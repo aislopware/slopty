@@ -45,7 +45,7 @@ impl WorkspaceView {
             .get(&key)
             .map(|w| w.sessions.keys().copied().collect())
             .unwrap_or_default();
-        self.reset_remote(key, &known);
+        self.reset_remote(key, &known, cx);
         let w = self.workers.entry(key).or_insert_with(|| Worker::new(name.clone()));
         w.name = name;
         w.status = WorkerStatus::Connected;
@@ -84,7 +84,7 @@ impl WorkspaceView {
         w.display_wanted = false;
         let sessions: Vec<SessionId> = w.sessions.keys().copied().collect();
         let items: Vec<ItemId> = w.doc.items().map(|i| i.id).collect();
-        self.reset_remote(key, &sessions);
+        self.reset_remote(key, &sessions, cx);
         for session in &sessions {
             self.terminals.remove(session);
             self.agents.remove(session);
@@ -390,7 +390,14 @@ impl WorkspaceView {
             ..TermSize::default()
         });
         let theme = self.theme.clone();
-        let view = cx.new(|cx| TerminalView::new(session, size, link.out.clone(), theme, cx));
+        let files = self.files_hook();
+        let view = cx.new(|cx| {
+            let mut view = TerminalView::new(session, size, link.out.clone(), theme, cx);
+            if let Some(files) = files {
+                view.set_files_hook(files);
+            }
+            view
+        });
         let sid = session;
         self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| match event {
             TerminalViewEvent::Bell => cx.emit(WorkspaceEvent::Bell(sid)),
@@ -420,6 +427,9 @@ impl WorkspaceView {
                 if let Some(worker) = this.worker_of_session(sid) {
                     this.drag_out(worker, &path);
                 }
+            }
+            TerminalViewEvent::PasteFiles(files) => {
+                this.paste_files_in_shell(sid, files.clone(), cx);
             }
         }));
         w.send(ClientMsg::Term { session, req: TermRequest::Attach { size } });
@@ -551,12 +561,17 @@ impl WorkspaceView {
                     }
                 });
                 let tile = TileRef { worker: key, item: id };
-                self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
-                    match event {
+                self.subscriptions.push(cx.subscribe(
+                    &view,
+                    move |this, view, event, cx| match event {
                         crate::screen::ScreenViewEvent::Pressed => this.focus_tile(tile, cx),
                         crate::screen::ScreenViewEvent::Ready => cx.notify(),
-                    }
-                }));
+                        crate::screen::ScreenViewEvent::PasteFiles(files) => {
+                            let view = view.downgrade();
+                            this.paste_files_in_window(tile, &view, files.clone(), cx);
+                        }
+                    },
+                ));
                 self.screens.insert(id, view);
             }
             ScreenEvent::Closed { stream, reason } => {

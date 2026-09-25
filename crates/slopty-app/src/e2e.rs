@@ -55,8 +55,16 @@ pub fn serve(
     runtime.spawn(listen(socket, tx));
     let handle = runtime.clone();
     cx.spawn(async move |cx| {
+        #[cfg(target_os = "macos")]
+        let dragged = park_drags(&workspace, cx);
         while let Some((command, reply)) = rx.recv().await {
             let answer = match command {
+                #[cfg(target_os = "macos")]
+                Command::KeepDragged { into } => keep_dragged(&dragged, into, &handle).await,
+                #[cfg(not(target_os = "macos"))]
+                Command::KeepDragged { .. } => {
+                    Reply::Error { message: "no drag out of the app here".into() }
+                }
                 Command::AddWorker { address } => {
                     let (done_tx, done_rx) = oneshot::channel();
                     handle.spawn(async move {
@@ -160,6 +168,48 @@ pub fn serve(
         }
     })
     .detach();
+}
+
+/// Drags of worker files out of the app, parked for [`Command::KeepDragged`] instead of
+/// starting a system drag.
+#[cfg(target_os = "macos")]
+type Parked = std::rc::Rc<std::cell::RefCell<Vec<slopty_platform::drag::Promise>>>;
+
+/// Park the promises of every drag out of the app from now on.
+#[cfg(target_os = "macos")]
+fn park_drags(workspace: &Entity<Workspace>, cx: &mut gpui::AsyncApp) -> Parked {
+    let parked = Parked::default();
+    let sink = std::rc::Rc::clone(&parked);
+    workspace.update(cx, |ws, cx| {
+        ws.view.update(cx, |view, _cx| {
+            view.set_drag_sink(std::rc::Rc::new(move |promises| {
+                *sink.borrow_mut() = promises;
+                true
+            }));
+        });
+    });
+    parked
+}
+
+/// Keep the parked promises in `into`, each as the drop there would ask, off the main thread
+/// as AppKit's own queue would.
+#[cfg(target_os = "macos")]
+async fn keep_dragged(parked: &Parked, into: String, runtime: &tokio::runtime::Handle) -> Reply {
+    let promises = std::mem::take(&mut *parked.borrow_mut());
+    if promises.is_empty() {
+        return Reply::Error { message: "nothing was dragged out".into() };
+    }
+    let into = PathBuf::from(into);
+    let kept = runtime.spawn_blocking(move || {
+        promises
+            .iter()
+            .try_for_each(|p| (p.keep)(&into.join(&p.name)).map_err(|e| (p.name.clone(), e)))
+    });
+    match kept.await {
+        Ok(Ok(())) => Reply::Ok,
+        Ok(Err((name, why))) => Reply::Error { message: format!("{name}: {why}") },
+        Err(e) => Reply::Error { message: format!("the keeper died: {e}") },
+    }
 }
 
 /// What the frame a command settles on draws.
@@ -457,14 +507,15 @@ fn apply(
             );
             Reply::Ok
         }
-        Command::Drag { x, y, to_x, to_y } => {
+        Command::Drag { x, y, to_x, to_y, command } => {
             let (from, to) = (point(px(x), px(y)), point(px(to_x), px(to_y)));
             let button = MouseButton::Left;
+            let modifiers = Modifiers { platform: command, ..Modifiers::default() };
             let _down = window.dispatch_event(
                 PlatformInput::MouseDown(MouseDownEvent {
                     button,
                     position: from,
-                    modifiers: Modifiers::default(),
+                    modifiers,
                     click_count: 1,
                     first_mouse: false,
                 }),
@@ -474,7 +525,7 @@ fn apply(
                 PlatformInput::MouseMove(MouseMoveEvent {
                     position: to,
                     pressed_button: Some(button),
-                    modifiers: Modifiers::default(),
+                    modifiers,
                 }),
                 cx,
             );
@@ -482,7 +533,7 @@ fn apply(
                 PlatformInput::MouseUp(MouseUpEvent {
                     button,
                     position: to,
-                    modifiers: Modifiers::default(),
+                    modifiers,
                     click_count: 1,
                 }),
                 cx,
@@ -592,6 +643,7 @@ fn apply(
         }
         Command::Dump
         | Command::AddWorker { .. }
+        | Command::KeepDragged { .. }
         | Command::Render { .. }
         | Command::Quit
         | Command::UiKeyPress { .. }
@@ -745,6 +797,8 @@ fn latency_info(s: &slopty_ui::terminal::latency::LatencyStats) -> LatencyInfo {
         echo_max_us: us(s.echo_max),
         echo_hops_us: s.echo_hops.map(|h| [us(h.p50), us(h.p95)]),
         predicted: s.predicted,
+        echo_first: s.echo_first,
+        guess_late: s.guess_late,
         predicted_p50_us: us(s.predicted_p50),
         predicted_p95_us: us(s.predicted_p95),
         predicted_p99_us: us(s.predicted_p99),
@@ -951,6 +1005,10 @@ impl Workspace {
                         .map(|f| [f.port.number, f.local.unwrap_or(0)])
                         .collect(),
                     upload: view.upload_on(tile).map(|(_, u)| u.label()),
+                    grid: terminal.metrics().map(|m| {
+                        let (x, y) = (f32::from(m.origin.x), f32::from(m.origin.y));
+                        [x, y, f32::from(m.cell_width), f32::from(m.line_height)]
+                    }),
                 });
             }
         }

@@ -89,7 +89,8 @@ pub enum Command {
         count: u32,
     },
     /// Press the primary button at a window point, move to another and release: a title-bar
-    /// drag moves an item, a corner drag resizes one.
+    /// drag moves an item, a corner drag resizes one, a ⌘-drag on a terminal path drags the
+    /// file out.
     Drag {
         /// Where the button goes down, x in points.
         x: f32,
@@ -99,6 +100,15 @@ pub enum Command {
         to_x: f32,
         /// Where it comes up, y in points.
         to_y: f32,
+        /// ⌘ is held throughout.
+        command: bool,
+    },
+    /// Keep the file promises of the last drag out of the app, as a drop in the directory
+    /// `into` would: each promise's own keeper writes its file there. Under the self-test a
+    /// drag out parks its promises here instead of starting a system drag. macOS only.
+    KeepDragged {
+        /// An existing directory on this machine.
+        into: String,
     },
     /// Drop files on a window point, as Finder's drag would end there: GPUI's own file-drop
     /// events (entered, over, dropped) through `Window::dispatch_event`, no system drag.
@@ -682,6 +692,21 @@ pub struct TerminalInfo {
     /// An upload dropped on the tile, as the tile shows it (`↑ 42%`); `None` without one.
     #[serde(default)]
     pub upload: Option<String>,
+    /// The grid in window points, once laid out: its origin x and y, the cell width and the
+    /// row height. Where a test points at a cell.
+    #[serde(default)]
+    pub grid: Option<[f32; 4]>,
+}
+
+impl TerminalInfo {
+    /// The window point at the middle of column `col` of visible row `row`, once laid out.
+    #[must_use]
+    pub fn cell_center(&self, col: usize, row: usize) -> Option<(f32, f32)> {
+        let [x, y, width, height] = self.grid?;
+        #[expect(clippy::cast_precision_loss, reason = "a column and a row of a terminal")]
+        let (col, row) = (col as f32, row as f32);
+        Some((width.mul_add(col + 0.5, x), height.mul_add(row + 0.5, y)))
+    }
 }
 
 /// Keystroke → paint (`slopty_ui::terminal::latency`), microseconds, over the last 256 keys.
@@ -705,6 +730,10 @@ pub struct LatencyInfo {
     pub echo_hops_us: [[u64; 2]; 5],
     /// Keys predicted.
     pub predicted: u64,
+    /// Keys guessed at whose echo was on the first frame painted after them, ahead of the guess.
+    pub echo_first: u64,
+    /// Keys guessed at that a frame painted after them showed neither guessed nor echoed.
+    pub guess_late: u64,
     /// Key → predicted paint, median.
     pub predicted_p50_us: u64,
     /// Same, 95th percentile.
@@ -732,7 +761,7 @@ impl LatencyInfo {
     pub fn row(&self) -> String {
         let ms = FrameInfo::ms;
         format!(
-            "echo {:.1} / {:.1} / {:.1} / {:.1} ms ({} keys) · predicted {:.1} / {:.1} / {:.1} / {:.1} ms ({} keys)",
+            "echo {:.1} / {:.1} / {:.1} / {:.1} ms ({} keys) · predicted {:.1} / {:.1} / {:.1} / {:.1} ms ({} keys, {} echoed first, {} late)",
             ms(self.echo_p50_us),
             ms(self.echo_p95_us),
             ms(self.echo_p99_us),
@@ -743,6 +772,8 @@ impl LatencyInfo {
             ms(self.predicted_p99_us),
             ms(self.predicted_max_us),
             self.predicted,
+            self.echo_first,
+            self.guess_late,
         )
     }
 

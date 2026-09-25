@@ -389,6 +389,10 @@ pub struct WorkspaceView {
     watching: std::collections::HashSet<WorkerKey>,
     /// Uploads in flight.
     uploads: HashMap<slopty_core::XferId, remote::Upload>,
+    /// Where a drag of worker files out of the app goes: a system drag, unless the self-test
+    /// keeps the promises itself.
+    #[cfg(target_os = "macos")]
+    drag_sink: Option<remote::DragSink>,
     /// Forwarded ports, by session.
     ports: HashMap<SessionId, Vec<slopty_client::tunnel::Forward>>,
     focus: FocusHandle,
@@ -496,6 +500,8 @@ impl WorkspaceView {
             app_active: true,
             watching: std::collections::HashSet::new(),
             uploads: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            drag_sink: None,
             ports: HashMap::new(),
             focus: cx.focus_handle(),
             subscriptions: Vec::new(),

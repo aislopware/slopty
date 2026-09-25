@@ -3693,3 +3693,13 @@ a quarter of the refresh at 75 frames a second. In the same run (d) read never 2
 always 34.1 (42.5) for the echo and 20.8 (29.1) for the guess. The (d) test's own check that 58
 of 60 guesses were drawn failed on both builds at this load (57 of 60). On loopback the echo
 sometimes lands before the guess's frame is painted, and then no frame ever shows that guess.
+
+## 2026-09-25 — guesses against echoes that win the race
+
+The keystroke meter now counts, for each key the predictor guessed at, whether its echo was on
+the first frame painted after it (`echo_first`) and whether a frame after it showed neither its
+guess nor its echo (`guess_late`). Same scenario (d) and command as "keystroke to glass, hop by
+hop", release build, mac-studio under other sessions' builds. With `SLOPTY_PREDICT=always`: 58
+of 60 keys drawn as guesses, 1 echoed first, 0 late; guess p50 21.6 ms (p95 30.8), echo p50
+34.9 ms (p95 44.1). With `never`: echo p50 26.4 ms (p95 32.2), 60 keys.
+

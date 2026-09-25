@@ -18,7 +18,7 @@ use objc2_app_kit::{
     NSPasteboardTypeTIFF, NSPasteboardWriting,
 };
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSArray, NSData, NSString};
+use objc2_foundation::{NSArray, NSData, NSString, NSURL};
 pub use slopty_proto::transfer::ORIGIN_TYPE;
 /// nspasteboard.org's marker for a secret (a password manager's copy); never synced.
 pub const CONCEALED_TYPE: &str = "org.nspasteboard.ConcealedType";
@@ -88,7 +88,8 @@ pub trait Board: Send + Sync {
     fn types(&self) -> Vec<String>;
     /// The first item's bytes of type `uti`.
     fn data(&self, uti: &str) -> Option<Vec<u8>>;
-    /// The `public.file-url` of every item that has one.
+    /// The `public.file-url` of every item that has one, as a path URL: a file named by
+    /// reference (`file:///.file/id=…`, as Finder copies) means nothing on another machine.
     fn file_urls(&self) -> Vec<String>;
     /// Replace the contents with `items`. The `changeCount` the write left, `None` when it
     /// failed.
@@ -175,7 +176,14 @@ impl Board for MacBoard {
         let Some(items) = self.board().pasteboardItems() else { return Vec::new() };
         let kind = Rep::FileUrl.uti();
         let kind = NSString::from_str(&kind);
-        items.iter().filter_map(|item| Some(item.stringForType(&kind)?.to_string())).collect()
+        items
+            .iter()
+            .filter_map(|item| {
+                let text = item.stringForType(&kind)?;
+                let url = NSURL::URLWithString(&text)?;
+                Some(url.filePathURL()?.absoluteString()?.to_string())
+            })
+            .collect()
     }
 
     fn write(&self, items: &[Item]) -> Option<isize> {

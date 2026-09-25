@@ -269,7 +269,13 @@ pub enum TerminalViewEvent {
         /// The path as the text gave it.
         path: String,
     },
+    /// ⌘V with files on the clipboard: the canvas sends them to the shell's directory and
+    /// types their paths, as a drop does.
+    PasteFiles(crate::clipboard::ClipFiles),
 }
+
+/// Asked by ⌘V before it pastes text: the files on the clipboard, pasted instead.
+pub type FilesHook = std::rc::Rc<dyn Fn() -> Option<crate::clipboard::ClipFiles>>;
 
 /// A placed image with the texture the element paints it from.
 #[derive(Clone, Debug)]
@@ -343,6 +349,8 @@ pub struct TerminalView {
     /// A ⌘-press on a path, acted on when the button comes up (open it) or when the pointer
     /// moves off far enough first (drag the file out).
     path_press: Option<(url::PathSpan, bool, gpui::Point<Pixels>)>,
+    /// Asked by ⌘V for files on the clipboard.
+    files_hook: Option<FilesHook>,
     /// The selection is being dragged past the grid's top or bottom: lines to scroll each
     /// tick (positive = up into history) and the column the pointer holds.
     autoscroll: Option<(i64, u16)>,
@@ -458,6 +466,7 @@ impl TerminalView {
             selected_by_press: false,
             click_at: None,
             path_press: None,
+            files_hook: None,
             hover: None,
             cmd_held: false,
             shift_held: false,
@@ -1418,9 +1427,22 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Where ⌘V asks for files on the clipboard.
+    pub fn set_files_hook(&mut self, hook: FilesHook) {
+        self.files_hook = Some(hook);
+    }
+
     /// ⌘V, or the phone key bar's "paste": the clipboard into the session (the worker brackets
-    /// it when the program asked).
+    /// it when the program asked). Files on it go to the shell's directory instead, and their
+    /// paths are typed.
     pub fn paste_clipboard(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(files) = self.files_hook.as_ref().and_then(|hook| hook()) {
+            self.selection = None;
+            self.state.scroll_to_bottom();
+            cx.emit(TerminalViewEvent::PasteFiles(files));
+            cx.notify();
+            return;
+        }
         let Some(item) = cx.read_from_clipboard() else { return };
         let Some(text) = item.text() else { return };
         self.selection = None;
@@ -1677,17 +1699,18 @@ impl TerminalView {
             self.state.scroll_to_bottom();
         }
         let now = Instant::now();
-        self.latency.pressed(self.key_seq, now);
         let guessing = self.predictor.visible(now);
-        let _guess = self.predictor.on_key(
+        let guess = self.predictor.on_key(
             &key,
             self.state.cursor(),
             self.state.size().cols,
             self.state.modes(),
             now,
         );
+        let shows = self.predictor.visible(now);
+        self.latency.pressed(self.key_seq, now, guess.is_some() && shows);
         self.send(TermRequest::Key(key));
-        unstuck || scrolled || guessing || self.predictor.visible(now)
+        unstuck || scrolled || guessing || shows
     }
 
     /// A key of the phone's bar: [`Self::press`].

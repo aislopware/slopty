@@ -1235,3 +1235,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_key_draws_a_frame_only_when_the_tile_shows_something_new`; latency
   `the_hops_of_an_echo_and_a_guess_add_up_to_their_totals`; e2e smooth
   `typing_is_timed_with_and_without_the_local_echo_on_the_mac` (prints the hops).
+
+- ✅ **The typing check counts an echo that beats its guess as a key answered in time**
+  (2026-09-25). The smooth suite's check wanted 58 of 60 keys drawn as guesses and saw 57 under
+  load. On loopback the echo can be applied before the next paint. That frame then shows the
+  echo, and the guess never appears, which is correct. The meter now marks each key the
+  predictor guessed at when it is pressed. It counts `echo_first` when such a key's echo is on
+  the first frame painted after it. It counts `guess_late` when a frame painted after the key
+  shows neither its guess nor its echo. The check wants guesses plus echoes-first to cover the
+  typed keys, at least one guess drawn, and no late guess. A lower threshold was rejected,
+  because it would also pass a predictor that drew fewer guesses. Tests: latency
+  `an_echo_that_beats_its_guess_is_told_apart_from_a_late_guess`; e2e smooth
+  `typing_is_timed_with_and_without_the_local_echo_on_the_mac`.

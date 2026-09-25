@@ -133,7 +133,26 @@ impl Driver {
     ///
     /// When the socket breaks.
     pub async fn drag(&mut self, x: f32, y: f32, to_x: f32, to_y: f32) -> Result<()> {
-        self.ok(&Command::Drag { x, y, to_x, to_y }).await
+        self.ok(&Command::Drag { x, y, to_x, to_y, command: false }).await
+    }
+
+    /// [`Self::drag`] with ⌘ held: on a terminal path, the file is dragged out of the app.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks.
+    pub async fn cmd_drag(&mut self, x: f32, y: f32, to_x: f32, to_y: f32) -> Result<()> {
+        self.ok(&Command::Drag { x, y, to_x, to_y, command: true }).await
+    }
+
+    /// Keep the promises of the last drag out of the app in the directory `into`
+    /// ([`Command::KeepDragged`]); returns once every file is written.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks, or a promise could not be kept.
+    pub async fn keep_dragged(&mut self, into: &Path) -> Result<()> {
+        self.ok(&Command::KeepDragged { into: into.display().to_string() }).await
     }
 
     /// Scroll `dx`, `dy` lines at a window point; with `zoom`, ⌘ is held and the canvas zooms.

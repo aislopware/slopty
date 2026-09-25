@@ -17,7 +17,8 @@ thiserror.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 objc2-app-kit.workspace = true
-objc2-foundation.workspace = true
+# A copied file named by reference resolved to its path (`pasteboard`).
+objc2-foundation = { workspace = true, features = [ "NSURL" ] }
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
 slopty-capture.workspace = true

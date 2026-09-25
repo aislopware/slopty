@@ -43,9 +43,19 @@ use tokio::sync::mpsc;
 use crate::colors::hsla;
 use crate::keys;
 
-/// What goes on the control stream ahead of a paste chord: this client's clipboard offer, when
-/// the worker has not heard it yet (`crate::clipboard::ClipSync::offer_for`).
-pub type PasteHook = std::rc::Rc<dyn Fn() -> Option<ClientMsg>>;
+/// Asked when a paste chord goes to the worker: what must reach it first.
+pub type PasteHook = std::rc::Rc<dyn Fn() -> PasteAhead>;
+
+/// What a paste chord needs ahead of it.
+#[derive(Debug, Default)]
+pub struct PasteAhead {
+    /// This client's clipboard offer, when the worker has not heard it yet
+    /// (`crate::clipboard::ClipSync::offer_for`); it goes on the control stream first.
+    pub offer: Option<ClientMsg>,
+    /// Files on the clipboard: they go to the worker's staging and its pasteboard before the
+    /// chord does, so the window's input waits ([`ScreenViewEvent::PasteFiles`]).
+    pub files: Option<crate::clipboard::ClipFiles>,
+}
 
 /// Makes a client-side stream for an `Opened` event (wraps `WorkerLink::screen`).
 pub type ScreenFactory = Arc<dyn Fn(StreamId, VideoCodec) -> ScreenHandle + Send + Sync>;
@@ -56,13 +66,16 @@ const QUALITY_COOLDOWN: Duration = Duration::from_millis(400);
 const MIN_SCALE: f32 = 0.25;
 
 /// Things the canvas may react to.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum ScreenViewEvent {
     /// First frame painted.
     Ready,
     /// Pressed: the canvas should make this item active. (The view stops the mouse event so
     /// the canvas does not pan, which also keeps it from the item's own activate handler.)
     Pressed,
+    /// A paste of files: the view holds its input, the paste chord first, until
+    /// [`ScreenView::release_paste`] once the files are on the worker's pasteboard.
+    PasteFiles(crate::clipboard::ClipFiles),
 }
 
 /// What the worker answered to `Open`, plus what we asked for.
@@ -169,6 +182,8 @@ pub struct ScreenView {
     held: Vec<KeyCode>,
     /// Asked before a paste chord goes, so the worker pastes what this client copied.
     paste_hook: Option<PasteHook>,
+    /// Pastes of files still on their way to the worker, and the input held behind them.
+    paste_hold: (u32, Vec<ScreenInput>),
     /// Modifiers armed by the phone key bar; applied to the next key, then cleared.
     sticky: Modifiers,
     /// The modifier keys as last reported, so a change forwards the key that moved.
@@ -468,6 +483,7 @@ impl ScreenView {
             modifiers: Modifiers::default(),
             let_go: None,
             paste_hook: None,
+            paste_hold: (0, Vec::new()),
             sticky: Modifiers::default(),
             marked: None,
             hud: None,
@@ -709,8 +725,30 @@ impl ScreenView {
         }
     }
 
-    fn input(&self, input: ScreenInput) {
+    fn input(&mut self, input: ScreenInput) {
+        if self.paste_hold.0 > 0 {
+            self.paste_hold.1.push(input);
+            return;
+        }
         self.send(ScreenRequest::Input { stream: self.stream, input });
+    }
+
+    /// Files a paste waited for are on the worker's pasteboard, or will not come: once no
+    /// other paste is waiting, the held input goes on, in order.
+    pub fn release_paste(&mut self) {
+        self.paste_hold.0 = self.paste_hold.0.saturating_sub(1);
+        if self.paste_hold.0 > 0 {
+            return;
+        }
+        for input in std::mem::take(&mut self.paste_hold.1) {
+            self.send(ScreenRequest::Input { stream: self.stream, input });
+        }
+    }
+
+    /// Whether input waits behind a paste of files.
+    #[must_use]
+    pub const fn paste_held(&self) -> bool {
+        self.paste_hold.0 > 0
     }
 
     /// Window position → stream pixels.
@@ -882,7 +920,7 @@ impl ScreenView {
 
     fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
         if is_paste_chord(&ev.keystroke) {
-            self.push_clipboard();
+            self.push_clipboard(cx);
         }
         let text = ev.keystroke.key_char.clone().filter(|t| !t.is_empty());
         self.press_key(&ev.keystroke, ev.is_held, text);
@@ -954,11 +992,19 @@ impl ScreenView {
 
     /// Before a paste reaches the worker, make sure it pastes what this client copied: this
     /// client's clipboard offer goes on the (ordered) control stream ahead of the key, when the
-    /// worker has not heard it yet.
-    fn push_clipboard(&self) {
-        let Some(msg) = self.paste_hook.as_ref().and_then(|hook| hook()) else { return };
-        if let Err(e) = self.out.try_send(msg) {
+    /// worker has not heard it yet. Copied files go to the worker first, and the chord and all
+    /// after it wait for them.
+    fn push_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(hook) = self.paste_hook.clone() else { return };
+        let ahead = hook();
+        if let Some(msg) = ahead.offer
+            && let Err(e) = self.out.try_send(msg)
+        {
             tracing::warn!(stream = %self.stream, error = %e, "outbound queue");
+        }
+        if let Some(files) = ahead.files {
+            self.paste_hold.0 = self.paste_hold.0.saturating_add(1);
+            cx.emit(ScreenViewEvent::PasteFiles(files));
         }
     }
 
@@ -992,7 +1038,7 @@ impl ScreenView {
         keystroke.modifiers.control |= armed.control;
         keystroke.modifiers.platform |= armed.platform;
         if is_paste_chord(&keystroke) {
-            self.push_clipboard();
+            self.push_clipboard(cx);
         }
         let code = keys::key_code(&keystroke.key);
         let mods = keys::mods(keystroke.modifiers);
@@ -1007,7 +1053,7 @@ impl ScreenView {
 
     /// Touch: a long press over the picture is a right click on the worker (context menus);
     /// a plain drag stays a canvas pan. Returns whether the gesture was claimed.
-    fn long_press(&self, ev: &LongPressEvent, cx: &mut Context<Self>) -> bool {
+    fn long_press(&mut self, ev: &LongPressEvent, cx: &mut Context<Self>) -> bool {
         if ev.phase != TouchPhase::Started || !self.inside(ev.start_position) {
             return false;
         }
@@ -1739,12 +1785,13 @@ mod tests {
         let pending = std::rc::Rc::new(std::cell::Cell::new(true));
         let once = std::rc::Rc::clone(&pending);
         view.update(cx, |v, _| {
-            v.set_paste_hook(std::rc::Rc::new(move || {
-                once.replace(false).then(|| {
+            v.set_paste_hook(std::rc::Rc::new(move || PasteAhead {
+                offer: once.replace(false).then(|| {
                     let origin = Peer::Client(slopty_core::ClientId::new());
                     let offer = Offer { origin, generation: 1, items: Vec::new() };
                     ClientMsg::Clip(ClipMsg::Offer(offer))
-                })
+                }),
+                files: None,
             }));
         });
         let kinds = |rx: &mut mpsc::Receiver<ClientMsg>| {
@@ -1754,6 +1801,53 @@ mod tests {
         assert_eq!(kinds(&mut rx)[..2], ["Clip", "Screen"], "the offer goes first");
         view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
         assert!(kinds(&mut rx).iter().all(|k| *k == "Screen"), "heard already: the key alone");
+    }
+
+    /// ⌘V with files on the clipboard asks the canvas to send them, and holds the chord and
+    /// everything typed after it until they are on the worker's pasteboard; then it all goes,
+    /// in order.
+    #[gpui::test]
+    fn a_paste_of_files_holds_the_window_input_until_they_are_there(cx: &mut gpui::TestAppContext) {
+        use crate::clipboard::ClipFiles;
+        let (view, mut rx) = view(cx);
+        let files = ClipFiles::Here(vec![std::path::PathBuf::from("/tmp/a.png")]);
+        let offered = files.clone();
+        view.update(cx, |v, _| {
+            v.set_paste_hook(std::rc::Rc::new(move || PasteAhead {
+                offer: None,
+                files: Some(offered.clone()),
+            }));
+        });
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&asked);
+        cx.update(|cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let ScreenViewEvent::PasteFiles(files) = event {
+                    seen.borrow_mut().push(files.clone());
+                }
+            })
+            .detach();
+        });
+        let keys = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|m| match m {
+                    ClientMsg::Screen(ScreenRequest::Input {
+                        input: ScreenInput::Key { code, action: KeyAction::Press, .. },
+                        ..
+                    }) => Some(code),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
+        view.update(cx, |v, cx| v.press(chord("x"), cx));
+        cx.run_until_parked();
+        assert_eq!(*asked.borrow(), [files], "the canvas is asked to send them");
+        assert!(keys(&mut rx).is_empty(), "nothing goes before the files");
+        assert!(view.read_with(cx, |v, _| v.paste_held()));
+        view.update(cx, |v, _| v.release_paste());
+        assert_eq!(keys(&mut rx), [KeyCode::V, KeyCode::X], "the chord, then what followed");
+        assert!(!view.read_with(cx, |v, _| v.paste_held()));
     }
 
     #[test]

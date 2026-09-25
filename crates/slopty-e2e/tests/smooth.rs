@@ -436,7 +436,16 @@ mod tests {
             stack.shutdown().await;
             assert!(latency.echoed >= TYPED_MIN, "{latency:?}");
             if policy == "always" {
-                assert!(latency.predicted >= TYPED_MIN, "no predictions drawn: {latency:?}");
+                // On loopback the echo can land before the frame the guess would have been on;
+                // that frame then shows the echo, which is right. What must never happen is a
+                // frame after a key that shows neither its guess nor its echo.
+                let answered = latency.predicted.saturating_add(latency.echo_first);
+                assert!(
+                    answered >= TYPED_MIN,
+                    "keys neither guessed nor echoed first: {latency:?}"
+                );
+                assert!(latency.predicted > 0, "no predictions drawn: {latency:?}");
+                assert_eq!(latency.guess_late, 0, "a guess fell behind its frame: {latency:?}");
             }
         }
     }

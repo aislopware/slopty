@@ -586,6 +586,31 @@ mod tests {
         assert_eq!(c.paste(next_link()), Paste::Ready, "a client that offered nothing");
     }
 
+    /// A client that copied files offers only their URLs. That offer takes the place of its
+    /// earlier one, whose text a paste would otherwise write over the staged files, and it
+    /// writes nothing itself: the files come as a transfer.
+    #[test]
+    fn a_clients_copied_files_replace_its_offer_and_write_nothing() {
+        let c = clip();
+        let a = next_link();
+        let offer = |generation, uti: String, body: &[u8], inline: bool| Offer {
+            origin: Peer::Client(ClientId::nil()),
+            generation,
+            items: vec![ClipItem {
+                uti,
+                size: body.len() as u64,
+                hash: digest(body),
+                inline: inline.then(|| body.to_vec()),
+            }],
+        };
+        c.offered(a, offer(1, text(), b"older text", true));
+        assert!(c.write_files(&["/tmp/staged.txt"]));
+        c.offered(a, offer(2, Rep::FileUrl.uti(), b"file:///Users/me/a.txt", false));
+        assert_eq!(c.paste(a), Paste::Ready, "nothing to fetch");
+        assert_eq!(c.board().file_urls(), ["file:///tmp/staged.txt"], "the staged files stay");
+        assert_eq!(c.board().data(&text()), None);
+    }
+
     #[test]
     fn staged_files_go_on_as_file_urls() {
         let c = clip();

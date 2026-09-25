@@ -162,3 +162,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     dials `127.0.0.1` and then `::1`, because a dev server bound to `localhost` on macOS often
     listens on `::1` only. It splices both ways with a half-close each way, and a refused dial
     resets the stream.
+
+- ✅ **Copied files paste as a transfer, and the window's paste waits on the client for them**
+  (2026-09-25, no protocol change).
+  - A paste of files goes where a drop goes. In a terminal, files copied here go up to the
+    shell's directory and their quoted paths are typed. In a streamed window, they go to
+    staging, and the worker's pasteboard then holds their URLs, as after a drop.
+  - A window's paste of files holds that window's input on the client, the chord first, until
+    the staging upload ends in any way. The worker's own hold was the other choice. It was
+    rejected because the upload's `Begin` leaves from a task of its own and can reach the worker
+    after the chord, and because the worker would then track which client stages what. The hold
+    has no time limit, since the tile shows the upload and its cancel pill, and a cancel, a
+    failure or the link going ends it.
+  - The client's offer for copied files holds only `public.file-url`, one URL per line, the
+    format the worker's offers already use. The worker never writes a client's file URLs, so the
+    offer writes nothing. It still counts, because it replaces the client's earlier offer. A
+    paste would otherwise write that offer's text over the staged files.
+  - Files a worker copied reach the client as that offer. The client writes the offer's text,
+    remembers whose files they are, and fetches the URLs when a paste wants them. Into a shell
+    of the same worker, the paths are typed as they are, with no transfer. Into another worker's
+    tile they come down to a scratch directory here, go up, and the directory is removed once
+    the upload ends. Pasting them into Finder on the client is not covered, since that needs a
+    file promise on the pasteboard.
+  - Finder names a copied file by reference (`file:///.file/id=…`). Such a URL means nothing on
+    another machine. Both pasteboards resolve it to the path URL when they read it
+    (`MacPasteboard::file_urls`, `MacBoard::file_urls`).
+  - Drags out get a seam for the self-test. The workspace hands a drag's file promises to a
+    sink, which is a system drag in the app. The self-test app parks them instead, and its
+    `KeepDragged` command keeps them as a drop into a directory would. No OS drag is ever
+    synthesised.
+  - Tests: clipboard `copied_files_are_offered_as_urls_and_named_for_a_paste`; worker
+    `a_clients_copied_files_replace_its_offer_and_write_nothing`; screen
+    `a_paste_of_files_holds_the_window_input_until_they_are_there`; workspace
+    `files_copied_here_paste_into_a_shell_as_a_drop`,
+    `files_a_worker_copied_paste_into_its_shell_or_travel_to_another`,
+    `files_pasted_into_a_window_are_staged_before_the_chord_goes`; platform
+    `a_named_pasteboard_names_the_files_copied_on_it`; e2e app
+    `files_copied_here_and_pasted_into_a_shell_land_there`,
+    `files_copied_on_the_worker_paste_into_its_shell_as_their_paths`,
+    `a_path_dragged_out_of_a_shell_is_kept_by_a_download`.

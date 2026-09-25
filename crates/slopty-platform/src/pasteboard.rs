@@ -28,6 +28,9 @@ pub const TRANSIENT_UTI: &str = "org.nspasteboard.TransientType";
 /// Plain text.
 pub const TEXT_UTI: &str = "public.utf8-plain-text";
 
+/// A file's URL, one per item: what Finder's copy puts on the pasteboard.
+pub const FILE_URL_UTI: &str = "public.file-url";
+
 /// Answers a promised representation with its bytes, or nothing when it cannot be had.
 pub type Provide = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
@@ -61,6 +64,11 @@ pub trait Pasteboard {
     fn types(&self) -> Vec<String>;
     /// The bytes of one type of the current contents (asking a promise's provider).
     fn data(&self, uti: &str) -> Option<Vec<u8>>;
+    /// The `file://` URLs of the files the contents name, one per item that names one, each a
+    /// path URL (a file reference URL resolved); empty when they name none.
+    fn file_urls(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// Replace the contents; returns the change count this write produced.
     fn write(&self, write: Write) -> i64;
     /// Whether reading the contents may ask the person first (iOS): read them only when they
@@ -78,6 +86,7 @@ pub struct Memory {
     promised: RefCell<Vec<String>>,
     provide: RefCell<Option<WriteProvide>>,
     order: RefCell<Vec<String>>,
+    files: RefCell<Vec<String>>,
     asks: bool,
     reads: Cell<usize>,
 }
@@ -113,6 +122,13 @@ impl Memory {
         self.order.borrow_mut().retain(|t| t != ORIGIN_TYPE);
     }
 
+    /// Put file URLs on it as Finder's copy does: one item per file, no origin.
+    pub fn copy_files(&self, urls: &[&str]) {
+        let first = urls.first().map(|u| u.as_bytes()).unwrap_or_default();
+        self.copy(&[(FILE_URL_UTI, first)]);
+        *self.files.borrow_mut() = urls.iter().map(|u| (*u).to_owned()).collect();
+    }
+
     /// The types that are promises rather than bytes.
     #[must_use]
     pub fn promised(&self) -> Vec<String> {
@@ -141,7 +157,12 @@ impl Pasteboard for Memory {
         provide(uti)
     }
 
+    fn file_urls(&self) -> Vec<String> {
+        self.files.borrow().clone()
+    }
+
     fn write(&self, write: Write) -> i64 {
+        self.files.borrow_mut().clear();
         let mut now = BTreeMap::new();
         let mut order = Vec::new();
         for (uti, bytes) in write.data {
@@ -176,7 +197,7 @@ mod mac {
         NSPasteboard, NSPasteboardItem, NSPasteboardItemDataProvider, NSPasteboardType,
         NSPasteboardWriting,
     };
-    use objc2_foundation::{NSArray, NSData, NSObject, NSObjectProtocol, NSString};
+    use objc2_foundation::{NSArray, NSData, NSObject, NSObjectProtocol, NSString, NSURL};
 
     use super::{ORIGIN_TYPE, Pasteboard, Provide, Write};
 
@@ -277,6 +298,25 @@ mod mac {
             self.change_count()
         }
 
+        /// Put the files at `paths` on it as Finder's copy does: one item per file holding its
+        /// URL, no origin. Returns the change count the copy produced.
+        pub fn copy_files(&self, paths: &[&std::path::Path]) -> i64 {
+            self.board.clearContents();
+            let writers: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = paths
+                .iter()
+                .map(|path| {
+                    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+                    let item = NSPasteboardItem::new();
+                    if let Some(text) = url.absoluteString() {
+                        item.setString_forType(&text, &NSString::from_str(super::FILE_URL_UTI));
+                    }
+                    ProtocolObject::from_retained(item)
+                })
+                .collect();
+            self.board.writeObjects(&NSArray::from_retained_slice(&writers));
+            self.change_count()
+        }
+
         /// Its text, when it has any.
         #[must_use]
         pub fn text(&self) -> Option<String> {
@@ -298,6 +338,21 @@ mod mac {
 
         fn data(&self, uti: &str) -> Option<Vec<u8>> {
             self.board.dataForType(&NSString::from_str(uti)).map(|d| d.to_vec())
+        }
+
+        fn file_urls(&self) -> Vec<String> {
+            let Some(items) = self.board.pasteboardItems() else { return Vec::new() };
+            let kind = NSString::from_str(super::FILE_URL_UTI);
+            items
+                .iter()
+                .filter_map(|item| {
+                    let text = item.stringForType(&kind)?;
+                    let url = NSURL::URLWithString(&text)?;
+                    // Finder names a file by reference (`file:///.file/id=…`); the path is what
+                    // travels.
+                    Some(url.filePathURL()?.absoluteString()?.to_string())
+                })
+                .collect()
         }
 
         fn write(&self, write: Write) -> i64 {
@@ -524,6 +579,33 @@ mod tests {
         assert_eq!(board.data(ORIGIN_TYPE).as_deref(), Some(&b"worker:7"[..]));
         assert_eq!(board.data("public.png"), Some(vec![0x89, b'P', b'N', b'G']));
         assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1, "asked once, on read");
+        board.release();
+    }
+
+    /// Files copied as Finder copies them come back as path URLs, one per item, a file named
+    /// by reference included; the general pasteboard is never touched.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_named_pasteboard_names_the_files_copied_on_it() {
+        use objc2_foundation::{NSString, NSURL};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a b.txt"), dir.path().join("c.txt"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"c").unwrap();
+        let name = format!("com.aislopware.slopty.test.files.{}", std::process::id());
+        let board = MacPasteboard::named(&name);
+        board.copy_files(&[a.as_path(), b.as_path()]);
+        let urls = board.file_urls();
+        assert_eq!(urls.len(), 2, "{urls:?}");
+        assert!(urls[0].starts_with("file:///") && urls[0].ends_with("/a%20b.txt"), "{urls:?}");
+
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&b.to_string_lossy()));
+        let by_reference = url.fileReferenceURL().unwrap().absoluteString().unwrap().to_string();
+        assert!(by_reference.contains("/.file/id="), "{by_reference}");
+        board.copy(&[(FILE_URL_UTI, by_reference.as_bytes())]);
+        let urls = board.file_urls();
+        assert!(urls.len() == 1 && urls[0].ends_with("/c.txt"), "resolved: {urls:?}");
         board.release();
     }
 

@@ -7,20 +7,48 @@
 //! three ways: every write here carries [`ORIGIN_TYPE`] and is never announced back, the change
 //! count a write produced is remembered and skipped, and contents whose digest matches what a
 //! worker just announced are not announced to it again.
+//!
+//! Copied files are the exception to announcing. Their URLs name files on one machine, so a paste
+//! of them moves the files by a transfer ([`ClipSync::files`]). An offer of files carries their
+//! URLs alone, one per line: the worker never writes them, and the offer replaces the text the
+//! client copied before, which a paste would otherwise write over the files.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use slopty_client::layout::WorkerKey;
 use slopty_core::ClientId;
 use slopty_platform::pasteboard::{
-    CONCEALED_UTI, ORIGIN_TYPE, Pasteboard, Provide, TEXT_UTI, TRANSIENT_UTI, Write,
+    CONCEALED_UTI, FILE_URL_UTI, ORIGIN_TYPE, Pasteboard, Provide, TEXT_UTI, TRANSIENT_UTI, Write,
 };
 use slopty_proto::transfer::{ClipItem, Hash, INLINE_CLIP_BYTES, Offer, Peer};
 
 /// The representations synced, richest first. File URLs name files on one machine only; files
 /// move by a transfer instead.
 pub const SYNCED: [&str; 5] = ["public.png", "public.tiff", "public.rtf", "public.html", TEXT_UTI];
+
+/// Files on the clipboard, for a paste that moves them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ClipFiles {
+    /// Files on this device, copied here.
+    Here(Vec<PathBuf>),
+    /// Files a worker copied: their URLs are its offer `generation`'s `public.file-url`.
+    Worker {
+        /// The worker they are on.
+        worker: WorkerKey,
+        /// Its offer.
+        generation: u64,
+    },
+}
+
+/// A worker's offer of files, and the change count its write here left.
+#[derive(Clone, Copy, Debug)]
+struct WorkerFiles {
+    worker: WorkerKey,
+    generation: u64,
+    count: i64,
+}
 
 /// The clipboard's contents as last read, and what was announced of them.
 #[derive(Debug)]
@@ -46,6 +74,8 @@ pub struct ClipSync {
     told: HashMap<WorkerKey, u64>,
     /// Digests a worker announced last: the same contents coming back are not announced again.
     heard: Vec<Hash>,
+    /// The files a worker's offer put here last.
+    worker_files: Option<WorkerFiles>,
 }
 
 impl std::fmt::Debug for ClipSync {
@@ -74,6 +104,7 @@ impl ClipSync {
             held: None,
             told: HashMap::new(),
             heard: Vec::new(),
+            worker_files: None,
         }
     }
 
@@ -95,8 +126,11 @@ impl ClipSync {
             || has(ORIGIN_TYPE)
             || has(CONCEALED_UTI)
             || has(TRANSIENT_UTI);
+        let urls = if skip { Vec::new() } else { self.board.file_urls() };
         let reps: Vec<(String, Vec<u8>)> = if skip {
             Vec::new()
+        } else if !urls.is_empty() {
+            vec![(FILE_URL_UTI.to_owned(), urls.join("\n").into_bytes())]
         } else {
             SYNCED
                 .iter()
@@ -136,6 +170,22 @@ impl ClipSync {
         Some(offer.clone())
     }
 
+    /// The files the clipboard holds, for a paste that moves them: files copied here, or the
+    /// files of the worker offer this client wrote last, while its write is still there.
+    /// Reads the clipboard, so only for a paste.
+    pub fn files(&self) -> Option<ClipFiles> {
+        let count = self.board.change_count();
+        if let Some(files) = self.worker_files.filter(|f| f.count == count) {
+            return Some(ClipFiles::Worker { worker: files.worker, generation: files.generation });
+        }
+        if self.wrote == Some(count) || self.board.types().iter().any(|t| t == ORIGIN_TYPE) {
+            return None;
+        }
+        let paths: Vec<PathBuf> =
+            self.board.file_urls().iter().filter_map(|url| file_url_path(url)).collect();
+        (!paths.is_empty()).then_some(ClipFiles::Here(paths))
+    }
+
     /// The bytes of `uti` in this client's offer `generation`, for a worker's fetch; `None`
     /// once the clipboard has moved on.
     #[must_use]
@@ -148,19 +198,26 @@ impl ClipSync {
         held.reps.iter().find(|(t, _)| t == uti).map(|(_, bytes)| bytes.clone())
     }
 
-    /// A worker's clipboard changed: put its offer here, inline text now and the rest as
-    /// promises that `provide` keeps. Contents this clipboard already holds are left alone.
-    pub fn receive(&mut self, offer: &Offer, provide: Provide) {
+    /// Worker `from`'s clipboard changed: put its offer here, inline text now and the rest as
+    /// promises that `provide` keeps. Contents this clipboard already holds are left alone. Files
+    /// it copied are remembered for a paste ([`Self::files`]); what goes on the pasteboard for
+    /// them is only what else the offer holds, their names as text.
+    pub fn receive(&mut self, from: WorkerKey, offer: &Offer, provide: Provide) {
         let items: Vec<&ClipItem> =
             offer.items.iter().filter(|i| SYNCED.contains(&i.uti.as_str())).collect();
-        if items.is_empty() {
+        let files = offer.items.iter().any(|i| i.uti == FILE_URL_UTI);
+        if items.is_empty() && !files {
             return;
         }
         self.heard = items.iter().map(|i| i.hash).collect();
-        let same =
-            self.held.as_ref().filter(|h| h.count == self.board.change_count()).is_some_and(|h| {
-                items.iter().all(|i| h.reps.iter().any(|(t, b)| *t == i.uti && digest(b) == i.hash))
-            });
+        let same = !files
+            && self.held.as_ref().filter(|h| h.count == self.board.change_count()).is_some_and(
+                |h| {
+                    items
+                        .iter()
+                        .all(|i| h.reps.iter().any(|(t, b)| *t == i.uti && digest(b) == i.hash))
+                },
+            );
         if same {
             tracing::debug!(generation = offer.generation, "clipboard already holds it");
             return;
@@ -178,13 +235,44 @@ impl ClipSync {
         let count = self.board.write(write);
         self.wrote = Some(count);
         self.held = Some(Held { count, offer: None, reps: Vec::new() });
-        tracing::debug!(generation = offer.generation, count, "clipboard from a worker");
+        self.worker_files =
+            files.then_some(WorkerFiles { worker: from, generation: offer.generation, count });
+        tracing::debug!(generation = offer.generation, count, files, "clipboard from a worker");
     }
 
     /// A worker's link is new: it has heard nothing yet.
     pub fn forget(&mut self, worker: WorkerKey) {
         self.told.remove(&worker);
     }
+}
+
+/// The path a `file://` URL names, percent escapes undone; `None` for any other URL.
+#[must_use]
+pub fn file_url_path(url: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+    let rest = url.strip_prefix("file://")?;
+    let path = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(path.len());
+    let mut it = path.bytes();
+    while let Some(b) = it.next() {
+        if b == b'%' {
+            let hex = [it.next()?, it.next()?];
+            let hex = std::str::from_utf8(&hex).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+        } else {
+            bytes.push(b);
+        }
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+/// The paths a `public.file-url` representation names: its URLs, one per line.
+#[must_use]
+pub fn file_url_paths(bytes: &[u8]) -> Vec<PathBuf> {
+    String::from_utf8_lossy(bytes).lines().filter_map(file_url_path).collect()
 }
 
 /// The [`ORIGIN_TYPE`] payload: who wrote, and which generation.
@@ -254,7 +342,7 @@ mod tests {
             log.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             (uti == "public.png").then(|| vec![1, 2, 3, 4])
         });
-        sync.receive(&worker_offer(7, vec![png, text_item("from the worker")]), provide);
+        sync.receive(studio, &worker_offer(7, vec![png, text_item("from the worker")]), provide);
         assert_eq!(board.data(TEXT_UTI).as_deref(), Some(&b"from the worker"[..]));
         assert_eq!(board.promised(), ["public.png"]);
         assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 0, "fetched only on paste");
@@ -270,12 +358,52 @@ mod tests {
     fn the_same_contents_coming_back_unstamped_are_not_echoed() {
         let (board, mut sync, me, studio) = setup();
         let noop: Provide = Arc::new(|_: &str| None);
-        sync.receive(&worker_offer(1, vec![text_item("ping")]), noop);
+        sync.receive(studio, &worker_offer(1, vec![text_item("ping")]), noop);
         // Universal Clipboard delivers the worker's copy again, without Slopty's stamp.
         board.copy(&[(TEXT_UTI, b"ping")]);
         assert!(sync.offer_for(studio, me).is_none(), "same digest: an echo");
         board.copy(&[(TEXT_UTI, b"pong")]);
         assert!(sync.offer_for(studio, me).is_some(), "new contents are announced");
+    }
+
+    /// Files copied here are offered as their URLs alone and named for a paste; a worker's
+    /// copied files are named by where they are, while its write is what the clipboard holds.
+    #[test]
+    fn copied_files_are_offered_as_urls_and_named_for_a_paste() {
+        let (board, mut sync, me, studio) = setup();
+        board.copy(&[(TEXT_UTI, b"older text")]);
+        assert!(sync.offer_for(studio, me).is_some());
+        board.copy_files(&["file:///Users/me/a%20b.txt", "file:///tmp/c"]);
+        let offer = sync.offer_for(studio, me).expect("the files replace the text");
+        let utis: Vec<_> = offer.items.iter().map(|i| i.uti.as_str()).collect();
+        assert_eq!(utis, [FILE_URL_UTI]);
+        assert_eq!(
+            sync.answer(offer.generation, FILE_URL_UTI).as_deref(),
+            Some(&b"file:///Users/me/a%20b.txt\nfile:///tmp/c"[..])
+        );
+        let here = vec![PathBuf::from("/Users/me/a b.txt"), PathBuf::from("/tmp/c")];
+        assert_eq!(sync.files(), Some(ClipFiles::Here(here)));
+
+        let noop: Provide = Arc::new(|_: &str| None);
+        let url = ClipItem { uti: FILE_URL_UTI.to_owned(), size: 9, hash: [3; 32], inline: None };
+        sync.receive(studio, &worker_offer(4, vec![url, text_item("a.txt")]), noop);
+        assert_eq!(board.data(TEXT_UTI).as_deref(), Some(&b"a.txt"[..]), "the names as text");
+        assert_eq!(sync.files(), Some(ClipFiles::Worker { worker: studio, generation: 4 }));
+        assert!(sync.offer_for(studio, me).is_none(), "our own write");
+        board.copy(&[(TEXT_UTI, b"moved on")]);
+        assert_eq!(sync.files(), None);
+    }
+
+    #[test]
+    fn file_urls_become_paths() {
+        assert_eq!(file_url_path("file:///tmp/%C3%BC%20x"), Some(PathBuf::from("/tmp/ü x")));
+        assert_eq!(file_url_path("file://localhost/tmp/a"), Some(PathBuf::from("/tmp/a")));
+        assert_eq!(file_url_path("https://example.com/a"), None);
+        assert_eq!(file_url_path("file:///tmp/%zz"), None);
+        assert_eq!(
+            file_url_paths(b"file:///a\nfile:///b%2Fc"),
+            [PathBuf::from("/a"), PathBuf::from("/b/c")]
+        );
     }
 
     #[test]

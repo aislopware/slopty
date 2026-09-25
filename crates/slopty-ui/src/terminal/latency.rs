@@ -11,6 +11,12 @@
 //! *echoed* time. A key the predictor drew nothing for (an arrow, a control key) gets no
 //! predicted time. Each time is also kept per hop ([`LatencyStats::echo_hops`]). Pure: callers
 //! pass the instants.
+//!
+//! A key the predictor guessed at can still reach the glass as its echo first: on a fast link
+//! the worker answers before the next paint, and that frame shows the echo instead of the
+//! guess. That is right, and counted apart ([`LatencyStats::echo_first`]). A guessed key whose
+//! guess was missing from a frame painted after the key, while its echo had not come either, is
+//! the guess path falling behind ([`LatencyStats::guess_late`]).
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -51,6 +57,12 @@ pub struct LatencyStats {
     pub echo_hops: [Spread; 5],
     /// Keys the local-echo overlay showed before the worker answered.
     pub predicted: u64,
+    /// Keys the predictor guessed at whose echo was on the first frame painted after them, so
+    /// that frame showed the echo and no guess.
+    pub echo_first: u64,
+    /// Keys the predictor guessed at that a frame painted after them showed neither guessed nor
+    /// echoed.
+    pub guess_late: u64,
     /// Key → glass of the prediction, median.
     pub predicted_p50: Duration,
     /// Same, 95th percentile.
@@ -67,7 +79,11 @@ pub struct LatencyStats {
 struct Pending {
     seq: u64,
     at: Instant,
+    /// The predictor made a guess for it that the overlay would draw.
+    guessed: bool,
     predicted: bool,
+    /// A frame painted after it showed neither its guess nor its echo.
+    missed: bool,
     /// The first frame acknowledging the key: when its batch left the link, and when it was
     /// applied.
     applied: Option<(Instant, Instant)>,
@@ -83,12 +99,22 @@ pub struct KeyLatency {
     predicted_hops: [VecDeque<Duration>; 3],
     echoed_count: u64,
     predicted_count: u64,
+    echo_first_count: u64,
+    guess_late_count: u64,
 }
 
 impl KeyLatency {
-    /// A key with sequence number `seq` left for the worker at `now`.
-    pub fn pressed(&mut self, seq: u64, now: Instant) {
-        self.pending.push_back(Pending { seq, at: now, predicted: false, applied: None });
+    /// A key with sequence number `seq` left for the worker at `now`; `guessed` when the
+    /// local-echo overlay has a guess of it to draw.
+    pub fn pressed(&mut self, seq: u64, now: Instant, guessed: bool) {
+        self.pending.push_back(Pending {
+            seq,
+            at: now,
+            guessed,
+            predicted: false,
+            missed: false,
+            applied: None,
+        });
         while self.pending.len() > RING {
             self.pending.pop_front();
         }
@@ -125,7 +151,17 @@ impl KeyLatency {
                 since(frame.painted, frame.submitted),
                 since(frame.submitted, frame.presented),
             ];
-            if !key.predicted && guessed.contains(&key.seq) {
+            let shown = guessed.contains(&key.seq);
+            let echoed = key.seq <= input_ack;
+            if key.guessed && !key.predicted && !shown && frame.painted >= key.at {
+                if echoed && !key.missed {
+                    self.echo_first_count = self.echo_first_count.saturating_add(1);
+                } else if !key.missed {
+                    key.missed = true;
+                    self.guess_late_count = self.guess_late_count.saturating_add(1);
+                }
+            }
+            if !key.predicted && shown {
                 key.predicted = true;
                 self.predicted_count = self.predicted_count.saturating_add(1);
                 push(&mut self.predicted, age);
@@ -133,7 +169,7 @@ impl KeyLatency {
                     push(ring, hop);
                 }
             }
-            if key.seq <= input_ack {
+            if echoed {
                 self.echoed_count = self.echoed_count.saturating_add(1);
                 push(&mut self.echo, age);
                 let (arrived, applied) = key.applied.unwrap_or((frame.painted, frame.painted));
@@ -167,6 +203,8 @@ impl KeyLatency {
             echo_max: echo.last().copied().unwrap_or_default(),
             echo_hops: self.echo_hops.each_ref().map(spread),
             predicted: self.predicted_count,
+            echo_first: self.echo_first_count,
+            guess_late: self.guess_late_count,
             predicted_p50: percentile(&predicted, 50),
             predicted_p95: percentile(&predicted, 95),
             predicted_p99: percentile(&predicted, 99),
@@ -224,7 +262,7 @@ mod tests {
     fn the_hops_of_an_echo_and_a_guess_add_up_to_their_totals() {
         let mut m = KeyLatency::default();
         let t0 = Instant::now();
-        m.pressed(1, t0);
+        m.pressed(1, t0, true);
         let guess = Shown { painted: t0 + MS, submitted: t0 + 2 * MS, presented: t0 + 20 * MS };
         m.presented(guess, &[1], 0);
         m.applied(1, t0 + 3 * MS, t0 + 4 * MS);
@@ -243,7 +281,7 @@ mod tests {
     fn a_key_is_echoed_at_the_first_paint_that_acknowledges_it() {
         let mut m = KeyLatency::default();
         let t0 = Instant::now();
-        m.pressed(1, t0);
+        m.pressed(1, t0, false);
         m.presented(on_glass_at(t0 + 8 * MS), &[], 0);
         assert_eq!(m.stats().echoed, 0, "the frame on screen predates the key");
         m.presented(on_glass_at(t0 + 24 * MS), &[], 1);
@@ -260,7 +298,7 @@ mod tests {
     fn a_prediction_is_timed_once_and_the_echo_still_follows() {
         let mut m = KeyLatency::default();
         let t0 = Instant::now();
-        m.pressed(7, t0);
+        m.pressed(7, t0, true);
         m.presented(on_glass_at(t0 + 5 * MS), &[7], 6);
         m.presented(on_glass_at(t0 + 21 * MS), &[7], 6);
         m.presented(on_glass_at(t0 + 38 * MS), &[], 7);
@@ -275,9 +313,9 @@ mod tests {
     fn a_key_the_predictor_drew_nothing_for_gets_no_predicted_time() {
         let mut m = KeyLatency::default();
         let t0 = Instant::now();
-        m.pressed(1, t0);
+        m.pressed(1, t0, true);
         m.presented(on_glass_at(t0 + 4 * MS), &[1], 0);
-        m.pressed(2, t0 + 10 * MS);
+        m.pressed(2, t0 + 10 * MS, false);
         m.presented(on_glass_at(t0 + 14 * MS), &[1], 0);
         m.presented(on_glass_at(t0 + 30 * MS), &[], 2);
         let s = m.stats();
@@ -285,17 +323,45 @@ mod tests {
         assert_eq!((s.echoed, s.echo_max), (2, 30 * MS));
     }
 
+    /// A guessed key whose echo is on the first frame painted after it counts as the echo
+    /// winning, not as a miss; one whose guess is missing from a frame while its echo is still
+    /// out is the guess path falling behind, counted once.
+    #[test]
+    fn an_echo_that_beats_its_guess_is_told_apart_from_a_late_guess() {
+        let mut m = KeyLatency::default();
+        let t0 = Instant::now();
+        m.pressed(1, t0 + 2 * MS, true);
+        m.presented(on_glass_at(t0 + MS), &[], 0);
+        m.presented(on_glass_at(t0 + 4 * MS), &[], 1);
+        let s = m.stats();
+        assert_eq!((s.predicted, s.echo_first, s.guess_late, s.echoed), (0, 1, 0, 1));
+
+        m.pressed(2, t0 + 10 * MS, true);
+        m.presented(on_glass_at(t0 + 12 * MS), &[], 1);
+        m.presented(on_glass_at(t0 + 14 * MS), &[], 1);
+        m.presented(on_glass_at(t0 + 16 * MS), &[2], 1);
+        m.presented(on_glass_at(t0 + 30 * MS), &[], 2);
+        let s = m.stats();
+        assert_eq!((s.predicted, s.echo_first, s.guess_late, s.echoed), (1, 1, 1, 2));
+
+        m.pressed(3, t0 + 40 * MS, false);
+        m.presented(on_glass_at(t0 + 42 * MS), &[], 2);
+        m.presented(on_glass_at(t0 + 44 * MS), &[], 3);
+        let s = m.stats();
+        assert_eq!((s.echo_first, s.guess_late), (1, 1), "an unguessed key is neither");
+    }
+
     #[test]
     fn keys_the_worker_never_answers_go_stale_and_percentiles_span_the_ring() {
         let mut m = KeyLatency::default();
         let t0 = Instant::now();
-        m.pressed(1, t0);
+        m.pressed(1, t0, false);
         m.presented(on_glass_at(t0 + STALE + MS), &[], 0);
         assert_eq!(m.stats().echoed, 0);
         assert!(m.pending.is_empty(), "stale key dropped");
         for i in 1..=100_u64 {
             let at = t0 + Duration::from_secs(10) + Duration::from_millis(i * 100);
-            m.pressed(i, at);
+            m.pressed(i, at, false);
             m.presented(on_glass_at(at + Duration::from_millis(i)), &[], i);
         }
         let s = m.stats();

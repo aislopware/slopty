@@ -461,8 +461,20 @@ forwarded TCP connection is a client-opened bidirectional stream that opens with
   - `Resume` answers the durable length of a partial, so an interrupted upload continues.
   - A drop on a streamed window goes to staging, and the files go on the worker's pasteboard
     as file URLs.
+  - Copied files paste the way a drop lands (`slopty_ui::clipboard::ClipFiles`). ⌘V in a
+    terminal with files copied here uploads them to the shell's directory and types their
+    paths. ⌘V in a streamed window stages them, and the window's input, the chord first, waits
+    on the client until the staging is done (`ScreenView::release_paste`). The offer for copied
+    files carries only their URLs. The worker never writes those, but the offer replaces the
+    client's earlier one, whose text would otherwise land over the staged files. Files a worker
+    copied are remembered by the client that received its offer. Pasted into a shell of that
+    worker, their paths are typed as they are. Pasted into another worker's tile, they come
+    down to a scratch directory here, go up as above, and the scratch directory is removed.
+    Both ends resolve a Finder file reference URL to its path before it travels.
   - ⌘-drag on a path in a terminal drags the file out as an `NSFilePromiseProvider` that
-    fetches it (`XferMsg::Fetch`, `Purpose::Download`). The client writes `name.partial`,
+    fetches it (`XferMsg::Fetch`, `Purpose::Download`). The workspace hands the promises to a
+    drag sink (`WorkspaceView::set_drag_sink`). In the app that is a system drag. The self-test
+    parks the promises and keeps them on request (`Command::KeepDragged`). The client writes `name.partial`,
     syncs it every 8 MiB, checks it against the digest in the worker's `Done` and renames it.
     A cut attempt is called off (`Cancel`) and fetched again under a new transfer whose `held`
     names the durable bytes of each partial and each file already landed. The worker resumes a

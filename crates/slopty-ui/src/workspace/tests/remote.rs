@@ -24,9 +24,13 @@ enum Call {
 }
 
 /// Records the calls; serves a worker port here `offset` ports up, as a client whose ports
-/// are partly taken would.
+/// are partly taken would. Its copied files are [`WORKER_FILES`], and a download of one
+/// writes a file of that name whose text is the path.
 #[derive(Debug)]
 struct Recorder(mpsc::UnboundedSender<Call>, u16);
+
+/// The `public.file-url` of the files a worker copied.
+const WORKER_FILES: &[u8] = b"file:///Users/w/a%20b.txt\nfile:///Users/w/c.txt";
 
 impl Remote for Recorder {
     fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest) {
@@ -37,12 +41,19 @@ impl Remote for Recorder {
         self.0.send(Call::Cancel(xfer)).unwrap();
     }
 
-    fn download(&self, _path: String, _into: PathBuf) -> Result<Vec<PathBuf>, String> {
-        Err("not in this test".to_owned())
+    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, String> {
+        let name = path.rsplit('/').next().ok_or("no name")?;
+        let file = into.join(name);
+        std::fs::write(&file, &path).map_err(|e| e.to_string())?;
+        Ok(vec![file])
     }
 
     fn clip_data(&self, _generation: u64, uti: &str, _wait: Duration) -> Option<Vec<u8>> {
-        (uti == "public.png").then(|| b"PNG".to_vec())
+        match uti {
+            "public.png" => Some(b"PNG".to_vec()),
+            "public.file-url" => Some(WORKER_FILES.to_vec()),
+            _ => None,
+        }
     }
 
     fn send_clip(&self, generation: u64, uti: String, bytes: Vec<u8>) {
@@ -69,26 +80,202 @@ fn connect_remote_at(
     cx: &mut VisualTestContext,
     offset: u16,
 ) -> (Fake, mpsc::UnboundedReceiver<Call>, Rc<Memory>) {
+    let board = Rc::new(Memory::default());
+    let shared: Rc<dyn Pasteboard> = Rc::<Memory>::clone(&board);
+    view.update_in(cx, |v, _window, _cx| v.set_pasteboard(shared));
+    let (fake, recorded) = link_remote(view, cx, 7, "studio", offset);
+    (fake, recorded, board)
+}
+
+/// Worker `name` under key `seed` connected with a recording [`Remote`].
+fn link_remote(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    seed: u128,
+    name: &str,
+    offset: u16,
+) -> (Fake, mpsc::UnboundedReceiver<Call>) {
     let (tx, rx) = mpsc::channel(256);
     let (calls, recorded) = mpsc::unbounded_channel();
     let me = ClientId::new();
-    let key = WorkerKey::new(7);
+    let key = WorkerKey::new(seed);
     let factory: ScreenFactory =
         Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
-    let board = Rc::new(Memory::default());
-    let shared: Rc<dyn Pasteboard> = Rc::<Memory>::clone(&board);
     view.update_in(cx, |v, _window, cx| {
-        v.set_pasteboard(shared);
-        v.add_worker(key, "studio".to_owned(), cx);
+        v.add_worker(key, name.to_owned(), cx);
         let remote: Arc<dyn Remote> = Arc::new(Recorder(calls, offset));
         let link = WorkerLink { me, out: tx, open_screen: factory, remote: Some(remote) };
-        v.connect_worker(key, "studio".to_owned(), link, Vec::new(), cx);
+        v.connect_worker(key, name.to_owned(), link, Vec::new(), cx);
         v.apply_sync(key, ItemSync::Snapshot { version: 0, items: Vec::new() }, cx);
     });
     cx.run_until_parked();
     let mut fake = Fake { key, me, rx };
     fake.drain();
-    (fake, recorded, board)
+    (fake, recorded)
+}
+
+/// What was pasted into `shell`.
+fn pasted(sent: Vec<ClientMsg>, shell: SessionId) -> Vec<String> {
+    sent.into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Term { session, req: TermRequest::Paste(text) } if session == shell => {
+                Some(text)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// ⌘V in `shell`'s terminal.
+fn paste_in(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, shell: SessionId) {
+    view.update_in(cx, |v, window, cx| {
+        let terminal = v.terminal(shell).expect("attached").clone();
+        terminal.update(cx, |t, cx| t.paste_clipboard(&crate::terminal::Paste, window, cx));
+    });
+    cx.run_until_parked();
+}
+
+/// The offer of worker `generation`'s copied files, announced to this client.
+fn worker_copied_files(generation: u64) -> Offer {
+    Offer {
+        origin: Peer::Worker(slopty_core::WorkerId::new()),
+        generation,
+        items: vec![ClipItem {
+            uti: "public.file-url".to_owned(),
+            size: WORKER_FILES.len() as u64,
+            hash: crate::clipboard::digest(WORKER_FILES),
+            inline: None,
+        }],
+    }
+}
+
+/// ⌘V in a shell with files copied here sends them to the shell's directory and types their
+/// paths once there, as a drop does; the worker hears the files' URLs as the clipboard.
+#[gpui::test]
+fn files_copied_here_paste_into_a_shell_as_a_drop(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (mut studio, mut calls, board) = connect_remote(&view, cx);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a b.txt");
+    std::fs::write(&file, b"abc").unwrap();
+    let url = format!("file://{}", dir.path().join("a%20b.txt").display());
+    board.copy_files(&[&url]);
+    let shell = SessionId::new();
+    opens(&view, cx, &studio, shell, studio.me, 1);
+    let offer = offers(&studio.drain()).pop().expect("announced on focus");
+    assert_eq!(offer.items.len(), 1);
+    assert_eq!(offer.items[0].uti, "public.file-url", "the URLs alone");
+
+    paste_in(&view, cx, shell);
+    let Call::Upload(xfer, files, dest) = calls.try_recv().expect("an upload") else {
+        panic!("an upload")
+    };
+    assert_eq!((files, dest), (vec![file], Dest::SessionCwd(shell)));
+    assert!(pasted(studio.drain(), shell).is_empty(), "nothing typed yet");
+    let paths = vec!["/Users/w/proj/a b.txt".to_owned()];
+    view.update_in(cx, |v, _window, cx| v.xfer_message(XferMsg::Finished { xfer, paths }, cx));
+    cx.run_until_parked();
+    assert_eq!(pasted(studio.drain(), shell), ["'/Users/w/proj/a b.txt' "]);
+}
+
+/// Files a worker copied, pasted into a shell of that worker, are typed where they are; into
+/// a shell of another worker, they come down here and go up to it, and what came down goes.
+#[gpui::test]
+fn files_a_worker_copied_paste_into_its_shell_or_travel_to_another(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (mut studio, mut studio_calls, _board) = connect_remote(&view, cx);
+    let (mut laptop, mut laptop_calls) = link_remote(&view, cx, 8, "laptop", 0);
+    let key = studio.key;
+    view.update_in(cx, |v, _window, _cx| {
+        v.clip_message(key, ClipMsg::Offer(worker_copied_files(5)));
+    });
+    let here = SessionId::new();
+    opens(&view, cx, &studio, here, studio.me, 1);
+    studio.drain();
+    paste_in(&view, cx, here);
+    assert_eq!(pasted(studio.drain(), here), ["'/Users/w/a b.txt' /Users/w/c.txt "]);
+    assert!(studio_calls.try_recv().is_err(), "nothing moved");
+
+    let there = SessionId::new();
+    opens(&view, cx, &laptop, there, laptop.me, 1);
+    laptop.drain();
+    paste_in(&view, cx, there);
+    let Call::Upload(xfer, files, dest) = laptop_calls.try_recv().expect("an upload") else {
+        panic!("an upload")
+    };
+    assert_eq!(dest, Dest::SessionCwd(there));
+    let names: Vec<_> = files.iter().map(|f| f.file_name().unwrap().to_owned()).collect();
+    assert_eq!(names, ["a b.txt", "c.txt"], "in the order copied");
+    assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), "/Users/w/a b.txt", "brought down");
+    let scratch = files[0].parent().unwrap().parent().unwrap().to_owned();
+    let paths = vec!["/Users/l/a b.txt".to_owned(), "/Users/l/c.txt".to_owned()];
+    view.update_in(cx, |v, _window, cx| v.xfer_message(XferMsg::Finished { xfer, paths }, cx));
+    cx.run_until_parked();
+    assert_eq!(pasted(laptop.drain(), there), ["'/Users/l/a b.txt' /Users/l/c.txt "]);
+    assert!(!scratch.exists(), "what came down for it is gone");
+}
+
+/// ⌘V of files into a remote window stages them on its worker, with no notice, and lets the
+/// window's held chord go once they are there; files on the window's own worker let it go at
+/// once.
+#[gpui::test]
+fn files_pasted_into_a_window_are_staged_before_the_chord_goes(cx: &mut TestAppContext) {
+    use gpui::AppContext as _;
+    use slopty_proto::screen::{CaptureTarget, Quality};
+
+    use crate::clipboard::ClipFiles;
+    use crate::screen::{Opened, ScreenView};
+
+    let (view, cx) = workspace(cx);
+    let (studio, mut calls, _board) = connect_remote(&view, cx);
+    let window =
+        arrives(&view, cx, &studio, ItemKind::Window { window: slopty_core::WindowId(9) }, 1);
+    let (out, _screen_rx) = mpsc::channel(64);
+    let screen = cx.update(|_window, cx| {
+        cx.new(|cx| {
+            let opened = Opened {
+                stream: StreamId(3),
+                target: CaptureTarget::Window(slopty_core::WindowId(9)),
+                size: (800, 600),
+                quality: Quality::default(),
+            };
+            let handle = slopty_client::ScreenHandle::detached(StreamId(3));
+            ScreenView::new(opened, handle, out, Theme::default(), cx)
+        })
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("shot.png");
+    std::fs::write(&file, b"png").unwrap();
+    let hold = |cx: &mut VisualTestContext, files: ClipFiles| {
+        screen.update(cx, |v, cx| {
+            v.set_paste_hook(Rc::new(move || crate::screen::PasteAhead {
+                offer: None,
+                files: Some(files.clone()),
+            }));
+            v.press(gpui::Keystroke::parse("cmd-v").unwrap(), cx);
+        });
+        screen.downgrade()
+    };
+    let weak = hold(cx, ClipFiles::Here(vec![file.clone()]));
+    view.update_in(cx, |v, _window, cx| {
+        v.paste_files_in_window(window, &weak, ClipFiles::Here(vec![file.clone()]), cx);
+    });
+    let Call::Upload(xfer, files, dest) = calls.try_recv().expect("an upload") else {
+        panic!("an upload")
+    };
+    assert_eq!((files, dest), (vec![file.clone()], Dest::Staging));
+    assert!(screen.read_with(cx, |v, _| v.paste_held()), "the chord waits");
+    let paths = vec!["/Users/w/.slopty/drop/x/shot.png".to_owned()];
+    view.update_in(cx, |v, _window, cx| v.xfer_message(XferMsg::Finished { xfer, paths }, cx));
+    cx.run_until_parked();
+    assert!(!screen.read_with(cx, |v, _| v.paste_held()), "and goes once they are there");
+    assert_eq!(view.read_with(cx, WorkspaceView::toast_text), None, "a paste says nothing");
+
+    let on_worker = ClipFiles::Worker { worker: studio.key, generation: 2 };
+    let weak = hold(cx, on_worker.clone());
+    view.update_in(cx, |v, _window, cx| v.paste_files_in_window(window, &weak, on_worker, cx));
+    assert!(calls.try_recv().is_err(), "nothing to send");
+    assert!(!screen.read_with(cx, |v, _| v.paste_held()));
 }
 
 fn watches(sent: &[ClientMsg]) -> Vec<bool> {
@@ -168,7 +355,9 @@ fn a_clipboard_that_asks_is_read_only_for_a_paste(cx: &mut TestAppContext) {
     assert_eq!(board.reads(), 0, "nothing read on focus");
 
     let hook = view.read_with(cx, |v, _| v.paste_hook(studio.key)).unwrap();
-    let Some(ClientMsg::Clip(ClipMsg::Offer(offer))) = hook() else { panic!("an offer to paste") };
+    let Some(ClientMsg::Clip(ClipMsg::Offer(offer))) = hook().offer else {
+        panic!("an offer to paste")
+    };
     assert_eq!(offer.items[0].inline.as_deref(), Some(&b"copied on the phone"[..]));
     assert!(board.reads() > 0, "read for the paste");
 }

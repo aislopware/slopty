@@ -1015,6 +1015,159 @@ mod tests {
         stack.shutdown().await;
     }
 
+    /// Files copied here, as Finder copies them, and pasted into a shell with ⌘V go up to the
+    /// shell's directory, and their quoted paths are typed: a drop by the keyboard. The copy is
+    /// on the run's own named pasteboard; the human's is never touched.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn files_copied_here_and_pasted_into_a_shell_land_there() {
+        use slopty_e2e::harness::pasteboard_name;
+        use slopty_platform::pasteboard::MacPasteboard;
+
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-paste-files").await.unwrap();
+        let app_name = pasteboard_name(stack.dir.path(), "app");
+        let work = stack.path("paste-here");
+        let outbox = stack.path("copied");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&outbox).unwrap();
+        let source = outbox.join("notes 2.txt");
+        let body: Vec<u8> = (0..300_000_u32).map(|i| b'a' + (i % 26) as u8).collect();
+        std::fs::write(&source, &body).unwrap();
+        let drv = &mut stack.driver;
+        shell_in(drv, &work).await;
+        let app = MacPasteboard::named(&app_name);
+        app.copy_files(&[source.as_path()]);
+        drv.keys("cmd-v").await.unwrap();
+
+        let dump = drv
+            .wait_for("the quoted path typed at the prompt", STEP, |d| {
+                !d.rows_containing("paste-here/notes 2.txt'").is_empty()
+                    && d.terminals[0].upload.is_none()
+            })
+            .await
+            .unwrap();
+        let landed = work.join("notes 2.txt");
+        assert_eq!(std::fs::read(&landed).unwrap(), body, "the file arrives whole");
+        let screen = dump.terminals[0].rows.concat();
+        let quoted = format!("'{}'", std::fs::canonicalize(&landed).unwrap().display());
+        assert!(screen.contains(&quoted), "its absolute path, quoted for its space: {screen}");
+        stack.shutdown().await;
+        app.release();
+    }
+
+    /// Files copied on the worker, pasted into a shell of that worker, are typed where they
+    /// are: the worker announces their URLs, the app remembers whose they are, fetches the URLs
+    /// on ⌘V and types the paths. Both pasteboards are the run's own.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn files_copied_on_the_worker_paste_into_its_shell_as_their_paths() {
+        use slopty_e2e::harness::pasteboard_name;
+        use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
+
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-paste-worker-files").await.unwrap();
+        let worker_name = pasteboard_name(stack.dir.path(), "worker");
+        let app_name = pasteboard_name(stack.dir.path(), "app");
+        let copied = stack.path("on-the-worker");
+        std::fs::create_dir_all(&copied).unwrap();
+        let (a, b) = (copied.join("a b.txt"), copied.join("c.txt"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"c").unwrap();
+        let drv = &mut stack.driver;
+        drv.wait_for("the worker's clipboard watched", STEP, |d| {
+            d.status == "connected"
+                && d.focus.as_deref() == Some("terminal")
+                && d.workers.iter().any(|w| w.clipboard_watched)
+        })
+        .await
+        .unwrap();
+        drv.type_text("clipboard-watched").await.unwrap();
+        drv.wait_for("the keys behind the watch echoed", STEP, |d| {
+            !d.rows_containing("clipboard-watched").is_empty()
+        })
+        .await
+        .unwrap();
+        drv.keys("ctrl-u").await.unwrap();
+        let (worker, app) = (MacPasteboard::named(&worker_name), MacPasteboard::named(&app_name));
+        let before = app.change_count();
+        worker.copy_files(&[a.as_path(), b.as_path()]);
+        let deadline = std::time::Instant::now() + STEP;
+        while app.change_count() == before && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_ne!(app.change_count(), before, "the worker's copy reached the app");
+        drv.keys("cmd-v").await.unwrap();
+
+        let typed = format!("'{}' {}", a.display(), b.display());
+        let dump = drv
+            .wait_for("the worker's paths typed", STEP, |d| {
+                d.terminals[0].rows.concat().contains(&typed)
+            })
+            .await
+            .unwrap();
+        assert!(dump.terminals[0].upload.is_none(), "nothing moved");
+        stack.shutdown().await;
+        worker.release();
+        app.release();
+    }
+
+    /// ⌘-drag on a worker path in a shell drags the file out as a file promise. The self-test
+    /// app parks the promise instead of starting a system drag; keeping it, as a drop into a
+    /// directory would ask, brings the whole file down from the worker under its own name.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_path_dragged_out_of_a_shell_is_kept_by_a_download() {
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-drag-out").await.unwrap();
+        // Short, so the printed path fits one row.
+        let short = tempfile::Builder::new().prefix("slopty-drag-").tempdir_in("/tmp").unwrap();
+        let source = short.path().join("out.bin");
+        let body: Vec<u8> =
+            (0..3_000_000_u32).map(|i| i.wrapping_mul(2_654_435_761).to_le_bytes()[2]).collect();
+        std::fs::write(&source, &body).unwrap();
+        let into = stack.path("dropped-here");
+        std::fs::create_dir_all(&into).unwrap();
+        let drv = &mut stack.driver;
+        drv.wait_for("the first shell with a prompt", STEP, |d| {
+            d.status == "connected"
+                && d.focus.as_deref() == Some("terminal")
+                && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
+        })
+        .await
+        .unwrap();
+        let printed = source.display().to_string();
+        drv.type_text(&format!("printf '%s\\n' {printed}")).await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the path printed on a row of its own", STEP, |d| {
+                d.terminals[0].grid.is_some()
+                    && d.terminals[0].rows.iter().any(|r| r.trim() == printed)
+            })
+            .await
+            .unwrap();
+        let term = &dump.terminals[0];
+        let row = term.rows.iter().position(|r| r.trim() == printed).unwrap();
+        let col = term.rows[row].find('/').unwrap() + 3;
+        let (x, y) = term.cell_center(col, row).unwrap();
+        drv.ok(&Command::Move { x, y }).await.unwrap();
+        drv.cmd_drag(x, y, x + 60.0, y + 20.0).await.unwrap();
+        drv.keep_dragged(&into).await.unwrap();
+
+        let landed = into.join("out.bin");
+        assert_eq!(std::fs::read(&landed).unwrap(), body, "the file arrives whole");
+        let left: Vec<_> =
+            std::fs::read_dir(&into).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, ["out.bin"], "nothing half-arrived is left beside it");
+        stack.shutdown().await;
+    }
+
     /// A port a shell listens on is served here: the chip's local port reaches the program on
     /// the worker through a tunnel. With the worker on this very Mac the port is taken here by
     /// the program itself, so the forward moves to the next free one.
