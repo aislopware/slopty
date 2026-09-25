@@ -48,6 +48,9 @@ const TILE_GROUP: &str = "tile";
 /// pointer is on the header itself, not anywhere over the body.
 const HEADER_GROUP: &str = "tile-header";
 
+/// How much faster a header's place shrinks than its title.
+const PLACE_SHRINK: f32 = 1000.0;
+
 /// What the in-body pill says while a tile's worker is being dialled again.
 pub const RECONNECTING: &str = "Reconnecting…";
 
@@ -503,7 +506,11 @@ impl WorkspaceView {
             _ => None,
         };
         let place = place.map(|text| {
-            div()
+            let mut place = div();
+            // Gives way long before the title does: a narrow tile keeps its name whole and
+            // loses where it is first.
+            place.style().flex_shrink = Some(PLACE_SHRINK);
+            place
                 .id("place")
                 .debug_selector(move || format!("place-{}", id.as_uuid()))
                 .role(Role::Label)
@@ -563,6 +570,7 @@ impl WorkspaceView {
                 .child(Input::new(&input).aria_label("Tile name"))
                 .into_any_element(),
             None => div()
+                .debug_selector(move || format!("name-{}", id.as_uuid()))
                 .min_w_0()
                 .overflow_hidden()
                 .child(
@@ -573,7 +581,7 @@ impl WorkspaceView {
                 .into_any_element(),
         };
         // The title and its place share what the right side leaves, the place giving way
-        // first only by being the shorter of the two.
+        // first.
         let names = div()
             .flex_1()
             .min_w_0()

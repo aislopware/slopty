@@ -7089,6 +7089,7 @@ dependencies = [
  "png 0.18.1",
  "pretty_assertions",
  "regex",
+ "rustix",
  "slopty-core",
  "slopty-grid",
  "slopty-proto",

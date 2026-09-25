@@ -5,6 +5,7 @@
 #   133;B  input starts (end of PS1)
 #   133;C  output starts (preexec)
 #   133;D;<status>  command ended (precmd, before the next prompt)
+#   OSC 7  the working directory (precmd), so the client can name where a shell is
 #
 # Sourced by the bootstrap .zshenv for interactive shells; safe to source twice.
 
@@ -19,6 +20,8 @@ _slopty_precmd() {
         'builtin' 'print' -n -- $'\e]133;D;'"$_slopty_last"$'\a'
         _slopty_running=0
     fi
+    'builtin' 'local' _slopty_dir=${PWD//\%/%25}
+    'builtin' 'print' -n -- $'\e]7;file://'"${HOST}${_slopty_dir// /%20}"$'\a'
     # Marks inside PS1/PS2 so zle redraws keep them; %{ %} hides them from width counting.
     if [[ "$PS1" != *$'\e]133;A'* ]]; then
         PS1=$'%{\e]133;A\a%}'"$PS1"$'%{\e]133;B\a%}'

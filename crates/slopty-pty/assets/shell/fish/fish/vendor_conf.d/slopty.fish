@@ -56,6 +56,14 @@ if status is-interactive; and test "$__slopty_integrated" = 1; and not string ma
     end
 end
 
+# The working directory (OSC 7) before each prompt, so the client can name where a shell is.
+if status is-interactive
+    function __slopty_cwd --on-event fish_prompt
+        set -l dir (string replace -a % %25 -- $PWD | string replace -a ' ' %20)
+        printf '\e]7;file://%s%s\a' $hostname $dir
+    end
+end
+
 # `sudo` keeps the terminfo (ghostty's `sudo` feature): TERM names our entry, and TERMINFO
 # says where it is, so `sudo vim` without it would find no terminal at all. sudoedit
 # (`-e`, `--edit`) takes no --preserve-env and is left alone; a sudo that is already a

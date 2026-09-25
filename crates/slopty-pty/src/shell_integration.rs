@@ -442,6 +442,16 @@ mod tests {
         assert!(has_mark(text, "D;1"), "{shell} status of `false`: {text:?}");
     }
 
+    /// The shell reported the directory it moved into, `a b%` under its `HOME`, as OSC 7 with
+    /// the space and the percent sign encoded.
+    fn assert_cwd(text: &str, shell: &str) {
+        let reported = text
+            .split("\x1b]7;file://")
+            .skip(1)
+            .any(|rest| rest.split_once('\x07').is_some_and(|(url, _)| url.ends_with("/a%20b%25")));
+        assert!(reported, "{shell} reports its directory: {text:?}");
+    }
+
     /// `sudo` is the wrapper that keeps TERMINFO (the shells print `function` for it).
     fn assert_sudo_wrapped(text: &str, shell: &str) {
         assert!(text.contains("sudo=function"), "{shell} wraps sudo: {text:?}");
@@ -457,10 +467,11 @@ mod tests {
             None,
             &[(".zshenv", "export SLOPTY_TEST_ZSHENV=ran\n")],
             // Two lines: the status of the first is reported by the precmd before the second.
-            "echo zdotdir=$ZDOTDIR env=$SLOPTY_TEST_ZSHENV sudo=$(whence -w sudo); false\nexit\n",
+            "mkdir -p ~/'a b%' && cd ~/'a b%'\necho zdotdir=$ZDOTDIR env=$SLOPTY_TEST_ZSHENV sudo=$(whence -w sudo); false\nexit\n",
         )
         .await;
         assert_marks(&text, "zsh");
+        assert_cwd(&text, "zsh");
         assert!(
             text.contains("zdotdir= env=ran sudo=sudo: function"),
             "ZDOTDIR handed back, user .zshenv ran, sudo wrapped: {text:?}"
@@ -511,10 +522,11 @@ mod tests {
                 &["-i"],
                 None,
                 &[(".bashrc", "export SLOPTY_TEST_BASHRC=ran\n"), (".bash_profile", "export SLOPTY_TEST_PROFILE=ran\n")],
-                "echo rc=$SLOPTY_TEST_BASHRC profile=$SLOPTY_TEST_PROFILE login=$SLOPTY_BASH_LOGIN sudo=$(type -t sudo); false\nexit\n",
+                "mkdir -p ~/'a b%' && cd ~/'a b%'\necho rc=$SLOPTY_TEST_BASHRC profile=$SLOPTY_TEST_PROFILE login=$SLOPTY_BASH_LOGIN sudo=$(type -t sudo); false\nexit\n",
             )
             .await;
             assert_marks(&text, bash);
+            assert_cwd(&text, bash);
             assert!(
                 text.contains("rc=ran profile= login= sudo=function"),
                 "{bash}: .bashrc only, env clean, sudo wrapped: {text:?}"
@@ -558,10 +570,11 @@ mod tests {
             &["-i"],
             None,
             &[(".config/fish/config.fish", "set -gx SLOPTY_TEST_FISH ran\n")],
-            "echo cfg=$SLOPTY_TEST_FISH loaded=$__slopty_integrated sudo=(type -t sudo); false\nexit\n",
+            "mkdir -p ~/'a b%'; and cd ~/'a b%'\necho cfg=$SLOPTY_TEST_FISH loaded=$__slopty_integrated sudo=(type -t sudo); false\nexit\n",
         )
         .await;
         assert_marks(&text, "fish");
+        assert_cwd(&text, "fish");
         // fish 4 marks on its own and the snippet only records that it loaded; on fish 3 it
         // wraps the prompt.
         assert!(

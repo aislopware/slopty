@@ -948,8 +948,13 @@ mod tests {
         assert_eq!(std::fs::read(&landed).unwrap(), body, "the file arrives whole");
         assert!(!work.join("report 1.txt.partial").exists(), "renamed into place");
         let screen = dump.terminals[0].rows.concat();
-        let quoted = format!("'{}'", std::fs::canonicalize(&landed).unwrap().display());
-        assert!(screen.contains(&quoted), "its absolute path, quoted for its space: {screen}");
+        // The shell's own `$PWD` names the directory, so /var may or may not be /private/var.
+        let canonical = std::fs::canonicalize(&landed).unwrap();
+        let quoted = [&landed, &canonical].map(|p| format!("'{}'", p.display()));
+        assert!(
+            quoted.iter().any(|q| screen.contains(q)),
+            "its absolute path, quoted for its space: {screen}"
+        );
         stack.shutdown().await;
     }
 
@@ -1052,8 +1057,13 @@ mod tests {
         let landed = work.join("notes 2.txt");
         assert_eq!(std::fs::read(&landed).unwrap(), body, "the file arrives whole");
         let screen = dump.terminals[0].rows.concat();
-        let quoted = format!("'{}'", std::fs::canonicalize(&landed).unwrap().display());
-        assert!(screen.contains(&quoted), "its absolute path, quoted for its space: {screen}");
+        // The shell's own `$PWD` names the directory, so /var may or may not be /private/var.
+        let canonical = std::fs::canonicalize(&landed).unwrap();
+        let quoted = [&landed, &canonical].map(|p| format!("'{}'", p.display()));
+        assert!(
+            quoted.iter().any(|q| screen.contains(q)),
+            "its absolute path, quoted for its space: {screen}"
+        );
         stack.shutdown().await;
         app.release();
     }

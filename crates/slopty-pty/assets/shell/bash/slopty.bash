@@ -55,8 +55,11 @@ _slopty_precmd() {
     _slopty_armed=0
 }
 
-# Last in PROMPT_COMMAND: (re)wrap PS1/PS2 (a theme may have rebuilt them) and arm the trap.
+# Last in PROMPT_COMMAND: report the working directory (OSC 7), (re)wrap PS1/PS2 (a theme
+# may have rebuilt them) and arm the trap.
 _slopty_arm() {
+    local _slopty_dir=${PWD//%/%25}
+    printf '\033]7;file://%s%s\007' "$HOSTNAME" "${_slopty_dir// /%20}"
     case $PS1 in
         *'133;A'*) ;;
         *) PS1='\[\033]133;A\007\]'"$PS1"'\[\033]133;B\007\]' ;;

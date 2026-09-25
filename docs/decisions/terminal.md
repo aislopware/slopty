@@ -1435,3 +1435,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   scroll at 200 × 60 took 356–385 µs before and 352–365 µs after, six interleaved release
   runs each, and echo and Enter bytes are unchanged. Test: engine
   `a_mark_above_a_sent_prompt_resends_its_status`.
+
+- ✅ **The shell integration reports the working directory** (2026-09-25). The new tile
+  header and status bar name where a shell is from `SessionSummary.cwd`. The worker only
+  learned that from OSC 7, which most prompts never send; the user's zsh with starship does
+  not. So every header read just "shell". The zsh and bash hooks now emit
+  `OSC 7 file://$HOST<path>` before each prompt, and fish on `fish_prompt`, with `%` and space
+  percent-encoded. The engine accepted a named host only when it matched `$HOSTNAME` or
+  `/etc/hostname`, and a Mac has neither, so it dropped any OSC 7 that named this machine,
+  zsh's included. It now compares against `uname`'s node name, read once. Tests: pty
+  `an_interactive_zsh_emits_prompt_marks`,
+  `an_interactive_bash_emits_prompt_marks_and_runs_the_users_bashrc` and the fish one, each
+  moving into `a b%`; engine `cwd_from_osc7` cases, including this machine's name.

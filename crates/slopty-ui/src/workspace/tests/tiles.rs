@@ -54,6 +54,41 @@ fn a_shell_header_names_its_directory(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("place", note.item)).is_none(), "a note has no place");
 }
 
+/// A narrow tile keeps its name whole and lets where it is give way.
+#[gpui::test]
+fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(720.0), px(600.0)));
+    let fake = connect(&view, cx, 1, "studio");
+    let named = |session| Item {
+        id: ItemId::new(),
+        kind: ItemKind::Terminal { session },
+        sleeping: false,
+        name: Some("release notes".to_owned()),
+    };
+    let (here, nowhere) = (SessionId::new(), SessionId::new());
+    let (placed, bare) = (named(here), named(nowhere));
+    let (placed_id, bare_id) = (placed.id, bare.id);
+    let key = fake.key;
+    view.update_in(cx, |v, _window, cx| {
+        v.session_opened(key, summary(here, Some("/srv/deployments/production-eu-west")), cx);
+        v.session_opened(key, summary(nowhere, None), cx);
+        for (version, item) in [(1, placed), (2, bare)] {
+            let op = ItemOp::Upsert(item);
+            v.apply_sync(key, ItemSync::Delta { version, by: fake.me, op }, cx);
+        }
+    });
+    cx.run_until_parked();
+    let width = |cx: &mut VisualTestContext, what: &str, item: ItemId| {
+        let b = cx.debug_bounds(selector(what, item)).unwrap_or_else(|| panic!("{what} drawn"));
+        f32::from(b.size.width)
+    };
+    let (title, alone) = (width(cx, "name", placed_id), width(cx, "name", bare_id));
+    assert!((title - alone).abs() < 1.0, "the title is whole beside its place: {title} vs {alone}");
+    let place = width(cx, "place", placed_id);
+    assert!(place > 0.0 && place < 100.0, "the place gave way: {place}");
+}
+
 /// The worker's name is worth a chip only when there is another worker it could be.
 #[gpui::test]
 fn the_worker_chip_shows_only_beside_another_worker(cx: &mut TestAppContext) {

@@ -15,6 +15,7 @@ libghostty-vt.workspace = true
 memchr.workspace = true
 png.workspace = true
 regex.workspace = true
+rustix.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
 slopty-theme.workspace = true

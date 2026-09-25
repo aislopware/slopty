@@ -1186,7 +1186,7 @@ fn alt_enter_at(chunk: &[u8]) -> Option<usize> {
 pub fn cwd_from_osc7(url: &str) -> Option<String> {
     let rest = url.strip_prefix("file://")?;
     let (host, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
-    if !(host.is_empty() || host == "localhost" || host.eq_ignore_ascii_case(&hostname())) {
+    if !(host.is_empty() || host == "localhost" || host.eq_ignore_ascii_case(hostname())) {
         return None;
     }
     if path.is_empty() {
@@ -1195,12 +1195,10 @@ pub fn cwd_from_osc7(url: &str) -> Option<String> {
     Some(percent_decode(path))
 }
 
-fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default()
+/// This machine's name, as a shell's `$HOST` spells it in an OSC 7 URL.
+fn hostname() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| rustix::system::uname().nodename().to_string_lossy().into_owned())
 }
 
 fn percent_decode(s: &str) -> String {
@@ -2578,6 +2576,7 @@ mod tests {
         assert_eq!(cwd_from_osc7("file:///tmp"), Some("/tmp".to_owned()));
         assert_eq!(cwd_from_osc7("file://localhost/a%20b/c"), Some("/a b/c".to_owned()));
         assert_eq!(cwd_from_osc7("file://elsewhere/tmp"), None);
+        assert_eq!(cwd_from_osc7(&format!("file://{}/tmp", hostname())), Some("/tmp".to_owned()));
         assert_eq!(cwd_from_osc7("kitty-shell-cwd:///tmp"), None);
         assert_eq!(cwd_from_osc7("file://"), None);
     }
