@@ -58,8 +58,8 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   back into view; one workspace of gesture travel is 1.1 viewport heights; fullscreen is not
   saved. Added 2026-09-25: a lone column is centred (niri's `always-center-single-column`, off
   by default there), including when a removal leaves one, and the overview centres a strip
-  that fits the zoomed-out window without moving the view (`shown_view_pos`). 67 unit tests
-  pin the maths.
+  that fits the zoomed-out window without moving the view (`shown_view_pos`). The layout's
+  unit tests pin the maths.
   Deviation added 2026-09-25, compact width: below 700 pt (a phone, an iPad in Split View) no
   column is narrower than the viewport. Every column shows full width and the strip scrolls
   between them, as it always did on the phone, because niri's proportions there give a 231 pt
@@ -263,7 +263,10 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   scrolling: 30 px band, 100 ms delay, up to 1500 px/s.
 - **Overview.** Zoom 0.5 on the overview spring; workspaces stacked with a gap of 0.1 × the
   view height; a click on a tile activates it and closes the overview; a drop between
-  workspaces makes one.
+  workspaces makes one. Deviation added 2026-09-25: the zoom is the largest, at most 0.5 and
+  at least 0.25, that fits every workspace with a gap around each (`overview_fit`), so the
+  trailing empty workspace is never cut off, and a stack that fits stays still while the focus
+  moves; a change in the count springs to the new fit.
 - **Feel.** A new column opens right of the focused one and becomes active, the view moving
   only as needed; closing a just-opened column returns to the one left of it at its exact
   offset; moving or resizing keeps the camera still while neighbours spring by the delta; a

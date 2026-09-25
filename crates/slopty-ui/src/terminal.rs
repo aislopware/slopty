@@ -3,6 +3,7 @@
 mod element;
 pub mod latency;
 pub mod metrics;
+mod scrollbar;
 mod sprite;
 pub mod url;
 mod view;

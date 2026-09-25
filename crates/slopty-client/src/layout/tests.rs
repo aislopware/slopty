@@ -12,6 +12,11 @@ const STEP: f32 = 636.0;
 const TWO_THIRDS: f32 = 840.0;
 /// Split View's 511 pt less a 12 pt peek each side, less one gap.
 const COMPACT_WORKING: f32 = 479.0;
+/// The overview's zoom with two workspaces (one and the empty one): two heights, a gap of a
+/// tenth above each for its name and one at either end fill the window.
+const OVERVIEW_TWO: f32 = 1.0 / 2.4;
+/// The same with three.
+const OVERVIEW_THREE: f32 = 1.0 / 3.5;
 
 /// Where column `i` of half-width columns starts, in strip coordinates.
 fn col_x(i: u8) -> f32 {
@@ -723,21 +728,82 @@ fn switching_workspaces_springs_and_cleans_up_when_it_lands() {
 
 // ----- overview and drops -------------------------------------------------------------------
 
+/// The overview shows every workspace, the empty one at the end included, each with a gap
+/// above it for its name and a gap of margin at either end: three workspaces fill the height
+/// exactly.
 #[test]
-fn the_overview_zooms_out_by_half_with_a_gap_between_rows() {
+fn the_overview_fits_every_workspace_with_a_gap_around_each() {
     let mut l = columns(1);
     l.open(tile(2, 1), Placement::Remote);
+    assert_eq!(l.workspaces().len(), 3);
     l.set_overview(true);
     let f = l.frame();
-    near(f.zoom, 0.5);
+    let zoom = OVERVIEW_THREE;
+    near(f.zoom, zoom);
     near(f.overview, 1.0);
-    assert_eq!(f.workspaces[0].1, Rect { x: 320.0, y: 200.0, w: 640.0, h: 400.0 });
-    near(f.workspaces[1].1.y, 200.0 + 400.0 + 40.0);
-    let a = rect(&l, t(1));
-    near(a.x, 320.0 + (1280.0 - HALF) / 4.0);
-    near(a.w, HALF / 2.0);
+    let (width, height, gap) = (1280.0 * zoom, 800.0 * zoom, 80.0 * zoom);
+    let left = (1280.0 - width) / 2.0;
+    for (i, (ix, row)) in f.workspaces.iter().enumerate() {
+        assert_eq!(*ix, i);
+        near(row.x, left);
+        near(row.w, width);
+        near(row.h, height);
+        near(row.y, (height + gap).mul_add(count(i), 2.0 * gap));
+    }
+    near(f.workspaces[2].1.bottom(), 800.0 - gap);
+    let first = rect(&l, t(1));
+    near(first.x, (1280.0 - HALF).mul_add(zoom / 2.0, left));
+    near(first.w, HALF * zoom);
     l.toggle_overview();
     near(l.frame().zoom, 1.0);
+    // One workspace and the empty one: niri's half would cut the empty one off at the
+    // window's foot, so the pair zooms a little further and both show whole.
+    let mut l = columns(1);
+    l.set_overview(true);
+    let f = l.frame();
+    near(f.zoom, OVERVIEW_TWO);
+    let gap = 80.0 * OVERVIEW_TWO;
+    near(f.workspaces[0].1.y, 2.0 * gap);
+    near(f.workspaces[1].1.bottom(), 800.0 - gap);
+}
+
+/// Past the least zoom the stack scrolls with the workspace on show, centred as niri has it,
+/// but held a gap from the window's edge at either end; a workspace added while the overview
+/// shows springs the zoom to the new fit rather than jumping.
+#[test]
+fn a_tall_overview_scrolls_with_the_active_workspace_and_refits_smoothly() {
+    let mut l = still();
+    for i in 1..=5 {
+        l.open(tile(i, 1), Placement::Remote);
+    }
+    assert_eq!(l.workspaces().len(), 6);
+    l.focus_workspace(0);
+    l.set_overview(true);
+    let f = l.frame();
+    near(f.zoom, OVERVIEW_MIN_ZOOM);
+    let gap = 80.0 * OVERVIEW_MIN_ZOOM;
+    near(f.workspaces[0].1.y, 2.0 * gap);
+    l.focus_workspace(5);
+    near(l.frame().workspaces[5].1.bottom(), 800.0 - gap);
+    l.focus_workspace_up();
+    l.focus_workspace_up();
+    let r = l.frame().workspaces[3].1;
+    near(r.y + r.h / 2.0, 400.0);
+
+    let mut l = moving();
+    l.open(t(1), Placement::Local);
+    l.set_overview(true);
+    l.set_clock(MS(2000));
+    near(l.frame().zoom, OVERVIEW_TWO);
+    l.open(tile(2, 1), Placement::Remote);
+    l.set_clock(MS(2016));
+    near(l.frame().zoom, OVERVIEW_TWO);
+    l.set_clock(MS(2050));
+    let z = l.frame().zoom;
+    assert!(z < OVERVIEW_TWO && z > OVERVIEW_THREE, "on its way: {z}");
+    assert!(l.is_animating());
+    l.set_clock(MS(4000));
+    near(l.frame().zoom, OVERVIEW_THREE);
 }
 
 /// niri's `always-center-single-column`: a lone column sits in the middle of the window, and
@@ -835,27 +901,40 @@ fn overview_drops_land_in_columns_between_columns_and_between_workspaces() {
     l.open(t(3), Placement::Local);
     // Workspace 0: [1, 2], [3], view at -8.
     l.set_overview(true);
-    // Column 0 spans x 324..638 at zoom 0.5; tile 1 is its top half.
-    let into = |y: f32| l.drop_target(480.0, y);
-    assert_eq!(into(260.0), Some(DropTarget::IntoColumn { workspace: 0, column: 0, index: 0 }));
-    assert_eq!(into(340.0), Some(DropTarget::IntoColumn { workspace: 0, column: 0, index: 1 }));
-    assert_eq!(into(560.0), Some(DropTarget::IntoColumn { workspace: 0, column: 0, index: 2 }));
-    // The outer 20 % of a column: a new column beside it.
-    assert_eq!(l.drop_target(330.0, 300.0), Some(DropTarget::NewColumn { workspace: 0, index: 0 }));
-    assert_eq!(l.drop_target(630.0, 300.0), Some(DropTarget::NewColumn { workspace: 0, index: 1 }));
-    // The gap between columns, and past the last one.
-    assert_eq!(l.drop_target(639.0, 300.0), Some(DropTarget::NewColumn { workspace: 0, index: 1 }));
-    assert_eq!(l.drop_target(955.0, 300.0), Some(DropTarget::NewColumn { workspace: 0, index: 2 }));
-    // A row reaches the full width of the viewport.
+    let f = l.frame();
+    let (row, next, z) = (f.workspaces[0].1, f.workspaces[1].1, f.zoom);
+    // A point given in the unzoomed view of workspace 0, where it is drawn.
+    let at = |x: f32, y: f32| l.drop_target(x.mul_add(z, row.x), y.mul_add(z, row.y));
+    // Column 0 spans view x 8..636; tile 1 is its top half.
     assert_eq!(
-        l.drop_target(1200.0, 300.0),
-        Some(DropTarget::NewColumn { workspace: 0, index: 2 })
+        at(320.0, 120.0),
+        Some(DropTarget::IntoColumn { workspace: 0, column: 0, index: 0 })
     );
+    assert_eq!(
+        at(320.0, 280.0),
+        Some(DropTarget::IntoColumn { workspace: 0, column: 0, index: 1 })
+    );
+    assert_eq!(
+        at(320.0, 720.0),
+        Some(DropTarget::IntoColumn { workspace: 0, column: 0, index: 2 })
+    );
+    // The outer 20 % of a column: a new column beside it.
+    assert_eq!(at(20.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 0 }));
+    assert_eq!(at(620.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 1 }));
+    // The gap between columns, and past the last one.
+    assert_eq!(at(638.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 1 }));
+    assert_eq!(at(1270.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 2 }));
+    // A row reaches the full width of the viewport.
+    assert_eq!(at(1760.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 2 }));
     // Between rows, above the first: a new workspace.
-    assert_eq!(l.drop_target(640.0, 620.0), Some(DropTarget::NewWorkspace { index: 1 }));
-    assert_eq!(l.drop_target(640.0, 100.0), Some(DropTarget::NewWorkspace { index: 0 }));
+    let between = f32::midpoint(row.bottom(), next.y);
+    assert_eq!(l.drop_target(640.0, between), Some(DropTarget::NewWorkspace { index: 1 }));
+    assert_eq!(l.drop_target(640.0, row.y / 2.0), Some(DropTarget::NewWorkspace { index: 0 }));
     // The trailing empty row takes a new column.
-    assert_eq!(l.drop_target(640.0, 700.0), Some(DropTarget::NewColumn { workspace: 1, index: 0 }));
+    assert_eq!(
+        l.drop_target(640.0, 120.0_f32.mul_add(z, next.y)),
+        Some(DropTarget::NewColumn { workspace: 1, index: 0 })
+    );
     // Out of the overview there is no gap to hit.
     l.set_overview(false);
     assert_eq!(l.drop_target(640.0, 900.0), None);
@@ -1181,7 +1260,7 @@ fn without_animation_everything_lands_at_once() {
     l.focus_column_first();
     l.move_column_right();
     l.set_overview(true);
-    near(l.frame().zoom, 0.5);
+    near(l.frame().zoom, OVERVIEW_TWO);
     l.set_overview(false);
     l.focus_workspace_down();
     l.focus_workspace_up();
@@ -1219,7 +1298,7 @@ fn the_target_rect_is_where_a_springing_tile_comes_to_rest() {
     l.set_overview(true);
     l.set_clock(MS(3000));
     let p = placed(&l, t(1));
-    near(p.rect.w, 420.0);
+    near(p.rect.w, 840.0 * OVERVIEW_TWO);
     near(p.target.w, 840.0);
 }
 

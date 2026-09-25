@@ -41,8 +41,10 @@ const CLOSE_FOR: Duration = Duration::from_millis(150);
 const RESIZE_THRESHOLD: f32 = 10.0;
 /// Gap between workspaces as a share of the viewport height.
 const WORKSPACE_GAP: f32 = 0.1;
-/// The overview's zoom.
+/// The overview's zoom, niri's, while every workspace fits the window at it.
 const OVERVIEW_ZOOM: f32 = 0.5;
+/// The least the overview zooms to fit more workspaces; past it the stack scrolls instead.
+const OVERVIEW_MIN_ZOOM: f32 = 0.25;
 /// A wheel step, in points: how far a ⌘⌥ wheel moves before a column or workspace step.
 pub const WHEEL_TICK: f32 = 50.0;
 /// Workspace steps from the wheel are at least this far apart.
@@ -60,6 +62,16 @@ const DROP_EDGE: f32 = 0.2;
 /// Horizontal view movement, window movement and resize, and the overview: 1.0 / 800 / 0.0001.
 fn view_spring() -> SpringParams {
     SpringParams::new(1.0, 800.0, 0.0001)
+}
+
+/// The overview's zoom for `n` workspaces: [`OVERVIEW_ZOOM`], or less when the stack would
+/// not fit the window's height at it, down to [`OVERVIEW_MIN_ZOOM`]. The stack is each
+/// workspace with the gap above it (where its name goes) and a gap of margin at either end.
+/// The gap is a share of the height, so the width plays no part.
+fn overview_fit(n: usize) -> f32 {
+    let n = count(n.max(1));
+    let height = n.mul_add(1.0 + WORKSPACE_GAP, 2.0 * WORKSPACE_GAP);
+    (1.0 / height).clamp(OVERVIEW_MIN_ZOOM, OVERVIEW_ZOOM)
 }
 
 /// The workspace switch: 1.0 / 1000 / 0.0001.
@@ -1824,6 +1836,10 @@ pub struct Layout {
     switch: Option<Switch>,
     overview_open: bool,
     overview: Option<Animation>,
+    /// The workspace count the overview's zoom is fitted to, and the spring to a new fit when
+    /// the count changed while the overview showed.
+    fitted: usize,
+    refit: Option<Animation>,
     closing: Vec<ClosingTile>,
     next_id: u64,
     stamps: u64,
@@ -1849,6 +1865,8 @@ impl Layout {
             switch: None,
             overview_open: false,
             overview: None,
+            fitted: 1,
+            refit: None,
             closing: Vec::new(),
             next_id: 2,
             stamps: 1,
@@ -1907,6 +1925,10 @@ impl Layout {
         if self.overview.is_some_and(|a| a.is_done(now)) {
             self.overview = None;
         }
+        if self.refit.is_some_and(|a| a.is_done(now)) {
+            self.refit = None;
+        }
+        self.fit_overview();
         for ws in &mut self.workspaces {
             ws.settle(now);
         }
@@ -1924,6 +1946,7 @@ impl Layout {
             self.clean_up();
         }
         self.overview = None;
+        self.refit = None;
         self.closing.clear();
         for ws in &mut self.workspaces {
             if let ViewOffset::Anim(a) = &ws.view {
@@ -1942,6 +1965,7 @@ impl Layout {
         let now = self.now;
         matches!(&self.switch, Some(Switch::Anim(a)) if !a.is_done(now))
             || self.overview.is_some_and(|a| !a.is_done(now))
+            || self.refit.is_some_and(|a| !a.is_done(now))
             || self.closing.iter().any(|c| !c.anim.is_done(now))
             || self.workspaces.iter().any(|ws| ws.animating(now))
     }
@@ -2488,6 +2512,7 @@ impl Layout {
         if self.overview_open == open {
             return;
         }
+        self.fit_overview();
         self.overview_open = open;
         let from = self.overview_progress();
         let velocity = self.overview.map_or(0.0, |a| a.velocity_at(self.now));
@@ -2508,7 +2533,29 @@ impl Layout {
     }
 
     fn zoom(&self) -> f32 {
-        self.overview_progress().mul_add(-(1.0 - OVERVIEW_ZOOM), 1.0).max(0.01)
+        self.overview_progress().mul_add(self.overview_zoom() - 1.0, 1.0).max(0.01)
+    }
+
+    /// The zoom the overview lands on: fitted to the workspaces, springing to the new fit
+    /// when their count changed while it showed.
+    fn overview_zoom(&self) -> f32 {
+        self.refit.map_or_else(|| overview_fit(self.fitted), |a| narrow(a.value_at(self.now)))
+    }
+
+    /// Fit the overview's zoom to the workspace count, if it changed.
+    fn fit_overview(&mut self) {
+        let n = self.workspaces.len();
+        if n == self.fitted {
+            return;
+        }
+        let from = self.overview_zoom();
+        let velocity = self.refit.map_or(0.0, |a| a.velocity_at(self.now));
+        self.fitted = n;
+        self.refit = if self.overview_progress() > 0.0 {
+            self.ctx().spring(from, overview_fit(n), velocity, view_spring())
+        } else {
+            None
+        };
     }
 
     /// Where `ws`'s view sits as drawn: its own position, moved in the overview (by the
@@ -2522,7 +2569,7 @@ impl Layout {
         }
         let g = &ctx.g;
         let strip_w = ws.column_x(ws.columns.len(), g) - g.gaps;
-        if strip_w > g.view_w / OVERVIEW_ZOOM {
+        if strip_w > g.view_w / self.overview_zoom() {
             return pos;
         }
         let centred = (strip_w - g.view_w) / 2.0;
@@ -2886,14 +2933,27 @@ impl Layout {
 
     // ----- rendering -------------------------------------------------------------------------
 
+    /// Each workspace's rectangle at `zoom`, top to bottom. The workspace on show is centred,
+    /// as in niri, but the stack (each workspace with the gap above it, where its name goes)
+    /// is held so neither of its ends comes further in than a gap from the window's edge: a
+    /// stack that fits is centred whole, so the overview never cuts off the empty workspace
+    /// at the end. Out of the overview (zoom 1) the hold never binds, since a workspace fills
+    /// the window and the switch's rubber band stays inside a gap.
     fn ws_rects(&self, zoom: f32) -> Vec<Rect> {
         let (w, h) = (self.view_w * zoom, self.view_h * zoom);
         let gap = self.view_h * WORKSPACE_GAP * zoom;
         let step = h + gap;
-        let (sx, sy) = ((self.view_w - w) / 2.0, (self.view_h - h) / 2.0);
-        let first = -self.render_idx() * step;
+        let sx = (self.view_w - w) / 2.0;
+        let stack = count(self.workspaces.len()) * step;
+        let (lowest, highest) = (self.view_h - gap - stack, gap);
+        let centred = self.render_idx().mul_add(-step, (self.view_h - h) / 2.0 - gap);
+        let top = if lowest >= highest {
+            f32::midpoint(lowest, highest)
+        } else {
+            centred.clamp(lowest, highest)
+        } + gap;
         (0..self.workspaces.len())
-            .map(|i| Rect { x: sx, y: count(i).mul_add(step, first) + sy, w, h })
+            .map(|i| Rect { x: sx, y: count(i).mul_add(step, top), w, h })
             .collect()
     }
 

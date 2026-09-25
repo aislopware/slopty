@@ -74,8 +74,10 @@ The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**
   except a plain click on the shell's input line, which becomes the arrow keys that put the
   cursor there (`TermState::cursor_path_to`), and, with `copy_on_select` set, a selection
   goes to the clipboard as it ends.
-  A scrollbar thumb over the grid's right edge shows while there is history and the pointer is
-  over the card or the viewport is in the history; it drags and its track pages. The wheel
+  A scrollbar thumb over the grid's right edge is an overlay, as on macOS: hidden at rest, it
+  shows while the viewport scrolls, while the pointer is near the right edge and while the thumb
+  is held, then stays a second and fades out (at once under Reduce Motion); never without
+  history (`terminal::scrollbar`). It drags and its track pages. The wheel
   scrolls the cache in whole lines (fractions carried between events), except for a program
   tracking the mouse or the alternate screen, whose rows go to the worker as `Wheel` (button
   presses, or cursor keys under alternate scroll). ⌘-click opens the link under the pointer:

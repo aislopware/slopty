@@ -1197,3 +1197,40 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   chrome's. The editor's line numbers sit tight against the code; that gutter is gpui-kit's.
   The terminal draws its scrollbar at rest (`transfers`). The settings dialog is still the
   TOML file with Save and Cancel, the way Zed treats its own settings file.
+
+- ✅ **The second pass's leftovers: an overlay scrollbar and an overview that fits**
+  (2026-09-25). Two of the three things that pass left as found are fixed. The third is
+  gpui-kit's to fix.
+  - The terminal's scrollbar is an overlay, as on macOS and in Zed. It is hidden at rest, even
+    with history and even with the viewport in it. It shows while the viewport scrolls (any
+    frame that draws a new offset: the wheel, a key, a jump to a prompt or a hit), while the
+    pointer is within two cells of the grid's right edge and while the thumb is held. Once the
+    last of those ends it stays for Zed's second and fades out over Zed's 400 ms. Under Reduce
+    Motion it goes at once when that second ends. The old rule (history and the pointer
+    anywhere over the card) kept a bar on every terminal the pointer rested on, which is what
+    `transfers` showed after a drop. The pointer's way to the edge and away from it is
+    watched on the window, so leaving the card also counts as leaving the edge.
+    `terminal::scrollbar::Visibility` is the pure rule. The element asks for frames only while
+    the fade runs, and a timer wakes the view once at the end of the linger. Tests:
+    `the_bar_shows_while_used_then_lingers_and_fades` (the rule, on a synthetic clock) and
+    `the_scrollbar_drags_and_pages_the_viewport` (a headless window on the test clock).
+  - The overview zoomed to niri's 0.5 and centred the active workspace, so with one workspace
+    and the empty one after it the empty one hung off the window's foot. It now zooms to fit
+    the whole stack: each workspace, the gap above it where its name goes, and a gap of
+    margin at either end, so the empty tray has the same air below it as the first name has
+    above it. That is 0.5 while it fits, 1/2.4 for two workspaces and 1/3.5 for three, and
+    never below 0.25. Past that the stack scrolls with the active workspace, which stays
+    centred as in niri, but neither end comes further in than a gap. A count that changes
+    while the overview is open springs the zoom to the new fit on the overview's spring
+    rather than jumping. Navigation is niri's as before: the same step between workspaces,
+    the same gesture travel, the same drops. With every workspace in view, a vertical swipe
+    in the overview moves the focus and not the stack. Out of the overview the hold never
+    binds. Tests in `slopty-client` `layout::tests`:
+    `the_overview_fits_every_workspace_with_a_gap_around_each` and
+    `a_tall_overview_scrolls_with_the_active_workspace_and_refits_smoothly`.
+  - The editor's line numbers sit 6 pt from the code because gpui-kit hard-codes that gap
+    (`LINE_NUMBER_RIGHT_MARGIN` in `crates/base/src/input/base/element.rs`, added to the
+    width of the digits in `layout_line_numbers`). Neither `EditorState` nor `Editor` has a
+    setting for it. Folding would widen the gutter by the fold icons' 18 pt, but that adds
+    folding, which the file tile turns off. The fix is a gutter-padding option in the fork.
+  Goldens rerendered: `overview`, `transfers`.

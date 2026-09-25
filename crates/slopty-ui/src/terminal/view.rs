@@ -31,6 +31,7 @@ use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
 use crate::kit::FIND_PLACEHOLDER;
 use crate::terminal::element::{CellMetrics, TerminalElement, separator_color};
+use crate::terminal::scrollbar::Visibility;
 use crate::terminal::{latency, url};
 
 /// Hits asked for per search; the worker counts every hit regardless.
@@ -368,6 +369,12 @@ pub struct TerminalView {
     bell_task: Option<gpui::Task<()>>,
     /// The scrollbar's thumb is held: the pointer's offset from the thumb's top.
     thumb_drag: Option<Pixels>,
+    /// Whether the overlay scrollbar shows, and the wait for its linger to end (dropped,
+    /// cancelled, with the view).
+    scrollbar: Visibility,
+    scrollbar_task: Option<gpui::Task<()>>,
+    /// The viewport offset the last frame drew: a frame that draws another has scrolled.
+    drawn_offset: u64,
     /// The fraction of a line the wheel has moved short of a whole one (a trackpad scrolls
     /// in fractions; they add up).
     wheel_remainder: f32,
@@ -410,6 +417,12 @@ impl std::fmt::Debug for TerminalView {
 }
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
+
+/// Whether the system asks for motion to be reduced, read when it matters so a change takes
+/// effect at once. Always false under test, which must not turn on the machine's setting.
+fn reduced_motion() -> bool {
+    !cfg!(test) && slopty_platform::reduce_motion()
+}
 
 /// `SLOPTY_PREDICT=never|adaptive|always` overrides the local-echo policy (testing on fast links).
 fn policy_from_env() -> Policy {
@@ -480,6 +493,9 @@ impl TerminalView {
             bell_flash: false,
             bell_task: None,
             thumb_drag: None,
+            scrollbar: Visibility::default(),
+            scrollbar_task: None,
+            drawn_offset: 0,
             wheel_remainder: 0.0,
             wheel_gesture: None,
             search: None,
@@ -2222,11 +2238,13 @@ impl TerminalView {
         }
         // The scrollbar, when it shows, takes the clicks over it: the thumb is dragged, the
         // track beside it pages towards the click.
+        let now = cx.background_executor().now();
         if event.button == MouseButton::Left
-            && let Some(thumb) = self.thumb()
+            && let Some(thumb) = self.thumb(now)
         {
             if thumb.contains(&event.position) {
                 self.thumb_drag = Some(event.position.y - thumb.origin.y);
+                self.scrollbar.hold(true, now);
                 cx.notify();
                 return;
             }
@@ -2320,17 +2338,69 @@ impl TerminalView {
         }));
     }
 
-    /// The pointer moved over the grid: the hover for the ⌘ underline, and the scrollbar
-    /// shows itself while the pointer is over the card (a drag is followed by
-    /// [`Self::drag_move`], which the element registers on the window so the drag can leave
-    /// the card).
+    /// The pointer moved over the grid: the hover for the ⌘ underline (a drag is followed by
+    /// [`Self::drag_move`], and the way to the scrollbar by [`Self::pointer_near_scrollbar`],
+    /// both of which the element registers on the window so they see the pointer leave).
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let shown = self.scrollbar_shown();
         let hover = self.metrics.and_then(|m| m.cell_at(event.position));
         self.set_pointer(hover, event.modifiers, cx);
-        if shown != self.scrollbar_shown() {
-            cx.notify();
+    }
+
+    /// The pointer came near the grid's right edge, or left it: the scrollbar shows while it
+    /// is there and lingers once it goes.
+    pub(super) fn pointer_near_scrollbar(&mut self, near: bool, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        if !self.scrollbar.pointer(near, now) || self.state.history_len() == 0 {
+            return;
         }
+        if !near {
+            self.wake_scrollbar(cx);
+        }
+        cx.notify();
+    }
+
+    /// A frame is being drawn: a viewport moved since the last one (the wheel, a key, the
+    /// thumb, a jump to a prompt or a hit) brings the scrollbar up.
+    pub(super) fn viewport_drawn(&mut self, now: Instant, cx: &Context<Self>) {
+        let offset = self.state.view_offset();
+        if offset == self.drawn_offset {
+            return;
+        }
+        self.drawn_offset = offset;
+        self.scrollbar.scrolled(now);
+        self.wake_scrollbar(cx);
+    }
+
+    /// Wait out the scrollbar's linger, however often it starts over, then draw once more:
+    /// that frame finds the bar fading and asks for the next frames itself.
+    fn wake_scrollbar(&mut self, cx: &Context<Self>) {
+        if self.scrollbar_task.is_some() {
+            return;
+        }
+        self.scrollbar_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let left = this.update(cx, |view, cx| {
+                    view.scrollbar.linger_left(cx.background_executor().now())
+                });
+                let Ok(Some(left)) = left else { break };
+                cx.background_executor().timer(left).await;
+            }
+            // A gone view has no bar to fade.
+            let _gone = this.update(cx, |view, cx| {
+                view.scrollbar_task = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The thumb was let go.
+    fn release_thumb(&mut self, cx: &Context<Self>) -> bool {
+        if self.thumb_drag.take().is_none() {
+            return false;
+        }
+        self.scrollbar.hold(false, cx.background_executor().now());
+        self.wake_scrollbar(cx);
+        true
     }
 
     /// A drag with the left button, wherever the pointer is: the thumb held scrolls the
@@ -2348,7 +2418,7 @@ impl TerminalView {
         }
         if event.pressed_button != Some(MouseButton::Left) {
             self.selecting = false;
-            self.thumb_drag = None;
+            self.release_thumb(cx);
             self.autoscroll = None;
             return;
         }
@@ -2432,9 +2502,9 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// The scrollbar's thumb, when the bar shows.
-    fn thumb(&self) -> Option<Bounds<Pixels>> {
-        if !self.scrollbar_shown() {
+    /// The scrollbar's thumb, while any of the bar shows.
+    fn thumb(&self, now: Instant) -> Option<Bounds<Pixels>> {
+        if self.scrollbar_opacity(now) <= 0.0 {
             return None;
         }
         let m = self.metrics?;
@@ -2446,11 +2516,13 @@ impl TerminalView {
         self.thumb_drag.is_some()
     }
 
-    /// Whether the scrollbar is drawn: there is history, and the viewport is in it, or the
-    /// pointer is over the grid, or the thumb is held.
-    pub(super) const fn scrollbar_shown(&self) -> bool {
-        self.state.history_len() > 0
-            && (self.state.view_offset() > 0 || self.hover.is_some() || self.thumb_drag.is_some())
+    /// How much of the overlay scrollbar shows at `now`, 0 to 1: none without history, else
+    /// as [`Visibility`] rules.
+    pub(super) fn scrollbar_opacity(&self, now: Instant) -> f32 {
+        if self.state.history_len() == 0 {
+            return 0.0;
+        }
+        self.scrollbar.opacity(now, reduced_motion())
     }
 
     fn mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2459,7 +2531,7 @@ impl TerminalView {
             self.open_path(&span, armed, cx);
             return;
         }
-        if self.thumb_drag.take().is_some() {
+        if self.release_thumb(cx) {
             cx.notify();
             return;
         }
@@ -4604,41 +4676,75 @@ mod tests {
         assert_eq!(wheels(&mut rx), [-1], "the alternate screen: the worker makes it a key");
     }
 
-    /// The scrollbar shows over the right edge once there is history and the pointer is over
-    /// the grid or the viewport is scrolled; its thumb drags the viewport, a click on the
-    /// track beside it pages, and the text under the bar is not selected by those clicks.
+    /// The scrollbar is an overlay: with history it is still hidden at rest, comes up while
+    /// the pointer is near the right edge or the viewport scrolls, and is gone once the linger
+    /// and the fade have run. Its thumb drags the viewport, a click on the track beside it
+    /// pages, and the text under the bar is not selected by those clicks.
     #[gpui::test]
     fn the_scrollbar_drags_and_pages_the_viewport(cx: &mut TestAppContext) {
+        use crate::terminal::scrollbar::{FADE, LINGER};
         let (view, _rx, cx) = terminal(cx);
         view.update_in(cx, |view, _window, cx| {
             view.apply(history_frame(0, &["hello wor", "second", "third row"]), cx);
         });
         cx.run_until_parked();
+        let shown = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, cx| v.scrollbar_opacity(cx.background_executor().now()))
+        };
+        let thumb = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, cx| v.thumb(cx.background_executor().now()))
+        };
         let mods = gpui::Modifiers::default();
-        cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), None, mods);
+        let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let edge = point(
+            m.origin.x + m.cell_width * (f32::from(m.cols) - 0.5),
+            m.origin.y + m.line_height * 1.5,
+        );
+        cx.simulate_mouse_move(edge, None, mods);
         cx.run_until_parked();
-        assert!(!view.read_with(cx, |v, _| v.scrollbar_shown()), "no history, no bar");
+        assert!(shown(cx) <= 0.0, "no history, no bar");
 
         view.update_in(cx, |view, _window, cx| {
             view.apply(history_frame(30, &["hello wor", "second", "third row"]), cx);
         });
         cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.scrollbar_shown()), "history and a pointer over it");
-        let thumb = view.read_with(cx, |v, _| v.thumb()).expect("a thumb");
-        let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        assert!(shown(cx) >= 1.0, "history, and the pointer at the right edge: up");
+        let thumb_now = thumb(cx).expect("a thumb");
         let rows = m.rows;
         let track_bottom = m.origin.y + m.line_height * f32::from(rows);
         assert!(
-            thumb.origin.y + thumb.size.height <= track_bottom + px(0.01),
-            "at the bottom of the history the thumb sits at the track's end: {thumb:?}"
+            thumb_now.origin.y + thumb_now.size.height <= track_bottom + px(0.01),
+            "at the bottom of the history the thumb sits at the track's end: {thumb_now:?}"
         );
         assert!(
-            thumb.origin.x + thumb.size.width
+            thumb_now.origin.x + thumb_now.size.width
                 <= m.origin.x + m.cell_width * f32::from(m.cols) + px(0.01)
         );
+        cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), None, mods);
+        cx.run_until_parked();
+        assert!(shown(cx) >= 1.0, "it lingers after the pointer leaves");
+        cx.executor().advance_clock(LINGER.saturating_add(FADE));
+        cx.run_until_parked();
+        assert!(shown(cx) <= 0.0, "then it is gone: history alone is not a reason");
+        assert_eq!(thumb(cx), None, "and a click there is the text's");
+
+        // A scroll brings it up wherever the pointer is.
+        cx.simulate_event(ScrollWheelEvent {
+            position: cell_center(&view, cx, 1.0, 1.0),
+            delta: ScrollDelta::Lines(point(0.0, 1.0)),
+            modifiers: mods,
+            touch_phase: TouchPhase::Started,
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 1);
+        assert!(shown(cx) >= 1.0, "scrolling shows it");
+        view.update_in(cx, |view, _window, cx| view.scroll_lines(-1, cx));
+        cx.simulate_mouse_move(edge, None, mods);
+        cx.run_until_parked();
+        let thumb_now = thumb(cx).expect("a thumb");
 
         // Clicking the track above the thumb pages up one screen.
-        let track_above = point(thumb.center().x, m.origin.y + px(1.0));
+        let track_above = point(thumb_now.center().x, m.origin.y + px(1.0));
         cx.simulate_mouse_down(track_above, MouseButton::Left, mods);
         cx.simulate_mouse_up(track_above, MouseButton::Left, mods);
         cx.run_until_parked();
@@ -4646,8 +4752,7 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the track does not select");
 
         // Dragging the thumb to the top of the track shows the oldest lines.
-        let thumb = view.read_with(cx, |v, _| v.thumb()).expect("a thumb");
-        let grab = thumb.center();
+        let grab = thumb(cx).expect("a thumb").center();
         cx.simulate_mouse_down(grab, MouseButton::Left, mods);
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.thumb_held()));
@@ -4661,6 +4766,10 @@ mod tests {
         cx.run_until_parked();
         assert!(!view.read_with(cx, |v, _| v.thumb_held()));
         assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the thumb does not select");
+        assert!(shown(cx) >= 1.0, "let go off the edge, it lingers");
+        cx.executor().advance_clock(LINGER.saturating_add(FADE));
+        cx.run_until_parked();
+        assert!(shown(cx) <= 0.0, "then it is gone");
     }
 
     /// ⌘← is `^A` on the wire and ⌥⌫ `ESC DEL`, as raw bytes; with the setting off the

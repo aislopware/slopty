@@ -1140,6 +1140,10 @@ impl Element for TerminalElement {
         let placed = self.view.update(cx, |view, _cx| view.placed_images(window));
         #[cfg(test)]
         let mut caption_texts: Vec<String> = Vec::new();
+        // A viewport that moved since the last frame brings the scrollbar up in this one.
+        let now = cx.background_executor().now();
+        self.view.update(cx, |view, cx| view.viewport_drawn(now, cx));
+        let fading;
         let prepared = {
             let view = self.view.read(cx);
             let theme = view.theme();
@@ -1158,10 +1162,12 @@ impl Element for TerminalElement {
             let grid_cols = state.size().cols;
             let (matches, current) = view.search_highlights().unwrap_or((&[], None));
             let link = view.link_highlight();
-            let scrollbar = view.scrollbar_shown().then(|| {
+            let shown = view.scrollbar_opacity(now);
+            fading = shown > 0.0 && shown < 1.0;
+            let scrollbar = (shown > 0.0).then(|| {
                 let held = view.thumb_held();
                 let alpha = if held { alpha::PRESSED } else { alpha::TINT };
-                (hsla_alpha(palette.theme.fg, alpha), state.history_len(), view_offset)
+                (hsla_alpha(palette.theme.fg, alpha * shown), state.history_len(), view_offset)
             });
             let look = |blink_off| Look { family: &family, ligatures, palette, blink_off };
 
@@ -1478,6 +1484,9 @@ impl Element for TerminalElement {
         *cx.global_mut::<ShapeCache>() = cache;
         // The clock ticks only while a painted frame has something to blink.
         self.view.update(cx, |view, cx| view.blinking(prepared.blinking, cx));
+        if fading {
+            window.request_animation_frame();
+        }
         prepared
     }
 
@@ -1512,12 +1521,18 @@ impl Element for TerminalElement {
             }
         });
         // A drag is followed wherever the pointer goes (the div's own move listener stops at
-        // its edge): the selection keeps growing and scrolls past the top or bottom.
+        // its edge): the selection keeps growing and scrolls past the top or bottom. So is
+        // the pointer's way to the scrollbar and away from it, off the card too.
         let view = self.view.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
-            if phase == DispatchPhase::Bubble && event.pressed_button.is_some() {
+            if phase != DispatchPhase::Bubble {
+                return;
+            }
+            if event.pressed_button.is_some() {
                 view.update(cx, |view, cx| view.drag_move(event, cx));
             }
+            let near = bounds.contains(&event.position) && near_scrollbar(&m, event.position);
+            view.update(cx, |view, cx| view.pointer_near_scrollbar(near, cx));
         });
         window.paint_quad(fill(bounds, prepared.background));
         for row in &prepared.rows {
@@ -1737,6 +1752,9 @@ pub fn placement_bounds(
 /// The scrollbar thumb's width, in cells of the grid's advance, and its least height in rows.
 const THUMB_CELLS: f32 = 0.6;
 const THUMB_MIN_ROWS: f32 = 1.5;
+/// How far left of the grid's right edge the pointer brings the scrollbar up, in cells: about
+/// the width of a macOS overlay scroller's track.
+const SCROLLBAR_REACH_CELLS: f32 = 2.0;
 
 /// Paint one cell-drawn glyph's geometry at `origin` in `fg` (see [`sprite`]).
 fn paint_sprite(
@@ -1843,6 +1861,15 @@ pub fn scrollbar_thumb(m: &CellMetrics, history: u64, offset: u64) -> Option<Bou
     #[expect(clippy::cast_possible_truncation, reason = "points, well inside f32")]
     let (y, h) = (px(top as f32), px(height as f32));
     Some(Bounds::new(point(x, m.origin.y + y), size(width, h)))
+}
+
+/// Whether `at` is where the pointer brings the scrollbar up: level with the grid, within
+/// `SCROLLBAR_REACH_CELLS` of its right edge or anywhere right of it (the card's inset).
+#[must_use]
+pub fn near_scrollbar(m: &CellMetrics, at: Point<Pixels>) -> bool {
+    let right = m.origin.x + m.cell_width * f32::from(m.cols);
+    let bottom = m.origin.y + m.line_height * f32::from(m.rows);
+    at.x >= right - m.cell_width * SCROLLBAR_REACH_CELLS && at.y >= m.origin.y && at.y < bottom
 }
 
 /// The viewport offset (lines from the bottom) that puts the thumb's top at `y`: the inverse
