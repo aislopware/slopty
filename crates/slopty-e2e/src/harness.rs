@@ -1076,6 +1076,13 @@ impl ServerDaemon {
         &self.address
     }
 
+    /// `[::1]:<port>`: the same listener over IPv6.
+    #[must_use]
+    pub fn address_v6(&self) -> String {
+        let port = self.address.rsplit_once(':').map_or("", |(_ip, port)| port);
+        format!("[::1]:{port}")
+    }
+
     /// The MCP endpoint on loopback (`http://<mcp>/mcp`).
     #[must_use]
     pub const fn mcp(&self) -> std::net::SocketAddr {
@@ -1254,21 +1261,63 @@ impl SecondWorker {
     ///
     /// When a binary is missing, a daemon does not come up or the relay cannot bind.
     pub async fn launch(name: &str, link: slopty_shape::Link) -> Result<Self> {
+        Self::launch_with(name, link, None).await
+    }
+
+    /// [`Self::launch`] with the worker registered with `server`, so the app finds it in the
+    /// directory and dials the address listed there, which is the relay's.
+    ///
+    /// The server lists a worker at the IP it registered from and the port it listens on. So the
+    /// worker listens on `127.0.0.1` only and registers over IPv6: the directory then says
+    /// `[::1]:<its port>`, where the relay listens
+    /// ([`slopty_shape::relay::Relay::bind_apart`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`].
+    pub async fn launch_registered(
+        name: &str,
+        link: slopty_shape::Link,
+        server: &ServerDaemon,
+    ) -> Result<Self> {
+        Self::launch_with(name, link, Some(server)).await
+    }
+
+    async fn launch_with(
+        name: &str,
+        link: slopty_shape::Link,
+        server: Option<&ServerDaemon>,
+    ) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-second-")?;
         let root = dir.path();
         let home = root.join("home");
         std::fs::create_dir_all(&home)?;
+        // `/var` is a link to `/private/var`: a shell's working directory is the resolved path,
+        // and zsh shortens it to `~` only when `HOME` is spelled the same way.
+        let home = std::fs::canonicalize(&home)?;
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
         let home_env = home.to_string_lossy();
-        let worker = Worker::start(root, name, None, &log, &[("HOME", &*home_env)]).await?;
-        let direct = worker.address().parse().context("the worker's address")?;
-        // The wildcard, not loopback: the relay's socket then sends to the worker's port and
-        // answers the app from the same port, whichever address each end used.
-        let any = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
+        let mut env = vec![("HOME", &*home_env)];
+        let server = server.map(ServerDaemon::address_v6);
+        if server.is_some() {
+            env.push(("SLOPTY_BIND", "127.0.0.1"));
+        }
+        let worker = Worker::start(root, name, server.as_deref(), &log, &env).await?;
+        let direct: std::net::SocketAddr =
+            worker.address().parse().context("the worker's address")?;
         // A fixed seed, so a run's losses fall where the last run's did.
-        let relay = slopty_shape::relay::Relay::bind(any, direct, link, 0x5107_7e2e)
-            .await
-            .context("bind the relay")?;
+        let seed = 0x5107_7e2e;
+        let relay = if server.is_some() {
+            let at = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, direct.port()));
+            let from = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+            slopty_shape::relay::Relay::bind_apart(at, from, direct, link, seed).await
+        } else {
+            // The wildcard, not loopback: the relay's socket then sends to the worker's port
+            // and answers the app from the same port, whichever address each end used.
+            let any = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
+            slopty_shape::relay::Relay::bind(any, direct, link, seed).await
+        }
+        .context("bind the relay")?;
         let address = relay.addr()?.to_string();
         let relay = std::sync::Arc::new(relay);
         let task = tokio::spawn({
@@ -1570,5 +1619,86 @@ impl ServerStack {
     pub async fn shutdown(mut self) {
         self.worker.shutdown().await;
         self.server.kill().await;
+    }
+}
+
+/// The app as it is normally used: a server, two workers registered with it, and the app at its
+/// first run, which knows neither until it is pointed at the server. Everything is killed on drop.
+///
+/// Worker `near` runs under `root/near` and is dialled on loopback; worker `far` is a
+/// [`SecondWorker`] whose directory entry is its relay's address, so the app reaches it over a
+/// shaped link it learned from the server. The app's data directory is `root/app`.
+#[derive(Debug)]
+pub struct ServerFleet {
+    /// Connected to the app's test socket.
+    pub driver: Driver,
+    /// The app process.
+    pub app: Child,
+    /// The worker on loopback.
+    pub near: Worker,
+    /// The worker behind the shaped link.
+    pub far: SecondWorker,
+    /// The server both register with.
+    pub server: ServerDaemon,
+    /// The temporary root, named for the test.
+    pub dir: StackDir,
+}
+
+impl ServerFleet {
+    /// Start the server, worker `near` on loopback and worker `far` behind a relay shaped as
+    /// `link`, both registered with it; then the app, once the server lists both online.
+    ///
+    /// # Errors
+    ///
+    /// When a binary is missing, a daemon dies, a worker never comes online or the app does not
+    /// come up.
+    pub async fn launch(near: &str, far: &str, link: slopty_shape::Link) -> Result<Self> {
+        let dir = StackDir::new("slopty-e2e-fleet-")?;
+        let root = dir.path();
+        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let server_dir = root.join("server");
+        std::fs::create_dir_all(&server_dir)?;
+        let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
+        let near =
+            Worker::start(&root.join("near"), near, Some(server.address()), &log, &[]).await?;
+        let far = SecondWorker::launch_registered(far, link, &server).await?;
+        let cli = root.join("cli");
+        let started = tokio::time::Instant::now();
+        loop {
+            let workers = slopty_json(server.address(), &cli, &["workers"], b"").await?;
+            let online = workers
+                .as_array()
+                .map_or(0, |all| all.iter().filter(|w| w["liveness"] == "online").count());
+            if online == 2 {
+                break;
+            }
+            ensure!(started.elapsed() < STARTUP, "both workers online: {workers}");
+            tokio::time::sleep(POLL).await;
+        }
+        let (app, mut driver) = spawn_app(root, "app", &log, &[]).await?;
+        driver.ok(&crate::Command::Ping).await?;
+        Ok(Self { driver, app, near, far, server, dir })
+    }
+
+    /// The server's directory as `slopty workers --json` prints it.
+    ///
+    /// # Errors
+    ///
+    /// When the CLI fails.
+    pub async fn directory(&self) -> Result<Value> {
+        slopty_json(self.server.address(), &self.dir.path().join("cli"), &["workers"], b"").await
+    }
+
+    /// Ask the app to quit, then kill it, both workers and the server.
+    pub async fn shutdown(mut self) {
+        let _quit = self.driver.call(&crate::Command::Quit).await;
+        let _killed = self.app.start_kill();
+        let _reaped = self.app.wait().await;
+        self.far.shutdown().await;
+        self.near.shutdown().await;
+        self.server.kill().await;
+        #[cfg(target_os = "macos")]
+        slopty_platform::pasteboard::MacPasteboard::named(&pasteboard_name(self.dir.path(), "app"))
+            .release();
     }
 }

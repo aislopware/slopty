@@ -1,4 +1,5 @@
-//! The relay loop: one UDP socket both ends speak through, with [`Shaper`] deciding each packet.
+//! The relay loop: one UDP socket both ends speak through (or one for each end,
+//! [`Relay::bind_apart`]), with [`Shaper`] deciding each packet.
 //!
 //! One client per run, learned from the first packet that is not the worker's. That is all a
 //! measurement needs, and it keeps the return path unambiguous: whatever the worker sends back
@@ -9,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::{Fate, Link, Shaper, Tally};
 
@@ -38,7 +39,11 @@ struct Outgoing {
 /// A relay that is running. Dropping it stops nothing; the loop owns itself.
 #[derive(Debug)]
 pub struct Relay {
+    /// Where clients reach it.
     socket: Arc<UdpSocket>,
+    /// Where it speaks to the worker from: the same socket, or one of its own
+    /// ([`Self::bind_apart`]).
+    worker_side: Arc<UdpSocket>,
     worker: SocketAddr,
     /// The run's epoch. Every `leaves` is measured from here, in both the shaper and the senders.
     started: Instant,
@@ -65,22 +70,57 @@ impl Relay {
         seed: u64,
     ) -> std::io::Result<Self> {
         let socket = Arc::new(UdpSocket::bind(at).await?);
+        Ok(Self::with_sockets(Arc::clone(&socket), socket, worker, link, seed))
+    }
+
+    /// Bind a relay that clients reach at `at` and that speaks to `worker` from a socket of its
+    /// own at `from`, forwarding over `link`.
+    ///
+    /// For a client that must reach the relay at the worker's own port on another address: a
+    /// server lists a worker at the address it registered from and the port it listens on, so
+    /// a relay in front of a worker on `127.0.0.1:p` that registered over IPv6 takes `[::1]:p`.
+    /// One socket there would send to the worker from `[::1]:p`, which it cannot, and a
+    /// dual-stack one would send from `127.0.0.1:p`, the worker's own address.
+    ///
+    /// # Errors
+    ///
+    /// If either address is taken.
+    pub async fn bind_apart(
+        at: SocketAddr,
+        from: SocketAddr,
+        worker: SocketAddr,
+        link: Link,
+        seed: u64,
+    ) -> std::io::Result<Self> {
+        let socket = Arc::new(UdpSocket::bind(at).await?);
+        let worker_side = Arc::new(UdpSocket::bind(from).await?);
+        Ok(Self::with_sockets(socket, worker_side, worker, link, seed))
+    }
+
+    fn with_sockets(
+        socket: Arc<UdpSocket>,
+        worker_side: Arc<UdpSocket>,
+        worker: SocketAddr,
+        link: Link,
+        seed: u64,
+    ) -> Self {
         let started = Instant::now();
-        let sender = || {
+        let sender = |socket: &Arc<UdpSocket>| {
             let (tx, rx) = mpsc::unbounded_channel();
-            tokio::spawn(send_in_order(Arc::clone(&socket), started, rx));
+            tokio::spawn(send_in_order(Arc::clone(socket), started, rx));
             tx
         };
-        let (to_worker, to_client) = (sender(), sender());
-        Ok(Self {
+        let (to_worker, to_client) = (sender(&worker_side), sender(&socket));
+        Self {
             socket,
+            worker_side,
             worker,
             started,
             up: Arc::new(Mutex::new(Shaper::new(link, seed))),
             down: Arc::new(Mutex::new(Shaper::new(link, seed ^ 0xffff_ffff))),
             to_worker,
             to_client,
-        })
+        }
     }
 
     /// Where the client should dial: loopback when the relay took the wildcard, since
@@ -115,36 +155,90 @@ impl Relay {
         self.down.lock().await.queue_delay(self.started.elapsed())
     }
 
-    /// Carry packets until the socket fails. Never returns otherwise.
+    /// Carry packets until a socket fails. Never returns otherwise.
     ///
     /// # Errors
     ///
-    /// If the socket cannot be read.
+    /// If a socket cannot be read.
     pub async fn run(&self) -> std::io::Result<()> {
+        if Arc::ptr_eq(&self.socket, &self.worker_side) {
+            return self.run_shared().await;
+        }
+        let (client_tx, client_rx) = watch::channel(None);
+        tokio::try_join!(self.run_up(client_tx), self.run_down(client_rx)).map(|((), ())| ())
+    }
+
+    /// One socket for both ends: a packet from the worker's address goes down, any other up.
+    async fn run_shared(&self) -> std::io::Result<()> {
         let mut client: Option<SocketAddr> = None;
         let mut buf = vec![0_u8; MAX_DATAGRAM];
         loop {
             let (len, from) = self.socket.recv_from(&mut buf).await?;
             let Some(datagram) = buf.get(..len) else { continue };
-            let (side, sender, to) = if from == self.worker {
+            if from == self.worker {
                 let Some(back) = client else {
                     tracing::warn!("the worker spoke before any client did; dropping");
                     continue;
                 };
-                (&self.down, &self.to_client, back)
+                self.carry(&self.down, &self.to_client, datagram, back).await;
             } else {
                 if client != Some(from) {
                     tracing::info!(%from, "client");
                     client = Some(from);
                 }
-                (&self.up, &self.to_worker, self.worker)
-            };
-            let fate = side.lock().await.admit(len as u64, self.started.elapsed());
-            let Fate::At(leaves) = fate else { continue };
-            let outgoing = Outgoing { leaves, packet: datagram.to_vec(), to };
-            if sender.send(outgoing).is_err() {
-                tracing::warn!("the sender for this direction is gone");
+                self.carry(&self.up, &self.to_worker, datagram, self.worker).await;
             }
+        }
+    }
+
+    /// The client's socket, apart: everything on it goes up.
+    async fn run_up(&self, client: watch::Sender<Option<SocketAddr>>) -> std::io::Result<()> {
+        let mut buf = vec![0_u8; MAX_DATAGRAM];
+        loop {
+            let (len, from) = self.socket.recv_from(&mut buf).await?;
+            let Some(datagram) = buf.get(..len) else { continue };
+            client.send_if_modified(|last| {
+                let moved = *last != Some(from);
+                if moved {
+                    tracing::info!(%from, "client");
+                    *last = Some(from);
+                }
+                moved
+            });
+            self.carry(&self.up, &self.to_worker, datagram, self.worker).await;
+        }
+    }
+
+    /// The worker's socket, apart: what the worker sends goes down to the last client.
+    async fn run_down(&self, client: watch::Receiver<Option<SocketAddr>>) -> std::io::Result<()> {
+        let mut buf = vec![0_u8; MAX_DATAGRAM];
+        loop {
+            let (len, from) = self.worker_side.recv_from(&mut buf).await?;
+            let Some(datagram) = buf.get(..len) else { continue };
+            if from != self.worker {
+                continue;
+            }
+            let Some(back) = *client.borrow() else {
+                tracing::warn!("the worker spoke before any client did; dropping");
+                continue;
+            };
+            self.carry(&self.down, &self.to_client, datagram, back).await;
+        }
+    }
+
+    /// Let `side`'s shaper decide the packet's fate and queue it on `sender` for `to`.
+    async fn carry(
+        &self,
+        side: &Mutex<Shaper>,
+        sender: &mpsc::UnboundedSender<Outgoing>,
+        datagram: &[u8],
+        to: SocketAddr,
+    ) {
+        let fate = side.lock().await.admit(datagram.len() as u64, self.started.elapsed());
+        let Fate::At(leaves) = fate else { return };
+        let outgoing = Outgoing { leaves, packet: datagram.to_vec(), to };
+        if sender.send(outgoing).is_err() {
+            tracing::warn!("the sender for this direction is gone");
         }
     }
 }
@@ -212,6 +306,39 @@ mod tests {
         let carried = relay.carried().await;
         assert_eq!((carried.up.sent, carried.down.sent), (1, 1));
         assert_eq!((carried.up.bytes, carried.down.bytes), (5, 7));
+    }
+
+    #[tokio::test]
+    async fn a_relay_apart_takes_the_workers_port_on_the_other_family() {
+        let worker = end().await;
+        let worker_addr = worker.local_addr().unwrap();
+        let at = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, worker_addr.port()));
+        let from = SocketAddr::from(([127, 0, 0, 1], 0));
+        let relay =
+            Arc::new(Relay::bind_apart(at, from, worker_addr, Link::CLEAR, 1).await.unwrap());
+        assert_eq!(relay.addr().unwrap(), at);
+        tokio::spawn({
+            let relay = Arc::clone(&relay);
+            async move { relay.run().await }
+        });
+        let client =
+            UdpSocket::bind(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 0))).await.unwrap();
+
+        client.send_to(b"hello", at).await.unwrap();
+        let mut buf = [0_u8; 16];
+        let (len, relay_side) =
+            tokio::time::timeout(Duration::from_secs(2), worker.recv_from(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(buf.get(..len), Some(&b"hello"[..]));
+        assert_ne!(relay_side, worker_addr, "the relay speaks from a socket of its own");
+        // A stranger on the worker's side is not the worker and goes nowhere.
+        end().await.send_to(b"stray", relay_side).await.unwrap();
+        worker.send_to(b"hi back", relay_side).await.unwrap();
+        assert_eq!(next(&client, Duration::from_secs(2)).await.as_deref(), Some(&b"hi back"[..]));
+        let carried = relay.carried().await;
+        assert_eq!((carried.up.sent, carried.down.sent), (1, 1));
     }
 
     #[tokio::test]

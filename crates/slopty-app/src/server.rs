@@ -60,8 +60,44 @@ const fn away(liveness: Liveness) -> Option<WorkerStatus> {
 }
 
 /// Where the cached directory lives: the client's data directory.
-fn cache_path() -> std::path::PathBuf {
+pub fn cache_path() -> std::path::PathBuf {
     slopty_settings::data_dir().join(directory::CACHE_FILE)
+}
+
+/// What the cached directory should hold next.
+#[derive(Clone, Debug)]
+pub enum Cache {
+    /// This server's directory.
+    Keep(HostAddr, Directory),
+    /// Nothing: the server was disconnected, so the file goes.
+    Remove,
+}
+
+/// The one task that writes the cached directory at `path`, in the order it was asked for.
+///
+/// A write per directory change, each on its own blocking task, raced: two in flight shared
+/// the temporary file, so one renamed the other's half-written file over the cache and the
+/// second failed, and an older directory could land last. Here each write finishes before the
+/// next starts, and a burst of changes costs the one write of the latest. The value the
+/// channel starts with is never written.
+pub async fn write_cache(path: std::path::PathBuf, mut next: tokio::sync::watch::Receiver<Cache>) {
+    while next.changed().await.is_ok() {
+        let cache = next.borrow_and_update().clone();
+        let path = path.clone();
+        let written = tokio::task::spawn_blocking(move || match cache {
+            Cache::Keep(server, directory) => directory.save(&path, &server),
+            Cache::Remove => match std::fs::remove_file(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            },
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "cache the directory"),
+            Err(e) => tracing::warn!(error = %e, "the directory cache's writer died"),
+        }
+    }
 }
 
 impl Workspace {
@@ -88,7 +124,7 @@ impl Workspace {
             v.forget_server_agents(None, cx);
         });
         if had_server && address.is_none() {
-            let _absent = std::fs::remove_file(cache_path());
+            self.directory_cache.send_replace(Cache::Remove);
         }
         let Some(address) = address else {
             self.directory = Directory::default();
@@ -230,15 +266,10 @@ impl Workspace {
         }
     }
 
-    /// Write the directory for the next launch, off the main thread.
+    /// Write the directory for the next launch, off the main thread ([`write_cache`]).
     fn save_directory(&self) {
         let Some(server) = self.server.as_ref().map(|s| s.address.clone()) else { return };
-        let directory = self.directory.clone();
-        self.runtime.spawn_blocking(move || {
-            if let Err(e) = directory.save(&cache_path(), &server) {
-                tracing::warn!(error = %e, "cache the directory");
-            }
-        });
+        self.directory_cache.send_replace(Cache::Keep(server, self.directory.clone()));
     }
 
     /// What worker `id`'s connect loop does next; `None` once it is dropped.
@@ -270,5 +301,48 @@ impl Workspace {
     /// The server's address as shown.
     pub(crate) fn server_address(&self) -> Option<&HostAddr> {
         self.server.as_ref().map(|s| &s.address)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The server named in the cache at `path`, once it is `want`; `None` for a file that is
+    /// absent.
+    async fn cached_server(path: &std::path::Path, want: Option<&str>) -> Option<String> {
+        let read = || {
+            let bytes = std::fs::read(path).ok()?;
+            let cache: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+            cache["server"].as_str().map(str::to_owned)
+        };
+        for _ in 0..200 {
+            if read().as_deref() == want {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        read()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_burst_of_directory_changes_leaves_the_last_one_cached_and_a_removal_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(directory::CACHE_FILE);
+        let (tx, rx) = tokio::sync::watch::channel(Cache::Remove);
+        let writer = tokio::spawn(write_cache(path.clone(), rx));
+        let server = |n: u16| HostAddr::new(format!("server-{n}"), 45_560);
+        for n in 0..50 {
+            tx.send_replace(Cache::Keep(server(n), Directory::default()));
+            tokio::task::yield_now().await;
+        }
+        let last = server(49).to_string();
+        assert_eq!(cached_server(&path, Some(&last)).await.as_deref(), Some(last.as_str()));
+        assert!(!path.with_extension("json.tmp").exists(), "no temporary file is left behind");
+
+        tx.send_replace(Cache::Remove);
+        assert_eq!(cached_server(&path, None).await, None);
+        drop(tx);
+        writer.await.unwrap();
     }
 }

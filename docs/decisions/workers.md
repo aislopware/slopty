@@ -314,3 +314,39 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_ping_draws_a_restarted_worker_s_reset_at_once` (`slopty-net` loopback, through an
   in-test front that swaps the worker behind one address). The e2e gained the scenario past
   the drop bar.
+
+- ✅ **The app is tested the way it is used: through a server** (2026-09-26). Every e2e that
+  ran the real app added its workers by address, and the server suite drove the server with
+  the CLI and MCP only. `cargo xtask e2e through-server` (`tests/through_server.rs`,
+  `harness::ServerFleet`) starts a `slopty-server`, worker `studio` on loopback and worker
+  `remote` behind the tailnet-shaped relay, both registered with it, and then the app at its
+  first run. The address is typed into the first-run panel and entered. Both workers then have
+  to arrive from the directory, each with a shell that answers a command. A permission hook
+  played on `remote` through `slopty hook` has to badge the pill. `remote` is then killed and
+  restarted twice, and each time is measured against a bound.
+  - **The directory has to lead through the relay.** The server lists a worker at the IP it
+    registered from and the port it listens on, and the app dials exactly that. So `remote`
+    listens on `127.0.0.1` only (`SLOPTY_BIND`) and registers over IPv6. The directory then
+    says `[::1]:<its port>`, and the relay listens there. One socket cannot relay that: bound to
+    `::1` it cannot send to `127.0.0.1`, and a dual-stack one would send from `127.0.0.1:<port>`,
+    the worker's own address. `slopty_shape::relay::Relay::bind_apart` gives the relay a second
+    socket to speak to the worker from (test:
+    `a_relay_apart_takes_the_workers_port_on_the_other_family`). Nothing in the worker or the
+    server changed for the test.
+  - **What the kills cover.** A restart as soon as the app shows the worker down is found by
+    the app's own link: its pings draw the new process's reset before the server has noticed
+    anything. A restart after the server has called the worker unreachable, while the app holds
+    it instead of redialling, is found because the server lists it online again, which wakes
+    the dial. That second path is the one only this suite can see. The narrower rule, where a
+    link that is still up but silent is given up when the server says the worker is back, does
+    not happen in an unscripted run. The server holds a killed worker's lease for 5 s and turns
+    the restarted one away until then, and by that time the app's ping has drawn the reset or
+    its drop bar has given the link up. The unit test stays its proof.
+  - **Bounds.** Shown down within 5 s of the kill, and connected within 2 s of either restart.
+    Five runs (`docs/MEASUREMENTS.md`, "the app through a server") read 2.4 to 3.1 s down, 0.76
+    to 0.88 s back by the app's own link, and 0.12 to 0.13 s back through the server. The bounds held
+    without a change to the app.
+  - **Golden.** `through-server` shows two workers from one server in one layout, with the
+    pill counting the remote worker's waiting agent. No other golden has more than one worker.
+    The second worker's private `HOME` is canonicalised, so its prompt reads `~` and not a
+    `/private/var/…` path.

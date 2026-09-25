@@ -143,6 +143,8 @@ pub struct Workspace {
     server: Option<server::ServerSlot>,
     /// Bumped whenever the server changes, so a late event from the old link is dropped.
     server_generation: u64,
+    /// What the cached directory should hold, for its one writer ([`server::write_cache`]).
+    directory_cache: tokio::sync::watch::Sender<server::Cache>,
     /// Every worker's tiles, in one layout.
     view: Entity<WorkspaceView>,
     /// A physical keyboard is attached (polled with the settings; hides the key bar).
@@ -1379,11 +1381,14 @@ pub fn open_workspace(
         // The key bar follows the focused tile: a workspace change re-renders the shell,
         // which is a key bar and the overlays.
         let changes = cx.observe(&view, |_ws, _view, cx| cx.notify());
+        let (directory_cache, cache_writes) = tokio::sync::watch::channel(server::Cache::Remove);
+        handle.spawn(server::write_cache(server::cache_path(), cache_writes));
         Workspace {
             workers: Vec::new(),
             directory: slopty_client::directory::Directory::default(),
             server: None,
             server_generation: 0,
+            directory_cache,
             view: view.clone(),
             hardware_keyboard: hardware_keyboard_attached(),
             theme: Theme::default(),

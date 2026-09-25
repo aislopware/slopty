@@ -60,6 +60,12 @@ pub enum Case {
     /// the directory, a shell typed to and read, files both ways, ports, close and exit, the
     /// lease lost on a killed worker and taken back. No permissions needed.
     Server,
+    /// The app as it is normally used: at its first run it is pointed at a `slopty-server` with
+    /// two workers registered, one on loopback and one behind a relay shaped like the tailnet.
+    /// Both come from the directory with a shell each, a hook on the far one badges the pill,
+    /// and the far one killed and restarted is measured back, by its own link and by the
+    /// server listing it online. No permissions needed.
+    ThroughServer,
     /// All of the above but the simulator cases (`smooth-ios`, `pair-ios`).
     All,
     /// ptyd + worker on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
@@ -218,6 +224,14 @@ const SERVER: &[Suite] = &[Suite {
     serial: false,
 }];
 
+const THROUGH_SERVER: &[Suite] = &[Suite {
+    gate: Some("SLOPTY_THROUGH_SERVER_E2E"),
+    package: "slopty-e2e",
+    test: "through_server",
+    filter: "",
+    serial: true,
+}];
+
 const SMOOTH_IOS: &[Suite] = &[Suite {
     gate: Some("SLOPTY_SMOOTH_IOS_E2E"),
     package: "slopty-e2e",
@@ -238,6 +252,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::PairIos => PAIR_IOS.iter().collect(),
         Case::Workers => WORKERS.iter().collect(),
         Case::Server => SERVER.iter().collect(),
+        Case::ThroughServer => THROUGH_SERVER.iter().collect(),
         Case::All => APP
             .iter()
             .chain(WORKER)
@@ -247,6 +262,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             .chain(SMOOTH)
             .chain(PAIR)
             .chain(WORKERS)
+            .chain(THROUGH_SERVER)
             .collect(),
         Case::Ios => IOS.iter().collect(),
     };

@@ -4795,3 +4795,40 @@ it. The bound is the part that holds: at most about 2 s between two probes, wher
 **Cost on a healthy link.** One keep-alive PING a second from whichever side's timer fires
 first, and its ACK, each at least 29 bytes of UDP payload, on a link with nothing else to send.
 A link that carries anything sends no keep-alives at all.
+
+## 2026-09-26 — the app through a server
+
+`cargo xtask e2e through-server`: a `slopty-server`, worker `studio` on loopback and worker
+`remote` behind the `slopty-shape` relay shaped like the tailnet (`harness::TAILNET`: 8 to 12 ms
+round trip, 3 % loss), both registered with it, and the app at its first run, connected by
+typing the server's address into the panel (`docs/decisions/workers.md`, "The app is tested
+the way it is used: through a server"). `remote` is killed with SIGKILL and restarted twice:
+first as soon as the app shows it down, then after the server has called it unreachable and
+the app holds it. Five runs on this Mac. The first two ran before the directory cache got its
+one writer and the far worker's `HOME` was canonicalised, and neither change is on the paths
+measured here.
+
+```sh
+cargo xtask e2e through-server     # the MEASURE lines
+```
+
+| | runs 1 to 5 | bound |
+| --- | --- | --- |
+| both workers connected after the server's address is entered | 0.03, 0.18, 0.08, 0.03, 0.04 s | |
+| far's hook badges the pill | 33, 20, 22, 20, 19 ms | |
+| far shown down after the kill | 3.1, 2.7, 2.4, 2.7, 2.9 s | 5 s |
+| connected again after a restart while shown down (the app's own link) | 0.88, 0.78, 0.84, 0.76, 0.77 s | 2 s |
+| held as unreachable after the kill (the server's 5 s lease, then its word) | 6.2, 6.2, 6.1, 6.2, 6.1 s | |
+| connected again after a restart while held (the server lists it online) | 0.12, 0.13, 0.13, 0.13, 0.12 s | 2 s |
+| whole run | 14.6, 19.4, 19.6, 18.4, 18.9 s | |
+
+Logs: `target/logs/through-server-{1,2,3,4,5}.log`. Runs 1 to 3 wrote the golden
+(`--accept`); 4 and 5 compared against it.
+
+Shown down comes in under the 3 s silence bar because the bar counts from the last datagram
+heard, which came up to a keep-alive before the kill. A restart the server announces is found
+faster than one the app's own link finds, 0.13 s against 0.8 s. The online event wakes the held
+connect loop at once, and the dial is a single handshake over the shaped link. The link's own
+path waits for a ping to draw the reset and then for the 250 ms redial. The first row, 0.03 s
+from Enter to both workers connected, is short because the link the panel dials to prove the
+server is kept as the directory's link, and each worker's dial is one handshake.

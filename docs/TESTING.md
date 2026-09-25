@@ -46,6 +46,15 @@
    capabilities, a shell typed to, waited on and read back, files both ways (binary too), a
    listener found by `ports`, a close, and a shell that exits on its own. A killed worker must
    turn unreachable and come back online under the same id.
+   `cargo xtask e2e through-server` (gate `SLOPTY_THROUGH_SERVER_E2E`, serial, about 20 s) is
+   the app as it is normally used (`harness::ServerFleet`). A `slopty-server` has two workers
+   registered with it: one on loopback and one behind the tailnet-shaped relay, which the
+   directory lists at the relay's address. The app starts at its first run, and the server's
+   address is typed into the panel and entered. Both workers must then come from the directory
+   with a shell each that answers a command, and a hook played on the far one through
+   `slopty hook` must badge the pill. The far worker is killed and restarted twice, as soon as
+   it shows down and again after the server has called it unreachable. It must show down within
+   5 s and be connected within 2 s of each restart. Golden `through-server`.
 4. **Live desktop**, `cargo xtask e2e worker|screen|input|all` (gates `SLOPTY_SCREEN_E2E`,
    `SLOPTY_INPUT_E2E`): real capture and real event posting, own data dir under `target/e2e/`.
    The assertions live inside those tests.

@@ -485,3 +485,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_named_pipe_is_refused_not_waited_on`,
     `a_directory_is_stat_only_for_the_entries_it_answers` (`slopty-worker`). Each failed on
     the old code.
+
+- ✅ **The cached directory has one writer** (2026-09-26). The app used to write
+  `directory.json` from a new blocking task on every change of the directory. The through-server
+  e2e caught a restarted worker's `Worker` updates arriving close together: two writes were in
+  flight on the same temporary file, one renamed the other's half-written file over the cache,
+  and the second failed with `No such file or directory`. An older directory could also land
+  last. Now the app hands each change to one task over a watch channel
+  (`slopty_app::server::write_cache`). A write finishes before the next starts, and a burst of
+  changes becomes one write of the latest. Disconnecting from the server removes the file
+  through the same task, so a write still running cannot bring the file back. Test:
+  `a_burst_of_directory_changes_leaves_the_last_one_cached_and_a_removal_removes_it`.
