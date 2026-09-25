@@ -1433,3 +1433,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `cmd_o_shows_the_picker_while_the_worker_lists_its_windows`,
   `the_overview_labels_keep_their_size_at_any_zoom`. The new chrome strings joined the
   sentence-case lint.
+
+  The gallery renders at 900 × 600, where docking would leave the strip under
+  `phone_below`, so there the navigator stays closed. `a_workspace_of_columns_in_both_themes`
+  now widens the window to 1280 × 800 for one more golden, `workspace-navigator`, with the
+  navigator docked. Every app golden was re-accepted for this ruling
+  (`cargo xtask e2e app --accept-all`, 22 of 22 passing).

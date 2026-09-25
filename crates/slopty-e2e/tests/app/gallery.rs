@@ -148,6 +148,21 @@ async fn a_workspace_of_columns_in_both_themes() {
     assert_eq!(dump.workspace, "Workspace 1");
     golden(drv, &dir, "workspace").await;
 
+    // A desktop-sized window leaves the strip its room, so the navigator docks beside it.
+    drv.ok(&Command::Resize { width: 1280.0, height: 800.0 }).await.unwrap();
+    drv.wait_for("the navigator docked", STEP, |d| {
+        d.a11y_node("Navigation", Some("Navigator")).is_some()
+    })
+    .await
+    .unwrap();
+    golden(drv, &dir, "workspace-navigator").await;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    drv.wait_for("the navigator gone again", STEP, |d| {
+        d.a11y_node("Navigation", Some("Navigator")).is_none()
+    })
+    .await
+    .unwrap();
+
     drv.keys("cmd-alt-o").await.unwrap();
     drv.wait_for("the overview", STEP, |d| d.overview).await.unwrap();
     golden(drv, &dir, "overview").await;
