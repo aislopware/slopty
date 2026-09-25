@@ -576,15 +576,19 @@ impl Capture {
                 Some(delegate),
             )
         };
-        let queue = DispatchQueue::new("io.slopty.capture", DispatchQueueAttr::SERIAL);
-        // Audio on its own queue: a sample never waits behind a frame's encode call, and the
-        // player's ~40 ms of slack is less than a few late video callbacks.
-        let audio_attr = DispatchQueueAttr::with_qos_class(
+        // Both queues are user-interactive. The video callback is where a frame is gated and
+        // handed to the encoder, on the path from the window server to the client's glass; a
+        // queue left at the default class runs behind whatever else the worker's machine is
+        // doing, and every millisecond it waits is a millisecond of latency on every frame.
+        let interactive = DispatchQueueAttr::with_qos_class(
             DispatchQueueAttr::SERIAL,
             DispatchQoS::UserInteractive,
             0,
         );
-        let audio_queue = DispatchQueue::new("io.slopty.capture.audio", Some(&audio_attr));
+        let queue = DispatchQueue::new("io.slopty.capture", Some(&interactive));
+        // Audio on its own queue: a sample never waits behind a frame's encode call, and the
+        // player's ~40 ms of slack is less than a few late video callbacks.
+        let audio_queue = DispatchQueue::new("io.slopty.capture.audio", Some(&interactive));
         let handler: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
         // SAFETY: valid stream, output and queue.
         unsafe {

@@ -132,7 +132,8 @@ pub struct CaptureConfig {
     pub fps: u16,
     /// Pixel layout.
     pub format: PixelFormat,
-    /// Buffers in flight between ScreenCaptureKit and us; 2 is the latency floor.
+    /// Surfaces in ScreenCaptureKit's pool: the ones the stream and the encoder hold plus one to
+    /// render the next capture into (the worker asks for 3).
     pub queue_depth: u8,
     /// Also capture the target's audio (48 kHz stereo, this process excluded).
     pub audio: bool,

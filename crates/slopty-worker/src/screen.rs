@@ -9,11 +9,14 @@
 //! the platform this build serves.
 //!
 //! Nothing here knows the network: datagrams go to a [`DatagramSink`] the transport (the worker)
-//! implements, from whichever thread produced them, in one call per frame. Everything the client
-//! sends back (reports, NACKs, refresh requests, quality changes) lands on [`ScreenStream`] and
-//! [`StreamControl`] methods. When the transport already holds more than the guard allows the
-//! capture callback drops whole frames rather than letting latency build up; the client notices
-//! the gap and asks for a refresh.
+//! implements, from whichever thread produced them, in one call per frame — except while audio
+//! is flowing, when video waits in a lane of its own and is handed over a slice of the link at a
+//! time so audio can go ahead of it (`Lane`). Everything the client sends back (reports, NACKs,
+//! refresh requests, quality changes) lands on [`ScreenStream`] and [`StreamControl`] methods.
+//! When the transport already holds more than the guard allows the capture callback drops whole
+//! frames rather than letting latency build up; the client notices the gap and asks for a
+//! refresh. The newest capture is kept, so a picture that went still still gets the frame the
+//! cadence or the guard held back, and a refresh asked for on it is answered (`repair_loop`).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -229,6 +232,262 @@ pub const fn keyframe_estimate(previous: u64, observed: u64) -> u64 {
     previous.saturating_sub(previous / 8).saturating_add(observed / 8)
 }
 
+/// The share of a `target_bps` link budget the encoder gets when the packetizer adds
+/// `parity_permille` of Reed–Solomon parity on top of every frame.
+///
+/// The rate controller's target is what the path carries, and parity rides the same path, so
+/// a target handed to the encoder whole put `1 + parity` of it on the wire: 20 % over at the
+/// default ratio, 50 % at the ceiling. The encoder gets `target × 1000 / (1000 + parity)` and
+/// the frame plus its parity fits the target. Proportional and nothing else; whether the
+/// picture is better served by less parity at a higher encoder rate is an A/B still to run.
+#[must_use]
+pub fn encoder_bps(target_bps: u32, parity_permille: u16) -> u32 {
+    let whole = 1000_u64.saturating_add(u64::from(parity_permille));
+    let share = u64::from(target_bps).saturating_mul(1000).checked_div(whole).unwrap_or(0);
+    u32::try_from(share).unwrap_or(u32::MAX)
+}
+
+/// How long after a capture the next one would have arrived had the picture kept changing;
+/// past it a capture that was not encoded is the last one there will be.
+///
+/// ScreenCaptureKit delivers only frames whose content changed, so a picture that goes still
+/// leaves nothing behind its last frame to carry what that frame was skipped for. Half again
+/// the capture period absorbs the display beat's jitter, and never less than a 60 Hz display's:
+/// a ceiling above the panel's rate would otherwise call the gap between two ordinary frames a
+/// stop and send the older one.
+const fn quiet_after_us(ceiling_fps: u16) -> u64 {
+    let fps = if ceiling_fps < 60 { ceiling_fps } else { 60 };
+    match 1_500_000_u64.checked_div(fps as u64) {
+        Some(us) => us,
+        None => 1_500_000,
+    }
+}
+
+/// What the held capture could answer: it never reached the encoder, a refresh is pending, a
+/// keyframe is pending.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct Asks {
+    owed: bool,
+    refresh: bool,
+    keyframe: bool,
+}
+
+/// When the held capture should be encoded, if nothing newer arrives first; `None` when
+/// nothing is owed.
+///
+/// `asks` says what the held capture could answer. The capture at `captured_us` goes out once the
+/// picture has gone quiet ([`quiet_after_us`]) and, unless a keyframe is wanted, once the
+/// cadence at `fps` is due again after the frame encoded at `last_us`: the same gate a fresh
+/// capture passes, so a repair never spends more than the rung allows.
+const fn repair_at(
+    asks: Asks,
+    captured_us: u64,
+    last_us: u64,
+    fps: u16,
+    ceiling_fps: u16,
+) -> Option<u64> {
+    if !asks.owed && !asks.refresh && !asks.keyframe {
+        return None;
+    }
+    let quiet = captured_us.saturating_add(quiet_after_us(ceiling_fps));
+    if asks.keyframe {
+        return Some(quiet);
+    }
+    let period = period_us(fps);
+    let due = last_us.saturating_add(period).saturating_sub(period / 8);
+    Some(if due > quiet { due } else { quiet })
+}
+
+/// One frame's period at `fps`, microseconds; a second at 0.
+const fn period_us(fps: u16) -> u64 {
+    match 1_000_000_u64.checked_div(fps as u64) {
+        Some(us) => us,
+        None => 1_000_000,
+    }
+}
+
+/// A long-term reference the client can be refreshed from: the tokens this encoder session
+/// offered and which of them the client acknowledged.
+///
+/// An IDR empties the decoder's reference list, so a token acknowledged before the latest
+/// keyframe names a picture neither end can predict from any more, and a refresh asked for then
+/// is answered with another IDR. That is what `ltr_acked` could not say: it latched on the
+/// first acknowledgement of the stream and stayed true through every keyframe after it
+/// (MEASUREMENTS.md, 2026-09-15, "the LTR reference is starved"). Here a token is usable only
+/// when it was offered after the latest keyframe of the current session and acknowledged.
+#[derive(Debug, Default)]
+struct LtrBook {
+    /// Tokens offered this session, oldest first: the token, the keyframe epoch it was offered
+    /// in, and when.
+    offered: VecDeque<(u64, u64, u64)>,
+    /// Keyframes (and rebuilds) seen: each one starts a new epoch.
+    epoch: u64,
+    /// The newest acknowledged token of the current epoch and when it was offered.
+    usable: Option<(u64, u64)>,
+}
+
+/// Offered tokens remembered; VideoToolbox offers about one per fifteen frames, so this is
+/// seconds of them.
+const LTR_OFFERED_KEEP: usize = 64;
+
+impl LtrBook {
+    /// An encoded frame: a keyframe starts a new epoch, and a token it carries is offered in it.
+    /// True when the frame offered a token.
+    fn on_packet(&mut self, keyframe: bool, token: Option<u64>, now: u64) -> bool {
+        if keyframe {
+            self.epoch = self.epoch.wrapping_add(1);
+            self.usable = None;
+        }
+        let Some(token) = token else { return false };
+        if self.offered.len() >= LTR_OFFERED_KEEP {
+            self.offered.pop_front();
+        }
+        self.offered.push_back((token, self.epoch, now));
+        true
+    }
+
+    /// The client acknowledged `token`. `true` when this session offered it, so the encoder may
+    /// be told; it becomes the usable reference when it belongs to the current epoch and is
+    /// newer than the one on record.
+    fn on_ack(&mut self, token: u64) -> bool {
+        let Some(&(_token, epoch, at)) = self.offered.iter().rev().find(|(t, ..)| *t == token)
+        else {
+            return false;
+        };
+        if epoch == self.epoch && self.usable.is_none_or(|(_t, newest)| at >= newest) {
+            self.usable = Some((token, at));
+        }
+        true
+    }
+
+    /// A new encoder session: nothing it will offer can be predicted from the old one's
+    /// references, and an acknowledgement still in flight for the old one names nothing.
+    fn reset(&mut self) {
+        self.offered.clear();
+        self.epoch = self.epoch.wrapping_add(1);
+        self.usable = None;
+    }
+
+    /// How long ago the usable reference was encoded, microseconds; `None` when there is none.
+    fn usable_age(&self, now: u64) -> Option<u64> {
+        self.usable.map(|(_token, at)| now.saturating_sub(at))
+    }
+}
+
+/// What the long-term reference machinery did on a stream, for the control socket.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct LtrStats {
+    /// Frames the encoder marked as long-term references (tokens offered).
+    pub offered: u64,
+    /// Tokens the client acknowledged that this encoder session had offered.
+    pub acked: u64,
+    /// Refreshes the encoder answered with an IDR: no usable reference behind them.
+    pub refreshes_idr: u64,
+    /// Refreshes the encoder answered with a delta off an acknowledged reference.
+    pub refreshes_delta: u64,
+    /// Whether an acknowledged reference newer than the latest keyframe is on record now, so a
+    /// refresh would be a delta.
+    pub usable: bool,
+    /// Age of that reference, microseconds; 0 when there is none.
+    pub usable_age_us: u64,
+}
+
+/// How much of the link, in time, video may hold in QUIC ahead of an audio packet.
+///
+/// QUIC's datagram queue is first in, first out, so audio sent behind a frame waits for the
+/// whole frame: a 130 kB keyframe is 52 ms of a 20 Mbit/s link, longer than the player's jitter
+/// slack. While audio is flowing, video is handed to QUIC a slice at a time and audio, sent
+/// straight in, waits behind at most this much. The slice has to outlast the lane's tick with
+/// room to spare, or the link idles between two top-ups and the frame arrives later than QUIC
+/// alone would have delivered it.
+const LANE_SLICE_US: u64 = 5_000;
+/// How often the lane tops QUIC up while video waits in it.
+const LANE_TICK: Duration = Duration::from_millis(1);
+/// The shortest span a drain rate is measured over.
+const LANE_SAMPLE_US: u64 = 1_000;
+/// After this long without an audio packet video goes straight to QUIC again: with nothing to
+/// let ahead, the lane would only cost the frame its ticks.
+const LANE_AUDIO_HOLD_US: u64 = 200_000;
+
+/// Video datagrams waiting to be handed to QUIC, so audio can go ahead of them.
+///
+/// The budget is a slice of the rate QUIC has been seen to drain at, measured from its held
+/// bytes between two looks rather than taken from the rate controller: a LAN drains many times
+/// the target, and a budget sized from the target would pace a fast link down to it.
+#[derive(Debug, Default)]
+struct Lane {
+    queue: VecDeque<Bytes>,
+    /// Bytes in `queue`.
+    bytes: usize,
+    /// What QUIC would hold now had nothing drained since the last look.
+    expected: usize,
+    /// Bytes QUIC drained since `mark_us`.
+    drained: usize,
+    mark_us: u64,
+    /// QUIC was seen empty since `mark_us`, so what drained is a floor and not the link's rate.
+    dry: bool,
+    /// Bytes a second QUIC has been seen to drain.
+    rate: u64,
+}
+
+impl Lane {
+    /// QUIC holds `held` bytes at `now`: fold what drained since the last look into the rate.
+    /// The rate rises to a sample at once; a sample taken while QUIC never ran dry is the link's
+    /// own rate and the estimate falls an eighth of the way to it, and one taken across a dry
+    /// spell only says the link is at least that fast.
+    fn observe(&mut self, held: usize, now: u64) {
+        self.drained = self.drained.saturating_add(self.expected.saturating_sub(held));
+        self.expected = held;
+        let span = now.saturating_sub(self.mark_us);
+        if span < LANE_SAMPLE_US {
+            self.dry |= held == 0;
+            return;
+        }
+        let drained = u64::try_from(self.drained).unwrap_or(u64::MAX);
+        let sample = drained.saturating_mul(1_000_000).checked_div(span).unwrap_or(0);
+        self.rate = if sample >= self.rate || self.dry || held == 0 {
+            self.rate.max(sample)
+        } else {
+            self.rate.saturating_sub(self.rate / 8).saturating_add(sample / 8)
+        };
+        self.drained = 0;
+        self.mark_us = now;
+        self.dry = held == 0;
+    }
+
+    /// Bytes QUIC may hold before video waits here: a slice of the drain rate, and never less
+    /// than a slice of `floor_rate` (bytes a second), what the rate controller already knows
+    /// the path carries.
+    fn budget(&self, floor_rate: u64) -> usize {
+        let rate = self.rate.max(floor_rate);
+        usize::try_from(rate.saturating_mul(LANE_SLICE_US) / 1_000_000).unwrap_or(usize::MAX)
+    }
+
+    /// Queue a frame's datagrams behind whatever is waiting.
+    fn push(&mut self, datagrams: &[Bytes]) {
+        self.bytes = datagrams.iter().fold(self.bytes, |sum, d| sum.saturating_add(d.len()));
+        self.queue.extend(datagrams.iter().cloned());
+    }
+
+    /// Take the datagrams that fit under `budget` with `held` already in QUIC. One always goes
+    /// when QUIC is empty, whatever the budget, so the lane cannot stall.
+    fn take(&mut self, held: usize, budget: usize) -> Vec<Bytes> {
+        let mut room = budget.saturating_sub(held);
+        let mut out = Vec::new();
+        while let Some(front) = self.queue.front() {
+            let first_into_empty = out.is_empty() && held == 0;
+            if front.len() > room && !first_into_empty {
+                break;
+            }
+            room = room.saturating_sub(front.len());
+            self.bytes = self.bytes.saturating_sub(front.len());
+            self.expected = self.expected.saturating_add(front.len());
+            out.extend(self.queue.pop_front());
+        }
+        out
+    }
+}
+
 /// p50 / p95 / max of a latency over the last `LATENCY_WINDOW` samples, microseconds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Quantiles {
@@ -397,14 +656,22 @@ pub struct ScreenStats {
     /// rather than through the window filter). Frames the crop delivered after it stopped holding
     /// the target are not among them — those are [`Self::withheld`].
     pub cropped: u64,
-    /// Whether the client has ever acknowledged a long-term reference on this stream.
+    /// Long-term references: offered, acknowledged, whether one is usable now, and how the
+    /// refreshes were answered.
     ///
-    /// What it costs to ask for a refresh. With a reference acknowledged the encoder answers
+    /// What it costs to ask for a refresh. With a usable reference the encoder answers
     /// `force_ltr_refresh` with a delta off it — 733 B against a 3 998 B IDR in
     /// `a_forced_ltr_refresh_is_a_delta_not_an_idr` — and without one it falls back to a full
-    /// keyframe. The congestion guard asks for a refresh on every frame it drops, so on a link
-    /// where this stays false every drop is a demand for a keyframe.
-    pub ltr_acked: bool,
+    /// keyframe.
+    pub ltr: LtrStats,
+    /// Bitrate the encoder was last given: the controller's target less the parity share
+    /// ([`encoder_bps`]).
+    pub encoder_bps: u64,
+    /// Frames encoded from the held capture rather than a fresh one: the last capture of a
+    /// picture that went still, or a refresh or keyframe answered while nothing changed.
+    pub repaired: u64,
+    /// Video datagrams that waited in the audio lane past their frame's own hand-over.
+    pub laned: u64,
     /// Whether the stream is on the display-crop path *right now*. The counter above says how
     /// many frames came that way; this says where the next one will come from, which is what a
     /// test asking "did the crop go away when the window did" has to look at.
@@ -635,7 +902,14 @@ struct Counters {
     latency_max_us: AtomicU64,
     latency_sum_us: AtomicU64,
     bitrate_bps: AtomicU64,
+    encoder_bps: AtomicU64,
     cropped: AtomicU64,
+    repaired: AtomicU64,
+    laned: AtomicU64,
+    ltr_offered: AtomicU64,
+    ltr_acked: AtomicU64,
+    refreshes_idr: AtomicU64,
+    refreshes_delta: AtomicU64,
     capture: Mutex<LatencyRing>,
     encode: Mutex<LatencyRing>,
     beat_gap: Mutex<LatencyRing>,
@@ -669,7 +943,14 @@ impl Counters {
             latency_max_us: AtomicU64::new(0),
             latency_sum_us: AtomicU64::new(0),
             bitrate_bps: AtomicU64::new(0),
+            encoder_bps: AtomicU64::new(0),
             cropped: AtomicU64::new(0),
+            repaired: AtomicU64::new(0),
+            laned: AtomicU64::new(0),
+            ltr_offered: AtomicU64::new(0),
+            ltr_acked: AtomicU64::new(0),
+            refreshes_idr: AtomicU64::new(0),
+            refreshes_delta: AtomicU64::new(0),
             capture: Mutex::new(LatencyRing::default()),
             encode: Mutex::new(LatencyRing::default()),
             beat_gap: Mutex::new(LatencyRing::default()),
@@ -708,8 +989,18 @@ impl Counters {
             dropped: self.dropped.load(Ordering::Relaxed),
             withheld: self.withheld.load(Ordering::Relaxed),
             keyframes_deferred: self.keyframes_deferred.load(Ordering::Relaxed),
-            // Placeholder: `Shared::stats` is the only reader and fills it from the stream.
-            ltr_acked: false,
+            // `usable` and its age are the stream's state: `Shared::stats` fills them.
+            ltr: LtrStats {
+                offered: self.ltr_offered.load(Ordering::Relaxed),
+                acked: self.ltr_acked.load(Ordering::Relaxed),
+                refreshes_idr: self.refreshes_idr.load(Ordering::Relaxed),
+                refreshes_delta: self.refreshes_delta.load(Ordering::Relaxed),
+                usable: false,
+                usable_age_us: 0,
+            },
+            encoder_bps: self.encoder_bps.load(Ordering::Relaxed),
+            repaired: self.repaired.load(Ordering::Relaxed),
+            laned: self.laned.load(Ordering::Relaxed),
             suspected: self.suspected.load(Ordering::Relaxed),
             suspicions: self.suspicions.load(Ordering::Relaxed),
             siblings: self.siblings.load(Ordering::Relaxed),
@@ -810,6 +1101,12 @@ impl<P: Platform> StreamControl<P> {
     pub fn nack(&self, frame: u32, fragments: &[u16]) {
         self.0.nack(frame, fragments);
     }
+
+    /// See [`ScreenStream::zoom`]; current across a rebuild, readable from the connection's task.
+    #[must_use]
+    pub fn zoom(&self) -> f64 {
+        self.0.zoom()
+    }
 }
 
 /// Audio gate: after this long without a sample above [`AUDIO_FLOOR`] the stream stops
@@ -850,10 +1147,28 @@ struct Shared<P: Platform = Native> {
     /// `host_now_us()` when the current run of deferrals began, `0` when none is running: the
     /// valve's clock.
     keyframe_deferred_us: AtomicU64,
-    /// The client has acknowledged a long-term reference, so an LTR refresh is a picture it can
-    /// decode and a keyframe is not the only way out of a hole. Nothing clears it: a client that
-    /// goes away takes the stream with it.
-    ltr_acked: AtomicBool,
+    /// The long-term references this encoder session offered and the client acknowledged.
+    ltr: Mutex<LtrBook>,
+    /// The newest capture of the target, kept after it is encoded. ScreenCaptureKit sends
+    /// nothing while the picture is still, so this is the only picture a skipped frame, a
+    /// refresh or a keyframe asked for on a still screen can be answered with
+    /// ([`repair_loop`]). Every encode goes through this lock, which also keeps the
+    /// presentation timestamps the encoder sees in order.
+    held: Mutex<Option<Frame<P>>>,
+    /// The held capture has not reached the encoder.
+    owed: AtomicBool,
+    /// Wakes [`repair_loop`]: a capture was held back, or a request came in.
+    repair: tokio::sync::Notify,
+    /// Video datagrams waiting to be handed to QUIC behind a slice of the link, so audio goes
+    /// ahead of them ([`Lane`]).
+    lane: Mutex<Lane>,
+    /// Wakes [`lane_loop`]: video is waiting in the lane.
+    lane_wake: tokio::sync::Notify,
+    /// `host_now_us()` of the last audio packet sent; the lane is used only while audio flows.
+    last_audio_us: AtomicU64,
+    /// Stream pixels per native pixel of the target (the `scale` of the quality in force), as
+    /// `f64` bits: what the cursor loop multiplies a position by, kept current across a rebuild.
+    zoom: AtomicU64,
     /// Whether frames come through the display-crop path right now.
     cropped: AtomicBool,
     /// The target window is not on screen. Nothing ScreenCaptureKit delivers can be a picture of
@@ -884,28 +1199,121 @@ struct Shared<P: Platform = Native> {
 }
 
 impl<P: Platform> Shared<P> {
-    /// The counters plus the state only the stream knows: whether the display crop is what is
-    /// being served right now. Every reader goes through here, so no caller can publish the
-    /// snapshot's placeholder and report the window filter for a stream on the crop.
-    fn stats(&self) -> ScreenStats {
-        ScreenStats {
-            on_crop: self.cropped.load(Ordering::Relaxed),
-            ltr_acked: self.ltr_acked.load(Ordering::Relaxed),
-            ..self.counters.snapshot()
+    /// A stream's state before its encoder is built: a keyframe pending, the rate controller
+    /// under `max_bps`, the cadence at `fps`.
+    fn new(
+        id: StreamId,
+        sink: Arc<dyn DatagramSink>,
+        max_bps: u32,
+        fps: u16,
+        cropped: bool,
+    ) -> Self {
+        Self {
+            id,
+            encoder: RwLock::new(None),
+            audio: Mutex::new(AudioState { encoder: None, seq: 0, last_loud_us: 0 }),
+            pending: Mutex::new(Pending { keyframe: true, ..Pending::default() }),
+            packetizer: Mutex::new(Packetizer::new(id)),
+            redundancy: Mutex::new(Redundancy::new()),
+            rate: Mutex::new(RateController::new(max_bps)),
+            sent_at_report: AtomicU64::new(0),
+            last_push_us: AtomicU64::new(now::<P>()),
+            fps: std::sync::atomic::AtomicU16::new(fps),
+            fps_ceiling: std::sync::atomic::AtomicU16::new(fps),
+            last_encoded_us: AtomicU64::new(0),
+            keyframe_bytes: AtomicU64::new(0),
+            keyframe_deferred_us: AtomicU64::new(0),
+            ltr: Mutex::new(LtrBook::default()),
+            held: Mutex::new(None),
+            owed: AtomicBool::new(false),
+            repair: tokio::sync::Notify::new(),
+            lane: Mutex::new(Lane::default()),
+            lane_wake: tokio::sync::Notify::new(),
+            last_audio_us: AtomicU64::new(0),
+            zoom: AtomicU64::new(1.0_f64.to_bits()),
+            cropped: AtomicBool::new(cropped),
+            target_hidden: AtomicBool::new(false),
+            pointer_over: AtomicBool::new(false),
+            suspect_until_us: AtomicU64::new(0),
+            filter_stalled: AtomicBool::new(false),
+            sink,
+            too_large_logged: AtomicBool::new(false),
+            bounds: Mutex::new(None),
+            counters: Counters::new(),
         }
     }
 
-    /// Point the live encoder at `bps` (a rebuild picks the controller's target up again).
-    fn apply_bitrate(&self, bps: u32) {
+    /// The counters plus the state only the stream knows: whether the display crop is what is
+    /// being served right now, and whether a long-term reference is usable. Every reader goes
+    /// through here, so no caller can publish the snapshot's placeholders.
+    fn stats(&self) -> ScreenStats {
+        let snapshot = self.counters.snapshot();
+        let age = self.ltr.lock().usable_age(now::<P>());
+        ScreenStats {
+            on_crop: self.cropped.load(Ordering::Relaxed),
+            ltr: LtrStats {
+                usable: age.is_some(),
+                usable_age_us: age.unwrap_or(0),
+                ..snapshot.ltr
+            },
+            ..snapshot
+        }
+    }
+
+    /// Stream pixels per native pixel right now.
+    fn zoom(&self) -> f64 {
+        f64::from_bits(self.zoom.load(Ordering::Relaxed))
+    }
+
+    /// Whether a refresh would come back as a delta: an acknowledged reference newer than the
+    /// latest keyframe is on record.
+    fn ltr_usable(&self) -> bool {
+        self.ltr.lock().usable.is_some()
+    }
+
+    /// Point the live encoder at the share of `target` the parity leaves it ([`encoder_bps`]);
+    /// a rebuild picks the controller's target up again. `target` stays the rate the guards
+    /// read: the bytes they weigh are frames and their parity together.
+    fn apply_bitrate(&self, target: u32) {
+        let parity = self.packetizer.lock().parity_permille();
+        let bps = encoder_bps(target, parity);
         let result = self.encoder.read().as_ref().map(|e| e.set_bitrate(bps));
         match result {
             Some(Ok(())) => {
-                self.counters.bitrate_bps.store(u64::from(bps), Ordering::Relaxed);
-                tracing::debug!(stream = %self.id, bps, "bitrate");
+                self.counters.bitrate_bps.store(u64::from(target), Ordering::Relaxed);
+                self.counters.encoder_bps.store(u64::from(bps), Ordering::Relaxed);
+                tracing::debug!(stream = %self.id, target, bps, parity, "bitrate");
             }
             Some(Err(e)) => tracing::warn!(stream = %self.id, bps, error = %e, "set bitrate"),
             None => {}
         }
+    }
+
+    /// A new encoder session replaced the old one: its references, the acknowledgements still
+    /// queued for them, the keyframe estimate and the valve's clock all described the old
+    /// session, and the held capture is the old size. The new session starts on a keyframe.
+    fn rebuilt(&self) {
+        self.ltr.lock().reset();
+        {
+            let mut pending = self.pending.lock();
+            pending.acked.clear();
+            pending.keyframe = true;
+        }
+        self.keyframe_bytes.store(0, Ordering::Relaxed);
+        self.keyframe_deferred_us.store(0, Ordering::Relaxed);
+        self.forget_held();
+    }
+
+    /// Drop the held capture: it is not a picture of the target any more (hidden, suspected, or
+    /// another size).
+    fn forget_held(&self) {
+        *self.held.lock() = None;
+        self.owed.store(false, Ordering::Relaxed);
+    }
+
+    /// Bytes waiting to leave: what QUIC holds plus what waits in the lane.
+    fn held_bytes(&self) -> usize {
+        self.sink.held().saturating_add(self.lane.lock().bytes)
     }
 
     /// Move the cadence to the rung `bps` affords, and tell the encoder it did.
@@ -972,7 +1380,7 @@ impl<P: Platform> Shared<P> {
     /// Whether the transport can take another frame now ([`frame_fits`]). The window is only
     /// asked for when something is held: with nothing held any frame fits.
     fn frame_fits(&self) -> bool {
-        let held = self.sink.held();
+        let held = self.held_bytes();
         let cwnd = if held == 0 { 0 } else { self.sink.cwnd() };
         frame_fits(
             held,
@@ -1006,16 +1414,35 @@ impl<P: Platform> Shared<P> {
         now < self.suspect_until_us.load(Ordering::Relaxed)
     }
 
-    /// ScreenCaptureKit delivered a frame.
-    fn on_frame(&self, frame: &Frame<P>) {
+    /// ScreenCaptureKit delivered a frame: hold it as the newest picture of the target and
+    /// encode it if the cadence, the congestion guard and the keyframe rule let it through. One
+    /// they hold back is owed, and [`repair_loop`] sends it if nothing newer comes.
+    fn on_frame(&self, frame: Frame<P>) {
         self.counters.captured.fetch_add(1, Ordering::Relaxed);
         self.counters.capture.lock().push(frame.latency_us);
+        if !self.is_of_target() {
+            self.forget_held();
+            return;
+        }
+        let mut held = self.held.lock();
+        *held = Some(frame);
+        self.owed.store(true, Ordering::Relaxed);
+        let attempt = self.try_encode(held.as_ref(), true, now::<P>());
+        drop(held);
+        if attempt != Attempt::Sent {
+            self.repair.notify_one();
+        }
+    }
+
+    /// Whether a frame arriving now may be taken as a picture of the target, counting the ones
+    /// that may not.
+    fn is_of_target(&self) -> bool {
         // Before anything is counted as a picture of the target: while the window is off screen
         // no frame can be one, and a display crop keeps delivering the desktop behind it
         // (MEASUREMENTS.md, "a hidden window on the crop path").
         if self.target_hidden.load(Ordering::Relaxed) {
             self.counters.withheld.fetch_add(1, Ordering::Relaxed);
-            return;
+            return false;
         }
         // And for the ~260 ms before the window list knows, the accessibility API's word: a
         // window of that application just went, so a crop may be the desktop already. The
@@ -1026,11 +1453,30 @@ impl<P: Platform> Shared<P> {
         // crop"). Nothing is sent for the hold, whichever path it arrives on.
         if self.suspected_at(now::<P>()) {
             self.counters.suspected.fetch_add(1, Ordering::Relaxed);
-            return;
+            return false;
         }
         if self.cropped.load(Ordering::Relaxed) {
             self.counters.cropped.fetch_add(1, Ordering::Relaxed);
         }
+        true
+    }
+
+    /// Encode the held capture if the gates let it through. `fresh` is a capture that just
+    /// arrived; otherwise it is [`repair_loop`] sending the held one again at `now`.
+    fn try_encode(&self, held: Option<&Frame<P>>, fresh: bool, now: u64) -> Attempt {
+        let Some(frame) = held else { return Attempt::Nothing };
+        let owed = self.owed.load(Ordering::Relaxed);
+        let (want_keyframe, want_refresh) = {
+            let pending = self.pending.lock();
+            (pending.keyframe, pending.refresh)
+        };
+        if !owed && !want_keyframe && !want_refresh {
+            return Attempt::Nothing;
+        }
+        // A repair is a picture of the target as it is now, stamped now: the capture's own time
+        // would put it behind the frame already encoded from it.
+        let last = self.last_encoded_us.load(Ordering::Relaxed);
+        let at = if fresh { frame.capture_ts_us } else { now };
         // The cadence rung, before the congestion guard: a capture the ladder is not asking for is
         // not a frame the link failed to carry, and skipping it is what gives the next one the
         // bytes to be worth sending. No refresh is owed, the client is missing nothing.
@@ -1039,24 +1485,25 @@ impl<P: Platform> Shared<P> {
         // not urgent in the same way — at a collapsed rate the guard below sets one on every frame
         // it drops, and letting those through would take the cadence off exactly where it is
         // needed.
-        let since_encoded =
-            frame.capture_ts_us.saturating_sub(self.last_encoded_us.load(Ordering::Relaxed));
-        let due = frame_due(since_encoded, self.fps.load(Ordering::Relaxed));
-        let want_keyframe = self.pending.lock().keyframe;
+        let due = frame_due(at.saturating_sub(last), self.fps.load(Ordering::Relaxed));
         if !due && !want_keyframe {
-            return;
+            return Attempt::NotDue;
         }
         if !self.frame_fits() {
-            self.dropped(now::<P>());
-            return;
+            // A capture that did not fit is a hole in the stream; a repair that did not fit is
+            // the same picture waiting another period.
+            if fresh {
+                self.dropped(now);
+            }
+            return Attempt::NoRoom;
         }
         // A keyframe the link cannot drain is put off and an LTR refresh encoded in its place: a
         // picture the client can decode, at a fraction of the bytes. The request stays pending, so
         // the keyframe follows as soon as the link can carry one or the valve opens. With it
         // deferred there is nothing urgent in this frame, so the cadence rung applies again.
-        let defer = want_keyframe && !self.keyframe_admitted(now::<P>());
+        let defer = want_keyframe && !self.keyframe_admitted(now);
         if defer && !due {
-            return;
+            return Attempt::NotDue;
         }
         let options = {
             let mut pending = self.pending.lock();
@@ -1067,24 +1514,60 @@ impl<P: Platform> Shared<P> {
                 acked_ltr: std::mem::take(&mut pending.acked),
             }
         };
-        self.last_encoded_us.store(frame.capture_ts_us, Ordering::Relaxed);
-        self.counters.submitted(frame.capture_ts_us, now::<P>());
-        let outcome = self
-            .encoder
-            .read()
-            .as_ref()
-            .map(|encoder| encoder.encode(&frame.image, frame.capture_ts_us, &options));
+        // The encoder wants presentation times that only go forward.
+        let pts = at.max(last.saturating_add(1));
+        self.last_encoded_us.store(pts, Ordering::Relaxed);
+        self.owed.store(false, Ordering::Relaxed);
+        if !fresh {
+            self.counters.repaired.fetch_add(1, Ordering::Relaxed);
+        }
+        self.counters.submitted(pts, now);
+        let outcome =
+            self.encoder.read().as_ref().map(|encoder| encoder.encode(&frame.image, pts, &options));
         if let Some(Err(e)) = outcome {
-            self.counters.returned(frame.capture_ts_us, now::<P>());
+            self.counters.returned(pts, Source::<P>::now_us());
             tracing::warn!(stream = %self.id, error = %e, "encode failed");
+            self.owed.store(true, Ordering::Relaxed);
             let mut pending = self.pending.lock();
             pending.keyframe |= options.force_keyframe;
             pending.refresh |= options.force_ltr_refresh;
             pending.acked.extend(options.acked_ltr);
+            drop(pending);
+            return Attempt::Failed;
         }
+        Attempt::Sent
+    }
+
+    /// When [`repair_loop`] should next look at the held capture; `None` while nothing is owed
+    /// or asked for.
+    fn repair_at(&self) -> Option<u64> {
+        let captured = self.held.lock().as_ref()?.capture_ts_us;
+        let (keyframe, refresh) = {
+            let pending = self.pending.lock();
+            (pending.keyframe, pending.refresh)
+        };
+        repair_at(
+            Asks { owed: self.owed.load(Ordering::Relaxed), refresh, keyframe },
+            captured,
+            self.last_encoded_us.load(Ordering::Relaxed),
+            self.fps.load(Ordering::Relaxed),
+            self.fps_ceiling.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Send the held capture again at `now`, unless the target is no longer on screen.
+    fn repair_now(&self, now: u64) -> Attempt {
+        if self.target_hidden.load(Ordering::Relaxed) || self.suspected_at(now) {
+            self.forget_held();
+            return Attempt::Nothing;
+        }
+        let held = self.held.lock();
+        self.try_encode(held.as_ref(), false, now)
     }
 
     /// ScreenCaptureKit delivered PCM: encode and send unless the source has gone quiet.
+    ///
+    /// Audio goes to QUIC at once, ahead of any video waiting in the lane.
     fn on_audio(&self, chunk: &CapturedAudio) {
         let now = now::<P>();
         let Some(packets) = self.encode_audio(&chunk.samples, now) else { return };
@@ -1092,8 +1575,48 @@ impl<P: Platform> Shared<P> {
             .iter()
             .filter_map(|(seq, packet)| audio_datagram(self.id, *seq, send_ms_lo(now), packet))
             .collect();
+        self.last_audio_us.store(now, Ordering::Relaxed);
         let taken = self.send(&datagrams);
         self.counters.audio_packets.fetch_add(taken, Ordering::Relaxed);
+    }
+
+    /// Hand a frame's video datagrams on: straight to QUIC while no audio flows, through the
+    /// lane while it does, and always behind video already waiting there.
+    fn send_video(&self, datagrams: &[Bytes], now: u64) {
+        let mut lane = self.lane.lock();
+        let audio = now.saturating_sub(self.last_audio_us.load(Ordering::Relaxed))
+            < LANE_AUDIO_HOLD_US
+            && self.last_audio_us.load(Ordering::Relaxed) != 0;
+        if lane.queue.is_empty() && !audio {
+            // Nothing to let ahead: a frame costs the lane nothing. The look keeps the drain rate
+            // current for when audio starts.
+            let held = self.sink.held();
+            lane.observe(held, now);
+            lane.expected = held.saturating_add(datagrams.iter().map(Bytes::len).sum::<usize>());
+            self.send(datagrams);
+            return;
+        }
+        lane.push(datagrams);
+        self.pump(&mut lane, now);
+        // Of this frame's datagrams, the ones still waiting: the queue's tail.
+        let waiting = lane.queue.len().min(datagrams.len());
+        drop(lane);
+        if waiting > 0 {
+            self.counters
+                .laned
+                .fetch_add(u64::try_from(waiting).unwrap_or(u64::MAX), Ordering::Relaxed);
+            self.lane_wake.notify_one();
+        }
+    }
+
+    /// Hand QUIC as much of the lane as fits in its slice. Under the lane's lock, so video
+    /// leaves in the order it was queued whichever thread tops it up.
+    fn pump(&self, lane: &mut Lane, now: u64) {
+        let held = self.sink.held();
+        lane.observe(held, now);
+        let floor = self.counters.bitrate_bps.load(Ordering::Relaxed) / 8;
+        let batch = lane.take(held, lane.budget(floor));
+        self.send(&batch);
     }
 
     /// Run the silence gate and the encoder under the audio lock; `None` when nothing goes out.
@@ -1144,6 +1667,17 @@ impl<P: Platform> Shared<P> {
             self.keyframe_bytes.store(estimate, Ordering::Relaxed);
             self.keyframe_deferred_us.store(0, Ordering::Relaxed);
         }
+        if self.ltr.lock().on_packet(packet.keyframe, packet.ltr_token, now) {
+            self.counters.ltr_offered.fetch_add(1, Ordering::Relaxed);
+        }
+        if packet.ltr_refresh {
+            let answered = if packet.keyframe {
+                &self.counters.refreshes_idr
+            } else {
+                &self.counters.refreshes_delta
+            };
+            answered.fetch_add(1, Ordering::Relaxed);
+        }
         if encoded == 0 || packet.keyframe {
             tracing::debug!(
                 stream = %self.id,
@@ -1172,32 +1706,72 @@ impl<P: Platform> Shared<P> {
             packetizer.packetize(&frame, send_ms_lo(now)).map(|sent| sent.datagrams.clone())
         };
         match cut {
-            Ok(datagrams) => {
-                self.send(&datagrams);
-            }
+            Ok(datagrams) => self.send_video(&datagrams, now),
             Err(e) => tracing::warn!(stream = %self.id, error = %e, "packetize failed"),
         }
     }
+}
+
+/// What became of an attempt to encode the held capture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Attempt {
+    /// Submitted to the encoder.
+    Sent,
+    /// Nothing held, or the held capture was encoded and nothing is asked of it.
+    Nothing,
+    /// The cadence has not come round yet.
+    NotDue,
+    /// The transport holds more than the guard allows.
+    NoRoom,
+    /// The encoder refused it; the requests it carried are pending again.
+    Failed,
 }
 
 impl<P: Platform> Shared<P> {
     /// A receiver report: acknowledged LTR tokens go to the encoder, the loss to the parity
     /// and rate controllers; a changed target is applied to the encoder.
     fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
-        let acked = report.acked_ltr.iter().take(usize::from(report.acked_ltr_len)).copied();
+        let acked: Vec<u64> = {
+            let mut ltr = self.ltr.lock();
+            let was_usable = ltr.usable.is_some();
+            // Only this session's tokens reach the encoder: one acknowledged for the session a
+            // rebuild replaced names nothing the new one offered.
+            let acked: Vec<u64> = report
+                .acked_ltr
+                .iter()
+                .take(usize::from(report.acked_ltr_len))
+                .copied()
+                .filter(|&token| ltr.on_ack(token))
+                .collect();
+            if !was_usable && ltr.usable.is_some() {
+                // From here a refresh is a delta off the reference rather than an IDR, so a
+                // keyframe can be deferred for one (`keyframe_admitted`).
+                tracing::debug!(stream = %self.id, token = ?ltr.usable.map(|(t, _at)| t), "LTR reference usable");
+            }
+            acked
+        };
+        self.counters
+            .ltr_acked
+            .fetch_add(u64::try_from(acked.len()).unwrap_or(u64::MAX), Ordering::Relaxed);
         self.pending.lock().acked.extend(acked);
-        if report.acked_ltr_len > 0 && !self.ltr_acked.swap(true, Ordering::Relaxed) {
-            // From here a refresh is a delta off the reference rather than an IDR, so it is cheap
-            // to ask for and a keyframe can be deferred for one (`keyframe_admitted`). Logged
-            // once: the stream's whole refresh policy turns on whether this ever happens.
-            tracing::debug!(stream = %self.id, tokens = report.acked_ltr_len, "first LTR ack");
-        }
         let sent_total = self.packetizer.lock().datagrams_sent();
         let previous = self.sent_at_report.swap(sent_total, Ordering::Relaxed);
         let sent = u32::try_from(sent_total.saturating_sub(previous)).unwrap_or(u32::MAX);
         let permille = self.redundancy.lock().on_report(report, sent);
-        self.packetizer.lock().set_parity_permille(permille);
-        let decision = self.rate.lock().on_report(report, sent, path)?;
+        let parity_moved = {
+            let mut packetizer = self.packetizer.lock();
+            let moved = packetizer.parity_permille() != permille;
+            packetizer.set_parity_permille(permille);
+            moved
+        };
+        let decision = self.rate.lock().on_report(report, sent, path);
+        let Some(decision) = decision else {
+            if parity_moved {
+                // The parity's share of the target moved, so the encoder's did too.
+                self.apply_bitrate(self.rate.lock().target_bps());
+            }
+            return None;
+        };
         tracing::debug!(
             stream = %self.id,
             verdict = ?decision.verdict,
@@ -1222,35 +1796,44 @@ impl<P: Platform> Shared<P> {
     ///
     /// The client will see a hole, so the obvious answer is to ask on every drop. That is what
     /// this did, and it is the shape a slow link turning into a stalled one would take. A forced
-    /// refresh comes
-    /// back from this encoder as a full IDR — 133 960 B measured — and not the 733 B delta it
-    /// produces with a fresh long-term reference on hand, because VideoToolbox offers about one
-    /// LTR token per stream and the single reference goes stale (`docs/decisions/transport.md`).
-    /// So a link already too slow for ordinary frames was being asked for keyframes twenty
-    /// times their size, each of which filled the queue and caused the next drop. Ask only when
-    /// the link could drain one; a held picture for a beat beats a picture that never arrives.
+    /// refresh comes back from this encoder as a full IDR — 133 960 B measured — and not the
+    /// 733 B delta it produces with a fresh long-term reference on hand, because VideoToolbox
+    /// offers about one LTR token per stream and the single reference goes stale
+    /// (`docs/decisions/transport.md`). So a link already too slow for ordinary frames was being
+    /// asked for keyframes twenty times their size, each of which filled the queue and caused the
+    /// next drop. Ask only when the link could drain one; a held picture for a beat beats a
+    /// picture that never arrives. Whether a reference is usable does not enter into it: a
+    /// refresh is budgeted as the keyframe it may turn out to be, and until the stream's first
+    /// keyframe has been measured the budget admits it.
     fn dropped(&self, now: u64) {
         self.counters.dropped.fetch_add(1, Ordering::Relaxed);
-        if self.keyframe_admitted(now) {
+        if self.standalone_fits(now) {
             self.pending.lock().refresh = true;
         }
     }
 
-    /// Whether a picture that stands on its own — a wanted keyframe, or the refresh a dropped
-    /// frame would ask for — is worth the bytes right now.
+    /// Whether a wanted keyframe should be encoded now rather than put off for an LTR refresh.
     ///
-    /// Deferring needs somewhere to fall back to: with no acknowledged long-term reference the
-    /// client can decode nothing but a keyframe, so one always goes out. Past that the estimate
-    /// decides, and [`KEYFRAME_VALVE_US`] after the run began it goes out regardless.
+    /// Deferring needs somewhere to fall back to: with no usable long-term reference a refresh
+    /// comes back as an IDR anyway, so the keyframe goes out. Past that the drain budget decides
+    /// ([`Self::standalone_fits`]).
     fn keyframe_admitted(&self, now: u64) -> bool {
-        if !self.ltr_acked.load(Ordering::Relaxed) {
-            return true;
-        }
+        !self.ltr_usable() || self.standalone_fits(now)
+    }
+
+    /// Whether a picture that stands on its own is worth the bytes right now: the link drains
+    /// one inside [`KEYFRAME_DRAIN_MS`], or it has been put off for [`KEYFRAME_VALVE_US`].
+    ///
+    /// A link that can carry one ends the episode, and not only a keyframe encoded: the next
+    /// collapse then starts its own clock and is counted as its own episode, where a stale start
+    /// would open the valve on its first frame.
+    fn standalone_fits(&self, now: u64) -> bool {
         if keyframe_fits(
             self.keyframe_bytes.load(Ordering::Relaxed),
-            self.sink.held(),
+            self.held_bytes(),
             self.counters.bitrate_bps.load(Ordering::Relaxed),
         ) {
+            self.keyframe_deferred_us.store(0, Ordering::Relaxed);
             return true;
         }
         // Counted where the clock starts, so the number is deferral episodes and not the frames
@@ -1266,7 +1849,7 @@ impl<P: Platform> Shared<P> {
                 tracing::debug!(
                     stream = %self.id,
                     estimate = self.keyframe_bytes.load(Ordering::Relaxed),
-                    held = self.sink.held(),
+                    held = self.held_bytes(),
                     target_bps = self.counters.bitrate_bps.load(Ordering::Relaxed),
                     "a picture that stands on its own is deferred: the link cannot drain one"
                 );
@@ -1276,25 +1859,27 @@ impl<P: Platform> Shared<P> {
         }
     }
 
-    /// The client lost a frame it cannot recover: make the next frame stand on its own.
+    /// The client lost a frame it cannot recover: make the next frame stand on its own. On a
+    /// still screen there is no next frame, so the held capture answers ([`repair_loop`]).
     fn request_refresh(&self, last_good_frame: u32) {
         tracing::debug!(stream = %self.id, last_good_frame, "refresh requested");
         self.counters.refreshes.fetch_add(1, Ordering::Relaxed);
         self.pending.lock().refresh = true;
+        self.repair.notify_one();
     }
 
     /// Retransmit fragments of a recent frame, unless the transport is holding more than the
     /// frame budget (see [`ScreenStream::nack`]).
     fn nack(&self, frame: u32, fragments: &[u16]) {
         if !self.frame_fits() {
-            tracing::debug!(stream = %self.id, frame, held = self.sink.held(), "nack not answered: transport is holding frames");
+            tracing::debug!(stream = %self.id, frame, held = self.held_bytes(), "nack not answered: transport is holding frames");
             return;
         }
         let datagrams = self.packetizer.lock().retransmit(frame, fragments);
         if datagrams.is_empty() {
             tracing::debug!(stream = %self.id, frame, "nack for a frame outside the history");
         }
-        self.send(&datagrams);
+        self.send_video(&datagrams, now::<P>());
     }
 }
 
@@ -1432,13 +2017,13 @@ fn resolve<P: Platform>(
     Ok((Source::<P>::resolve(content, target)?, WindowPath::Filter))
 }
 
-/// What the stream is asking ScreenCaptureKit to become: a path and crop that are committed
-/// only once every asynchronous call for them has completed without error. Shared with the
-/// completion callbacks.
+/// What the stream is asking ScreenCaptureKit to become: a path and a whole configuration (size,
+/// rate, crop) that are committed only once every asynchronous call for them has completed
+/// without error. Shared with the completion callbacks.
 #[derive(Debug)]
 struct Transition {
     path: WindowPath,
-    crop: Option<Crop>,
+    config: CaptureConfig,
     /// Completion callbacks still to come.
     outstanding: u8,
     failed: bool,
@@ -1451,10 +2036,10 @@ enum Settled {
     Idle,
     /// Callbacks still to come: leave the stream alone this tick.
     Busy,
-    /// Every call completed; the stream is now on this path and crop.
-    Commit(WindowPath, Option<Crop>),
+    /// Every call completed; the stream is now on this path with this configuration.
+    Commit(WindowPath, CaptureConfig),
     /// A call failed: the stream is wherever it was; the next tick asks again.
-    Failed(WindowPath, Option<Crop>),
+    Failed(WindowPath, CaptureConfig),
 }
 
 /// The in-flight transition, if any, behind a lock the callbacks can take.
@@ -1464,12 +2049,12 @@ struct Transitions(Arc<Mutex<Option<Transition>>>);
 impl Transitions {
     /// Start a transition that `calls` completion callbacks will finish. False (and nothing
     /// started) while one is still in flight.
-    fn begin(&self, path: WindowPath, crop: Option<Crop>, calls: u8) -> bool {
+    fn begin(&self, path: WindowPath, config: CaptureConfig, calls: u8) -> bool {
         let mut slot = self.0.lock();
         if slot.as_ref().is_some_and(|t| t.outstanding > 0) {
             return false;
         }
-        *slot = Some(Transition { path, crop, outstanding: calls, failed: false });
+        *slot = Some(Transition { path, config, outstanding: calls, failed: false });
         true
     }
 
@@ -1489,9 +2074,9 @@ impl Transitions {
             Some(t) if t.outstanding > 0 => Settled::Busy,
             Some(t) => {
                 let outcome = if t.failed {
-                    Settled::Failed(t.path, t.crop)
+                    Settled::Failed(t.path, t.config)
                 } else {
-                    Settled::Commit(t.path, t.crop)
+                    Settled::Commit(t.path, t.config)
                 };
                 *slot = None;
                 outcome
@@ -1499,6 +2084,44 @@ impl Transitions {
         }
     }
 }
+
+/// A new size the target has to hold for a tick before the stream is rebuilt for it.
+///
+/// A rebuild is a fresh encoder session and a keyframe, and a live drag of a window's corner
+/// changes its size on every 100 ms geometry tick: rebuilt at once, that is ten IDRs a second
+/// for as long as the drag lasts. Until the size holds, the capture keeps its old output size
+/// and scales the window into it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct ResizeDebounce {
+    candidate: Option<(u32, u32)>,
+}
+
+impl ResizeDebounce {
+    /// The target measures `native` pixels while the stream is built for `current`: the size to
+    /// rebuild for, once the same new size is seen on two ticks in a row.
+    fn observe(&mut self, native: (u32, u32), current: (u32, u32)) -> Option<(u32, u32)> {
+        if native == current {
+            self.candidate = None;
+            return None;
+        }
+        if self.candidate == Some(native) {
+            self.candidate = None;
+            return Some(native);
+        }
+        self.candidate = Some(native);
+        None
+    }
+}
+
+/// Surfaces in ScreenCaptureKit's pool.
+///
+/// The stream keeps the newest capture (`Shared::held`) so a still picture can be sent again,
+/// and the encoder holds the one it is compressing for its ~7 ms. At 2 those two could be every
+/// surface there is, and the next capture would wait for the encoder to let go. 3 leaves one
+/// free for ScreenCaptureKit to render into whatever the other two are doing. Measured on the
+/// window filter against 2 (MEASUREMENTS.md, "capture floor"): p50 0.49 ms against 0.46, p95
+/// 1.48 against 2.35 — the same within the run-to-run spread the table records.
+const QUEUE_DEPTH: u8 = 3;
 
 /// Capture and encoder settings for a target at a requested quality.
 fn configs(native: (u32, u32), quality: &Quality) -> (CaptureConfig, EncoderConfig) {
@@ -1512,8 +2135,15 @@ fn configs(native: (u32, u32), quality: &Quality) -> (CaptureConfig, EncoderConf
     let (width, height) = (side(native.0), side(native.1));
     let fps = quality.fps.clamp(1, 240);
     let format = PixelFormat::Nv12Full;
-    let capture =
-        CaptureConfig { width, height, fps, format, queue_depth: 2, audio: true, crop: None };
+    let capture = CaptureConfig {
+        width,
+        height,
+        fps,
+        format,
+        queue_depth: QUEUE_DEPTH,
+        audio: true,
+        crop: None,
+    };
     let encoder = EncoderConfig {
         width,
         height,
@@ -1534,12 +2164,25 @@ pub struct Pipeline<P: Platform> {
     native: (u32, u32),
     capture: <Source<P> as CaptureSource>::Stream,
     shared: Arc<Shared<P>>,
+    /// The configuration ScreenCaptureKit has committed (see `transitions`).
     capture_config: CaptureConfig,
+    /// The configuration the stream wants: size, rate and crop together. Every change goes
+    /// through here and reaches ScreenCaptureKit whole, through one transition at a time, so
+    /// a size change never carries a crop older than the one a move just asked for.
+    desired: CaptureConfig,
+    /// The path the stream wants.
+    desired_path: WindowPath,
+    /// A new size waiting to hold for a tick before the stream is rebuilt for it.
+    resize: ResizeDebounce,
     encoder_config: EncoderConfig,
     cursor: JoinHandle<()>,
     /// The task that reads the cursor's picture and reports a change.
     shape: JoinHandle<()>,
     beat: JoinHandle<()>,
+    /// The task that sends the held capture when nothing newer comes.
+    repair: JoinHandle<()>,
+    /// The task that tops QUIC up from the audio lane.
+    lane: JoinHandle<()>,
     /// The accessibility observer on the window's application, for a window target of a
     /// trusted worker; `None` for a display, an untrusted process or an application that would
     /// not be observed. Dropped with the stream.
@@ -1695,32 +2338,15 @@ impl<P: Platform> Pipeline<P> {
         let (mut capture_config, encoder_config) = configs(native, &quality);
         capture_config.crop = Source::<P>::crop(&resolved);
 
-        let shared = Arc::new(Shared {
+        let shared = Arc::new(Shared::new(
             id,
-            encoder: RwLock::new(None),
-            audio: Mutex::new(AudioState { encoder: None, seq: 0, last_loud_us: 0 }),
-            pending: Mutex::new(Pending { keyframe: true, ..Pending::default() }),
-            packetizer: Mutex::new(Packetizer::new(id)),
-            redundancy: Mutex::new(Redundancy::new()),
-            rate: Mutex::new(RateController::new(encoder_config.bitrate_bps)),
-            sent_at_report: AtomicU64::new(0),
-            last_push_us: AtomicU64::new(now::<P>()),
-            fps: std::sync::atomic::AtomicU16::new(capture_config.fps),
-            fps_ceiling: std::sync::atomic::AtomicU16::new(capture_config.fps),
-            last_encoded_us: AtomicU64::new(0),
-            keyframe_bytes: AtomicU64::new(0),
-            keyframe_deferred_us: AtomicU64::new(0),
-            ltr_acked: AtomicBool::new(false),
-            cropped: AtomicBool::new(path == WindowPath::DisplayCrop),
-            target_hidden: AtomicBool::new(false),
-            pointer_over: AtomicBool::new(false),
-            suspect_until_us: AtomicU64::new(0),
-            filter_stalled: AtomicBool::new(false),
             sink,
-            too_large_logged: AtomicBool::new(false),
-            bounds: Mutex::new(None),
-            counters: Counters::new(),
-        });
+            encoder_config.bitrate_bps,
+            capture_config.fps,
+            path == WindowPath::DisplayCrop,
+        ));
+        let zoom = f64::from(capture_config.width) / f64::from(native.0);
+        shared.zoom.store(zoom.to_bits(), Ordering::Relaxed);
         let t_encoder = Instant::now();
         let encoder = build_encoder(&Arc::downgrade(&shared), encoder_config)?;
         let encoder_built = t_encoder.elapsed();
@@ -1735,7 +2361,7 @@ impl<P: Platform> Pipeline<P> {
         let capture = Source::<P>::start(
             &resolved,
             &capture_config,
-            move |frame| sink.on_frame(&frame),
+            move |frame| sink.on_frame(frame),
             Some(Box::new(move |chunk| audio_sink.on_audio(&chunk))),
             {
                 let on_stop = Arc::clone(&on_stop);
@@ -1756,13 +2382,14 @@ impl<P: Platform> Pipeline<P> {
             "capture started"
         );
 
-        let zoom = f64::from(capture_config.width) / f64::from(native.0);
         let point_scale = f64::from(Source::<P>::point_scale(&resolved));
         // Two tasks, not one. The beat is a promise about time and must never be behind work
         // that takes any: the pointer read in the cursor loop is a window-server round trip, and
         // those have been measured at 90 ms, three beats' worth.
         let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
-        let cursor = tokio::spawn(cursor_loop(Arc::clone(&shared), zoom, point_scale));
+        let cursor = tokio::spawn(cursor_loop(Arc::clone(&shared), point_scale));
+        let repair = tokio::spawn(repair_loop(Arc::clone(&shared)));
+        let lane = tokio::spawn(lane_loop(Arc::clone(&shared)));
         #[expect(clippy::cast_possible_truncation, reason = "a display scale is 1 to 4")]
         #[expect(clippy::cast_sign_loss, reason = "a display scale is positive")]
         let backing = point_scale.round().clamp(1.0, 4.0) as u8;
@@ -1787,10 +2414,15 @@ impl<P: Platform> Pipeline<P> {
             capture,
             shared,
             capture_config,
+            desired: capture_config,
+            desired_path: path,
+            resize: ResizeDebounce::default(),
             encoder_config,
             cursor,
             shape,
             beat,
+            repair,
+            lane,
             hide_watch,
             injector,
             point_scale,
@@ -1842,59 +2474,60 @@ impl<P: Platform> Pipeline<P> {
     }
 
     /// Change quality. A size, rate or codec change rebuilds the encoder and reconfigures the
-    /// capture; a bitrate-only change is applied in place.
+    /// capture; a bitrate-only change is applied in place, cadence included.
     pub fn set_quality(&mut self, quality: &Quality) -> Result<(), ScreenError> {
         self.quality = *quality;
-        let (mut capture_config, encoder_config) = configs(self.native, quality);
-        capture_config.crop = self.capture_config.crop;
-        if capture_config == self.capture_config
-            && encoder_config.codec == self.encoder_config.codec
-        {
+        let (capture_config, encoder_config) = configs(self.native, quality);
+        let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
+        if desired == self.desired && encoder_config.codec == self.encoder_config.codec {
             if encoder_config.bitrate_bps != self.encoder_config.bitrate_bps {
-                // The client moved its ceiling; the controller keeps its place under it.
+                // The client moved its ceiling; the controller keeps its place under it, and the
+                // rung follows the target the way a rate decision moves it.
                 let target = {
                     let mut rate = self.shared.rate.lock();
                     rate.set_max(encoder_config.bitrate_bps);
                     rate.target_bps()
                 };
                 self.shared.apply_bitrate(target);
+                self.shared.apply_cadence(target);
                 self.encoder_config = encoder_config;
             }
             return Ok(());
         }
-        self.reconfigure(capture_config, encoder_config)
+        self.reconfigure(desired, encoder_config)
     }
 
     /// Follow the target: a window the user resized on the worker gets a stream of its new
-    /// size (fresh encoder, keyframe) and the client hears `Geometry`; one on the display-crop
-    /// path that moved gets its crop moved, and one that went under another window (or off
-    /// its display) falls back to the window filter until it is clear again. Decided from `probe`,
-    /// which [`Self::prober`] read off the runtime; nothing here waits on the window server.
-    /// Call it a few times a second.
+    /// size (fresh encoder, keyframe) once the size has held for a tick, and the client hears
+    /// `Geometry`; one on the display-crop path that moved gets its crop moved, and one that went
+    /// under another window (or off its display) falls back to the window filter until it is
+    /// clear again. Decided from `probe`, which [`Self::prober`] read off the runtime; nothing
+    /// here waits on the window server. Call it a few times a second.
     pub fn check_geometry(&mut self, probe: &Probe) -> Result<Option<ScreenEvent>, ScreenError> {
         let Some(rect) = probe.bounds else {
             self.window_gone();
             return Ok(None);
         };
+        self.settle();
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
         let px = |points: f64| (points * self.point_scale).round().clamp(2.0, 16_384.0) as u32;
         let native = (px(rect.w), px(rect.h));
-        let resized = native != self.native;
-        if let (CaptureTarget::Window(id), Some((on_screen, crop))) = (self.target, probe.window) {
-            self.follow_window(id, on_screen, crop);
+        if let (CaptureTarget::Window(_), Some((on_screen, crop))) = (self.target, probe.window) {
+            self.follow_window(on_screen, crop);
         }
-        if !resized {
+        let Some(native) = self.resize.observe(native, self.native) else {
+            self.apply_desired();
             return Ok(None);
-        }
+        };
         tracing::info!(stream = %self.id, from = ?self.native, to = ?native, "target resized");
         self.native = native;
-        let (mut capture_config, encoder_config) = configs(native, &self.quality);
-        capture_config.crop = self.capture_config.crop;
-        self.reconfigure(capture_config, encoder_config)?;
+        let (capture_config, encoder_config) = configs(native, &self.quality);
+        let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
+        self.reconfigure(desired, encoder_config)?;
         Ok(Some(ScreenEvent::Geometry {
             stream: self.id,
-            width: self.capture_config.width,
-            height: self.capture_config.height,
+            width: self.desired.width,
+            height: self.desired.height,
         }))
     }
 
@@ -1947,36 +2580,35 @@ impl<P: Platform> Pipeline<P> {
         (self.on_stop)(CaptureError::Stopped("window closed".to_owned()));
     }
 
-    /// Keep a window on the right path: crop where it is now, or the window filter while
+    /// Take the outcome of the transition in flight, if it has completed: the path and
+    /// configuration it carried become the stream's, or, if a call failed, nothing changes and
+    /// [`Self::apply_desired`] asks again.
+    fn settle(&mut self) {
+        match self.transitions.settle() {
+            Settled::Busy | Settled::Idle => {}
+            Settled::Commit(path, config) => {
+                self.path = path;
+                self.capture_config = config;
+                self.shared.cropped.store(path == WindowPath::DisplayCrop, Ordering::Relaxed);
+                tracing::debug!(stream = %self.id, ?path, crop = ?config.crop, "capture path settled");
+            }
+            Settled::Failed(path, config) => {
+                tracing::warn!(stream = %self.id, ?path, crop = ?config.crop, "capture change failed; retrying");
+            }
+        }
+    }
+
+    /// Decide the path a window wants: crop where it is now, or the window filter while
     /// something covers it. On-screen state and occlusion come from every probe, since other
-    /// windows move too; `available` is the crop the probe found, before any suspicion. Nothing is
-    /// committed here: the completion callbacks of the ScreenCaptureKit calls settle the
-    /// transition on a later tick, and a failed one is simply asked again.
-    fn follow_window(
-        &mut self,
-        id: slopty_core::WindowId,
-        on_screen: bool,
-        available: Option<Crop>,
-    ) {
+    /// windows move too; `available` is the crop the probe found, before any suspicion. Only the
+    /// wish is recorded here; [`Self::apply_desired`] asks ScreenCaptureKit for it.
+    fn follow_window(&mut self, on_screen: bool, available: Option<Crop>) {
         // First, and outside everything below: the guard must not depend on the transition state
-        // machine. A swap that ScreenCaptureKit keeps rejecting leaves `settle` busy for as long
-        // as it keeps failing, and those are exactly the ticks where the crop is still running
-        // over a window that is no longer there.
+        // machine. A swap that ScreenCaptureKit keeps rejecting leaves a transition busy for as
+        // long as it keeps failing, and those are exactly the ticks where the crop is still
+        // running over a window that is no longer there.
         if self.shared.target_hidden.swap(!on_screen, Ordering::Relaxed) == on_screen {
             tracing::info!(stream = %self.id, on_screen, "target visibility");
-        }
-        match self.transitions.settle() {
-            Settled::Busy => return,
-            Settled::Idle => {}
-            Settled::Commit(path, crop) => {
-                self.path = path;
-                self.capture_config.crop = crop;
-                self.shared.cropped.store(path == WindowPath::DisplayCrop, Ordering::Relaxed);
-                tracing::debug!(stream = %self.id, ?path, ?crop, "capture path settled");
-            }
-            Settled::Failed(path, crop) => {
-                tracing::warn!(stream = %self.id, ?path, ?crop, "capture path change failed; retrying");
-            }
         }
         // Keyed on the target, not on the path this side believes it is on: a `retarget` the
         // framework rejects leaves the crop running while the bookkeeping says window filter,
@@ -1997,69 +2629,74 @@ impl<P: Platform> Pipeline<P> {
         // wanted again on the next. Any other path change is a change of kind as well and
         // clears the flag by itself.
         let stalled = self.shared.filter_stalled.load(Ordering::Relaxed);
-        let waking = stalled && wanted.is_some() && self.path == WindowPath::DisplayCrop;
-        if waking {
+        if stalled && wanted.is_some() && self.path == WindowPath::DisplayCrop {
             wanted = None;
         }
-        let wanted_path =
+        self.desired_path =
             if wanted.is_some() { WindowPath::DisplayCrop } else { WindowPath::Filter };
-        if wanted_path == self.path && wanted == self.capture_config.crop {
+        self.desired.crop = wanted;
+    }
+
+    /// Ask ScreenCaptureKit for the desired path and configuration, whole, unless a transition
+    /// is still in flight; the next tick asks again for whatever is still different.
+    ///
+    /// Order matters between the two calls of a path change: the crop is cleared before the swap
+    /// to the window filter, since a `sourceRect` on a window stream would be read in the
+    /// window's own space, and the display filter is in place before the crop is set on it.
+    fn apply_desired(&self) {
+        if self.stopped {
             return;
         }
-        match (self.path, wanted) {
-            (WindowPath::DisplayCrop, Some(crop)) => {
-                // A move: one configuration update carries the new rectangle.
-                if self.transitions.begin(WindowPath::DisplayCrop, Some(crop), 1) {
-                    self.update_capture(Some(crop));
-                }
+        let (path, config) = (self.desired_path, self.desired);
+        if path == self.path && config == self.capture_config {
+            return;
+        }
+        if path == self.path {
+            // A move, a size or a rate: one configuration update carries all of it.
+            if self.transitions.begin(path, config, 1) {
+                self.update_capture(config);
             }
-            (WindowPath::DisplayCrop, None) => {
-                // To the window filter: clear the crop first, a `sourceRect` on a window
-                // stream would be read in the window's own space.
-                let target = match Source::<P>::resolve(&self.content, self.target) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::warn!(stream = %self.id, error = %e, "window filter");
-                        return;
-                    }
-                };
-                if self.transitions.begin(WindowPath::Filter, None, 2) {
-                    self.shared.filter_stalled.store(false, Ordering::Relaxed);
-                    if waking {
-                        tracing::info!(stream = %self.id, "another window of the application went: waking the capture through the window filter");
-                    } else {
-                        tracing::info!(stream = %self.id, on_screen, suspected, "window covered, hidden, off its display or suspected: window filter");
-                    }
-                    self.update_capture(None);
-                    self.retarget(&target);
-                }
+            return;
+        }
+        let CaptureTarget::Window(id) = self.target else { return };
+        let target = match path {
+            WindowPath::Filter => Source::<P>::resolve(&self.content, self.target).map(Some),
+            WindowPath::DisplayCrop => Source::<P>::resolve_crop(&self.content, id),
+        };
+        let target = match target {
+            Ok(Some(target)) => target,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(stream = %self.id, ?path, error = %e, "capture path");
+                return;
             }
-            (WindowPath::Filter, Some(crop)) => {
-                let target = match Source::<P>::resolve_crop(&self.content, id) {
-                    Ok(Some(t)) => t,
-                    Ok(None) => return,
-                    Err(e) => {
-                        tracing::warn!(stream = %self.id, error = %e, "display crop");
-                        return;
-                    }
-                };
-                if self.transitions.begin(WindowPath::DisplayCrop, Some(crop), 2) {
-                    self.shared.filter_stalled.store(false, Ordering::Relaxed);
-                    tracing::info!(stream = %self.id, ?crop, "window clear: display crop");
-                    self.retarget(&target);
-                    self.update_capture(Some(crop));
+        };
+        if !self.transitions.begin(path, config, 2) {
+            return;
+        }
+        let waking = self.shared.filter_stalled.swap(false, Ordering::Relaxed);
+        match path {
+            WindowPath::Filter => {
+                if waking {
+                    tracing::info!(stream = %self.id, "another window of the application went: waking the capture through the window filter");
+                } else {
+                    tracing::info!(stream = %self.id, "window covered, hidden, off its display or suspected: window filter");
                 }
+                self.update_capture(config);
+                self.retarget(&target);
             }
-            (WindowPath::Filter, None) => {}
+            WindowPath::DisplayCrop => {
+                tracing::info!(stream = %self.id, crop = ?config.crop, "window clear: display crop");
+                self.retarget(&target);
+                self.update_capture(config);
+            }
         }
     }
 
-    /// Push the current configuration with `crop` to the live stream; the completion lands
-    /// in the transition.
-    fn update_capture(&self, crop: Option<Crop>) {
+    /// Push `config` to the live stream; the completion lands in the transition.
+    fn update_capture(&self, config: CaptureConfig) {
         let id = self.id;
         let transitions = self.transitions.clone();
-        let config = CaptureConfig { crop, ..self.capture_config };
         Source::<P>::update(&self.capture, &config, move |result| {
             if let Err(e) = &result {
                 tracing::warn!(stream = %id, error = %e, "capture update failed");
@@ -2080,15 +2717,17 @@ impl<P: Platform> Pipeline<P> {
         });
     }
 
-    /// Rebuild the encoder and reconfigure the capture for a new size, rate or codec.
+    /// Rebuild the encoder for a new size, rate or codec and ask the capture for `desired`.
+    /// The new session's long-term references start from nothing ([`Shared::rebuilt`]).
     fn reconfigure(
         &mut self,
-        capture_config: CaptureConfig,
+        desired: CaptureConfig,
         encoder_config: EncoderConfig,
     ) -> Result<(), ScreenError> {
         let weak = Arc::downgrade(&self.shared);
         let encoder = build_encoder(&weak, encoder_config)?;
         *self.shared.encoder.write() = Some(encoder);
+        self.shared.rebuilt();
         let target = {
             let mut rate = self.shared.rate.lock();
             rate.set_max(encoder_config.bitrate_bps);
@@ -2097,21 +2736,24 @@ impl<P: Platform> Pipeline<P> {
         self.shared.apply_bitrate(target);
         // A new quality sets a new ceiling, and the ladder starts from it again: the rung that was
         // in force answered a bitrate the client has just replaced.
-        self.shared.fps_ceiling.store(capture_config.fps, Ordering::Relaxed);
-        self.shared.fps.store(capture_config.fps, Ordering::Relaxed);
+        self.shared.fps_ceiling.store(desired.fps, Ordering::Relaxed);
+        self.shared.fps.store(desired.fps, Ordering::Relaxed);
         self.shared.apply_cadence(target);
-        self.shared.pending.lock().keyframe = true;
-        let id = self.id;
-        Source::<P>::update(&self.capture, &capture_config, move |result| {
-            if let Err(e) = result {
-                tracing::warn!(stream = %id, error = %e, "capture reconfigure failed");
-            }
-        });
-        let zoom = f64::from(capture_config.width) / f64::from(self.native.0);
+        let zoom = f64::from(desired.width) / f64::from(self.native.0);
+        self.shared.zoom.store(zoom.to_bits(), Ordering::Relaxed);
         self.injector.set_scale(self.point_scale * zoom);
-        self.capture_config = capture_config;
+        self.desired = desired;
         self.encoder_config = encoder_config;
+        self.apply_desired();
         Ok(())
+    }
+
+    /// Stream pixels per native pixel of the target: the quality's scale as the stream was last
+    /// built for it. A client position in stream pixels over `zoom × point_scale` is a
+    /// position in the target's points.
+    #[must_use]
+    pub fn zoom(&self) -> f64 {
+        self.shared.zoom()
     }
 
     /// Deliver client input to the streamed window or display.
@@ -2172,6 +2814,8 @@ impl<P: Platform> Pipeline<P> {
         self.cursor.abort();
         self.shape.abort();
         self.beat.abort();
+        self.repair.abort();
+        self.lane.abort();
         drop(self.hide_watch.take());
         let (tx, rx) = oneshot::channel();
         Source::<P>::stop(&self.capture, move |result| {
@@ -2282,6 +2926,57 @@ async fn beat_loop<P: Platform>(shared: Arc<Shared<P>>) {
     }
 }
 
+/// Send the held capture when nothing newer will: the last frame of a picture that went still,
+/// skipped by the cadence, the guard or a deferral, and a refresh or keyframe asked for while the
+/// picture stays still. Sleeps until the moment one is due ([`repair_at`]) and waits on
+/// [`Shared::repair`] while nothing is owed, so a stream whose captures all go straight out
+/// never wakes it for them.
+async fn repair_loop<P: Platform>(shared: Arc<Shared<P>>) {
+    while !shared.sink.is_closed() {
+        let Some(at) = shared.repair_at() else {
+            shared.repair.notified().await;
+            continue;
+        };
+        let now = now::<P>();
+        if at > now {
+            // A capture or a request arriving meanwhile moves the moment; look again then.
+            let wait = Duration::from_micros(at.saturating_sub(now));
+            let _woken = tokio::time::timeout(wait, shared.repair.notified()).await;
+            continue;
+        }
+        let period = period_us(shared.fps.load(Ordering::Relaxed));
+        let wait = match shared.repair_now(now) {
+            Attempt::Sent | Attempt::Nothing => continue,
+            // A keyframe put off for a refresh waits for the cadence like any frame.
+            Attempt::NotDue => {
+                let due = shared
+                    .last_encoded_us
+                    .load(Ordering::Relaxed)
+                    .saturating_add(period.saturating_sub(period / 8));
+                due.saturating_sub(now).max(1_000)
+            }
+            // The link or the encoder is not taking it; ask again a period on, not on a spin.
+            Attempt::NoRoom | Attempt::Failed => period,
+        };
+        let _woken =
+            tokio::time::timeout(Duration::from_micros(wait), shared.repair.notified()).await;
+    }
+}
+
+/// Top QUIC up from the audio lane every [`LANE_TICK`] while video waits in it; wait on
+/// [`Shared::lane_wake`] while it is empty.
+async fn lane_loop<P: Platform>(shared: Arc<Shared<P>>) {
+    while !shared.sink.is_closed() {
+        if shared.lane.lock().queue.is_empty() {
+            shared.lane_wake.notified().await;
+            continue;
+        }
+        tokio::time::sleep(LANE_TICK).await;
+        let mut lane = shared.lane.lock();
+        shared.pump(&mut lane, now::<P>());
+    }
+}
+
 /// How long until a heartbeat is due after `silence_us` of nothing sent; `None` when it is due.
 const fn beat_due_in(silence_us: u64, after_us: u64) -> Option<Duration> {
     if silence_us >= after_us {
@@ -2300,7 +2995,7 @@ const fn beat_due_in(silence_us: u64, after_us: u64) -> Option<Duration> {
 /// window-server round trip, so it runs on the blocking pool: what this loop must not do is
 /// occupy a runtime worker, because [`beat_loop`] needs one on time (MEASUREMENTS.md, "the beat
 /// behind the geometry call").
-async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, zoom: f64, point_scale: f64) {
+async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, point_scale: f64) {
     let mut ticks = tokio::time::interval(CURSOR_PERIOD);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pointer: Option<(u32, (f64, f64))> = None;
@@ -2323,6 +3018,8 @@ async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, zoom: f64, point_scale
         };
         let visible = rect.contains(px, py);
         shared.pointer_over.store(visible, Ordering::Relaxed);
+        // Read every sample: a quality change rescales the stream under a still pointer.
+        let zoom = shared.zoom();
         let to_pixels = |v: f64| -> i32 {
             #[expect(clippy::cast_possible_truncation, reason = "clamped")]
             let p = (v * point_scale * zoom).round().clamp(-1.0e6, 1.0e6) as i32;
@@ -2480,32 +3177,11 @@ mod tests {
     fn shared_for_frames() -> (Arc<Shared>, Arc<Wire>) {
         let wire = Wire::new();
         let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
-        let shared = Arc::new(Shared {
-            id: StreamId(1),
-            encoder: RwLock::new(None),
-            audio: Mutex::new(AudioState { encoder: None, seq: 0, last_loud_us: 0 }),
-            pending: Mutex::new(Pending::default()),
-            packetizer: Mutex::new(Packetizer::new(StreamId(1))),
-            redundancy: Mutex::new(Redundancy::new()),
-            rate: Mutex::new(RateController::new(8_000_000)),
-            sent_at_report: AtomicU64::new(0),
-            last_push_us: AtomicU64::new(0),
-            fps: std::sync::atomic::AtomicU16::new(60),
-            fps_ceiling: std::sync::atomic::AtomicU16::new(60),
-            last_encoded_us: AtomicU64::new(0),
-            keyframe_bytes: AtomicU64::new(0),
-            keyframe_deferred_us: AtomicU64::new(0),
-            ltr_acked: AtomicBool::new(false),
-            cropped: AtomicBool::new(true),
-            target_hidden: AtomicBool::new(false),
-            pointer_over: AtomicBool::new(false),
-            suspect_until_us: AtomicU64::new(0),
-            filter_stalled: AtomicBool::new(false),
-            sink,
-            too_large_logged: AtomicBool::new(false),
-            bounds: Mutex::new(None),
-            counters: Counters::new(),
-        });
+        let shared = Shared::new(StreamId(1), sink, 8_000_000, 60, true);
+        // A stream past its first keyframe, with nothing sent yet.
+        shared.pending.lock().keyframe = false;
+        shared.last_push_us.store(0, Ordering::Relaxed);
+        let shared = Arc::new(shared);
         (shared, wire)
     }
 
@@ -2614,6 +3290,16 @@ mod tests {
         }
     }
 
+    /// Another reference to the same capture, as ScreenCaptureKit hands over a surface it keeps.
+    fn again(frame: &CapturedFrame) -> CapturedFrame {
+        CapturedFrame {
+            image: slopty_codec::PixelBuffer::from_retained(objc2_core_foundation::Type::retain(
+                frame.image.as_cv(),
+            )),
+            ..*frame
+        }
+    }
+
     /// The beat is a promise about time, so the thing that must be true of it is that nothing
     /// else the stream does can make it late. Geometry work that takes 300 ms — six times a
     /// stall gap, and three times the worst window-server round trip measured — runs beside it
@@ -2693,28 +3379,28 @@ mod tests {
 
         // A frame now is held as suspected and never reaches the crop count.
         shared.suspect(host_now_us());
-        shared.on_frame(&frame);
+        shared.on_frame(again(&frame));
         let held = shared.stats();
         assert_eq!((held.captured, held.suspected, held.withheld, held.cropped), (1, 1, 0, 0));
 
         // The window filter's frames are held just the same: the framework still delivers a
         // frame or two of the old filter after a swap has settled.
         shared.cropped.store(false, Ordering::Relaxed);
-        shared.on_frame(&frame);
+        shared.on_frame(again(&frame));
         let filtered = shared.stats();
         assert_eq!((filtered.captured, filtered.suspected, filtered.cropped), (2, 2, 0));
         shared.cropped.store(true, Ordering::Relaxed);
 
         // Confirmed by the window list: the frame is withheld, the older reason wins.
         shared.target_hidden.store(true, Ordering::Relaxed);
-        shared.on_frame(&frame);
+        shared.on_frame(again(&frame));
         let confirmed = shared.stats();
         assert_eq!((confirmed.suspected, confirmed.withheld), (2, 1));
 
         // The hold has lapsed and the window list says on screen: frames flow again.
         shared.target_hidden.store(false, Ordering::Relaxed);
         shared.suspect_until_us.store(0, Ordering::Relaxed);
-        shared.on_frame(&frame);
+        shared.on_frame(again(&frame));
         let flowing = shared.stats();
         assert_eq!((flowing.captured, flowing.suspected, flowing.cropped), (4, 2, 1));
     }
@@ -2746,7 +3432,7 @@ mod tests {
             // Capture timestamps are the worker clock, so the first frame of a stream is always
             // due.
             frame.capture_ts_us = 1_000_000_u64.saturating_add(beat.saturating_mul(16_667));
-            shared.on_frame(&frame);
+            shared.on_frame(again(&frame));
             if shared.last_encoded_us.load(Ordering::Relaxed) == frame.capture_ts_us {
                 encoded = encoded.saturating_add(1);
             }
@@ -2760,7 +3446,7 @@ mod tests {
         let last = shared.last_encoded_us.load(Ordering::Relaxed);
         shared.pending.lock().keyframe = true;
         frame.capture_ts_us = last.saturating_add(1_000);
-        shared.on_frame(&frame);
+        shared.on_frame(again(&frame));
         assert_eq!(shared.last_encoded_us.load(Ordering::Relaxed), last.saturating_add(1_000));
     }
 
@@ -2773,12 +3459,12 @@ mod tests {
     fn a_frame_captured_while_the_target_is_hidden_is_withheld() {
         let (shared, _wire) = shared_for_frames();
 
-        shared.on_frame(&a_frame());
+        shared.on_frame(a_frame());
         let seen = shared.stats();
         assert_eq!((seen.captured, seen.withheld, seen.cropped), (1, 0, 1));
 
         shared.target_hidden.store(true, Ordering::Relaxed);
-        shared.on_frame(&a_frame());
+        shared.on_frame(a_frame());
         let hidden = shared.stats();
         assert_eq!(
             (hidden.captured, hidden.withheld, hidden.cropped),
@@ -2858,30 +3544,74 @@ mod tests {
         assert_eq!(crop_allowed(true, Some(CROP), true), None, "covered");
     }
 
+    /// A configuration as a transition carries it: `crop` on a 600×400 stream.
+    fn config(crop: Option<Crop>) -> CaptureConfig {
+        let quality =
+            Quality { fps: 60, bitrate_bps: 8_000_000, scale: 1.0, codec: VideoCodec::Hevc };
+        CaptureConfig { crop, ..configs((600, 400), &quality).0 }
+    }
+
     #[test]
     fn a_transition_commits_only_when_every_call_succeeded() {
         let t = Transitions::default();
         assert_eq!(t.settle(), Settled::Idle);
-        assert!(t.begin(WindowPath::DisplayCrop, Some(CROP), 2));
+        assert!(t.begin(WindowPath::DisplayCrop, config(Some(CROP)), 2));
         assert_eq!(t.settle(), Settled::Busy);
-        assert!(!t.begin(WindowPath::Filter, None, 1), "one at a time");
+        assert!(!t.begin(WindowPath::Filter, config(None), 1), "one at a time");
         t.on_result(true);
         assert_eq!(t.settle(), Settled::Busy, "one callback still to come");
         t.on_result(true);
-        assert_eq!(t.settle(), Settled::Commit(WindowPath::DisplayCrop, Some(CROP)));
+        assert_eq!(t.settle(), Settled::Commit(WindowPath::DisplayCrop, config(Some(CROP))));
         assert_eq!(t.settle(), Settled::Idle, "taken once");
     }
 
     #[test]
     fn a_failed_call_leaves_the_stream_where_it_was_and_the_next_tick_retries() {
         let t = Transitions::default();
-        assert!(t.begin(WindowPath::Filter, None, 2));
+        assert!(t.begin(WindowPath::Filter, config(None), 2));
         t.on_result(true);
         t.on_result(false);
-        assert_eq!(t.settle(), Settled::Failed(WindowPath::Filter, None));
+        assert_eq!(t.settle(), Settled::Failed(WindowPath::Filter, config(None)));
         // Nothing committed, nothing in flight: the next tick may ask again.
         assert_eq!(t.settle(), Settled::Idle);
-        assert!(t.begin(WindowPath::Filter, None, 2));
+        assert!(t.begin(WindowPath::Filter, config(None), 2));
+    }
+
+    /// A transition commits the size and the crop together: what ScreenCaptureKit was sent is
+    /// what the stream records, so a resize cannot land beside a crop move and leave the older
+    /// crop in force.
+    #[test]
+    fn a_transition_carries_the_size_and_the_crop_as_one_configuration() {
+        let t = Transitions::default();
+        let moved = Crop { x: 40.0, ..CROP };
+        let resized = CaptureConfig { width: 800, height: 500, ..config(Some(moved)) };
+        assert!(t.begin(WindowPath::DisplayCrop, resized, 1));
+        t.on_result(true);
+        let Settled::Commit(path, committed) = t.settle() else { panic!("not committed") };
+        assert_eq!(
+            (path, committed.crop, committed.width),
+            (WindowPath::DisplayCrop, Some(moved), 800)
+        );
+    }
+
+    /// A live drag changes the window's size on every tick; the stream is rebuilt only for a
+    /// size that holds for one, so a drag costs one keyframe at its end rather than ten a second.
+    #[test]
+    fn a_resize_rebuilds_only_once_the_size_holds_for_a_tick() {
+        let mut debounce = ResizeDebounce::default();
+        let built = (800, 600);
+        assert_eq!(debounce.observe((800, 600), built), None, "no change");
+        // Dragging: a new size every tick.
+        assert_eq!(debounce.observe((820, 610), built), None);
+        assert_eq!(debounce.observe((840, 620), built), None);
+        assert_eq!(debounce.observe((860, 630), built), None);
+        // Released: the same size twice.
+        assert_eq!(debounce.observe((860, 630), built), Some((860, 630)));
+        // Built for it now; a size that goes back before it holds rebuilds nothing.
+        let built = (860, 630);
+        assert_eq!(debounce.observe((900, 700), built), None);
+        assert_eq!(debounce.observe((860, 630), built), None, "back where it was");
+        assert_eq!(debounce.observe((900, 700), built), None, "a fresh candidate, not the old one");
     }
 
     /// The encode latency is the time between a frame's submit and its return, matched by
@@ -2969,6 +3699,9 @@ mod tests {
     #[test]
     fn a_refresh_and_a_report_reach_the_next_frame_options() {
         let (shared, _wire) = shared_for_frames();
+        for token in [5, 6] {
+            shared.ltr.lock().on_packet(false, Some(token), 0);
+        }
         shared.request_refresh(41);
         assert!(shared.pending.lock().refresh);
         assert_eq!(shared.stats().refreshes, 1);
@@ -3077,20 +3810,41 @@ mod tests {
         assert_eq!(keyframe_estimate(8, 8), 8, "a steady stream stays put");
     }
 
+    /// A report acknowledging `tokens`.
+    fn acking(tokens: &[u64]) -> ReceiverReport {
+        let mut acked_ltr = [0; 4];
+        let n = tokens.len().min(4);
+        acked_ltr[..n].copy_from_slice(&tokens[..n]);
+        ReceiverReport {
+            acked_ltr,
+            acked_ltr_len: u8::try_from(n).unwrap_or(4),
+            ..ReceiverReport::default()
+        }
+    }
+
+    /// An encoded frame of `bytes`, a keyframe or not, offering `token`.
+    fn packet(bytes: usize, keyframe: bool, token: Option<u64>, refresh: bool) -> EncodedPacket {
+        EncodedPacket {
+            data: vec![7; bytes],
+            keyframe,
+            ltr_token: token,
+            ltr_refresh: refresh,
+            pts_us: host_now_us(),
+        }
+    }
+
     #[test]
     fn a_keyframe_is_deferred_only_when_a_refresh_can_go_out_instead() {
         let (shared, _wire) = shared_for_frames();
         shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
         shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
-        // The client has never acknowledged a reference, so a refresh would decode into nothing
-        // and the keyframe goes out however badly it fits.
+        // No reference is usable, so a refresh would come back as an IDR anyway and the keyframe
+        // goes out however badly it fits.
         assert!(shared.keyframe_admitted(1_000_000));
         assert_eq!(shared.stats().keyframes_deferred, 0);
 
-        let mut acked_ltr = [0; 4];
-        acked_ltr[0] = 7;
-        let report = ReceiverReport { acked_ltr, acked_ltr_len: 1, ..ReceiverReport::default() };
-        shared.report(&report, None);
+        shared.on_packet(&packet(900, false, Some(7), false));
+        shared.report(&acking(&[7]), None);
         assert!(!shared.keyframe_admitted(1_000_000), "now a refresh is a picture");
         assert_eq!(shared.stats().keyframes_deferred, 1);
 
@@ -3104,20 +3858,20 @@ mod tests {
     /// The rule the keyframe path could not reach: `pending.keyframe` is set at stream open and
     /// on a quality change and almost nowhere else, so `keyframes_deferred` read 0 on every rung
     /// of the shaped ladder. The *drop* path runs on every dropped frame, which on a collapsed
-    /// link is most of them, and a refresh is an IDR here — so this is where the budget bites.
+    /// link is most of them, and a refresh is budgeted as the IDR it may be — so this is where
+    /// the budget bites.
     #[test]
     fn a_dropped_frame_asks_for_a_refresh_only_when_the_link_could_carry_one() {
         let (shared, _wire) = shared_for_frames();
-        shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
         shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
 
-        // Nothing acknowledged yet: only a keyframe decodes, so the ask goes out regardless.
+        // No keyframe measured yet: the stream's first picture is never refused.
         shared.dropped(1_000_000);
-        assert!(shared.pending.lock().refresh, "no reference means ask anyway");
+        assert!(shared.pending.lock().refresh, "no estimate means ask anyway");
         assert_eq!(shared.counters.dropped.load(Ordering::Relaxed), 1);
 
         shared.pending.lock().refresh = false;
-        shared.ltr_acked.store(true, Ordering::Relaxed);
+        shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
         shared.dropped(1_000_000);
         assert!(
             !shared.pending.lock().refresh,
@@ -3131,10 +3885,15 @@ mod tests {
         assert!(shared.pending.lock().refresh);
     }
 
+    /// A link that recovers ends the episode by itself, not only a keyframe encoded: the next
+    /// collapse is its own episode with its own clock. With the first episode's start left
+    /// standing, the second one's first frame found the valve a second past and let the
+    /// keyframe straight through.
     #[test]
     fn a_link_that_recovers_ends_the_deferral_without_the_valve() {
         let (shared, _wire) = shared_for_frames();
-        shared.ltr_acked.store(true, Ordering::Relaxed);
+        shared.on_packet(&packet(900, false, Some(3), false));
+        shared.report(&acking(&[3]), None);
         shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
         shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
         assert!(!shared.keyframe_admitted(1_000_000));
@@ -3142,5 +3901,239 @@ mod tests {
         shared.counters.bitrate_bps.store(12_000_000, Ordering::Relaxed);
         assert!(shared.keyframe_admitted(1_100_000), "not the valve, the link");
         assert_eq!(shared.stats().keyframes_deferred, 1, "still the one episode");
+
+        // Five seconds on the link collapses again: a new episode, deferred from its start.
+        shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
+        assert!(!shared.keyframe_admitted(6_000_000), "a stale start opened the valve at once");
+        assert_eq!(shared.stats().keyframes_deferred, 2, "counted as its own episode");
+        assert!(!shared.keyframe_admitted(6_999_999));
+        assert!(shared.keyframe_admitted(7_000_000), "its own valve, a second after its own start");
+    }
+
+    /// A token is a reference a refresh can use only while nothing has emptied the reference
+    /// list since it was offered: a keyframe does, and so does a new encoder session. Tokens the
+    /// session never offered do not reach the encoder at all.
+    #[test]
+    fn a_reference_is_usable_until_a_keyframe_or_a_rebuild() {
+        let (shared, _wire) = shared_for_frames();
+        shared.on_packet(&packet(40_000, true, None, false));
+        shared.on_packet(&packet(900, false, Some(11), false));
+        assert!(!shared.ltr_usable(), "offered, not acknowledged");
+        shared.report(&acking(&[11, 99]), None);
+        assert!(shared.ltr_usable());
+        assert_eq!(shared.pending.lock().acked, vec![11], "99 was never offered");
+        let seen = shared.stats().ltr;
+        assert_eq!((seen.offered, seen.acked, seen.usable), (1, 1, true));
+
+        // A refresh answered as a delta, then one answered as an IDR: the IDR retires the token.
+        shared.on_packet(&packet(700, false, None, true));
+        assert!(shared.ltr_usable());
+        shared.on_packet(&packet(40_000, true, None, true));
+        assert!(!shared.ltr_usable(), "an IDR empties the reference list");
+        shared.report(&acking(&[11]), None);
+        assert!(!shared.ltr_usable(), "a late ack for the old epoch names nothing usable");
+        let seen = shared.stats().ltr;
+        assert_eq!((seen.refreshes_delta, seen.refreshes_idr), (1, 1));
+
+        // A token offered after the keyframe is usable again, until the encoder is rebuilt.
+        shared.on_packet(&packet(900, false, Some(12), false));
+        shared.report(&acking(&[12]), None);
+        assert!(shared.ltr_usable());
+        shared.pending.lock().acked = vec![12];
+        shared.keyframe_bytes.store(50_000, Ordering::Relaxed);
+        shared.keyframe_deferred_us.store(1, Ordering::Relaxed);
+        shared.rebuilt();
+        assert!(!shared.ltr_usable(), "a new session predicts from none of the old references");
+        assert!(shared.pending.lock().acked.is_empty(), "nor is it told about them");
+        assert!(shared.pending.lock().keyframe, "and it starts on a keyframe");
+        assert_eq!(shared.keyframe_bytes.load(Ordering::Relaxed), 0, "of a size not yet known");
+        assert_eq!(shared.keyframe_deferred_us.load(Ordering::Relaxed), 0);
+        shared.report(&acking(&[12]), None);
+        assert!(shared.pending.lock().acked.is_empty(), "the old session's token is dropped");
+    }
+
+    /// The last capture of a scroll arrives inside the cadence's period, so the gate holds it
+    /// back; ScreenCaptureKit sends nothing more for a still picture, so the held capture is
+    /// what goes out once the picture has gone quiet. A refresh asked for on the still picture
+    /// is answered from it too, as a refresh.
+    #[test]
+    fn a_still_picture_sends_its_held_capture_when_owed_or_asked() {
+        let (shared, _wire) = shared_for_frames();
+        shared.fps.store(30, Ordering::Relaxed);
+        let mut frame = a_frame();
+        let base = host_now_us();
+        frame.capture_ts_us = base;
+        shared.on_frame(again(&frame));
+        assert_eq!(shared.last_encoded_us.load(Ordering::Relaxed), base, "the first is due");
+        assert_eq!(shared.repair_at(), None, "nothing owed");
+
+        // The scroll's last frame, one display beat later: inside the 30 fps period.
+        frame.capture_ts_us = base + 16_667;
+        shared.on_frame(again(&frame));
+        assert!(shared.owed.load(Ordering::Relaxed), "held back by the cadence");
+        let at = shared.repair_at().expect("owed");
+        // Due at the cadence (29.2 ms after the last) and once quiet (25 ms after the capture).
+        assert_eq!(at, base + 16_667 + 25_000);
+        assert_eq!(shared.repair_now(at), Attempt::Sent);
+        assert_eq!(shared.last_encoded_us.load(Ordering::Relaxed), at, "stamped when it went");
+        assert!(!shared.owed.load(Ordering::Relaxed));
+        assert_eq!(shared.stats().repaired, 1);
+        assert_eq!(shared.repair_at(), None, "sent once");
+
+        // A refresh on the still picture: answered from the held capture a period on.
+        shared.request_refresh(3);
+        let refresh_at = shared.repair_at().expect("a refresh is owed");
+        assert_eq!(refresh_at, at + 33_333 - 4_166);
+        assert_eq!(shared.repair_now(refresh_at), Attempt::Sent);
+        assert!(!shared.pending.lock().refresh, "the refresh went out with it");
+        assert_eq!(shared.stats().repaired, 2);
+
+        // A still target that is hidden is not repaired: the held capture is dropped.
+        shared.request_refresh(4);
+        shared.target_hidden.store(true, Ordering::Relaxed);
+        assert_eq!(shared.repair_now(refresh_at + 100_000), Attempt::Nothing);
+        assert_eq!(shared.repair_at(), None, "nothing held any more");
+    }
+
+    /// While the picture keeps changing a held-back capture is overtaken by the next one, which
+    /// is fresher; the repair waits for the quiet so it never sends the older frame instead.
+    #[test]
+    fn a_moving_picture_is_never_repaired_ahead_of_its_next_capture() {
+        let base = 10_000_000;
+        // 30 fps cadence, 60 Hz capture: the capture at +16.7 ms is owed; the one at +33.3 ms
+        // would be due at +29.2 ms, but the repair waits to +41.7 ms, past the next capture.
+        let owed = Asks { owed: true, ..Asks::default() };
+        let keyframe = Asks { keyframe: true, ..Asks::default() };
+        let at = repair_at(owed, base + 16_667, base, 30, 60);
+        assert_eq!(at, Some(base + 16_667 + 25_000));
+        // A 120 Hz ceiling on a 60 Hz panel waits as long, not 12.5 ms.
+        assert_eq!(repair_at(owed, base, base, 120, 120), Some(base + 25_000));
+        // A keyframe does not wait for the cadence, only for the quiet.
+        assert_eq!(repair_at(keyframe, base, base, 15, 60), Some(base + 25_000));
+        assert_eq!(repair_at(Asks::default(), base, base, 60, 60), None, "nothing owed");
+    }
+
+    /// The parity rides the same link as the frame, so the encoder gets the target less its
+    /// share.
+    #[test]
+    fn the_encoder_gets_the_target_less_the_parity_share() {
+        assert_eq!(encoder_bps(12_000_000, 0), 12_000_000);
+        assert_eq!(encoder_bps(12_000_000, 200), 10_000_000, "the default 20 %");
+        assert_eq!(encoder_bps(12_000_000, 500), 8_000_000, "the 50 % ceiling");
+        assert_eq!(encoder_bps(u32::MAX, 0), u32::MAX);
+    }
+
+    /// A link simulated a millisecond at a time: QUIC's datagram queue in order, `rate` bytes
+    /// leaving each millisecond.
+    struct Link {
+        queue: Mutex<VecDeque<Bytes>>,
+    }
+
+    impl Link {
+        fn drain(&self, mut bytes: usize) -> Vec<Bytes> {
+            let mut queue = self.queue.lock();
+            let mut out = Vec::new();
+            while let Some(front) = queue.front() {
+                if front.len() > bytes {
+                    break;
+                }
+                bytes = bytes.saturating_sub(front.len());
+                out.extend(queue.pop_front());
+            }
+            drop(queue);
+            out
+        }
+    }
+
+    impl DatagramSink for Link {
+        fn send(&self, datagrams: &[Bytes]) -> Result<(), Refused> {
+            self.queue.lock().extend(datagrams.iter().cloned());
+            Ok(())
+        }
+
+        fn max_size(&self) -> Option<usize> {
+            Some(MAX_DATAGRAM)
+        }
+
+        fn held(&self) -> usize {
+            self.queue.lock().iter().map(Bytes::len).sum()
+        }
+
+        fn cwnd(&self) -> u64 {
+            0
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    /// Milliseconds an audio packet sent `after_ms` into a 130 kB keyframe waits in QUIC's
+    /// queue on a `rate` bytes-a-millisecond link, and when the keyframe's last byte leaves;
+    /// with `lane` the audio lane is in use (audio flowing), without it every datagram goes
+    /// straight in.
+    fn audio_behind_a_keyframe(rate: usize, target_bps: u64, lane: bool) -> (usize, usize) {
+        let link = Arc::new(Link { queue: Mutex::new(VecDeque::new()) });
+        let sink: Arc<dyn DatagramSink> = Arc::<Link>::clone(&link);
+        let shared = Shared::<Native>::new(StreamId(1), sink, 30_000_000, 60, false);
+        shared.counters.bitrate_bps.store(target_bps, Ordering::Relaxed);
+        let base = 1_000_000_u64;
+        shared.last_audio_us.store(if lane { base } else { 0 }, Ordering::Relaxed);
+        let keyframe: Vec<Bytes> =
+            std::iter::repeat_n(Bytes::from(vec![1_u8; 1_150]), 113).collect();
+        shared.send_video(&keyframe, base);
+        let audio = Bytes::from_static(&[9_u8; 160]);
+        let (mut audio_wait, mut last_video) = (0, 0);
+        let mut audio_sent_at = None;
+        for ms in 1..400_usize {
+            let now = base.saturating_add(u64::try_from(ms).unwrap_or(0).saturating_mul(1_000));
+            for gone in link.drain(rate) {
+                if gone.len() == audio.len() {
+                    audio_wait = ms.saturating_sub(audio_sent_at.unwrap_or(ms));
+                } else {
+                    last_video = ms;
+                }
+            }
+            if ms == 5 {
+                shared.last_audio_us.store(if lane { now } else { 0 }, Ordering::Relaxed);
+                shared.send(std::slice::from_ref(&audio));
+                audio_sent_at = Some(ms);
+            }
+            let mut lane = shared.lane.lock();
+            if !lane.queue.is_empty() {
+                shared.pump(&mut lane, now);
+            }
+        }
+        (audio_wait, last_video)
+    }
+
+    /// The number behind the lane. On a 20 Mbit/s link (2.5 kB a millisecond) a 130 kB keyframe
+    /// is 52 ms of queue, and audio sent into its middle waited for all of what was left. With
+    /// the lane it waits behind a slice, and the keyframe still leaves when the link would have
+    /// let it; on a link forty times faster the lane learns the rate and costs the keyframe a
+    /// few ticks at most.
+    #[test]
+    fn audio_waits_behind_a_slice_of_a_keyframe_not_all_of_it() {
+        let (fifo_wait, fifo_done) = audio_behind_a_keyframe(2_500, 20_000_000, false);
+        let (lane_wait, lane_done) = audio_behind_a_keyframe(2_500, 20_000_000, true);
+        eprintln!(
+            "20 Mbit/s: audio waits {fifo_wait} ms → {lane_wait} ms, keyframe done at {fifo_done} → {lane_done} ms"
+        );
+        assert!(fifo_wait >= 45, "the FIFO baseline: {fifo_wait} ms");
+        assert!(lane_wait <= 6, "behind a 5 ms slice: {lane_wait} ms");
+        assert!(
+            lane_done <= fifo_done + 1,
+            "the keyframe is not slowed: {lane_done} against {fifo_done} ms"
+        );
+
+        let (_fast_fifo_wait, fast_fifo_done) = audio_behind_a_keyframe(100_000, 20_000_000, false);
+        let (fast_wait, fast_done) = audio_behind_a_keyframe(100_000, 20_000_000, true);
+        eprintln!(
+            "800 Mbit/s: audio waits {fast_wait} ms, keyframe done at {fast_fifo_done} → {fast_done} ms"
+        );
+        assert!(
+            fast_done <= fast_fifo_done + 3,
+            "a fast link: {fast_done} against {fast_fifo_done} ms"
+        );
     }
 }

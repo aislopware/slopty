@@ -3702,6 +3702,7 @@ hop", release build, mac-studio under other sessions' builds. With `SLOPTY_PREDI
 of 60 keys drawn as guesses, 1 echoed first, 0 late; guess p50 21.6 ms (p95 30.8), echo p50
 34.9 ms (p95 44.1). With `never`: echo p50 26.4 ms (p95 32.2), 60 keys.
 
+
 ## 2026-09-25 — an echo beside floods waits for the tick, and nothing drawn sooner shows sooner
 
 Scenario (h) puts the echo p50 at 28.4 ms, against about 22.5 ms in an idle window. Most of
@@ -3770,3 +3771,52 @@ frame at a random phase. With this compositor, a window that must draw every ref
 avoid it. Nothing was changed in the app or in the fork's frame scheduling. The scenario
 labels in smooth.rs ((a) to (i)) match the latest sections above. The older, dated sections
 keep the labels of their own day.
+
+## 2026-09-25 — the held capture, the audio lane, and what is still owed on hardware
+
+Unit models in `slopty-worker`, run on mac-studio under load from other sessions. None of these
+touches a capture or a real link; the hardware runs are listed at the end as owed.
+
+```sh
+cargo nextest run -p slopty-worker --lib -E 'test(/screen::/)' --no-capture
+```
+
+**Audio behind a keyframe** (`audio_waits_behind_a_slice_of_a_keyframe_not_all_of_it`). The
+model is QUIC's datagram queue drained a millisecond at a time in whole datagrams. A 130 kB
+keyframe (113 × 1 150 B) goes in at 0 ms and a 160 B audio packet at 5 ms. The 20 Mbit/s rate
+comes out at 2.3 kB a millisecond once whole datagrams are drained.
+
+| link | audio wait, FIFO | audio wait, lane | keyframe's last byte, FIFO | with lane |
+| --- | --- | --- | --- | --- |
+| 20 Mbit/s | 52 ms | 4 ms | 57 ms | 57 ms |
+| 800 Mbit/s | 1 ms | 1 ms | 2 ms | 3 ms |
+
+At 20 Mbit/s the lane keeps QUIC one slice ahead and the link never idles, so the keyframe is not
+later. At 800 Mbit/s the lane starts from the target's rate and learns the link in two ticks;
+that one extra millisecond is paid on the first large frame after audio starts, and only while
+audio flows.
+
+**A still picture's owed frame** (`a_still_picture_sends_its_held_capture_when_owed_or_asked`,
+`a_moving_picture_is_never_repaired_ahead_of_its_next_capture`). At a 30 fps rung on a 60 Hz
+capture, the scroll's last capture (16.7 ms after the last encoded one) was never sent before.
+Now it goes out 25 ms after it was captured, the quiet threshold, and a refresh on the still
+picture goes out one cadence period after the last frame. While the picture keeps moving the
+repair waits past the next capture, so it never sends an older frame in place of a newer one.
+
+**Owed, on hardware.** Each needs the installed, TCC-granted worker, and the machine was shared
+with five other sessions, so none ran here:
+
+```sh
+cargo xtask sign && slopty worker install --port 45560 --bind <lan-ip> --log 'info,slopty_worker=debug'
+slopty worker doctor
+# shaped ladder: collapsed-rung gaps and drops, keyframes_deferred, and now ScreenStats::ltr
+# (offered / acked / refreshes_idr / refreshes_delta / usable) and repaired, per rung
+SLOPTY_E2E_WORKER_SOCKET="$HOME/Library/Application Support/Slopty/run/worker.sock" \
+  SLOPTY_E2E_SECONDS=8 RUST_LOG=info,slopty_client=debug,slopty_codec=debug \
+  cargo nextest run -p slopty-workerd --test e2e -E 'test(screen_over_a_shaped_link)' --no-capture
+# capture floor at queueDepth 3 with a held surface and the user-interactive video queue
+slopty bench screen --worker <lan-ip>:45560 --window <id> --seconds 20   # host capture / encode p50 / p95 against the 2026-09-05 table
+```
+
+The ladder should also run once with audio playing in the target, to read the lane on a real
+link (`laned` in `slopty worker screens`).

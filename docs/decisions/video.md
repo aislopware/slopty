@@ -115,7 +115,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
      `slopty bench screen` looks its own stream up by its client id too, not the first
      connection that happens to have a stream of that number.
 
-- ✅ **`queueDepth` stays 2** (2026-09-05). Measured 2 / 3 / 5 / 8 on the window filter
+- ✅ **`queueDepth` stays 2** (2026-09-05; superseded 2026-09-25 by 3, see "A still picture keeps
+  its newest capture"). Measured 2 / 3 / 5 / 8 on the window filter
   (MEASUREMENTS.md, "capture floor"): p50 is flat (0.46 → 0.49 ms) and p95/max grow with the
   depth; no drops at any depth on a 60 Hz source. The default 8 buys nothing here since the
   callback hands the surface straight to the encoder.
@@ -899,3 +900,102 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   reassembly, NACKs and decode behind a report. It uses `try_send` now: a full channel drops that
   report (the next follows in 50 ms), and the counters are published either way. Test:
   `a_full_control_channel_does_not_stall_the_worker`.
+
+- ✅ **A still picture keeps its newest capture, and the stream sends it when nothing newer
+  will** (2026-09-25). ScreenCaptureKit hands over only frames whose content changed
+  (`SCFrameStatus::Complete`), and the capture callback used to drop anything the cadence gate,
+  the congestion guard or a keyframe deferral held back. So the last frame of a scroll that
+  landed inside the rung's period never went out, and a refresh asked for on a still window had
+  no frame to ride on: the client stayed on a wrong picture until something moved. Now
+  `Shared::held` keeps the newest capture of the target, and `owed` says it has not reached the
+  encoder. `repair_loop` sleeps until `repair_at`: the later of the cadence's next due time and
+  the moment the picture counts as quiet (1.5 capture periods after the held capture, never
+  under 25 ms, so a ceiling above the panel's rate cannot call the gap between two ordinary
+  frames a stop). A keyframe waits only for the quiet. The repair runs the same gates as a
+  fresh capture, stamps the frame with the time it goes (the encoder wants presentation times
+  that only go forward, and every encode goes through the held frame's lock), and is counted in
+  `ScreenStats::repaired`. A hidden or suspected target drops the held capture rather than send
+  a picture from before the hide, and a rebuild drops it because it is the old size.
+  Holding a surface costs a slot in the pool, so `queueDepth` goes from 2 to 3: one held, one in
+  the encoder for its ~7 ms, one for ScreenCaptureKit to render into. The 2026-09-05 survey
+  already has 3 on the window filter at 0.49 ms p50 against 0.46 at 2, inside its own
+  run-to-run spread. This supersedes "`queueDepth` stays 2". Tests:
+  `a_still_picture_sends_its_held_capture_when_owed_or_asked`,
+  `a_moving_picture_is_never_repaired_ahead_of_its_next_capture`. Owed: the capture floor and
+  `bench screen` at depth 3 against the installed worker (MEASUREMENTS.md, 2026-09-25, "the
+  held capture, the audio lane").
+
+- ✅ **A long-term reference is usable only until the next keyframe or rebuild, and the keyframe
+  deferral episode ends when the link recovers** (2026-09-25). `ltr_acked` latched on the
+  stream's first acknowledgement and stayed true through every IDR after it, though an IDR
+  empties the reference list and a refresh asked for then comes back as another IDR (the
+  "starved reference" measurement of 2026-09-15). `LtrBook` now records each token the session
+  offers with the keyframe epoch it came in, and a token is usable when it was acknowledged and
+  no keyframe has been encoded since. Acknowledgements for tokens this session never offered no
+  longer reach the encoder, and a rebuild (resize, codec, rate) clears the book, the queued
+  acknowledgements, the keyframe estimate and the valve's clock. `keyframe_admitted` defers a
+  keyframe only while a reference is usable. The drop path no longer looks at references at
+  all: a refresh is budgeted as the IDR it may turn out to be, admitted while no keyframe has
+  been measured, then by the drain budget and the valve (`standalone_fits`). The control socket
+  carries `ScreenStats::ltr`: tokens offered and acknowledged, refreshes answered as IDR and as
+  delta, and whether a reference is usable now with its age. Those counters are what decides
+  whether the supply of references is the problem, and they need a shaped-ladder run to read.
+  Separately, the one-second valve only reset when a keyframe was encoded. An episode that ended
+  because the link could carry a keyframe again left its start standing, and the next collapse
+  found the valve a second past and let its first keyframe straight through.
+  `standalone_fits` now clears the clock whenever a keyframe fits. Tests:
+  `a_reference_is_usable_until_a_keyframe_or_a_rebuild`,
+  `a_link_that_recovers_ends_the_deferral_without_the_valve` (now with a second collapse),
+  `a_keyframe_is_deferred_only_when_a_refresh_can_go_out_instead`,
+  `a_dropped_frame_asks_for_a_refresh_only_when_the_link_could_carry_one`.
+
+- ✅ **One desired capture configuration, sent whole through one transition; a resize waits for
+  the size to hold** (2026-09-25). A resize used to rebuild the encoder and call
+  `updateConfiguration` with the new size and the *committed* crop, outside the transition
+  machinery, while a crop move for the same tick was still in flight with the old size. The
+  later call could leave a stale `sourceRect` in force. Now the pipeline keeps `desired` (size,
+  rate, format and crop together) and `desired_path`. `follow_window` only records the wish,
+  and `apply_desired` sends the whole configuration through `Transitions`, one at a time, with
+  the old call order for a path change. A transition commits the configuration it carried, so
+  what the stream records is what ScreenCaptureKit was sent. A live corner drag changed the size
+  on every 100 ms tick and rebuilt a VideoToolbox session each time, 10 IDRs a second.
+  `ResizeDebounce` rebuilds only for a size seen on two ticks in a row, so a drag costs one
+  keyframe at its end and at most 100 ms on a settled resize. Tests:
+  `a_transition_carries_the_size_and_the_crop_as_one_configuration`,
+  `a_resize_rebuilds_only_once_the_size_holds_for_a_tick`, plus the two transition tests.
+
+- ✅ **Small rate and cadence fixes on the worker** (2026-09-25). A bitrate-only `SetQuality`
+  moved the encoder's rate but not the cadence rung; it now calls `apply_cadence` like a rate
+  decision does. `force_ltr_refresh` on a session without long-term references was a plain
+  P-frame off the picture the receiver lost, so a client waiting on a refresh waited for good;
+  `slopty_codec::encoder::submission` makes it a keyframe then, and a frame that is already a
+  forced keyframe is not also flagged as a refresh (test
+  `a_refresh_without_long_term_references_is_a_keyframe`). The encoder now gets
+  `target × 1000 / (1000 + parity)` (`encoder_bps`, test
+  `the_encoder_gets_the_target_less_the_parity_share`), re-applied when the parity ratio moves,
+  since the parity rides the link the target describes. 🔬 That is proportional only; whether
+  less parity at a higher encoder rate reads better is an A/B still to run. The guards keep
+  reading the full target, because the bytes they weigh include parity. The video capture queue
+  is `UserInteractive`, like the audio queue: its callback gates the frame and submits it to the
+  encoder. Not measured; owed with the capture floor above. The cursor loop reads the stream's
+  zoom from `Shared` on every sample, so a quality change rescales the cursor as it already
+  rescaled the injector. `Pipeline::zoom` / `StreamControl::zoom` expose it for mapping client
+  input.
+
+- 🔬 **Audio goes ahead of queued video, without a protocol change** (2026-09-25). QUIC's
+  datagram queue is first in, first out and noq has no priority for datagrams, so audio sent
+  behind a keyframe waited for all of it: 130 kB is 52 ms of a 20 Mbit/s link, more than the
+  player's jitter slack. While audio flows (a packet in the last 200 ms), video goes through
+  `Lane`, and `lane_loop` tops QUIC up every millisecond to 5 ms of the rate QUIC has been seen
+  to drain at. That rate comes from QUIC's held bytes between two looks, never lower than the
+  controller's target, because a budget sized from the target would pace a LAN down to it.
+  Audio and cursor datagrams go straight in and wait behind at most that slice. Video keeps its
+  order whichever thread tops it up, and the guard and the NACK gate count lane bytes as held.
+  With no audio flowing the lane is empty and video goes straight in as before. This is the
+  first queue of the worker's own since "media datagrams go to QUIC from the thread that made
+  them", and only while audio flows. Measured on a model of the link, not yet on one
+  (MEASUREMENTS.md, 2026-09-25): audio behind a 130 kB keyframe waits 52 ms → 4 ms at 20 Mbit/s
+  with the keyframe done at the same millisecond, and on an 800 Mbit/s link the first keyframe
+  finishes 1 ms later while the rate is learned. Test:
+  `audio_waits_behind_a_slice_of_a_keyframe_not_all_of_it`. Owed: the shaped ladder with audio
+  playing.

@@ -71,6 +71,19 @@ fn is_refresh(refcon: *mut c_void) -> bool {
     refcon.addr() == REFRESH_REFCON
 }
 
+/// What a frame is submitted as, `(keyframe, ltr_refresh)`, for `options` on a session that
+/// does or does not have long-term references (`ltr`).
+///
+/// A refresh is what a receiver with a hole is waiting on, so it must come back as a picture
+/// that stands on its own. With references the encoder makes it a delta off an acknowledged one
+/// (or an IDR when none is). Without them `ForceLTRRefresh` means nothing and the frame would
+/// be a plain P-frame off the picture the receiver lost; a keyframe is the refresh then. A
+/// keyframe asked for outright answers any refresh with it, so it is not flagged as one.
+const fn submission(options_keyframe: bool, options_refresh: bool, ltr: bool) -> (bool, bool) {
+    let keyframe = options_keyframe || (options_refresh && !ltr);
+    (keyframe, options_refresh && ltr && !keyframe)
+}
+
 struct Shared {
     sink: Sink,
     codec: VideoCodec,
@@ -381,13 +394,14 @@ impl Encoder {
         let mut values: Vec<&CFType> = Vec::new();
         let tokens: CFRetained<CFArray<CFNumber>>;
         let has_acks = self.ltr && !options.acked_ltr.is_empty();
-        if options.force_keyframe {
+        let (keyframe, refresh) =
+            submission(options.force_keyframe, options.force_ltr_refresh, self.ltr);
+        if keyframe {
             // SAFETY: framework-provided constant string.
             let key = unsafe { kVTEncodeFrameOptionKey_ForceKeyFrame };
             keys.push(key);
             values.push(CFBoolean::new(true));
         }
-        let refresh = options.force_ltr_refresh && self.ltr;
         if refresh {
             // SAFETY: framework-provided constant string.
             let key = unsafe { kVTEncodeFrameOptionKey_ForceLTRRefresh };
@@ -877,6 +891,18 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A refresh is always a picture that stands on its own: a delta off a reference where the
+    /// session has them, a keyframe where it has none, and a keyframe asked for outright is not
+    /// also flagged as a refresh.
+    #[test]
+    fn a_refresh_without_long_term_references_is_a_keyframe() {
+        assert_eq!(submission(false, true, true), (false, true), "a delta off a reference");
+        assert_eq!(submission(false, true, false), (true, false), "no references: a keyframe");
+        assert_eq!(submission(true, true, true), (true, false), "the keyframe answers it");
+        assert_eq!(submission(true, false, false), (true, false));
+        assert_eq!(submission(false, false, true), (false, false), "a plain frame");
     }
 
     /// The refresh flag comes back on the frame that asked for it and on no other, however
