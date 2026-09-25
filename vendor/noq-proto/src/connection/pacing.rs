@@ -95,7 +95,13 @@ impl Pacer {
         // A controller that computes its own sending rate drives the bucket directly; the
         // window- and RTT-derived refill below is used only when no rate is reported.
         if let Some(pacing_rate) = controller_metrics.pacing_rate {
-            return self.delay_at_rate(pacing_rate, bytes_to_send, mtu, now);
+            return self.delay_at_rate(
+                pacing_rate,
+                controller_metrics.send_quantum,
+                bytes_to_send,
+                mtu,
+                now,
+            );
         }
 
         let window = rate_limited_window(smoothed_rtt, window, self.max_bytes_per_second);
@@ -158,11 +164,20 @@ impl Pacer {
     /// controller dictates an explicit `pacing_rate` in bytes/sec.
     ///
     /// Credit accumulates in `tokens` at `pacing_rate` for the time elapsed since the last
-    /// refill, bounded by a burst budget derived from that same rate. If the credit on hand
-    /// is short, the returned delay indicates when the shortfall will have been earned.
+    /// refill, bounded by a burst budget derived from that same rate and never smaller than the
+    /// controller's `send_quantum`. If the credit on hand is short, the returned delay indicates
+    /// when the shortfall will have been earned.
+    ///
+    /// A send asks for a whole MTU of credit (`bytes_to_send` is the segment size, since the
+    /// packet is not built yet), so a budget of one MTU makes every packet wait for the bucket
+    /// to fill completely: at a low rate a 40-byte ACK or a 100-byte datagram right after
+    /// another small packet then waits tens of milliseconds. `C.send_quantum` is the
+    /// aggregate the controller means to let out together, at least `2 * SMSS` in BBR
+    /// (draft-ietf-ccwg-bbr-06 section 5.6.3), so the budget honours it.
     fn delay_at_rate(
         &mut self,
         pacing_rate: u64,
+        send_quantum: Option<u64>,
         bytes_to_send: u64,
         mtu: u16,
         now: Instant,
@@ -176,7 +191,7 @@ impl Pacer {
         }
         .max(1);
 
-        let capacity = rate_capacity(rate, mtu);
+        let capacity = Ord::max(rate_capacity(rate, mtu), send_quantum.unwrap_or(0));
         if capacity != self.capacity {
             self.capacity = capacity;
             // here we cap the number of bytes sent at once during a burst
@@ -368,6 +383,45 @@ mod tests {
             }
         }
         sent
+    }
+
+    /// At a low pacing rate the bucket still holds the controller's send quantum, so a small
+    /// packet right after another small one is not held back, and a sender that keeps going
+    /// is still paced at the rate once the quantum is spent.
+    #[test]
+    fn a_low_rate_lets_the_send_quantum_out_together() {
+        let mtu = 1252;
+        let rtt = Duration::from_millis(20);
+        let window = 5_008;
+        let rate = 20_000;
+        let now = Instant::now();
+        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let quantum = paced_metrics(window, rate, 2 * u64::from(mtu));
+        let at = now + Duration::from_millis(500);
+
+        // An echo frame, and a small datagram 2 ms later.
+        assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, at, &quantum), None);
+        pacer.on_transmit(300);
+        let soon = at + Duration::from_millis(2);
+        assert_eq!(
+            pacer.delay(rtt, u64::from(mtu), mtu, soon, &quantum),
+            None,
+            "the second small packet of a quantum waits for nothing"
+        );
+        pacer.on_transmit(330);
+        let (wait, sent) = burst_until_blocked(&mut pacer, rtt, mtu, soon, &quantum)
+            .expect("past the quantum the rate holds");
+        assert!(sent <= u64::from(mtu), "{sent} bytes let out past the quantum");
+        assert!(wait > Duration::from_millis(10), "paced at 20 kB/s: {wait:?}");
+
+        // Without a quantum the budget is one MTU, and the second packet waits for the first
+        // packet's bytes to be earned back: 15 ms at this rate.
+        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let bare = ControllerMetrics { send_quantum: None, ..quantum };
+        assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, at, &bare), None);
+        pacer.on_transmit(300);
+        let wait = pacer.delay(rtt, u64::from(mtu), mtu, soon, &bare);
+        assert!(wait.is_some_and(|w| w > Duration::from_millis(10)), "{wait:?}");
     }
 
     #[test]

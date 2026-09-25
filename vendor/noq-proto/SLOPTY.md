@@ -1,4 +1,4 @@
-# noq-proto, vendored with three patches
+# noq-proto, vendored with four patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -26,6 +26,18 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    The draft's `HandleProbeRTT` begins with `MarkConnectionAppLimited()`, so the low
    delivery rates of a flow held to half a BDP do not read as the path's. noq left it out. Test:
    `probe_rtt_marks_its_samples_app_limited`.
+
+4. `fix(proto): Let the pacer hold the controller's send quantum`
+
+   A send asks the pacer for a whole MTU of credit, since the packet is not built yet, and at a
+   pacing rate below 125 kB/s the bucket held one MTU. So every packet waited for the bucket to
+   fill completely, and a small packet right after another (an ACK, a datagram) waited for the
+   first one's bytes to be earned back. BBR3 on a lossy, app-limited connection paces at tens
+   of kB/s, and that wait was 15 to 30 ms. The bucket is now never smaller than the
+   controller's `send_quantum` (BBR's `C.send_quantum`, at least `2 * SMSS`,
+   draft-ietf-ccwg-bbr-06 section 5.6.3); above the lowest rates the rate's own budget is
+   larger and nothing changes. Test: `a_low_rate_lets_the_send_quantum_out_together`
+   (docs/MEASUREMENTS.md, "datagram copies of a keystroke and its echo").
 
 Commits 2 and 3 share `VideoSim` in the `bbr3` tests: a screen encoder's frames through one
 bottleneck, paced by noq's token bucket. `video_through_one_bottleneck` (ignored) prints what
