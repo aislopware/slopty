@@ -188,7 +188,7 @@ mod tests {
         assert!(!dump.items.iter().any(|i| i.id == term.id && i.active), "{dump:#?}");
         let finished = |d: &slopty_e2e::Dump| {
             d.a11y.iter().any(|n| {
-                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("done "))
+                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("Done · "))
             })
         };
         drv.wait_for("the sleep to badge its shell", STEP + Duration::from_secs(8), finished)
@@ -1073,10 +1073,9 @@ mod tests {
         let text = format!("relinked {}\n", std::process::id()).repeat(200_000);
         assert!(text.len() > 2 << 20, "{} bytes", text.len());
         let (worker, app) = (MacPasteboard::named(&worker_name), MacPasteboard::named(&app_name));
-        let before = app.change_count();
         worker.copy(&[(TEXT, text.as_bytes())]);
         let deadline = std::time::Instant::now() + STEP;
-        while app.change_count() == before && std::time::Instant::now() < deadline {
+        while !app.types().iter().any(|t| t == TEXT) && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(app.types().iter().any(|t| t == TEXT), "promised: {:?}", app.types());

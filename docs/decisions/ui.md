@@ -1597,3 +1597,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `narrowing_the_window_never_lays_the_strip_out_as_a_phone`; palette
   `the_palette_fits_above_a_phone_keyboard`, `without_a_keyboard_the_palette_prints_no_chords`.
   e2e `ios` gains a navigator golden on each device.
+
+- ✅ **Attention is said once per place, and a tile's content sits 12 pt in** (2026-09-25). A
+  design pass over the Mac goldens against Warp found two things.
+  - **One count.** A waiting agent showed four times: the warn bar and pill on its tile, a
+    `1 needs you` chip in the title bar, the bell's badge, and `1 needs you` in the status bar.
+    The chip is gone. The bell counts what waits for the human and what finished unwatched,
+    and opens the list. The status bar names the agents and goes to the next one waiting, as
+    the chip did. The tile marks the agent itself. The frame entry's "needs-you chip" is
+    withdrawn.
+  - **Inset.** A terminal's text, a note's and a file's started 8 pt from the divider, level
+    with the header's icon. With panes flush, text that close to the hairline reads as
+    cramped; Warp leaves about twice that. `Spacing::inset()` (12) is now the one edge for the
+    header, the grid and both text bodies. A remote window and a browser page stay full-bleed.
+
+  - **Words.** The agent and finished pills were lowercase fragments: `claude`, `allow? Bash`,
+    `asking: a question`, `done 3.2 s`. They read as sentences now: `Idle`, `Allow Bash?`,
+    `Has a question`, `Done · 3.2 s`, `Exit 1 · 1 m 04 s`, in the shape of `Exited · code N`.
+  - **A worker coming up keeps its hands off the keys.** A worker with nothing on it is given
+    a shell, and that shell took the focus. When a second worker came up (at launch, on a
+    reconnect, or added by an agent), keys meant for the first machine went to it. The given
+    shell still opens beside the rest, and the focus goes back where it was. With nothing
+    focused yet it takes the focus as before. The two-machine e2e caught this against a real
+    MacBook over Tailscale.
+
+  Tests: the UI tests that looked for the chip look for the status bar's summary
+  (`status-agents`); the e2e helpers already matched any button ending in "needs you".
+  `a_new_workers_shell_opens_beside_without_taking_the_focus`. Every golden was re-accepted.

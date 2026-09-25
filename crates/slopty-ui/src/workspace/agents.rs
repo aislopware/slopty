@@ -62,20 +62,21 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
     let detail = agent.detail.as_deref().filter(|d| !d.is_empty());
     match &agent.status {
         AgentStatus::None => String::new(),
-        AgentStatus::Idle => "claude".to_owned(),
-        AgentStatus::Working => detail.unwrap_or("working").to_owned(),
+        AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt) => "Idle".to_owned(),
+        AgentStatus::Working => detail.unwrap_or("Working").to_owned(),
         AgentStatus::Tool { tool } => detail.unwrap_or(tool).to_owned(),
         AgentStatus::Blocked(BlockReason::Permission { tool }) => {
-            format!("allow? {}", detail.unwrap_or(tool))
+            format!("Allow {}?", detail.unwrap_or(tool))
         }
         AgentStatus::Blocked(BlockReason::Question) => {
-            format!("asking: {}", detail.unwrap_or("a question"))
+            detail.map_or_else(|| "Has a question".to_owned(), |d| format!("Asks: {d}"))
         }
         AgentStatus::Blocked(BlockReason::Elicitation) => {
-            format!("needs input: {}", detail.unwrap_or("an answer"))
+            detail.map_or_else(|| "Needs input".to_owned(), |d| format!("Needs input: {d}"))
         }
-        AgentStatus::Blocked(BlockReason::IdlePrompt) => "idle".to_owned(),
-        AgentStatus::Done => format!("done: {}", detail.unwrap_or("turn finished")),
+        AgentStatus::Done => {
+            detail.map_or_else(|| "Turn finished".to_owned(), |d| format!("Done: {d}"))
+        }
     }
 }
 

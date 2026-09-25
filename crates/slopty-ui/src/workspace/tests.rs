@@ -349,8 +349,8 @@ fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
 #[test]
 fn a_finished_badge_says_the_status_and_the_time() {
     let done = |exit| Finished { command: "make".into(), exit, elapsed: Duration::from_secs(3) };
-    assert!(done(Some(0)).label().starts_with("done "), "{}", done(Some(0)).label());
-    assert!(done(Some(2)).label().starts_with("failed (2) "), "{}", done(Some(2)).label());
+    assert!(done(Some(0)).label().starts_with("Done · "), "{}", done(Some(0)).label());
+    assert!(done(Some(2)).label().starts_with("Exit 2 · "), "{}", done(Some(2)).label());
 }
 
 #[test]
@@ -1049,7 +1049,7 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.needs_you_count()), 1);
     assert!(events.borrow().contains(&WorkspaceEvent::NeedsYou(1)), "{:?}", events.borrow());
-    assert!(cx.debug_bounds("needs-you").is_some(), "the titlebar says so");
+    assert!(cx.debug_bounds("status-agents").is_some(), "the status bar says so");
     cx.simulate_keystrokes("cmd-shift-a");
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(waiting));
@@ -1143,7 +1143,7 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
         view.read_with(cx, |v, _| (v.needs_you_count(), v.needs_you_on(studio.key))),
         (1, 1)
     );
-    assert!(cx.debug_bounds("needs-you").is_some(), "the titlebar counts it");
+    assert!(cx.debug_bounds("status-agents").is_some(), "the status bar counts it");
     studio.drain();
 
     cx.simulate_keystrokes("cmd-shift-a");
@@ -1252,3 +1252,23 @@ mod palette;
 mod remote;
 mod strip_marks;
 mod tiles;
+
+/// A worker that comes up with nothing on it is given a shell beside the rest, and the focus
+/// stays where the human is typing: keys meant for one machine never land on another. The
+/// first worker's shell, with nothing focused yet, takes the focus.
+#[gpui::test]
+fn a_new_workers_shell_opens_beside_without_taking_the_focus(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let typing = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    assert_eq!(focused(&view, cx), Some(typing), "the first shell takes the focus");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let given = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
+    assert_eq!(focused(&view, cx), Some(typing), "the focus stays on the studio's shell");
+    let workspace_of = |tile| {
+        view.read_with(cx, |v, _| v.layout().position(tile).map(|p| p.workspace)).expect("placed")
+    };
+    assert_eq!(workspace_of(given), workspace_of(typing), "beside it, in the same workspace");
+    let next = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 2);
+    assert_eq!(focused(&view, cx), Some(next), "a shell the human opens takes the focus");
+}

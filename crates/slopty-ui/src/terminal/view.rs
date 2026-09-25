@@ -5531,7 +5531,7 @@ mod tests {
     #[gpui::test]
     fn a_zoomed_grid_still_fits_the_item(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
-        let pad = px(Theme::default().spacing.sm);
+        let pad = px(Theme::default().spacing.inset());
         for zoom in [0.3_f32, 0.5, 1.0, 2.0] {
             view.update_in(cx, |view, _window, cx| {
                 view.set_zoom(zoom);

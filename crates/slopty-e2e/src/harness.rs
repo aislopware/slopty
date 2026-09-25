@@ -283,13 +283,15 @@ fn terminfo_env(root: &Path) -> [(&'static str, std::ffi::OsString); 2] {
 /// The variable naming the pasteboard the worker and the app share the clipboard through.
 pub const PASTEBOARD_ENV: &str = "SLOPTY_PASTEBOARD";
 
-/// The pasteboard `who` (`worker`, or an app's name) of the run under `root` uses: named after
-/// the run, so no two runs and no two processes share one, and nothing touches the human's
-/// clipboard.
+/// The pasteboard `who` (`worker`, or an app's name) of the run under `root` uses.
+///
+/// Named after the run and this test process, so no two runs and no two processes share one,
+/// and nothing touches the human's clipboard. The process is in the name because a root's name
+/// repeats from run to run ([`StackDir`]), and a named pasteboard outlives the run that wrote it.
 #[must_use]
 pub fn pasteboard_name(root: &Path, who: &str) -> String {
     let run = root.file_name().map_or_else(|| "run".into(), |n| n.to_string_lossy());
-    format!("com.aislopware.slopty.e2e.{run}.{who}")
+    format!("com.aislopware.slopty.e2e.{run}.{}.{who}", std::process::id())
 }
 
 /// The shells' zsh configuration: a fixed prompt and nothing else, in `root/zsh`, which ptyd's

@@ -418,14 +418,23 @@ pub struct Spacing {
     pub xxs: f32,
     /// 4: tight gaps, inline button padding.
     pub xs: f32,
-    /// 8: the base unit — row gaps, button padding, grid inset.
+    /// 8: the base unit — row gaps, button padding.
     pub sm: f32,
-    /// 12: panel horizontal padding, section gaps.
+    /// 12: panel horizontal padding, section gaps, a tile's inset.
     pub md: f32,
     /// 16: panel padding.
     pub lg: f32,
     /// 24: dialog padding.
     pub xl: f32,
+}
+
+impl Spacing {
+    /// How far in a tile's content starts: its header, a terminal's grid, a note's and a
+    /// file's text, so they share one edge, clear of the dividers between flush panes.
+    #[must_use]
+    pub const fn inset(&self) -> f32 {
+        self.md
+    }
 }
 
 impl Default for Spacing {

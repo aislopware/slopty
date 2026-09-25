@@ -72,7 +72,7 @@ struct BarRow {
     /// What the left part holds at its natural width: the name, the server's and the workers'
     /// status.
     left: f32,
-    /// What the right part holds: the round trip, who needs you, "+" and "…".
+    /// What the right part holds: the bell, "+" and "…".
     right: f32,
     /// The dots themselves.
     dots: f32,
@@ -217,32 +217,9 @@ impl WorkspaceView {
             cx.notify();
         }));
 
-        // Right: the agents waiting, the inbox, "+" and "…".
+        // Right: the inbox, "+" and "…". Who needs you is counted on the bell and named in the
+        // status bar, which also goes to them.
         let total = self.needs_you_count();
-        let needs_you_text = (total > 0).then(|| {
-            if total == 1 { "1 needs you".to_owned() } else { format!("{total} need you") }
-        });
-        let needs_you = needs_you_text.clone().map(|text| {
-            let warm = s.warn;
-            let pill = div()
-                .id("needs-you")
-                .debug_selector(|| "needs-you".to_owned())
-                .role(Role::Button)
-                .aria_label(SharedString::from(text.clone()))
-                .flex_none()
-                .px(px(spacing.sm))
-                .py(px(spacing.xxs))
-                .rounded(px(radii.xs))
-                .text_size(px(small))
-                .text_color(hsla(warm))
-                .bg(hsla_alpha(warm, alpha::FAINT))
-                .hover(move |el| el.bg(hsla_alpha(warm, alpha::TINT)))
-                .cursor_pointer()
-                .child(SharedString::from(text));
-            tab_stop(pill, s.accent).on_click(cx.listener(|this, _ev, window, cx| {
-                this.next_attention(&super::actions::NextAttention, window, cx);
-            }))
-        });
         let unread = self.inbox_count();
         let bell = has_workers.then(|| {
             let tone = if total > 0 { s.warn } else { s.accent };
@@ -316,12 +293,8 @@ impl WorkspaceView {
                     .filter(|w| !w.status.is_up())
                     .map(|w| status(&format!("{} {}", w.name, w.status.text()))),
             );
-            let chip = needs_you_text
-                .as_deref()
-                .map(|t| spacing.sm.mul_add(2.0, text(t, small, gpui::FontWeight::NORMAL)));
             let count: f32 = if has_workers { 3.0 } else { 1.0 };
-            let buttons_w = count.mul_add(side, (count - 1.0) * spacing.xxs);
-            let right = chip.map_or(buttons_w, |chip| chip + spacing.md + buttons_w);
+            let right = count.mul_add(side, (count - 1.0) * spacing.xxs);
             let x = dots_at(BarRow {
                 width: self.width(window),
                 safe: (f32::from(safe.left), f32::from(safe.right)),
@@ -373,16 +346,7 @@ impl WorkspaceView {
                     .children(down),
             )
             .children(indicator)
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .gap(px(spacing.md))
-                    .children(needs_you)
-                    .child(buttons),
-            )
+            .child(div().flex_1().flex().items_center().justify_end().child(buttons))
             .into_any_element()
     }
 

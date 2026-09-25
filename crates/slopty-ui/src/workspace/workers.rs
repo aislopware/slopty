@@ -242,8 +242,12 @@ impl WorkspaceView {
                 let tile = TileRef { worker: key, item: id };
                 let placement = if by_me { Placement::Local } else { Placement::Remote };
                 self.layout.open(tile, placement);
-                if by_me {
-                    self.after_focus_moved(cx);
+                // A worker's given shell opens beside the rest and leaves the focus where it
+                // was: a worker coming up must not take the keys someone is typing elsewhere.
+                match (by_me, self.given_pending.remove(&key)) {
+                    (true, Some(Some(before))) => self.layout.focus(before),
+                    (true, _) => self.after_focus_moved(cx),
+                    (false, _) => {}
                 }
             }
             ItemChange::Removed(id) => {
@@ -267,6 +271,7 @@ impl WorkspaceView {
         if !empty || !self.given_shell.insert(key) {
             return;
         }
+        self.given_pending.insert(key, self.focused());
         self.open_session_on(key, None, Vec::new(), None, cx);
     }
 

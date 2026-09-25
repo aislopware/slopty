@@ -1075,7 +1075,7 @@ impl Element for TerminalElement {
             (
                 px(theme.typography.mono_size),
                 theme.typography.mono_line_height,
-                px(theme.spacing.sm),
+                px(theme.spacing.inset()),
                 theme.behaviour.cursor_blink,
                 theme.behaviour.cursor_style,
                 theme.typography.ligatures,

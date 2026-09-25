@@ -235,13 +235,13 @@ pub struct Finished {
 }
 
 impl Finished {
-    /// The badge text: "done 3.2 s", "failed (1) 1 m 04 s" (the row caption's clock).
+    /// The badge text: "Done · 3.2 s", "Exit 1 · 1 m 04 s" (the row caption's clock).
     #[must_use]
     pub fn label(&self) -> String {
         let took = crate::terminal::took_label(self.elapsed);
         match self.exit {
-            Some(0) | None => format!("done {took}"),
-            Some(code) => format!("failed ({code}) {took}"),
+            Some(0) | None => format!("Done · {took}"),
+            Some(code) => format!("Exit {code} · {took}"),
         }
     }
 }
@@ -401,6 +401,9 @@ pub struct WorkspaceView {
     save_pending: bool,
     /// Workers whose empty registry was given a shell this run.
     given_shell: std::collections::HashSet<WorkerKey>,
+    /// Workers whose given shell has not arrived yet, and the tile that had the focus when it
+    /// was asked for: it goes back there when the shell lands.
+    given_pending: HashMap<WorkerKey, Option<TileRef>>,
     /// The clipboard kept in step with the workers; `None` where the platform has none here.
     clip: Option<Rc<std::cell::RefCell<crate::clipboard::ClipSync>>>,
     /// The app is frontmost.
@@ -520,6 +523,7 @@ impl WorkspaceView {
             layout_saved: saved,
             save_pending: false,
             given_shell: std::collections::HashSet::new(),
+            given_pending: HashMap::new(),
             clip: None,
             app_active: true,
             watching: std::collections::HashSet::new(),

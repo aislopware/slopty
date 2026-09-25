@@ -654,7 +654,7 @@ impl WorkspaceView {
             .flex_none()
             .flex()
             .items_center()
-            .px(px(theme.spacing.sm * k))
+            .px(px(theme.spacing.inset() * k))
             .gap(px(theme.spacing.sm * k))
             .border_b_1()
             .border_color(hsla(s.border))
@@ -1235,7 +1235,7 @@ impl WorkspaceView {
             }
             ItemKind::Note { .. } => match self.notes.get(&item.id) {
                 Some(view) => {
-                    let (pad, text_size) = (theme.spacing.sm, theme.typography.ui_size);
+                    let (pad, text_size) = (theme.spacing.inset(), theme.typography.ui_size);
                     view.update(cx, |v, _| v.set_layout(k, pad, text_size));
                     div()
                         .flex_1()
@@ -1263,7 +1263,7 @@ impl WorkspaceView {
             },
             ItemKind::File { .. } => match self.files.get(&item.id) {
                 Some(view) => {
-                    let (pad, text_size) = (theme.spacing.sm, theme.typography.mono_size);
+                    let (pad, text_size) = (theme.spacing.inset(), theme.typography.mono_size);
                     view.update(cx, |v, _| v.set_layout(k, pad, text_size));
                     let body = if self.cacheable(placed) {
                         view.clone()
