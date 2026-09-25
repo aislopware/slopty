@@ -163,6 +163,8 @@ pub async fn run(
             "screen closing"
         );
     }
+    // The close drops the stream's input sink, which lets go of every key and button the client
+    // still held: a lost connection ends here too.
     stream.close().await;
     daemon.screens.remove(&client, id);
     if by_client {

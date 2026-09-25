@@ -13,6 +13,9 @@
 //! smaller stream when it is painted small (canvas zoomed out), quantised so the encoder is
 //! not rebuilt on every wheel tick.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,13 +41,13 @@ use slopty_proto::screen::{
     SourceState, VideoCodec,
 };
 use slopty_theme::{Theme, alpha};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::colors::hsla;
 use crate::keys;
 
 /// Asked when a paste chord goes to the worker: what must reach it first.
-pub type PasteHook = std::rc::Rc<dyn Fn() -> PasteAhead>;
+pub type PasteHook = Rc<dyn Fn() -> PasteAhead>;
 
 /// What a paste chord needs ahead of it.
 #[derive(Debug, Default)]
@@ -64,6 +67,9 @@ pub type ScreenFactory = Arc<dyn Fn(StreamId, VideoCodec) -> ScreenHandle + Send
 const QUALITY_COOLDOWN: Duration = Duration::from_millis(400);
 /// Smallest scale the view asks for.
 const MIN_SCALE: f32 = 0.25;
+/// Messages the outbox holds while the outbound queue is full, past which input that lets go of
+/// nothing is dropped (moves never count: they coalesce).
+const OUTBOX_DEPTH: usize = 256;
 
 /// Things the canvas may react to.
 #[derive(Clone, Debug)]
@@ -172,7 +178,11 @@ pub struct ScreenView {
     cursor: CursorState,
     /// The worker's cursor as it is drawn at that position.
     pointer: Pointer,
-    out: mpsc::Sender<ClientMsg>,
+    /// The stream size the worker maps input with: the size last asked for, or last told by
+    /// `Geometry`. The worker takes a new scale in order with the input behind it, so frames
+    /// still in flight at the old scale must not move it (unlike `size`, the picture's).
+    mapped: (u32, u32),
+    out: Outbox,
     theme: Theme,
     focus: FocusHandle,
     bounds: Bounds<Pixels>,
@@ -474,7 +484,8 @@ impl ScreenView {
             quality_changed: Instant::now(),
             cursor: CursorState::default(),
             pointer: Pointer::Arrow,
-            out,
+            mapped: size,
+            out: Outbox::new(out, cx),
             theme,
             focus: cx.focus_handle(),
             bounds: Bounds::default(),
@@ -670,6 +681,7 @@ impl ScreenView {
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
         let side = |native: f32| ((native * bucket).round().max(2.0) as u32).next_multiple_of(2);
         self.size = (side(self.native.0), side(self.native.1));
+        self.mapped = self.size;
         self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
     }
 
@@ -677,6 +689,7 @@ impl ScreenView {
     /// scale, so the native size follows from it.
     pub fn set_geometry(&mut self, width: u32, height: u32) {
         self.size = (width, height);
+        self.mapped = self.size;
         let scale = self.quality.scale.clamp(MIN_SCALE, 1.0);
         #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
         let native = (width as f32 / scale, height as f32 / scale);
@@ -720,9 +733,7 @@ impl ScreenView {
     }
 
     fn send(&self, req: ScreenRequest) {
-        if let Err(e) = self.out.try_send(ClientMsg::Screen(req)) {
-            tracing::warn!(stream = %self.stream, error = %e, "outbound queue");
-        }
+        self.out.send(ClientMsg::Screen(req));
     }
 
     fn input(&mut self, input: ScreenInput) {
@@ -751,15 +762,15 @@ impl ScreenView {
         self.paste_hold.0 > 0
     }
 
-    /// Window position → stream pixels.
+    /// Window position → stream pixels, at the size the worker maps them with.
     fn to_stream(&self, position: Point<Pixels>) -> (f32, f32) {
         let width = f32::from(self.bounds.size.width).max(1.0);
         let height = f32::from(self.bounds.size.height).max(1.0);
         #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
-        let (stream_w, stream_h) = (self.size.0 as f32, self.size.1 as f32);
+        let (stream_w, stream_h) = (self.mapped.0 as f32, self.mapped.1 as f32);
         let x = (f32::from(position.x) - f32::from(self.bounds.origin.x)) / width * stream_w;
         let y = (f32::from(position.y) - f32::from(self.bounds.origin.y)) / height * stream_h;
-        tracing::trace!(?position, bounds = ?self.bounds, size = ?self.size, x, y, "to_stream");
+        tracing::trace!(?position, bounds = ?self.bounds, mapped = ?self.mapped, x, y, "to_stream");
         (x, y)
     }
 
@@ -997,10 +1008,8 @@ impl ScreenView {
     fn push_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some(hook) = self.paste_hook.clone() else { return };
         let ahead = hook();
-        if let Some(msg) = ahead.offer
-            && let Err(e) = self.out.try_send(msg)
-        {
-            tracing::warn!(stream = %self.stream, error = %e, "outbound queue");
+        if let Some(msg) = ahead.offer {
+            self.out.send(msg);
         }
         if let Some(files) = ahead.files {
             self.paste_hold.0 = self.paste_hold.0.saturating_add(1);
@@ -1147,6 +1156,110 @@ impl Drop for ScreenView {
     fn drop(&mut self) {
         self.send(ScreenRequest::Close(self.stream));
     }
+}
+
+/// The view's way to the worker: the connection's outbound queue, and what waits in order for
+/// room in it.
+///
+/// The queue is shared with everything else on the connection, and a full one used to drop
+/// whatever was sent, releases included: a key or button whose release was lost stays down on
+/// the worker. Now nothing is dropped that lets go of something. While messages wait, a move
+/// replaces a move waiting last, since only where the pointer ends up matters.
+struct Outbox {
+    out: mpsc::Sender<ClientMsg>,
+    waiting: Rc<RefCell<VecDeque<ClientMsg>>>,
+    wake: Rc<Notify>,
+}
+
+impl Outbox {
+    /// An outbox into `out`, with the task that moves what waits into it as room frees. The
+    /// task outlives the view until what the view left waiting (its `Close`, say) has gone.
+    fn new(out: mpsc::Sender<ClientMsg>, cx: &gpui::App) -> Self {
+        let waiting = Rc::default();
+        let wake = Rc::new(Notify::new());
+        cx.foreground_executor()
+            .spawn(flush(out.clone(), Rc::clone(&waiting), Rc::clone(&wake)))
+            .detach();
+        Self { out, waiting, wake }
+    }
+
+    fn send(&self, msg: ClientMsg) {
+        let mut waiting = self.waiting.borrow_mut();
+        if waiting.is_empty() {
+            match self.out.try_send(msg) {
+                Ok(()) => return,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!("outbound queue closed");
+                    return;
+                }
+                Err(mpsc::error::TrySendError::Full(msg)) => waiting.push_back(msg),
+            }
+        } else {
+            hold(&mut waiting, msg);
+        }
+        self.wake.notify_one();
+    }
+}
+
+impl Drop for Outbox {
+    fn drop(&mut self) {
+        // The flush task ends once it holds the last reference and nothing waits.
+        self.wake.notify_one();
+    }
+}
+
+/// Move what waits into the queue in order as room frees, until the outbox is gone and nothing
+/// waits, or the connection is.
+async fn flush(
+    out: mpsc::Sender<ClientMsg>,
+    waiting: Rc<RefCell<VecDeque<ClientMsg>>>,
+    wake: Rc<Notify>,
+) {
+    loop {
+        while !waiting.borrow().is_empty() {
+            let Ok(permit) = out.reserve().await else { return };
+            let Some(msg) = waiting.borrow_mut().pop_front() else { break };
+            permit.send(msg);
+        }
+        if Rc::strong_count(&waiting) == 1 {
+            return;
+        }
+        wake.notified().await;
+    }
+}
+
+/// Queue `msg` behind what already waits: a move replaces a move of the same stream waiting
+/// last; past [`OUTBOX_DEPTH`] waiting, input is dropped unless it lets go of something.
+fn hold(waiting: &mut VecDeque<ClientMsg>, msg: ClientMsg) {
+    if let ClientMsg::Screen(ScreenRequest::Input { stream, input: to @ ScreenInput::Move { .. } }) =
+        &msg
+        && let Some(ClientMsg::Screen(ScreenRequest::Input {
+            stream: behind,
+            input: last @ ScreenInput::Move { .. },
+        })) = waiting.back_mut()
+        && behind == stream
+    {
+        *last = to.clone();
+        return;
+    }
+    if waiting.len() >= OUTBOX_DEPTH && !must_arrive(&msg) {
+        tracing::debug!(?msg, "outbound queue full; dropped");
+        return;
+    }
+    waiting.push_back(msg);
+}
+
+/// Whether `msg` may not be dropped: anything but input, and input that ends something — a key
+/// or button release, a scroll gesture's or momentum's end.
+const fn must_arrive(msg: &ClientMsg) -> bool {
+    let ClientMsg::Screen(ScreenRequest::Input { input, .. }) = msg else { return true };
+    matches!(
+        input,
+        ScreenInput::Key { action: KeyAction::Release, .. }
+            | ScreenInput::Button { down: false, .. }
+            | ScreenInput::Scroll { phase: ScrollPhase::Ended | ScrollPhase::Cancelled, .. }
+            | ScreenInput::Scroll { momentum: ScrollPhase::Ended | ScrollPhase::Cancelled, .. }
+    )
 }
 
 const fn proto_button(button: MouseButton) -> ProtoButton {
@@ -1782,10 +1895,10 @@ mod tests {
     fn a_paste_chord_sends_the_clipboard_offer_ahead_of_the_key(cx: &mut gpui::TestAppContext) {
         use slopty_proto::transfer::{ClipMsg, Offer, Peer};
         let (view, mut rx) = view(cx);
-        let pending = std::rc::Rc::new(std::cell::Cell::new(true));
-        let once = std::rc::Rc::clone(&pending);
+        let pending = Rc::new(std::cell::Cell::new(true));
+        let once = Rc::clone(&pending);
         view.update(cx, |v, _| {
-            v.set_paste_hook(std::rc::Rc::new(move || PasteAhead {
+            v.set_paste_hook(Rc::new(move || PasteAhead {
                 offer: once.replace(false).then(|| {
                     let origin = Peer::Client(slopty_core::ClientId::new());
                     let offer = Offer { origin, generation: 1, items: Vec::new() };
@@ -1813,13 +1926,13 @@ mod tests {
         let files = ClipFiles::Here(vec![std::path::PathBuf::from("/tmp/a.png")]);
         let offered = files.clone();
         view.update(cx, |v, _| {
-            v.set_paste_hook(std::rc::Rc::new(move || PasteAhead {
+            v.set_paste_hook(Rc::new(move || PasteAhead {
                 offer: None,
                 files: Some(offered.clone()),
             }));
         });
-        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&asked);
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&asked);
         cx.update(|cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
                 if let ScreenViewEvent::PasteFiles(files) = event {
@@ -2121,5 +2234,119 @@ mod tests {
         );
         cx.run_until_parked();
         assert!(inputs(&mut rx).is_empty());
+    }
+
+    /// Everything the view sends, in order, letting its outbox refill the queue after each
+    /// message is taken.
+    fn drain(cx: &gpui::TestAppContext, rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<ScreenInput> {
+        let mut got = Vec::new();
+        loop {
+            cx.run_until_parked();
+            match rx.try_recv() {
+                Ok(ClientMsg::Screen(ScreenRequest::Input { input, .. })) => got.push(input),
+                Ok(other) => panic!("{other:?}"),
+                Err(_) => return got,
+            }
+        }
+    }
+
+    /// A full outbound queue never loses a release. What does not fit waits and goes, in order,
+    /// as room frees; moves waiting behind each other go as the last one; past the outbox's depth
+    /// a press is dropped and every release is still kept.
+    #[gpui::test]
+    fn a_full_queue_coalesces_moves_and_keeps_every_release(cx: &mut gpui::TestAppContext) {
+        let (out, mut rx) = mpsc::channel(1);
+        let opened = Opened {
+            stream: StreamId(4),
+            target: CaptureTarget::Display(2),
+            size: (800, 600),
+            quality: Quality { scale: 1.0, ..Quality::default() },
+        };
+        let view = cx.new(|cx| {
+            ScreenView::new(opened, ScreenHandle::detached(StreamId(4)), out, Theme::default(), cx)
+        });
+        let mv = |x: f32| ScreenInput::Move { x, y: 0.0 };
+        let key =
+            |action| ScreenInput::Key { code: KeyCode::A, action, mods: Mods::SUPER, text: None };
+        let button = |down| ScreenInput::Button {
+            button: ProtoButton::Left,
+            down,
+            clicks: 1,
+            x: 0.0,
+            y: 0.0,
+            mods: Mods::empty(),
+        };
+        view.update(cx, |v, _| {
+            for input in [
+                mv(1.0),
+                button(true),
+                mv(2.0),
+                mv(3.0),
+                mv(4.0),
+                key(KeyAction::Press),
+                mv(5.0),
+                mv(6.0),
+                key(KeyAction::Release),
+                button(false),
+            ] {
+                v.input(input);
+            }
+        });
+        assert_eq!(
+            drain(cx, &mut rx),
+            [
+                mv(1.0),
+                button(true),
+                mv(4.0),
+                key(KeyAction::Press),
+                mv(6.0),
+                key(KeyAction::Release),
+                button(false),
+            ]
+        );
+
+        view.update(cx, |v, _| {
+            v.input(mv(0.0));
+            for _ in 0..=OUTBOX_DEPTH {
+                v.input(key(KeyAction::Press));
+            }
+            v.input(key(KeyAction::Release));
+            v.input(button(false));
+        });
+        let got = drain(cx, &mut rx);
+        assert_eq!(got.len(), 1 + OUTBOX_DEPTH + 2, "one press past the depth dropped");
+        assert_eq!(got[OUTBOX_DEPTH + 1..], [key(KeyAction::Release), button(false)]);
+    }
+
+    /// Once the view has asked for a smaller picture, the pointer maps into the size it asked
+    /// for even while frames of the old size still arrive: the worker takes the new scale in
+    /// order with the input behind it, before those frames stop.
+    #[gpui::test]
+    fn input_maps_with_the_scale_asked_for_not_the_frame_in_flight(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        view.update(cx, |v, _| {
+            v.quality_changed = past_cooldown();
+            v.set_painted_width(300.0);
+            // A frame at the old scale lands after the ask, and the picture takes its size.
+            v.size = (800, 600);
+        });
+        let asked = sent(&mut rx);
+        assert!(
+            matches!(asked.as_slice(), [ScreenRequest::SetQuality { quality, .. }] if (quality.scale - 0.5).abs() < f32::EPSILON),
+            "{asked:?}"
+        );
+        let bounds = view.read_with(cx, |v, _| v.bounds);
+        let at = point(
+            bounds.origin.x + bounds.size.width * 0.25,
+            bounds.origin.y + bounds.size.height * 0.5,
+        );
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let got = inputs(&mut rx);
+        assert!(
+            matches!(got.as_slice(), [ScreenInput::Button { x, y, .. }]
+                if (x - 100.0).abs() < 1.0 && (y - 150.0).abs() < 1.0),
+            "a quarter across and half down the 400×300 stream asked for: {got:?}"
+        );
     }
 }

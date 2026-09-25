@@ -204,3 +204,48 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
   Test: `a_fling_over_the_picture_reaches_the_worker_as_a_gesture_and_then_as_momentum` drives the
   whole shape, both ways it can finish, and the doubled open.
+
+- ✅ **A stream that ends lets go of everything held on the worker** (2026-09-25). A connection
+  that dropped mid-⌘-chord or mid-drag left ⌘ or the button down on the worker, and on a display
+  stream that is the worker's whole session. Nothing let go of held input when a stream closed or
+  its connection went. The injector tracked buttons but not keys, and the client's `ScreenView`
+  dropped whatever did not fit the connection's full outbound queue, releases included. Ruling:
+  the injector keeps held keys as well as buttons, and `Injector::release_all` lets go of each
+  button where the pointer last was, then each key, then each modifier, whose release carries
+  the modifiers still down. A drop does the same. The sink is dropped when `ScreenStream::close`
+  ends, which both a client's close and a lost connection go through, so both end with nothing
+  held. `InputSink::release_all` is there to let go before the close waits on ScreenCaptureKit
+  as well. On the client the view writes through an `Outbox`. What the queue has no room for
+  waits and goes in order as room frees, and a move replaces a move waiting last. Past 256
+  waiting, input is dropped unless it ends something: a key or button release, a scroll's or
+  momentum's end. Tests: `release_all_lets_go_of_every_button_key_and_modifier`,
+  `dropping_the_injector_lets_go`, `dropping_the_sink_lets_go_of_what_it_held`,
+  `a_full_queue_coalesces_moves_and_keeps_every_release`.
+
+- ✅ **Each stream's input is injected on a thread of its own** (2026-09-25). The stream's tokio
+  task called the injector inline, and the injector talked to the window server there. It read
+  the target's bounds (`CGWindowListCreateDescriptionFromArray`) every 100 ms of pointer input,
+  and looked the owner up in `NSRunningApplication` on every key-down and button-down. Measured
+  on the task, a move cost up to 12 ms and a key press 1–2 ms at the median and up to 17 ms
+  (MEASUREMENTS.md, "input injection off the runtime"). Ruling: `CgEvents` is an `InputThread`.
+  The stream's task hands each event over a channel, and the thread owns the `Injector`, so
+  order holds and the task waits on nothing. A second thread re-reads the bounds every 80 ms
+  while pointer input flows and hands them to the injector (`Injector::set_bounds`). It stops a
+  second after the pointer does and is woken by the next pointer event. Only bounds older than
+  the 100 ms TTL are read in front of an event: the first move after a quiet second, or a wake
+  that raced the reader going idle. The owner found active, or activated, is taken as active
+  for 250 ms. Activation lands some milliseconds after it is asked for, so the check on every
+  key re-activated an owner that was already coming forward. The price is that a key typed
+  within 250 ms of the owner losing activation some other way waits in the owner's queue until
+  the next check. Not the alternative of feeding the geometry probe's bounds (already read at 10 Hz)
+  into the sink. That needs the stream to hand them over, and would retire the reader thread;
+  worth doing when `ScreenStream` next changes. Tests: `fresh_bounds_from_outside_spare_the_read`,
+  `a_burst_of_keys_checks_the_owner_once`, `the_bounds_are_read_beside_the_pointer_not_in_front_of_it`.
+
+- ✅ **The pointer maps with the scale the view asked for** (2026-09-25). `ScreenView` mapped a
+  pointer into the size of the last decoded frame. After a scale change (zooming a card out,
+  the overview) frames at the old scale are still in flight for about a round trip. The worker
+  applies the new scale in order with the input behind it, so every click in that time landed
+  at the old scale's position. The view now keeps the size the worker maps input with apart
+  from the picture's: the size it asked for, or the one `Geometry` reported. Test:
+  `input_maps_with_the_scale_asked_for_not_the_frame_in_flight`.

@@ -3820,3 +3820,42 @@ slopty bench screen --worker <lan-ip>:45560 --window <id> --seconds 20   # host 
 
 The ladder should also run once with audio playing in the target, to read the lane on a real
 link (`laned` in `slopty worker screens`).
+
+## 2026-09-25 — input injection off the runtime
+
+```sh
+cargo nextest run -p slopty-input --test cost --run-ignored only --no-capture
+```
+
+`injection_cost_on_the_callers_thread` drives 1500 moves at 500 Hz and then 200 key presses at
+200 Hz into an injector aimed at a real on-screen window. The window-server reads are real (the
+target's bounds, the owner's `NSRunningApplication`); nothing is posted and nothing is activated.
+The time is what one event costs the thread that hands it over, which on the worker is the
+stream's tokio task. Before is the injector as it stood at `5e7e85d`, called inline by the task.
+After is the stream's `InputThread`. mac-studio, three runs each, with other builds running
+(load average about 6).
+
+| per event, on the stream's task | before | after |
+| --- | --- | --- |
+| move, p50 | 0.4–0.5 µs | 3.0–3.9 µs |
+| move, p99 | 1.1–4.0 ms | 33–48 µs |
+| move, max | 7.2–11.9 ms | 70–296 µs |
+| key press, p50 | 1.3–2.1 ms | 4.0–5.7 µs |
+| key press, p99 | 5.8–15.1 ms | 12–28 µs |
+| key press, max | 12.0–17.2 ms | 20–42 µs |
+| bounds reads in front of a move, of 1500 | 43 | 0–1 (the first move, when it beats the reader) |
+| owner lookups, of 200 presses | 200 | 5–6 |
+
+Before, a bounds read (`CGWindowListCreateDescriptionFromArray`) landed on the task every
+100 ms of pointer input, and every key-down and button-down paid an `NSRunningApplication`
+lookup. The lookup cost 1–2 ms at the median and up to 17 ms, more than the bounds read. On
+the worker the geometry tick measured that read at p95 2–6 ms and 93 ms at most (the heartbeat
+section above). After, the task only queues. The input thread maps each move with bounds that a
+second thread re-reads every 80 ms while pointer input flows, and stops reading a second after
+it stops. The owner is looked up once per 250 ms of keys rather than on every one. The move
+median rises by about 3 µs, the cost of a channel send, in exchange for a tail three orders of
+magnitude shorter.
+
+Queued to posted on the input thread, all 1900 events: p50 9–12 µs, p99 0.12–0.74 ms, max
+0.9–8.4 ms. The tail there is the owner lookups and the one inline read, which no longer hold
+up the stream's other work.

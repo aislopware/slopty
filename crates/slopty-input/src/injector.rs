@@ -10,10 +10,25 @@ use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton};
 use slopty_proto::screen::{CaptureTarget, ScreenInput};
 
 use crate::backend::{Backend, Event, Post, Route, System};
-use crate::{InputError, InputSink, keymap};
+use crate::{InputError, keymap};
 
-/// How long cached window bounds stay valid; windows move rarely, pointer events are dense.
-const BOUNDS_TTL: Duration = Duration::from_millis(100);
+/// How long bounds stay valid; windows move rarely, pointer events are dense.
+pub const BOUNDS_TTL: Duration = Duration::from_millis(100);
+
+/// How long an owner found active, or just activated, is taken to stay active. Activation lands
+/// some milliseconds after it is asked for, and the lookup behind the check costs 1–2 ms
+/// (MEASUREMENTS.md, "input injection off the runtime"), so checking before every key-down
+/// re-activated an owner that was already on its way and paid the lookup on every keystroke.
+const ACTIVE_TTL: Duration = Duration::from_millis(250);
+
+/// Every button, in the order [`Injector::release_all`] lets go of them.
+const BUTTONS: [MouseButton; 5] = [
+    MouseButton::Left,
+    MouseButton::Right,
+    MouseButton::Middle,
+    MouseButton::Back,
+    MouseButton::Forward,
+];
 
 /// Whether this process may post events (Accessibility / "post event access").
 #[must_use]
@@ -27,8 +42,12 @@ pub fn request_post() -> bool {
 }
 
 /// Injects one stream's input through a [`Backend`].
+///
+/// It keeps what the client holds down (buttons, keys, modifiers) and lets go of all of it on
+/// [`Self::release_all`] and when dropped, so a stream that ends mid-chord or mid-drag leaves
+/// nothing down on the worker.
 #[derive(Debug)]
-pub struct Injector<B = System> {
+pub struct Injector<B: Backend = System> {
     backend: B,
     target: CaptureTarget,
     /// Stream pixels per display point.
@@ -36,8 +55,14 @@ pub struct Injector<B = System> {
     route: Route,
     bounds: Option<Rect>,
     bounds_at: Option<Instant>,
+    /// When the owner was last found active or activated.
+    active_at: Option<Instant>,
     /// Buttons currently held, so moves post as drags.
     held: u8,
+    /// Where the pointer was last put: where held buttons are let go.
+    at: Option<CGPoint>,
+    /// Keys pressed and not released, in press order.
+    keys: Vec<KeyCode>,
     /// Modifier flags from the latest event, kept so bare modifier presses post correctly.
     flags: CGEventFlags,
 }
@@ -48,28 +73,6 @@ impl Injector<System> {
     #[must_use]
     pub fn new(target: CaptureTarget, scale: f64) -> Self {
         Self::with_backend(target, scale, System)
-    }
-}
-
-/// [`Injector`] posting real events, as the worker's [`InputSink`].
-#[derive(Debug)]
-pub struct CgEvents(Injector);
-
-impl InputSink for CgEvents {
-    fn new(target: CaptureTarget, scale: f64) -> Self {
-        Self(Injector::new(target, scale))
-    }
-
-    fn set_scale(&mut self, scale: f64) {
-        self.0.set_scale(scale);
-    }
-
-    fn inject(&mut self, input: &ScreenInput) -> Result<(), InputError> {
-        self.0.inject(input)
-    }
-
-    fn focus(&mut self) -> Result<(), InputError> {
-        self.0.focus()
     }
 }
 
@@ -86,7 +89,10 @@ impl<B: Backend> Injector<B> {
             route,
             bounds: None,
             bounds_at: None,
+            active_at: None,
             held: 0,
+            at: None,
+            keys: Vec::new(),
             flags: CGEventFlags::empty(),
         }
     }
@@ -142,16 +148,66 @@ impl<B: Backend> Injector<B> {
     /// Bring the target's application to the front so it takes keyboard events.
     pub fn focus(&mut self) -> Result<(), InputError> {
         let Route::Pid(pid) = self.route else { return Ok(()) };
-        self.backend.activate(pid)
+        self.backend.activate(pid)?;
+        self.active_at = Some(Instant::now());
+        Ok(())
     }
 
-    /// Activate the owner if it is not the active app (see the module docs).
+    /// Let go of everything held down: each button where the pointer last was, then each key,
+    /// then each modifier, whose release carries the modifiers still down after it. Nothing
+    /// held posts nothing. Called when the stream ends, and on drop.
+    pub fn release_all(&mut self) {
+        for button in BUTTONS {
+            if self.held & button_bit(button) == 0 {
+                continue;
+            }
+            self.set_held(button, false);
+            let Some(at) = self.at else { continue };
+            let (kind, cg_button, number) = button_event(button, false);
+            if let Err(e) = self.post_mouse(kind, at, cg_button, number, 1) {
+                tracing::debug!(target = ?self.target, ?button, error = %e, "release");
+            }
+        }
+        let (modifiers, plain): (Vec<KeyCode>, Vec<KeyCode>) =
+            std::mem::take(&mut self.keys).into_iter().partition(|&c| keymap::is_modifier(c));
+        for code in plain {
+            self.release_key(code);
+        }
+        for (n, code) in modifiers.iter().enumerate() {
+            let still = modifiers.get(n.saturating_add(1)..).unwrap_or_default();
+            let locked = self.flags & CGEventFlags::MaskAlphaShift;
+            self.flags = still.iter().fold(locked, |flags, &c| flags | modifier_flag(c));
+            self.release_key(*code);
+        }
+    }
+
+    fn release_key(&mut self, code: KeyCode) {
+        if let Err(e) = self.post_key(code, KeyAction::Release, None) {
+            tracing::debug!(target = ?self.target, ?code, error = %e, "release");
+        }
+    }
+
+    /// Bounds read somewhere else at `at`, so the next pointer event need not read them. Older
+    /// than what the injector has, they are ignored.
+    pub fn set_bounds(&mut self, bounds: Option<Rect>, at: Instant) {
+        if self.bounds_at.is_none_or(|had| at > had) {
+            self.bounds = bounds;
+            self.bounds_at = Some(at);
+        }
+    }
+
+    /// Activate the owner if it is not the active app (see the module docs), unless it was
+    /// found active or activated within [`ACTIVE_TTL`].
     fn ensure_active(&mut self) {
         let Route::Pid(pid) = self.route else { return };
+        if self.active_at.is_some_and(|at| at.elapsed() < ACTIVE_TTL) {
+            return;
+        }
         if !self.backend.is_active(pid) {
             // A vanished owner is reported by the next post, not here.
             let _gone = self.backend.activate(pid);
         }
+        self.active_at = Some(Instant::now());
     }
 
     /// The stream was re-scaled: `scale` stream pixels per display point from now on.
@@ -167,15 +223,18 @@ impl<B: Backend> Injector<B> {
         self.target
     }
 
-    /// Stream pixels → global display points, refreshing the cached bounds when stale.
+    /// Stream pixels → global display points, reading the bounds when they are stale.
     fn point(&mut self, x: f32, y: f32) -> Result<CGPoint, InputError> {
         let stale = self.bounds_at.is_none_or(|at| at.elapsed() > BOUNDS_TTL);
         if stale {
+            let read_at = Instant::now();
             self.bounds = self.backend.bounds(self.target);
-            self.bounds_at = Some(Instant::now());
+            self.bounds_at = Some(read_at);
         }
         let rect = self.bounds.ok_or(InputError::NoBounds)?;
-        Ok(to_point(rect, self.scale, f64::from(x), f64::from(y)))
+        let at = to_point(rect, self.scale, f64::from(x), f64::from(y));
+        self.at = Some(at);
+        Ok(at)
     }
 
     const fn move_type(&self) -> CGEventType {
@@ -228,16 +287,42 @@ impl<B: Backend> Injector<B> {
         let down = !matches!(action, KeyAction::Release);
         let modifier = keymap::is_modifier(code);
         let text = text.filter(|t| down && !t.is_empty() && !modifier).map(str::to_owned);
-        self.post(
+        let posted = self.post(
             None,
             Event::Key { vk, down, modifier, repeat: matches!(action, KeyAction::Repeat), text },
-        )
+        );
+        if !down {
+            self.keys.retain(|&held| held != code);
+        } else if posted.is_ok() && !self.keys.contains(&code) {
+            self.keys.push(code);
+        }
+        posted
     }
 
     /// Post through the backend; `route` overrides the stream's own route.
     fn post(&mut self, route: Option<Route>, event: Event) -> Result<(), InputError> {
         let route = route.unwrap_or(self.route);
         self.backend.post(Post { route, flags: self.flags, event })
+    }
+}
+
+impl<B: Backend> Drop for Injector<B> {
+    fn drop(&mut self) {
+        self.release_all();
+    }
+}
+
+/// The flag a held modifier key sets.
+const fn modifier_flag(code: KeyCode) -> CGEventFlags {
+    match code {
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => CGEventFlags::MaskShift,
+        KeyCode::ControlLeft | KeyCode::ControlRight => CGEventFlags::MaskControl,
+        KeyCode::AltLeft | KeyCode::AltRight => CGEventFlags::MaskAlternate,
+        KeyCode::MetaLeft | KeyCode::MetaRight => CGEventFlags::MaskCommand,
+        KeyCode::Fn => CGEventFlags::MaskSecondaryFn,
+        // Caps lock is a lock, not a hold: its flag says whether it is on, which letting go of
+        // the key does not change.
+        _ => CGEventFlags::empty(),
     }
 }
 
@@ -574,6 +659,168 @@ mod tests {
         let mut inj = display();
         inj.focus().unwrap();
         assert!(inj.backend().activations.is_empty());
+    }
+
+    /// `release_all` lets go of every held button where the pointer last was, then every key,
+    /// then every modifier, each modifier's release carrying only the modifiers still down; the
+    /// held state is empty afterwards, so a second call posts nothing.
+    #[test]
+    fn release_all_lets_go_of_every_button_key_and_modifier() {
+        let mut inj = display();
+        let key =
+            |code, mods| ScreenInput::Key { code, action: KeyAction::Press, mods, text: None };
+        let button = |button| ScreenInput::Button {
+            button,
+            down: true,
+            clicks: 1,
+            x: 4.0,
+            y: 6.0,
+            mods: Mods::SUPER | Mods::SHIFT,
+        };
+        inj.inject(&key(KeyCode::MetaLeft, Mods::SUPER)).unwrap();
+        inj.inject(&key(KeyCode::ShiftLeft, Mods::SUPER | Mods::SHIFT)).unwrap();
+        inj.inject(&key(KeyCode::Z, Mods::SUPER | Mods::SHIFT)).unwrap();
+        inj.inject(&button(MouseButton::Left)).unwrap();
+        inj.inject(&button(MouseButton::Middle)).unwrap();
+        inj.inject(&ScreenInput::Move { x: 8.0, y: 9.0 }).unwrap();
+        let before = inj.backend().posts.len();
+        inj.release_all();
+
+        let ups: Vec<(Event, CGEventFlags)> =
+            inj.backend().posts[before..].iter().map(|p| (p.event.clone(), p.flags)).collect();
+        let vk = |code| keymap::virtual_key(code).unwrap();
+        let mouse_up = |kind, button, number| Event::Mouse {
+            kind,
+            at: pt(108.0, 59.0),
+            button,
+            number,
+            clicks: 1,
+        };
+        let key_up = |code, modifier| Event::Key {
+            vk: vk(code),
+            down: false,
+            modifier,
+            repeat: false,
+            text: None,
+        };
+        let both = CGEventFlags::MaskCommand | CGEventFlags::MaskShift;
+        assert_eq!(
+            ups,
+            [
+                (mouse_up(CGEventType::LeftMouseUp, CGMouseButton::Left, 0), both),
+                (mouse_up(CGEventType::OtherMouseUp, CGMouseButton::Center, 2), both),
+                (key_up(KeyCode::Z, false), both),
+                (key_up(KeyCode::MetaLeft, true), CGEventFlags::MaskShift),
+                (key_up(KeyCode::ShiftLeft, true), CGEventFlags::empty()),
+            ]
+        );
+        assert_eq!(inj.move_type(), CGEventType::MouseMoved, "no button is held");
+        let after = inj.backend().posts.len();
+        inj.release_all();
+        assert_eq!(inj.backend().posts.len(), after, "nothing is held the second time");
+    }
+
+    /// A key released by the client is no longer held; a repeat does not hold it twice.
+    #[test]
+    fn released_keys_are_not_released_again() {
+        let mut inj = display();
+        let key =
+            |action| ScreenInput::Key { code: KeyCode::A, action, mods: Mods::empty(), text: None };
+        inj.inject(&key(KeyAction::Press)).unwrap();
+        inj.inject(&key(KeyAction::Repeat)).unwrap();
+        inj.inject(&key(KeyAction::Release)).unwrap();
+        let posted = inj.backend().posts.len();
+        inj.release_all();
+        assert_eq!(inj.backend().posts.len(), posted);
+    }
+
+    /// Dropping the injector, as a closed stream does, lets go of what it held.
+    #[test]
+    fn dropping_the_injector_lets_go() {
+        #[derive(Debug)]
+        struct Shared(Recorder, std::rc::Rc<std::cell::RefCell<Vec<Post>>>);
+        impl Backend for Shared {
+            fn owner_pid(&self, target: CaptureTarget) -> Option<i32> {
+                self.0.owner_pid(target)
+            }
+
+            fn bounds(&mut self, target: CaptureTarget) -> Option<Rect> {
+                self.0.bounds(target)
+            }
+
+            fn is_active(&mut self, pid: i32) -> bool {
+                self.0.is_active(pid)
+            }
+
+            fn activate(&mut self, pid: i32) -> Result<(), InputError> {
+                self.0.activate(pid)
+            }
+
+            fn post(&mut self, post: Post) -> Result<(), InputError> {
+                self.1.borrow_mut().push(post);
+                Ok(())
+            }
+        }
+        let tap = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let backend = Shared(Recorder::display(BOUNDS), std::rc::Rc::clone(&tap));
+        let mut inj = Injector::with_backend(CaptureTarget::Display(1), 1.0, backend);
+        inj.inject(&ScreenInput::Key {
+            code: KeyCode::MetaLeft,
+            action: KeyAction::Press,
+            mods: Mods::SUPER,
+            text: None,
+        })
+        .unwrap();
+        drop(inj);
+        let posts = tap.borrow();
+        assert!(
+            matches!(posts.as_slice(), [_, Post { event: Event::Key { down: false, .. }, flags, .. }]
+                if flags.is_empty()),
+            "{posts:?}"
+        );
+    }
+
+    /// Bounds handed in fresh are used as they are; stale ones are read again.
+    #[test]
+    fn fresh_bounds_from_outside_spare_the_read() {
+        let mut inj = display();
+        inj.set_bounds(Some(Rect { x: 1000.0, y: 0.0, w: 10.0, h: 10.0 }), Instant::now());
+        inj.inject(&ScreenInput::Move { x: 5.0, y: 5.0 }).unwrap();
+        assert_eq!(inj.backend().bounds_reads, 0);
+        assert!(
+            matches!(inj.backend().posts[0].event, Event::Mouse { at, .. } if at == pt(1005.0, 5.0))
+        );
+        // Older than what the injector has: ignored.
+        let old = Instant::now().checked_sub(BOUNDS_TTL.saturating_mul(3)).unwrap();
+        inj.set_bounds(None, old);
+        inj.inject(&ScreenInput::Move { x: 5.0, y: 5.0 }).unwrap();
+        assert_eq!(inj.backend().bounds_reads, 0);
+        // Stale: the injector reads them itself.
+        let mut inj = display();
+        inj.set_bounds(Some(Rect { x: 1000.0, y: 0.0, w: 10.0, h: 10.0 }), old);
+        inj.inject(&ScreenInput::Move { x: 5.0, y: 5.0 }).unwrap();
+        assert_eq!(inj.backend().bounds_reads, 1);
+        assert!(
+            matches!(inj.backend().posts[0].event, Event::Mouse { at, .. } if at == pt(105.0, 55.0))
+        );
+    }
+
+    /// A burst of key presses looks the owner up once, not once per key, while the owner was
+    /// just found active or activated.
+    #[test]
+    fn a_burst_of_keys_checks_the_owner_once() {
+        let mut inj = window();
+        for _ in 0..20 {
+            inj.inject(&ScreenInput::Key {
+                code: KeyCode::A,
+                action: KeyAction::Press,
+                mods: Mods::empty(),
+                text: Some("a".into()),
+            })
+            .unwrap();
+        }
+        assert_eq!(inj.backend().active_checks, 1);
+        assert_eq!(inj.backend().activations, [PID]);
     }
 
     #[test]

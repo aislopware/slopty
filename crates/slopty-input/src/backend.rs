@@ -105,9 +105,9 @@ pub trait Backend {
     /// The pid owning a window target; `None` for displays or unknown windows.
     fn owner_pid(&self, target: CaptureTarget) -> Option<i32>;
     /// Current bounds of the target in global display points.
-    fn bounds(&self, target: CaptureTarget) -> Option<Rect>;
+    fn bounds(&mut self, target: CaptureTarget) -> Option<Rect>;
     /// Whether the app with this pid is the active application.
-    fn is_active(&self, pid: i32) -> bool;
+    fn is_active(&mut self, pid: i32) -> bool;
     /// Bring the app with this pid to the front.
     fn activate(&mut self, pid: i32) -> Result<(), InputError>;
     /// Post one event.
@@ -126,11 +126,11 @@ impl Backend for System {
         }
     }
 
-    fn bounds(&self, target: CaptureTarget) -> Option<Rect> {
+    fn bounds(&mut self, target: CaptureTarget) -> Option<Rect> {
         slopty_capture::target_bounds(target)
     }
 
-    fn is_active(&self, pid: i32) -> bool {
+    fn is_active(&mut self, pid: i32) -> bool {
         NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
             .is_some_and(|app| app.isActive())
     }
@@ -242,6 +242,10 @@ pub struct Recorder {
     pub owner: Option<i32>,
     /// Whether the owner currently counts as the active app.
     pub active: bool,
+    /// Calls to [`Backend::bounds`]: window-server reads, on the real backend.
+    pub bounds_reads: usize,
+    /// Calls to [`Backend::is_active`]: `NSRunningApplication` lookups, on the real backend.
+    pub active_checks: usize,
     /// Pids passed to [`Backend::activate`], in order.
     pub activations: Vec<i32>,
     /// Everything posted, in order.
@@ -276,11 +280,13 @@ impl Backend for Recorder {
         }
     }
 
-    fn bounds(&self, _target: CaptureTarget) -> Option<Rect> {
+    fn bounds(&mut self, _target: CaptureTarget) -> Option<Rect> {
+        self.bounds_reads = self.bounds_reads.saturating_add(1);
         self.bounds
     }
 
-    fn is_active(&self, pid: i32) -> bool {
+    fn is_active(&mut self, pid: i32) -> bool {
+        self.active_checks = self.active_checks.saturating_add(1);
         self.active && self.owner == Some(pid)
     }
 
