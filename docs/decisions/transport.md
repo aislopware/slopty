@@ -1050,11 +1050,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   written behind it waits for it: at the bottleneck if it was paced above the link rate, in QUIC
   if below, since noq writes datagrams before stream data (`connection/mod.rs:6504` before
   `:6562`). The bound removes the controller's own queue, not that one. The rest of the fix
-  sits in noq, which Slopty does not fork for this:
-  1. Write stream frames before datagrams, or give datagrams a priority below a stream's
-     (`populate_packet`, the `DATAGRAM` block ahead of `STREAM`). Then the capture guard's held
-     frame waits in QUIC behind the echo, and the bound keeps the bottleneck short, which is the
-     half that needed this change.
+  sits in noq:
+  1. Write stream frames before datagrams (`populate_packet`, the `DATAGRAM` block ahead of
+     `STREAM`). Done in Slopty's noq, see "Control and session streams go ahead of datagrams"
+     at the end of this file.
   2. In `handle_restart_from_idle` (`bbr3/mod.rs:1266`) also zero `extra_acked_delivered`, as
      Linux does on `CA_EVENT_TX_START`, and cap `extra_acked` at some milliseconds of `max_bw`
      in `update_max_inflight` (line 1350; Linux uses 100 ms).
@@ -1068,3 +1067,35 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   against `bbr3-unbounded`, watching the rate controller's cap and keyframe delivery. The shaper
   has no AQM and releases packets on 1 ms ticks, so a Wi-Fi link's aggregation or an fq_codel
   router may move the numbers.
+
+- ✅ **Control and session streams go ahead of datagrams; tunnels and files stay behind them**
+  (2026-09-25, MEASUREMENTS.md "an echo ahead of the datagrams"). noq-proto 1.3.0 writes every
+  queued DATAGRAM frame that fits before any STREAM frame, so an echo written behind a keyframe
+  left after it. Slopty patches noq with `TransportConfig::stream_priority_before_datagrams`.
+  With `Some(threshold)`, `populate_packet` writes STREAM frames for streams at or above the
+  threshold first, then datagrams, then the rest. Priority order and `send_fairness` hold inside
+  each group, and `None` is noq's order. Neither noq nor quinn had an issue or PR on the
+  ordering. The nearest is noq#816, on hierarchical stream scheduling. The patch lives
+  in `vendor/noq-proto`: the published 1.3.0 crate plus the one commit, wired in with
+  `[patch.crates-io]`. Only `noq-proto` changes, and `noq` and `noq-udp` stay on crates.io.
+  It is vendored rather than forked because this change is one crate and 178 lines, and
+  `vendor/noq-proto/SLOPTY.md` says how to carry it to the next release. It is small and
+  opt-in, so it is worth offering upstream.
+
+  Slopty's threshold is `streams::AHEAD_OF_DATAGRAMS`, 0, which is where the control and session
+  streams sit. Tunnels moved from 0 to `TUNNEL_PRIORITY`, −1, and files from −1 to
+  `BULK_PRIORITY`, −2. A download through a forwarded port has no bound but the link, and ahead
+  of the datagrams it would starve video. A session stream is bounded by the terminal's own
+  credit, and the control stream carries small messages. On the 20 Mbit/s shaper, ten
+  interleaved runs a side, the bursts arm's echo p99 went from 24.6 to 19.0 ms (median of runs)
+  and the halved arm's p50 from 25.3 to 21.0 ms. Keyframe times, goodput and frames delivered
+  whole did not move. `SLOPTY_DATAGRAMS_FIRST=1` restores noq's order, to measure against.
+  `a_session_frame_overtakes_queued_datagrams` (`slopty-net`) fails without the change.
+
+  noq's old order was never strict. When the head datagram does not fit, as in a packet that
+  carries an ACK, the rest of the packet takes stream data of any priority. So files could
+  already slip ahead of video now and then, and still can.
+
+  Worth proposing upstream: it is opt-in, keeps the default, and is a few lines. Upstream may
+  prefer to give datagrams a priority of their own in the stream order, which says the same
+  thing.

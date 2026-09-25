@@ -44,6 +44,11 @@ in its `HelloAck`; it admits a connection by source address alone — loopback, 
 | Terminal | one unidirectional stream per session, worker→client; input on the control stream | grid **row diffs** from the worker-side VT engine, scrollback line pages on demand |
 | Media | unreliable datagrams (RFC 9221) | HEVC fragments + Reed–Solomon parity, Opus audio, cursor position/shape; client → worker: `Feedback` (NACK, refresh), each datagram standing alone so a lost one never holds the next back |
 
+Inside a packet, the control and session streams go first, then media datagrams, then tunnels and
+files (`slopty_net::streams::AHEAD_OF_DATAGRAMS`, on a noq patched with
+`stream_priority_before_datagrams`). Stock noq writes every datagram first, and an echo waited
+behind a keyframe (MEASUREMENTS.md, "an echo ahead of the datagrams").
+
 ## 2. Terminal: the VT engine lives on the worker
 
 The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**, not bytes
@@ -458,8 +463,9 @@ different.
 **Clipboard, files and ports** ride beside the control stream (`slopty-proto::transfer`,
 `slopty-net::streams`). Control messages (`ClipMsg`, `XferMsg`, `WorkerMsg::Ports`) go on the
 control stream. Bytes go on unidirectional bulk streams that open with `UniHead::Bulk` and are
-sent at priority −1, so a file never queues ahead of a keystroke's echo or a video frame. A
-forwarded TCP connection is a client-opened bidirectional stream that opens with `TunnelOpen`.
+sent at priority −2, so a file never queues ahead of a keystroke's echo or a video frame. A
+forwarded TCP connection is a client-opened bidirectional stream that opens with `TunnelOpen`,
+sent at −1: above files, below video.
 
 - **Clipboard: announce, then fetch.** The worker reads `NSPasteboard.changeCount` every 200 ms,
   but only while some connection has sent `Watch(true)`. A client sends that while a remote

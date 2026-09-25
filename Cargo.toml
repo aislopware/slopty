@@ -327,6 +327,12 @@ tempfile = "3.27.0"
 ignore = "0.4.33"
 pretty_assertions = "1.4.1"
 
+# noq-proto 1.3.0 with `TransportConfig::stream_priority_before_datagrams`, so a keystroke's
+# echo is not written behind a keyframe's datagrams (docs/decisions/transport.md). Vendored with
+# the one commit on top; `vendor/noq-proto/SLOPTY.md` says what it is and how to move it.
+[patch.crates-io]
+noq-proto = { path = "vendor/noq-proto" }
+
 # ---------------------------------------------------------------------------------------------
 # Lints. Groups are `warn` here; the gate (`cargo gate`) runs clippy with `-D warnings`, so a
 # warning never reaches main. Restriction lints are opted in one by one.

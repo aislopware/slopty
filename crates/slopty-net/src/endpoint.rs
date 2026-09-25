@@ -67,6 +67,9 @@ const MTU_UPPER_BOUND: u16 = 1252;
 pub const CC_ENV: &str = "SLOPTY_CC";
 /// Appended to a [`CC_ENV`] choice, leaves noq's window alone.
 pub const UNBOUNDED_SUFFIX: &str = "-unbounded";
+/// Set to `1`, noq writes queued datagrams ahead of every stream, as it ships (diagnostics:
+/// measuring against [`crate::streams::AHEAD_OF_DATAGRAMS`]).
+pub const DATAGRAMS_FIRST_ENV: &str = "SLOPTY_DATAGRAMS_FIRST";
 /// Environment override for the initial congestion window, in packets (diagnostics).
 pub const INITIAL_WINDOW_ENV: &str = "SLOPTY_QUIC_IW";
 /// Initial congestion window, in packets of the initial 1200-byte datagram size.
@@ -111,8 +114,15 @@ pub fn transport_config() -> TransportConfig {
         .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
         .datagram_send_buffer_size(DATAGRAM_BUFFER)
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_STREAMS))
-        .max_concurrent_uni_streams(VarInt::from_u32(MAX_STREAMS));
+        .max_concurrent_uni_streams(VarInt::from_u32(MAX_STREAMS))
+        .stream_priority_before_datagrams(streams_ahead_of_datagrams());
     config
+}
+
+/// [`crate::streams::AHEAD_OF_DATAGRAMS`], unless [`DATAGRAMS_FIRST_ENV`] is `1`.
+fn streams_ahead_of_datagrams() -> Option<i32> {
+    let datagrams_first = std::env::var(DATAGRAMS_FIRST_ENV).is_ok_and(|v| v == "1");
+    (!datagrams_first).then_some(crate::streams::AHEAD_OF_DATAGRAMS)
 }
 
 /// Transport config for server links: [`transport_config`] with the lease's timings.

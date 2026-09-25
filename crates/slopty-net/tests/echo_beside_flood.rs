@@ -1,7 +1,9 @@
 //! A terminal's echo beside a video stream on one connection, through a shaped link.
 //!
-//! noq fills each packet with queued datagrams before it writes any stream data, so an echo
-//! written while a frame's datagrams wait for the congestion window leaves after the frame.
+//! noq as it ships fills each packet with queued datagrams before it writes any stream data, so
+//! an echo written while a frame's datagrams wait for the congestion window leaves after the
+//! frame. Slopty's endpoint writes the control and session streams first
+//! (`slopty_net::streams::AHEAD_OF_DATAGRAMS`); `SLOPTY_DATAGRAMS_FIRST=1` puts noq's order back.
 //! Here the worker's side of a real connection runs `/bin/cat` behind the control stream and a
 //! session stream, the way a terminal does, while it floods datagrams the way the encoder hands
 //! frames over: one burst per frame at 60 fps, a keyframe a second. The link is

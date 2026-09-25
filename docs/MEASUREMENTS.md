@@ -4199,7 +4199,8 @@ What the numbers say:
   (`connection/mod.rs:6504` before `:6562`); paced above, it waits in the bottleneck. Either way
   an echo written behind it waits for it. The bound only stops the controller adding queue of
   its own on top. The halved arm shows the sender's half: with the queue held at the bottleneck,
-  the capture guard's 50 kB held in QUIC put the echo's p50 at 24 ms.
+  the capture guard's 50 kB held in QUIC put the echo's p50 at 24 ms. The QUIC half is fixed
+  since: see "an echo ahead of the datagrams" below.
 * **Cubic is not the answer, bounded or not.** Unbounded, it has no rate to pace by, so a burst
   leaves at once: on the shallow queue 950 packets overflowed and not one keyframe arrived
   whole. Bounded, it fills the buffer when the link halves (199 ms, 312 dropped), because
@@ -4212,6 +4213,61 @@ What the numbers say:
 The final run with nothing set, load 10 to 21 (`target/cc-logs/final.log`): bursts echo p50 9.3
 / p99 24.3 ms, queue p99 7.8 ms, cwnd 36 kB, 787 of 789 frames whole at 12.4 Mbit/s; halved
 echo p99 39.4 ms, queue p99 22.8 ms, no overflow, 9.6 Mbit/s.
+
+## 2026-09-25 — an echo ahead of the datagrams
+
+noq-proto 1.3.0 writes every queued DATAGRAM frame that fits into a packet before any STREAM
+frame, so an echo written behind a keyframe waited for the keyframe's datagrams to be paced out
+("datagrams ahead of an echo", above). Slopty's noq now has
+`TransportConfig::stream_priority_before_datagrams(Some(threshold))`: streams at or above the
+threshold write first, then datagrams, then the rest. Slopty sets it to 0, so the control and
+session streams go first and tunnels (−1) and files (−2) stay behind video.
+`SLOPTY_DATAGRAMS_FIRST=1` restores noq's order, and that is the "off" arm.
+
+The harness is `echo_beside_a_video_flood` as described above: 20 Mbit/s, 2 ms each way, 100 ms
+of bottleneck queue, BBR3 with the bound. Release build, mac-studio. On and off ran interleaved,
+alternating which went first, ten runs each for bursts and halved and three for the other arms.
+The load average fell from 159 to 8 over the half hour. Runs 8 to 10 saw 8 to 13. Logs are in
+`target/logs/prio/`.
+
+```
+cargo nextest run -p slopty-net --release --test echo_beside_flood --run-ignored only --no-capture
+SLOPTY_DATAGRAMS_FIRST=1 cargo nextest run -p slopty-net --release --test echo_beside_flood --run-ignored only --no-capture
+SLOPTY_ECHO_ARMS=bursts,halved …                                       # runs 4 to 10
+```
+
+Medians over the runs, with each statistic's range across runs in brackets:
+
+| arm | order | runs | echo p50 ms | echo p99 ms | echo max ms | frames whole | Mbit/s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| bursts | streams first | 10 | 9.4 [8.8–10.7] | **19.0** [13.5–30.2] | **22.9** [14.3–71.9] | all but 2 | 12.4–12.6 |
+| bursts | datagrams first | 10 | 9.8 [8.1–10.1] | 24.6 [18.4–50.9] | 31.8 [19.7–87.1] | all but 1–2 | 12.4–12.7 |
+| halved | streams first | 10 | **21.0** [19.2–24.4] | **34.4** [27.3–43.4] | **39.6** [28.3–55.5] | all but 1–5 | 9.6–9.7 |
+| halved | datagrams first | 10 | 25.3 [23.0–30.7] | 39.0 [33.7–83.3] | 51.0 [33.7–120.6] | all but 3–5 | 9.0–9.7 |
+| laned | streams first | 3 | 9.8 [9.1–10.4] | 17.9 [14.2–23.8] | 25.1 [23.0–30.6] | all but 2 | 12.5–12.6 |
+| laned | datagrams first | 3 | 10.2 [9.1–10.7] | 36.3 [27.9–73.9] | 46.4 [36.9–118.8] | all but 2 | 12.4–12.6 |
+| metered | streams first | 3 | 9.2 [8.6–9.5] | 21.6 [13.8–22.7] | 36.7 [28.3–48.0] | all but 2 | 12.4–12.5 |
+| metered | datagrams first | 3 | 9.0 [8.4–9.5] | 20.7 [20.7–41.7] | 31.3 [21.7–95.7] | all but 2–3 | 12.3–12.4 |
+
+Paired run by run, streams first had the lower or equal bursts p99 in nine of ten runs and the
+lower halved p50 in all ten. The halved arm holds the capture guard's 50 kB in QUIC for most of
+its keys, and its p50 dropped by about 4 ms. Bursts only catches an echo behind a keyframe now
+and then, so its p50 is unchanged and its tail moved. Keyframe p50 stayed at 55 to 56 ms
+(bursts) and 149 to 165 ms (halved), and the same frames arrived whole in both orders. Video
+gave up nothing. The "datagrams ahead of it" column the harness prints reads the same in both
+orders. It counts what QUIC held when the echo was written, and streams first now pass it.
+
+What is left is the bottleneck. The halved arm's echo p50 of 21 ms is the 7 ms baseline plus a
+queue of 10 to 15 ms at the shaper, and a keyframe already on the wire when a key arrives still
+drains ahead of the echo. Single maxima of 50 to 120 ms turn up in both orders, and at this load
+they say little.
+
+`a_session_frame_overtakes_queued_datagrams` (`crates/slopty-net/tests/loopback.rs`) queues
+1 200 full datagrams, 1.4 s of a 1 MB/s link, ahead of a session frame. With streams first the
+frame arrived after 1 or 2 of them. With `SLOPTY_DATAGRAMS_FIRST=1` it arrived after all 1 200,
+and the test fails. Early in a connection it came after 16 either way. A packet that carries
+an ACK has no room left for a full datagram, and noq then fills it with stream data, a file's
+included. So noq's order was never strict, and the test waits out start-up before it floods.
 
 ## 2026-09-25 — a working mark that steps: frames drawn a second with one agent at work
 

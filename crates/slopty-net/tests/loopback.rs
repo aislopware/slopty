@@ -301,4 +301,72 @@ mod tests {
         assert!(matches!(err, HandshakeError::Net(NetError::Connect(_))), "{err:?}");
         assert!(started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
     }
+
+    /// Datagrams queued ahead of a session frame, over a link that takes 1.4 s to carry them: the
+    /// frame leaves in the next packet. With `SLOPTY_DATAGRAMS_FIRST=1` it waits for all of them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_frame_overtakes_queued_datagrams() {
+        const DATAGRAMS: u64 = 1_200;
+        let listener =
+            WorkerListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), Admission::default())
+                .unwrap();
+        let worker_addr = listener.local_addr().unwrap();
+        let link = slopty_shape::Link {
+            delay: Duration::from_millis(1),
+            jitter: Duration::ZERO,
+            loss: 0.0,
+            rate: 1_000_000,
+            queue: 1_000_000,
+        };
+        let relay = std::sync::Arc::new(
+            slopty_shape::relay::Relay::bind(
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                worker_addr,
+                link,
+                1,
+            )
+            .await
+            .unwrap(),
+        );
+        let relayed = {
+            let relay = std::sync::Arc::clone(&relay);
+            tokio::spawn(async move { relay.run().await })
+        };
+        let (go, flood) = tokio::sync::oneshot::channel::<()>();
+        let worker_task = tokio::spawn(async move {
+            let mut client = listener.accept().await.unwrap();
+            client.tx.send(&WorkerMsg::HelloAck(ack(WorkerId::new()))).await.unwrap();
+            let mut session =
+                streams::open_session(&client.conn, SessionId::new(), streams::SESSION_STREAM_WAIT)
+                    .await
+                    .unwrap();
+            session.send(&TermEvent::Bell).await.unwrap();
+            flood.await.unwrap();
+            // Past start-up: while the worker still acknowledges the client's packets, an ACK
+            // leaves no room for a full datagram and stream data takes the packet in either order.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let size = client.conn.max_datagram_size().unwrap();
+            for _ in 0..DATAGRAMS {
+                client.conn.send_datagram(vec![0_u8; size].into()).unwrap();
+            }
+            session.send(&TermEvent::Bell).await.unwrap();
+            client.conn.closed().await;
+        });
+        let endpoint = bind_client().unwrap();
+        let conn = connect_addr(&endpoint, relay.addr().unwrap(), hello()).await.unwrap();
+        let Uni::Session { rx: mut events, .. } = streams::accept_uni(&conn.conn).await.unwrap()
+        else {
+            panic!("a session stream");
+        };
+        assert_eq!(events.recv().await.unwrap(), TermEvent::Bell);
+        go.send(()).unwrap();
+
+        let echo = tokio::time::timeout(Duration::from_secs(10), events.recv()).await.unwrap();
+        let at_echo = conn.conn.stats().frame_rx.datagram;
+        assert_eq!(echo.unwrap(), TermEvent::Bell);
+        assert!(at_echo < DATAGRAMS / 4, "the frame came after {at_echo} datagrams");
+        conn.close();
+        worker_task.await.unwrap();
+        relayed.abort();
+    }
 }

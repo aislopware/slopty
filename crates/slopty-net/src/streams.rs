@@ -16,9 +16,25 @@ use slopty_proto::transfer::{BulkHeader, TunnelOpen, UniHead};
 use crate::NetError;
 use crate::framed::{FramedRecv, FramedSend};
 
-/// Send priority of bulk streams: below the control stream, session streams and tunnels
-/// (all at the default 0), so a file never queues ahead of a keystroke's echo.
-pub const BULK_PRIORITY: i32 = -1;
+/// Lowest send priority that goes ahead of queued datagrams.
+///
+/// `noq::TransportConfig::stream_priority_before_datagrams` takes it: the control and session
+/// streams, at the default 0, go first, so a keystroke's echo leaves in the next packet instead
+/// of behind a keyframe's datagrams. A tunnel or a file, below it, cannot starve video.
+pub const AHEAD_OF_DATAGRAMS: i32 = 0;
+
+/// Send priority of tunnels: behind video, since a download through a forwarded port has no
+/// bound but the link; ahead of files.
+pub const TUNNEL_PRIORITY: i32 = -1;
+
+/// Send priority of bulk streams: below the control stream, session streams and tunnels, so a
+/// file never queues ahead of a keystroke's echo.
+pub const BULK_PRIORITY: i32 = -2;
+
+const _: () = assert!(
+    BULK_PRIORITY < TUNNEL_PRIORITY && TUNNEL_PRIORITY < AHEAD_OF_DATAGRAMS,
+    "files, then tunnels, then everything that goes ahead of video"
+);
 
 /// A unidirectional stream the peer opened.
 #[derive(Debug)]
@@ -110,20 +126,22 @@ pub async fn accept_uni(conn: &Connection) -> Result<Uni, NetError> {
     })
 }
 
-/// Client: open a tunnel to `port` on the worker.
+/// Client: open a tunnel to `port` on the worker, at [`TUNNEL_PRIORITY`].
 pub async fn open_tunnel(conn: &Connection, port: u16) -> Result<(SendStream, RawRecv), NetError> {
     let (send, recv) = conn.open_bi().await.map_err(|e| NetError::stream(&e))?;
+    send.set_priority(TUNNEL_PRIORITY).map_err(|e| NetError::stream(&e))?;
     let mut head = FramedSend::<TunnelOpen>::new(send);
     head.send(&TunnelOpen { port }).await?;
     Ok((head.into_inner(), RawRecv::new(BytesMut::new(), recv)))
 }
 
 /// Worker: accept the next tunnel a client opens (every bidirectional stream after the control
-/// stream is one).
+/// stream is one), and put its send half at [`TUNNEL_PRIORITY`].
 pub async fn accept_tunnel(
     conn: &Connection,
 ) -> Result<(TunnelOpen, SendStream, RawRecv), NetError> {
     let (send, recv) = conn.accept_bi().await.map_err(|e| NetError::stream(&e))?;
+    send.set_priority(TUNNEL_PRIORITY).map_err(|e| NetError::stream(&e))?;
     let mut head = FramedRecv::<TunnelOpen>::new(recv);
     let open = head.recv().await?;
     Ok((open, send, head.into_raw()))

@@ -8,6 +8,8 @@ include = [
     "crates/**/*.toml",
     "xtask/**/*.toml",
 ]
+# Vendored crates keep their published manifests byte for byte (`*.toml` above reaches them).
+exclude = [ "vendor/**" ]
 
 [formatting]
 align_entries = false
