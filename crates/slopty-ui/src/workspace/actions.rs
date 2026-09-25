@@ -34,6 +34,8 @@ actions!(
         ToggleMute,
         /// Show or hide the stream stats overlay on every remote window.
         ToggleStats,
+        /// Show or hide the navigator: the workers, what runs on them, and what needs you.
+        ToggleNavigator,
         /// Move the keyboard focus to the next control, from anywhere, a terminal included.
         FocusNext,
         /// Move the keyboard focus to the previous control.
@@ -135,6 +137,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-a", NextAttention, CTX),
         KeyBinding::new("cmd-shift-m", ToggleMute, CTX),
         KeyBinding::new("cmd-shift-i", ToggleStats, CTX),
+        KeyBinding::new("cmd-b", ToggleNavigator, CTX),
         KeyBinding::new("cmd-f", crate::terminal::Find, CTX),
         // Tab is the shell's; ⌃Tab enters the control ring from a terminal, then Tab walks it.
         KeyBinding::new("ctrl-tab", FocusNext, RING_CTX),
@@ -208,6 +211,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Next agent that needs you", Box::new(NextAttention)),
         w("Mute or unmute window", Box::new(ToggleMute)),
         w("Stream stats", Box::new(ToggleStats)),
+        w("Show or hide the navigator", Box::new(ToggleNavigator)),
         w("Name this tile", Box::new(RenameItem)),
         w("Point other devices at this tile", Box::new(PointOthers)),
         w("Find in every tile", Box::new(FindEverywhere)),

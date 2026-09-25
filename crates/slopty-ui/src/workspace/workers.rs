@@ -154,7 +154,8 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some(w) = self.workers.get_mut(&key) else { return };
-        let changed = w.rtt != rtt;
+        let label = super::navigator::rtt_label;
+        let changed = w.rtt.map(label) != rtt.map(label);
         w.rtt = rtt;
         let sessions: Vec<SessionId> = w.sessions.keys().copied().collect();
         let items: Vec<ItemId> = w.doc.items().map(|i| i.id).collect();
@@ -168,7 +169,7 @@ impl WorkspaceView {
                 view.update(cx, |v, _| v.set_rtt(rtt));
             }
         }
-        // The bar shows it: repaint only when what it shows moved.
+        // The status bar and the navigator show it: repaint only when what they print moved.
         if changed && self.rtt_shown(key) {
             cx.notify();
         }

@@ -1,7 +1,7 @@
-//! The bar across the top: the active workspace's name and, quietly, any worker that is down
-//! on the left; the strip indicator in the middle; the link's round trip, the agents waiting
-//! on the human, "+" and "…" on the right. Nothing else: every other action is a key, the
-//! palette, or a tile's own header.
+//! The bar across the top: the navigator's toggle, the active workspace's name and, quietly,
+//! any worker that is down on the left; the strip indicator in the middle; the agents waiting
+//! on the human, the inbox's bell, "+" and "…" on the right. Nothing else: every other action
+//! is a key, the palette, or a tile's own header, and the readouts live in the status bar.
 
 use std::rc::Rc;
 
@@ -16,11 +16,12 @@ use slopty_client::layout::WorkerKey;
 use slopty_theme::alpha;
 
 use super::actions::{
-    AddWindow, NewAgent, NewNote, NewTerminal, OpenFile, OpenPalette, ToggleStats,
+    AddWindow, NewAgent, NewNote, NewTerminal, OpenFile, OpenPalette, ToggleNavigator, ToggleStats,
 };
 use super::{MenuEntry, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
+use crate::icons::{IconName, IconSize, icon};
 use crate::kit;
 
 /// The bar's height, under the safe area.
@@ -40,10 +41,6 @@ const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
 const DOT: f32 = 6.0;
 const DOTS_AT_FULL_SIZE: usize = 12;
 
-/// The side of the square "+" and "…" buttons, and the stroke their glyphs are drawn with.
-const ICON_BUTTON: f32 = 24.0;
-const ICON_STROKE: f32 = 1.5;
-
 /// Which of the bar's menus is open.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum MenuKind {
@@ -51,6 +48,13 @@ pub(super) enum MenuKind {
     Add,
     /// "…": everything else, the app's entries included.
     More,
+    /// The bell: what needs the human and what finished.
+    Inbox,
+}
+
+/// The side of a [`kit::icon_button`], which the dots keep clear of.
+fn icon_button_side(theme: &slopty_theme::Theme) -> f32 {
+    2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large())
 }
 
 /// The widths across the bar that decide where the column dots go, in points.
@@ -86,9 +90,10 @@ fn dots_at(row: BarRow) -> Option<f32> {
 }
 
 impl WorkspaceView {
-    /// Whether the bar shows `key`'s round trip: the worker of the focused tile does.
+    /// Whether `key`'s round trip is on screen: the status bar shows the focused tile's
+    /// worker's, and the navigator every worker's.
     pub(super) fn rtt_shown(&self, key: WorkerKey) -> bool {
-        self.context_worker() == Some(key)
+        self.nav.drawn.is_some() || self.status_worker() == Some(key)
     }
 
     /// The active workspace's name: the one given, else its place.
@@ -118,73 +123,26 @@ impl WorkspaceView {
         let (spacing, radii) = (theme.spacing, theme.radii);
         let safe = window.insets().effective();
         let small = theme.typography.small();
-        let hint_theme = Rc::new(theme.clone());
-        // A square button around a glyph drawn from quads, so "+" and "…" sit on the button's
-        // centre in any font rather than on a text baseline.
-        let button =
-            |id: &'static str, glyph: gpui::AnyElement, label: &'static str, hint: &'static str| {
-                let hint_theme = Rc::clone(&hint_theme);
-                let pill = div()
-                    .id(id)
-                    .debug_selector(move || id.to_owned())
-                    .role(Role::Button)
-                    .aria_label(label)
-                    .flex_none()
-                    .size(px(ICON_BUTTON))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(radii.sm))
-                    .hover(move |el| el.bg(hsla(s.raised)))
-                    .active(move |el| el.bg(hsla(s.overlay)))
-                    .cursor_pointer()
-                    .child(glyph)
-                    .when(SHORTCUT_HINTS && !hint.is_empty(), |el| {
-                        el.tooltip(move |_window, cx| {
-                            cx.new(|_| kit::Hint::new(label, hint, Rc::clone(&hint_theme))).into()
-                        })
-                    });
-                tab_stop(pill, s.accent)
-            };
-        let ink = hsla(s.text_secondary);
-        let plus = div()
-            .relative()
-            .size(px(spacing.md))
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px((spacing.md - ICON_STROKE) / 2.0))
-                    .w_full()
-                    .h(px(ICON_STROKE))
-                    .rounded_full()
-                    .bg(ink),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(px((spacing.md - ICON_STROKE) / 2.0))
-                    .h_full()
-                    .w(px(ICON_STROKE))
-                    .rounded_full()
-                    .bg(ink),
-            )
-            .into_any_element();
-        let dot = || div().size(px(ICON_STROKE * 2.0)).rounded_full().bg(ink);
-        let ellipsis = div()
-            .flex()
-            .items_center()
-            .gap(px(spacing.xxs))
-            .child(dot())
-            .child(dot())
-            .child(dot())
-            .into_any_element();
         // Nothing to open, no column to mark and no one to point at before the first worker:
         // the bar keeps only "…", where settings and the ways to add one live.
         let has_workers = !self.workers.is_empty();
 
-        // Left: where the human is, and which workers are not there with them.
+        // Left: the navigator's toggle, where the human is, and which workers are not there
+        // with them.
+        let toggle = has_workers.then(|| {
+            let hint_theme = Rc::new(theme.clone());
+            kit::icon_button(theme, "navigator-toggle", IconName::PanelLeft, "Navigator")
+                .when(SHORTCUT_HINTS, |el| {
+                    el.tooltip(move |_window, cx| {
+                        let keys =
+                            crate::palette::keys_for(&ToggleNavigator, &super::key_bindings());
+                        cx.new(|_| kit::Hint::new("Navigator", keys, Rc::clone(&hint_theme))).into()
+                    })
+                })
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.toggle_navigator(&ToggleNavigator, window, cx);
+                }))
+        });
         let down: Vec<gpui::AnyElement> = self
             .workers
             .iter()
@@ -232,26 +190,34 @@ impl WorkspaceView {
             )))
             .flex_shrink(1.0)
             .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .text_size(px(theme.typography.ui_size))
-            .font_weight(gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT))
-            .text_color(hsla(s.text))
+            .flex()
+            .items_center()
+            .gap(px(spacing.xs))
+            .px(px(spacing.xs))
+            .py(px(spacing.xxs))
+            .rounded(px(radii.sm))
+            .hover(move |el| el.bg(hsla(s.raised)))
+            .active(move |el| el.bg(hsla(s.overlay)))
             .cursor_pointer()
-            .child(SharedString::from(self.workspace_name()))
-            .on_click(cx.listener(|this, _ev, _w, cx| {
-                this.tick();
-                this.layout.toggle_overview();
-                cx.notify();
-            }));
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(theme.typography.ui_size))
+                    .font_weight(gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT))
+                    .text_color(hsla(s.text))
+                    .child(SharedString::from(self.workspace_name())),
+            )
+            .child(icon(theme, IconName::ChevronDown, IconSize::Inline, hsla(s.text_muted)));
+        let name = tab_stop(name, s.accent).on_click(cx.listener(|this, _ev, _w, cx| {
+            this.tick();
+            this.layout.toggle_overview();
+            cx.notify();
+        }));
 
-        // Right: the round trip to the focused tile's worker, the agents waiting, "+" and "…".
-        let rtt = self
-            .context_worker()
-            .and_then(|key| self.workers.get(&key)?.rtt)
-            .map(|d| format!("{:.1} ms", d.as_secs_f64() * 1e3));
-        let rtt_text = rtt.clone();
+        // Right: the agents waiting, the inbox, "+" and "…".
         let total = self.needs_you_count();
         let needs_you_text = (total > 0).then(|| {
             if total == 1 { "1 needs you".to_owned() } else { format!("{total} need you") }
@@ -277,44 +243,55 @@ impl WorkspaceView {
                 this.next_attention(&super::actions::NextAttention, window, cx);
             }))
         });
-        let add = has_workers.then(|| {
-            button("add", plus, "Open", "").on_click(cx.listener(|this, _ev, _w, cx| {
-                this.toggle_menu(MenuKind::Add, cx);
-            }))
+        let unread = self.inbox_count();
+        let bell = has_workers.then(|| {
+            let tone = if total > 0 { s.warn } else { s.accent };
+            let badge = (unread > 0).then(|| {
+                let count = SharedString::from(unread.to_string());
+                let side = theme.typography.caption() + spacing.xs;
+                div()
+                    .id("bell-count")
+                    .debug_selector(|| "bell-count".to_owned())
+                    .role(Role::Status)
+                    .aria_label(SharedString::from(format!("{unread} new")))
+                    .absolute()
+                    .top(px(-spacing.xxs))
+                    .right(px(-spacing.xxs))
+                    .h(px(side))
+                    .min_w(px(side))
+                    .px(px(spacing.xxs))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(hsla(tone))
+                    .text_color(hsla(s.accent_fg))
+                    .text_size(px(theme.typography.caption()))
+                    .child(count)
+            });
+            kit::icon_button(theme, "bell", IconName::Bell, "Inbox")
+                .relative()
+                .children(badge)
+                .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_menu(MenuKind::Inbox, cx)))
         });
-        let more =
-            button("more", ellipsis, "More", "").on_click(cx.listener(|this, _ev, _w, cx| {
-                this.toggle_menu(MenuKind::More, cx);
-            }));
-        // The readouts, then the buttons: a number set right against "+" read as its label.
-        let readouts = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(spacing.sm))
-            .when_some(rtt, |el, rtt| {
-                el.child(
-                    div()
-                        .id("rtt")
-                        .debug_selector(|| "rtt".to_owned())
-                        .flex_none()
-                        .text_size(px(small))
-                        .text_color(hsla(s.text_muted))
-                        .child(SharedString::from(rtt)),
-                )
-            })
-            .when_some(needs_you, gpui::ParentElement::child);
+        let add = has_workers.then(|| {
+            kit::icon_button(theme, "add", IconName::Plus, "Open")
+                .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_menu(MenuKind::Add, cx)))
+        });
+        let more = kit::icon_button(theme, "more", IconName::Ellipsis, "More")
+            .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_menu(MenuKind::More, cx)));
         let buttons = div()
             .flex_none()
             .flex()
             .items_center()
             .gap(px(spacing.xxs))
-            .when_some(add, gpui::ParentElement::child)
+            .children(bell)
+            .children(add)
             .child(more);
         // The column dots sit on the middle of the safe area, not on the middle of what the
         // traffic lights leave (the bar's leading inset is 78 pt and its trailing one 12, so a
         // dot row between two equal flexible sides stood 33 pt right of it), and give way to
-        // the name and the buttons rather than cover them.
+        // the toggle, the name and the buttons rather than cover them.
         let (leading, trailing) =
             (LEADING_INSET + f32::from(safe.left), spacing.md + f32::from(safe.right));
         let indicator = self.render_indicator(cx).and_then(|(marks, dots)| {
@@ -324,10 +301,13 @@ impl WorkspaceView {
             let status = |status: &str| {
                 spacing.xs.mul_add(2.0, text(status, small, gpui::FontWeight::NORMAL))
             };
+            let side = icon_button_side(theme);
             let mut left: Vec<f32> = Vec::new();
             if has_workers {
                 let strong = gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT);
-                left.push(text(&self.workspace_name(), theme.typography.ui_size, strong));
+                left.push(side);
+                let name = text(&self.workspace_name(), theme.typography.ui_size, strong);
+                left.push(spacing.xs.mul_add(3.0, name) + theme.typography.icon());
             }
             left.extend(self.server_status.as_deref().map(status));
             left.extend(
@@ -336,15 +316,12 @@ impl WorkspaceView {
                     .filter(|w| !w.status.is_up())
                     .map(|w| status(&format!("{} {}", w.name, w.status.text()))),
             );
-            let mut readouts: Vec<f32> = Vec::new();
-            readouts.extend(rtt_text.as_deref().map(|t| text(t, small, gpui::FontWeight::NORMAL)));
-            readouts.extend(
-                needs_you_text
-                    .as_deref()
-                    .map(|t| spacing.sm.mul_add(2.0, text(t, small, gpui::FontWeight::NORMAL))),
-            );
-            let buttons_w =
-                if has_workers { ICON_BUTTON.mul_add(2.0, spacing.xxs) } else { ICON_BUTTON };
+            let chip = needs_you_text
+                .as_deref()
+                .map(|t| spacing.sm.mul_add(2.0, text(t, small, gpui::FontWeight::NORMAL)));
+            let count: f32 = if has_workers { 3.0 } else { 1.0 };
+            let buttons_w = count.mul_add(side, (count - 1.0) * spacing.xxs);
+            let right = chip.map_or(buttons_w, |chip| chip + spacing.md + buttons_w);
             let x = dots_at(BarRow {
                 width: f32::from(window.viewport_size().width),
                 safe: (f32::from(safe.left), f32::from(safe.right)),
@@ -352,7 +329,7 @@ impl WorkspaceView {
                 trailing,
                 gap: spacing.md,
                 left: spaced(&left, spacing.md),
-                right: spaced(&readouts, spacing.sm) + spacing.md + buttons_w,
+                right,
                 dots,
             })?;
             Some(
@@ -390,6 +367,7 @@ impl WorkspaceView {
                     .flex()
                     .items_center()
                     .gap(px(spacing.md))
+                    .children(toggle)
                     .when(has_workers, |el| el.child(name))
                     .when_some(server, gpui::ParentElement::child)
                     .children(down),
@@ -402,7 +380,7 @@ impl WorkspaceView {
                     .items_center()
                     .justify_end()
                     .gap(px(spacing.md))
-                    .child(readouts)
+                    .children(needs_you)
                     .child(buttons),
             )
             .into_any_element()
@@ -508,6 +486,7 @@ impl WorkspaceView {
             }
         };
         let entries: Vec<MenuEntry> = match which {
+            MenuKind::Inbox => Vec::new(),
             MenuKind::Add => vec![
                 action("Shell", &NewTerminal, |this, w, cx| this.new_terminal(&NewTerminal, w, cx)),
                 action("Agent", &NewAgent, |this, w, cx| this.new_agent(&NewAgent, w, cx)),
@@ -581,23 +560,11 @@ impl WorkspaceView {
                     .into_any_element()
             })
             .collect();
-        let panel = div()
-            .id("menu")
-            .debug_selector(|| "menu".to_owned())
-            .role(Role::Menu)
-            .occlude()
-            .w(px(260.0))
-            .flex()
-            .flex_col()
-            .py(px(spacing.xs))
-            .rounded(px(theme.radii.md))
-            .bg(hsla(s.panel))
-            .border_1()
-            .border_color(hsla(s.border))
-            .shadow_sm()
-            .font_family(theme.typography.ui_family.clone())
-            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .children(rows);
+        let panel = if which == MenuKind::Inbox {
+            self.render_inbox(cx)
+        } else {
+            self.menu_panel(rows, cx)
+        };
         // A click anywhere else closes it.
         Some(
             div()
@@ -620,6 +587,31 @@ impl WorkspaceView {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The "+" or "…" menu's panel around its rows.
+    fn menu_panel(&self, rows: Vec<gpui::AnyElement>, _cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let spacing = theme.spacing;
+        div()
+            .id("menu")
+            .debug_selector(|| "menu".to_owned())
+            .role(Role::Menu)
+            .occlude()
+            .w(px(260.0))
+            .flex()
+            .flex_col()
+            .py(px(spacing.xs))
+            .rounded(px(theme.radii.md))
+            .bg(hsla(s.panel))
+            .border_1()
+            .border_color(hsla(s.border))
+            .shadow_sm()
+            .font_family(theme.typography.ui_family.clone())
+            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .children(rows)
+            .into_any_element()
     }
 }
 

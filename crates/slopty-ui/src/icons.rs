@@ -184,9 +184,9 @@ impl Status {
     pub const fn tone(self, theme: &Theme) -> Rgb {
         let s = &theme.surfaces;
         match self {
-            Self::Idle | Self::Away => s.text_muted,
+            Self::Idle => s.text_muted,
             Self::Working => s.accent,
-            Self::NeedsYou => s.warn,
+            Self::NeedsYou | Self::Away => s.warn,
             Self::Done => s.success,
             Self::Failed => s.error,
         }

@@ -11,8 +11,9 @@ use slopty_proto::terminal::TermRequest;
 
 use super::actions::{FindEverywhere, ListWorkers, OpenFile, OpenPalette};
 use super::agents::{agent_status_text, needs_human};
-use super::tile::kind_name;
+use super::tile::{kind_icon, kind_name};
 use super::{AGENT_COMMAND, WorkspaceView};
+use crate::icons::Status;
 use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
 
@@ -28,41 +29,65 @@ impl WorkspaceView {
         tiles.into_iter().map(|(_, t)| t).collect()
     }
 
+    /// `worker`'s name for a line about one of its tiles, when more than one worker is known
+    /// and so the name tells them apart.
+    fn worker_label(&self, worker: WorkerKey) -> Option<String> {
+        (self.workers.len() > 1)
+            .then(|| self.workers.get(&worker).map(|w| w.name.clone()))
+            .flatten()
+    }
+
+    /// A line per worker: `Go to <name>`, its link marked and spelled on the right.
+    fn worker_lines(&self) -> impl Iterator<Item = PaletteItem> + '_ {
+        self.workers.iter().map(|(key, w)| {
+            PaletteItem::worker(&w.name, &w.status.text(), *key)
+                .with_status(Some(super::navigator::worker_status(&w.status)))
+        })
+    }
+
     /// Every line the palette offers: the sessions to go to (agents waiting on the human
-    /// first), the file cards and named tiles, the last few commands of the shell a "run"
-    /// would go to, then every action, then the app's own.
+    /// first), the file cards and named tiles, the workers, the last few commands of the shell
+    /// a "run" would go to, then every action, then the app's own. The palette groups them
+    /// into its sections.
     #[must_use]
     pub fn palette_lines(&self, cx: &Context<Self>) -> Vec<PaletteItem> {
         let mut items: Vec<PaletteItem> = self
             .session_rows(cx)
             .into_iter()
             .map(|row| {
+                let icon = if row.status.is_some() {
+                    crate::icons::IconName::Bot
+                } else {
+                    crate::icons::IconName::SquareTerminal
+                };
                 PaletteItem::session(&row.title, &row.status.unwrap_or_default(), row.session)
+                    .with_icon(icon)
+                    .with_status(row.mark)
+                    .on_worker(row.worker)
             })
             .collect();
         // Every file card, and every other tile the human named: a name is a wish to find it
         // again.
         for tile in self.reading_order() {
             let Some(item) = self.item(tile) else { continue };
-            match &item.kind {
-                ItemKind::Terminal { .. } => {}
-                ItemKind::File { .. } => {
-                    items.push(PaletteItem::item(
-                        &self.card_title(tile, item, cx),
-                        "file",
-                        item.id,
-                    ));
-                }
+            let line = match &item.kind {
+                ItemKind::Terminal { .. } => None,
+                ItemKind::File { .. } => Some(PaletteItem::item(
+                    &self.card_title(tile, item, cx),
+                    "file",
+                    kind_icon(item, false),
+                    item.id,
+                )),
                 ItemKind::Window { .. }
                 | ItemKind::Display { .. }
                 | ItemKind::Note { .. }
-                | ItemKind::Browser { .. } => {
-                    if let Some(name) = item.name.as_deref() {
-                        items.push(PaletteItem::item(name, kind_name(item), item.id));
-                    }
-                }
-            }
+                | ItemKind::Browser { .. } => item.name.as_deref().map(|name| {
+                    PaletteItem::item(name, kind_name(item), kind_icon(item, false), item.id)
+                }),
+            };
+            items.extend(line.map(|line| line.on_worker(self.worker_label(tile.worker))));
         }
+        items.extend(self.worker_lines());
         // The shell a "run" would go to: its last few commands, to run again.
         if let Some(shell) = self.run_target()
             && let Some(view) = self.terminals.get(&shell)
@@ -94,11 +119,7 @@ impl WorkspaceView {
         if self.palette.is_some() {
             return;
         }
-        let lines = self
-            .workers
-            .iter()
-            .map(|(key, w)| PaletteItem::worker(&w.name, &w.status.text(), *key))
-            .collect();
+        let lines = self.worker_lines().collect();
         let theme = self.theme.clone();
         let palette = cx.new(|cx| CommandPalette::new(lines, theme, window, cx));
         self.show_palette(palette, window, cx);
@@ -381,6 +402,20 @@ impl WorkspaceView {
         }
     }
 
+    /// ⌘O asked `key` for its windows: the picker shows at once with the sessions, a row
+    /// standing where the windows will be, so the key never seems to do nothing while the
+    /// worker answers. A picker already up stays as it is.
+    pub(super) fn show_picker_loading(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+        if self.picker.is_some() {
+            return;
+        }
+        let theme = self.theme.clone();
+        let sessions = self.session_rows(cx);
+        let picker = cx.new(|cx| WindowPicker::loading(sessions, theme, cx));
+        self.watch_picker(key, &picker, cx);
+    }
+
+    /// `key`'s listing arrived for the picker: it fills the one waiting for it, or opens one.
     pub(super) fn show_picker(
         &mut self,
         key: WorkerKey,
@@ -388,10 +423,26 @@ impl WorkspaceView {
         displays: Vec<DisplayInfo>,
         cx: &mut Context<Self>,
     ) {
+        if let Some((waiting, picker)) = &self.picker
+            && *waiting == key
+            && picker.read(cx).is_loading()
+        {
+            picker.update(cx, |p, cx| p.set_listing(windows, displays, cx));
+            return;
+        }
         let theme = self.theme.clone();
         let sessions = self.session_rows(cx);
         let picker = cx.new(|cx| WindowPicker::new(sessions, windows, displays, theme, cx));
-        self.subscriptions.push(cx.subscribe(&picker, move |this, _picker, event, cx| {
+        self.watch_picker(key, &picker, cx);
+    }
+
+    fn watch_picker(
+        &mut self,
+        key: WorkerKey,
+        picker: &Entity<WindowPicker>,
+        cx: &mut Context<Self>,
+    ) {
+        self.subscriptions.push(cx.subscribe(picker, move |this, _picker, event, cx| {
             match event {
                 PickerEvent::Pick { target, title, .. } => {
                     this.add_screen_item(key, *target, title.clone(), cx);
@@ -399,13 +450,18 @@ impl WorkspaceView {
                 PickerEvent::Jump(session) => this.reveal_session(*session, cx),
                 PickerEvent::Dismiss => {}
             }
+            // A listing still on its way no longer has a picker to fill; it must not open one.
+            if let Some(w) = this.workers.get_mut(&key) {
+                w.picker_wanted = false;
+            }
             this.picker = None;
             // The jump focuses its terminal; every other outcome hands focus back.
             this.pending_focus_self = !matches!(event, PickerEvent::Jump(_));
             cx.notify();
         }));
         self.pending_focus_picker = true;
-        self.picker = Some((key, picker));
+        self.picker = Some((key, picker.clone()));
+        cx.notify();
     }
 
     /// The terminal sessions for the picker and the palette: agents waiting on the human
@@ -430,6 +486,8 @@ impl WorkspaceView {
                     title: self.card_title(*tile, item, cx),
                     status: agent.map(agent_status_text),
                     needs_you,
+                    mark: agent.and_then(Status::of_agent),
+                    worker: self.worker_label(tile.worker),
                 };
                 Some((rank, at, row))
             })

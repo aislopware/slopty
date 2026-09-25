@@ -1375,3 +1375,61 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_tile_whose_worker_dropped_says_reconnecting_at_its_foot`,
   `an_exited_shell_offers_restart_and_close`, `notices_stack_two_in_the_corner_and_go`,
   `the_closed_notice_takes_the_tile_back`.
+
+  *Shipped: the frame.*
+  - **Navigator** (`workspace/navigator.rs`). It docks at 248 pt and drags from 200 to 400 pt
+    by a 6 pt handle. ⌘B or the toggle after the traffic lights shows and hides it. Its width
+    and whether it docks are saved in `layout.json` as `Saved::navigator`, and restore clamps
+    the width. Where docking would shrink the strip to a phone's width, it opens over the strip
+    instead: on an iPad as an overlay, on a phone as a drawer. Either closes once a row is
+    chosen, and neither changes the saved setting. Native web pages hide under it.
+  - **Worker rows.** A worker row folds its tiles. A tile or workspace row flies the camera
+    there. An away worker is marked `Away` in `warn`, the tone the token table already gives
+    reconnecting.
+  - **Status bar** (`statusbar.rs`). It shows the focused tile's worker and directory tail,
+    uploads in flight, the round trip, the probe's median draw time (recomputed at most once a
+    second), and the agent summary, which runs next-attention. A phone keeps the worker, the
+    round trip and the agents.
+  - **Title bar.** `+` and `…` are Lucide icon buttons, and the workspace name is a button with
+    a chevron. The bell counts waiting agents and unwatched finished commands, and opens
+    `inbox.rs` with *Needs you* and *Finished*. The inbox has no *All* tab yet, because toasts
+    keep no history. The column dots keep clear of the new left-hand items.
+
+  Tests (`workspace/tests/frame.rs`):
+  `the_navigator_docks_only_where_the_strip_keeps_its_room`,
+  `cmd_b_hides_and_shows_the_navigator_and_the_layout_keeps_it`,
+  `dragging_the_handle_resizes_the_navigator_within_its_clamps`,
+  `the_navigator_lists_what_needs_you_then_the_workers_then_the_workspaces`,
+  `on_a_phone_the_navigator_is_a_drawer_that_closes_on_a_choice`,
+  `a_tile_row_focuses_its_tile`, `the_status_bar_reads_the_focused_tile_and_its_link`,
+  `the_bell_counts_the_inbox_and_its_rows_go_there`,
+  `the_column_dots_keep_clear_of_the_toggle_and_the_name`; `statusbar`
+  `the_readouts_say_what_they_count`; client `save_and_restore_round_trip_through_json`,
+  `restore_cleans_up_whatever_it_is_given`.
+
+  *Shipped: the palette and the empty states.*
+  - **Palette.** Its lines group under small muted headings in the order Tiles, Workers,
+    Commands, then Files. Files are the paths a worker found, and they lead when the field
+    spells a path. A heading shows only when two or more groups are visible. Each line has a
+    kind icon in a fixed slot, muted, and in the text colour on the chosen line: a column of
+    fifty icons in full colour was louder than the words. On the right come the worker's name
+    when there is more than one worker, then the status mark and the keys. The main palette now
+    lists the workers too.
+  - **Window picker.** ⌘O opens it at once with the sessions and a row that says the worker is
+    being asked for its windows. The listing fills that same picker. It groups rows under
+    Sessions, Displays and Windows and says `Nothing matches` when a filter empties it.
+  - **Empty workspace.** It shows a large muted grid icon, `Empty workspace`, and three rows
+    with icons and key caps read from the bindings (only the first accented). Below them come
+    the workers with their marks, each opening a shell. With no worker it says `No workers yet`
+    and where one comes from.
+  - **Overview.** Workspace names are small strong text with a muted tile count, at one size
+    at every zoom. The new-workspace zone has a plus and its name.
+
+  Tests: palette `lines_group_into_sections_in_a_fixed_order`, `every_line_icon_is_embedded`;
+  picker `the_picker_waits_for_the_listing_and_says_when_nothing_is_left`;
+  `workspace/tests/palette.rs` `the_palette_lists_tiles_then_workers_then_commands`,
+  `the_icon_slot_keeps_every_title_on_one_edge`,
+  `the_empty_workspace_begins_a_terminal_an_agent_or_a_window`,
+  `cmd_o_shows_the_picker_while_the_worker_lists_its_windows`,
+  `the_overview_labels_keep_their_size_at_any_zoom`. The new chrome strings joined the
+  sentence-case lint.

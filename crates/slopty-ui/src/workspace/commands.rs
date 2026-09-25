@@ -465,12 +465,15 @@ impl WorkspaceView {
         self.propose(tile.worker, ItemOp::Upsert(item), cx);
     }
 
-    /// ⌘O: ask the context worker for its windows, then show the picker.
+    /// ⌘O: ask the context worker for its windows, and show the picker while it answers.
     pub fn add_window(&mut self, _: &AddWindow, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.context_worker() else { return };
-        if let Some(w) = self.workers.get_mut(&key) {
-            w.picker_wanted = true;
-            w.send(ClientMsg::Screen(ScreenRequest::List));
+        let Some(w) = self.workers.get_mut(&key) else { return };
+        w.picker_wanted = true;
+        w.send(ClientMsg::Screen(ScreenRequest::List));
+        // A worker out of reach will not answer; the picker would wait on nothing.
+        if w.link.is_some() {
+            self.show_picker_loading(key, cx);
         }
         cx.notify();
     }

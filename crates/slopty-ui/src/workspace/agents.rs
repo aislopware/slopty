@@ -348,7 +348,12 @@ impl WorkspaceView {
 
     /// An agent that needs the human in a session with no tile here: give it one, which the
     /// worker then syncs to every client. A worker this client cannot reach says so instead.
-    fn show_untiled(&mut self, worker: WorkerKey, session: SessionId, cx: &mut Context<Self>) {
+    pub(super) fn show_untiled(
+        &mut self,
+        worker: WorkerKey,
+        session: SessionId,
+        cx: &mut Context<Self>,
+    ) {
         let Some(w) = self.workers.get(&worker) else { return };
         if w.link.is_none() {
             let text = format!("{} is not reachable from here", w.name);

@@ -1448,7 +1448,9 @@ fn save_and_restore_round_trip_through_json() {
     l.set_workspace_name(1, Some("remote".to_owned()));
     l.focus_workspace_down();
     l.set_workspace_name(2, Some("spare".to_owned()));
+    l.set_navigator(Navigator { shown: false, width: 999.0 });
     let saved = l.save();
+    assert_eq!(saved.navigator, Navigator { shown: false, width: Navigator::MAX_WIDTH });
     let json = serde_json::to_string(&saved).unwrap();
     let back: Saved = serde_json::from_str(&json).unwrap();
     assert_eq!(back, saved);
@@ -1509,6 +1511,7 @@ fn restore_cleans_up_whatever_it_is_given() {
             SavedWorkspace { columns: vec![col(vec![t(2), t(4)])], ..SavedWorkspace::default() },
         ],
         active: 0,
+        navigator: Navigator { shown: false, width: f32::NAN },
     };
     let r = Layout::restore(saved, LayoutConfig::default());
     assert_eq!(shape(&r), vec![vec![vec![t(1), t(2)], vec![t(3)]], vec![vec![t(4)]], vec![]]);
@@ -1522,6 +1525,7 @@ fn restore_cleans_up_whatever_it_is_given() {
     assert_eq!(ws.columns()[1].tiles()[0].height(), TileHeight::default());
     assert_eq!(r.active_workspace(), 0, "the dropped active workspace handed over to the next");
     assert!(r.frame().tiles.iter().all(|p| p.rect.x.is_finite()));
+    assert_eq!(r.navigator(), Navigator { shown: false, width: Navigator::DEFAULT_WIDTH });
     // Nothing at all: one empty workspace.
     let e = Layout::restore(Saved::default(), LayoutConfig::default());
     assert_eq!(shape(&e), vec![Vec::<Vec<TileRef>>::new()]);

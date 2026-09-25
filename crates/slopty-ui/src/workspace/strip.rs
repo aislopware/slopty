@@ -10,20 +10,20 @@
 //! the wheel steps columns and workspaces. A pinch in opens the overview; out closes it.
 
 use gpui::{
-    Bounds, Context, DispatchPhase, InteractiveElement as _, IntoElement as _, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point,
-    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TouchPhase, Window, canvas, div, px,
+    Bounds, Context, DispatchPhase, FontWeight, InteractiveElement as _, IntoElement as _,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent,
+    Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
+    Styled as _, TouchPhase, Window, canvas, div, px,
 };
 use slopty_client::layout::{Axis, AxisLock, DropTarget, Frame, Rect, TileRef, WHEEL_TICK};
 use slopty_core::ItemId;
 use slopty_proto::items::ItemKind;
-use slopty_theme::alpha;
+use slopty_theme::{Typography, alpha};
 
 use super::WorkspaceView;
 use super::tile::{Chrome, HEADER_H};
 use crate::colors::{hsla, hsla_alpha};
-use crate::kit::{ButtonKind, button};
+use crate::icons::{IconName, IconSize};
 
 /// How far a header press travels before it is a move rather than a click.
 const DRAG_SLOP: f32 = 4.0;
@@ -508,16 +508,20 @@ impl WorkspaceView {
         // In the overview each workspace is a tray the tiles sit on, a step off the canvas so
         // the tiles' own edges still read on it, with its name above; an empty one (the one
         // kept at the end for what comes next) is only its dashed outline, a place and not a
-        // blank slab.
+        // blank slab, with a plus and its name inside to say what dropping there does.
         let backdrops: Vec<gpui::AnyElement> = if frame.overview > 0.0 {
             let workspaces = self.layout.workspaces();
             let active = self.layout.active_workspace();
             let s = &theme.surfaces;
+            let fade = frame.overview;
             frame
                 .workspaces
                 .iter()
                 .flat_map(|(ix, r)| {
-                    let empty = workspaces.get(*ix).is_none_or(|ws| ws.columns().is_empty());
+                    let ix = *ix;
+                    let tiles: usize = workspaces
+                        .get(ix)
+                        .map_or(0, |ws| ws.columns().iter().map(|c| c.tiles().len()).sum());
                     let panel = div()
                         .absolute()
                         .left(px(r.x))
@@ -525,35 +529,71 @@ impl WorkspaceView {
                         .w(px(r.w))
                         .h(px(r.h))
                         .rounded(px(theme.radii.md));
-                    let panel = if empty {
-                        panel
+                    // The labels are chrome: drawn at the type scale whatever the zoom, so a
+                    // name stays readable however many workspaces the overview fits.
+                    if tiles == 0 {
+                        let muted = hsla_alpha(s.text_muted, fade);
+                        let zone = panel
                             .border_1()
                             .border_dashed()
-                            .border_color(hsla_alpha(s.text_muted, frame.overview * alpha::TINT))
+                            .border_color(hsla_alpha(s.text_muted, fade * alpha::TINT))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(theme.spacing.xs))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(theme.typography.small()))
+                            .font_family(theme.typography.ui_family.clone())
+                            .text_color(muted)
+                            .child(crate::icons::icon(
+                                theme,
+                                IconName::Plus,
+                                IconSize::Inline,
+                                muted,
+                            ))
+                            .child(
+                                div()
+                                    .debug_selector(move || format!("overview-name-{ix}"))
+                                    .child(NEW_WORKSPACE),
+                            );
+                        vec![zone.into_any_element()]
                     } else {
-                        panel.bg(hsla_alpha(s.raised, frame.overview))
-                    };
-                    let name = if empty {
-                        "New workspace".to_owned()
-                    } else {
-                        self.workspace_name_at(*ix)
-                    };
-                    let ink = if *ix == active && !empty { s.text } else { s.text_muted };
-                    let label = div()
-                        .absolute()
-                        .left(px(r.x))
-                        .top(px(r.y - theme.spacing.xl))
-                        .w(px(r.w))
-                        .h(px(theme.spacing.xl))
-                        .flex()
-                        .items_center()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_size(px(theme.typography.small()))
-                        .font_family(theme.typography.ui_family.clone())
-                        .text_color(hsla_alpha(ink, frame.overview))
-                        .child(SharedString::from(name));
-                    [panel.into_any_element(), label.into_any_element()]
+                        let ink = if ix == active { s.text } else { s.text_secondary };
+                        let count =
+                            if tiles == 1 { "1 tile".to_owned() } else { format!("{tiles} tiles") };
+                        let tray = panel.bg(hsla_alpha(s.raised, fade)).into_any_element();
+                        let label = div()
+                            .absolute()
+                            .left(px(r.x))
+                            .top(px(r.y - theme.spacing.xl))
+                            .w(px(r.w))
+                            .h(px(theme.spacing.xl))
+                            .flex()
+                            .items_center()
+                            .gap(px(theme.spacing.sm))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(theme.typography.small()))
+                            .font_family(theme.typography.ui_family.clone())
+                            .child(
+                                div()
+                                    .debug_selector(move || format!("overview-name-{ix}"))
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .font_weight(FontWeight(Typography::STRONG_WEIGHT))
+                                    .text_color(hsla_alpha(ink, fade))
+                                    .child(SharedString::from(self.workspace_name_at(ix))),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(hsla_alpha(s.text_muted, fade))
+                                    .child(SharedString::from(count)),
+                            );
+                        vec![tray, label.into_any_element()]
+                    }
                 })
                 .collect()
         } else {
@@ -600,34 +640,125 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// An empty workspace: the two ways to put something in it, as buttons. Their keys are
-    /// the palette's and the buttons' hints to list, not this screen's to print. With no
-    /// worker there is nothing to open, and the line says only that.
+    /// An empty workspace: a large muted mark and what this is, then the three ways to begin,
+    /// each with its key cap (a key cap teaches the chord where the chord is the way in), the
+    /// first the accented one, then the workers with how they are doing. With no worker there
+    /// is nothing to open, and the page says where one comes from.
     fn render_empty(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
-        let body =
-            if self.workers.is_empty() {
-                div().text_color(hsla(s.text_muted)).child("No workers yet").into_any_element()
-            } else {
-                div()
+        let muted = hsla(s.text_muted);
+        let title = |text: &'static str| {
+            div()
+                .pt(px(spacing.sm))
+                .pb(px(spacing.xs))
+                .text_size(px(theme.typography.title()))
+                .font_weight(FontWeight(Typography::STRONG_WEIGHT))
+                .text_color(hsla(s.text))
+                .child(text)
+        };
+        let column = div().w(px(EMPTY_W)).flex().flex_col().items_center().gap(px(spacing.xs));
+        let column = if self.workers.is_empty() {
+            column
+                .child(crate::icons::icon(theme, IconName::Server, IconSize::Large, muted))
+                .child(title(NO_WORKERS))
+                .child(div().text_color(muted).child(NO_WORKERS_NEXT))
+        } else {
+            let [terminal, agent, window] = &*BEGIN_KEYS;
+            let begin = div()
+                .w_full()
+                .pt(px(spacing.sm))
+                .flex()
+                .flex_col()
+                .child(
+                    self.begin_row(
+                        "empty-terminal",
+                        IconName::SquareTerminal,
+                        NEW_TERMINAL,
+                        terminal,
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.new_terminal(&super::actions::NewTerminal, window, cx);
+                    })),
+                )
+                .child(
+                    self.begin_row("empty-agent", IconName::Bot, NEW_AGENT, agent, false).on_click(
+                        cx.listener(|this, _ev, window, cx| {
+                            this.new_agent(&super::actions::NewAgent, window, cx);
+                        }),
+                    ),
+                )
+                .child(
+                    self.begin_row("empty-window", IconName::AppWindow, ADD_WINDOW, window, false)
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.add_window(&super::actions::AddWindow, window, cx);
+                        })),
+                );
+            let workers = self.workers.iter().enumerate().map(|(ix, (key, w))| {
+                let key = *key;
+                let row = div()
+                    .id(("empty-worker", ix))
+                    .debug_selector(move || format!("empty-worker-{ix}"))
+                    .role(gpui::accesskit::Role::Button)
+                    .aria_label(SharedString::from(format!("{}, {}", w.name, w.status.text())))
+                    .w_full()
+                    .px(px(spacing.md))
+                    .py(px(spacing.xs))
                     .flex()
+                    .items_center()
                     .gap(px(spacing.sm))
+                    .rounded(px(theme.radii.sm))
+                    .cursor_pointer()
+                    .hover(|st| st.bg(hsla(s.raised)))
+                    .active(|st| st.bg(hsla(s.overlay)))
+                    .child(crate::icons::status_mark(
+                        theme,
+                        Some(super::navigator::worker_status(&w.status)),
+                    ))
                     .child(
-                        button(theme, "empty-terminal", "New terminal", ButtonKind::Primary)
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.new_terminal(&super::actions::NewTerminal, window, cx);
-                            })),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(hsla(s.text))
+                            .child(SharedString::from(w.name.clone())),
                     )
                     .child(
-                        button(theme, "empty-window", "Add a window", ButtonKind::Secondary)
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.add_window(&super::actions::AddWindow, window, cx);
-                            })),
-                    )
+                        div()
+                            .flex_none()
+                            .text_size(px(theme.typography.small()))
+                            .text_color(muted)
+                            .child(SharedString::from(w.status.text())),
+                    );
+                crate::a11y::tab_stop(row, s.accent)
+                    .on_click(cx.listener(move |this, _ev, _window, cx| this.go_to_worker(key, cx)))
                     .into_any_element()
-            };
+            });
+            column
+                .child(crate::icons::icon(theme, IconName::LayoutGrid, IconSize::Large, muted))
+                .child(title(EMPTY_WORKSPACE))
+                .child(begin)
+                .child(
+                    div()
+                        .w_full()
+                        .pt(px(spacing.md))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            crate::palette::section_heading(
+                                theme,
+                                "empty-workers".into(),
+                                "Workers",
+                            )
+                            .w_full(),
+                        )
+                        .children(workers),
+                )
+        };
         div()
             .absolute()
             .inset_0()
@@ -636,7 +767,77 @@ impl WorkspaceView {
             .justify_center()
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
-            .child(body)
+            .child(column)
             .into_any_element()
     }
+
+    /// One way to begin: its icon, what it does and its key cap; `primary` is the accented one.
+    fn begin_row(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        label: &'static str,
+        keys: &str,
+        primary: bool,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let spacing = theme.spacing;
+        let ink = if primary { s.accent } else { s.text };
+        let icon_ink = if primary { s.accent } else { s.text_muted };
+        let row = div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(label)
+            .w_full()
+            .px(px(spacing.md))
+            .py(px(spacing.xs))
+            .flex()
+            .items_center()
+            .gap(px(spacing.sm))
+            .rounded(px(theme.radii.sm))
+            .cursor_pointer()
+            .hover(|st| st.bg(hsla(s.raised)))
+            .active(|st| st.bg(hsla(s.overlay)))
+            .child(crate::palette::icon_slot(theme, icon, hsla(icon_ink)))
+            .child(div().flex_1().text_color(hsla(ink)).child(label))
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(spacing.xs))
+                    .rounded(px(theme.radii.xs))
+                    .border_1()
+                    .border_color(hsla(s.border))
+                    .bg(hsla(s.raised))
+                    .text_size(px(theme.typography.small()))
+                    .text_color(hsla(s.text_secondary))
+                    .child(SharedString::from(keys.to_owned())),
+            );
+        crate::a11y::tab_stop(row, s.accent)
+    }
 }
+
+/// How wide the empty workspace's column stands: room for the longest way to begin and its key
+/// cap, narrow enough to read as one block in the middle of the strip.
+const EMPTY_W: f32 = 320.0;
+
+/// What the empty workspace says.
+pub const EMPTY_WORKSPACE: &str = "Empty workspace";
+pub const NO_WORKERS: &str = "No workers yet";
+pub const NO_WORKERS_NEXT: &str = "Add a worker from the command palette.";
+const NEW_TERMINAL: &str = "New terminal";
+const NEW_AGENT: &str = "New agent";
+const ADD_WINDOW: &str = "Add a window or display";
+/// The overview's place for a new workspace.
+pub const NEW_WORKSPACE: &str = "New workspace";
+
+/// The keys of the three ways to begin, read once from the workspace's bindings.
+pub(super) static BEGIN_KEYS: std::sync::LazyLock<[String; 3]> = std::sync::LazyLock::new(|| {
+    let bindings = super::actions::key_bindings();
+    [
+        crate::palette::keys_for(&super::actions::NewTerminal, &bindings),
+        crate::palette::keys_for(&super::actions::NewAgent, &bindings),
+        crate::palette::keys_for(&super::actions::AddWindow, &bindings),
+    ]
+});

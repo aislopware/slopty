@@ -404,6 +404,43 @@ pub struct Saved {
     pub workspaces: Vec<SavedWorkspace>,
     /// The active one.
     pub active: usize,
+    /// The navigator beside the strip.
+    pub navigator: Navigator,
+}
+
+/// The navigator beside the strip, as this device left it. The layout keeps it only to save
+/// it with the arrangement it frames; the UI draws it.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Navigator {
+    /// Docked beside the strip, where the window is wide enough to dock it.
+    pub shown: bool,
+    /// Its width, in points, from [`Navigator::MIN_WIDTH`] to [`Navigator::MAX_WIDTH`].
+    pub width: f32,
+}
+
+impl Navigator {
+    /// Its width before it is ever dragged.
+    pub const DEFAULT_WIDTH: f32 = 248.0;
+    /// The widest it is dragged to, in points.
+    pub const MAX_WIDTH: f32 = 400.0;
+    /// The narrowest it is dragged to, in points.
+    pub const MIN_WIDTH: f32 = 200.0;
+
+    /// `width` within the clamps; a width that is not a number is the default.
+    #[must_use]
+    pub const fn clamp_width(width: f32) -> f32 {
+        if width.is_finite() {
+            width.clamp(Self::MIN_WIDTH, Self::MAX_WIDTH)
+        } else {
+            Self::DEFAULT_WIDTH
+        }
+    }
+}
+
+impl Default for Navigator {
+    fn default() -> Self {
+        Self { shown: true, width: Self::DEFAULT_WIDTH }
+    }
 }
 
 /// A saved workspace.
@@ -1860,6 +1897,7 @@ pub struct Layout {
     wheel_x: WheelTracker,
     wheel_y: WheelTracker,
     wheel_switched: Option<Duration>,
+    navigator: Navigator,
 }
 
 impl Layout {
@@ -1887,6 +1925,7 @@ impl Layout {
             wheel_x: WheelTracker::new(WHEEL_TICK),
             wheel_y: WheelTracker::new(WHEEL_TICK),
             wheel_switched: None,
+            navigator: Navigator::default(),
         }
     }
 
@@ -1894,6 +1933,18 @@ impl Layout {
     #[must_use]
     pub const fn config(&self) -> &LayoutConfig {
         &self.config
+    }
+
+    /// The navigator as it is to be saved.
+    #[must_use]
+    pub const fn navigator(&self) -> Navigator {
+        self.navigator
+    }
+
+    /// Keep the navigator's state with the layout; its width is clamped.
+    pub const fn set_navigator(&mut self, navigator: Navigator) {
+        self.navigator =
+            Navigator { shown: navigator.shown, width: Navigator::clamp_width(navigator.width) };
     }
 
     /// The workspace area, in points.
@@ -3153,6 +3204,7 @@ impl Layout {
                 })
                 .collect(),
             active: self.active,
+            navigator: self.navigator,
         }
     }
 
@@ -3162,6 +3214,7 @@ impl Layout {
     #[must_use]
     pub fn restore(saved: Saved, config: LayoutConfig) -> Self {
         let mut layout = Self::new(config);
+        layout.set_navigator(saved.navigator);
         let presets = layout.config.presets.len();
         layout.workspaces.clear();
         let mut seen: HashSet<TileRef> = HashSet::new();

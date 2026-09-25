@@ -156,7 +156,8 @@ impl WorkspaceView {
             overlay: self.covered
                 || self.palette.is_some()
                 || self.picker.is_some()
-                || self.menu.is_some(),
+                || self.menu.is_some()
+                || self.nav.open,
             overview: self.layout.overview_open() || self.drawn_zoom < 1.0,
             toast: self.toast_drawn.get().filter(|(frame, _)| *frame == self.frames_drawn).map(
                 |(_, b)| Rect {

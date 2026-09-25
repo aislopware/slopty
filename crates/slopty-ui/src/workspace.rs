@@ -16,13 +16,19 @@
 //! * `strip` — the tiles laid out from the layout's frame, and the pointer and gestures.
 //! * `tile` — one tile's chrome and body.
 //! * `titlebar` — the bar across the top.
+//! * `navigator` — the workers, their tiles and the workspaces, down the left.
+//! * `statusbar` — the bar along the bottom: where the focused tile runs, the link, the agents.
+//! * `inbox` — the bell's list of what needs the human and what finished.
 
 pub mod actions;
 mod agents;
 mod browsers;
 mod commands;
+mod inbox;
+mod navigator;
 mod overlays;
 pub mod remote;
+mod statusbar;
 mod strip;
 mod tile;
 mod titlebar;
@@ -49,7 +55,11 @@ use slopty_proto::screen::CaptureTarget;
 use slopty_proto::terminal::SessionSummary;
 use slopty_theme::Theme;
 #[cfg(test)]
-pub(crate) use tile::{INSTALL_HOOKS, TAKE_OVER};
+pub(crate) use strip::{EMPTY_WORKSPACE, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
+#[cfg(test)]
+pub(crate) use tile::{
+    CLOSE_TILE, FULLSCREEN_TILE, INSTALL_HOOKS, RECONNECTING, SESSION_ENDED, TAKE_OVER,
+};
 pub use tile::{NOTE_TITLE_CHARS, file_title, note_progress, note_title};
 pub use titlebar::TITLEBAR_H;
 use tokio::sync::mpsc;
@@ -347,6 +357,10 @@ pub struct WorkspaceView {
     pending_focus_palette: bool,
     /// Which titlebar menu is open.
     menu: Option<titlebar::MenuKind>,
+    /// The navigator's state for this run (its width and whether it docks are the layout's).
+    nav: navigator::NavState,
+    /// The status bar's frame time, and when it was worked out.
+    frame_text: Option<(Instant, Option<SharedString>)>,
     /// The app's rows in the "…" menu.
     more_entries: Vec<MenuEntry>,
     show_stats: bool,
@@ -475,6 +489,8 @@ impl WorkspaceView {
             palette_extra: Vec::new(),
             pending_focus_palette: false,
             menu: None,
+            nav: navigator::NavState::default(),
+            frame_text: None,
             more_entries: Vec::new(),
             show_stats: false,
             toast: None,
@@ -918,6 +934,9 @@ impl gpui::Render for WorkspaceView {
         self.apply_pending_focus(window, cx);
         self.sync_clipboard_watch();
         let titlebar = self.render_titlebar(window, cx);
+        // Before the strip: a docked navigator narrows it.
+        let navigator = self.render_navigator(window, cx);
+        let statusbar = self.render_statusbar(window, cx);
         let strip = self.render_strip(window, cx);
         let toast = self.render_toast(cx);
         let menu = self.render_menu(window, cx);
@@ -976,21 +995,50 @@ impl gpui::Render for WorkspaceView {
                 window.focus_prev(cx);
                 this.leave_screen(window, cx);
             }))
+            .on_action(cx.listener(Self::toggle_navigator))
             .child(titlebar)
+            .child(Self::render_middle(navigator, strip, toast))
+            .children(statusbar)
+            .children(menu)
+            .when_some(picker, gpui::ParentElement::child)
+            .when_some(palette, gpui::ParentElement::child)
+            .child(Self::browser_sync(cx))
+    }
+}
+
+impl WorkspaceView {
+    /// Between the bars: the navigator docked beside the strip, or laid over it.
+    fn render_middle(
+        navigator: Option<(navigator::Mode, gpui::AnyElement)>,
+        strip: gpui::AnyElement,
+        toast: Option<gpui::AnyElement>,
+    ) -> gpui::AnyElement {
+        use gpui::{IntoElement as _, ParentElement as _, Styled as _};
+        let (docked, over) = match navigator {
+            Some((navigator::Mode::Docked, el)) => (Some(el), None),
+            Some((_, el)) => (None, Some(el)),
+            None => (None, None),
+        };
+        gpui::div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .children(docked)
             .child(
                 gpui::div()
                     .relative()
                     .flex_1()
-                    .w_full()
+                    .min_w_0()
+                    .h_full()
                     .flex()
                     .flex_col()
                     .child(strip)
                     .children(toast),
             )
-            .children(menu)
-            .when_some(picker, gpui::ParentElement::child)
-            .when_some(palette, gpui::ParentElement::child)
-            .child(Self::browser_sync(cx))
+            .children(over)
+            .into_any_element()
     }
 }
 

@@ -562,8 +562,9 @@ fn the_width_keys_resize_the_column_and_its_grid(cx: &mut TestAppContext) {
     let cols = |cx: &mut VisualTestContext| {
         view.read_with(cx, |v, cx| v.terminal(session).unwrap().read(cx).size().cols)
     };
+    let strip = f32::from(cx.debug_bounds("strip").unwrap().size.width);
     let half = width(cx);
-    assert!((half - 8.0_f32.mul_add(-3.0, VIEWPORT.0) / 2.0).abs() < 2.0, "half the strip: {half}");
+    assert!((half - 8.0_f32.mul_add(-3.0, strip) / 2.0).abs() < 2.0, "half the strip: {half}");
     let half_cols = cols(cx);
     cx.simulate_keystrokes("cmd-r");
     cx.run_until_parked();
@@ -572,7 +573,7 @@ fn the_width_keys_resize_the_column_and_its_grid(cx: &mut TestAppContext) {
     assert!(cols(cx) > half_cols, "the grid grew with it");
     cx.simulate_keystrokes("cmd-shift-enter");
     cx.run_until_parked();
-    assert!(width(cx) > VIEWPORT.0 - 40.0, "maximized: {}", width(cx));
+    assert!(width(cx) > strip - 40.0, "maximized: {}", width(cx));
     cx.simulate_keystrokes("cmd-shift-enter");
     cx.run_until_parked();
     assert!((width(cx) - wider).abs() < 2.0, "and back");
@@ -1246,5 +1247,7 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+mod frame;
+mod palette;
 mod remote;
 mod tiles;
