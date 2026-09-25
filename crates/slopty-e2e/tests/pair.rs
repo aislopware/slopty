@@ -195,12 +195,14 @@ mod tests {
             .find(|l| l.ends_with("needs you") || l.ends_with("need you"))
     }
 
-    /// Click the middle of `session`'s tile on `drv` (revealing it first when this client's
-    /// layout has it out of view) and wait for its grid to hold the keyboard.
+    /// Click the middle of `session`'s tile on `drv` (revealing it instead when this client's
+    /// layout has it out of view, or so far off the edge that its middle is) and wait for its
+    /// grid to hold the keyboard.
     async fn focus_session(drv: &mut Driver, session: &str) {
         let d = drv.dump().await.unwrap();
         let item = d.item_for_session(session).unwrap_or_else(|| panic!("{session} on {d:#?}"));
-        if item.bounds[2] <= 0.0 {
+        let (x, _) = item.center();
+        if item.bounds[2] <= 0.0 || x <= 0.0 || x >= d.window.width {
             drv.reveal(session).await.unwrap();
         } else {
             let (x, y) = item.center();
