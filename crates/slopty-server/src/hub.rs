@@ -11,9 +11,14 @@
 //! dropped and every link gets the directory again without them.
 //!
 //! [`Hub::dispatch`] is the one verb dispatch both front ends call (QUIC links and MCP): the
-//! directory verbs are answered here, the rest go down the owning worker's link.
+//! directory verbs, [`Verb::Events`] and [`Verb::ForgetWorker`] are answered here, the rest go
+//! down the owning worker's link.
+//!
+//! Every change of liveness, terminal and agent status also goes into a bounded log of
+//! [`HubEvent`]s under one sequence, which [`Verb::Events`] reads from a cursor and waits on:
+//! one call watches the whole fleet, over MCP's stateless HTTP as well as a QUIC link.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,7 +26,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use slopty_core::{SessionId, WorkerId};
 use slopty_proto::agent::AgentStatus;
-use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
+use slopty_proto::orchestration::{
+    ErrorCode, EventFilter, Happening, HubEvent, Outcome, TermRef, Verb,
+};
 use slopty_proto::server::{
     Event, FromServer, Liveness, Refusal, Registration, RequestId, ToServer, WorkerCaps, WorkerInfo,
 };
@@ -42,6 +49,11 @@ const WAIT_GRACE: Duration = Duration::from_secs(15);
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(60);
 /// Directory changes buffered per client link before it lags and gets the whole directory again.
 const EVENT_BUFFER: usize = 1024;
+/// Events the log holds for [`Verb::Events`]; a cursor older than the oldest reads on from it
+/// and is told how many it missed.
+pub const EVENT_LOG: usize = 4096;
+/// Most events one [`Verb::Events`] returns; the caller asks again from `next`.
+pub const EVENTS_PER_ANSWER: usize = 500;
 
 /// The registry and the router, shared by every link and the MCP endpoint.
 #[derive(Clone, Debug)]
@@ -55,6 +67,25 @@ struct Inner {
     state: Mutex<State>,
     events: broadcast::Sender<FromServer>,
     persist: watch::Sender<Vec<WorkerInfo>>,
+    /// Taken only inside `state`'s lock, or alone.
+    log: Mutex<Log>,
+    /// The log's next sequence number, for [`Verb::Events`] to wait on.
+    head: watch::Sender<u64>,
+}
+
+/// The newest [`HubEvent`]s, oldest first.
+#[derive(Debug)]
+struct Log {
+    ring: VecDeque<HubEvent>,
+    next: u64,
+}
+
+/// One read of the log.
+#[derive(Debug)]
+struct Page {
+    events: Vec<HubEvent>,
+    next: u64,
+    missed: u64,
 }
 
 #[derive(Debug, Default)]
@@ -104,7 +135,10 @@ impl Hub {
         }
         let (events, _none) = broadcast::channel(EVENT_BUFFER);
         let (persist, _none) = watch::channel(Vec::new());
-        Self { inner: Arc::new(Inner { name, state: Mutex::new(state), events, persist }) }
+        let log = Mutex::new(Log { ring: VecDeque::new(), next: 1 });
+        let (head, _none) = watch::channel(1);
+        let state = Mutex::new(state);
+        Self { inner: Arc::new(Inner { name, state, events, persist, log, head }) }
     }
 
     /// The server's name.
@@ -171,7 +205,9 @@ impl Hub {
             .collect();
         for old in &replaced {
             tracing::info!(worker = %old, name = %info.name, by = %worker, "worker replaced");
-            state.workers.remove(old);
+            if let Some(gone) = state.workers.remove(old) {
+                self.happen(Happening::WorkerRemoved { worker: *old, name: gone.info.name });
+            }
         }
         let (reshaped, gone, opened) = if let Some(entry) = state.workers.get_mut(&worker) {
             let reshaped = !same_shape(&entry.info, &info);
@@ -197,14 +233,18 @@ impl Hub {
             state.workers.insert(worker, entry);
             (true, Vec::new(), opened)
         };
+        let (name, liveness) = (info.name.clone(), info.liveness);
+        self.happen(Happening::Worker { worker, name, liveness });
         self.announce(FromServer::Worker(info));
         if !replaced.is_empty() {
             self.announce(FromServer::Directory(listing(&state)));
         }
         for session in gone {
+            self.happen(Happening::SessionClosed { term: TermRef { worker, session } });
             self.announce(FromServer::Event(Event::SessionClosed { worker, session }));
         }
         for summary in opened {
+            self.happen(Happening::SessionOpened { worker, summary: summary.clone() });
             self.announce(FromServer::Event(Event::SessionOpened { worker, summary }));
         }
         if reshaped || !replaced.is_empty() {
@@ -220,8 +260,88 @@ impl Hub {
         match verb {
             Verb::ListWorkers => Outcome::Workers(self.directory()),
             Verb::ListTerminals { worker } => self.terminals(worker),
+            Verb::Events { since, timeout_ms, filter } => {
+                self.events(since, timeout_ms, filter).await
+            }
+            Verb::ForgetWorker { worker } => self.forget_worker(worker),
             other => self.forward(other).await,
         }
+    }
+
+    /// The events from `since` (from now when absent) that pass `filter`, waiting up to
+    /// `timeout_ms` (capped at [`WAIT_CAP_MS`]) for a first one.
+    async fn events(&self, since: Option<u64>, timeout_ms: u32, filter: EventFilter) -> Outcome {
+        let wait = Duration::from_millis(u64::from(timeout_ms.min(WAIT_CAP_MS)));
+        let deadline = tokio::time::Instant::now().checked_add(wait);
+        let mut head = self.inner.head.subscribe();
+        let mut from = since.unwrap_or_else(|| *head.borrow_and_update());
+        let mut missed = None;
+        loop {
+            // Seen before the read: an event logged after it wakes the wait below.
+            head.borrow_and_update();
+            let page = self.read_log(from, filter);
+            let missed = *missed.get_or_insert(page.missed);
+            if !page.events.is_empty() {
+                return Outcome::Events { events: page.events, next: page.next, missed };
+            }
+            from = page.next;
+            let woke = match deadline {
+                Some(at) => tokio::time::timeout_at(at, head.changed()).await,
+                None => Ok(head.changed().await),
+            };
+            if !matches!(woke, Ok(Ok(()))) {
+                return Outcome::Events { events: Vec::new(), next: from, missed };
+            }
+        }
+    }
+
+    fn read_log(&self, from: u64, filter: EventFilter) -> Page {
+        let log = self.inner.log.lock();
+        let oldest = log.ring.front().map_or(log.next, |e| e.seq);
+        // A cursor ahead of the log is from before a restart: everything held is new to it.
+        let from = if from > log.next { oldest } else { from.max(1) };
+        let missed = oldest.saturating_sub(from);
+        let skip = usize::try_from(from.saturating_sub(oldest)).unwrap_or(usize::MAX);
+        let mut page = Page { events: Vec::new(), next: log.next, missed };
+        for event in log.ring.iter().skip(skip) {
+            if page.events.len() == EVENTS_PER_ANSWER {
+                page.next = event.seq;
+                break;
+            }
+            if filter.admits(&event.what) {
+                page.events.push(event.clone());
+            }
+        }
+        drop(log);
+        page
+    }
+
+    /// Remove a worker that holds no lease. A live one would register again at once, so it is
+    /// refused; every link hears the directory without the worker, and the state file loses it.
+    fn forget_worker(&self, worker: WorkerId) -> Outcome {
+        let mut state = self.inner.state.lock();
+        let Some(entry) = state.workers.get(&worker) else { return unknown_worker(worker) };
+        if entry.link.is_some() {
+            return Outcome::Error {
+                code: ErrorCode::Invalid,
+                message: format!(
+                    "worker {} ({worker}) is online and would register again at once; stop it \
+                     first (`slopty worker uninstall` on that machine)",
+                    entry.info.name
+                ),
+            };
+        }
+        let Some(gone) = state.workers.remove(&worker) else { return unknown_worker(worker) };
+        tracing::info!(%worker, name = %gone.info.name, "worker forgotten");
+        for summary in &gone.sessions {
+            let term = TermRef { worker, session: summary.id };
+            self.happen(Happening::SessionClosed { term });
+        }
+        self.happen(Happening::WorkerRemoved { worker, name: gone.info.name });
+        self.announce(FromServer::Directory(listing(&state)));
+        self.persist(&state);
+        drop(state);
+        Outcome::Done
     }
 
     fn terminals(&self, only: Option<WorkerId>) -> Outcome {
@@ -310,6 +430,19 @@ impl Hub {
         let _no_listeners = self.inner.events.send(msg);
     }
 
+    /// Log an event under the next sequence number and wake the waiting [`Verb::Events`].
+    /// Called under the state lock, so the log's order is the order changes were made.
+    fn happen(&self, what: Happening) {
+        let mut log = self.inner.log.lock();
+        let seq = log.next;
+        log.next = seq.saturating_add(1);
+        log.ring.push_back(HubEvent { seq, at_ms: now_ms(), what });
+        if log.ring.len() > EVENT_LOG {
+            log.ring.pop_front();
+        }
+        self.inner.head.send_replace(log.next);
+    }
+
     fn persist(&self, state: &State) {
         let mut all: Vec<WorkerInfo> = state.workers.values().map(|e| e.info.clone()).collect();
         all.sort_by_key(|w| w.worker);
@@ -328,6 +461,8 @@ impl Hub {
         entry.info.last_seen_ms = now_ms();
         let info = entry.info.clone();
         tracing::info!(%worker, name = %info.name, "worker unreachable");
+        let (name, liveness) = (info.name.clone(), info.liveness);
+        self.happen(Happening::Worker { worker, name, liveness });
         self.announce(FromServer::Worker(info));
         self.persist(&state);
         drop(state);
@@ -353,6 +488,8 @@ impl Hub {
         entry.info.liveness = Liveness::Gone;
         tracing::info!(%worker, name = %entry.info.name, "worker gone");
         let info = entry.info.clone();
+        let name = info.name.clone();
+        self.happen(Happening::Worker { worker, name, liveness: Liveness::Gone });
         drop(state);
         self.announce(FromServer::Worker(info));
     }
@@ -415,20 +552,37 @@ impl Lease {
                 }
             }
             ToServer::SessionOpened(summary) => {
-                match entry.sessions.iter_mut().find(|s| s.id == summary.id) {
-                    Some(known) => known.clone_from(&summary),
-                    None => entry.sessions.push(summary.clone()),
+                // A known session reports a change (a resize): no event of its own.
+                if let Some(known) = entry.sessions.iter_mut().find(|s| s.id == summary.id) {
+                    known.clone_from(&summary);
+                } else {
+                    entry.sessions.push(summary.clone());
+                    hub.happen(Happening::SessionOpened { worker, summary: summary.clone() });
                 }
                 hub.announce(FromServer::Event(Event::SessionOpened { worker, summary }));
             }
             ToServer::SessionClosed { session, .. } => {
                 entry.sessions.retain(|s| s.id != session);
+                hub.happen(Happening::SessionClosed { term: TermRef { worker, session } });
                 hub.announce(FromServer::Event(Event::SessionClosed { worker, session }));
             }
             ToServer::Agent(event) => {
-                if let Some(summary) = entry.sessions.iter_mut().find(|s| s.id == event.session) {
+                let listed = entry.sessions.iter_mut().find(|s| s.id == event.session);
+                let before = listed.as_ref().map(|s| s.agent.as_ref().map(|(_kind, st)| st));
+                // A report of the status already known (the same tool again) is no change.
+                let same = before
+                    .is_some_and(|before| before.unwrap_or(&AgentStatus::None) == &event.status);
+                if let Some(summary) = listed {
                     summary.agent = (event.status != AgentStatus::None)
                         .then(|| (event.kind, event.status.clone()));
+                }
+                if !same {
+                    hub.happen(Happening::Agent {
+                        term: TermRef { worker, session: event.session },
+                        kind: event.kind,
+                        status: event.status.clone(),
+                        detail: event.detail.clone(),
+                    });
                 }
                 hub.announce(FromServer::Event(Event::Agent { worker, event }));
             }
@@ -450,11 +604,16 @@ impl Drop for Lease {
 /// The worker a forwarded verb goes to.
 const fn target(verb: &Verb) -> Option<WorkerId> {
     match verb {
-        Verb::ListWorkers | Verb::ListTerminals { .. } => None,
+        Verb::ListWorkers
+        | Verb::ListTerminals { .. }
+        | Verb::Events { .. }
+        | Verb::ForgetWorker { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }
         | Verb::ReadFile { worker, .. }
         | Verb::WriteFile { worker, .. }
+        | Verb::ListDir { worker, .. }
+        | Verb::Stat { worker, .. }
         | Verb::ListPorts { worker } => Some(*worker),
         Verb::SendInput { term, .. }
         | Verb::ReadScreen { term }
@@ -462,6 +621,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::ListCommands { term, .. }
         | Verb::WaitFor { term, .. }
         | Verb::AgentStatus { term }
+        | Verb::ResizeTerminal { term, .. }
         | Verb::Close { term } => Some(term.worker),
     }
 }
@@ -515,7 +675,7 @@ pub(crate) mod tests {
     use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, BlockReason};
     use slopty_proto::orchestration::{Screen, TermRef};
     use slopty_proto::server::Os;
-    use slopty_proto::terminal::SessionState;
+    use slopty_proto::terminal::{CloseReason, SessionState};
 
     use super::*;
 
@@ -706,10 +866,7 @@ pub(crate) mod tests {
         let lease = hub.register(registration(worker, vec![summary(first)]), ip(), tx).unwrap();
         let mut events = hub.subscribe();
         lease.handle(ToServer::SessionOpened(summary(second)));
-        lease.handle(ToServer::SessionClosed {
-            session: first,
-            reason: slopty_proto::terminal::CloseReason::Exited,
-        });
+        lease.handle(ToServer::SessionClosed { session: first, reason: CloseReason::Exited });
         let Outcome::Terminals(list) = hub.dispatch(Verb::ListTerminals { worker: None }).await
         else {
             panic!("terminals")
@@ -810,6 +967,173 @@ pub(crate) mod tests {
         };
         let hub = Hub::new("server".to_owned(), vec![info.clone()]);
         assert_eq!(hub.directory(), vec![WorkerInfo { liveness: Liveness::Gone, ..info }]);
+    }
+
+    fn agent_report(session: SessionId, status: AgentStatus) -> ToServer {
+        ToServer::Agent(AgentEvent {
+            session,
+            kind: AgentKind::ClaudeCode,
+            status,
+            agent_session: None,
+            detail: None,
+            attention: false,
+            source: AgentSource::Hook,
+        })
+    }
+
+    async fn events(hub: &Hub, since: Option<u64>, timeout_ms: u32) -> (Vec<HubEvent>, u64, u64) {
+        let filter = EventFilter::All;
+        match hub.dispatch(Verb::Events { since, timeout_ms, filter }).await {
+            Outcome::Events { events, next, missed } => (events, next, missed),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Events read from a cursor: what happened after it, the cursor to go on from, a wait for
+    /// the next one that wakes when it comes and gives up at its timeout, and a filter that
+    /// skips what it does not want while the cursor still moves past it.
+    #[tokio::test(start_paused = true)]
+    async fn events_are_read_from_a_cursor_and_waited_for() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let (none, now, missed) = events(&hub, None, 0).await;
+        assert_eq!((none.len(), now, missed), (0, 1, 0), "nothing yet; from now is 1");
+
+        let (worker, session) = (WorkerId::new(), SessionId::new());
+        let (tx, _rx) = mpsc::channel(8);
+        let lease = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
+        lease.handle(ToServer::SessionOpened(summary(session)));
+        let (seen, next, _) = events(&hub, Some(now), 0).await;
+        let whats: Vec<&Happening> = seen.iter().map(|e| &e.what).collect();
+        assert!(
+            matches!(whats[..], [
+                Happening::Worker { liveness: Liveness::Online, .. },
+                Happening::SessionOpened { summary, .. },
+            ] if summary.id == session),
+            "{whats:?}"
+        );
+        assert_eq!((seen[0].seq, seen[1].seq, next), (1, 2, 3));
+        lease.handle(ToServer::SessionOpened(summary(session)));
+        assert!(events(&hub, Some(next), 0).await.0.is_empty(), "a known session's update");
+
+        // A wait wakes for the next event, however long before its timeout it comes.
+        let waiting = tokio::spawn({
+            let hub = hub.clone();
+            async move { events(&hub, None, 60_000).await }
+        });
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!waiting.is_finished(), "nothing new yet");
+        let blocked = AgentStatus::Blocked(BlockReason::Question);
+        lease.handle(agent_report(session, blocked.clone()));
+        let (woke, after, _) = waiting.await.unwrap();
+        let term = TermRef { worker, session };
+        assert!(
+            matches!(woke.as_slice(), [HubEvent { what: Happening::Agent { term: t, status, .. }, .. }]
+                if *t == term && *status == blocked),
+            "{woke:?}"
+        );
+        lease.handle(agent_report(session, blocked));
+        let started = tokio::time::Instant::now();
+        let (none, same, _) = events(&hub, Some(after), 1_000).await;
+        assert!(none.is_empty(), "the same status again is no event");
+        assert_eq!(same, after, "the cursor stays");
+        assert_eq!(started.elapsed(), Duration::from_secs(1), "gave up at the timeout");
+
+        // Filtered: only an agent that needs a human or went idle, the cursor past the rest.
+        lease.handle(agent_report(session, AgentStatus::Working));
+        lease.handle(ToServer::SessionClosed {
+            session: SessionId::new(),
+            reason: CloseReason::Exited,
+        });
+        lease.handle(agent_report(session, AgentStatus::Idle));
+        let filter = EventFilter::AgentNeedsInput;
+        let asked = Verb::Events { since: Some(after), timeout_ms: 0, filter };
+        let Outcome::Events { events: needs, next, .. } = hub.dispatch(asked).await else {
+            panic!("events")
+        };
+        assert!(
+            matches!(
+                needs.as_slice(),
+                [HubEvent { what: Happening::Agent { status: AgentStatus::Idle, .. }, .. }]
+            ),
+            "{needs:?}"
+        );
+        assert_eq!(next, after + 3);
+
+        drop(lease);
+        let (gone, ..) = events(&hub, Some(next), 0).await;
+        assert!(
+            matches!(
+                gone.as_slice(),
+                [HubEvent { what: Happening::Worker { liveness: Liveness::Unreachable, .. }, .. }]
+            ),
+            "{gone:?}"
+        );
+    }
+
+    /// The log keeps the newest [`EVENT_LOG`]: an older cursor reads on from the oldest held and
+    /// is told how many it missed, one answer holds [`EVENTS_PER_ANSWER`], and a cursor from
+    /// before a restart reads from the oldest.
+    #[tokio::test]
+    async fn the_event_log_is_bounded_and_says_what_was_missed() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let (worker, session) = (WorkerId::new(), SessionId::new());
+        let (tx, _rx) = mpsc::channel(8);
+        let lease = hub.register(registration(worker, vec![summary(session)]), ip(), tx).unwrap();
+        let extra = 10;
+        for i in 0..EVENT_LOG + extra {
+            let status = if i % 2 == 0 { AgentStatus::Working } else { AgentStatus::Idle };
+            lease.handle(agent_report(session, status));
+        }
+        // The worker coming online and its terminal opening, then the agent's flips.
+        let logged = u64::try_from(EVENT_LOG + extra + 2).unwrap();
+        let (page, next, missed) = events(&hub, Some(1), 0).await;
+        let oldest = logged + 1 - u64::try_from(EVENT_LOG).unwrap();
+        assert_eq!(missed, oldest - 1);
+        assert_eq!(page.len(), EVENTS_PER_ANSWER);
+        assert_eq!(page[0].seq, oldest);
+        assert_eq!(next, oldest + u64::try_from(EVENTS_PER_ANSWER).unwrap());
+        let (_page, _next, missed) = events(&hub, Some(next), 0).await;
+        assert_eq!(missed, 0, "a cursor inside the log missed nothing");
+        let (from_before, ..) = events(&hub, Some(logged + 1_000), 0).await;
+        assert_eq!(from_before[0].seq, oldest, "a cursor from before a restart");
+    }
+
+    /// A worker without a lease is forgotten: gone from the directory, the state file and every
+    /// link's listing, with an event. A live one is refused, an unknown one is unknown.
+    #[tokio::test]
+    async fn a_worker_is_forgotten_only_when_it_is_not_online() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let mut persisted = hub.persisted();
+        let worker = WorkerId::new();
+        let (tx, _rx) = mpsc::channel(8);
+        let lease = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
+        let online = hub.dispatch(Verb::ForgetWorker { worker }).await;
+        let Outcome::Error { code: ErrorCode::Invalid, message } = online else {
+            panic!("{online:?}")
+        };
+        assert!(message.contains("online"), "{message}");
+        assert_eq!(hub.directory().len(), 1, "still listed");
+
+        drop(lease);
+        drop(persisted.borrow_and_update());
+        let mut links = hub.subscribe();
+        let (_, from, _) = events(&hub, None, 0).await;
+        assert_eq!(hub.dispatch(Verb::ForgetWorker { worker }).await, Outcome::Done);
+        assert!(hub.directory().is_empty());
+        assert!(persisted.borrow_and_update().is_empty(), "the state file loses it");
+        assert!(
+            matches!(links.recv().await.unwrap(), FromServer::Directory(list) if list.is_empty())
+        );
+        let (heard, ..) = events(&hub, Some(from), 0).await;
+        assert!(
+            matches!(heard.as_slice(), [HubEvent { what: Happening::WorkerRemoved { worker: w, .. }, .. }] if *w == worker),
+            "{heard:?}"
+        );
+        let again = hub.dispatch(Verb::ForgetWorker { worker }).await;
+        assert!(
+            matches!(again, Outcome::Error { code: ErrorCode::UnknownWorker, .. }),
+            "{again:?}"
+        );
     }
 
     /// A worker set up again registers a new id under its old name from its old address: the

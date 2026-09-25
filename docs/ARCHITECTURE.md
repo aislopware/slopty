@@ -268,8 +268,13 @@ answers the verbs the server forwards. It opens terminals through the same path 
 of the engine on the session's thread (`GhosttyEngine::screen_text`, `text_lines`,
 `text_since`, `commands`). `WaitFor` sleeps on the session's `Activity` watch channel and
 matches output from a per-session mark, as `expect` does. `slopty-worker::ports` finds the TCP
-listeners in each terminal's process tree through libproc. Rulings in
-`docs/decisions/topology.md`.
+listeners in each terminal's process tree through libproc. The server's hub answers two verbs
+itself: `Events`, a long poll on a bounded log of what it hears from every worker (liveness,
+terminals opened and closed, agent status changes) read from a cursor, which is how one agent
+watches the whole fleet over stateless HTTP; and `ForgetWorker`. Files are read in ranges of at
+most 8 MiB with the whole size reported, directories listed with `ListDir`, paths checked with
+`Stat`; a terminal opened by a verb takes a size, and `ResizeTerminal` resizes one no client
+shows. Rulings in `docs/decisions/topology.md`.
 
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),
 `slopty-predict`, `slopty-pty` (openpty/spawn, async master, ptyd protocol + client),
@@ -299,7 +304,8 @@ control stream (`ScreenEvent::Cursor`, a `CursorShape` of premultiplied BGRA wit
 and backing scale), read by `slopty_capture::cursor_shape` from `NSCursor.currentSystemCursor`
 at 30 Hz while the worker's pointer is over the target and sent only when it changed
 (`slopty_worker::screen::ShapeDedup`); the client draws that picture with its hotspot on the
-position (`ScreenView`'s `Pointer`), and its own arrow until the first one arrives. While a
+position (`ScreenView`'s `Pointer`), and its own arrow until the first one arrives. The position
+scales by the stream size input maps with, the one last asked for, not the frame in flight. While a
 frame is up the card hides the client's own pointer (`CursorStyle::None`, a fork addition: on
 macOS a cursor rect with a one-pixel clear `NSCursor`, restored by AppKit when the pointer
 leaves), so only the worker's pointer shows on it.
@@ -546,14 +552,21 @@ dropped rather than encoded while more than two
 frames' worth at the rate in force wait there, or one window, whichever is larger
 (`frame_fits`); `warm_up` runs one throwaway capture when the worker comes online and `shareable()`
 keeps its enumeration for 2 s; the geometry split in two, `prober()` for the window-server
-reads off the runtime and `check_geometry(&Probe)` for the decision; a cursor sampler that reads
-the bounds the last probe left and asks for the pointer on the blocking pool only when it
-moved, and a heartbeat on its own task beside it — a promise about time must not share a
+reads off the runtime and `check_geometry(&Probe)` for the decision, which also hands the probe's
+bounds to the input sink; a cursor sampler that reads the bounds the last probe left and, for a
+display, asks for the real pointer on the blocking pool only when it moved, while a window's
+pointer is where its input last put it (`PointerWatch`, hidden before the first event), since
+input posted to the window's owner leaves the real pointer alone; `release_input` lets go of what
+the client held before the close waits on ScreenCaptureKit; and a heartbeat on its own task beside it — a promise about time must not share a
 task with a call that takes it (DECISIONS.md, "The heartbeat has its own task"); input injection), `slopty-input` (client
 `ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays,
 right clicks always through the HID tap because AppKit only tracks context menus for those;
 activates the owner before clicks and keys because macOS only delivers keyboard events to the
-active app). `slopty-worker` gives each stream a task of its own (`screens.rs`: the open,
+active app, taking an owner found active as active for 250 ms; each stream's `Injector` runs on
+an `InputThread` of its own, fed in order through a channel, so the stream's task never waits on
+the window server; it maps through the bounds the geometry probe hands over, reading them itself
+only when none newer than 250 ms came; it tracks held buttons and keys and lets go of them on
+`release_all` and on drop). `slopty-worker` gives each stream a task of its own (`screens.rs`: the open,
 input, quality, resize, the geometry tick and the close, in the order asked) and a `QuicSink`
 over the connection; its connection loop only routes, with loss feedback and reports going
 straight to the stream's `StreamControl` and everything slow (session open and close, file
@@ -1067,7 +1080,7 @@ as a dialog over the workspace with a Cancel. The phone adds "Paste", since it h
 | `slopty-media` | packetizer, FEC, reassembly, NACK/refresh policy, redundancy | all |
 | `slopty-capture` | the capture seam (`CaptureSource`); ScreenCaptureKit on macOS | worker |
 | `slopty-codec` | the encoder seam (`VideoEncoder`, `AudioEncoder`); VideoToolbox encode (worker) / decode (all) | split |
-| `slopty-input` | the input and clipboard seams (`InputSink`, `Board`); CGEvent injection for remote-window input (keymap, pointer/scroll/keys, owner activation) and `NSPasteboard` on macOS | worker |
+| `slopty-input` | the input and clipboard seams (`InputSink`, `Board`); CGEvent injection for remote-window input (keymap, pointer/scroll/keys, owner activation, a thread per stream, held input let go at the end) and `NSPasteboard` on macOS | worker |
 | `slopty-agent` | Claude Code hook payloads → per-session `AgentStatus` | worker |
 | `slopty-worker` | session manager, mux, fan-out, the orchestration verbs, worker capabilities, listening ports | worker |
 | `slopty-client` | client session state, the item registry mirror, the layout model | client |

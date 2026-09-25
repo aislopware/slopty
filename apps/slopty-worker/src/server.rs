@@ -18,7 +18,7 @@ use slopty_net::{HostAddr, NetError};
 use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentKind, AgentStatus};
 use slopty_proto::codec::CodecError;
-use slopty_proto::orchestration::{ErrorCode, Outcome};
+use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
 use slopty_proto::server::{FromServer, Refusal, Registration, Role, ToServer, WorkerCaps};
 use slopty_worker::orchestrate::{Agents, Orchestrator};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -157,7 +157,18 @@ async fn session(
                 Ok(FromServer::Request { id, verb }) => {
                     let (orchestrator, out) = (orchestrator.clone(), out.clone());
                     requests.spawn(async move {
+                        let resized = match &verb {
+                            Verb::ResizeTerminal { term, .. } => Some(term.session),
+                            _ => None,
+                        };
                         let outcome = orchestrator.serve(verb).await;
+                        // The server lists each terminal's size from its summaries: the new one
+                        // goes ahead of the answer, so a listing after it shows the size.
+                        if let (Some(session), Outcome::Done) = (resized, &outcome)
+                            && let Some(summary) = orchestrator.summary(session).await
+                        {
+                            let _sent = out.send(ToServer::SessionOpened(summary)).await;
+                        }
                         let _sent = out.send(ToServer::Reply { id, outcome }).await;
                     });
                 }

@@ -136,11 +136,16 @@ mod tests {
                 "read_output",
                 "list_commands",
                 "wait_for",
+                "events",
                 "agent_status",
+                "resize_terminal",
                 "close_terminal",
                 "read_file",
                 "write_file",
+                "list_dir",
+                "stat",
                 "list_ports",
+                "forget_worker",
             ]
         );
         let wait = &listed["result"]["tools"][8];
@@ -279,7 +284,7 @@ mod tests {
 
         let inside = SocketAddr::from(([127, 0, 0, 1], port));
         let listed = rpc(inside, 1, "tools/list", None, json!({})).await;
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 14);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 19);
         serving.abort();
     }
 }

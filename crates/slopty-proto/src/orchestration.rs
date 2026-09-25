@@ -8,12 +8,16 @@
 //!
 //! Reads come from the worker's terminal engine, never from raw PTY bytes: the rendered screen,
 //! scrollback by absolute line index, and OSC 133 command blocks with their exit codes.
+//!
+//! The server answers [`Verb::Events`] and [`Verb::ForgetWorker`] itself, from its registry:
+//! events are what it heard from every worker, numbered in one sequence, so one long poll
+//! watches the whole fleet.
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WorkerId};
 
 use crate::agent::{AgentKind, AgentStatus};
-use crate::server::WorkerInfo;
+use crate::server::{Liveness, WorkerInfo};
 use crate::terminal::SessionSummary;
 
 /// A terminal on a worker.
@@ -23,6 +27,15 @@ pub struct TermRef {
     pub worker: WorkerId,
     /// The session on that worker.
     pub session: SessionId,
+}
+
+/// A terminal's grid in character cells.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct Size {
+    /// Columns.
+    pub cols: u16,
+    /// Rows.
+    pub rows: u16,
 }
 
 /// What to type into a terminal.
@@ -84,6 +97,8 @@ pub enum Verb {
         env: Vec<(String, String)>,
         /// A name for the terminal's tile.
         name: Option<String>,
+        /// The grid until a client shows it and sizes it to its window; 120×36 when absent.
+        size: Option<Size>,
     },
     /// Start an agent's TUI in a new terminal, optionally with a first prompt.
     SpawnAgent {
@@ -95,6 +110,12 @@ pub enum Verb {
         cwd: String,
         /// The first prompt, typed once the agent is ready.
         prompt: Option<String>,
+        /// Arguments after the agent's program.
+        args: Vec<String>,
+        /// Extra environment.
+        env: Vec<(String, String)>,
+        /// The grid, as for [`Verb::OpenTerminal`].
+        size: Option<Size>,
     },
     /// Type into a terminal.
     SendInput {
@@ -143,12 +164,17 @@ pub enum Verb {
         /// Which.
         term: TermRef,
     },
-    /// Read a file on a worker.
+    /// Read a file on a worker, whole or a range of it; answered with [`Outcome::File`].
     ReadFile {
         /// Where.
         worker: WorkerId,
         /// Absolute path, or `~/…`.
         path: String,
+        /// First byte wanted.
+        offset: u64,
+        /// At most this many bytes, capped by the worker. The rest of the file when absent,
+        /// which fails for a rest over the cap.
+        length: Option<u64>,
     },
     /// Write a file on a worker, replacing it.
     WriteFile {
@@ -164,6 +190,168 @@ pub enum Verb {
         /// Where.
         worker: WorkerId,
     },
+    /// Resize a terminal no client shows (a client showing one sizes it to its window).
+    ResizeTerminal {
+        /// Which.
+        term: TermRef,
+        /// The new grid.
+        size: Size,
+    },
+    /// A directory's entries by name; answered with [`Outcome::Dir`].
+    ListDir {
+        /// Where.
+        worker: WorkerId,
+        /// Absolute path, or `~/…`.
+        path: String,
+        /// At most this many entries, capped by the worker.
+        max: u32,
+    },
+    /// What is at a path; answered with [`Outcome::Stat`].
+    Stat {
+        /// Where.
+        worker: WorkerId,
+        /// Absolute path, or `~/…`; a symbolic link is followed.
+        path: String,
+    },
+    /// What happened on the fleet from cursor `since` on, waiting up to `timeout_ms` when
+    /// nothing has yet; answered by the server with [`Outcome::Events`].
+    Events {
+        /// The first sequence number wanted: the `next` of the previous answer. From now on
+        /// when absent. A cursor ahead of the server's (it restarted) reads from its oldest.
+        since: Option<u64>,
+        /// Wait this long for a first event that passes `filter`; the server caps it as it
+        /// caps [`Verb::WaitFor`].
+        timeout_ms: u32,
+        /// Which events count.
+        filter: EventFilter,
+    },
+    /// Remove a worker that is not online from the server's registry.
+    ForgetWorker {
+        /// Which.
+        worker: WorkerId,
+    },
+}
+
+/// Which [`HubEvent`]s a [`Verb::Events`] returns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum EventFilter {
+    /// Every event.
+    #[default]
+    All,
+    /// An agent's move to a state that needs a human or is idle, as
+    /// [`WaitUntil::AgentNeedsInput`] reads it, on any worker.
+    AgentNeedsInput,
+}
+
+impl EventFilter {
+    /// Whether `what` passes.
+    #[must_use]
+    pub const fn admits(self, what: &Happening) -> bool {
+        match self {
+            Self::All => true,
+            Self::AgentNeedsInput => matches!(
+                what,
+                Happening::Agent {
+                    status: AgentStatus::Blocked(_) | AgentStatus::Idle | AgentStatus::Done,
+                    ..
+                }
+            ),
+        }
+    }
+}
+
+/// Something the server heard, numbered in the order it heard it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct HubEvent {
+    /// Its place in the server's one sequence, from 1.
+    pub seq: u64,
+    /// Milliseconds since the Unix epoch when the server heard it.
+    pub at_ms: u64,
+    /// What.
+    pub what: Happening,
+}
+
+/// What a [`HubEvent`] reports.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Happening {
+    /// A worker came online, turned unreachable or was presumed gone.
+    Worker {
+        /// Which.
+        worker: WorkerId,
+        /// Its name.
+        name: String,
+        /// Its new liveness.
+        liveness: Liveness,
+    },
+    /// A worker left the registry: forgotten, or replaced by the same machine set up again.
+    WorkerRemoved {
+        /// Which.
+        worker: WorkerId,
+        /// Its name.
+        name: String,
+    },
+    /// A terminal opened.
+    SessionOpened {
+        /// Where.
+        worker: WorkerId,
+        /// What.
+        summary: SessionSummary,
+    },
+    /// A terminal ended.
+    SessionClosed {
+        /// Which.
+        term: TermRef,
+    },
+    /// An agent's status changed.
+    Agent {
+        /// Where.
+        term: TermRef,
+        /// Which agent.
+        kind: AgentKind,
+        /// Its new status; `None` when it left.
+        status: AgentStatus,
+        /// What it says, for a human.
+        detail: Option<String>,
+    },
+}
+
+/// What kind of thing is at a path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum FileKind {
+    /// A regular file.
+    File,
+    /// A directory.
+    Dir,
+    /// A symbolic link (in a listing; [`Verb::Stat`] follows links).
+    Symlink,
+    /// A pipe, socket or device.
+    Other,
+}
+
+/// One entry of a directory.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DirEntry {
+    /// Its name in the directory.
+    pub name: String,
+    /// What it is, the link itself for a symbolic link.
+    pub kind: FileKind,
+    /// Bytes.
+    pub size: u64,
+    /// Last modification, milliseconds since the Unix epoch.
+    pub modified_ms: u64,
+}
+
+/// What is at a path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FileStat {
+    /// What it is.
+    pub kind: FileKind,
+    /// Bytes.
+    pub size: u64,
+    /// Last modification, milliseconds since the Unix epoch.
+    pub modified_ms: u64,
+    /// Permission bits (`0o755`).
+    pub mode: u32,
 }
 
 /// One line of terminal text.
@@ -271,11 +459,19 @@ pub enum Outcome {
     Waited(Waited),
     /// For [`Verb::AgentStatus`]: the agent, if one runs, and its status.
     Agent(Option<(AgentKind, AgentStatus)>),
-    /// For [`Verb::ReadFile`].
-    File(Vec<u8>),
+    /// For [`Verb::ReadFile`]: the bytes from `offset` on, and the file's whole size.
+    File {
+        /// What was read.
+        bytes: Vec<u8>,
+        /// Where they start in the file.
+        offset: u64,
+        /// The file's size in bytes.
+        size: u64,
+    },
     /// For [`Verb::ListPorts`].
     Ports(Vec<Port>),
-    /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`], [`Verb::WriteFile`]).
+    /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`], [`Verb::WriteFile`],
+    /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`]).
     Done,
     /// It failed.
     Error {
@@ -283,5 +479,23 @@ pub enum Outcome {
         code: ErrorCode,
         /// For a human or a model to read.
         message: String,
+    },
+    /// For [`Verb::ListDir`]: entries by name, and how many the directory holds.
+    Dir {
+        /// The first `max` entries by name.
+        entries: Vec<DirEntry>,
+        /// Every entry the directory holds.
+        total: u32,
+    },
+    /// For [`Verb::Stat`]; `None` when nothing is at the path.
+    Stat(Option<FileStat>),
+    /// For [`Verb::Events`].
+    Events {
+        /// Oldest first.
+        events: Vec<HubEvent>,
+        /// The cursor to ask from next.
+        next: u64,
+        /// Events after `since` the server no longer holds.
+        missed: u64,
     },
 }

@@ -15,7 +15,7 @@ mod tests {
     use slopty_net::server::{AcceptedLink, ServerListener};
     use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::orchestration::{
-        ErrorCode, Input, Outcome, TermRef, Verb, WaitUntil, Waited,
+        ErrorCode, Input, Outcome, Size, TermRef, Verb, WaitUntil, Waited,
     };
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer};
     use slopty_proto::terminal::CloseReason;
@@ -155,6 +155,7 @@ mod tests {
                 ("BASH_SILENCE_DEPRECATION_WARNING".to_owned(), "1".to_owned()),
             ],
             name: Some("link test".to_owned()),
+            size: None,
         }
     }
 
@@ -162,10 +163,10 @@ mod tests {
         Input::Text(s.to_owned())
     }
 
-    /// A file the worker may read but whose answer is too large for one message on the link:
-    /// the server gets an error in its place, and the link goes on answering.
+    /// The largest read fits in one message on the link with its envelope, a file larger than
+    /// one read is refused whole and read in parts, and the link goes on answering.
     #[tokio::test]
-    async fn an_answer_too_large_for_the_link_is_an_error_and_the_link_goes_on() {
+    async fn the_largest_read_fits_in_one_message_and_a_larger_file_is_read_in_parts() {
         let dir = tempfile::tempdir().unwrap();
         let server =
             ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
@@ -176,12 +177,22 @@ mod tests {
         let worker = reg.worker;
 
         let big = dir.path().join("big.bin");
-        let size = slopty_worker::orchestrate::MAX_FILE_BYTES;
+        let cap = slopty_worker::orchestrate::MAX_FILE_BYTES;
+        let size = cap.saturating_add(5);
         std::fs::File::create(&big).unwrap().set_len(size).unwrap();
         let path = big.to_string_lossy().into_owned();
-        let read = peer.ask(Verb::ReadFile { worker, path }).await;
-        let Outcome::Error { code: ErrorCode::Failed, message } = read else { panic!("{read:?}") };
-        assert!(message.contains("more than the"), "{message}");
+        let read = |offset, length| Verb::ReadFile { worker, path: path.clone(), offset, length };
+        let whole = peer.ask(read(0, None)).await;
+        let Outcome::Error { code: ErrorCode::Failed, message } = whole else {
+            panic!("{whole:?}")
+        };
+        assert!(message.contains("offset and length"), "{message}");
+        let first = peer.ask(read(0, Some(u64::MAX))).await;
+        let Outcome::File { bytes, offset: 0, size: told } = first else { panic!("{first:?}") };
+        assert_eq!((bytes.len() as u64, told), (cap, size), "a whole read's worth arrived");
+        let rest = peer.ask(read(cap, None)).await;
+        let Outcome::File { bytes, .. } = rest else { panic!("{rest:?}") };
+        assert_eq!(bytes.len(), 5);
 
         let ports = peer.ask(Verb::ListPorts { worker }).await;
         assert!(matches!(ports, Outcome::Ports(_)), "the link still answers: {ports:?}");
@@ -209,6 +220,15 @@ mod tests {
         };
         assert_eq!(term.worker, worker);
         peer.heard(|m| matches!(m, ToServer::SessionOpened(s) if s.id == term.session)).await;
+
+        // Resized with no client showing it; the server hears the new size before the answer.
+        let size = Size { cols: 100, rows: 30 };
+        assert_eq!(peer.ask(Verb::ResizeTerminal { term, size }).await, Outcome::Done);
+        let resized = |m: &ToServer| matches!(m, ToServer::SessionOpened(s) if s.id == term.session && (s.cols, s.rows) == (100, 30));
+        assert!(peer.heard.iter().any(resized), "{:?}", peer.heard);
+        let tiny = Size { cols: 1, rows: 1 };
+        let refused = peer.ask(Verb::ResizeTerminal { term, size: tiny }).await;
+        assert!(matches!(refused, Outcome::Error { code: ErrorCode::Invalid, .. }), "{refused:?}");
 
         // Typed, then waited for in a separate request: the output is found however soon it
         // came.
@@ -266,8 +286,8 @@ mod tests {
         let write = Verb::WriteFile { worker, path: path.clone(), bytes: b"hello".to_vec() };
         assert_eq!(peer.ask(write).await, Outcome::Done);
         assert_eq!(
-            peer.ask(Verb::ReadFile { worker, path }).await,
-            Outcome::File(b"hello".to_vec())
+            peer.ask(Verb::ReadFile { worker, path, offset: 1, length: Some(3) }).await,
+            Outcome::File { bytes: b"ell".to_vec(), offset: 1, size: 5 }
         );
 
         let elsewhere = TermRef { worker: WorkerId::new(), session: term.session };
@@ -288,9 +308,17 @@ mod tests {
 
         // A shell that exits on its own is announced as exited, once, without a verb closing
         // it.
-        let Outcome::Opened(quitter) = peer.ask(open(worker, dir.path())).await else {
+        let mut sized = open(worker, dir.path());
+        if let Verb::OpenTerminal { size, .. } = &mut sized {
+            *size = Some(Size { cols: 90, rows: 20 });
+        }
+        let Outcome::Opened(quitter) = peer.ask(sized).await else {
             panic!("the second terminal opens");
         };
+        peer.heard(|m| {
+            matches!(m, ToServer::SessionOpened(s) if s.id == quitter.session && (s.cols, s.rows) == (90, 20))
+        })
+        .await;
         assert_eq!(
             peer.ask(Verb::SendInput { term: quitter, input: text("exit\n") }).await,
             Outcome::Done

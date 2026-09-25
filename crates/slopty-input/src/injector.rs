@@ -10,10 +10,13 @@ use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton};
 use slopty_proto::screen::{CaptureTarget, ScreenInput};
 
 use crate::backend::{Backend, Event, Post, Route, System};
-use crate::{InputError, keymap};
+use crate::{InputError, PointerWatch, keymap};
 
-/// How long bounds stay valid; windows move rarely, pointer events are dense.
-pub const BOUNDS_TTL: Duration = Duration::from_millis(100);
+/// How long bounds stay valid before a pointer event reads them itself. The stream's geometry
+/// probe hands fresh ones over every 100 ms ([`Injector::set_bounds`]); this is long enough that a
+/// probe late by a slow window-server answer does not put a read in front of a move, and short
+/// enough that an injector nobody feeds still follows a window that moved.
+pub const BOUNDS_TTL: Duration = Duration::from_millis(250);
 
 /// How long an owner found active, or just activated, is taken to stay active. Activation lands
 /// some milliseconds after it is asked for, and the lookup behind the check costs 1–2 ms
@@ -61,6 +64,8 @@ pub struct Injector<B: Backend = System> {
     held: u8,
     /// Where the pointer was last put: where held buttons are let go.
     at: Option<CGPoint>,
+    /// The same, for the stream's cursor samples.
+    placed: PointerWatch,
     /// Keys pressed and not released, in press order.
     keys: Vec<KeyCode>,
     /// Modifier flags from the latest event, kept so bare modifier presses post correctly.
@@ -82,6 +87,10 @@ impl<B: Backend> Injector<B> {
     #[must_use]
     pub fn with_backend(target: CaptureTarget, scale: f64, backend: B) -> Self {
         let route = backend.owner_pid(target).map_or(Route::Hid, Route::Pid);
+        let placed = PointerWatch::default();
+        if route == Route::Hid {
+            placed.follow_real();
+        }
         Self {
             backend,
             target,
@@ -92,6 +101,7 @@ impl<B: Backend> Injector<B> {
             active_at: None,
             held: 0,
             at: None,
+            placed,
             keys: Vec::new(),
             flags: CGEventFlags::empty(),
         }
@@ -107,6 +117,18 @@ impl<B: Backend> Injector<B> {
     #[must_use]
     pub const fn route(&self) -> Route {
         self.route
+    }
+
+    /// Report where the pointer is put through `watch` from now on: events posted to the owner
+    /// leave the worker's pointer alone, so the last place one was put is the pointer the
+    /// stream shows; events through the HID tap move the real one.
+    pub fn report_pointer(&mut self, watch: PointerWatch) {
+        match (self.route, self.at) {
+            (Route::Hid, _) => watch.follow_real(),
+            (Route::Pid(_), Some(at)) => watch.place(at.x, at.y),
+            (Route::Pid(_), None) => {}
+        }
+        self.placed = watch;
     }
 
     /// Apply one input event.
@@ -234,6 +256,9 @@ impl<B: Backend> Injector<B> {
         let rect = self.bounds.ok_or(InputError::NoBounds)?;
         let at = to_point(rect, self.scale, f64::from(x), f64::from(y));
         self.at = Some(at);
+        if matches!(self.route, Route::Pid(_)) {
+            self.placed.place(at.x, at.y);
+        }
         Ok(at)
     }
 

@@ -147,6 +147,26 @@ mod actor {
         session.close();
     }
 
+    /// Orchestration resizes a terminal only while no client shows it, checked and applied in
+    /// one step, so a client that attached first keeps the size its window set.
+    #[tokio::test]
+    async fn a_resize_applies_only_while_no_client_shows_the_terminal() {
+        let (session, _child) = start(&["/bin/sh", "-c", "cat"]);
+        assert_eq!(session.resize_unviewed(size(100, 30)).await.unwrap(), 0);
+        let snap = session.snapshot().await.unwrap();
+        assert_eq!((snap.size.cols, snap.size.rows), (100, 30), "nobody watches: applied");
+
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full)))
+            .await;
+        assert_eq!(session.resize_unviewed(size(150, 40)).await.unwrap(), 1);
+        let snap = session.snapshot().await.unwrap();
+        assert_eq!((snap.size.cols, snap.size.rows), (40, 6), "the viewer's size stands");
+        session.close();
+    }
+
     /// Every read goes to the tap as it is, and once the shell is quiet a checkpoint follows
     /// that a fresh actor can start from: the second actor shows the first one's screen.
     #[tokio::test]

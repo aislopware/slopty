@@ -14,19 +14,20 @@
 pub mod keys;
 mod wait;
 
-use std::io::Read as _;
+use std::io::{Read as _, Seek as _};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use slopty_core::{ClientId, SessionId, WorkerId};
 use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{
-    Command, ErrorCode, Input, Line, Outcome, Screen, TermRef, Verb, WaitUntil,
+    Command, DirEntry, ErrorCode, FileKind, FileStat, Input, Line, Outcome, Screen, Size, TermRef,
+    Verb, WaitUntil,
 };
-use slopty_proto::terminal::{CloseReason, OpenSession, TermRequest, TermSize};
+use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
 
@@ -41,8 +42,23 @@ const ORCHESTRATOR: ClientId = ClientId::nil();
 /// frame, and a caller pages on with `next`.
 pub const MAX_OUTPUT_LINES: u32 = 10_000;
 
-/// Largest file `ReadFile` returns; a reply is one frame on the server's control stream.
-pub const MAX_FILE_BYTES: u64 = 16 << 20;
+/// Most bytes one `ReadFile` returns. A reply is one frame on the server's control stream,
+/// and this leaves half of it for the envelope; a caller pages through a larger file with
+/// `offset`.
+pub const MAX_FILE_BYTES: u64 = 8 << 20;
+const _: () = assert!(
+    MAX_FILE_BYTES.saturating_mul(2) <= slopty_proto::codec::MAX_FRAME_BYTES as u64,
+    "a whole read and its envelope fit in one frame"
+);
+
+/// Most entries one `ListDir` returns: names of up to 255 bytes each keep the reply a few
+/// megabytes, well inside a frame.
+pub const MAX_DIR_ENTRIES: u32 = 10_000;
+
+/// The grid a verb may ask for, inclusive: as small as a status line, as large as a wall of
+/// displays in a small font.
+const MIN_SIZE: Size = Size { cols: 10, rows: 2 };
+const MAX_SIZE: Size = Size { cols: 1000, rows: 500 };
 
 /// How long a spawned agent's first prompt waits for the agent to say it is at its prompt
 /// before it is typed anyway.
@@ -137,13 +153,16 @@ impl Orchestrator {
     async fn dispatch(&self, verb: Verb) -> Result<Outcome, Failure> {
         let inner = &self.inner;
         match verb {
-            Verb::ListWorkers | Verb::ListTerminals { .. } => {
+            Verb::ListWorkers
+            | Verb::ListTerminals { .. }
+            | Verb::Events { .. }
+            | Verb::ForgetWorker { .. } => {
                 Err(Failure::new(ErrorCode::Invalid, "the server answers this, not a worker"))
             }
-            Verb::OpenTerminal { worker, cwd, command, env, name } => {
+            Verb::OpenTerminal { worker, cwd, command, env, name, size } => {
                 self.mine(worker)?;
                 let req = OpenSession {
-                    size: ORCHESTRATED_SIZE,
+                    size: term_size(size)?,
                     cwd,
                     command,
                     env,
@@ -153,9 +172,10 @@ impl Orchestrator {
                 let handle = self.open(&req, ORCHESTRATOR).await?;
                 Ok(Outcome::Opened(TermRef { worker, session: handle.id() }))
             }
-            Verb::SpawnAgent { worker, agent, cwd, prompt } => {
+            Verb::SpawnAgent { worker, agent, cwd, prompt, args, env, size } => {
                 self.mine(worker)?;
-                self.spawn_agent(agent, cwd, prompt).await
+                let spawn = Spawn { cwd, args, env, size: term_size(size)? };
+                self.spawn_agent(agent, spawn, prompt).await
             }
             Verb::SendInput { term, input } => {
                 send_input(&self.session(term)?, &input).await?;
@@ -189,10 +209,11 @@ impl Orchestrator {
                 self.close(term.session).await?;
                 Ok(Outcome::Done)
             }
-            Verb::ReadFile { worker, path } => {
+            Verb::ReadFile { worker, path, offset, length } => {
                 self.mine(worker)?;
                 let path = crate::file::expand_home(Path::new(&path));
-                blocking(move || read_file(&path)).await.map(Outcome::File)
+                let (bytes, size) = blocking(move || read_file(&path, offset, length)).await?;
+                Ok(Outcome::File { bytes, offset, size })
             }
             Verb::WriteFile { worker, path, bytes } => {
                 self.mine(worker)?;
@@ -205,7 +226,28 @@ impl Orchestrator {
                 let ports = blocking(move || Ok(crate::ports::listening(&roots))).await?;
                 Ok(Outcome::Ports(ports))
             }
+            Verb::ResizeTerminal { term, size } => {
+                let size = term_size(Some(size))?;
+                resize(&self.session(term)?, size).await?;
+                Ok(Outcome::Done)
+            }
+            Verb::ListDir { worker, path, max } => {
+                self.mine(worker)?;
+                let path = crate::file::expand_home(Path::new(&path));
+                let (entries, total) = blocking(move || list_dir(&path, max)).await?;
+                Ok(Outcome::Dir { entries, total })
+            }
+            Verb::Stat { worker, path } => {
+                self.mine(worker)?;
+                let path = crate::file::expand_home(Path::new(&path));
+                blocking(move || stat(&path)).await.map(Outcome::Stat)
+            }
         }
+    }
+
+    /// The session's summary as a client's list shows it, if the session runs.
+    pub async fn summary(&self, session: SessionId) -> Option<SessionSummary> {
+        self.inner.worker.summaries().await.into_iter().find(|s| s.id == session)
     }
 
     /// Open a session and announce it the way a client's open is announced: the summary to
@@ -248,11 +290,11 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Start the agent's TUI in `cwd`; with a prompt, type it once the agent is at its prompt.
+    /// Start the agent's TUI; with a prompt, type it once the agent is at its prompt.
     async fn spawn_agent(
         &self,
         agent: AgentKind,
-        cwd: String,
+        spawn: Spawn,
         prompt: Option<String>,
     ) -> Result<Outcome, Failure> {
         let program = match agent {
@@ -261,11 +303,12 @@ impl Orchestrator {
         // Subscribed before the spawn: the agent may report itself ready before the open
         // returns.
         let events = self.inner.events.subscribe();
+        let Spawn { cwd, args, env, size } = spawn;
         let req = OpenSession {
-            size: ORCHESTRATED_SIZE,
+            size,
             cwd: Some(cwd),
-            command: vec![program.to_owned()],
-            env: Vec::new(),
+            command: std::iter::once(program.to_owned()).chain(args).collect(),
+            env,
             title: None,
             attach: false,
         };
@@ -300,6 +343,55 @@ impl Orchestrator {
             )
         })
     }
+}
+
+/// Where and how an agent starts.
+struct Spawn {
+    cwd: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    size: TermSize,
+}
+
+/// The session size a verb asks for, [`ORCHESTRATED_SIZE`] when it names none.
+fn term_size(size: Option<Size>) -> Result<TermSize, Failure> {
+    let Some(size) = size else { return Ok(ORCHESTRATED_SIZE) };
+    let fits = (MIN_SIZE.cols..=MAX_SIZE.cols).contains(&size.cols)
+        && (MIN_SIZE.rows..=MAX_SIZE.rows).contains(&size.rows);
+    if !fits {
+        return Err(Failure::new(
+            ErrorCode::Invalid,
+            format!(
+                "{}x{} is not a terminal size; cols {}..={}, rows {}..={}",
+                size.cols, size.rows, MIN_SIZE.cols, MAX_SIZE.cols, MIN_SIZE.rows, MAX_SIZE.rows
+            ),
+        ));
+    }
+    Ok(TermSize { cols: size.cols, rows: size.rows, ..ORCHESTRATED_SIZE })
+}
+
+/// Resize a session no client shows.
+///
+/// A session's size is its driver's, and a client showing it drives it to fit its window, so a
+/// session with viewers is refused rather than fought over. The check and the resize are one
+/// step on the session's actor, so a client attaching meanwhile keeps its seat.
+///
+/// # Errors
+///
+/// [`ErrorCode::Failed`] while a client shows the session; [`ErrorCode::UnknownTerminal`] when
+/// it is gone.
+pub async fn resize(handle: &SessionHandle, size: TermSize) -> Result<(), Failure> {
+    let viewers = handle.resize_unviewed(size).await?;
+    if viewers > 0 {
+        return Err(Failure::new(
+            ErrorCode::Failed,
+            format!(
+                "{viewers} client(s) show this terminal and size it to their window; only a \
+                 terminal no client shows can be resized"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Type a spawned agent's first prompt once it says it is at its prompt, from a signal that
@@ -483,35 +575,95 @@ fn io_failure(path: &Path, e: &std::io::Error) -> Failure {
     Failure::new(ErrorCode::Failed, format!("{}: {e}", path.display()))
 }
 
-/// A whole file, [`MAX_FILE_BYTES`] at most.
-fn read_file(path: &Path) -> Result<Vec<u8>, Failure> {
+/// The bytes of a file from `offset` on, `length` of them or the rest, [`MAX_FILE_BYTES`] at
+/// most; and the file's size.
+fn read_file(path: &Path, offset: u64, length: Option<u64>) -> Result<(Vec<u8>, u64), Failure> {
     let mut file = std::fs::File::open(path).map_err(|e| io_failure(path, &e))?;
     let meta = file.metadata().map_err(|e| io_failure(path, &e))?;
     if meta.is_dir() {
         return Err(Failure::new(ErrorCode::Failed, format!("{} is a directory", path.display())));
     }
-    let too_big = |size: u64| {
-        Failure::new(
-            ErrorCode::Failed,
-            format!(
-                "{} is {size} bytes; read_file returns at most {MAX_FILE_BYTES} (16 MiB)",
-                path.display()
-            ),
-        )
+    let size = meta.len();
+    let want = if let Some(length) = length {
+        length.min(MAX_FILE_BYTES)
+    } else {
+        let rest = size.saturating_sub(offset);
+        if rest > MAX_FILE_BYTES {
+            return Err(Failure::new(
+                ErrorCode::Failed,
+                format!(
+                    "{} is {size} bytes, and one read returns at most {MAX_FILE_BYTES} (8 MiB); \
+                     read it in parts with offset and length",
+                    path.display()
+                ),
+            ));
+        }
+        rest
     };
-    if meta.len() > MAX_FILE_BYTES {
-        return Err(too_big(meta.len()));
+    if offset > 0 {
+        file.seek(std::io::SeekFrom::Start(offset)).map_err(|e| io_failure(path, &e))?;
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    // One byte past the cap tells a file that grew since the stat from one that fits.
-    (&mut file)
-        .take(MAX_FILE_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|e| io_failure(path, &e))?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(too_big(bytes.len() as u64));
+    let mut bytes = Vec::with_capacity(usize::try_from(want.min(size)).unwrap_or(0));
+    // Capped here too: the file may have grown since the stat.
+    (&mut file).take(want).read_to_end(&mut bytes).map_err(|e| io_failure(path, &e))?;
+    Ok((bytes, size))
+}
+
+/// The first `max` entries of a directory by name ([`MAX_DIR_ENTRIES`] at most), and how many
+/// it holds.
+fn list_dir(path: &Path, max: u32) -> Result<(Vec<DirEntry>, u32), Failure> {
+    let read = std::fs::read_dir(path).map_err(|e| io_failure(path, &e))?;
+    let mut entries = Vec::new();
+    for entry in read {
+        let entry = entry.map_err(|e| io_failure(path, &e))?;
+        // Gone between the listing and the look: it is not in the directory any more.
+        let Ok(meta) = entry.metadata() else { continue };
+        entries.push(DirEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            kind: kind(meta.file_type()),
+            size: meta.len(),
+            modified_ms: modified_ms(&meta),
+        });
     }
-    Ok(bytes)
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let total = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    entries.truncate(usize::try_from(max.min(MAX_DIR_ENTRIES)).unwrap_or(usize::MAX));
+    Ok((entries, total))
+}
+
+/// What is at `path`, following a symbolic link; `None` when nothing is.
+fn stat(path: &Path) -> Result<Option<FileStat>, Failure> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_failure(path, &e)),
+    };
+    Ok(Some(FileStat {
+        kind: kind(meta.file_type()),
+        size: meta.len(),
+        modified_ms: modified_ms(&meta),
+        mode: std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o7777,
+    }))
+}
+
+fn kind(t: std::fs::FileType) -> FileKind {
+    use std::os::unix::fs::FileTypeExt as _;
+    if t.is_symlink() {
+        FileKind::Symlink
+    } else if t.is_dir() {
+        FileKind::Dir
+    } else if t.is_fifo() || t.is_socket() || t.is_block_device() || t.is_char_device() {
+        FileKind::Other
+    } else {
+        FileKind::File
+    }
+}
+
+fn modified_ms(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Replace a file whole ([`crate::file::replace`]).
@@ -537,16 +689,20 @@ mod tests {
         assert_eq!(shape, ["echo hi", "<Enter>", "ls", "<Enter>", "<Enter>", "x"]);
     }
 
+    fn whole(path: &Path) -> Result<Vec<u8>, Failure> {
+        read_file(path, 0, None).map(|(bytes, _size)| bytes)
+    }
+
     #[test]
     fn files_are_read_capped_and_written_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes.txt");
         write_file(&path, b"one").unwrap();
-        assert_eq!(read_file(&path).unwrap(), b"one");
+        assert_eq!(whole(&path).unwrap(), b"one");
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         write_file(&path, b"two").unwrap();
-        assert_eq!(read_file(&path).unwrap(), b"two");
+        assert_eq!(whole(&path).unwrap(), b"two");
         let mode = std::os::unix::fs::PermissionsExt::mode(
             &std::fs::metadata(&path).unwrap().permissions(),
         );
@@ -557,10 +713,75 @@ mod tests {
         let big = dir.path().join("big.bin");
         let file = std::fs::File::create(&big).unwrap();
         file.set_len(MAX_FILE_BYTES + 1).unwrap();
-        let err = read_file(&big).unwrap_err();
-        assert!(err.message.contains("16 MiB"), "{err:?}");
-        assert_eq!(read_file(dir.path()).unwrap_err().code, ErrorCode::Failed);
+        let err = whole(&big).unwrap_err();
+        assert!(err.message.contains("offset and length"), "{err:?}");
+        assert_eq!(whole(dir.path()).unwrap_err().code, ErrorCode::Failed);
         let missing = write_file(&dir.path().join("no/such/dir/x"), b"").unwrap_err();
         assert_eq!(missing.code, ErrorCode::Failed);
+    }
+
+    /// A range reads from its offset, a length past the end stops at the end, and every read
+    /// reports the whole file's size; a file over the cap is read in parts, each at most the
+    /// cap.
+    #[test]
+    fn a_file_is_read_in_ranges_with_its_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("digits");
+        std::fs::write(&path, b"0123456789").unwrap();
+        assert_eq!(read_file(&path, 3, Some(4)).unwrap(), (b"3456".to_vec(), 10));
+        assert_eq!(read_file(&path, 8, None).unwrap(), (b"89".to_vec(), 10));
+        assert_eq!(read_file(&path, 8, Some(100)).unwrap(), (b"89".to_vec(), 10));
+        assert_eq!(read_file(&path, 20, Some(5)).unwrap(), (Vec::new(), 10), "past the end");
+
+        let big = dir.path().join("big.bin");
+        std::fs::File::create(&big).unwrap().set_len(MAX_FILE_BYTES + 3).unwrap();
+        let (first, size) = read_file(&big, 0, Some(u64::MAX)).unwrap();
+        assert_eq!((first.len() as u64, size), (MAX_FILE_BYTES, MAX_FILE_BYTES + 3));
+        let (rest, _size) = read_file(&big, MAX_FILE_BYTES, None).unwrap();
+        assert_eq!(rest.len(), 3, "the rest fits");
+    }
+
+    /// Entries come by name with their kind, size and time, up to `max`, with the count of all
+    /// of them; a missing path is an error, a missing stat is `None`.
+    #[test]
+    fn a_directory_lists_by_name_and_a_path_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"hello").unwrap();
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::os::unix::fs::symlink("b.txt", dir.path().join("c")).unwrap();
+        let (entries, total) = list_dir(dir.path(), 10).unwrap();
+        let shape: Vec<(&str, FileKind)> =
+            entries.iter().map(|e| (e.name.as_str(), e.kind)).collect();
+        assert_eq!(
+            shape,
+            [("a", FileKind::Dir), ("b.txt", FileKind::File), ("c", FileKind::Symlink)]
+        );
+        assert_eq!(total, 3);
+        assert_eq!(entries[1].size, 5);
+        assert!(entries[1].modified_ms > 1_700_000_000_000, "{:?}", entries[1]);
+        let (first, total) = list_dir(dir.path(), 1).unwrap();
+        assert_eq!((first.len(), total), (1, 3), "bounded, with the whole count");
+        assert_eq!(list_dir(&dir.path().join("nope"), 10).unwrap_err().code, ErrorCode::Failed);
+
+        let linked = stat(&dir.path().join("c")).unwrap().unwrap();
+        assert_eq!((linked.kind, linked.size), (FileKind::File, 5), "a link is followed");
+        std::fs::set_permissions(
+            dir.path().join("a"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o750),
+        )
+        .unwrap();
+        let a = stat(&dir.path().join("a")).unwrap().unwrap();
+        assert_eq!((a.kind, a.mode), (FileKind::Dir, 0o750));
+        assert_eq!(stat(&dir.path().join("nope")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_size_is_checked_and_defaults() {
+        assert_eq!(term_size(None).unwrap(), ORCHESTRATED_SIZE);
+        let wide = term_size(Some(Size { cols: 200, rows: 50 })).unwrap();
+        assert_eq!((wide.cols, wide.rows, wide.metrics), (200, 50, ORCHESTRATED_SIZE.metrics));
+        let err = term_size(Some(Size { cols: 0, rows: 50 })).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Invalid);
+        term_size(Some(Size { cols: 80, rows: 5000 })).unwrap_err();
     }
 }

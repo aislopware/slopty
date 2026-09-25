@@ -19,7 +19,9 @@
 //!
 //! [`InputSink`] is the worker's input seam, compiled on every target; [`CgEvents`] is the
 //! macOS implementation (`docs/decisions/topology.md`): the stream's [`Injector`] on an
-//! [`InputThread`], so no window-server call is made on the stream's task. [`pasteboard::Board`] is
+//! [`InputThread`], so no window-server call is made on the stream's task. The target's bounds
+//! come from the stream's geometry probe ([`InputSink::set_bounds`]), and where the input put the
+//! pointer goes back to the stream's cursor samples ([`PointerWatch`]). [`pasteboard::Board`] is
 //! the clipboard seam.
 
 #[cfg(target_os = "macos")]
@@ -29,8 +31,11 @@ mod injector;
 #[cfg(target_os = "macos")]
 pub mod keymap;
 pub mod pasteboard;
+mod pointer;
 #[cfg(target_os = "macos")]
 mod thread;
+
+use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 pub use backend::{Backend, Event, Post, Recorder, Route, System};
@@ -39,6 +44,8 @@ pub use injector::{Injector, can_post, flags_for, request_post, to_point};
 #[cfg(target_os = "macos")]
 pub use pasteboard::MacBoard;
 pub use pasteboard::{Board, Rep};
+pub use pointer::{Pointer, PointerWatch};
+use slopty_capture::Rect;
 use slopty_proto::screen::{CaptureTarget, ScreenInput};
 #[cfg(target_os = "macos")]
 pub use thread::{CgEvents, InputThread};
@@ -70,6 +77,10 @@ pub trait InputSink: Send + Sized + 'static {
     fn new(target: CaptureTarget, scale: f64) -> Self;
     /// The stream was re-scaled: `scale` stream pixels per display point from now on.
     fn set_scale(&mut self, scale: f64);
+    /// The target's bounds in global display points as read at `at` (`None`: the window is
+    /// gone): what the pointer events after this one map through. The stream's geometry probe
+    /// hands every read over, so the sink need not read them in front of an event.
+    fn set_bounds(&mut self, bounds: Option<Rect>, at: Instant);
     /// Deliver one input event.
     ///
     /// # Errors
@@ -85,4 +96,6 @@ pub trait InputSink: Send + Sized + 'static {
     /// Let go of every key and button held down through this sink: the stream is ending.
     /// Dropping the sink does the same.
     fn release_all(&mut self);
+    /// Where this sink's input puts the worker's pointer, readable from any thread.
+    fn pointer(&self) -> PointerWatch;
 }

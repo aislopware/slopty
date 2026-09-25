@@ -710,6 +710,121 @@ mod golden {
 }
 
 #[cfg(test)]
+mod orchestration {
+    use slopty_core::{SessionId, WorkerId};
+    use slopty_proto::agent::{AgentKind, AgentStatus, BlockReason};
+    use slopty_proto::codec;
+    use slopty_proto::orchestration::{
+        DirEntry, EventFilter, FileKind, FileStat, Happening, HubEvent, Outcome, Size, TermRef,
+        Verb,
+    };
+    use slopty_proto::server::{FromServer, ToServer};
+    use uuid::Uuid;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes
+            .chunks(16)
+            .map(|row| row.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[track_caller]
+    fn snap<T: serde::Serialize>(name: &str, msg: &T) {
+        let bytes = codec::encode(msg).expect("encodes");
+        insta::assert_snapshot!(name, hex(&bytes));
+    }
+
+    fn term() -> TermRef {
+        TermRef {
+            worker: WorkerId::from_uuid(Uuid::from_u128(0x77)),
+            session: SessionId::from_uuid(Uuid::from_u128(
+                0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10,
+            )),
+        }
+    }
+
+    fn request(verb: Verb) -> FromServer {
+        FromServer::Request { id: 8, verb }
+    }
+
+    fn reply(outcome: Outcome) -> ToServer {
+        ToServer::Reply { id: 8, outcome }
+    }
+
+    #[test]
+    fn sizes_ranges_and_directories() {
+        let worker = term().worker;
+        let size = Some(Size { cols: 200, rows: 50 });
+        snap(
+            "server_request_spawn",
+            &request(Verb::SpawnAgent {
+                worker,
+                agent: AgentKind::ClaudeCode,
+                cwd: "~/src/app".to_owned(),
+                prompt: Some("fix it".to_owned()),
+                args: vec!["--model".to_owned(), "opus".to_owned()],
+                env: vec![("A".to_owned(), "1".to_owned())],
+                size,
+            }),
+        );
+        let resize = Verb::ResizeTerminal { term: term(), size: Size { cols: 100, rows: 30 } };
+        snap("server_request_resize", &request(resize));
+        let read =
+            Verb::ReadFile { worker, path: "/tmp/a".to_owned(), offset: 4096, length: Some(1024) };
+        snap("server_request_read_range", &request(read));
+        let file = Outcome::File { bytes: b"hi".to_vec(), offset: 4096, size: 8192 };
+        snap("server_reply_file", &reply(file));
+        snap(
+            "server_request_list_dir",
+            &request(Verb::ListDir { worker, path: "~".to_owned(), max: 1000 }),
+        );
+        let entry = DirEntry {
+            name: "src".to_owned(),
+            kind: FileKind::Dir,
+            size: 96,
+            modified_ms: 1_790_000_000_000,
+        };
+        snap("server_reply_dir", &reply(Outcome::Dir { entries: vec![entry], total: 2 }));
+        let stat = FileStat {
+            kind: FileKind::File,
+            size: 12,
+            modified_ms: 1_790_000_000_000,
+            mode: 0o644,
+        };
+        snap("server_reply_stat", &reply(Outcome::Stat(Some(stat))));
+    }
+
+    #[test]
+    fn events_and_forgetting() {
+        let asked = ToServer::Request {
+            id: 9,
+            verb: Verb::Events {
+                since: Some(41),
+                timeout_ms: 60_000,
+                filter: EventFilter::AgentNeedsInput,
+            },
+        };
+        snap("server_request_events", &asked);
+        let event = HubEvent {
+            seq: 41,
+            at_ms: 1_790_000_000_000,
+            what: Happening::Agent {
+                term: term(),
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Blocked(BlockReason::Question),
+                detail: Some("Which branch?".to_owned()),
+            },
+        };
+        let answer = Outcome::Events { events: vec![event], next: 42, missed: 0 };
+        snap("server_reply_events", &FromServer::Reply { id: 9, outcome: answer });
+        let forget =
+            ToServer::Request { id: 10, verb: Verb::ForgetWorker { worker: term().worker } };
+        snap("server_request_forget", &forget);
+    }
+}
+
+#[cfg(test)]
 mod size_report {
     use slopty_grid::{Cursor, CursorShape, Line, RowUpdate, Style, TermModes};
     use slopty_proto::codec;

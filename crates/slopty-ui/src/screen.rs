@@ -681,6 +681,16 @@ impl ScreenView {
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
         let side = |native: f32| ((native * bucket).round().max(2.0) as u32).next_multiple_of(2);
         self.size = (side(self.native.0), side(self.native.1));
+        // The worker's pointer is drawn at the new scale from here on; the sample it last sent
+        // is carried over, so a still pointer stays put until the worker's first sample at the
+        // new scale comes back.
+        let rescale = |v: i32, from: u32, to: u32| -> i32 {
+            #[expect(clippy::cast_possible_truncation, reason = "a pixel position, rounded")]
+            let p = (f64::from(v) * f64::from(to) / f64::from(from.max(1))).round() as i32;
+            p
+        };
+        self.cursor.x = rescale(self.cursor.x, self.mapped.0, self.size.0);
+        self.cursor.y = rescale(self.cursor.y, self.mapped.1, self.size.1);
         self.mapped = self.size;
         self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
     }
@@ -776,6 +786,19 @@ impl ScreenView {
 
     fn inside(&self, p: Point<Pixels>) -> bool {
         self.bounds.contains(&p)
+    }
+
+    /// The worker's pointer from the picture's top-left, in view pixels. Its samples are in the
+    /// stream pixels the worker maps input with, so they scale by the same size input does,
+    /// not by the size of the frame in flight.
+    fn cursor_offset(&self) -> (Pixels, Pixels) {
+        let w = f32::from(self.bounds.size.width).max(1.0);
+        let h = f32::from(self.bounds.size.height).max(1.0);
+        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
+        let (sw, sh) = (self.mapped.0.max(1) as f32, self.mapped.1.max(1) as f32);
+        #[expect(clippy::cast_precision_loss, reason = "cursor coordinates are small")]
+        let (x, y) = (self.cursor.x as f32 / sw * w, self.cursor.y as f32 / sh * h);
+        (px(x), px(y))
     }
 
     fn mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, _cx: &mut Context<Self>) {
@@ -1101,19 +1124,14 @@ impl ScreenView {
             Pointer::Arrow => None,
             Pointer::Image { image, size, hot } => Some((Arc::clone(image), *size, *hot)),
         };
-        let w = f32::from(self.bounds.size.width).max(1.0);
-        let h = f32::from(self.bounds.size.height).max(1.0);
-        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
-        let (sw, sh) = (self.size.0.max(1) as f32, self.size.1.max(1) as f32);
-        #[expect(clippy::cast_precision_loss, reason = "cursor coordinates are small")]
-        let (cx_px, cy_px) = (self.cursor.x as f32 / sw * w, self.cursor.y as f32 / sh * h);
+        let (dx, dy) = self.cursor_offset();
         let fill = hsla(self.theme.surfaces.text);
         let outline = hsla(self.theme.surfaces.canvas);
         Some(
             canvas(
                 |_bounds, _window, _cx| {},
                 move |bounds, (), window, _cx| {
-                    let origin = point(bounds.origin.x + px(cx_px), bounds.origin.y + px(cy_px));
+                    let origin = point(bounds.origin.x + dx, bounds.origin.y + dy);
                     if let Some((image, size, hot)) = picture {
                         let at = pointer_bounds(origin, size, hot);
                         let _painted =
@@ -1478,12 +1496,8 @@ impl EntityInputHandler for ScreenView {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         // The worker's pointer stands in for a caret: candidate windows hang there.
-        let (w, h) = (f32::from(self.bounds.size.width), f32::from(self.bounds.size.height));
-        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
-        let (sw, sh) = ((self.size.0 as f32).max(1.0), (self.size.1 as f32).max(1.0));
-        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
-        let (x, y) = (self.cursor.x as f32 / sw * w, self.cursor.y as f32 / sh * h);
-        let origin = point(self.bounds.origin.x + px(x), self.bounds.origin.y + px(y));
+        let (dx, dy) = self.cursor_offset();
+        let origin = point(self.bounds.origin.x + dx, self.bounds.origin.y + dy);
         Some(Bounds::new(origin, size(px(1.0), px(16.0))))
     }
 
@@ -2348,5 +2362,36 @@ mod tests {
                 if (x - 100.0).abs() < 1.0 && (y - 150.0).abs() < 1.0),
             "a quarter across and half down the 400×300 stream asked for: {got:?}"
         );
+    }
+
+    /// The worker's pointer, drawn and standing in for the IME caret, scales by the size input
+    /// maps with: a frame at the old scale landing after the ask does not move it, the sample
+    /// the worker sent before the ask stays where it was, and so does the worker's first sample
+    /// at the new scale.
+    #[gpui::test]
+    fn the_workers_pointer_is_drawn_at_the_scale_asked_for(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        let caret = |view: &gpui::Entity<ScreenView>, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                view.update(cx, |v, cx| {
+                    v.bounds_for_range(0..0, Bounds::default(), window, cx).map(|b| b.origin)
+                })
+            })
+        };
+        let bounds = view.read_with(cx, |v, _| v.bounds);
+        let half_quarter = point(
+            bounds.origin.x + bounds.size.width * 0.5,
+            bounds.origin.y + bounds.size.height * 0.25,
+        );
+        view.update(cx, |v, _| v.cursor = CursorState { x: 400, y: 150, visible: true });
+        assert_eq!(caret(&view, cx), Some(half_quarter), "on the 800×600 stream");
+        view.update(cx, |v, _| {
+            v.quality_changed = past_cooldown();
+            v.set_painted_width(300.0);
+            v.size = (800, 600);
+        });
+        assert_eq!(caret(&view, cx), Some(half_quarter), "the sample sent before the ask");
+        view.update(cx, |v, _| v.cursor = CursorState { x: 200, y: 75, visible: true });
+        assert_eq!(caret(&view, cx), Some(half_quarter), "the first at the 400×300 asked for");
     }
 }

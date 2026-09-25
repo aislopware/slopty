@@ -69,6 +69,22 @@ mod tests {
         Ok(all.iter().any(|t| t["term"] == term))
     }
 
+    /// A tool called over MCP: its result parsed, failing on a tool error.
+    async fn tool(stack: &ServerStack, id: u64, name: &str, arguments: Value) -> Result<Value> {
+        let params = json!({ "name": name, "arguments": arguments });
+        let called = stack.mcp(id, "tools/call", params).await?;
+        let result = &called["result"];
+        ensure!(result["isError"] != json!(true), "{name}: {called}");
+        Ok(serde_json::from_str(str_of(&result["content"][0], "text")?)?)
+    }
+
+    /// The terminal as `slopty terminals --json` lists it.
+    async fn terminal_entry(stack: &ServerStack, term: &str) -> Result<Value> {
+        let terminals = stack.slopty(&["terminals"]).await?;
+        let all = terminals.as_array().context("terminals is a list")?;
+        all.iter().find(|t| t["term"] == term).cloned().with_context(|| format!("{term} listed"))
+    }
+
     async fn send_text(stack: &ServerStack, term: &str, text: &str) -> Result<()> {
         let done = stack.slopty(&["send", term, "--text", text]).await?;
         ensure!(done == json!({ "ok": true }), "send: {done}");
@@ -167,7 +183,24 @@ mod tests {
         ensure!(cat["encoding"] == "base64" && cat["size"] == binary.len(), "{cat}");
         let decoded = data_encoding::BASE64.decode(str_of(&cat, "content")?.as_bytes())?;
         ensure!(decoded == binary, "cat read the bytes back");
-        clock.lap("put, cat");
+        let part = ["cat", "--worker", &worker, &text_path, "--offset", "7", "--length", "6"];
+        let part = stack.slopty(&part).await?;
+        ensure!(
+            part["content"] == "worker" && part["size"] == 14 && part["more"] == true,
+            "{part}"
+        );
+        let dir = stack.dir.path().to_string_lossy().into_owned();
+        let listing = stack.slopty(&["ls", "--worker", &worker, &dir]).await?;
+        let entries = listing["entries"].as_array().context("entries")?;
+        ensure!(
+            entries
+                .iter()
+                .any(|e| e["name"] == "note.txt" && e["kind"] == "file" && e["size"] == 14),
+            "{listing}"
+        );
+        let stat = stack.slopty(&["stat", "--worker", &worker, &bin_path]).await?;
+        ensure!(stat["exists"] == true && stat["size"] == binary.len(), "{stat}");
+        clock.lap("put, cat, ls, stat");
 
         // 4. A listener started in the terminal is found in it.
         let port = {
@@ -201,6 +234,50 @@ mod tests {
         ensure!(shown.contains("nc -l"), "the screen as it is now: {shown}");
         clock.lap("mcp");
 
+        // 8. Over MCP: one events call sees a terminal open on the fleet; a terminal opened at a
+        //    size is resized, and the program in it sees the new width.
+        let cursor = tool(stack, 10, "events", json!({ "timeout_ms": 0 })).await?;
+        ensure!(cursor["events"] == json!([]), "from now: nothing yet: {cursor}");
+        let cwd = stack.dir.path().to_string_lossy().into_owned();
+        let bash = ["/bin/bash", "--noprofile", "--norc", "-i"];
+        let open = json!({
+            "worker": worker, "cwd": cwd, "command": bash, "cols": 100, "rows": 30,
+        });
+        let sized = tool(stack, 11, "open_terminal", open).await?;
+        let sized = str_of(&sized, "term")?.to_owned();
+        let since = json!({ "since": cursor["next"], "timeout_ms": 10_000 });
+        let heard = tool(stack, 12, "events", since).await?;
+        let opened = heard["events"].as_array().context("events")?;
+        ensure!(
+            opened.iter().any(|e| e["kind"] == "session_opened" && e["term"] == sized.as_str()),
+            "{heard}"
+        );
+        let entry = terminal_entry(stack, &sized).await?;
+        ensure!(entry["cols"] == 100 && entry["rows"] == 30, "opened at its size: {entry}");
+        let resize = json!({ "term": sized, "cols": 150, "rows": 40 });
+        tool(stack, 13, "resize_terminal", resize).await?;
+        let entry = terminal_entry(stack, &sized).await?;
+        ensure!(entry["cols"] == 150 && entry["rows"] == 40, "listed at the new size: {entry}");
+        send_text(stack, &sized, "tput cols\n").await?;
+        let width = stack.slopty(&["wait", &sized, "--output", "^150$"]).await?;
+        ensure!(width["result"] == "met", "the program sees 150 columns: {width}");
+        let screen = tool(stack, 14, "read_screen", json!({ "term": sized })).await?;
+        let rows = screen["lines"].as_array().context("lines")?.len();
+        ensure!(rows == 40, "40 rows on the screen, not {rows}");
+        let after = json!({ "since": heard["next"], "timeout_ms": 0 });
+        tool(stack, 15, "close_terminal", json!({ "term": sized })).await?;
+        let closed = tool(stack, 16, "events", after).await?;
+        let closed = closed["events"].as_array().context("events")?;
+        ensure!(
+            closed.iter().any(|e| e["kind"] == "session_closed" && e["term"] == sized.as_str()),
+            "{closed:?}"
+        );
+        let online = json!({ "worker": worker });
+        let params = json!({ "name": "forget_worker", "arguments": online });
+        let refused = stack.mcp(17, "tools/call", params).await?;
+        ensure!(refused["result"]["isError"] == json!(true), "an online worker stays: {refused}");
+        clock.lap("mcp events, resize");
+
         // 5. Closed, and exited on its own: both leave the list.
         let closed = stack.slopty(&["close", &term]).await?;
         ensure!(closed == json!({ "ok": true }), "{closed}");
@@ -215,7 +292,9 @@ mod tests {
         clock.lap("close, exit");
 
         // 6. The worker dies without a goodbye: unreachable within the lease; back under the same
-        //    id.
+        //    id. The fleet's events say both.
+        let cursor = tool(stack, 20, "events", json!({ "timeout_ms": 0 })).await?;
+        let cursor = cursor["next"].as_u64().context("next")?.to_string();
         stack.worker.kill_worker().await;
         let killed = Instant::now();
         stack.worker_is("unreachable", UNREACHABLE_BOUND).await?;
@@ -224,6 +303,15 @@ mod tests {
         stack.worker.restart_worker().await?;
         let back = stack.worker_online(STEP).await?;
         ensure!(back["worker"] == worker_id.as_str(), "the same worker: {back}");
+        let moves = stack.slopty(&["events", "--since", &cursor, "--timeout", "0"]).await?;
+        let moves: Vec<&Value> = moves["events"]
+            .as_array()
+            .context("events")?
+            .iter()
+            .filter(|e| e["kind"] == "worker" && e["worker"] == worker_id.as_str())
+            .map(|e| &e["liveness"])
+            .collect();
+        ensure!(moves == [&json!("unreachable"), &json!("online")], "{moves:?}");
         clock.lap("back online");
         Ok(())
     }

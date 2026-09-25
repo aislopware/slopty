@@ -191,8 +191,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     running any more. Every link then gets the whole `Directory` again, which clients already
     read as a replacement, and the state file is rewritten. The tools' resolver also takes the
     one online worker when a name matches several. An entry at another address stays until
-    something removes it by hand, which needs a `ForgetWorker` verb and a protocol change
-    that are still owed. Tests: `a_worker_set_up_again_replaces_its_old_entry`
+    `ForgetWorker` removes it (protocol 56, below). Tests: `a_worker_set_up_again_replaces_its_old_entry`
     (`slopty-server` hub) and `a_shared_name_means_the_one_online` (`slopty-tools`).
   - **MCP.** Streamable HTTP on TCP 45561 (`MCP_PORT`, next to `SERVER_PORT`), path `/mcp`,
     stateless, with JSON responses.
@@ -254,7 +253,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     end, and returns 10 000 lines at most. The command blocks keep their marks in stream
     order, so a command with no output or two prompts on adjacent rows stay apart, and the
     marks survive a full-screen program.
-  - `ReadFile` refuses files over 16 MiB, since a reply is one frame. `WriteFile` writes a
+  - `ReadFile` returns 8 MiB at most, half a frame, and reads a range (protocol 56, below). `WriteFile` writes a
     temporary file beside the target, fsyncs it and renames it over, keeping the old mode.
   - A message too large for one frame is never written; an error goes in its place and the
     link carries on (2026-09-25). The frame holds more than the file's bytes, so a file just
@@ -398,3 +397,52 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     port. The registry takes an `http` or `https` address with a host, 2 KiB at most, with no
     whitespace or control characters, so a shared document cannot make another client open
     `file:` or `javascript:`.
+
+- ✅ **The fleet has one event log; terminals take a size; files read in ranges** (2026-09-25,
+  protocol 56). An audit of what an agent orchestrating many workers could not do found five
+  gaps, each closed with a verb rather than a workaround.
+  - **Events.** `WaitFor` watches one terminal, and the MCP endpoint is stateless HTTP with no
+    notifications, so an agent watching ten workers had to poll each. The hub now logs what it
+    already hears into one sequence (`HubEvent`): liveness moves, a worker removed, terminals
+    opened and closed, and agent status changes, a report of the status already known left
+    out. The log keeps the newest 4096. `Events { since, timeout_ms, filter }` answers the
+    events after the cursor with the next cursor and how many the log dropped, and blocks up
+    to the timeout (capped as `WaitFor` is) when there are none. `since` absent means from now
+    on. A cursor ahead of the log, from before a server restart, reads from the oldest.
+    `EventFilter::AgentNeedsInput` makes it a wait for any agent on any worker that needs a
+    human or went idle, which is the `WaitAny` the audit asked for, with no verb of its own.
+    It is a long poll rather than a push because it works the same over stateless HTTP, the
+    stdio shim and the CLI (`slopty events --follow`), and a cursor loses nothing between
+    calls. Rejected: MCP resource subscriptions and server-sent notifications, which a
+    stateless endpoint cannot hold and Claude Code does not document consuming.
+  - **Size.** A terminal opened by a verb was 120×36 until a client showed it, which is too
+    narrow for some programs and wasteful for a model reading the screen. `OpenTerminal` and
+    `SpawnAgent` take an optional `Size`, and `ResizeTerminal` resizes, within 10×2 and
+    1000×500. A session's size belongs to the client driving it, so a resize is refused while
+    any client shows the terminal. Otherwise the session's actor applies it, the check and the
+    resize one step there (`SessionHandle::resize_unviewed`), so a client attaching meanwhile
+    keeps its seat and the next client to attach drives as before. The worker's link sends the
+    resized summary to the server ahead of the answer, so `list_terminals` shows the new
+    size.
+  - **Forgetting a worker.** `ForgetWorker` removes an entry without a live lease, emits
+    `WorkerRemoved`, sends every link the directory without it and rewrites the state file. An
+    online worker is refused: it would register again at once. `slopty workers forget`.
+  - **Files.** `ReadFile { offset, length }` answers `File { bytes, offset, size }`, so a
+    caller knows the whole size and pages through a large file; one read returns at most 8 MiB
+    (`MAX_FILE_BYTES`, half a frame, asserted at compile time), which leaves room for the
+    envelope. A read of the rest over that cap is refused with a hint to read in parts, and
+    `slopty cat` reads in parts. `ListDir` answers entries by name with kind, size and
+    modification time, 10 000 at most, with the total. `Stat` follows links and answers `None`
+    for a missing path. `SpawnAgent` takes arguments and environment for `claude`.
+  - **An oversized request from the CLI.** `slopty mcp` and the CLI sent a request past a
+    frame down the link, the send failed, and the link was dropped with "the connection to the
+    server was lost". The encoder refuses before writing, so the link now answers that call
+    `Invalid` with the server's own wording and carries on.
+  - Tests: `events_are_read_from_a_cursor_and_waited_for`,
+    `the_event_log_is_bounded_and_says_what_was_missed`,
+    `a_worker_is_forgotten_only_when_it_is_not_online` (hub);
+    `a_file_is_read_in_ranges_with_its_size`, `a_directory_lists_by_name_and_a_path_stats`
+    (`slopty-worker`); `the_largest_read_fits_in_one_message_and_a_larger_file_is_read_in_parts`
+    and the resize in `a_worker_registers_answers_forwarded_verbs_and_comes_back`
+    (`slopty-workerd` `server_link`); the events, resize, range, `ls` and `stat` steps of
+    `cargo xtask e2e server`.

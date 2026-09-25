@@ -1,40 +1,33 @@
 //! A stream's [`Injector`] on a thread of its own, so the stream's task only queues.
 //!
-//! Everything an injection can wait on happens here: the window server's answer for the target's
-//! bounds (p95 2–6 ms, 93 ms at worst), the `NSRunningApplication` lookup behind activation
-//! (1–2 ms each), the post itself. A second thread re-reads the bounds while pointer input
-//! flows, so a move mid-drag is mapped with bounds already read and waits on nothing
-//! (MEASUREMENTS.md, "input injection off the runtime").
+//! Everything an injection can wait on happens here: the `NSRunningApplication` lookup behind
+//! activation (1–2 ms each), the post itself, and, when nobody handed fresher ones over, the
+//! window server's answer for the target's bounds (p95 2–6 ms, 93 ms at worst). The stream's
+//! geometry probe reads the bounds off the runtime every 100 ms whether or not input flows and
+//! hands each read over ([`InputSink::set_bounds`]), in order with the input, so a move is mapped
+//! with bounds already read and waits on nothing (MEASUREMENTS.md, "input injection off the
+//! runtime").
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Instant;
 
 use slopty_capture::Rect;
 use slopty_proto::screen::{CaptureTarget, ScreenInput};
 
 use crate::backend::{Backend, System};
-use crate::injector::{BOUNDS_TTL, Injector};
-use crate::{InputError, InputSink};
-
-/// How often the bounds are re-read while pointer input flows: inside [`BOUNDS_TTL`], so the
-/// injector never finds them stale mid-gesture.
-const REFRESH_EVERY: Duration = BOUNDS_TTL.saturating_sub(Duration::from_millis(20));
-
-/// Refresh periods without pointer input before the re-reads stop: about a second, so a hand
-/// resting on the mouse does not cost a read on the next move.
-const REFRESH_QUIET: u32 = 12;
+use crate::injector::Injector;
+use crate::{InputError, InputSink, PointerWatch};
 
 /// The worker's [`InputSink`]: an [`InputThread`] posting real `CGEvent`s.
 pub type CgEvents = InputThread;
 
 /// One stream's input, injected in order on a thread of its own.
 ///
-/// Dropping it lets go of everything held down on the worker and ends the threads.
+/// Dropping it lets go of everything held down on the worker and ends the thread.
 #[derive(Debug)]
 pub struct InputThread {
     jobs: Sender<Job>,
+    pointer: PointerWatch,
 }
 
 #[derive(Debug)]
@@ -42,15 +35,8 @@ enum Job {
     Input(ScreenInput),
     Focus,
     Scale(f64),
+    Bounds(Option<Rect>, Instant),
     Release,
-}
-
-/// Whether pointer input came since the bounds were last read, and whether the reader is
-/// waiting to be woken for more.
-#[derive(Debug, Default)]
-struct Pointer {
-    used: AtomicBool,
-    idle: AtomicBool,
 }
 
 impl InputThread {
@@ -59,16 +45,18 @@ impl InputThread {
     /// injection answers [`InputError::Stopped`].
     pub fn spawn<B>(target: CaptureTarget, scale: f64, backend: B) -> Self
     where
-        B: Backend + Clone + Send + 'static,
+        B: Backend + Send + 'static,
     {
         let (jobs, queue) = mpsc::channel();
+        let pointer = PointerWatch::default();
+        let watch = pointer.clone();
         let started = std::thread::Builder::new()
             .name("slopty-input".to_owned())
-            .spawn(move || serve(target, scale, backend, &queue));
+            .spawn(move || serve(target, scale, backend, watch, &queue));
         if let Err(e) = started {
             tracing::warn!(?target, error = %e, "input thread");
         }
-        Self { jobs }
+        Self { jobs, pointer }
     }
 
     fn send(&self, job: Job) -> Result<(), InputError> {
@@ -85,6 +73,10 @@ impl InputSink for InputThread {
         let _stopped = self.send(Job::Scale(scale));
     }
 
+    fn set_bounds(&mut self, bounds: Option<Rect>, at: Instant) {
+        let _stopped = self.send(Job::Bounds(bounds, at));
+    }
+
     fn inject(&mut self, input: &ScreenInput) -> Result<(), InputError> {
         self.send(Job::Input(input.clone()))
     }
@@ -96,41 +88,33 @@ impl InputSink for InputThread {
     fn release_all(&mut self) {
         let _stopped = self.send(Job::Release);
     }
+
+    fn pointer(&self) -> PointerWatch {
+        self.pointer.clone()
+    }
 }
 
 /// The input thread: jobs in order until the handle is dropped, then the injector's drop lets
 /// go of what is held.
-fn serve<B>(target: CaptureTarget, scale: f64, backend: B, queue: &Receiver<Job>)
-where
-    B: Backend + Clone + Send + 'static,
-{
-    let (published, fresh) = mpsc::channel();
-    let (wake, woken) = mpsc::sync_channel(1);
-    let pointer = Arc::new(Pointer::default());
-    let reader = backend.clone();
-    let shared = Arc::clone(&pointer);
-    let started = std::thread::Builder::new()
-        .name("slopty-input-bounds".to_owned())
-        .spawn(move || read_bounds(reader, target, &published, &woken, &shared));
-    if let Err(e) = started {
-        // The injector reads the bounds itself when they go stale.
-        tracing::warn!(?target, error = %e, "input bounds thread");
-    }
+fn serve<B: Backend>(
+    target: CaptureTarget,
+    scale: f64,
+    backend: B,
+    pointer: PointerWatch,
+    queue: &Receiver<Job>,
+) {
     let mut injector = Injector::with_backend(target, scale, backend);
+    injector.report_pointer(pointer);
     while let Ok(job) = queue.recv() {
-        while let Ok((bounds, at)) = fresh.try_recv() {
-            injector.set_bounds(bounds, at);
-        }
         let done = match job {
-            Job::Input(input) => {
-                if is_pointer(&input) {
-                    wake_reader(&pointer, &wake);
-                }
-                injector.inject(&input)
-            }
+            Job::Input(input) => injector.inject(&input),
             Job::Focus => injector.focus(),
             Job::Scale(scale) => {
                 injector.set_scale(scale);
+                Ok(())
+            }
+            Job::Bounds(bounds, at) => {
+                injector.set_bounds(bounds, at);
                 Ok(())
             }
             Job::Release => {
@@ -144,62 +128,12 @@ where
     }
 }
 
-const fn is_pointer(input: &ScreenInput) -> bool {
-    matches!(
-        input,
-        ScreenInput::Move { .. } | ScreenInput::Button { .. } | ScreenInput::Scroll { .. }
-    )
-}
-
-fn wake_reader(pointer: &Pointer, wake: &SyncSender<()>) {
-    pointer.used.store(true, Ordering::Relaxed);
-    if pointer.idle.load(Ordering::Relaxed) {
-        // Full means a wake is already on its way.
-        let _pending = wake.try_send(());
-    }
-}
-
-/// The bounds thread: a read every [`REFRESH_EVERY`] while pointer input flows, none once it
-/// has been quiet for [`REFRESH_QUIET`] periods until the input thread wakes it. A wake that
-/// races the reader going idle costs the next event one read of its own, never a wrong point.
-fn read_bounds<B: Backend>(
-    mut backend: B,
-    target: CaptureTarget,
-    published: &Sender<(Option<Rect>, Instant)>,
-    woken: &Receiver<()>,
-    pointer: &Pointer,
-) {
-    let mut quiet = 0_u32;
-    loop {
-        let at = Instant::now();
-        let bounds = backend.bounds(target);
-        if published.send((bounds, at)).is_err() {
-            return;
-        }
-        if matches!(woken.recv_timeout(REFRESH_EVERY), Err(RecvTimeoutError::Disconnected)) {
-            return;
-        }
-        if pointer.used.swap(false, Ordering::Relaxed) {
-            quiet = 0;
-            continue;
-        }
-        quiet = quiet.saturating_add(1);
-        if quiet < REFRESH_QUIET {
-            continue;
-        }
-        pointer.idle.store(true, Ordering::Relaxed);
-        let woke = woken.recv();
-        pointer.idle.store(false, Ordering::Relaxed);
-        if woke.is_err() {
-            return;
-        }
-        quiet = 0;
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
 
     use objc2_core_foundation::CGPoint;
     use objc2_core_graphics::{CGEventFlags, CGEventType};
@@ -208,26 +142,22 @@ mod tests {
 
     use super::*;
     use crate::backend::{Event, Post, Recorder};
-    use crate::keymap;
+    use crate::injector::BOUNDS_TTL;
+    use crate::{Pointer, keymap};
 
     /// A [`Recorder`] whose posts leave through a channel, so a test can read them while the
-    /// injector lives on its thread, and whose bounds reads are counted by the thread that made
-    /// them.
-    #[derive(Clone, Debug)]
+    /// injector lives on its thread, and whose bounds reads are counted.
+    #[derive(Debug)]
     struct Tap {
         recorder: Recorder,
         posts: Sender<Post>,
-        /// Reads on the input thread, in front of an event.
-        inline: Arc<AtomicUsize>,
-        /// Reads on the bounds thread.
-        beside: Arc<AtomicUsize>,
+        reads: Arc<AtomicUsize>,
     }
 
     impl Tap {
         fn new(recorder: Recorder) -> (Self, Receiver<Post>) {
             let (posts, rx) = mpsc::channel();
-            let tap = Self { recorder, posts, inline: Arc::default(), beside: Arc::default() };
-            (tap, rx)
+            (Self { recorder, posts, reads: Arc::default() }, rx)
         }
     }
 
@@ -237,9 +167,7 @@ mod tests {
         }
 
         fn bounds(&mut self, target: CaptureTarget) -> Option<Rect> {
-            let beside = std::thread::current().name() == Some("slopty-input-bounds");
-            let count = if beside { &self.beside } else { &self.inline };
-            count.fetch_add(1, Ordering::Relaxed);
+            self.reads.fetch_add(1, Ordering::Relaxed);
             self.recorder.bounds(target)
         }
 
@@ -257,16 +185,25 @@ mod tests {
         }
     }
 
-    /// Everything posted until the injector and the bounds reader have both let go of the tap.
+    /// The next post, waiting for the input thread.
+    fn next(posts: &Receiver<Post>) -> Post {
+        posts.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+
+    /// Everything posted until the injector has let go of the tap.
     fn drain(posts: &Receiver<Post>) -> Vec<Post> {
         let mut all = Vec::new();
         loop {
             match posts.recv_timeout(Duration::from_secs(5)) {
                 Ok(post) => all.push(post),
                 Err(RecvTimeoutError::Disconnected) => return all,
-                Err(RecvTimeoutError::Timeout) => panic!("the input threads did not end: {all:?}"),
+                Err(RecvTimeoutError::Timeout) => panic!("the input thread did not end: {all:?}"),
             }
         }
+    }
+
+    fn key(code: KeyCode, action: KeyAction) -> ScreenInput {
+        ScreenInput::Key { code, action, mods: Mods::SUPER, text: None }
     }
 
     /// A stream dropped mid-⌘-drag (the connection went, or the stream closed) leaves nothing
@@ -277,7 +214,6 @@ mod tests {
         let bounds = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
         let (tap, posts) = Tap::new(Recorder::window(7, bounds));
         let mut sink = InputThread::spawn(CaptureTarget::Window(WindowId(3)), 1.0, tap);
-        let key = |code, action| ScreenInput::Key { code, action, mods: Mods::SUPER, text: None };
         sink.inject(&key(KeyCode::MetaLeft, KeyAction::Press)).unwrap();
         sink.inject(&key(KeyCode::C, KeyAction::Press)).unwrap();
         let press = ScreenInput::Button {
@@ -318,34 +254,87 @@ mod tests {
         );
     }
 
-    /// While pointer input flows the bounds come from the reader thread: over 400 ms of moves
-    /// at 200 Hz the input thread reads them at most once, for the first move if it beat the
-    /// reader's first read, and every move is mapped through them.
+    /// A stream that is ending lets go before its handle is dropped: `release_all` posts the
+    /// releases while the sink still lives (the stream's close then waits on ScreenCaptureKit
+    /// with nothing held), and the drop after it has nothing left to let go of.
     #[test]
-    fn the_bounds_are_read_beside_the_pointer_not_in_front_of_it() {
-        let bounds = Rect { x: 100.0, y: 0.0, w: 800.0, h: 600.0 };
-        let (tap, posts) = Tap::new(Recorder::display(bounds));
-        let (inline, beside) = (Arc::clone(&tap.inline), Arc::clone(&tap.beside));
+    fn release_all_lets_go_while_the_sink_lives() {
+        let bounds = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
+        let (tap, posts) = Tap::new(Recorder::window(7, bounds));
+        let mut sink = InputThread::spawn(CaptureTarget::Window(WindowId(3)), 1.0, tap);
+        sink.inject(&key(KeyCode::MetaLeft, KeyAction::Press)).unwrap();
+        sink.inject(&key(KeyCode::C, KeyAction::Press)).unwrap();
+        sink.release_all();
+
+        let got: Vec<Post> = std::iter::repeat_with(|| next(&posts)).take(4).collect();
+        let downs: Vec<bool> =
+            got.iter().map(|p| matches!(p.event, Event::Key { down, .. } if down)).collect();
+        assert_eq!(downs, [true, true, false, false], "{got:?}");
+        drop(sink);
+        assert_eq!(drain(&posts), [], "nothing held is left for the drop");
+    }
+
+    /// The bounds the stream's probe hands over are the only ones used: moves at 200 Hz for
+    /// longer than the bounds live, with a hand-over every 100 ms as the probe does, read the
+    /// window server not once, and each move maps through the latest bounds handed over before
+    /// it, including after the target moved.
+    #[test]
+    fn the_probes_bounds_spare_every_read_in_front_of_the_pointer() {
+        let unread = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
+        let (tap, posts) = Tap::new(Recorder::display(unread));
+        let reads = Arc::clone(&tap.reads);
         let mut sink = InputThread::spawn(CaptureTarget::Display(1), 1.0, tap);
         let (_never, pause) = mpsc::channel::<()>();
+        let probed = |x: f64| Some(Rect { x, y: 0.0, w: 800.0, h: 600.0 });
+        let run = BOUNDS_TTL.saturating_mul(3);
         let started = Instant::now();
-        let mut moves = 0_usize;
-        while started.elapsed() < BOUNDS_TTL.saturating_mul(4) {
-            #[expect(clippy::cast_precision_loss, reason = "a small count")]
-            let x = (moves % 100) as f32;
-            sink.inject(&ScreenInput::Move { x, y: 0.0 }).unwrap();
-            moves = moves.saturating_add(1);
+        let mut probe_at = started;
+        let mut origin = 100.0;
+        let mut moved_at = None;
+        let mut origins = Vec::new();
+        while started.elapsed() < run {
+            if Instant::now() >= probe_at {
+                if moved_at.is_none() && started.elapsed() >= run / 2 {
+                    origin = 300.0;
+                    moved_at = Some(origins.len());
+                }
+                sink.set_bounds(probed(origin), Instant::now());
+                probe_at = probe_at.checked_add(Duration::from_millis(100)).unwrap();
+            }
+            sink.inject(&ScreenInput::Move { x: 10.0, y: 0.0 }).unwrap();
+            origins.push(origin);
             let _paced = pause.recv_timeout(Duration::from_millis(5));
         }
         drop(sink);
         let posted = drain(&posts);
-        assert_eq!(posted.len(), moves);
-        assert!(
-            posted.iter().all(|p| matches!(p.event, Event::Mouse { at, .. } if at.x >= 100.0)),
-            "every move mapped through the bounds"
-        );
-        let (inline, beside) = (inline.load(Ordering::Relaxed), beside.load(Ordering::Relaxed));
-        assert!(inline <= 1, "{inline} reads in front of a move");
-        assert!(beside >= 4, "{beside} reads beside");
+        assert!(moved_at.is_some(), "the target moved mid-run");
+        assert_eq!(posted.len(), origins.len());
+        for (post, origin) in posted.iter().zip(&origins) {
+            assert!(
+                matches!(post.event, Event::Mouse { at, .. } if at == CGPoint::new(origin + 10.0, 0.0)),
+                "mapped through the bounds handed over: {post:?}, origin {origin}"
+            );
+        }
+        assert_eq!(reads.load(Ordering::Relaxed), 0, "reads in front of a move");
+    }
+
+    /// A window stream's events go to its owner and leave the worker's pointer alone, so the
+    /// pointer the stream shows is where the last event was put; a display stream's move the
+    /// real one.
+    #[test]
+    fn a_window_streams_pointer_is_where_its_input_put_it() {
+        let bounds = Rect { x: 100.0, y: 50.0, w: 800.0, h: 600.0 };
+        let (tap, posts) = Tap::new(Recorder::window(7, bounds));
+        let mut window = InputThread::spawn(CaptureTarget::Window(WindowId(3)), 2.0, tap);
+        assert_eq!(window.pointer().get(), Pointer::Placed(None), "nowhere before the first");
+        window.inject(&ScreenInput::Move { x: 20.0, y: 40.0 }).unwrap();
+        let _moved = next(&posts);
+        assert_eq!(window.pointer().get(), Pointer::Placed(Some((110.0, 70.0))));
+
+        let (tap, posts) = Tap::new(Recorder::display(bounds));
+        let mut display = InputThread::spawn(CaptureTarget::Display(1), 2.0, tap);
+        display.inject(&ScreenInput::Move { x: 20.0, y: 40.0 }).unwrap();
+        let _moved = next(&posts);
+        assert_eq!(display.pointer().get(), Pointer::Real);
     }
 }

@@ -79,7 +79,7 @@ mod tests {
                 cwd: Some("/tmp".to_owned()),
                 alternate: false,
             }),
-            Verb::ReadFile { .. } => Outcome::File(vec![0xff, 0]),
+            Verb::ReadFile { .. } => Outcome::File { bytes: vec![0xff, 0], offset: 0, size: 2 },
             Verb::WaitFor { .. } => Outcome::Waited(Waited::TimedOut),
             Verb::Close { .. } => Outcome::Error {
                 code: ErrorCode::UnknownTerminal,
@@ -232,10 +232,90 @@ mod tests {
         let file = result(&over_http(server.mcp_addr(), 99, "read_file", &calls[4].1).await).1;
         assert_eq!(
             file,
-            json!({ "path": "/bin/x", "size": 2, "encoding": "base64", "content": "/wA=" })
+            json!({
+                "path": "/bin/x", "size": 2, "offset": 0, "length": 2, "more": false,
+                "encoding": "base64", "content": "/wA="
+            })
         );
         let closed = result(&over_http(server.mcp_addr(), 98, "close_terminal", &calls[6].1).await);
         assert_eq!(closed, (json!(true), json!("no such terminal (UnknownTerminal)")));
+
+        drop(stdin);
+        let _exited = tokio::time::timeout(PATIENCE, child.wait()).await;
+        working.abort();
+        server.shutdown().await;
+    }
+
+    /// A `write_file` too large for one message to the server is refused by `slopty mcp` with
+    /// the server's own words, and the link goes on: the next call is answered. It used to
+    /// drop the link and read "the connection to the server was lost".
+    #[tokio::test]
+    async fn slopty_mcp_refuses_a_file_too_large_for_the_link_and_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::start(Config {
+            name: "test-server".to_owned(),
+            quic: "127.0.0.1:0".parse().unwrap(),
+            mcp: "127.0.0.1:0".parse().unwrap(),
+            data_dir: dir.path().to_path_buf(),
+            admission: Admission::default(),
+        })
+        .await
+        .unwrap();
+        let worker = WorkerId::new();
+        let endpoint = bind_client().unwrap();
+        let quic = HostAddr::from(server.quic_addr());
+        let link = connect(&endpoint, &quic, Role::Worker(registration(worker))).await.unwrap();
+        let working = tokio::spawn(work(link));
+
+        let data = tempfile::tempdir().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_slopty"))
+            .arg("--server")
+            .arg(server.quic_addr().to_string())
+            .arg("--data-dir")
+            .arg(data.path())
+            .arg("mcp")
+            .env_remove("SLOPTY_SERVER")
+            .env("RUST_LOG", "warn")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+
+        let bytes = slopty_proto::codec::MAX_FRAME_BYTES - 1;
+        let content = "A".repeat(bytes / 3 * 4);
+        let arguments = json!({
+            "worker": worker.to_string(), "path": "/tmp/too-large", "content": content,
+            "encoding": "base64",
+        });
+        let calls = [("write_file", arguments), ("list_workers", json!({}))];
+        let mut answers = Vec::new();
+        for (id, (name, arguments)) in (1_u64..).zip(&calls) {
+            let line = format!("{}\n", request(id, name, arguments));
+            stdin.write_all(line.as_bytes()).await.unwrap();
+            stdin.flush().await.unwrap();
+            let answer = loop {
+                let line = tokio::time::timeout(PATIENCE, stdout.next_line())
+                    .await
+                    .expect("an answer in time")
+                    .unwrap()
+                    .expect("the shim is still running");
+                let msg: Value = serde_json::from_str(&line).unwrap();
+                if msg["id"] == id {
+                    break result(&msg);
+                }
+            };
+            answers.push(answer);
+        }
+        let (failed, text) = &answers[0];
+        assert_eq!(failed, &json!(true), "{text}");
+        let text = text.as_str().unwrap();
+        assert!(text.contains("more than the") && text.contains("(Invalid)"), "{text}");
+        assert_ne!(answers[1].0, json!(true), "the link goes on: {:?}", answers[1]);
+        assert_eq!(answers[1].1[0]["name"], "fake-worker");
 
         drop(stdin);
         let _exited = tokio::time::timeout(PATIENCE, child.wait()).await;

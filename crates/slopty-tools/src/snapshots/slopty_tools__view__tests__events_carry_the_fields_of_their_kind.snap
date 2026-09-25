@@ -1,0 +1,33 @@
+---
+source: crates/slopty-tools/src/view.rs
+expression: events(&page)
+---
+{
+  "events": [
+    {
+      "seq": 7,
+      "at_ms": 100,
+      "kind": "worker",
+      "worker": "0199a000-0000-7000-8000-000000000001",
+      "name": "mac-studio",
+      "liveness": "unreachable"
+    },
+    {
+      "seq": 8,
+      "at_ms": 101,
+      "kind": "agent",
+      "worker": "0199a000-0000-7000-8000-000000000001",
+      "term": "0199a000-0000-7000-8000-000000000001/0199a1b1-c3d4-7000-8000-00000000abcd",
+      "agent": {
+        "agent": "claude_code",
+        "status": "blocked",
+        "tool": null,
+        "reason": "question",
+        "needs_human": true
+      },
+      "detail": "Which branch?"
+    }
+  ],
+  "next": 9,
+  "missed": 0
+}

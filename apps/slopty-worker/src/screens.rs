@@ -163,8 +163,9 @@ pub async fn run(
             "screen closing"
         );
     }
-    // The close drops the stream's input sink, which lets go of every key and button the client
-    // still held: a lost connection ends here too.
+    // Whatever the client still holds down on the worker is let go now, not after the close has
+    // waited on ScreenCaptureKit; a lost connection ends here too.
+    stream.release_input();
     stream.close().await;
     daemon.screens.remove(&client, id);
     if by_client {

@@ -237,10 +237,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   for 250 ms. Activation lands some milliseconds after it is asked for, so the check on every
   key re-activated an owner that was already coming forward. The price is that a key typed
   within 250 ms of the owner losing activation some other way waits in the owner's queue until
-  the next check. Not the alternative of feeding the geometry probe's bounds (already read at 10 Hz)
-  into the sink. That needs the stream to hand them over, and would retire the reader thread;
-  worth doing when `ScreenStream` next changes. Tests: `fresh_bounds_from_outside_spare_the_read`,
-  `a_burst_of_keys_checks_the_owner_once`, `the_bounds_are_read_beside_the_pointer_not_in_front_of_it`.
+  the next check. The reader thread went later the same day, when the geometry probe's bounds
+  took its place (below). Tests: `fresh_bounds_from_outside_spare_the_read`,
+  `a_burst_of_keys_checks_the_owner_once`.
 
 - ✅ **The pointer maps with the scale the view asked for** (2026-09-25). `ScreenView` mapped a
   pointer into the size of the last decoded frame. After a scale change (zooming a card out,
@@ -249,3 +248,55 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   at the old scale's position. The view now keeps the size the worker maps input with apart
   from the picture's: the size it asked for, or the one `Geometry` reported. Test:
   `input_maps_with_the_scale_asked_for_not_the_frame_in_flight`.
+
+- ✅ **Held input is let go before the capture stops** (2026-09-25). The sink let go of held keys
+  and buttons only when it was dropped, and `ScreenStream::close` drops it after ScreenCaptureKit
+  answers the stop, which can take a while. For that long ⌘ or a button stayed down on the
+  worker. The stream task now calls `ScreenStream::release_input` as soon as its command loop
+  ends and before `close`. The input thread posts the releases while the close waits, and the
+  drop afterwards finds nothing held. Test: `release_all_lets_go_while_the_sink_lives`. The
+  order in `screens.rs` has no test, since a `ScreenStream` needs a real capture.
+
+- ✅ **Input maps through the geometry probe's bounds** (2026-09-25). Two things read the same
+  bounds. The stream's geometry probe read them every 100 ms off the runtime, and the input
+  thread had a reader of its own, every 80 ms while pointer input flowed. Now `check_geometry`
+  hands each probe's bounds and read time to the sink (`InputSink::set_bounds`), in order with
+  the input, and the reader thread is gone. The probe runs whether or not input flows, so the
+  first move after a pause no longer reads in front of itself either. `BOUNDS_TTL` went from 100
+  to 250 ms. At 100 ms, bounds handed over every 100 ms would expire just as the next ones
+  arrived, and a probe held up by a slow window-server answer would put a read in front of a
+  move. Past 250 ms the injector still reads the bounds itself, which covers an injector nobody
+  feeds.
+
+  100 ms against 80 ms makes no difference to a window drag. Neither cadence follows a window
+  moving under the pointer between reads. When the client drags a window by its own title bar,
+  fresher bounds are worse, not better. Each move maps to the new origin plus the pointer's
+  place in the picture, so the window gains the distance it has already moved, again, at every
+  read. Pinning the bounds from button-down to button-up would fix that. It needs a check on
+  hardware first, since it is not settled whether a title-bar drag posted to a pid moves the
+  window at all. Test: `the_probes_bounds_spare_every_read_in_front_of_the_pointer`.
+
+- ✅ **A window stream's pointer is where its input put it** (2026-09-25). Audit #15. On a window
+  stream there was no pointer, or one stuck in place. Events posted to the window's owner leave
+  the worker's pointer alone, yet the cursor loop sampled that real pointer. Meanwhile the card
+  hides the client's own pointer whenever a frame is up. The injector already kept the last
+  place it put the pointer, for letting go of buttons. It now also writes that place to a
+  `PointerWatch`, and the cursor loop sends it for streams routed to a pid. Before the first
+  event the sample says hidden. Display streams go through the HID tap and move the real
+  pointer, so they still read it. The shape still comes from the system cursor, which follows
+  the real pointer and may not match what the window would show at the placed point. Keeping
+  the client's own pointer visible on window cards would have been the other way. It shows
+  input without the round trip, but not the worker's cursor picture or where a click landed
+  after clamping. Tests: `a_window_streams_pointer_is_where_its_input_put_it`,
+  `a_window_streams_cursor_is_where_its_input_put_the_pointer`. A hardware check is still owed.
+  Stream a window, hover and click, and see the pointer follow.
+
+- ✅ **The worker's pointer is drawn at the scale input maps with** (2026-09-25). The cursor
+  overlay and the IME caret divided the worker's sample by the size of the frame on screen.
+  After a scale change that is the old size until the first new frame is decoded, while the
+  worker samples at the new scale as soon as it applies the change. Both now divide by
+  `mapped`, the size input uses. That is off the other way for samples the worker sent before
+  it applied the change, so the view rescales the sample it holds when it asks for the new
+  scale. A still pointer stays put, and only a pointer that moved in the round trip before the
+  ask is drawn wrong until the worker's next sample. Test:
+  `the_workers_pointer_is_drawn_at_the_scale_asked_for`.

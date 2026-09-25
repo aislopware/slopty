@@ -123,6 +123,7 @@ enum Cmd {
     Reserve { client: ClientId },
     Request { client: ClientId, req: TermRequest, at: tokio::time::Instant },
     Snapshot { reply: oneshot::Sender<Snapshot> },
+    ResizeUnviewed { size: TermSize, reply: oneshot::Sender<u16> },
     Probe { reply: oneshot::Sender<Probe> },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
     Exited { status: i32 },
@@ -256,6 +257,7 @@ impl std::fmt::Debug for Cmd {
             Self::Reserve { .. } => "Reserve",
             Self::Request { .. } => "Request",
             Self::Snapshot { .. } => "Snapshot",
+            Self::ResizeUnviewed { .. } => "ResizeUnviewed",
             Self::Probe { .. } => "Probe",
             Self::Read { .. } => "Read",
             Self::Exited { .. } => "Exited",
@@ -311,6 +313,15 @@ impl SessionHandle {
     pub async fn snapshot(&self) -> Result<Snapshot, WorkerError> {
         let (reply, rx) = oneshot::channel();
         self.send(Cmd::Snapshot { reply })?;
+        rx.await.map_err(|_gone| WorkerError::SessionClosed)
+    }
+
+    /// Resize the session if no client shows it, in one step on the actor, so a client that
+    /// attaches meanwhile cannot lose its seat to the resize. Returns the number of clients
+    /// showing it: zero means the size was applied.
+    pub async fn resize_unviewed(&self, size: TermSize) -> Result<u16, WorkerError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Cmd::ResizeUnviewed { size, reply })?;
         rx.await.map_err(|_gone| WorkerError::SessionClosed)
     }
 
@@ -1407,6 +1418,13 @@ impl Actor {
                     viewers: u16::try_from(self.viewers.len()).unwrap_or(u16::MAX),
                     exited: self.exited,
                 });
+            }
+            Cmd::ResizeUnviewed { size, reply } => {
+                let viewers = u16::try_from(self.viewers.len()).unwrap_or(u16::MAX);
+                if viewers == 0 {
+                    self.apply_size(size);
+                }
+                let _ignored = reply.send(viewers);
             }
             Cmd::Probe { reply } => {
                 // A child that already exited has no foreground process; asking would only

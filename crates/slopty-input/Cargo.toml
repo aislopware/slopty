@@ -11,6 +11,7 @@ description = "The Slopty worker's input and clipboard seams, with CGEvent injec
 workspace = true
 
 [dependencies]
+slopty-capture.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
 
@@ -21,11 +22,9 @@ objc2-app-kit.workspace = true
 objc2-foundation = { workspace = true, features = [ "NSURL" ] }
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
-slopty-capture.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-slopty-capture.workspace = true
 slopty-core.workspace = true
 slopty-proto.workspace = true
 tokio = { workspace = true, features = [ "macros", "rt-multi-thread", "time" ] }

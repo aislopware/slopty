@@ -36,7 +36,7 @@ use slopty_codec::{
     AudioEncoder as _, CodecError, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder as _,
 };
 use slopty_core::StreamId;
-use slopty_input::{InputError, InputSink as _};
+use slopty_input::{InputError, InputSink as _, Pointer, PointerWatch};
 pub use slopty_media::PathSample;
 use slopty_media::{
     Cadence, Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Packetizer, RateController,
@@ -1963,6 +1963,8 @@ fn wanted_crop<P: Platform>(
 pub struct Probe {
     /// The target's bounds in points; `None` when a window is gone.
     bounds: Option<Rect>,
+    /// When the reads began.
+    at: Instant,
     /// For a window that may be served from a display crop: whether it is on screen, and the crop
     /// it could be served from (on one display, uncovered), before any suspicion.
     window: Option<(bool, Option<Crop>)>,
@@ -1978,14 +1980,16 @@ fn probe<P: Platform>(
     shared: &Shared<P>,
 ) -> Probe {
     let started = now::<P>();
+    let at = Instant::now();
     let probe = match target {
         CaptureTarget::Display(_) => {
-            Probe { bounds: Source::<P>::target_bounds(target), window: None }
+            Probe { bounds: Source::<P>::target_bounds(target), at, window: None }
         }
         CaptureTarget::Window(id) => match Source::<P>::window_state(id) {
-            None => Probe { bounds: None, window: None },
+            None => Probe { bounds: None, at, window: None },
             Some(state) => Probe {
                 bounds: Some(state.bounds),
+                at,
                 window: crop.then(|| (state.on_screen, wanted_crop::<P>(id, &state, point_scale))),
             },
         },
@@ -2383,11 +2387,13 @@ impl<P: Platform> Pipeline<P> {
         );
 
         let point_scale = f64::from(Source::<P>::point_scale(&resolved));
+        let injector = P::Input::new(target, point_scale * zoom);
         // Two tasks, not one. The beat is a promise about time and must never be behind work
         // that takes any: the pointer read in the cursor loop is a window-server round trip, and
         // those have been measured at 90 ms, three beats' worth.
         let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
-        let cursor = tokio::spawn(cursor_loop(Arc::clone(&shared), point_scale));
+        let cursor =
+            tokio::spawn(cursor_loop(Arc::clone(&shared), point_scale, injector.pointer()));
         let repair = tokio::spawn(repair_loop(Arc::clone(&shared)));
         let lane = tokio::spawn(lane_loop(Arc::clone(&shared)));
         #[expect(clippy::cast_possible_truncation, reason = "a display scale is 1 to 4")]
@@ -2406,7 +2412,6 @@ impl<P: Platform> Pipeline<P> {
             scale,
             hdr: false,
         };
-        let injector = P::Input::new(target, point_scale * zoom);
         let stream = Self {
             id,
             target,
@@ -2503,7 +2508,11 @@ impl<P: Platform> Pipeline<P> {
     /// under another window (or off its display) falls back to the window filter until it is
     /// clear again. Decided from `probe`, which [`Self::prober`] read off the runtime; nothing
     /// here waits on the window server. Call it a few times a second.
+    ///
+    /// The probe's bounds are also what the input sink maps the pointer through from here on,
+    /// so input never reads them in front of an event.
     pub fn check_geometry(&mut self, probe: &Probe) -> Result<Option<ScreenEvent>, ScreenError> {
+        self.injector.set_bounds(probe.bounds, probe.at);
         let Some(rect) = probe.bounds else {
             self.window_gone();
             return Ok(None);
@@ -2766,6 +2775,13 @@ impl<P: Platform> Pipeline<P> {
         Ok(self.injector.focus()?)
     }
 
+    /// Let go of every key and button the client holds down on the worker: the stream is
+    /// ending. Returns at once, so call it ahead of [`Self::close`], which waits on
+    /// ScreenCaptureKit's stop before it drops the input sink.
+    pub fn release_input(&mut self) {
+        self.injector.release_all();
+    }
+
     /// What a client's resize to `(width, height)` native pixels asks of the worker: the window
     /// and the size in points, for [`resize_window`] off the runtime. A display stream asks
     /// nothing.
@@ -2988,14 +3004,17 @@ const fn beat_due_in(silence_us: u64, after_us: u64) -> Option<Duration> {
 
 /// Where the pointer is over the target, sent when it moves.
 ///
-/// A still pointer costs one read of the event system's move counters a tick
+/// A window stream's input goes to the window's application and leaves the worker's pointer
+/// wherever the worker's own user left it, so its pointer is where the input last put it
+/// (`input`), and hidden before the first event. A display stream's input moves the real pointer,
+/// which is read. A still pointer costs one read of the event system's move counters a tick
 /// ([`CaptureSource::pointer_moves`], tens of nanoseconds): the pointer itself is only asked
 /// for when the counters moved, and the target's bounds (which move a still pointer across the
 /// picture) are the ones the owner's geometry probe last read. The pointer read is a
 /// window-server round trip, so it runs on the blocking pool: what this loop must not do is
 /// occupy a runtime worker, because [`beat_loop`] needs one on time (MEASUREMENTS.md, "the beat
 /// behind the geometry call").
-async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, point_scale: f64) {
+async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, point_scale: f64, input: PointerWatch) {
     let mut ticks = tokio::time::interval(CURSOR_PERIOD);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pointer: Option<(u32, (f64, f64))> = None;
@@ -3004,28 +3023,26 @@ async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, point_scale: f64) {
     while !shared.sink.is_closed() {
         ticks.tick().await;
         let Some(rect) = *shared.bounds.lock() else { continue };
-        let moves = Source::<P>::pointer_moves();
-        let (px, py) = match pointer {
-            Some((seen, at)) if seen == moves => at,
-            _moved_or_unread => {
-                let Ok(at) = tokio::task::spawn_blocking(Source::<P>::pointer_location).await
-                else {
-                    return;
-                };
-                pointer = Some((moves, at));
-                at
-            }
-        };
-        let visible = rect.contains(px, py);
-        shared.pointer_over.store(visible, Ordering::Relaxed);
         // Read every sample: a quality change rescales the stream under a still pointer.
-        let zoom = shared.zoom();
-        let to_pixels = |v: f64| -> i32 {
-            #[expect(clippy::cast_possible_truncation, reason = "clamped")]
-            let p = (v * point_scale * zoom).round().clamp(-1.0e6, 1.0e6) as i32;
-            p
+        let pixels_per_point = point_scale * shared.zoom();
+        let sample = if let Some(placed) = placed_sample(&input, rect, pixels_per_point) {
+            placed
+        } else {
+            let moves = Source::<P>::pointer_moves();
+            let at = match pointer {
+                Some((seen, at)) if seen == moves => at,
+                _moved_or_unread => {
+                    let Ok(at) = tokio::task::spawn_blocking(Source::<P>::pointer_location).await
+                    else {
+                        return;
+                    };
+                    pointer = Some((moves, at));
+                    at
+                }
+            };
+            cursor_sample(rect, at, pixels_per_point)
         };
-        let sample = (to_pixels(px - rect.x), to_pixels(py - rect.y), visible);
+        shared.pointer_over.store(sample.2, Ordering::Relaxed);
         if last == Some(sample) {
             continue;
         }
@@ -3034,6 +3051,32 @@ async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, point_scale: f64) {
         let datagram =
             cursor_datagram(shared.id, seq, send_ms_lo(now::<P>()), sample.0, sample.1, sample.2);
         shared.send(&[datagram]);
+    }
+}
+
+/// The pointer at `at` (global points) as a cursor sample for a target with bounds `rect`: its
+/// place in stream pixels at `pixels_per_point`, and whether it is over the target.
+fn cursor_sample(rect: Rect, at: (f64, f64), pixels_per_point: f64) -> (i32, i32, bool) {
+    let to_pixels = |v: f64| -> i32 {
+        #[expect(clippy::cast_possible_truncation, reason = "clamped")]
+        let p = (v * pixels_per_point).round().clamp(-1.0e6, 1.0e6) as i32;
+        p
+    };
+    (to_pixels(at.0 - rect.x), to_pixels(at.1 - rect.y), rect.contains(at.0, at.1))
+}
+
+/// The cursor sample of a stream whose input leaves the worker's pointer alone: where the input
+/// last put it, hidden before the first event. `None` when the input moves the real pointer,
+/// which is the one to read.
+fn placed_sample(
+    input: &PointerWatch,
+    rect: Rect,
+    pixels_per_point: f64,
+) -> Option<(i32, i32, bool)> {
+    match input.get() {
+        Pointer::Real => None,
+        Pointer::Placed(None) => Some((0, 0, false)),
+        Pointer::Placed(Some(at)) => Some(cursor_sample(rect, at, pixels_per_point)),
     }
 }
 
@@ -3104,6 +3147,27 @@ mod shape_tests {
         assert_eq!(dedup.observe(None), None, "a hidden or unreadable cursor keeps the last");
         assert_eq!(dedup.observe(Some(shape(1))), None, "still the one the client has");
         assert_eq!(dedup.observe(Some(shape(2))), Some(shape(2)), "a new picture");
+    }
+
+    /// A window stream's pointer is where its input put it, since that input leaves the
+    /// worker's own pointer alone: hidden before the first event, then in the stream's pixels
+    /// over the target's bounds. A display stream's input moves the real pointer, so its sample
+    /// comes from reading that one.
+    #[test]
+    fn a_window_streams_cursor_is_where_its_input_put_the_pointer() {
+        let rect = Rect { x: 100.0, y: 50.0, w: 800.0, h: 600.0 };
+        let input = PointerWatch::default();
+        assert_eq!(placed_sample(&input, rect, 1.0), Some((0, 0, false)), "none yet: hidden");
+        input.place(110.0, 70.0);
+        assert_eq!(placed_sample(&input, rect, 2.0), Some((20, 40, true)));
+        input.place(900.0, 70.0);
+        assert_eq!(
+            placed_sample(&input, rect, 2.0),
+            Some((1600, 40, false)),
+            "its far edge is outside"
+        );
+        input.follow_real();
+        assert_eq!(placed_sample(&input, rect, 2.0), None, "the real pointer is read");
     }
 }
 

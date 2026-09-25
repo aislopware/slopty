@@ -13,9 +13,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WorkerId};
 use slopty_proto::agent::{AgentKind, AgentStatus, BlockReason};
-use slopty_proto::orchestration::{Command, Line, Port, Screen, TermRef, Waited};
+use slopty_proto::orchestration::{
+    Command, DirEntry, FileKind, FileStat, Happening, HubEvent, Line, Port, Screen, TermRef, Waited,
+};
 use slopty_proto::server::{Liveness, Os, WorkerInfo};
 use slopty_proto::terminal::{SessionState, SessionSummary};
+
+use crate::ops::{Chunk, EventPage};
 
 /// The shortest session-id prefix text output uses. `UUIDv7`s start with their creation time,
 /// so ids minted close together share more than this and get longer prefixes.
@@ -173,9 +177,79 @@ impl Encoding {
 #[derive(Debug, Serialize)]
 pub struct FileView<'a> {
     path: &'a str,
-    size: usize,
+    /// The whole file's size.
+    size: u64,
+    /// Where `content` starts in the file.
+    offset: u64,
+    /// How many bytes `content` holds.
+    length: usize,
+    /// The file goes on past `content`.
+    more: bool,
     encoding: Encoding,
     content: Cow<'a, str>,
+}
+
+/// A directory, for JSON.
+#[derive(Debug, Serialize)]
+pub struct DirView<'a> {
+    path: &'a str,
+    entries: Vec<EntryView<'a>>,
+    total: u32,
+    truncated: bool,
+}
+
+/// One entry of a directory, for JSON.
+#[derive(Debug, Serialize)]
+pub struct EntryView<'a> {
+    name: &'a str,
+    kind: &'static str,
+    size: u64,
+    modified_ms: u64,
+}
+
+/// What is at a path, for JSON.
+#[derive(Debug, Serialize)]
+pub struct StatView<'a> {
+    path: &'a str,
+    exists: bool,
+    kind: Option<&'static str>,
+    size: Option<u64>,
+    modified_ms: Option<u64>,
+    /// Permission bits in octal, `"755"`.
+    mode: Option<String>,
+}
+
+/// A page of the server's events, for JSON.
+#[derive(Debug, Serialize)]
+pub struct EventsView<'a> {
+    events: Vec<EventView<'a>>,
+    next: u64,
+    missed: u64,
+}
+
+/// One event, for JSON: the fields its `kind` has.
+#[derive(Debug, Serialize)]
+pub struct EventView<'a> {
+    seq: u64,
+    at_ms: u64,
+    kind: &'static str,
+    worker: WorkerId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    term: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    liveness: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<AgentView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'a str>,
 }
 
 /// A new terminal, for JSON.
@@ -572,12 +646,179 @@ pub fn ports_text(worker: WorkerId, ports: &[Port]) -> String {
 }
 
 /// A file's contents, for JSON.
-pub fn file<'a>(path: &'a str, bytes: &'a [u8]) -> FileView<'a> {
+pub fn file<'a>(path: &'a str, chunk: &'a Chunk) -> FileView<'a> {
+    let bytes = &chunk.bytes;
     let (encoding, content) = match std::str::from_utf8(bytes) {
         Ok(text) => (Encoding::Utf8, Cow::Borrowed(text)),
         Err(_binary) => (Encoding::Base64, Cow::Owned(data_encoding::BASE64.encode(bytes))),
     };
-    FileView { path, size: bytes.len(), encoding, content }
+    let end = chunk.offset.saturating_add(bytes.len() as u64);
+    FileView {
+        path,
+        size: chunk.size,
+        offset: chunk.offset,
+        length: bytes.len(),
+        more: end < chunk.size,
+        encoding,
+        content,
+    }
+}
+
+const fn kind_key(kind: FileKind) -> &'static str {
+    match kind {
+        FileKind::File => "file",
+        FileKind::Dir => "dir",
+        FileKind::Symlink => "symlink",
+        FileKind::Other => "other",
+    }
+}
+
+/// A directory, for JSON.
+pub fn dir<'a>(path: &'a str, entries: &'a [DirEntry], total: u32) -> DirView<'a> {
+    let listed = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    DirView {
+        path,
+        entries: entries
+            .iter()
+            .map(|e| EntryView {
+                name: &e.name,
+                kind: kind_key(e.kind),
+                size: e.size,
+                modified_ms: e.modified_ms,
+            })
+            .collect(),
+        total,
+        truncated: listed < total,
+    }
+}
+
+/// A directory, for a person: `ls -p` style, a directory's name ending in `/` and a link's
+/// in `@`.
+pub fn dir_text(entries: &[DirEntry], total: u32) -> String {
+    let rows = entries
+        .iter()
+        .map(|e| {
+            let mark = match e.kind {
+                FileKind::Dir => "/",
+                FileKind::Symlink => "@",
+                FileKind::File | FileKind::Other => "",
+            };
+            vec![e.size.to_string(), format!("{}{mark}", e.name)]
+        })
+        .collect();
+    let mut out = table(&["SIZE", "NAME"], rows);
+    let listed = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    if listed < total {
+        let _infallible = writeln!(out, "… {} more", total.saturating_sub(listed));
+    }
+    out
+}
+
+/// What is at a path, for JSON.
+pub fn stat<'a>(path: &'a str, stat: Option<&FileStat>) -> StatView<'a> {
+    StatView {
+        path,
+        exists: stat.is_some(),
+        kind: stat.map(|s| kind_key(s.kind)),
+        size: stat.map(|s| s.size),
+        modified_ms: stat.map(|s| s.modified_ms),
+        mode: stat.map(|s| format!("{:o}", s.mode)),
+    }
+}
+
+/// What is at a path, for a person.
+pub fn stat_text(path: &str, stat: Option<&FileStat>) -> String {
+    stat.map_or_else(
+        || format!("{path}: nothing there\n"),
+        |s| format!("{path}: {} {} bytes mode {:o}\n", kind_key(s.kind), s.size, s.mode),
+    )
+}
+
+/// A page of the server's events, for JSON.
+pub fn events(page: &EventPage) -> EventsView<'_> {
+    EventsView {
+        events: page.events.iter().map(event).collect(),
+        next: page.next,
+        missed: page.missed,
+    }
+}
+
+/// One event, for JSON.
+pub fn event(e: &HubEvent) -> EventView<'_> {
+    let mut view = EventView {
+        seq: e.seq,
+        at_ms: e.at_ms,
+        kind: "",
+        worker: WorkerId::nil(),
+        term: None,
+        name: None,
+        liveness: None,
+        title: None,
+        cwd: None,
+        command: None,
+        agent: None,
+        detail: None,
+    };
+    match &e.what {
+        Happening::Worker { worker, name, liveness: l } => {
+            view.kind = "worker";
+            view.worker = *worker;
+            view.name = Some(name);
+            view.liveness = Some(liveness(*l));
+        }
+        Happening::WorkerRemoved { worker, name } => {
+            view.kind = "worker_removed";
+            view.worker = *worker;
+            view.name = Some(name);
+        }
+        Happening::SessionOpened { worker, summary } => {
+            view.kind = "session_opened";
+            view.worker = *worker;
+            view.term = Some(term_string(TermRef { worker: *worker, session: summary.id }));
+            view.title = Some(&summary.title);
+            view.cwd = summary.cwd.as_deref();
+            view.command = Some(&summary.command);
+        }
+        Happening::SessionClosed { term } => {
+            view.kind = "session_closed";
+            view.worker = term.worker;
+            view.term = Some(term_string(*term));
+        }
+        Happening::Agent { term, kind, status, detail } => {
+            view.kind = "agent";
+            view.worker = term.worker;
+            view.term = Some(term_string(*term));
+            view.agent = Some(agent(Some(&(*kind, status.clone()))));
+            view.detail = detail.as_deref();
+        }
+    }
+    view
+}
+
+/// One event, for a person, on one line; workers by name where `names` knows them.
+pub fn event_text<S: std::hash::BuildHasher>(
+    e: &HubEvent,
+    names: &HashMap<WorkerId, String, S>,
+) -> String {
+    let worker = |id: &WorkerId| names.get(id).cloned().unwrap_or_else(|| id.to_string());
+    let term = |t: &TermRef| format!("{}/{}", worker(&t.worker), t.session);
+    let what = match &e.what {
+        Happening::Worker { name, liveness: l, .. } => format!("worker  {name} {}", liveness(*l)),
+        Happening::WorkerRemoved { name, .. } => format!("worker  {name} removed"),
+        Happening::SessionOpened { worker: w, summary } => {
+            let t = TermRef { worker: *w, session: summary.id };
+            format!("opened  {}  {}", term(&t), summary.title)
+        }
+        Happening::SessionClosed { term: t } => format!("closed  {}", term(t)),
+        Happening::Agent { term: t, kind, status, detail } => {
+            let said = agent_text(Some(&(*kind, status.clone())));
+            match detail {
+                Some(detail) => format!("agent   {}  {said}: {detail}", term(t)),
+                None => format!("agent   {}  {said}", term(t)),
+            }
+        }
+    };
+    format!("{:>6}  {what}", e.seq)
 }
 
 /// A new terminal, for JSON.
@@ -811,21 +1052,98 @@ mod tests {
         assert_eq!(agent_text(None), "no agent");
     }
 
+    fn chunk(bytes: &[u8], offset: u64, size: u64) -> Chunk {
+        Chunk { bytes: bytes.to_vec(), offset, size }
+    }
+
     #[test]
     fn a_file_is_text_when_it_can_be_and_base64_otherwise() {
-        let text = serde_json::to_value(file("/tmp/a", "héllo\n".as_bytes())).unwrap();
+        let whole = chunk("héllo\n".as_bytes(), 0, 7);
+        let text = serde_json::to_value(file("/tmp/a", &whole)).unwrap();
         assert_eq!(
             text,
             serde_json::json!({
-                "path": "/tmp/a", "size": 7, "encoding": "utf8", "content": "héllo\n"
+                "path": "/tmp/a", "size": 7, "offset": 0, "length": 7, "more": false,
+                "encoding": "utf8", "content": "héllo\n"
             })
         );
-        let binary = serde_json::to_value(file("/tmp/b", &[0xff, 0])).unwrap();
+        let part = chunk(&[0xff, 0], 10, 40);
+        let binary = serde_json::to_value(file("/tmp/b", &part)).unwrap();
         assert_eq!(binary["encoding"], "base64");
         assert_eq!(binary["content"], "/wA=");
-        assert_eq!(binary["size"], 2, "the size of the file, not of its spelling");
+        assert_eq!(binary["length"], 2, "the bytes read, not their spelling");
+        assert_eq!((binary["size"].as_u64(), binary["more"].as_bool()), (Some(40), Some(true)));
         assert_eq!(Encoding::Base64.decode("/wA=".to_owned()).unwrap(), [0xff, 0]);
         assert_eq!(Encoding::Utf8.decode("/wA=".to_owned()).unwrap(), b"/wA=");
         Encoding::Base64.decode("not base64".to_owned()).unwrap_err();
+    }
+
+    #[test]
+    fn a_directory_and_a_stat_read_as_views() {
+        let entries = vec![
+            DirEntry { name: "src".to_owned(), kind: FileKind::Dir, size: 96, modified_ms: 5 },
+            DirEntry { name: "a.rs".to_owned(), kind: FileKind::File, size: 12, modified_ms: 6 },
+        ];
+        let json = serde_json::to_value(dir("/r", &entries, 3)).unwrap();
+        assert_eq!(
+            json["entries"][0],
+            serde_json::json!({
+                "name": "src", "kind": "dir", "size": 96, "modified_ms": 5
+            })
+        );
+        assert_eq!((json["total"].as_u64(), json["truncated"].as_bool()), (Some(3), Some(true)));
+        assert_eq!(dir_text(&entries, 3), "SIZE  NAME\n96    src/\n12    a.rs\n… 1 more\n");
+        let found = FileStat { kind: FileKind::File, size: 4, modified_ms: 9, mode: 0o644 };
+        let json = serde_json::to_value(stat("/r/a", Some(&found))).unwrap();
+        assert_eq!(json["mode"], "644");
+        assert_eq!(json["exists"], true);
+        let json = serde_json::to_value(stat("/r/b", None)).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "path": "/r/b", "exists": false, "kind": null, "size": null,
+                "modified_ms": null, "mode": null
+            })
+        );
+    }
+
+    #[test]
+    fn events_carry_the_fields_of_their_kind() {
+        let term = TermRef { worker: worker(1), session: session(1) };
+        let page = EventPage {
+            events: vec![
+                HubEvent {
+                    seq: 7,
+                    at_ms: 100,
+                    what: Happening::Worker {
+                        worker: worker(1),
+                        name: "mac-studio".to_owned(),
+                        liveness: Liveness::Unreachable,
+                    },
+                },
+                HubEvent {
+                    seq: 8,
+                    at_ms: 101,
+                    what: Happening::Agent {
+                        term,
+                        kind: AgentKind::ClaudeCode,
+                        status: AgentStatus::Blocked(BlockReason::Question),
+                        detail: Some("Which branch?".to_owned()),
+                    },
+                },
+            ],
+            next: 9,
+            missed: 0,
+        };
+        insta::assert_json_snapshot!(events(&page));
+        let names = HashMap::from([(worker(1), "mac-studio".to_owned())]);
+        assert_eq!(event_text(&page.events[0], &names), "     7  worker  mac-studio unreachable");
+        assert_eq!(
+            event_text(&page.events[1], &names),
+            format!(
+                "     8  agent   mac-studio/{}  Claude Code  waiting: a question: Which branch?",
+                session(1)
+            )
+        );
     }
 }

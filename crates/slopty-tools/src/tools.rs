@@ -15,9 +15,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
-use slopty_proto::orchestration::{ErrorCode, Input, WaitUntil};
+use slopty_proto::orchestration::{ErrorCode, EventFilter, Input, Size, WaitUntil};
 
-use crate::ops::{self, DEFAULT_MAX_LINES, DEFAULT_WAIT_MS, Spec};
+use crate::ops::{self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_WAIT_MS, Spec};
 use crate::resolve::Resolver;
 use crate::view::{self, Encoding};
 use crate::{Dispatch, ToolError};
@@ -28,8 +28,9 @@ Slopty runs terminals and coding agents on a fleet of machines (workers). Start 
 list_workers, then list_terminals. A terminal is named by its `term` (worker/session, as the \
 lists print it); copy it verbatim into the terminal tools. A `worker` argument takes a worker's \
 name or id. To run a command: send_input text \"cmd\\n\", then wait_for command_done, then \
-read_output from the line you started at. Prefer wait_for to polling read_screen or read_output \
-in a loop.";
+read_output from the line you started at. Prefer wait_for (one terminal) and events (the whole \
+fleet: agents needing you, terminals opening and closing, workers coming and going) to polling \
+read_screen or read_output in a loop.";
 
 /// How often a `wait_for` with a progress sink reports that it is still waiting.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);
@@ -69,6 +70,10 @@ struct OpenTerminalArgs {
     env: BTreeMap<String, String>,
     /// A short name for the terminal's tile on the workspace.
     name: Option<String>,
+    /// Columns (10-1000); with `rows`. 120x36 when omitted, until a client shows it.
+    cols: Option<u16>,
+    /// Rows (2-500); with `cols`.
+    rows: Option<u16>,
 }
 
 /// `spawn_agent`.
@@ -81,6 +86,43 @@ struct SpawnAgentArgs {
     cwd: String,
     /// The first prompt, typed once the agent is ready.
     prompt: Option<String>,
+    /// Arguments for `claude`, e.g. `["--model", "opus"]`.
+    #[serde(default)]
+    args: Vec<String>,
+    /// Extra environment variables.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    /// Columns (10-1000); with `rows`. 120x36 when omitted, until a client shows it.
+    cols: Option<u16>,
+    /// Rows (2-500); with `cols`.
+    rows: Option<u16>,
+}
+
+/// `resize_terminal`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ResizeArgs {
+    /// The terminal, as the lists print it (`worker/session`).
+    term: String,
+    /// Columns (10-1000).
+    cols: u16,
+    /// Rows (2-500).
+    rows: u16,
+}
+
+/// `events`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct EventsArgs {
+    /// Cursor: the `next` of the previous call. Omitted means from now on; 0 means everything
+    /// the server still holds.
+    since: Option<u64>,
+    /// Wait this long for a first event (default 60000; the server caps it at 240000). 0
+    /// answers at once, with the cursor for now.
+    timeout_ms: Option<u32>,
+    /// Only agents that come to need a human or go idle, on any worker.
+    #[serde(default)]
+    agent_input: bool,
 }
 
 /// `send_input`.
@@ -159,6 +201,41 @@ struct ReadFileArgs {
     worker: Option<String>,
     /// Absolute path, or `~/…`.
     path: String,
+    /// First byte to read (default 0).
+    #[serde(default)]
+    offset: u64,
+    /// At most this many bytes (8 MiB at most); the rest of the file when omitted.
+    length: Option<u64>,
+}
+
+/// `list_dir`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListDirArgs {
+    /// Worker name or id; the only worker online when omitted.
+    worker: Option<String>,
+    /// Absolute path, or `~/…`.
+    path: String,
+    /// At most this many entries (default 1000, at most 10000).
+    max: Option<u32>,
+}
+
+/// `stat`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PathArgs {
+    /// Worker name or id; the only worker online when omitted.
+    worker: Option<String>,
+    /// Absolute path, or `~/…`.
+    path: String,
+}
+
+/// `forget_worker`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ForgetWorkerArgs {
+    /// Worker name or id.
+    worker: String,
 }
 
 /// `write_file`.
@@ -174,6 +251,15 @@ struct WriteFileArgs {
     /// `utf8` (the default) for text as it is, `base64` for binary contents.
     #[serde(default)]
     encoding: Encoding,
+}
+
+/// `cols` and `rows` together, or neither.
+fn size(cols: Option<u16>, rows: Option<u16>) -> Result<Option<Size>, ToolError> {
+    match (cols, rows) {
+        (Some(cols), Some(rows)) => Ok(Some(Size { cols, rows })),
+        (None, None) => Ok(None),
+        _ => Err(ToolError::invalid("give cols and rows together")),
+    }
 }
 
 impl SendInputArgs {
@@ -262,14 +348,16 @@ pub fn list() -> Vec<Tool> {
         tool::<OpenTerminalArgs>(
             "open_terminal",
             "Start a terminal on a worker, running the login shell or `command`, and return its \
-             `term`. Then send_input, wait_for and read_output.",
+             `term`. Then send_input, wait_for and read_output. `cols`/`rows` set its size; \
+             a client that shows it later sizes it to its window.",
             Kind::Write,
         ),
         tool::<SpawnAgentArgs>(
             "spawn_agent",
-            "Start Claude Code in a new terminal in `cwd`, optionally typing `prompt` once it is \
-             ready, and return its `term`. Follow it with wait_for agent_input to learn when it \
-             needs you, agent_status for what it is doing, and read_screen to see it.",
+            "Start Claude Code (`claude` plus `args`) in a new terminal in `cwd`, optionally \
+             typing `prompt` once it is ready, and return its `term`. Follow it with wait_for \
+             agent_input (this agent) or events agent_input (any agent) to learn when it needs \
+             you, agent_status for what it is doing, and read_screen to see it.",
             Kind::Write,
         ),
         tool::<SendInputArgs>(
@@ -318,12 +406,30 @@ pub fn list() -> Vec<Tool> {
              look with read_screen, then wait again.",
             Kind::Read,
         ),
+        tool::<EventsArgs>(
+            "events",
+            "What happened across every worker, oldest first: agent status changes (`agent`, \
+             with `term` and `needs_human`), terminals opened and closed, workers online, \
+             unreachable, gone or removed. Blocks until at least one event or `timeout_ms`. \
+             Returns `events`, `next` and `missed` (events dropped from the server's log). Pass \
+             `next` back as `since` to go on without gaps. With `agent_input` it waits for the \
+             first agent anywhere that needs a human or goes idle. To see nothing twice, take \
+             the cursor first (timeout_ms 0), then read state (list_workers), then wait from \
+             the cursor.",
+            Kind::Read,
+        ),
         tool::<TermArgs>(
             "agent_status",
             "The coding agent in a terminal, if one runs, and its status: idle, working, tool \
              (running `tool`), blocked (needs a human, with `reason` and for a permission the \
              `tool`), or done.",
             Kind::Read,
+        ),
+        tool::<ResizeArgs>(
+            "resize_terminal",
+            "Resize a terminal to `cols` x `rows`, for a program that lays out to the width. \
+             Fails while a client shows the terminal, since its window sets the size then.",
+            Kind::Write,
         ),
         tool::<TermArgs>(
             "close_terminal",
@@ -332,8 +438,10 @@ pub fn list() -> Vec<Tool> {
         ),
         tool::<ReadFileArgs>(
             "read_file",
-            "Read a file on a worker. Returns `content`, its `encoding` (utf8 when the file is \
-             UTF-8 text, else base64) and the file's `size` in bytes.",
+            "Read a file on a worker, whole or from `offset` for `length` bytes (8 MiB per \
+             read). Returns `content`, its `encoding` (utf8 when the bytes are UTF-8, else \
+             base64), the file's `size`, `offset`, `length` read and `more` (the file goes on: \
+             read again from offset + length).",
             Kind::Read,
         ),
         tool::<WriteFileArgs>(
@@ -342,11 +450,30 @@ pub fn list() -> Vec<Tool> {
              contents in base64 with `encoding` base64.",
             Kind::Destroy,
         ),
+        tool::<ListDirArgs>(
+            "list_dir",
+            "A directory's entries on a worker, by name: `name`, `kind` (file, dir, symlink, \
+             other), `size` and `modified_ms`, with `total` and `truncated` when there are more \
+             than `max`.",
+            Kind::Read,
+        ),
+        tool::<PathArgs>(
+            "stat",
+            "What is at a path on a worker, following links: `exists`, then `kind`, `size`, \
+             `modified_ms` and `mode` (octal).",
+            Kind::Read,
+        ),
         tool::<WorkerArgs>(
             "list_ports",
             "TCP ports listening in a worker's terminals' process trees, with the process and \
              the `term` it runs in: how to find the dev server a terminal started.",
             Kind::Read,
+        ),
+        tool::<ForgetWorkerArgs>(
+            "forget_worker",
+            "Remove a worker that is not online (unreachable or gone) from the server's list, \
+             for a machine retired or set up again elsewhere. An online worker is refused.",
+            Kind::Destroy,
         ),
     ]
 }
@@ -410,13 +537,33 @@ async fn run<D: Dispatch>(
         "open_terminal" => {
             let a: OpenTerminalArgs = args(arguments)?;
             let env = a.env.into_iter().collect();
-            let spec = Spec { cwd: a.cwd, command: a.command, env, name: a.name };
+            let size = size(a.cols, a.rows)?;
+            let spec = Spec { cwd: a.cwd, command: a.command, env, name: a.name, size };
             json(&view::opened(ops::open(&mut res, a.worker.as_deref(), spec).await?))
         }
         "spawn_agent" => {
             let a: SpawnAgentArgs = args(arguments)?;
-            let term = ops::spawn_agent(&mut res, a.worker.as_deref(), a.cwd, a.prompt).await?;
-            json(&view::opened(term))
+            let spec = AgentSpec {
+                cwd: a.cwd,
+                prompt: a.prompt,
+                args: a.args,
+                env: a.env.into_iter().collect(),
+                size: size(a.cols, a.rows)?,
+            };
+            json(&view::opened(ops::spawn_agent(&mut res, a.worker.as_deref(), spec).await?))
+        }
+        "resize_terminal" => {
+            let a: ResizeArgs = args(arguments)?;
+            ops::resize(&mut res, &a.term, Size { cols: a.cols, rows: a.rows }).await?;
+            json(&view::DONE)
+        }
+        "events" => {
+            let a: EventsArgs = args(arguments)?;
+            let filter =
+                if a.agent_input { EventFilter::AgentNeedsInput } else { EventFilter::All };
+            let timeout = a.timeout_ms.unwrap_or(DEFAULT_WAIT_MS);
+            let page = with_progress(ops::events(dispatch, a.since, timeout, filter), progress);
+            json(&view::events(&page.await?))
         }
         "send_input" => {
             let a: SendInputArgs = args(arguments)?;
@@ -457,8 +604,10 @@ async fn run<D: Dispatch>(
         }
         "read_file" => {
             let a: ReadFileArgs = args(arguments)?;
-            let bytes = ops::read_file(&mut res, a.worker.as_deref(), a.path.clone()).await?;
-            json(&view::file(&a.path, &bytes))
+            let worker = res.worker(a.worker.as_deref()).await?;
+            let path = a.path.clone();
+            let chunk = ops::read_file(dispatch, worker, path, a.offset, a.length).await?;
+            json(&view::file(&a.path, &chunk))
         }
         "write_file" => {
             let a: WriteFileArgs = args(arguments)?;
@@ -473,6 +622,23 @@ async fn run<D: Dispatch>(
             let a: WorkerArgs = args(arguments)?;
             let (worker, ports) = ops::ports(&mut res, a.worker.as_deref()).await?;
             json(&view::ports(worker, &ports))
+        }
+        "list_dir" => {
+            let a: ListDirArgs = args(arguments)?;
+            let max = a.max.unwrap_or(DEFAULT_MAX_ENTRIES);
+            let path = a.path.clone();
+            let (entries, total) = ops::list_dir(&mut res, a.worker.as_deref(), path, max).await?;
+            json(&view::dir(&a.path, &entries, total))
+        }
+        "stat" => {
+            let a: PathArgs = args(arguments)?;
+            let found = ops::stat(&mut res, a.worker.as_deref(), a.path.clone()).await?;
+            json(&view::stat(&a.path, found.as_ref()))
+        }
+        "forget_worker" => {
+            let a: ForgetWorkerArgs = args(arguments)?;
+            ops::forget_worker(&mut res, &a.worker).await?;
+            json(&view::DONE)
         }
         other => Err(ToolError::invalid(format!("no tool is called {other}"))),
     }
@@ -569,7 +735,12 @@ mod tests {
                     tokio::time::sleep(Duration::from_secs(25)).await;
                     Outcome::Waited(Waited::TimedOut)
                 }
-                Verb::ReadFile { .. } => Outcome::File(vec![0xff, 0]),
+                Verb::ReadFile { offset, .. } => {
+                    Outcome::File { bytes: vec![0xff, 0], offset, size: offset.saturating_add(2) }
+                }
+                Verb::Events { since, .. } => {
+                    Outcome::Events { events: Vec::new(), next: since.unwrap_or(41), missed: 0 }
+                }
                 Verb::Close { .. } => Outcome::Error {
                     code: ErrorCode::UnknownTerminal,
                     message: "no such terminal".to_owned(),
@@ -602,11 +773,16 @@ mod tests {
                 "read_output",
                 "list_commands",
                 "wait_for",
+                "events",
                 "agent_status",
+                "resize_terminal",
                 "close_terminal",
                 "read_file",
                 "write_file",
+                "list_dir",
+                "stat",
                 "list_ports",
+                "forget_worker",
             ]
         );
         for t in &tools {
@@ -703,7 +879,10 @@ mod tests {
         let file: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
             file,
-            json!({ "path": "/bin/x", "size": 2, "encoding": "base64", "content": "/wA=" })
+            json!({
+                "path": "/bin/x", "size": 2, "offset": 0, "length": 2, "more": false,
+                "encoding": "base64", "content": "/wA="
+            })
         );
 
         let args = json!({ "worker": studio().to_string(), "path": "/b", "content": "AAE=", "encoding": "base64" });
@@ -721,6 +900,58 @@ mod tests {
         let args = json!({ "path": "/b", "content": "!!", "encoding": "base64" });
         let (failed, text) = call_json(&fake, "write_file", args).await;
         assert!(failed && text.contains("not base64"), "{text}");
+    }
+
+    /// The new verbs' arguments reach the wire as they were given: a size together or not at
+    /// all, a range, the agent filter, the agent's arguments.
+    #[tokio::test]
+    async fn sizes_ranges_and_filters_reach_the_verb() {
+        let fake = Fake::default();
+        let term = format!("{}/{}", studio(), shell());
+        let t = TermRef { worker: studio(), session: shell() };
+        let (failed, text) =
+            call_json(&fake, "resize_terminal", json!({ "term": term, "cols": 200, "rows": 50 }))
+                .await;
+        assert!(!failed, "{text}");
+        let size = Size { cols: 200, rows: 50 };
+        assert_eq!(fake.verbs().pop(), Some(Verb::ResizeTerminal { term: t, size }));
+
+        let (failed, text) = call_json(&fake, "open_terminal", json!({ "cols": 90 })).await;
+        assert!(failed && text.contains("together"), "{text}");
+        let spawn = json!({
+            "worker": studio().to_string(), "cwd": "~/src", "args": ["--model", "opus"],
+            "env": { "A": "1" }, "cols": 100, "rows": 30,
+        });
+        call_json(&fake, "spawn_agent", spawn).await;
+        let Some(Verb::SpawnAgent { args, env, size, prompt, .. }) = fake.verbs().pop() else {
+            panic!("spawn")
+        };
+        assert_eq!(args, ["--model", "opus"]);
+        assert_eq!(env, [("A".to_owned(), "1".to_owned())]);
+        assert_eq!((size, prompt), (Some(Size { cols: 100, rows: 30 }), None));
+
+        let read =
+            json!({ "worker": studio().to_string(), "path": "/f", "offset": 10, "length": 2 });
+        let (_, text) = call_json(&fake, "read_file", read).await;
+        let file: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!((file["offset"].as_u64(), file["more"].as_bool()), (Some(10), Some(false)));
+        let Some(Verb::ReadFile { offset, length, .. }) = fake.verbs().pop() else { panic!() };
+        assert_eq!((offset, length), (10, Some(2)));
+
+        let (_, text) =
+            call_json(&fake, "events", json!({ "agent_input": true, "timeout_ms": 0 })).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({
+                "events": [], "next": 41, "missed": 0
+            })
+        );
+        let filter = EventFilter::AgentNeedsInput;
+        assert_eq!(
+            fake.verbs().pop(),
+            Some(Verb::Events { since: None, timeout_ms: 0, filter }),
+            "the hub answers it: no name is resolved first"
+        );
     }
 
     #[tokio::test(start_paused = true)]

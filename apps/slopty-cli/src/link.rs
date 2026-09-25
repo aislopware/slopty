@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, anyhow};
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_net::server::{DialError, ServerLink, connect};
-use slopty_net::{Endpoint, HostAddr};
+use slopty_net::{Endpoint, HostAddr, NetError};
+use slopty_proto::codec::CodecError;
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
 use slopty_proto::server::{FromServer, Refusal, RequestId, Role, ToServer};
 use slopty_tools::Dispatch;
@@ -221,11 +222,24 @@ async fn serve(
         };
         if let Some(Call { verb, reply }) = call {
             next = next.wrapping_add(1);
-            if let Err(e) = tx.send(&ToServer::Request { id: next, verb }).await {
-                let _gone = reply.send(Err(anyhow!("the connection to the server was lost")));
-                break Ended::Lost(e.into());
+            match tx.send(&ToServer::Request { id: next, verb }).await {
+                Ok(()) => {
+                    pending.insert(next, reply);
+                }
+                // Refused before a byte went out, so the link carries on.
+                Err(NetError::Codec(CodecError::TooLarge { len, max })) => {
+                    let _gone = reply.send(Ok(Outcome::Error {
+                        code: ErrorCode::Invalid,
+                        message: format!(
+                            "the message is {len} bytes, more than the {max} one message carries"
+                        ),
+                    }));
+                }
+                Err(e) => {
+                    let _gone = reply.send(Err(anyhow!("the connection to the server was lost")));
+                    break Ended::Lost(e.into());
+                }
             }
-            pending.insert(next, reply);
         }
     };
     conn.close(0_u32.into(), b"bye");
