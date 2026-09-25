@@ -1624,3 +1624,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Tests: the UI tests that looked for the chip look for the status bar's summary
   (`status-agents`); the e2e helpers already matched any button ending in "needs you".
   `a_new_workers_shell_opens_beside_without_taking_the_focus`. Every golden was re-accepted.
+
+- ✅ **Upstream sync of 2026-09-25, second round: a double-click word follows a soft wrap**
+  (2026-09-25). zed rebased onto main `397cbc84de` (4 commits, fork head `a5ceabe751`),
+  gpui-kit onto main `d565fd57` (5 commits, fork head `6a552431`), and `vendor/ghostty` moved
+  16 commits to ghostty main `982fe90d9`. The libghostty-rs fork pins the same commit at
+  `137d62a`. The C header did not change, so the regenerated bindings are byte-identical.
+  Every fork replayed without a conflict. Stable 1.98.1, nightly 2026-09-24 and every gate
+  tool were already current; `cargo update` moved eleven semver-compatible patches (`cc`,
+  `smallvec`, `siphasher`, the `wasm-bindgen` family).
+  - **zed** touched no `gpui` crate. Its one terminal change rounds the background of Zed's
+    own terminal view to fit a rounded card. Slopty's tiles are square by design (the tiles
+    test asserts it), so the full-rect background stays.
+  - **gpui-kit** brought a redesigned `Attachment`, a bottom dock that drags shut and back
+    open in one motion, chart tooltip builders and a large docs pass. Slopty uses none of
+    these components, so nothing changes here. The dock drag is worth a look if a bottom
+    panel ever appears.
+  - **ghostty** changed the VT library in two places that matter. Runs of DEC special
+    graphics (the line-drawing set that `tmux`, `mc` and dialog boxes draw borders with) are
+    now written in batches, which comes for free. Word selection stops at a hard line break
+    and still crosses a soft wrap. Slopty's word selection never left its row, so it already
+    stopped at a hard break, but it split a wrapped word in two. It now follows Ghostty's
+    rule. A double-click on either half of a word wrapped over the right edge takes the whole
+    word, and a word that ends at the edge before a hard break stays on its row. Copying a
+    run joins a soft-wrapped row to the one before with no newline and keeps the blanks at
+    the wrap, so a long wrapped line pastes as the one line the program printed. A block
+    selection keeps a newline per row. The glyph cache key packing, the OpenGL/EGL fix and
+    the tmux viewer fix are outside what libghostty-vt builds for Slopty.
+  - Test: view `a_word_follows_a_soft_wrap_but_not_a_hard_break`.

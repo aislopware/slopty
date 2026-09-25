@@ -18,7 +18,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::term::{BlockHead, CommandBlock, TermImage};
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
-use slopty_grid::{Cursor, LineIndex, TermModes};
+use slopty_grid::{Cursor, LineFlags, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentStatus;
@@ -940,37 +940,66 @@ impl TerminalView {
         self.set_pointer(self.hover, event.modifiers, cx);
     }
 
-    /// The word under `col` on line `index` as inclusive columns: the run of non-blank cells
-    /// around it, or just the cell when it is blank.
-    fn word_at(&self, index: LineIndex, col: u16) -> (u16, u16) {
-        let Some(line) = self.state.line(index) else { return (col, col) };
-        let blank = |c: u16| {
-            line.cells
-                .get(usize::from(c))
+    /// The word under `at` as inclusive cells: the run of non-blank cells around it, or just
+    /// the cell when it is blank. Like Ghostty's word selection, the run follows a soft wrap
+    /// onto the next row but stops at a hard line break.
+    fn word_at(&self, at: (LineIndex, u16)) -> ((LineIndex, u16), (LineIndex, u16)) {
+        let blank = |(index, col): (LineIndex, u16)| {
+            self.state
+                .line(index)
+                .and_then(|line| line.cells.get(usize::from(col)))
                 .is_none_or(|cell| cell.width.draws_text() && cell.text.as_str().trim().is_empty())
         };
-        if blank(col) {
-            return (col, col);
+        if blank(at) {
+            return (at, at);
         }
-        let mut start = col;
-        while start > 0 && !blank(start.wrapping_sub(1)) {
-            start = start.wrapping_sub(1);
+        let mut start = at;
+        while let Some(before) = self.cell_before(start)
+            && !blank(before)
+        {
+            start = before;
         }
-        let mut end = col;
-        while !blank(end.wrapping_add(1)) {
-            end = end.wrapping_add(1);
+        let mut end = at;
+        while let Some(after) = self.cell_after(end)
+            && !blank(after)
+        {
+            end = after;
         }
         (start, end)
     }
 
-    /// Select `cols` of line `index`: the word at `col` for two clicks, the line for more.
+    /// The cell before `(index, col)` in reading order, back over a soft wrap but not a hard
+    /// line break.
+    fn cell_before(&self, (index, col): (LineIndex, u16)) -> Option<(LineIndex, u16)> {
+        if let Some(col) = col.checked_sub(1) {
+            return Some((index, col));
+        }
+        if !self.state.line(index)?.flags.contains(LineFlags::WRAPPED) {
+            return None;
+        }
+        let above = LineIndex(index.0.checked_sub(1)?);
+        Some((above, self.state.line(above)?.cols().checked_sub(1)?))
+    }
+
+    /// The cell after `(index, col)` in reading order, on over a soft wrap but not a hard line
+    /// break.
+    fn cell_after(&self, (index, col): (LineIndex, u16)) -> Option<(LineIndex, u16)> {
+        let next = col.checked_add(1)?;
+        if next < self.state.line(index)?.cols() {
+            return Some((index, next));
+        }
+        let below = index.next();
+        self.state.line(below)?.flags.contains(LineFlags::WRAPPED).then_some((below, 0))
+    }
+
+    /// Select around `col` of line `index`: the word for two clicks, the row for more.
     fn select_by_clicks(&mut self, index: LineIndex, col: u16, clicks: usize) {
         let (start, end) = if clicks == 2 {
-            self.word_at(index, col)
+            self.word_at((index, col))
         } else {
-            (0, self.state.size().cols.saturating_sub(1))
+            ((index, 0), (index, self.state.size().cols.saturating_sub(1)))
         };
-        self.selection = Some(Selection::run((index, start), (index, end)));
+        self.selection = Some(Selection::run(start, end));
     }
 
     /// A touch long press over the terminal. On the phone a plain drag pans the canvas, so
@@ -1027,17 +1056,25 @@ impl TerminalView {
         }
     }
 
-    /// The selected text: trailing blanks trimmed per line, lines joined with newlines. Lines
-    /// not in the scrollback cache come out empty.
+    /// The selected text: trailing blanks trimmed per line, lines joined with newlines. A run
+    /// joins a soft-wrapped row to the one before it with nothing between, so a long line or a
+    /// wrapped word copies whole. Lines not in the scrollback cache come out empty.
     #[must_use]
     pub fn selected_text(&self) -> Option<String> {
         let selection = self.selection?;
         let (start, end) = selection.ordered();
         let cols = self.state.size().cols;
+        let continues = |index: LineIndex| {
+            !selection.block
+                && self
+                    .state
+                    .line(index)
+                    .is_some_and(|line| line.flags.contains(LineFlags::WRAPPED))
+        };
         let mut out = String::new();
         let mut index = start.0;
         loop {
-            if index != start.0 {
+            if index != start.0 && !continues(index) {
                 out.push('\n');
             }
             if let Some(range) = selection.columns(index, cols)
@@ -1049,7 +1086,8 @@ impl TerminalView {
                         text.push_str(if cell.text.is_empty() { " " } else { cell.text.as_str() });
                     }
                 }
-                out.push_str(text.trim_end());
+                let wraps_on = index < end.0 && continues(index.next());
+                out.push_str(if wraps_on { &text } else { text.trim_end() });
             }
             if index >= end.0 {
                 break;
@@ -4334,6 +4372,37 @@ mod tests {
         });
     }
 
+    /// A word soft-wrapped over the right edge is one word to a double-click from either row,
+    /// and copies without a break; a word ending at the edge of a hard break stays on its row,
+    /// as in Ghostty. A run over the wrap copies as the one line it is.
+    #[gpui::test]
+    fn a_word_follows_a_soft_wrap_but_not_a_hard_break(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let mut f = history_frame(100, &["say   rain", "bow abcdef", "fgh"]);
+        if let TermEvent::Frame(frame) = &mut f {
+            frame.updates[1].line.flags |= LineFlags::WRAPPED;
+        }
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(f, cx);
+            let word = |view: &mut TerminalView, index: u64, col: u16| {
+                view.select_by_clicks(LineIndex(index), col, 2);
+                (view.selection.map(Selection::ordered), view.selected_text())
+            };
+            let wrapped =
+                (Some(((LineIndex(100), 6), (LineIndex(101), 2))), Some("rainbow".to_owned()));
+            assert_eq!(word(view, 100, 7), wrapped, "from the row it starts on");
+            assert_eq!(word(view, 101, 1), wrapped, "from the row it wraps onto");
+            assert_eq!(
+                word(view, 101, 7),
+                (Some(((LineIndex(101), 4), (LineIndex(101), 9))), Some("abcdef".to_owned())),
+                "the hard break ends it"
+            );
+            assert_eq!(word(view, 102, 1).1.as_deref(), Some("fgh"), "nor does it reach back");
+            view.selection = Some(Selection::run((LineIndex(100), 0), (LineIndex(102), 9)));
+            assert_eq!(view.selected_text().as_deref(), Some("say   rainbow abcdef\nfgh"));
+        });
+    }
+
     /// A frame of `rows` on a screen whose first line is `first`, with `first` lines of
     /// history before it (line 0 is the oldest kept).
     fn history_frame(first: u64, rows: &[&str]) -> TermEvent {
@@ -4553,7 +4622,7 @@ mod tests {
         if let TermEvent::Frame(frame) = &mut f {
             frame.updates[1].line.mark = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
             frame.updates[2].line.mark = SemanticMark::Input;
-            frame.updates[2].line.flags |= slopty_grid::LineFlags::WRAPPED;
+            frame.updates[2].line.flags |= LineFlags::WRAPPED;
             frame.cursor = Cursor { row: 1, col: 8, visible: true, ..Cursor::default() };
         }
         view.update_in(cx, |view, _window, cx| view.apply(f, cx));
