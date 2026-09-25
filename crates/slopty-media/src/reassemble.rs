@@ -55,6 +55,9 @@ const STAMP_SLACK: Duration = match SEND_STAMP_RANGE.checked_div(2) {
     None => SEND_STAMP_RANGE,
 };
 
+/// Acknowledged tokens kept for the next report; older ones are superseded by newer ones.
+const MAX_PENDING_ACKS: usize = 16;
+
 /// The default [`Config::tick_period`]: half [`STALL_GAP`], so the receiver looks twice per gap.
 const HALF_STALL_GAP: Duration = match STALL_GAP.checked_div(2) {
     Some(half) => half,
@@ -177,8 +180,8 @@ pub struct FrameInfo {
 pub struct FrameOut {
     /// Metadata.
     pub info: FrameInfo,
-    /// The bitstream.
-    pub data: Vec<u8>,
+    /// The bitstream: a view into the reassembled fragments, not a copy of them.
+    pub data: Bytes,
     /// Time from the first fragment's arrival to delivery.
     pub hold: Duration,
     /// When the fragment that completed the frame arrived. This, not the delivery instant, is
@@ -479,7 +482,11 @@ pub struct Reassembler {
     /// round trip to hand) use the same number `tick` does.
     nack_delay: Duration,
     last_worker_ts_us: u32,
+    /// Tokens of decoded frames not yet in a report, oldest first.
     ltr_acks: VecDeque<u64>,
+    /// The newest token acknowledged, repeated in every report that delivered a frame (see
+    /// [`Reassembler::take_report`]).
+    newest_ack: Option<u64>,
 }
 
 impl std::fmt::Debug for Reassembler {
@@ -528,6 +535,7 @@ impl Reassembler {
             nack_delay: cfg.nack_delay.for_rtt(last_rtt),
             last_worker_ts_us: 0,
             ltr_acks: VecDeque::new(),
+            newest_ack: None,
         }
     }
 
@@ -583,11 +591,60 @@ impl Reassembler {
     }
 
     /// Record that a frame carrying `token` was decoded; the next report acknowledges it.
+    ///
+    /// Call it from the decoder's output, never on submission: a token acknowledged for a frame
+    /// the decoder then failed names a reference the client does not hold, and the worker's
+    /// next refresh would be predicted from it.
     pub fn ack_ltr(&mut self, token: u64) {
-        if self.ltr_acks.len() >= 16 {
+        if self.ltr_acks.len() >= MAX_PENDING_ACKS {
             self.ltr_acks.pop_front();
         }
         self.ltr_acks.push_back(token);
+        self.newest_ack = Some(token);
+    }
+
+    /// The decoder could not use what it was given: ask for a picture it can decode, and drop
+    /// every frame until one comes. `keyframe` says the decoder lost its session, so a refresh
+    /// predicted from a long-term reference cannot help and only an IDR restarts it.
+    ///
+    /// A receiver already waiting for a refresh asks nothing more here; its repeats run on the
+    /// usual backoff, so a decoder failing on every frame cannot turn into a request per frame.
+    pub fn force_refresh(&mut self, now: Instant, keyframe: bool) {
+        let waiting = self.awaiting_refresh();
+        self.need =
+            if keyframe || self.need == Need::Keyframe { Need::Keyframe } else { Need::Refresh };
+        self.ready.clear();
+        if keyframe {
+            // References the lost session decoded are not held by the next one.
+            self.ltr_acks.clear();
+            self.newest_ack = None;
+        }
+        if !waiting {
+            self.refresh_requested_at = None;
+            self.request_refresh(now);
+        }
+    }
+
+    /// A report that could not be sent: its counts and acknowledgements go into the next one,
+    /// so the worker neither misses a loss nor a reference it may predict from.
+    pub fn take_back(&mut self, report: &ReceiverReport) {
+        let tokens = report.acked_ltr.iter().take(usize::from(report.acked_ltr_len));
+        for &token in tokens.rev() {
+            if !self.ltr_acks.contains(&token) {
+                self.ltr_acks.push_front(token);
+            }
+        }
+        while self.ltr_acks.len() > MAX_PENDING_ACKS {
+            self.ltr_acks.pop_front();
+        }
+        let window = &mut self.window;
+        window.frames_ok = window.frames_ok.saturating_add(report.frames_ok);
+        window.frames_fec = window.frames_fec.saturating_add(report.frames_fec);
+        window.frames_lost = window.frames_lost.saturating_add(report.frames_lost);
+        window.datagrams_lost = window.datagrams_lost.saturating_add(report.datagrams_lost);
+        window.stalled =
+            window.stalled.saturating_add(Duration::from_millis(u64::from(report.stalled_ms)));
+        window.stalls = window.stalls.saturating_add(report.stalls);
     }
 
     /// Feed one datagram.
@@ -1209,6 +1266,16 @@ impl Reassembler {
             *slot = token;
             acked_ltr_len = acked_ltr_len.saturating_add(1);
         }
+        // Repeated while frames flow, so a report that never reached the worker costs it one
+        // report period and not the reference. Only then: the worker holds acknowledgements
+        // until its next encode, and a still source would pile up one per report.
+        if acked_ltr_len == 0
+            && window.frames_ok > 0
+            && let Some(token) = self.newest_ack
+        {
+            acked_ltr[0] = token;
+            acked_ltr_len = 1;
+        }
         ReceiverReport {
             frames_ok: window.frames_ok,
             frames_fec: window.frames_fec,
@@ -1274,7 +1341,10 @@ fn assemble(
     }
     let (prefix, rest) = FramePrefix::parse(&body)?;
     let len = usize::try_from(prefix.len.get()).ok()?;
-    let data = rest.get(..len)?.to_vec();
+    let start = body.len().checked_sub(rest.len())?;
+    let end = start.checked_add(len).filter(|&end| end <= body.len())?;
+    let prefix = *prefix;
+    let data = Bytes::from(body).slice(start..end);
     let f = partial.flags;
     Some(FrameOut {
         info: FrameInfo {
@@ -1360,5 +1430,52 @@ mod nack_delay_tests {
         let _quiet = rx.tick(now, Duration::from_millis(120));
         assert_eq!(rx.nack_delay(), Duration::from_millis(20));
         assert_eq!(rx.stall_threshold(), Duration::from_millis(140));
+    }
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+    use crate::{EncodedFrame, Packetizer};
+
+    /// What reassembling one frame costs on the client's stream worker when every data fragment
+    /// arrives: a 62 KB P-frame and a 300 KB keyframe, fed datagram by datagram and taken out
+    /// in decode order. `docs/MEASUREMENTS.md` records runs.
+    #[test]
+    #[ignore = "a measurement; run with --run-ignored only --no-capture in release"]
+    fn reassemble_cost() {
+        for (name, len) in [("P-frame", 62_000_usize), ("keyframe", 300_000)] {
+            let data: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect();
+            let rounds = 200_u32;
+            let mut packetizer = Packetizer::new(StreamId(1));
+            packetizer.set_parity_permille(0);
+            let frames: Vec<Vec<Bytes>> = (0..rounds)
+                .map(|n| {
+                    let frame = EncodedFrame {
+                        data: &data,
+                        keyframe: n == 0,
+                        ltr_token: None,
+                        ltr_refresh: false,
+                        capture_ts_us: n,
+                    };
+                    packetizer.packetize(&frame, 0).unwrap().datagrams.clone()
+                })
+                .collect();
+            let now = Instant::now();
+            let mut rx = Reassembler::new(StreamId(1), Config::default(), now);
+            let started = Instant::now();
+            let mut out = 0_usize;
+            for datagrams in &frames {
+                for d in datagrams {
+                    let _stored = rx.ingest(d, now);
+                }
+                while let Some(frame) = rx.next_frame() {
+                    out = out.wrapping_add(frame.data.len());
+                }
+            }
+            let per = started.elapsed() / rounds;
+            assert_eq!(out, len.saturating_mul(rounds as usize));
+            eprintln!("{name} {len} B, {} datagrams: {per:?} per frame", frames[0].len());
+        }
     }
 }

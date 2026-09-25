@@ -1259,6 +1259,86 @@ mod tests {
         assert_eq!((report.acked_ltr_len, &report.acked_ltr[..3]), (3, &[1, 2, 3][..]));
     }
 
+    /// A frame the decoder failed on asks for a refresh at once and drops what follows until one
+    /// comes; a decoder that lost its session waits for an IDR and lets an LTR refresh go by.
+    /// Failures while already waiting ask nothing more: the repeats keep their backoff.
+    #[test]
+    fn a_decoder_failure_forces_a_refresh_and_a_lost_session_a_keyframe() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        h.deliver(&s0.datagrams);
+        h.deliver(&s1.datagrams);
+        assert_eq!(h.drain().len(), 2);
+
+        h.rx.force_refresh(h.now, false);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 1 }]);
+        h.rx.force_refresh(h.now, false);
+        assert!(h.tick().is_empty(), "already waiting: no second request");
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver(&s2.datagrams);
+        assert!(h.drain().is_empty(), "a frame predicted from the broken one is dropped");
+        let refresh = h.send(&frame_bytes(4, 2_000), false, true);
+        h.deliver(&refresh.datagrams);
+        let out = h.drain();
+        assert_eq!(out.iter().map(|f| f.info.frame).collect::<Vec<_>>(), vec![3]);
+        assert!(!h.rx.awaiting_refresh());
+
+        h.rx.ack_ltr(9);
+        h.rx.force_refresh(h.now, true);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 3 }]);
+        assert_eq!(h.rx.take_report(h.now, 0).acked_ltr_len, 0, "the old session's references");
+        let refresh = h.send(&frame_bytes(5, 2_000), false, true);
+        h.deliver(&refresh.datagrams);
+        assert!(h.drain().is_empty(), "a new session cannot use an LTR refresh");
+        h.rx.force_refresh(h.now, false);
+        let key = h.send(&frame_bytes(6, 2_000), true, false);
+        h.deliver(&key.datagrams);
+        let out = h.drain();
+        assert_eq!(
+            out.iter().map(|f| (f.info.frame, f.info.keyframe)).collect::<Vec<_>>(),
+            vec![(5, true)]
+        );
+        assert_eq!(h.rx.stats().frames_lost, 0, "the decoder's failure is not the link's loss");
+    }
+
+    /// The newest acknowledged token rides every report that delivered a frame, so one report
+    /// that never left heals on the next; a report handed back goes out again whole.
+    #[test]
+    fn acks_repeat_while_frames_flow_and_a_report_handed_back_is_not_lost() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        assert_eq!(h.drain().len(), 1);
+        h.rx.ack_ltr(7);
+        let first = h.rx.take_report(h.now, 0);
+        assert_eq!((first.acked_ltr_len, first.acked_ltr[0]), (1, 7));
+
+        // That report was dropped on a full channel; the next one carries the token again
+        // because a frame came through meanwhile.
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        h.deliver(&s1.datagrams);
+        assert_eq!(h.drain().len(), 1);
+        let second = h.rx.take_report(h.now, 0);
+        assert_eq!((second.acked_ltr_len, second.acked_ltr[0]), (1, 7));
+        let idle = h.rx.take_report(h.now, 0);
+        assert_eq!(idle.acked_ltr_len, 0, "nothing flowed, nothing repeated");
+
+        // Handed back: the tokens and the counts go into the next report.
+        h.rx.ack_ltr(8);
+        h.rx.ack_ltr(9);
+        let s2 = h.send(&frame_bytes(3, 30_000), false, false);
+        h.deliver_except(&s2, &[1]);
+        h.drain();
+        let unsent = h.rx.take_report(h.now, 0);
+        assert_eq!((unsent.acked_ltr_len, unsent.frames_ok, unsent.datagrams_lost), (2, 1, 1));
+        h.rx.take_back(&unsent);
+        h.rx.ack_ltr(10);
+        let next = h.rx.take_report(h.now, 0);
+        assert_eq!((next.acked_ltr_len, &next.acked_ltr[..3]), (3, &[8, 9, 10][..]));
+        assert_eq!((next.frames_ok, next.frames_fec, next.datagrams_lost), (1, 1, 1));
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
 

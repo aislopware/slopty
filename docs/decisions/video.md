@@ -999,3 +999,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   finishes 1 ms later while the rate is learned. Test:
   `audio_waits_behind_a_slice_of_a_keyframe_not_all_of_it`. Owed: the shaped ladder with audio
   playing.
+- ✅ **A decoder failure asks for a refresh, a lost session rebuilds, and only a decoded picture
+  acknowledges its long-term reference** (2026-09-25, no protocol change). The VideoToolbox
+  callback reports every bad status, dropped frame and missing image instead of returning
+  silently; the stream worker then sends one immediate `Feedback::Refresh` through
+  `Reassembler::force_refresh` and drops frames until the restart. On -12903/-12911 (sleep,
+  background, media-server reset) the decoder drops its session and parameter sets, so the next
+  keyframe rebuilds even with identical sets. A token is acknowledged when its picture comes
+  back, never on submit, and each report repeats the newest acknowledged token while frames
+  flow, so a lost report heals; a report refused by a full channel is handed back into the next.
+  Owed, and a protocol change: after a lost session only an IDR helps, but the worker answers
+  `Refresh` with a long-term-reference refresh once any token was acknowledged, which a fresh
+  session cannot decode (-17694). The fix is a keyframe flag on `Feedback::Refresh`.

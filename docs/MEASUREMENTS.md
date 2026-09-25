@@ -3859,3 +3859,47 @@ magnitude shorter.
 Queued to posted on the input thread, all 1900 events: p50 9–12 µs, p99 0.12–0.74 ms, max
 0.9–8.4 ms. The tail there is the owner lookups and the one inline read, which no longer hold
 up the stream's other work.
+
+## 2026-09-25 — the audio jitter buffer on synthetic traces, and a reassembled frame without its copy
+
+Release, mac-studio, shared with five other sessions. `docs/decisions/audio.md` (2026-09-25,
+"Playback is a jitter buffer") holds the ruling.
+
+```
+cargo nextest run -p slopty-codec --release latency_tests --no-capture
+cargo nextest run -p slopty-media --release --run-ignored only reassemble_cost --no-capture
+```
+
+**Audio, the playout on arrival traces** (`slopty_codec::audio` `latency_tests`). The traces are
+built from arrival times, with 3 ms of link delay; the device pulls a 10 ms buffer every 10 ms of
+its own clock, and each packet is a 440 Hz tone continuous across packets. "Heard" is the ring
+plus the three device buffers queued ahead of it, the same model as the 2026-09-24 entry. It is
+not a reading at the DAC. The largest step between neighbouring output samples is set against
+the tone's own, 0.0288, and a hard cut in this tone can step by up to 1.0.
+
+| trace | heard | underruns | trimmed / stretched | largest step |
+| --- | --- | --- | --- | --- |
+| 250 ms stall, then its backlog in one burst | 63 ms at most after the burst, 58 ms mean over 1.5–3 s | 1 | 227 ms / 0 | 0.0288 |
+| worker clock +100 ppm, 2 min, 1 ms scatter | 60 ms at 5–15 s, 60 ms at 110–120 s | 0 | 25 ms / 0 | 0.0325 |
+| worker clock −100 ppm, 2 min, 1 ms scatter | 58 ms, then 49 ms | 0 | 15 ms / 10 ms | 0.0325 |
+| a 40 ms keyframe burst every 2 s, 3 ms scatter, 20 s | 77 ms mean after 3 s, 110 ms at most | 3 | 140 ms / 0 | 0.0327 |
+
+The 2026-09-24 ring on the stall trace read 70 ms after the burst and 74 ms mean afterwards,
+and cut the backlog with a hard edge. The target settles at 20 ms, the floor, on every trace.
+Trimmed audio on the drift traces includes the first second's default target of 40 ms coming
+down to 20. A clock 100 ppm off moves about 12 ms in two minutes, and the part the slices
+absorbed is the rest of the trimmed figure. On the keyframe trace the percentile calls the
+bursts noise, since they make up two packets in a hundred. So a burst starves the ring once a
+window, and the lateness that starved it holds the depth until the window forgets it.
+
+**Client, reassembling one frame** (`reassemble_cost`: every data fragment arrives, no parity,
+200 frames, ingest to `next_frame`). The frame's bitstream is now a `Bytes::slice` of the
+reassembled fragments, where it was a copy of them.
+
+| frame | before | after |
+| --- | --- | --- |
+| 62 KB P-frame, 53 datagrams | 5.06 µs | 3.9 µs |
+| 300 KB keyframe, 254 datagrams | 23.4 µs | 17.8 µs |
+
+Three runs each. The before runs were taken earlier in the same session, at a load that was not
+recorded; the after runs ran at a load average of 4 to 5.

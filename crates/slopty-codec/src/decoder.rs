@@ -1,8 +1,10 @@
-//! `VTDecompressionSession` fed Annex B; rebuilds itself from in-band parameter sets.
+//! `VTDecompressionSession` fed Annex B; rebuilds itself from in-band parameter sets, and
+//! again from the next keyframe's after the system took the session away.
 
 use std::ffi::{c_char, c_void};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_media::{
@@ -18,7 +20,8 @@ use objc2_core_video::{
 };
 use objc2_video_toolbox::{
     VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
-    VTDecompressionSession, kVTDecompressionPropertyKey_RealTime,
+    VTDecompressionSession, kVTDecompressionPropertyKey_RealTime, kVTInvalidSessionErr,
+    kVTVideoDecoderMalfunctionErr,
 };
 use slopty_proto::screen::VideoCodec;
 
@@ -86,10 +89,44 @@ pub struct DecodedFrame {
     pub pts_us: u64,
 }
 
-type Sink = Box<dyn Fn(DecodedFrame) + Send + Sync>;
+/// A frame the decoder returned no picture for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DecodeFailure {
+    /// The presentation timestamp given to `decode`.
+    pub pts_us: u64,
+    /// VideoToolbox's status; zero when it dropped the frame without naming an error.
+    pub status: i32,
+}
+
+impl DecodeFailure {
+    /// The system took the session away, so frames predicted from anything before are
+    /// undecodable and only a keyframe restarts the stream (see [`session_lost`]).
+    #[must_use]
+    pub const fn session_lost(&self) -> bool {
+        session_lost(self.status)
+    }
+}
+
+/// What the decoder made of one submitted frame.
+pub type DecodeOutcome = Result<DecodedFrame, DecodeFailure>;
+
+/// Whether `status` means the system took the session away for good.
+///
+/// That is `kVTInvalidSessionErr` (an iOS app sent to the background, a Mac that slept,
+/// `mediaserverd` restarting) or `kVTVideoDecoderMalfunctionErr` (the hardware decoder reset).
+/// The session is rebuilt from the next keyframe's parameter sets, which are the same ones, so
+/// a change of parameter sets cannot be the trigger.
+#[must_use]
+pub const fn session_lost(status: i32) -> bool {
+    status == kVTInvalidSessionErr || status == kVTVideoDecoderMalfunctionErr
+}
+
+type Sink = Box<dyn Fn(DecodeOutcome) + Send + Sync>;
 
 struct Shared {
     sink: Sink,
+    /// Set by the output callback on a [`session_lost`] status; `decode` drops the session.
+    lost: AtomicBool,
 }
 
 /// A hardware decoder for one stream.
@@ -155,14 +192,28 @@ pub fn warm_up() -> Result<std::time::Duration, CodecError> {
 }
 
 impl Decoder {
-    /// A decoder that delivers pictures to `sink` on VideoToolbox's thread.
+    /// A decoder that delivers pictures to `sink` on VideoToolbox's thread and drops failures.
     pub fn new(codec: VideoCodec, sink: impl Fn(DecodedFrame) + Send + Sync + 'static) -> Self {
+        Self::with_outcomes(codec, move |outcome| {
+            if let Ok(frame) = outcome {
+                sink(frame);
+            }
+        })
+    }
+
+    /// A decoder that hands `sink` every submitted frame's outcome, on VideoToolbox's thread: the
+    /// picture, or why there is none. A receiver needs the failures to ask for a refresh, and the
+    /// successes to know which long-term references it really holds.
+    pub fn with_outcomes(
+        codec: VideoCodec,
+        sink: impl Fn(DecodeOutcome) + Send + Sync + 'static,
+    ) -> Self {
         Self {
             codec,
             session: None,
             format: None,
             parameter_sets: Vec::new(),
-            shared: Arc::new(Shared { sink: Box::new(sink) }),
+            shared: Arc::new(Shared { sink: Box::new(sink), lost: AtomicBool::new(false) }),
             frames_in: 0,
         }
     }
@@ -183,7 +234,16 @@ impl Decoder {
     ///
     /// One scan finds the parameter sets and the picture's units; the units are written once,
     /// length-prefixed, straight into the sample's block buffer.
+    ///
+    /// A lost session (see [`session_lost`]) is dropped with its parameter sets. A keyframe that
+    /// finds it lost rebuilds it and is submitted again, so the frame that could restart the
+    /// stream is not the one spent finding out; anything else fails until a keyframe comes, and
+    /// [`Self::ready`] turns false to say so.
     pub fn decode(&mut self, annexb: &[u8], pts_us: u64) -> Result<(), CodecError> {
+        if self.shared.lost.load(Ordering::Acquire) {
+            tracing::info!("decoder session lost; waiting for a keyframe");
+            self.reset();
+        }
         let is_ps: fn(&[u8]) -> bool = match self.codec {
             VideoCodec::Hevc => hevc::is_parameter_set,
             VideoCodec::H264 => h264::is_parameter_set,
@@ -193,36 +253,71 @@ impl Decoder {
         if !sets.is_empty()
             && !sets.iter().copied().eq(self.parameter_sets.iter().map(Vec::as_slice))
         {
-            let owned: Vec<Vec<u8>> = sets.iter().map(|set| set.to_vec()).collect();
-            let t0 = std::time::Instant::now();
-            self.configure(&owned)?;
-            tracing::debug!(ms = t0.elapsed().as_millis(), "decoder session configured");
-            self.parameter_sets = owned;
+            self.rebuild(sets)?;
         }
-        let Some(session) = self.session.as_ref() else {
+        if self.session.is_none() {
             return Err(CodecError::NoParameterSets);
-        };
-        let Some(format) = self.format.as_ref() else {
-            return Err(CodecError::NoParameterSets);
-        };
+        }
         if unit.length_prefixed_len() == 0 {
             return Ok(());
         }
-        let sample = sample_buffer(&unit, format, cf::time_us(pts_us))?;
+        let mut status = self.submit(&unit, pts_us)?;
+        if session_lost(status) {
+            self.reset();
+            if !sets.is_empty() {
+                tracing::info!(status, "decoder session lost; rebuilt from the keyframe");
+                self.rebuild(sets)?;
+                status = self.submit(&unit, pts_us)?;
+                if session_lost(status) {
+                    self.reset();
+                }
+            }
+        }
+        check("VTDecompressionSessionDecodeFrame", status)?;
+        self.frames_in = self.frames_in.saturating_add(1);
+        Ok(())
+    }
+
+    /// Configure for `sets` and remember them.
+    fn rebuild(&mut self, sets: &[&[u8]]) -> Result<(), CodecError> {
+        let owned: Vec<Vec<u8>> = sets.iter().map(|set| set.to_vec()).collect();
+        let t0 = std::time::Instant::now();
+        self.configure(&owned)?;
+        tracing::debug!(ms = t0.elapsed().as_millis(), "decoder session configured");
+        self.parameter_sets = owned;
+        Ok(())
+    }
+
+    /// Hand one picture to the session; VideoToolbox's status for the submission.
+    fn submit(&self, unit: &AccessUnit<'_>, pts_us: u64) -> Result<i32, CodecError> {
+        let (Some(session), Some(format)) = (self.session.as_ref(), self.format.as_ref()) else {
+            return Err(CodecError::NoParameterSets);
+        };
+        let sample = sample_buffer(unit, format, cf::time_us(pts_us))?;
         let mut info = VTDecodeInfoFlags::empty();
         // SAFETY: the sample buffer is valid and owned by us; the session outlives the call.
         // Frames are returned through the output callback, so no source refcon is needed.
-        let status = unsafe {
+        Ok(unsafe {
             session.decode_frame(
                 &sample,
                 VTDecodeFrameFlags::Frame_EnableAsynchronousDecompression,
                 ptr::null_mut(),
                 &raw mut info,
             )
-        };
-        check("VTDecompressionSessionDecodeFrame", status)?;
-        self.frames_in = self.frames_in.saturating_add(1);
-        Ok(())
+        })
+    }
+
+    /// Forget the session and the parameter sets it was built from, so the next keyframe
+    /// builds a new one even though its parameter sets are the same.
+    fn reset(&mut self) {
+        if let Some(session) = self.session.take() {
+            // SAFETY: invalidating a session is allowed in any state, a dead one included; once
+            // it returns the old session calls back no more, so its verdict can be cleared.
+            unsafe { session.invalidate() }
+        }
+        self.shared.lost.store(false, Ordering::Release);
+        self.format = None;
+        self.parameter_sets.clear();
     }
 
     /// Build a format description from parameter sets and (re)create the session.
@@ -310,19 +405,25 @@ unsafe extern "C-unwind" fn output_callback(
     pts: CMTime,
     _duration: CMTime,
 ) {
-    if status != 0 || flags.contains(VTDecodeInfoFlags::FrameDropped) {
-        tracing::debug!(status, ?flags, "decoder dropped a frame");
-        return;
-    }
-    let Some(image) = NonNull::new(image) else { return };
-    // SAFETY: VideoToolbox hands the callback a borrowed image buffer; retaining it here gives
-    // the sink its own reference.
-    let image = unsafe { CFRetained::retain(image) };
     // SAFETY: the refcon was created from `Arc::as_ptr` on the decoder's `Shared`, which the
     // `Decoder` keeps alive until the session is invalidated (see `Drop`).
     let shared: &Shared = unsafe { &*refcon.cast::<Shared>() };
     let pts_us = cf::micros(pts).unwrap_or(0);
-    (shared.sink)(DecodedFrame { image: PixelBuffer(image), pts_us });
+    let image = NonNull::new(image);
+    let (true, false, Some(image)) =
+        (status == 0, flags.contains(VTDecodeInfoFlags::FrameDropped), image)
+    else {
+        tracing::debug!(status, ?flags, "decoder returned no picture");
+        if session_lost(status) {
+            shared.lost.store(true, Ordering::Release);
+        }
+        (shared.sink)(Err(DecodeFailure { pts_us, status }));
+        return;
+    };
+    // SAFETY: VideoToolbox hands the callback a borrowed image buffer; retaining it here gives
+    // the sink its own reference.
+    let image = unsafe { CFRetained::retain(image) };
+    (shared.sink)(Ok(DecodedFrame { image: PixelBuffer(image), pts_us }));
 }
 
 pub fn format_description(
@@ -452,6 +553,184 @@ fn sample_buffer(
     };
     // SAFETY: +1 reference from the create call.
     Ok(unsafe { CFRetained::from_raw(sample) })
+}
+
+#[cfg(test)]
+impl Decoder {
+    /// Invalidate the session but keep it, the state the system leaves behind when it takes a
+    /// session away: every later call on it answers `kVTInvalidSessionErr`.
+    fn kill_session(&self) {
+        if let Some(session) = self.session.as_ref() {
+            // SAFETY: invalidating a live session is always allowed; it stays retained here.
+            unsafe { session.invalidate() }
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+#[expect(clippy::arithmetic_side_effects, reason = "test timestamps on a handful of frames")]
+mod recovery_tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use objc2_core_video::CVPixelBufferCreate;
+
+    use super::*;
+    use crate::{EncodedPacket, Encoder, EncoderConfig, FrameOptions};
+
+    /// A picture for the encoder; what it shows does not matter here.
+    fn picture() -> CFRetained<CVPixelBuffer> {
+        let mut raw: *mut CVPixelBuffer = ptr::null_mut();
+        // SAFETY: CoreVideo rule: a valid out-pointer and no attributes.
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                320,
+                180,
+                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                None,
+                NonNull::from(&mut raw),
+            )
+        };
+        assert_eq!(status, 0, "CVPixelBufferCreate");
+        // SAFETY: +1 reference from the create call.
+        unsafe { CFRetained::from_raw(NonNull::new(raw).unwrap()) }
+    }
+
+    /// Encoded access units, a keyframe wherever `keyframes` says.
+    fn stream(keyframes: &[bool]) -> Vec<EncodedPacket> {
+        let (tx, rx) = mpsc::channel();
+        let config = EncoderConfig {
+            width: 320,
+            height: 180,
+            codec: VideoCodec::Hevc,
+            fps: 60,
+            bitrate_bps: 2_000_000,
+        };
+        let encoder = Encoder::new(config, move |packet| {
+            let _receiver_gone = tx.send(packet);
+        })
+        .unwrap();
+        let image = picture();
+        for (i, &keyframe) in keyframes.iter().enumerate() {
+            let options = FrameOptions { force_keyframe: keyframe, ..FrameOptions::default() };
+            encoder.encode(&image, u64::try_from(i).unwrap() * 16_667, &options).unwrap();
+        }
+        encoder.flush().unwrap();
+        let packets: Vec<EncodedPacket> = (0..keyframes.len())
+            .map_while(|_| rx.recv_timeout(Duration::from_secs(30)).ok())
+            .collect();
+        assert_eq!(packets.len(), keyframes.len(), "every picture encoded");
+        let got: Vec<bool> = packets.iter().map(|p| p.keyframe).collect();
+        assert_eq!(got, keyframes, "keyframes where asked");
+        packets
+    }
+
+    fn decoder() -> (Decoder, mpsc::Receiver<Result<u64, DecodeFailure>>) {
+        let (tx, rx) = mpsc::channel();
+        let decoder = Decoder::with_outcomes(VideoCodec::Hevc, move |outcome| {
+            let _receiver_gone = tx.send(outcome.map(|frame| frame.pts_us));
+        });
+        (decoder, rx)
+    }
+
+    /// The next outcome. The wait is long because VideoToolbox runs far slower from some
+    /// volumes, not because an outcome is expected to take it.
+    #[track_caller]
+    fn next(rx: &mpsc::Receiver<Result<u64, DecodeFailure>>) -> Result<u64, DecodeFailure> {
+        match rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(outcome) => outcome,
+            Err(e) => panic!("no outcome: {e}"),
+        }
+    }
+
+    /// Wait for everything submitted to come back.
+    fn settle(decoder: &Decoder) {
+        if let Some(session) = decoder.session.as_ref() {
+            // SAFETY: a live session; the call only blocks until pending frames are emitted.
+            let status = unsafe { session.wait_for_asynchronous_frames() };
+            assert_eq!(status, 0, "VTDecompressionSessionWaitForAsynchronousFrames");
+        }
+    }
+
+    /// A frame the decoder could not use comes back as a failure, not as silence: a P-frame
+    /// whose reference it never decoded, and a lost session reported by the callback. The latter
+    /// drops the session, so a P-frame is refused until a keyframe builds a new one.
+    #[test]
+    fn a_frame_without_a_picture_comes_back_as_a_failure() {
+        let packets = stream(&[true, false, true]);
+        let (mut decoder, rx) = decoder();
+        // The keyframe's parameter sets alone build the session without a picture, so the P-frame
+        // after it names a reference the decoder never saw: the state a new session is in when
+        // anything but a keyframe reaches it.
+        let mut sets_only = Vec::new();
+        for set in AccessUnit::parse(&packets[0].data, hevc::is_parameter_set).parameter_sets() {
+            sets_only.extend_from_slice(&crate::annexb::START_CODE);
+            sets_only.extend_from_slice(set);
+        }
+        decoder.decode(&sets_only, 0).unwrap();
+        decoder.decode(&packets[1].data, 1).unwrap();
+        settle(&decoder);
+        let failed = next(&rx).unwrap_err();
+        assert_eq!(failed.pts_us, 1);
+        assert_ne!(failed.status, 0);
+        assert!(!failed.session_lost(), "the frame's fault, not the session's: {failed:?}");
+        assert!(decoder.ready());
+
+        // SAFETY: the refcon is the decoder's own `Shared`, alive for the call; a null image
+        // with an error status is what VideoToolbox passes for a failed frame.
+        unsafe {
+            output_callback(
+                Arc::as_ptr(&decoder.shared).cast_mut().cast::<c_void>(),
+                ptr::null_mut(),
+                kVTInvalidSessionErr,
+                VTDecodeInfoFlags::empty(),
+                ptr::null_mut(),
+                cf::time_us(2),
+                cf::time_us(0),
+            );
+        }
+        let lost = next(&rx).unwrap_err();
+        assert_eq!((lost.pts_us, lost.session_lost()), (2, true));
+        assert!(matches!(decoder.decode(&packets[1].data, 3), Err(CodecError::NoParameterSets)));
+        assert!(!decoder.ready(), "the session went with the verdict");
+        decoder.decode(&packets[2].data, 4).unwrap();
+        settle(&decoder);
+        assert_eq!(next(&rx), Ok(4), "the next keyframe decodes on a new session");
+    }
+
+    /// A session the system took away is dropped with its parameter sets, which the next
+    /// keyframe carries unchanged: a P-frame that finds it dead fails and leaves the decoder
+    /// waiting, and a keyframe that finds it dead rebuilds it and is decoded after all.
+    #[test]
+    fn a_lost_session_is_rebuilt_from_the_next_keyframe() {
+        let packets = stream(&[true, false, false, true, false, true]);
+        let (mut decoder, rx) = decoder();
+        for (pts, packet) in (0..).zip(&packets[..2]) {
+            decoder.decode(&packet.data, pts).unwrap();
+        }
+        settle(&decoder);
+        assert_eq!((next(&rx), next(&rx)), (Ok(0), Ok(1)));
+
+        decoder.kill_session();
+        let refused = decoder.decode(&packets[2].data, 2);
+        assert!(
+            matches!(refused, Err(CodecError::Os { status, .. }) if session_lost(status)),
+            "{refused:?}"
+        );
+        assert!(!decoder.ready());
+        decoder.decode(&packets[3].data, 3).unwrap();
+        decoder.decode(&packets[4].data, 4).unwrap();
+        settle(&decoder);
+        assert_eq!((next(&rx), next(&rx)), (Ok(3), Ok(4)));
+
+        decoder.kill_session();
+        decoder.decode(&packets[5].data, 5).unwrap();
+        settle(&decoder);
+        assert_eq!(next(&rx), Ok(5), "the keyframe that found it dead was not wasted");
+        assert!(rx.try_recv().is_err(), "nothing else came back");
+    }
 }
 
 #[cfg(test)]

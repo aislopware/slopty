@@ -30,7 +30,9 @@ pub use audio::Opus;
 #[cfg(target_vendor = "apple")]
 pub use cf::micros;
 #[cfg(target_vendor = "apple")]
-pub use decoder::{DecodedFrame, Decoder, PixelBuffer, warm_up};
+pub use decoder::{
+    DecodeFailure, DecodeOutcome, DecodedFrame, Decoder, PixelBuffer, session_lost, warm_up,
+};
 #[cfg(all(target_os = "macos", feature = "experiments"))]
 pub use encoder::RateControl;
 #[cfg(target_os = "macos")]

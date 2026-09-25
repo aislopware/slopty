@@ -59,9 +59,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   silence (replaying 60 ms of anything sounds worse than a pause, and the ring underruns to
   silence by itself). Counted as `audio_concealed` in the client's `ScreenStats` and on the
   overlay's second line. Unit-tested on the fade shape and the cap; the loss-injection app
-  self-test (`SLOPTY_E2E_DROP_PERMILLE`) exercises the path. Still ⏸: a jitter estimator
-  with an adaptive prefill (the ring starts playing at once and holds at most 200 ms; no
-  measurement has shown late packets as a problem on the links tried). No `Quality` field for
+  self-test (`SLOPTY_E2E_DROP_PERMILLE`) exercises the path. The jitter estimator with an
+  adaptive prefill that was still open here came on 2026-09-25 ("Playback is a jitter buffer"). No `Quality` field for
   audio on purpose: keeping it off the wire avoided a protocol bump, and the gate makes "on"
   free.
 
@@ -92,7 +91,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_paste_chord_pushes_the_clipboards_picture_once`, `the_kinds_the_pasteboard_holds_as_they_are`,
   golden `client_clipboard_image`.
 
-- ✅ **Playback holds about 40 ms, and a stall's burst is trimmed rather than kept** (2026-09-24).
+- ✅ **Playback holds about 40 ms, and a stall's burst is trimmed rather than kept** (2026-09-24;
+  the fixed 40 ms and the hard trim superseded 2026-09-25 by "Playback is a jitter buffer").
   The ring kept up to 200 ms behind three 20 ms device buffers, and only an overrun past
   200 ms trimmed it. After a stall, the held-up packets land together and the listener stayed
   that far behind the picture for good (a simulated 250 ms stall: 260 ms behind, still 260 ms a
@@ -201,3 +201,38 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `files_copied_here_and_pasted_into_a_shell_land_there`,
     `files_copied_on_the_worker_paste_into_its_shell_as_their_paths`,
     `a_path_dragged_out_of_a_shell_is_kept_by_a_download`.
+
+- ✅ **Playback is a jitter buffer that aims for the lateness it measures** (2026-09-25, no
+  protocol change; `slopty_codec::audio::Playout`).
+  - A packet's delay is its arrival, as the connection's reader stamped it, minus its sequence
+    times 20 ms. Its lateness is that delay minus the least one of the last 5 s. The ring aims
+    to hold, when a packet arrives on time, the 95th percentile of lateness plus one 10 ms
+    device buffer, kept between 20 and 120 ms. Until a second of arrivals is in, it aims for
+    40 ms.
+  - Lateness past 110 ms is a stall, which no depth up to the ceiling could cover. The stall's
+    packets are left out of the percentile, and so is everything released within 10 ms of one.
+    A stall's backlog carries every lateness from its length down to none, and none of it
+    describes the link otherwise. A lateness that did starve the ring is kept as a floor for the
+    window, since it has proved it is not noise.
+  - The depth an arrival reads is the ring's level before the packet plus the packet's
+    lateness. A late packet finds the ring lower by exactly its lateness, so a clump reads the
+    same depth as a steady stream and costs nothing. When the mean of the last 25 readings is off
+    the target by more than 7.5 ms, one 5 ms slice is dropped or played twice, joined with a
+    2.5 ms crossfade. That absorbs a worker clock ±100 ppm off the device's. A reading more than
+    40 ms over the target is a stall's backlog, and is cut back to the target as its packets
+    land, crossfaded as well.
+  - The ring plays only once the next on-time packet would find the target: at the start, after
+    running dry, and after a mute. A ring that runs dry ramps from the last sample played down to
+    silence over 2.5 ms, so a dry ring at a buffer's edge is not a click. Running dry after a
+    packet with nothing above -80 dBFS is the host's silence gate, not an underrun, and the next
+    sound starts a fresh estimate, since the gate stops the sequence clock too.
+  - The alternative to the percentile was the window's maximum lateness. It would absorb
+    recurring keyframe bursts that the percentile calls noise when they are two packets in a
+    hundred, at the price of holding any one outlier's delay for 5 s. The percentile with the
+    starved floor costs about one underrun per window on such a link, 3 in 20 s with a 40 ms
+    burst every 2 s.
+  - Counted in `ScreenStats` as `audio_underruns`, `audio_trimmed`, `audio_stretched` and
+    `audio_target`. Measured on synthetic traces in `docs/MEASUREMENTS.md` (2026-09-25). Tests:
+    `a_stall_burst_does_not_leave_lasting_delay`,
+    `keyframe_bursts_starve_the_ring_at_most_once_a_window`, `clock_drift_is_absorbed_by_slices`,
+    `the_silence_gate_is_not_an_underrun`.

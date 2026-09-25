@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use parking_lot::Mutex;
-use slopty_codec::audio::{Conceal, OpusDecoder, Player};
-use slopty_codec::{DecodedFrame, Decoder};
+use slopty_codec::audio::{Arrival as AudioArrival, Conceal, OpusDecoder, Player};
+use slopty_codec::{DecodeFailure, DecodedFrame, Decoder};
 use slopty_core::StreamId;
 use slopty_media::{
     Action, Config, Ingest, Reassembler, ReassemblerStats, STALL_GAP, StallAttribution,
@@ -24,7 +24,7 @@ use slopty_media::{
 use slopty_proto::ClientMsg;
 use slopty_proto::media::{MAX_DATAGRAM, MediaHeader};
 use slopty_proto::screen::{Feedback, ScreenRequest, VideoCodec};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::pacing::{CaptureClock, FrameStamp};
@@ -186,7 +186,7 @@ impl ScreenRouter {
     }
 }
 
-/// Frames whose arrival instant is remembered while the decoder works on them. VideoToolbox is
+/// Frames remembered while the decoder works on them. VideoToolbox is
 /// asynchronous and gives the callback nothing but the presentation timestamp, so the worker
 /// parks the stamp under that timestamp and the callback picks it back up. Two frames' worth of
 /// a second is plenty; anything older has been answered or dropped.
@@ -202,22 +202,64 @@ pub struct Presentable {
     pub stamp: FrameStamp,
 }
 
-/// Arrival instants parked by presentation timestamp for the decoder callback.
-#[derive(Debug, Default)]
-struct Arrivals(VecDeque<(u64, Instant)>);
+/// A frame handed to the decoder, parked by presentation timestamp for its callback.
+#[derive(Clone, Copy, Debug)]
+struct Parked {
+    pts_us: u64,
+    arrived: Instant,
+    ltr_token: Option<u64>,
+}
 
-impl Arrivals {
-    fn park(&mut self, pts_us: u64, arrived: Instant) {
-        if self.0.len() >= ARRIVALS {
-            self.0.pop_front();
+/// What the decoder callback leaves for the stream worker: the frames it is working on, the
+/// long-term references it really decoded, and whether it failed on anything.
+#[derive(Debug, Default)]
+struct Inflight {
+    parked: VecDeque<Parked>,
+    /// Tokens of frames the decoder returned a picture for, not yet given to the reassembler.
+    acks: Vec<u64>,
+    failed: Option<Failed>,
+}
+
+/// Failures since the worker last looked, folded into one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Failed {
+    /// The newest failed frame's timestamp.
+    pts_us: u64,
+    /// Any of them lost the session, so only a keyframe helps.
+    session_lost: bool,
+    count: u64,
+}
+
+impl Inflight {
+    fn park(&mut self, pts_us: u64, arrived: Instant, ltr_token: Option<u64>) {
+        if self.parked.len() >= ARRIVALS {
+            self.parked.pop_front();
         }
-        self.0.push_back((pts_us, arrived));
+        self.parked.push_back(Parked { pts_us, arrived, ltr_token });
     }
 
-    /// The arrival of the frame with this timestamp, and everything older forgotten with it.
-    fn take(&mut self, pts_us: u64) -> Option<Instant> {
-        let at = self.0.iter().position(|&(pts, _)| pts == pts_us)?;
-        self.0.drain(..=at).next_back().map(|(_pts, t)| t)
+    /// The frame with this timestamp, and everything older forgotten with it.
+    fn take(&mut self, pts_us: u64) -> Option<Parked> {
+        let at = self.parked.iter().position(|p| p.pts_us == pts_us)?;
+        self.parked.drain(..=at).next_back()
+    }
+
+    /// The decoder returned this frame's picture: its arrival, and its token is now held.
+    fn decoded(&mut self, pts_us: u64) -> Option<Instant> {
+        let parked = self.take(pts_us)?;
+        self.acks.extend(parked.ltr_token);
+        Some(parked.arrived)
+    }
+
+    /// The decoder returned no picture for this frame: its token is never acknowledged.
+    fn failed(&mut self, failure: DecodeFailure) {
+        let _gone = self.take(failure.pts_us);
+        let before = self.failed.unwrap_or(Failed { pts_us: 0, session_lost: false, count: 0 });
+        self.failed = Some(Failed {
+            pts_us: before.pts_us.max(failure.pts_us),
+            session_lost: before.session_lost || failure.session_lost(),
+            count: before.count.saturating_add(1),
+        });
     }
 }
 
@@ -270,6 +312,14 @@ pub struct ScreenStats {
     pub audio_lost: u64,
     /// Lost packets papered over with the previous packet fading out (short gaps only).
     pub audio_concealed: u64,
+    /// Times playback ran dry under sound (see [`slopty_codec::audio::PlayoutStats`]).
+    pub audio_underruns: u64,
+    /// Audio dropped to keep the delay at the target.
+    pub audio_trimmed: Duration,
+    /// Audio played twice to keep the depth at the target.
+    pub audio_stretched: Duration,
+    /// Depth the jitter buffer aims for when a packet arrives on time.
+    pub audio_target: Duration,
     /// Stalls that released: nothing arrived for a stall gap, then everything at once.
     pub stalls: u64,
     /// Time spent stalled, milliseconds (released stalls plus the one in progress).
@@ -476,18 +526,28 @@ pub fn spawn_screen(
     let source_live = Arc::new(AtomicBool::new(true));
     let first_decoded = Arc::new(Mutex::new(None));
     let decoded_at = Arc::clone(&first_decoded);
-    let arrivals = Arc::new(Mutex::new(Arrivals::default()));
-    let parked = Arc::clone(&arrivals);
+    let inflight = Arc::new(Mutex::new(Inflight::default()));
+    let parked = Arc::clone(&inflight);
+    let failed = Arc::new(Notify::new());
+    let wake = Arc::clone(&failed);
     // Counted here, on the decoder's side of the newest-only channel, so the element can tell
     // how many pictures the channel swallowed before it looked.
     let decode_seq = Arc::new(AtomicU64::new(0));
     let seq = Arc::clone(&decode_seq);
-    let decoder = Decoder::new(codec, move |frame| {
+    let decoder = Decoder::with_outcomes(codec, move |outcome| {
+        let frame = match outcome {
+            Ok(frame) => frame,
+            Err(failure) => {
+                parked.lock().failed(failure);
+                wake.notify_one();
+                return;
+            }
+        };
         let decoded = Instant::now();
         decoded_at.lock().get_or_insert(decoded);
         // A picture whose arrival is no longer parked (a duplicate from the decoder, or one
         // that outlived the ring) is still shown; its timing simply does not enter the ring.
-        let arrived = parked.lock().take(frame.pts_us).unwrap_or(decoded);
+        let arrived = parked.lock().decoded(frame.pts_us).unwrap_or(decoded);
         let stamp = FrameStamp {
             pts_us: frame.pts_us,
             decode_seq: seq.fetch_add(1, Ordering::Relaxed),
@@ -508,7 +568,9 @@ pub fn spawn_screen(
             Instant::now(),
         ),
         decoder,
-        arrivals,
+        inflight,
+        failed,
+        restart_pts: None,
         out: uplink.control,
         feedback: uplink.feedback,
         rtt: uplink.rtt,
@@ -533,8 +595,13 @@ struct Worker {
     datagrams: mpsc::Receiver<Arrival>,
     reassembler: Reassembler,
     decoder: Decoder,
-    /// Arrival instants parked for the decoder callback, keyed by presentation timestamp.
-    arrivals: Arc<Mutex<Arrivals>>,
+    /// Frames parked for the decoder callback, and what the callback left behind.
+    inflight: Arc<Mutex<Inflight>>,
+    /// The decoder callback failed on a frame.
+    failed: Arc<Notify>,
+    /// Timestamp of the last frame that restarts decoding (a keyframe or an LTR refresh). A
+    /// failure older than it was already answered by it.
+    restart_pts: Option<u64>,
     out: mpsc::Sender<ClientMsg>,
     feedback: Box<dyn Fn(Bytes) -> bool + Send>,
     rtt: Box<dyn Fn() -> Option<Duration> + Send>,
@@ -582,10 +649,10 @@ impl Worker {
         };
     }
 
-    /// Decode and queue one Opus packet; late duplicates are dropped, gaps counted. A packet
-    /// that lands while the player is still opening (or after it failed) is lost to playback
-    /// and counted as such.
-    fn play_audio(&mut self, seq: u32, payload: &Bytes) {
+    /// Decode and queue one Opus packet that arrived at `at`; late duplicates are dropped, gaps
+    /// counted. A packet that lands while the player is still opening (or after it failed) is
+    /// lost to playback and counted as such.
+    fn play_audio(&mut self, seq: u32, payload: &Bytes, at: Instant) {
         self.open_audio();
         let AudioSlot::Open(audio) = &mut self.audio else {
             self.counters.audio_lost = self.counters.audio_lost.saturating_add(1);
@@ -603,18 +670,21 @@ impl Worker {
             audio.conceal.fill(missing, &mut audio.stand_in);
             if !audio.stand_in.is_empty() {
                 if !self.muted.load(Ordering::Relaxed) {
-                    audio.player.push(&audio.stand_in);
+                    audio.player.conceal(&audio.stand_in);
                 }
                 self.counters.audio_concealed =
                     self.counters.audio_concealed.saturating_add(u64::from(missing));
             }
         }
         audio.seq = seq;
+        let arrival = AudioArrival { seq, at };
         match audio.decoder.decode(payload) {
             Ok(pcm) => {
                 audio.conceal.remember(pcm);
-                if !self.muted.load(Ordering::Relaxed) {
-                    audio.player.push(pcm);
+                if self.muted.load(Ordering::Relaxed) {
+                    audio.player.hold(arrival);
+                } else {
+                    audio.player.push(pcm, arrival);
                 }
                 self.counters.audio_packets = self.counters.audio_packets.saturating_add(1);
             }
@@ -640,8 +710,10 @@ impl Worker {
                     }
                 }
                 () = tick => {}
+                () = self.failed.notified() => {}
                 _instant = report.tick() => self.report(),
             }
+            self.outcomes();
             if !self.actions() {
                 break;
             }
@@ -681,7 +753,7 @@ impl Worker {
                     self.cursor.send_replace(state);
                 }
             }
-            Ingest::Audio { seq, payload } => self.play_audio(seq, &payload),
+            Ingest::Audio { seq, payload } => self.play_audio(seq, &payload, now),
             Ingest::Heartbeat | Ingest::Ignored(_) => {}
         }
     }
@@ -698,21 +770,41 @@ impl Worker {
             // echoes whatever it is given back to the callback, so the parked arrivals and the
             // pacer's ordering both inherit a timestamp that survives the wrap.
             let pts = self.capture_clock.widen(frame.info.capture_ts_us);
-            // Park the arrival before submitting: VideoToolbox may call back on another thread
-            // before `decode` returns.
-            self.arrivals.lock().park(pts, frame.arrived);
-            match self.decoder.decode(&frame.data, pts) {
-                Ok(()) => {
-                    if let Some(token) = frame.info.ltr_token {
-                        self.reassembler.ack_ltr(token);
-                    }
-                }
-                Err(e) => {
-                    self.counters.decode_errors = self.counters.decode_errors.saturating_add(1);
-                    tracing::debug!(stream = %self.stream, frame = frame.info.frame, error = %e, "decode");
-                }
+            // Park the frame before submitting: VideoToolbox may call back on another thread
+            // before `decode` returns. Its token is acknowledged only once a picture comes back.
+            self.inflight.lock().park(pts, frame.arrived, frame.info.ltr_token);
+            if frame.info.keyframe || frame.info.ltr_refresh {
+                self.restart_pts = Some(pts);
+            }
+            if let Err(e) = self.decoder.decode(&frame.data, pts) {
+                let _gone = self.inflight.lock().take(pts);
+                self.counters.decode_errors = self.counters.decode_errors.saturating_add(1);
+                // No session left means nothing but a keyframe can be decoded.
+                let keyframe = !self.decoder.ready();
+                tracing::debug!(stream = %self.stream, frame = frame.info.frame, error = %e, keyframe, "decode");
+                self.reassembler.force_refresh(Instant::now(), keyframe);
             }
         }
+    }
+
+    /// Take what the decoder callback left: acknowledge the references it decoded, and ask for a
+    /// refresh when it failed on a frame the last restart did not already replace.
+    fn outcomes(&mut self) {
+        let (acks, failed) = {
+            let mut inflight = self.inflight.lock();
+            (std::mem::take(&mut inflight.acks), inflight.failed.take())
+        };
+        for token in acks {
+            self.reassembler.ack_ltr(token);
+        }
+        let Some(failed) = failed else { return };
+        self.counters.decode_errors = self.counters.decode_errors.saturating_add(failed.count);
+        if self.restart_pts.is_some_and(|restart| failed.pts_us < restart) {
+            return;
+        }
+        tracing::debug!(stream = %self.stream, ?failed, "decoder returned no picture");
+        self.reassembler
+            .force_refresh(Instant::now(), failed.session_lost || !self.decoder.ready());
     }
 
     /// Run the reassembler's timers; `false` when the connection is gone.
@@ -743,9 +835,10 @@ impl Worker {
     }
 
     /// Publish the counters and send the worker a receiver report. The report never waits for
-    /// room on the control channel: a full channel drops this one (the next follows in
-    /// [`REPORT_EVERY`]) rather than holding reassembly and decode behind it.
+    /// room on the control channel: on a full one its counts and acknowledgements go into the
+    /// next report, [`REPORT_EVERY`] later, rather than holding reassembly and decode behind it.
     fn report(&mut self) {
+        self.outcomes();
         let now = Instant::now();
         let report = self.reassembler.take_report(now, 0);
         let stats = self.reassembler.stats();
@@ -765,12 +858,20 @@ impl Worker {
         self.counters.jitter = report.owd_jitter.to_std();
         self.counters.queue_depth = report.queue_depth;
         self.counters.first_decoded_at = *self.first_decoded.lock();
+        if let AudioSlot::Open(audio) = &self.audio {
+            let playout = audio.player.stats();
+            self.counters.audio_underruns = playout.underruns;
+            self.counters.audio_trimmed = playout.trimmed;
+            self.counters.audio_stretched = playout.stretched;
+            self.counters.audio_target = playout.target;
+        }
         self.stats.send_replace(self.counters);
         let stream = self.stream;
         match self.out.try_send(ClientMsg::Screen(ScreenRequest::Report { stream, report })) {
             Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::debug!(stream = %self.stream, "control channel full; report dropped");
+                tracing::debug!(stream = %self.stream, "control channel full; report carried to the next");
+                self.reassembler.take_back(&report);
             }
         }
     }
@@ -811,27 +912,54 @@ mod arrival_tests {
     fn a_parked_arrival_comes_back_with_its_frame_and_clears_the_older_ones() {
         let epoch = Instant::now();
         let at = |ms: u64| epoch.checked_add(Duration::from_millis(ms)).unwrap();
-        let mut arrivals = Arrivals::default();
+        let mut arrivals = Inflight::default();
         for i in 0..4_u64 {
-            arrivals.park(i * 1_000, at(i * 16));
+            arrivals.park(i * 1_000, at(i * 16), None);
         }
-        assert_eq!(arrivals.take(2_000), Some(at(32)));
-        assert_eq!(arrivals.take(1_000), None, "older frames went with it");
-        assert_eq!(arrivals.take(3_000), Some(at(48)));
-        assert_eq!(arrivals.take(3_000), None, "taken once");
+        assert_eq!(arrivals.decoded(2_000), Some(at(32)));
+        assert_eq!(arrivals.decoded(1_000), None, "older frames went with it");
+        assert_eq!(arrivals.decoded(3_000), Some(at(48)));
+        assert_eq!(arrivals.decoded(3_000), None, "taken once");
+    }
+
+    /// A long-term reference is acknowledged when the decoder returns its picture, never when
+    /// it was only submitted, and never when the decoder failed on it. Failures fold into one,
+    /// and a lost session in any of them says only a keyframe helps.
+    #[test]
+    fn a_token_is_acknowledged_by_its_picture_and_a_failure_is_kept() {
+        let epoch = Instant::now();
+        let mut inflight = Inflight::default();
+        inflight.park(1, epoch, Some(11));
+        inflight.park(2, epoch, Some(12));
+        inflight.park(3, epoch, None);
+        inflight.park(4, epoch, Some(14));
+        assert!(inflight.acks.is_empty(), "submitted is not decoded");
+        let failure = |pts_us: u64, status: i32| DecodeFailure { pts_us, status };
+        inflight.failed(failure(1, -12_909));
+        assert_eq!(inflight.decoded(2), Some(epoch));
+        inflight.failed(failure(3, -12_903));
+        assert_eq!(inflight.acks, vec![12], "only the frame that came back");
+        assert_eq!(
+            inflight.failed,
+            Some(Failed { pts_us: 3, session_lost: true, count: 2 }),
+            "the newest failure, and the session is gone"
+        );
+        assert_eq!(inflight.decoded(4), Some(epoch));
+        assert_eq!(inflight.acks, vec![12, 14]);
+        assert!(inflight.parked.is_empty());
     }
 
     /// The ring is bounded: a decoder that never calls back cannot grow it.
     #[test]
     fn the_ring_forgets_the_oldest_arrivals() {
         let epoch = Instant::now();
-        let mut arrivals = Arrivals::default();
+        let mut arrivals = Inflight::default();
         for i in 0..(u64::try_from(ARRIVALS).unwrap() + 10) {
-            arrivals.park(i, epoch);
+            arrivals.park(i, epoch, None);
         }
-        assert_eq!(arrivals.0.len(), ARRIVALS);
-        assert_eq!(arrivals.take(0), None);
-        assert_eq!(arrivals.take(u64::try_from(ARRIVALS).unwrap()), Some(epoch));
+        assert_eq!(arrivals.parked.len(), ARRIVALS);
+        assert_eq!(arrivals.decoded(0), None);
+        assert_eq!(arrivals.decoded(u64::try_from(ARRIVALS).unwrap()), Some(epoch));
     }
 }
 
@@ -963,21 +1091,21 @@ mod tests {
 
     #[test]
     fn a_parked_arrival_is_taken_by_its_timestamp_and_older_ones_go_with_it() {
-        let mut arrivals = Arrivals::default();
+        let mut arrivals = Inflight::default();
         let t0 = Instant::now();
         let t = |n: u64| t0 + Duration::from_micros(n);
-        arrivals.park(10, t(1));
-        arrivals.park(20, t(2));
-        arrivals.park(30, t(3));
-        assert_eq!(arrivals.take(20), Some(t(2)));
-        assert_eq!(arrivals.take(10), None, "older than the one taken: forgotten with it");
-        assert_eq!(arrivals.take(30), Some(t(3)));
-        assert!(arrivals.0.is_empty());
+        arrivals.park(10, t(1), None);
+        arrivals.park(20, t(2), None);
+        arrivals.park(30, t(3), None);
+        assert_eq!(arrivals.decoded(20), Some(t(2)));
+        assert_eq!(arrivals.decoded(10), None, "older than the one taken: forgotten with it");
+        assert_eq!(arrivals.decoded(30), Some(t(3)));
+        assert!(arrivals.parked.is_empty());
         for n in 0..u64::try_from(ARRIVALS).unwrap_or(u64::MAX).saturating_add(5) {
-            arrivals.park(n, t(n));
+            arrivals.park(n, t(n), None);
         }
-        assert_eq!(arrivals.0.len(), ARRIVALS, "bounded");
-        assert_eq!(arrivals.take(0), None, "the oldest were dropped to make room");
+        assert_eq!(arrivals.parked.len(), ARRIVALS, "bounded");
+        assert_eq!(arrivals.decoded(0), None, "the oldest were dropped to make room");
     }
 }
 
@@ -1003,6 +1131,8 @@ mod worker_tests {
         alive: Arc<AtomicBool>,
         /// Datagrams handed to the router, to know when the worker has seen them all.
         routed: Arc<AtomicU64>,
+        /// Every token the reports acknowledged.
+        acked: Vec<u64>,
     }
 
     impl Harness {
@@ -1029,7 +1159,16 @@ mod worker_tests {
                 rtt: Box::new(|| Some(Duration::from_millis(10))),
             };
             let handle = spawn_screen(rt.handle(), &router, STREAM, VideoCodec::Hevc, uplink);
-            Self { rt, router, handle, control, feedback, alive, routed: Arc::default() }
+            Self {
+                rt,
+                router,
+                handle,
+                control,
+                feedback,
+                alive,
+                routed: Arc::default(),
+                acked: Vec::new(),
+            }
         }
 
         /// Poll `done` every few milliseconds for up to `secs`, draining the reports the worker
@@ -1039,10 +1178,13 @@ mod worker_tests {
             self.rt.block_on(async {
                 loop {
                     while let Ok(msg) = self.control.try_recv() {
-                        assert!(
-                            matches!(msg, ClientMsg::Screen(ScreenRequest::Report { stream, .. }) if stream == STREAM),
-                            "{msg:?}"
-                        );
+                        let ClientMsg::Screen(ScreenRequest::Report { stream, report }) = msg
+                        else {
+                            panic!("{msg:?}");
+                        };
+                        assert_eq!(stream, STREAM);
+                        let len = usize::from(report.acked_ltr_len);
+                        self.acked.extend_from_slice(&report.acked_ltr[..len]);
                     }
                     if done(&self.handle) {
                         return;
@@ -1081,15 +1223,49 @@ mod worker_tests {
     }
 
     fn packetize(packetizer: &mut Packetizer, keyframe: bool, capture_ts_us: u32) -> Vec<Bytes> {
+        packetize_ltr(packetizer, keyframe, None, capture_ts_us)
+    }
+
+    fn packetize_ltr(
+        packetizer: &mut Packetizer,
+        keyframe: bool,
+        ltr_token: Option<u64>,
+        capture_ts_us: u32,
+    ) -> Vec<Bytes> {
         let data = frame_bytes();
-        let frame = EncodedFrame {
-            data: &data,
-            keyframe,
-            ltr_token: None,
-            ltr_refresh: false,
-            capture_ts_us,
-        };
+        let frame =
+            EncodedFrame { data: &data, keyframe, ltr_token, ltr_refresh: false, capture_ts_us };
         packetizer.packetize(&frame, 0).unwrap().datagrams.clone()
+    }
+
+    /// A frame the decoder rejects asks the worker for a refresh at once and holds back what
+    /// was predicted from it, and its long-term reference is never acknowledged: submitted is
+    /// not decoded.
+    #[test]
+    fn a_rejected_frame_asks_for_a_refresh_and_acknowledges_nothing() {
+        let mut h = Harness::start();
+        let mut packetizer = Packetizer::new(STREAM);
+        packetizer.set_parity_permille(0);
+        for d in packetize_ltr(&mut packetizer, true, Some(7), 1_000) {
+            h.route(d);
+        }
+        h.wait_for("the rejection", 3, |handle| handle.stats().decode_errors == 1);
+        let refreshes = h.handle.stats().refreshes;
+        for d in packetize_ltr(&mut packetizer, false, Some(8), 2_000) {
+            h.route(d);
+        }
+        let settled = h.settle();
+        assert_eq!(settled.frames, 1, "the P-frame waits for a picture it can be decoded from");
+        assert!(refreshes >= 1, "{settled:?}");
+        let feedback = Arc::clone(&h.feedback);
+        assert!(
+            feedback.lock().iter().any(|fb| matches!(fb, Feedback::Refresh { .. })),
+            "a refresh went out"
+        );
+        h.wait_for("a few reports", 3, |handle| {
+            handle.stats().first_frame_at.is_some_and(|t| t.elapsed() > REPORT_EVERY * 4)
+        });
+        assert!(h.acked.is_empty(), "nothing decoded, nothing acknowledged: {:?}", h.acked);
     }
 
     #[test]
@@ -1155,7 +1331,8 @@ mod worker_tests {
         assert_eq!(packets.len(), 3);
         let mut seq = 1;
         h.route(audio_datagram(STREAM, seq, 0, &packets[0]).unwrap());
-        for d in packetize(&mut packetizer, false, 2_000) {
+        // A keyframe: the first was rejected, so nothing else would be let through.
+        for d in packetize(&mut packetizer, true, 2_000) {
             h.route(d);
         }
         h.wait_for("a frame while the player opens", 3, |handle| handle.stats().frames == 2);
@@ -1226,8 +1403,10 @@ mod worker_tests {
         rt.block_on(async {
             // Two report periods: the one slot is taken and the next report finds it full.
             tokio::time::sleep(REPORT_EVERY.saturating_mul(3)).await;
+            // Keyframes both: the decoder rejects these, and after a rejection only a keyframe
+            // is let through.
             for (n, ts) in [(1_u64, 1_000_u32), (2, 2_000)] {
-                for d in packetize(&mut packetizer, n == 1, ts) {
+                for d in packetize(&mut packetizer, true, ts) {
                     router.route(d, Instant::now());
                 }
                 let deadline = Instant::now().checked_add(Duration::from_secs(3)).unwrap();

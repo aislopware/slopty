@@ -420,8 +420,10 @@ this process excluded) → `AudioConverter` Opus (Apple's, in the OS; 20 ms pack
 one `Audio` datagram per packet, no FEC and no NACK (a lost 20 ms is cheaper than a late one).
 The worker stops sending 300 ms after the last non-silent sample, so silent apps cost nothing.
 The client decodes with `AudioConverter` and plays through an `AudioQueue` of three 10 ms
-buffers fed from a ring that pads silence on underrun and trims a burst past 50 ms back to
-40 ms (`slopty-codec::audio`);
+buffers fed from a jitter buffer (`slopty-codec::audio::Playout`) that aims for the lateness it
+measures (p95 over 5 s plus a device buffer, 20–120 ms), prefills after a start, a mute or a
+dry run, and converges by dropping or repeating one 5 ms slice with a crossfade, which also
+absorbs clock drift;
 iOS puts the app in the `Playback` session category so it plays past the ring switch.
 Mute is per item and per client (the "mute" pill, ⌘⇧M, View ▸ Mute Window): packets still
 arrive and decode, only playback stops, so unmuting is instant and other clients hear nothing
