@@ -1247,3 +1247,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   because it would also pass a predictor that drew fewer guesses. Tests: latency
   `an_echo_that_beats_its_guess_is_told_apart_from_a_late_guess`; e2e smooth
   `typing_is_timed_with_and_without_the_local_echo_on_the_mac`.
+
+- ✅ **An echo beside a window that draws every refresh waits for the next tick** (2026-09-25).
+  With six shells flooding, the window draws on every display-link tick, and a typed key's
+  echo waits for the next one: 28.3 ms from key to glass, against 21.3 in an idle window. The
+  fork's immediate frame only goes to a window that drew nothing for a refresh, and that stays.
+  A frame drawn for the echo off the tick, while the tick's frame is still in flight, reaches
+  the glass a refresh after that frame, because a `CAMetalLayer` shows its drawables in order,
+  each for at least a refresh. That is the refresh the next tick's frame would have reached
+  anyway, and the frame after it then queues. The fork's `frame_latency flood` measured the
+  echo 1–4 ms later that way, with frames queued. Drawing each tick's frame later, nearer the
+  compositor's deadline, was measured too. The deadline sits 2–4 ms after the tick and moves
+  with load, and the app's draw already uses 1.1–1.4 ms of that. The gain is at most about a
+  millisecond, it was inside the noise, and each miss costs a repeated frame and a queue. Both
+  were rejected. What remains is half a refresh of waiting on average, and a faster display
+  shortens it (MEASUREMENTS 2026-09-25, "an echo beside floods waits for the tick"). Probe:
+  fork `frame_latency flood`; e2e smooth `six_streaming_shells_in_view_on_the_mac` (h).

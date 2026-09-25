@@ -3702,3 +3702,71 @@ hop", release build, mac-studio under other sessions' builds. With `SLOPTY_PREDI
 of 60 keys drawn as guesses, 1 echoed first, 0 late; guess p50 21.6 ms (p95 30.8), echo p50
 34.9 ms (p95 44.1). With `never`: echo p50 26.4 ms (p95 32.2), 60 keys.
 
+## 2026-09-25 — an echo beside floods waits for the tick, and nothing drawn sooner shows sooner
+
+Scenario (h) puts the echo p50 at 28.4 ms, against about 22.5 ms in an idle window. Most of
+the gap is the hop from applied to painted. Six flooding shells make the window draw on every
+display-link tick, so an echo waits for the next tick and never gets an idle window's
+immediate frame. The question was whether a frame drawn for the echo at once, off the tick,
+could reach the glass sooner. The fork's `frame_latency` has a `flood` mode for this (fork
+7b2e5e9). One thread notifies every 2 ms, so the window draws every refresh. Another notifies
+every 60 ms or so, at a phase that walks across the refresh, the way a keystroke's echo
+arrives. `wake_to_glass` runs from that notify to the glass of the first frame submitted
+after it. Two other schedules ran as local patches to `gpui_macos`, not kept. *At once* lets
+the echo's notify take an immediate frame even while the window draws every refresh.
+*Deferred* draws each tick's frame about 2 ms after the tick, closer to the compositor's
+deadline. It asks the main queue's `dispatch_after` for 1 or 1.5 ms, and the timer's leeway
+stretches that to 1.9–2.5 ms. 75 Hz display (13.3 ms a refresh), mac-studio,
+release-fast, 200 samples a run (40 for `idle`), ms:
+
+```
+cd .research/zed-main && MACOSX_DEPLOYMENT_TARGET=26.5 IPHONEOS_DEPLOYMENT_TARGET= \
+  cargo run -p gpui --example frame_latency --profile release-fast -- flood|idle
+```
+
+| schedule | wake → glass p50, one run each (load 6–14) | submit → glass p50 |
+| --- | --- | --- |
+| on the tick (the fork today) | 24.4, 26.2, 23.8; earlier 23.7–26.1 in 8 runs | 17.9–18.2 |
+| at once, off the tick | 27.7, 27.2, 26.8; earlier 26.2–30.1 in 4 runs | **27.8–31.2** (queued) |
+| deferred about 2 ms | 27.7, 24.5, 24.2; earlier 23.2–29.9 in 5 runs | 16.3–17.9 |
+| a lone frame in an idle window (`idle`) | 20.5, 19.7, 18.4 | 18.2–20.3 |
+
+Two runs, one on the tick and one deferred, stalled for 5–8 s with a few hundred frames
+dropped, as if the window had been hidden. Their p50s are listed but say little.
+
+**Drawn at once, it shows later.** A `CAMetalLayer` presents drawables in order and shows each
+one for at least a refresh. While the window draws every refresh, the tick's frame is still
+in flight when the echo arrives (submit → glass is about 18 ms, longer than a refresh). A frame
+drawn for the echo then reaches the glass a refresh after that frame, the same refresh the next
+tick's frame would have reached anyway. The tick's frame that follows then queues behind it,
+which is what the 28–31 ms submit → glass shows, until the pacer holds a tick to drain it.
+
+**The tick is already close to the deadline.** In `continuous`, a busy-wait of 3 ms before
+each render still made the same refresh. At 7 and 8 ms every frame missed it by exactly one
+refresh (tick → glass 31.3 against 19.0). The runs at 2, 4, 5 and 6 ms mixed hits and misses
+and queued (submit → glass p50 25–29), so the edge is not sharp. The deferred runs agree: a
+draw about 2.5 ms after the tick made its refresh, one at 3.8 ms missed it. The deadline sits
+2–4 ms after the tick and moves with the machine's load. The app's draw beside six floods
+takes 1.1–1.4 ms of that (its submit → glass is 16.8 against the probe's
+17.9). At best a deferred draw would gain about a millisecond. Each miss costs a repeated
+frame and a queue that a later hold has to drain.
+
+```
+FRAME_LATENCY_SPIN_US=0|2000|3000|4000|5000|6000|7000|8000 \
+  target/release-fast/examples/frame_latency continuous   # (in .research/zed-main)
+```
+
+The app, same session, release build, (h) and (d) with the commands of "keystroke to glass, hop
+by hop" (`--test-threads 1`), load 3–9. p50 (p95) in ms:
+
+| run | echo, key → glass | key → arrived | applied → painted | painted → submitted | submitted → glass |
+| --- | --- | --- | --- | --- | --- |
+| (h) beside 6 floods | 28.3 (45.0) | 1.5 | 8.1 | 0.6 | 16.8 |
+| (d) `never`, idle window | 21.3 (28.2) | 0.4 | 0.4 | 0.1 | 20.3 |
+
+The gap between them is the wait for the next tick, about half a refresh plus the time from
+the tick to the paint, less the 3.5 ms by which a tick's frame reaches the glass sooner than a
+frame at a random phase. With this compositor, a window that must draw every refresh cannot
+avoid it. Nothing was changed in the app or in the fork's frame scheduling. The scenario
+labels in smooth.rs ((a) to (i)) match the latest sections above. The older, dated sections
+keep the labels of their own day.
