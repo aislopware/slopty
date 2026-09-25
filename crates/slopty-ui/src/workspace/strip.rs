@@ -9,12 +9,11 @@
 //! window takes every swipe over its picture (on a phone, every remote picture does). ⌘⌥ and
 //! the wheel steps columns and workspaces. A pinch in opens the overview; out closes it.
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Bounds, Context, DispatchPhase, InteractiveElement as _, IntoElement as _, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point,
-    ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, TouchPhase,
-    Window, canvas, div, px,
+    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
+    TouchPhase, Window, canvas, div, px,
 };
 use slopty_client::layout::{Axis, AxisLock, DropTarget, Frame, Rect, TileRef, WHEEL_TICK};
 use slopty_core::ItemId;
@@ -24,6 +23,7 @@ use slopty_theme::alpha;
 use super::WorkspaceView;
 use super::tile::{Chrome, HEADER_H};
 use crate::colors::{hsla, hsla_alpha};
+use crate::kit::{ButtonKind, button};
 
 /// How far a header press travels before it is a move rather than a click.
 const DRAG_SLOP: f32 = 4.0;
@@ -503,15 +503,18 @@ impl WorkspaceView {
             .map(|c| self.render_closing(c.rect, c.alpha, c.scale, frame.zoom))
             .collect();
         let theme = &self.theme;
-        // In the overview each workspace is a panel the tiles sit on; an empty one (the one
+        // In the overview each workspace is a tray the tiles sit on, a step off the canvas so
+        // the tiles' own edges still read on it, with its name above; an empty one (the one
         // kept at the end for what comes next) is only its dashed outline, a place and not a
         // blank slab.
         let backdrops: Vec<gpui::AnyElement> = if frame.overview > 0.0 {
             let workspaces = self.layout.workspaces();
+            let active = self.layout.active_workspace();
+            let s = &theme.surfaces;
             frame
                 .workspaces
                 .iter()
-                .map(|(ix, r)| {
+                .flat_map(|(ix, r)| {
                     let empty = workspaces.get(*ix).is_none_or(|ws| ws.columns().is_empty());
                     let panel = div()
                         .absolute()
@@ -520,20 +523,35 @@ impl WorkspaceView {
                         .w(px(r.w))
                         .h(px(r.h))
                         .rounded(px(theme.radii.md));
-                    if empty {
+                    let panel = if empty {
                         panel
                             .border_1()
                             .border_dashed()
-                            .border_color(hsla_alpha(
-                                theme.surfaces.text_muted,
-                                frame.overview * alpha::TINT,
-                            ))
-                            .into_any_element()
+                            .border_color(hsla_alpha(s.text_muted, frame.overview * alpha::TINT))
                     } else {
-                        panel
-                            .bg(hsla_alpha(theme.surfaces.panel, frame.overview * alpha::VEIL))
-                            .into_any_element()
-                    }
+                        panel.bg(hsla_alpha(s.raised, frame.overview))
+                    };
+                    let name = if empty {
+                        "New workspace".to_owned()
+                    } else {
+                        self.workspace_name_at(*ix)
+                    };
+                    let ink = if *ix == active && !empty { s.text } else { s.text_muted };
+                    let label = div()
+                        .absolute()
+                        .left(px(r.x))
+                        .top(px(r.y - theme.spacing.xl))
+                        .w(px(r.w))
+                        .h(px(theme.spacing.xl))
+                        .flex()
+                        .items_center()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(theme.typography.small()))
+                        .font_family(theme.typography.ui_family.clone())
+                        .text_color(hsla_alpha(ink, frame.overview))
+                        .child(SharedString::from(name));
+                    [panel.into_any_element(), label.into_any_element()]
                 })
                 .collect()
         } else {
@@ -586,42 +604,28 @@ impl WorkspaceView {
     fn render_empty(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let (spacing, radii) = (theme.spacing, theme.radii);
-        let body = if self.workers.is_empty() {
-            div().text_color(hsla(s.text_muted)).child("No workers yet").into_any_element()
-        } else {
-            let button = |id: &'static str, label: &'static str, primary: bool| {
-                let el = div()
-                    .id(id)
-                    .debug_selector(move || id.to_owned())
-                    .role(gpui::accesskit::Role::Button)
-                    .aria_label(label)
-                    .px(px(spacing.md))
-                    .py(px(spacing.xs))
-                    .rounded(px(radii.sm))
-                    .cursor_pointer()
-                    .when(primary, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
-                    .when(!primary, |el| {
-                        el.bg(hsla(s.raised))
-                            .text_color(hsla(s.text))
-                            .hover(move |el| el.bg(hsla(s.overlay)))
-                    })
-                    .child(label);
-                crate::a11y::tab_stop(el, s.accent)
+        let spacing = theme.spacing;
+        let body =
+            if self.workers.is_empty() {
+                div().text_color(hsla(s.text_muted)).child("No workers yet").into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .gap(px(spacing.sm))
+                    .child(
+                        button(theme, "empty-terminal", "New terminal", ButtonKind::Primary)
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.new_terminal(&super::actions::NewTerminal, window, cx);
+                            })),
+                    )
+                    .child(
+                        button(theme, "empty-window", "Add a window", ButtonKind::Secondary)
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.add_window(&super::actions::AddWindow, window, cx);
+                            })),
+                    )
+                    .into_any_element()
             };
-            div()
-                .flex()
-                .gap(px(spacing.sm))
-                .child(button("empty-terminal", "New terminal", true).on_click(cx.listener(
-                    |this, _ev, window, cx| {
-                        this.new_terminal(&super::actions::NewTerminal, window, cx);
-                    },
-                )))
-                .child(button("empty-window", "Add a window", false).on_click(cx.listener(
-                    |this, _ev, window, cx| this.add_window(&super::actions::AddWindow, window, cx),
-                )))
-                .into_any_element()
-        };
         div()
             .absolute()
             .inset_0()

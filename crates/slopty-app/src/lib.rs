@@ -31,10 +31,10 @@ use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WorkerId};
 use slopty_proto::WorkerMsg;
 use slopty_settings::{Loaded, Settings};
-use slopty_theme::Theme;
+use slopty_theme::{Theme, Typography};
 use slopty_ui::a11y::{key_name, tab_stop};
 use slopty_ui::colors::hsla;
-use slopty_ui::kit;
+use slopty_ui::kit::{self, ButtonKind};
 use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
 use slopty_ui::terminal::TerminalView;
@@ -752,23 +752,7 @@ impl Workspace {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
-        let button = move |id: &'static str, text: &'static str, accent: bool| {
-            let pill = div()
-                .id(id)
-                .role(Role::Button)
-                .aria_label(text)
-                .flex_none()
-                .px(px(spacing.md))
-                .py(px(spacing.xs))
-                .rounded(px(radii.sm))
-                .text_size(px(theme.typography.ui_size))
-                .text_color(hsla(if accent { s.accent_fg } else { s.text }))
-                .bg(hsla(if accent { s.accent } else { s.raised }))
-                .when(!accent, |el| el.hover(move |el| el.bg(hsla(s.overlay))))
-                .cursor_pointer()
-                .child(text);
-            tab_stop(pill, s.accent)
-        };
+        let button = |id, text, kind| kit::button(theme, id, text, kind);
         let (title, blurb, field, go, other, other_mode) = match adding.mode {
             Panel::Server => (
                 "Connect to a server",
@@ -793,90 +777,89 @@ impl Workspace {
             (None, true) => Some(("Connecting…".to_owned(), s.text_muted)),
             (None, false) => None,
         };
-        let switch = div()
-            .id("panel-switch")
-            .role(Role::Button)
-            .aria_label(other)
+        let switch = button("panel-switch", other, ButtonKind::Link)
             .text_size(px(theme.typography.small()))
-            .text_color(hsla(s.text_muted))
-            .hover(move |el| el.text_color(hsla(s.text)))
-            .cursor_pointer()
-            .child(other)
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.show_add_worker(other_mode, window, cx);
             }));
-        let panel =
-            div()
-                .id("add-worker")
-                .occlude()
-                .flex()
-                .flex_col()
-                .gap(px(spacing.md))
-                .w(px(ADD_PANEL_W))
-                .max_w_full()
-                .font_family(theme.typography.ui_family.clone())
-                .when(!welcome, |el| {
-                    el.p(px(spacing.xl))
-                        .rounded(px(radii.md))
-                        .bg(hsla(s.panel))
-                        .border_1()
-                        .border_color(hsla(s.border))
-                        .shadow_sm()
-                })
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(spacing.xs))
-                        .child(
-                            div()
-                                .id("add-worker-title")
-                                .role(Role::Heading)
-                                .aria_label(title)
-                                .text_size(px(theme.typography.title()))
-                                .text_color(hsla(s.text))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(theme.typography.small()))
-                                .text_color(hsla(s.text_muted))
-                                .child(blurb),
-                        ),
-                )
-                .child(Input::new(&adding.address).aria_label(field))
-                .when_some(status, |el, (text, tone)| {
-                    el.child(
+        let panel = div()
+            .id("add-worker")
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(spacing.md))
+            .w(px(ADD_PANEL_W))
+            .max_w_full()
+            .font_family(theme.typography.ui_family.clone())
+            .when(!welcome, |el| {
+                el.p(px(spacing.xl))
+                    .rounded(px(radii.md))
+                    .bg(hsla(s.panel))
+                    .border_1()
+                    .border_color(hsla(s.border))
+                    .shadow_sm()
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(spacing.xs))
+                    .child(
                         div()
-                            .id("add-worker-status")
-                            .role(Role::Status)
-                            .aria_label(SharedString::from(text.clone()))
-                            .text_size(px(theme.typography.small()))
-                            .text_color(hsla(tone))
-                            .child(SharedString::from(text)),
+                            .id("add-worker-title")
+                            .role(Role::Heading)
+                            .aria_label(title)
+                            .text_size(px(if welcome {
+                                theme.typography.display()
+                            } else {
+                                theme.typography.title()
+                            }))
+                            .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
+                            .text_color(hsla(s.text))
+                            .child(title),
                     )
-                })
-                .child(
+                    .child(
+                        div()
+                            .text_size(px(theme.typography.small()))
+                            .text_color(hsla(s.text_muted))
+                            .child(blurb),
+                    ),
+            )
+            .child(Input::new(&adding.address).aria_label(field))
+            .when_some(status, |el, (text, tone)| {
+                el.child(
                     div()
-                        .flex()
-                        .gap(px(spacing.sm))
-                        .items_center()
-                        .child(button("add", go, true).on_click(
-                            cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)),
-                        ))
-                        .when(KEY_BAR, |row| {
-                            row.child(button("paste-address", "Paste", false).on_click(
-                                cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)),
-                            ))
-                        })
-                        .child(div().flex_1())
-                        .when(!welcome, |row| {
-                            row.child(button("cancel-add", "Cancel", false).on_click(cx.listener(
-                                |this, _ev, window, cx| this.cancel_add_worker(window, cx),
-                            )))
-                        }),
+                        .id("add-worker-status")
+                        .role(Role::Status)
+                        .aria_label(SharedString::from(text.clone()))
+                        .text_size(px(theme.typography.small()))
+                        .text_color(hsla(tone))
+                        .child(SharedString::from(text)),
                 )
-                .child(tab_stop(switch, s.accent));
+            })
+            .child(
+                div()
+                    .flex()
+                    .gap(px(spacing.sm))
+                    .items_center()
+                    .child(
+                        button("add", go, ButtonKind::Primary).on_click(
+                            cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)),
+                        ),
+                    )
+                    .when(KEY_BAR, |row| {
+                        row.child(button("paste-address", "Paste", ButtonKind::Secondary).on_click(
+                            cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)),
+                        ))
+                    })
+                    .child(div().flex_1())
+                    .when(!welcome, |row| {
+                        row.child(button("cancel-add", "Cancel", ButtonKind::Ghost).on_click(
+                            cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)),
+                        ))
+                    }),
+            )
+            .child(div().flex().child(switch));
         if welcome {
             // Not a dialog over an app that does nothing yet: the page itself, the content a
             // third of the way down where the eye starts.

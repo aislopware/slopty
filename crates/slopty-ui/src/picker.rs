@@ -15,10 +15,10 @@ use gpui::{
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_core::SessionId;
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
-use slopty_theme::{Theme, alpha};
+use slopty_theme::Theme;
 
 use crate::a11y::tab_stop;
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 
 /// What the field says before anything is typed.
 pub(crate) const FILTER_PLACEHOLDER: &str = "Type to filter";
@@ -306,8 +306,8 @@ impl WindowPicker {
             .gap(px(theme.spacing.sm))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .when(chosen, |el| el.bg(hsla_alpha(theme.surfaces.accent, alpha::TINT)))
-            .hover(move |s| s.bg(hsla(raised)))
+            .when(chosen, |el| el.bg(hsla(overlay)))
+            .when(!chosen, |el| el.hover(move |s| s.bg(hsla(raised))))
             .active(move |s| s.bg(hsla(overlay)))
             .child(div().text_color(hsla(theme.surfaces.text)).child(SharedString::from(primary)))
             .child(
@@ -385,22 +385,25 @@ impl Render for WindowPicker {
                     .debug_selector(|| "picker".to_owned())
                     .role(gpui::accesskit::Role::Dialog)
                     .aria_label(title)
+                    // The title, the field and the rows' text share one left edge: the list's
+                    // inset plus a row's.
                     .child(
                         div()
-                            .px(px(theme.spacing.md))
+                            .px(px(theme.spacing.lg))
                             .py(px(theme.spacing.sm))
                             .border_b_1()
                             .border_color(hsla(theme.surfaces.border))
                             .text_color(hsla(theme.surfaces.text))
+                            .font_weight(gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT))
                             .child(title),
                     )
                     .children(self.input.as_ref().map(|input| {
                         div()
-                            .px(px(theme.spacing.md))
+                            .px(px(theme.spacing.lg))
                             .py(px(theme.spacing.sm))
                             .border_b_1()
                             .border_color(hsla(theme.surfaces.border))
-                            .child(Input::new(input).appearance(false).aria_label("Filter"))
+                            .child(Input::new(input).appearance(false).px_0().aria_label("Filter"))
                     }))
                     .child(
                         div()

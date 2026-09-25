@@ -335,6 +335,10 @@ pub struct Typography {
 }
 
 impl Typography {
+    /// The one weight above the regular one: headings and the workspace's name. Chrome has
+    /// no bold; a second step would be a weight nobody could name.
+    pub const STRONG_WEIGHT: f32 = 600.0;
+
     /// The smallest chrome size: HUD readouts, timestamps, chevrons (base − 3).
     #[must_use]
     pub fn caption(&self) -> f32 {
@@ -351,6 +355,12 @@ impl Typography {
     #[must_use]
     pub fn title(&self) -> f32 {
         self.ui_size + 2.0
+    }
+
+    /// The heading of a page that is the whole window, the first run (base + 7).
+    #[must_use]
+    pub fn display(&self) -> f32 {
+        self.ui_size + 7.0
     }
 }
 
@@ -742,7 +752,7 @@ mod tests {
         assert_ne!(dark.accent_fg, light.accent_fg, "text on the accent flips with the variant");
 
         let mut t = Typography::default();
-        assert_eq!((t.caption(), t.small(), t.title()), (10.0, 12.0, 15.0));
+        assert_eq!((t.caption(), t.small(), t.title(), t.display()), (10.0, 12.0, 15.0, 20.0));
         t.ui_size = 8.0;
         assert_eq!((t.caption(), t.small(), t.title()), (6.0, 7.0, 10.0), "clamped at the floor");
         let s = Spacing::default();

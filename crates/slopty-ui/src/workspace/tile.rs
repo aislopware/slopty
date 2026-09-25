@@ -602,12 +602,23 @@ impl WorkspaceView {
         let id = item.id;
         let path = path.clone();
         let worker = tile.worker;
+        // A page with two lines of text on it. The bare outline it replaced read as the box a
+        // font draws for a glyph it does not have.
+        let ink = hsla(theme.surfaces.text_secondary);
+        let text_line = || div().w_full().h(px(k)).bg(ink);
         let page = div()
-            .w(px(theme.spacing.sm * k))
+            .w(px((theme.spacing.sm + theme.spacing.xxs) * k))
             .h(px(theme.spacing.md * k))
+            .flex()
+            .flex_col()
+            .gap(px(theme.spacing.xxs * k))
+            .px(px(theme.spacing.xxs * k))
+            .pt(px(theme.spacing.xs * k))
             .border_1()
-            .border_color(hsla(theme.surfaces.text_secondary))
-            .rounded(px(theme.radii.xs * k * 0.5));
+            .border_color(ink)
+            .rounded(px(theme.radii.xs * k * 0.5))
+            .child(text_line())
+            .child(text_line());
         Some(
             div()
                 .id("file-proxy")

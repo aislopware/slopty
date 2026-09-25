@@ -62,12 +62,16 @@ impl WorkspaceView {
     /// The active workspace's name: the one given, else its place.
     #[must_use]
     pub fn workspace_name(&self) -> String {
-        let active = self.layout.active_workspace();
+        self.workspace_name_at(self.layout.active_workspace())
+    }
+
+    /// Workspace `ix`'s name: the one given, else its place.
+    pub(super) fn workspace_name_at(&self, ix: usize) -> String {
         self.layout
             .workspaces()
-            .get(active)
+            .get(ix)
             .and_then(|ws| ws.name().map(str::to_owned))
-            .unwrap_or_else(|| format!("Workspace {}", active.saturating_add(1)))
+            .unwrap_or_else(|| format!("Workspace {}", ix.saturating_add(1)))
     }
 
     fn toggle_menu(&mut self, which: MenuKind, cx: &mut Context<Self>) {
@@ -183,7 +187,7 @@ impl WorkspaceView {
                 .gap(px(spacing.xs))
                 .text_size(px(small))
                 .text_color(hsla(s.text_muted))
-                .child(div().size(px(spacing.xs)).rounded_full().bg(hsla(s.text_muted)))
+                .child(div().size(px(spacing.xs)).rounded_full().bg(hsla(s.warn)))
                 .child(text)
         });
         let name = div()
@@ -200,6 +204,7 @@ impl WorkspaceView {
             .whitespace_nowrap()
             .text_ellipsis()
             .text_size(px(theme.typography.ui_size))
+            .font_weight(gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT))
             .text_color(hsla(s.text))
             .cursor_pointer()
             .child(SharedString::from(self.workspace_name()))
@@ -247,9 +252,50 @@ impl WorkspaceView {
             button("more", ellipsis, "More", "").on_click(cx.listener(|this, _ev, _w, cx| {
                 this.toggle_menu(MenuKind::More, cx);
             }));
+        // The readouts, then the buttons: a number set right against "+" read as its label.
+        let readouts = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(spacing.sm))
+            .when_some(rtt, |el, rtt| {
+                el.child(
+                    div()
+                        .id("rtt")
+                        .debug_selector(|| "rtt".to_owned())
+                        .flex_none()
+                        .text_size(px(small))
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(rtt)),
+                )
+            })
+            .when_some(needs_you, gpui::ParentElement::child);
+        let buttons = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(spacing.xxs))
+            .when_some(add, gpui::ParentElement::child)
+            .child(more);
+        // The column dots sit on the window's centre, not on the centre of what the traffic
+        // lights leave: the bar's leading inset is 78 pt and its trailing one 12, so a dot row
+        // between two equal flexible sides stood 33 pt right of the middle.
+        let indicator = self.render_indicator(cx).map(|marks| {
+            div()
+                .absolute()
+                .top(safe.top)
+                .bottom_0()
+                .left_0()
+                .right_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(marks)
+        });
         div()
             .id("titlebar")
             .debug_selector(|| "titlebar".to_owned())
+            .relative()
             .h(px(TITLEBAR_H) + safe.top)
             .pt(safe.top)
             .w_full()
@@ -274,28 +320,16 @@ impl WorkspaceView {
                     .when_some(server, gpui::ParentElement::child)
                     .children(down),
             )
-            .children(self.render_indicator(cx))
+            .children(indicator)
             .child(
                 div()
                     .flex_1()
                     .flex()
                     .items_center()
                     .justify_end()
-                    .gap(px(spacing.xs))
-                    .when_some(rtt, |el, rtt| {
-                        el.child(
-                            div()
-                                .id("rtt")
-                                .debug_selector(|| "rtt".to_owned())
-                                .flex_none()
-                                .text_size(px(small))
-                                .text_color(hsla(s.text_muted))
-                                .child(SharedString::from(rtt)),
-                        )
-                    })
-                    .when_some(needs_you, gpui::ParentElement::child)
-                    .when_some(add, gpui::ParentElement::child)
-                    .child(more),
+                    .gap(px(spacing.md))
+                    .child(readouts)
+                    .child(buttons),
             )
             .into_any_element()
     }

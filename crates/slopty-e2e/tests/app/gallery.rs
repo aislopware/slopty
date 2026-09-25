@@ -103,6 +103,9 @@ async fn the_first_run_offers_one_way_in() {
         .await
         .unwrap();
     assert!(labels(&dump, "Button").iter().any(|b| b == "Add"), "{:#?}", dump.a11y);
+    // The pointer leaves the link it clicked, so the golden holds the panel at rest and not
+    // the link's hover.
+    drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
     golden(drv, &dir, "add-worker").await;
 
     stack.add_worker().await.unwrap();

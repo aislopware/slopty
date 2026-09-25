@@ -14,10 +14,11 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{Enter, Escape, InputEvent, Textarea, TextareaState};
-use slopty_theme::{Theme, alpha};
+use gpui_kit::component::{Sizable as _, Size};
+use slopty_theme::Theme;
 
-use crate::a11y::tab_stop;
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
+use crate::kit::ButtonKind;
 
 /// Key context of the dialog.
 pub const CTX: &str = "SettingsEditor";
@@ -146,28 +147,9 @@ impl Focusable for SettingsEditor {
 impl Render for SettingsEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let (s, spacing, radii) = (theme.surfaces, theme.spacing, theme.radii);
+        let (s, spacing) = (theme.surfaces, theme.spacing);
         // A button says what it does; the keys (Esc, ⌘↩) are the palette's to list.
-        let button = move |id: &'static str, label: &'static str, accent| {
-            let row = div()
-                .id(id)
-                .debug_selector(move || id.to_owned())
-                .role(gpui::accesskit::Role::Button)
-                .aria_label(label)
-                .flex()
-                .items_center()
-                .px(px(spacing.md))
-                .py(px(spacing.xs))
-                .rounded(px(radii.sm))
-                .cursor_pointer()
-                .when(accent, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
-                .when(!accent, |el| {
-                    el.text_color(hsla(s.text_secondary))
-                        .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
-                })
-                .child(label);
-            tab_stop(row, s.accent)
-        };
+        let button = |id, label, kind| crate::kit::button(&theme, id, label, kind);
         let error = self.error.clone().map(|error| {
             div()
                 .id("settings-error")
@@ -220,7 +202,13 @@ impl Render for SettingsEditor {
                             .py(px(spacing.sm))
                             .border_b_1()
                             .border_color(hsla(s.border))
-                            .child("Settings")
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight(
+                                        slopty_theme::Typography::STRONG_WEIGHT,
+                                    ))
+                                    .child("Settings"),
+                            )
                             .child(
                                 div()
                                     .id("settings-path")
@@ -234,12 +222,16 @@ impl Render for SettingsEditor {
                         div()
                             .flex_1()
                             .min_h(px(0.0))
-                            .p(px(spacing.sm))
+                            // The text starts on the header's edge: the field pads itself by
+                            // its size's inset, and this makes up the rest of `spacing.md`.
+                            .px(px(spacing.md) - Size::Small.input_px())
+                            .py(px(spacing.sm))
                             .font_family(
                                 theme.typography.mono_families.first().cloned().unwrap_or_default(),
                             )
                             .child(
                                 Textarea::new(&self.text)
+                                    .small()
                                     .appearance(false)
                                     .bordered(false)
                                     .aria_label("settings.toml")
@@ -259,20 +251,20 @@ impl Render for SettingsEditor {
                             .border_color(hsla(s.border))
                             .when(self.external, |el| {
                                 el.child(
-                                    button("settings-open-external", "Open in editor", false)
+                                    button("settings-open-external", "Open in editor", ButtonKind::Link)
                                         .on_click(cx.listener(|_this, _ev, _w, cx| {
                                             cx.emit(SettingsEditorEvent::OpenExternally);
                                         })),
                                 )
                             })
                             .when(self.external, |el| el.child(div().flex_1()))
-                            .child(button("settings-cancel", "Cancel", false).on_click(
+                            .child(button("settings-cancel", "Cancel", ButtonKind::Ghost).on_click(
                                 cx.listener(|_this, _ev, _w, cx| {
                                     cx.emit(SettingsEditorEvent::Dismiss);
                                 }),
                             ))
                             .child(
-                                button("settings-save", "Save", true)
+                                button("settings-save", "Save", ButtonKind::Primary)
                                     .on_click(cx.listener(|this, _ev, _w, cx| this.save(cx))),
                             ),
                     ),

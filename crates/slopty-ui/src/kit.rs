@@ -8,9 +8,10 @@
 
 use std::rc::Rc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Window, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_kit::base::text::TextViewDefaults;
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
@@ -89,6 +90,75 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
         .font_family(theme.typography.ui_family.clone())
         .text_color(hsla(s.text))
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+}
+
+/// How loud a [`button`] is. One primary per surface; the rest are secondary, or ghost where
+/// a frame would crowd a bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ButtonKind {
+    /// The one action the surface is for: an accent fill.
+    Primary,
+    /// Another way on: the panel with a hairline, so it holds its edge on any surface.
+    Secondary,
+    /// A way out (Cancel): text only until the pointer is on it.
+    Ghost,
+    /// A way aside (the other way in, Open in editor): accent text with no pad, so its words
+    /// start on the same edge as the text above them.
+    Link,
+}
+
+/// A text button, the one every dialog, panel and empty state draws.
+///
+/// Four had been written by hand, and the secondary among them filled itself with `raised`,
+/// which on the light canvas is one step from the canvas itself: "Add a window" and the phone's
+/// "Paste" were words floating on a smudge. Every kind wears a 1 pt border (clear on a ghost or
+/// a link) so they all stand the same height side by side and the keyboard's focus hairline
+/// moves nothing.
+#[must_use]
+pub fn button(
+    theme: &Theme,
+    id: &'static str,
+    label: &'static str,
+    kind: ButtonKind,
+) -> gpui::Stateful<Div> {
+    let s = theme.surfaces;
+    let el = div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .role(gpui::accesskit::Role::Button)
+        .aria_label(label)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(kind != ButtonKind::Link, |el| el.px(px(theme.spacing.md)).border_1())
+        .when(kind == ButtonKind::Link, |el| el.border_t_1().border_b_1())
+        .py(px(theme.spacing.xs))
+        .rounded(px(theme.radii.sm))
+        .text_size(px(theme.typography.ui_size))
+        .cursor_pointer()
+        .child(label);
+    let el = match kind {
+        ButtonKind::Primary => {
+            el.border_color(hsla(s.accent)).bg(hsla(s.accent)).text_color(hsla(s.accent_fg))
+        }
+        ButtonKind::Secondary => el
+            .border_color(hsla(s.border))
+            .bg(hsla(s.panel))
+            .text_color(hsla(s.text))
+            .hover(move |el| el.bg(hsla(s.raised)))
+            .active(move |el| el.bg(hsla(s.overlay))),
+        ButtonKind::Ghost => el
+            .border_color(gpui::transparent_black())
+            .text_color(hsla(s.text_secondary))
+            .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+            .active(move |el| el.bg(hsla(s.overlay))),
+        ButtonKind::Link => el
+            .border_color(gpui::transparent_black())
+            .text_color(hsla(s.accent))
+            .hover(gpui::Styled::underline),
+    };
+    crate::a11y::tab_stop(el, s.accent)
 }
 
 /// What a bar button does, and the key that does it, shown after a pause on the pointer.
@@ -177,6 +247,9 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.success = hsla(s.success);
     c.warning = hsla(s.warn);
     c.scrollbar_thumb = hsla_alpha(s.text_muted, alpha::PRESSED);
+    // Focus is one accent hairline. gpui-kit's ring is a second, wider halo painted outside
+    // the field's border, and the first-run field wore both.
+    kit.focus_ring = false;
     KitTheme::sync_base(cx);
     // `sync_base` reinstalls the Markdown defaults, so the code colouring goes on after it.
     TextViewDefaults::global(cx)
@@ -234,6 +307,7 @@ mod tests {
                 assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.accent_fg));
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
                 assert_eq!(kit.colors.ring, hsla(theme.surfaces.accent));
+                assert!(!kit.focus_ring, "a focused field is one hairline, not a halo");
                 assert!(
                     TextViewDefaults::global(cx).has_code_block_highlighter(),
                     "fenced code is coloured after the sync"

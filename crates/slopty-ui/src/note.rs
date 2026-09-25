@@ -18,6 +18,7 @@ use gpui::{
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
+use gpui_kit::component::{Sizable as _, Size};
 use slopty_core::ItemId;
 use slopty_theme::Theme;
 
@@ -298,9 +299,15 @@ impl Render for NoteView {
                 ))
                 .into_any_element()
         } else {
-            body.text_size(px(self.text_size * self.zoom))
+            // The field pads itself by its size's inset; the body gives up that much, so the
+            // caret starts where the rendered note's text did and the header's title does.
+            let pad = px(self.pad * self.zoom);
+            body.px((pad - Size::Small.input_px()).max(px(0.0)))
+                .py((pad - Size::Small.input_py()).max(px(0.0)))
+                .text_size(px(self.text_size * self.zoom))
                 .child(
                     Textarea::new(&self.text)
+                        .small()
                         .appearance(false)
                         .bordered(false)
                         .aria_label("Note")

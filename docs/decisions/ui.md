@@ -505,7 +505,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   | `typography.mono_size` @ `mono_line_height` | 13 @ 1.0 | same | terminal grid, code in the conversation (the multiplier is ghostty's `adjust-cell-height`; 1.0 = the font's own) |
   | `typography.markdown_line_height` | 1.5 | same | assistant turns |
   | `alpha::FAINT` | 0.12 | same | a quiet fill, a hover wash, the command-block hairline, the visual bell |
-  | `alpha::TINT` | 0.25 | same | a tint that has to be seen: a selected row, a text selection |
+  | `alpha::TINT` | 0.25 | same | a tint that has to be seen: a text selection (a selected row is `overlay` since the second de-slop pass) |
   | `alpha::PRESSED` | 0.4 | same | under the pointer; a scrollbar thumb |
   | `alpha::SCRIM` | 0.6 | same | modal backdrop |
   | `alpha::STRONG` | 0.7 | same | the separator after a failed command, minimap item blocks |
@@ -1146,3 +1146,54 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   system's reason in the body and a "↻" to try again. The tests load only a page the test
   serves itself on 127.0.0.1 (`tiles.rs`, golden `browser`), and read the view back over the
   self-test socket: its title, its own URL, shown or hidden while the palette is open.
+
+- ✅ **The second de-slop pass: one button, one left edge, one focus hairline** (2026-09-25).
+  A design review of every golden, done as a product designer would do it, found the
+  remaining slop in composition: things that sat a few points off from each other or were
+  built four times over. What changed, worst first:
+  - Buttons had four hand-written copies (the empty workspace, the connect panel, settings,
+    the file bar). The secondary among them was filled with `raised`, which on the light
+    canvas is one step from the canvas: "Add a window" and the phone's "Paste" were words on
+    a smudge. `kit::button` is the only button now, in four kinds: `Primary` (accent fill),
+    `Secondary` (panel with the hairline, so it holds its edge on any surface), `Ghost` (text
+    until hovered: Cancel) and `Link` (accent text with no pad, so its words start on the edge
+    of the text above: the other way in, Open in editor). Every kind wears a 1 pt border,
+    clear on a ghost or a link, so they stand the same height side by side and keyboard focus
+    moves nothing. The file bar's buttons stay its own, since they scale with the overview.
+  - The column dots were centred between the bar's two flexible halves, and the bar is
+    inset 78 pt on the left for the traffic lights and 12 on the right, so they stood 33 pt
+    right of the window's middle. They sit on the window's centre now. The round trip sat 4 pt
+    from "+" and read as its label; the readouts and the buttons are two groups a `spacing.md`
+    apart.
+  - A focused field wore two rings: its accent border and gpui-kit's halo outside it (the
+    first run's field showed both). `kit::sync` turns gpui-kit's `focus_ring` off, so focus is
+    the one accent hairline the token ruling named.
+  - A selected palette or picker row was an accent tint, the loudest fill on screen after
+    the primary button, for the row the arrow keys are on. It is `overlay`, the neutral step
+    Zed, Linear and Raycast use; hover is `raised` and no longer paints over the selection.
+    The accent keeps to focus, the primary action, links and a text selection.
+  - Text in the palette, the picker and settings started on three edges within 10 pt: a
+    gpui-kit field pads itself (10 pt at its default size), so the typed text sat right of the
+    rows below it. The field's pad is taken off and the container pads to the rows' edge
+    (`spacing.lg`); in settings and a note the text area runs at gpui-kit's `Small` size
+    (8 pt) and the container makes up the rest. A note's caret now starts where its rendered
+    text and its header's title do, where it used to jump 10 pt right on a click.
+  - The file tile's proxy was a bare rounded outline, which reads as the box a font draws for
+    a missing glyph. It is a page with two lines of text on it.
+  - The first run's heading was 15 pt regular over a 12 pt line: no hierarchy. The type
+    scale gains `display()` (base + 7) for the heading of a page that is the whole window, and
+    `Typography::STRONG_WEIGHT` (600), the one weight above regular, for headings and the
+    workspace's name in the bar. The other way in is a link, where it was muted text with
+    nothing to say it could be clicked.
+  - The overview drew each workspace as a white panel under white tiles, so the tiles lost
+    their edges and the panel read as a thick frame. It is a `raised` tray with the
+    workspace's name above it, and the empty workspace at the end is labelled "New workspace".
+  - "server unreachable" had a muted dot, so a failure read as metadata. It takes `warn`, as
+    a worker that is down does.
+  - The `add-worker` golden held the link's hover, since the test's click left the pointer on
+    it; the test moves the pointer away first.
+  Left as found, and why: the overview's empty workspace is still cut off by the window's
+  bottom edge, because where it goes is the layout's geometry (`slopty-client`), not the
+  chrome's. The editor's line numbers sit tight against the code; that gutter is gpui-kit's.
+  The terminal draws its scrollbar at rest (`transfers`). The settings dialog is still the
+  TOML file with Save and Cancel, the way Zed treats its own settings file.
