@@ -1,6 +1,6 @@
 //! Terminal session state on the client.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use slopty_grid::{
@@ -11,8 +11,12 @@ use slopty_proto::terminal::{
     TermSize,
 };
 
-/// Lines kept client-side. Newest-first eviction; the worker retains 50k.
+/// Lines kept client-side; the worker retains 50k. Past it the lines farthest from the view
+/// go first (see [`Scrollback`]), so what was fetched to be looked at stays.
 pub const CACHE_LINES: usize = 20_000;
+
+/// Most lines one `FetchLines` asks for: the worker serves no more in one answer.
+pub const FETCH_CHUNK: u32 = 4096;
 
 /// What the UI or connection should do after an event was applied.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -119,6 +123,18 @@ pub struct TermState {
     /// Frames dropped as older than the last one applied: the tail of a stream a re-attach
     /// replaced.
     superseded: u64,
+    /// The `FetchLines` asked and not answered yet, oldest first, each with the numbering it
+    /// was asked in: a range in flight is not asked again, and an answer for a numbering that
+    /// has gone is dropped.
+    in_flight: VecDeque<Fetch>,
+}
+
+/// One `FetchLines` in flight.
+#[derive(Clone, Copy, Debug)]
+struct Fetch {
+    start: LineIndex,
+    end: LineIndex,
+    epoch: Option<u32>,
 }
 
 /// What the client held of the primary screen's numbering when a program took the alternate
@@ -204,6 +220,7 @@ impl TermState {
             colors: ColorOverrides::default(),
             parked: None,
             superseded: 0,
+            in_flight: VecDeque::new(),
         }
     }
 
@@ -361,7 +378,9 @@ impl TermState {
         match event {
             TermEvent::Frame(frame) => self.apply_frame(frame),
             TermEvent::Lines { start, lines } => {
-                self.scrollback.insert_batch(start, lines);
+                if self.answered(start) {
+                    self.scrollback.insert_batch(start, lines);
+                }
                 Vec::new()
             }
             TermEvent::Title(t) => {
@@ -439,6 +458,9 @@ impl TermState {
         }
         if frame.full {
             self.resync_pending = false;
+            // A whole frame is what a new stream starts with, and the old one's answers may
+            // never come: whatever is still missing is asked again.
+            self.in_flight.clear();
         }
         self.last_seq = Some(frame.seq);
         if (frame.cols, frame.rows) != (self.screen.cols(), self.screen.rows()) {
@@ -448,6 +470,8 @@ impl TermState {
         }
         let moved = self.first_visible != frame.first_visible_line;
         self.first_visible = frame.first_visible_line;
+        let focus = if self.view_offset == 0 { None } else { top };
+        self.scrollback.set_view(focus.unwrap_or(self.first_visible), self.first_visible);
         self.scrollback.set_extent(frame.oldest_line, frame.total_lines);
         if moved && !frame.full {
             self.readopt();
@@ -594,28 +618,77 @@ impl TermState {
     /// Scroll to an absolute offset from the bottom.
     pub fn scroll_to(&mut self, offset: u64) -> Vec<Effect> {
         self.view_offset = offset.min(self.history_len());
-        self.fetch_missing()
+        self.scrollback.set_view(self.index_at_row(0), self.first_visible);
+        if self.view_offset == 0 {
+            return Vec::new();
+        }
+        self.request_lines(self.index_at_row(0), u64::from(self.screen.rows()))
     }
 
     /// Jump back to following output.
     pub const fn scroll_to_bottom(&mut self) {
         self.view_offset = 0;
+        self.scrollback.set_view(self.first_visible, self.first_visible);
     }
 
-    /// Fetch requests for the currently visible range.
-    fn fetch_missing(&self) -> Vec<Effect> {
-        if self.view_offset == 0 {
-            return Vec::new();
+    /// Ask for the lines of `[start, start + count)` that are neither held nor already asked
+    /// for, in requests of at most [`FETCH_CHUNK`] lines.
+    pub fn request_lines(&mut self, start: LineIndex, count: u64) -> Vec<Effect> {
+        let mut out = Vec::new();
+        for (gap, len) in self.scrollback.missing(start, count) {
+            let mut from = gap.0;
+            let end = gap.0.saturating_add(len);
+            while from < end {
+                // Skip what an earlier request covers; ask for the rest up to the next one.
+                let epoch = self.epoch;
+                let mut asked = self.in_flight.iter().filter(|f| f.epoch == epoch);
+                if let Some(covering) = asked.find(|f| f.start.0 <= from && from < f.end.0) {
+                    from = covering.end.0;
+                    continue;
+                }
+                let next_asked = self
+                    .in_flight
+                    .iter()
+                    .filter(|f| f.epoch == epoch && f.start.0 > from)
+                    .map(|f| f.start.0)
+                    .min()
+                    .unwrap_or(u64::MAX);
+                let to = end.min(next_asked).min(from.saturating_add(u64::from(FETCH_CHUNK)));
+                let count = u32::try_from(to.saturating_sub(from)).unwrap_or(FETCH_CHUNK);
+                self.in_flight.push_back(Fetch {
+                    start: LineIndex(from),
+                    end: LineIndex(to),
+                    epoch: self.epoch,
+                });
+                out.push(Effect::Request(TermRequest::FetchLines {
+                    start: LineIndex(from),
+                    count,
+                }));
+                from = to;
+            }
         }
-        let start = LineIndex(self.first_visible.0.saturating_sub(self.view_offset));
-        self.scrollback
-            .missing(start, u64::from(self.screen.rows()))
-            .into_iter()
-            .map(|(start, count)| {
-                let count = u32::try_from(count).unwrap_or(u32::MAX);
-                Effect::Request(TermRequest::FetchLines { start, count })
-            })
-            .collect()
+        out
+    }
+
+    /// Whether an answer starting at `start` is to be kept: the request it answers leaves the
+    /// flight (and any asked before it, answered or failed, since answers come in order), and
+    /// it is kept unless that request was asked in another numbering.
+    fn answered(&mut self, start: LineIndex) -> bool {
+        // The worker answers from its oldest line when the start was dropped: an answer may
+        // start anywhere up to the request's end, or past it when all of it was dropped (and
+        // then it is the oldest request's).
+        let at = self.in_flight.iter().position(|f| f.start <= start && start <= f.end);
+        let fetch = match at {
+            Some(at) => self.in_flight.drain(..=at).next_back(),
+            None => self.in_flight.pop_front(),
+        };
+        fetch.is_none_or(|f| f.epoch == self.epoch)
+    }
+
+    /// Lines asked for and not answered yet (tests and the debug overlay).
+    #[must_use]
+    pub fn lines_in_flight(&self) -> u64 {
+        self.in_flight.iter().map(|f| f.end.0.saturating_sub(f.start.0)).sum()
     }
 
     /// Whether a command is running now: it left its prompt and no newer prompt has started
@@ -1431,6 +1504,64 @@ mod tests {
             lines: ["p", "q", "r"].iter().map(|t| Line::from_text(t, 10, Style::DEFAULT)).collect(),
         });
         assert_eq!(texts(&s), vec![Some("p".into()), Some("q".into()), Some("r".into())]);
+    }
+
+    fn lines_of(texts: &[&str]) -> Vec<Line> {
+        texts.iter().map(|t| Line::from_text(t, 10, Style::DEFAULT)).collect()
+    }
+
+    /// A range asked for is not asked again while the answer is on its way, frame after
+    /// frame; an answer lets it go, and a whole frame (a new stream) asks again.
+    #[test]
+    fn a_range_in_flight_is_asked_once() {
+        let mut s = TermState::new(size());
+        s.apply(TermEvent::Frame(frame(1, true, 0, 100, 103, &[(0, "x"), (1, "y"), (2, "z")])));
+        assert_eq!(s.scroll(3).len(), 1);
+        assert_eq!(s.lines_in_flight(), 3);
+        for seq in 2..5 {
+            let effects = s.apply(TermEvent::Frame(frame(seq, false, 0, 100, 103, &[])));
+            assert!(effects.is_empty(), "frame {seq} asked again: {effects:?}");
+        }
+        assert!(s.scroll_to(3).is_empty(), "nor does a scroll back to it");
+        s.apply(TermEvent::Lines { start: LineIndex(97), lines: lines_of(&["p", "q", "r"]) });
+        assert_eq!(s.lines_in_flight(), 0);
+        s.apply(TermEvent::Frame(frame(5, true, 0, 100, 103, &[(0, "x")])));
+        assert_eq!(s.lines_in_flight(), 0, "nothing missing: nothing asked");
+        let effects = s.scroll(3);
+        assert_eq!(
+            effects,
+            vec![Effect::Request(TermRequest::FetchLines { start: LineIndex(94), count: 3 })],
+            "only what is not held"
+        );
+        s.apply(TermEvent::Frame(frame(6, true, 0, 100, 103, &[(0, "x")])));
+        assert_eq!(s.lines_in_flight(), 3, "a whole frame asks again for what is still missing");
+    }
+
+    /// A long range goes out in requests the worker serves whole, skipping what is held or
+    /// already asked for; an answer for a numbering that has gone is dropped, and one that
+    /// starts past its request (all of it dropped on the worker) still answers it.
+    #[test]
+    fn a_long_range_is_asked_in_chunks_and_stale_answers_are_dropped() {
+        let mut s = TermState::new(size());
+        s.apply(TermEvent::Frame(frame(1, true, 0, 10_000, 10_003, &[(0, "x")])));
+        s.apply(TermEvent::Lines { start: LineIndex(5_000), lines: lines_of(&["held"]) });
+        let asked: Vec<(u64, u32)> = s
+            .request_lines(LineIndex(0), 10_000)
+            .into_iter()
+            .map(|e| match e {
+                Effect::Request(TermRequest::FetchLines { start, count }) => (start.0, count),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(asked, [(0, 4096), (4096, 904), (5001, 4096), (9097, 903)]);
+        assert!(s.request_lines(LineIndex(100), 5_000).is_empty(), "all of it in flight");
+        s.apply(TermEvent::Lines { start: LineIndex(20), lines: Vec::new() });
+        assert_eq!(s.lines_in_flight(), 10_000 - 1 - 4096, "the first request answered");
+        s.apply(TermEvent::Frame(frame(2, false, 1, 9_000, 9_003, &[(0, "new")])));
+        s.apply(TermEvent::Lines { start: LineIndex(4096), lines: lines_of(&["old"]) });
+        assert!(s.line(LineIndex(4096)).is_none(), "asked in the old numbering: dropped");
+        let asked = s.request_lines(LineIndex(6_000), 1);
+        assert_eq!(asked.len(), 1, "a range in flight in the old numbering is asked again");
     }
 
     #[test]

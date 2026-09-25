@@ -24,7 +24,7 @@ pub mod osc133;
 pub mod placeholder;
 pub mod search;
 
-pub use ghostty::GhosttyEngine;
+pub use ghostty::{GhosttyEngine, LineDiscipline};
 pub use graphics::ImageUpload;
 use slopty_proto::terminal::{ColorOverrides, TermSize};
 

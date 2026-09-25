@@ -1,100 +1,131 @@
 //! Links in terminal text: the link under a cell, found on the client from the line cache.
 //!
 //! An OSC 8 run the program marked wins (`Line::links`, filled by the worker engine). Most
-//! programs do not emit OSC 8, so otherwise the row is joined column by column (a wide cluster
-//! fills its first column, the spacer contributes nothing) so a cell column maps to a byte
-//! offset, then the longest run around that offset that starts with a known scheme and ends
-//! at whitespace or a quote is the link, minus the punctuation prose puts after a URL.
+//! programs do not emit OSC 8, so otherwise the logical line (the row and the rows soft-wrapped
+//! onto it) is joined column by column (a wide cluster fills its first column, the spacer
+//! contributes nothing) so a cell maps to a byte offset, then the longest run around that
+//! offset that starts with a known scheme and ends at whitespace or a quote is the link, minus
+//! the punctuation prose puts after a URL. A link the terminal wrapped is one link.
 
 use std::ops::Range;
 
 use slopty_grid::Line;
 
-/// A link under a cell: the columns it covers on its line and where it goes.
+/// A cell of a logical line: the row (0 = its first) and the column.
+pub type Cell = (usize, u16);
+
+/// A link under a cell: the cells it covers and where it goes.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LinkSpan {
-    /// First column.
-    pub start: u16,
-    /// One past the last column.
-    pub end: u16,
+    /// First cell.
+    pub start: Cell,
+    /// One past the last cell, on the last cell's row.
+    pub end: Cell,
     /// Target.
     pub url: String,
 }
 
-/// The link covering column `col` of `line`: the OSC 8 run when the program marked one, else
-/// the URL found in the row's text.
+/// The link covering `at` in `rows` (a logical line, top to bottom): the OSC 8 run when the
+/// program marked one, else the URL found in the text.
 #[must_use]
-pub fn link_at_col(line: &Line, col: u16) -> Option<LinkSpan> {
-    if let Some(link) = line.link_at(col) {
-        return Some(LinkSpan { start: link.col, end: link.end(), url: link.uri.clone() });
+pub fn link_at(rows: &[&Line], at: Cell) -> Option<LinkSpan> {
+    osc8_at(rows, at).or_else(|| text_link_at(rows, at))
+}
+
+/// The OSC 8 run under `at`, carried on over the rows it wraps onto: a run that ends at the
+/// right edge and one with the same target at the next row's start are one link.
+fn osc8_at(rows: &[&Line], (row, col): Cell) -> Option<LinkSpan> {
+    let link = rows.get(row)?.link_at(col)?;
+    let same = |line: &Line, col: u16| line.link_at(col).filter(|l| l.uri == link.uri).cloned();
+    let (mut start, mut first) = ((row, link.col), link.clone());
+    while first.col == 0
+        && let Some(above) = start.0.checked_sub(1)
+        && let Some(line) = rows.get(above)
+        && let Some(run) = line.cols().checked_sub(1).and_then(|last| same(line, last))
+    {
+        start = (above, run.col);
+        first = run;
     }
-    text_link_at_col(line, col)
+    let (mut end, mut last) = ((row, link.end()), link.clone());
+    while rows.get(end.0).is_some_and(|line| last.end() >= line.cols())
+        && let Some(line) = rows.get(end.0.saturating_add(1))
+        && let Some(run) = same(line, 0)
+    {
+        end = (end.0.saturating_add(1), run.end());
+        last = run;
+    }
+    Some(LinkSpan { start, end, url: link.uri.clone() })
 }
 
 /// Schemes worth opening. `mailto:` has no `//`.
 const SCHEMES: &[&str] =
     &["https://", "http://", "file://", "ssh://", "git://", "ftp://", "mailto:"];
 
-/// The plain-text URL covering column `col` of `line`, if any, with the columns it spans.
-#[must_use]
-pub fn text_link_at_col(line: &Line, col: u16) -> Option<LinkSpan> {
-    let (text, starts, offset) = joined(line, col);
+/// The plain-text URL covering `at` in `rows`, if any, with the cells it spans.
+fn text_link_at(rows: &[&Line], at: Cell) -> Option<LinkSpan> {
+    let (text, starts, offset) = joined(rows, at);
     let range = url_range_at(&text, offset?)?;
     let url = text.get(range.clone())?.to_owned();
-    let (start, end) = columns_of(&starts, &range)?;
+    let (start, end) = cells_of(&starts, &range)?;
     Some(LinkSpan { start, end, url })
 }
 
 /// A file path under a cell, as compilers, linters and greps print them.
 ///
-/// `src/main.rs:12:5`, `./notes.md`, `~/.zshrc`: the columns it covers, the path without its
+/// `src/main.rs:12:5`, `./notes.md`, `~/.zshrc`: the cells it covers, the path without its
 /// position, and the line number when one followed.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PathSpan {
-    /// First column.
-    pub start: u16,
-    /// One past the last column.
-    pub end: u16,
+    /// First cell.
+    pub start: Cell,
+    /// One past the last cell, on the last cell's row.
+    pub end: Cell,
     /// The path as printed, without a trailing `:line[:col]`.
     pub path: String,
     /// The line number that followed the path, if any.
     pub line: Option<u32>,
 }
 
-/// The file path covering column `col` of `line`, if the text there reads as one.
+/// The file path covering `at` in `rows` (a logical line), if the text there reads as one.
 #[must_use]
-pub fn path_at_col(line: &Line, col: u16) -> Option<PathSpan> {
-    let (text, starts, offset) = joined(line, col);
+pub fn path_at(rows: &[&Line], at: Cell) -> Option<PathSpan> {
+    let (text, starts, offset) = joined(rows, at);
     let (range, path, line_no) = path_range_at(&text, offset?)?;
-    let (start, end) = columns_of(&starts, &range)?;
+    let (start, end) = cells_of(&starts, &range)?;
     Some(PathSpan { start, end, path, line: line_no })
 }
 
-/// The row's text joined column by column, where each text-drawing column starts in it
-/// (`(column, columns spanned, byte offset)`), and the byte offset of `col`.
-fn joined(line: &Line, col: u16) -> (String, Vec<(u16, u16, usize)>, Option<usize>) {
+/// Where a text-drawing cell starts in the joined text: the cell, the columns it spans, and
+/// its byte offset.
+type Start = (Cell, u16, usize);
+
+/// The rows' text joined cell by cell, where each text-drawing cell starts in it, and the
+/// byte offset of `at`.
+fn joined(rows: &[&Line], at: Cell) -> (String, Vec<Start>, Option<usize>) {
     let mut text = String::new();
     let mut offset = None;
-    let mut starts: Vec<(u16, u16, usize)> = Vec::with_capacity(line.cells.len());
-    for (i, cell) in line.cells.iter().enumerate() {
-        let i = u16::try_from(i).unwrap_or(u16::MAX);
-        if i == col {
-            offset = Some(text.len());
-        }
-        if cell.width.draws_text() {
-            starts.push((i, cell.width.columns(), text.len()));
-            text.push_str(if cell.text.is_empty() { " " } else { cell.text.as_str() });
+    let mut starts: Vec<Start> = Vec::with_capacity(rows.iter().map(|l| l.cells.len()).sum());
+    for (row, line) in rows.iter().enumerate() {
+        for (col, cell) in line.cells.iter().enumerate() {
+            let cell_at = (row, u16::try_from(col).unwrap_or(u16::MAX));
+            if cell_at == at {
+                offset = Some(text.len());
+            }
+            if cell.width.draws_text() {
+                starts.push((cell_at, cell.width.columns(), text.len()));
+                text.push_str(if cell.text.is_empty() { " " } else { cell.text.as_str() });
+            }
         }
     }
     (text, starts, offset)
 }
 
-/// The first column and one past the last of the cells whose text lies in `range`.
-fn columns_of(starts: &[(u16, u16, usize)], range: &Range<usize>) -> Option<(u16, u16)> {
+/// The first cell and one past the last of the cells whose text lies in `range`.
+fn cells_of(starts: &[Start], range: &Range<usize>) -> Option<(Cell, Cell)> {
     let mut covered = starts.iter().filter(|&&(_, _, at)| range.contains(&at));
     let (start, span, _) = *covered.next()?;
-    let (last, last_span, _) = covered.next_back().copied().unwrap_or((start, span, 0));
-    Some((start, last.saturating_add(last_span)))
+    let ((row, col), span, _) = covered.next_back().copied().unwrap_or((start, span, 0));
+    Some((start, (row, col.saturating_add(span))))
 }
 
 /// Extensions a bare `name.ext` is taken for a file by; a token with a `/` needs none.
@@ -297,11 +328,45 @@ mod tests {
         line.cells[16] = Cell::spacer_tail(Style::DEFAULT);
         line.cells[17] = Cell::narrow('x', Style::DEFAULT);
         line.cells[18] = Cell::narrow(' ', Style::DEFAULT);
-        let span = text_link_at_col(&line, 5).unwrap();
+        let span = text_link_at(&[&line], (0, 5)).unwrap();
         assert_eq!(span.url, "https://a.b/字x");
-        assert_eq!((span.start, span.end), (3, 18), "the wide cell's spacer is inside the span");
-        assert_eq!(text_link_at_col(&line, 2), None);
-        assert_eq!(text_link_at_col(&line, 19), None);
+        assert_eq!((span.start, span.end), ((0, 3), (0, 18)), "the wide cell's spacer is inside");
+        assert_eq!(text_link_at(&[&line], (0, 2)), None);
+        assert_eq!(text_link_at(&[&line], (0, 19)), None);
+    }
+
+    /// A URL or a path the terminal wrapped is found whole from either row, and ends where
+    /// its text does; an OSC 8 run carried on to the next row is one link too.
+    #[test]
+    fn a_wrapped_link_or_path_is_one() {
+        let top = Line::from_text("see https://a.b", 15, Style::DEFAULT);
+        let mut below = Line::from_text("/cd/ef now", 15, Style::DEFAULT);
+        below.flags.insert(slopty_grid::LineFlags::WRAPPED);
+        let rows = [&top, &below];
+        for at in [(0, 6), (1, 2)] {
+            let span = link_at(&rows, at).unwrap();
+            assert_eq!(span.url, "https://a.b/cd/ef", "from {at:?}");
+            assert_eq!((span.start, span.end), ((0, 4), (1, 6)));
+        }
+        assert_eq!(link_at(&rows, (1, 8)), None, "the word after it");
+
+        let top = Line::from_text("at src/very/lo", 14, Style::DEFAULT);
+        let below = Line::from_text("ng/name.rs:9 x", 14, Style::DEFAULT);
+        let span = path_at(&[&top, &below], (1, 1)).unwrap();
+        assert_eq!((span.path.as_str(), span.line), ("src/very/long/name.rs", Some(9)));
+        assert_eq!((span.start, span.end), ((0, 3), (1, 12)));
+
+        let mut top = Line::from_text("docs here", 9, Style::DEFAULT);
+        top.links.push(Hyperlink { col: 5, len: 4, uri: "https://real/".to_owned() });
+        let mut below = Line::from_text("ok then", 9, Style::DEFAULT);
+        below.links.push(Hyperlink { col: 0, len: 2, uri: "https://real/".to_owned() });
+        for at in [(0, 6), (1, 0)] {
+            let span = link_at(&[&top, &below], at).unwrap();
+            assert_eq!(
+                (span.start, span.end, span.url.as_str()),
+                ((0, 5), (1, 2), "https://real/")
+            );
+        }
     }
 
     #[test]
@@ -319,12 +384,12 @@ mod tests {
         assert_eq!(at("12:30 now", 1), None);
         assert_eq!(at("   ", 1), None);
         let line = Line::from_text("in src/lib.rs:7", 20, Style::DEFAULT);
-        let span = path_at_col(&line, 6).unwrap();
+        let span = path_at(&[&line], (0, 6)).unwrap();
         assert_eq!(
             (span.start, span.end, span.path.as_str(), span.line),
-            (3, 15, "src/lib.rs", Some(7))
+            ((0, 3), (0, 15), "src/lib.rs", Some(7))
         );
-        assert_eq!(path_at_col(&line, 1), None);
+        assert_eq!(path_at(&[&line], (0, 1)), None);
         assert_eq!(shell_word("it's a b"), "'it'\\''s a b'");
         assert_eq!(editor_command("a b.rs", Some(3)), "${EDITOR:-vi} +3 'a b.rs'");
         assert_eq!(editor_command("/x/y", None), "${EDITOR:-vi} '/x/y'");
@@ -334,10 +399,10 @@ mod tests {
     fn osc8_runs_win_over_the_text_scan() {
         let mut line = Line::from_text("docs https://x.y", 20, Style::DEFAULT);
         line.links.push(Hyperlink { col: 0, len: 4, uri: "https://real/".to_owned() });
-        let span = link_at_col(&line, 1).unwrap();
-        assert_eq!((span.start, span.end, span.url.as_str()), (0, 4, "https://real/"));
-        let span = link_at_col(&line, 7).unwrap();
-        assert_eq!((span.start, span.end, span.url.as_str()), (5, 16, "https://x.y"));
+        let span = link_at(&[&line], (0, 1)).unwrap();
+        assert_eq!((span.start, span.end, span.url.as_str()), ((0, 0), (0, 4), "https://real/"));
+        let span = link_at(&[&line], (0, 7)).unwrap();
+        assert_eq!((span.start, span.end, span.url.as_str()), ((0, 5), (0, 16), "https://x.y"));
     }
 
     #[test]

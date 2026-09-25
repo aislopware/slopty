@@ -4864,3 +4864,47 @@ cargo test -p slopty-ui --lib measure_a_frame -- --ignored --nocapture
 ```
 
 Logs: `target/logs/agent-ui-measure-before.log`, `target/logs/agent-ui-measure-after.log`.
+
+## 2026-09-26 — serving a history fetch, and scanning the output for prompt marks
+
+Two worker paths the output and the scrollback go through, measured before and after
+trimming them (`docs/decisions/terminal.md`, "The history cache keeps what the view is
+near"). Mac Studio, release, other sessions' builds running on the machine throughout, so each
+figure is given with its spread over three runs.
+
+**`FetchLines`**: one 4096-row chunk (the worker's cap) of 80-column rows read from the oldest
+history of a 50 000-line scrollback, half the rows plain and half with bold, colour and
+underline runs, ten reads per run.
+
+| build | p50 per chunk (3 runs) | per row |
+| --- | --- | --- |
+| before | 11.95–12.2 ms | 2.9 µs |
+| after | 8.1–9.4 ms | 2.0 µs |
+
+A side-by-side run of both `read_line`s in one binary put the fastest of ten reads at 11.5–11.8
+ms before and 8.2–9.6 ms after. `read_line` now skips the per-cell lookups the row's flags say
+are empty (no styling, no multi-codepoint cluster, no link), resolves a style once per run of
+cells sharing its id, asks for the semantic content past the first cell only on a prompt's
+rows, and builds a cell's text on the stack instead of a `String`. What is left is mostly the
+grid lookup itself: `Terminal::grid_ref` per cell plus `cell()` alone cost 3.0–4.2 ms of the
+chunk. Stepping a `GridRef` along a row would need an API in the libghostty-rs fork, which
+this change did not touch.
+
+**OSC 133 scanner**: 30 000 OSCs that are not marks (an OSC 8 link opened and closed around a
+file name and a title, as `ls --hyperlink` and prompt themes write them), twenty scans.
+
+| build | p50 per OSC (3 runs) |
+| --- | --- |
+| before | 54–55 ns |
+| after | 18–19 ns |
+
+The scanner allocated a `Vec` for every OSC and stepped through its payload byte by byte. It
+now keeps the payload on the stack, and an OSC whose first bytes are not `133;` is skipped to
+its terminator with `memchr2`.
+
+```sh
+cargo nextest run -p slopty-engine --release --run-ignored only \
+  -E 'test(fetch_lines_cost) | test(osc_scan_cost)' --no-capture
+```
+
+Logs: `target/logs/term-bench-before.log`, `target/logs/term-bench-after.log` (one run each).

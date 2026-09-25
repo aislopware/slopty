@@ -18,10 +18,10 @@ use std::sync::Arc;
 use gpui::{
     App, BorderStyle, BorrowAppContext as _, Bounds, Corners, DispatchPhase, Edges, Element,
     ElementId, ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, GlyphId,
-    Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseExitEvent,
-    MouseMoveEvent, PathBuilder, Pixels, Point, RenderImage, ShapedLine, SharedString, Size, Style,
-    TextAlign, TextRun, TransformationMatrix, UnderlineStyle, Window, fill, point, px, quad,
-    relative, size,
+    Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent,
+    MouseExitEvent, MouseMoveEvent, PathBuilder, Pixels, Point, RenderImage, ShapedLine,
+    SharedString, Size, Style, TextAlign, TextRun, TouchPhase, TransformationMatrix,
+    UnderlineStyle, Window, fill, point, px, quad, relative, size,
 };
 use rustc_hash::{FxHashMap, FxHasher};
 use slopty_grid::{Cell, CellWidth, CursorShape, Style as CellStyle, StyleFlags, Underline};
@@ -140,6 +140,9 @@ pub struct Prepared {
     blinking: bool,
     /// Images the program placed (kitty graphics), clipped to the grid.
     images: Vec<PreparedImage>,
+    /// The grid's place in the hit test: a touch that lands on an overlay above it (the find
+    /// bar, a menu) is not the grid's.
+    hitbox: Hitbox,
 }
 
 /// One placed image ready to paint.
@@ -1053,6 +1056,7 @@ impl Element for TerminalElement {
         if !cx.has_global::<Probe>() {
             cx.set_global(Probe::default());
         }
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         // Resolving the family walks every installed font: once per app for a theme's list
         // (the cache), remembered per view so a frame costs neither the walk nor the lookup.
         let known_family = self.view.read(cx).font_family();
@@ -1333,9 +1337,15 @@ impl Element for TerminalElement {
                         (col, shaped_word)
                     })
                     .collect();
+                // A link wrapped over rows is underlined on each, edge to edge in between.
                 let link = link
-                    .filter(|&(at, ..)| at == index)
-                    .map(|(_, start, end)| (start, end.min(grid_cols)));
+                    .filter(|((first, _), (last, _))| (*first..=*last).contains(&index))
+                    .map(|((first, start), (last, end))| {
+                        (
+                            if first == index { start } else { 0 },
+                            if last == index { end.min(grid_cols) } else { grid_cols },
+                        )
+                    });
                 // A prompt starts here: rule off the command above it, red when it failed.
                 // On the grid's top edge a neutral rule would lie a padding under the tile
                 // header's hairline and read as a double line; a failed command's red one still
@@ -1484,6 +1494,7 @@ impl Element for TerminalElement {
                     .unwrap_or_default(),
                 blinking,
                 images,
+                hitbox,
             }
         };
         #[cfg(test)]
@@ -1524,8 +1535,15 @@ impl Element for TerminalElement {
         // Touch: a long press over the text starts a selection (a plain drag pans the canvas).
         // Claiming it at `Started` keeps the rest of the gesture away from the canvas.
         let view = self.view.clone();
+        let hitbox = prepared.hitbox.clone();
         window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble {
+                return;
+            }
+            // Only a press that starts on the grid itself, not on what is drawn over it.
+            if event.phase == TouchPhase::Started
+                && !hitbox.is_hovered_at(event.start_position, window)
+            {
                 return;
             }
             let claimed = view.update(cx, |view, cx| view.long_press(event, window, cx));

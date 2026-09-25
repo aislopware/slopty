@@ -354,6 +354,13 @@ pub struct TerminalView {
     path_press: Option<(url::PathSpan, bool, gpui::Point<Pixels>)>,
     /// Asked by ⌘V for files on the clipboard.
     files_hook: Option<FilesHook>,
+    /// A ⌘C whose history is still arriving.
+    copying: Option<Copying>,
+    /// The buttons whose press went to the program (one bit each, as [`button_bit`]): their
+    /// release goes there too, and a drag with one of them down.
+    program_buttons: u8,
+    /// The cell the program was last told the pointer is on: a move within it is not news.
+    reported_cell: Option<(u16, u16)>,
     /// The selection is being dragged past the grid's top or bottom: lines to scroll each
     /// tick (positive = up into history) and the column the pointer holds.
     autoscroll: Option<(i64, u16)>,
@@ -459,6 +466,13 @@ impl TerminalView {
         theme: Theme,
         cx: &Context<Self>,
     ) -> Self {
+        // The images' textures live in every window's atlas until they are dropped from it.
+        cx.on_release(|view, cx| {
+            for (_, texture) in view.textures.drain() {
+                cx.drop_image(texture.image, None);
+            }
+        })
+        .detach();
         Self {
             session,
             state: TermState::new(size),
@@ -491,6 +505,9 @@ impl TerminalView {
             click_at: None,
             path_press: None,
             files_hook: None,
+            copying: None,
+            program_buttons: 0,
+            reported_cell: None,
             hover: None,
             cmd_held: false,
             shift_held: false,
@@ -753,19 +770,55 @@ impl TerminalView {
         self.selection
     }
 
-    /// The link to underline: the run under the pointer while ⌘ is held, as
-    /// `(line, first column, one past the last)`.
+    /// The link to underline: the run under the pointer while ⌘ is held, as its first cell
+    /// and one past its last, on the rows it wraps over.
     #[must_use]
-    pub fn link_highlight(&self) -> Option<(LineIndex, u16, u16)> {
+    pub fn link_highlight(&self) -> Option<((LineIndex, u16), (LineIndex, u16))> {
         if !self.cmd_held {
             return None;
         }
         let (col, row) = self.hover?;
-        let index = self.state.index_at_row(row);
-        let line = self.state.line(index)?;
-        url::link_at_col(line, col)
-            .map(|span| (index, span.start, span.end))
-            .or_else(|| url::path_at_col(line, col).map(|span| (index, span.start, span.end)))
+        let (first, under) = self.under(self.state.index_at_row(row), col)?;
+        let (start, end) = match &under {
+            Under::Link(span) => (span.start, span.end),
+            Under::Path(span) => (span.start, span.end),
+        };
+        let at = |(row, col): url::Cell| (first.offset(u64::try_from(row).unwrap_or(0)), col);
+        Some((at(start), at(end)))
+    }
+
+    /// The first and last line of the logical line `index` is part of: the rows soft-wrapped
+    /// onto one another, at most `reach` either side of it.
+    fn logical_line(&self, index: LineIndex, reach: u64) -> (LineIndex, LineIndex) {
+        let wraps = |index: LineIndex| {
+            self.state.line(index).is_some_and(|l| l.flags.contains(LineFlags::WRAPPED))
+        };
+        let mut first = index;
+        while index.0.saturating_sub(first.0) < reach
+            && wraps(first)
+            && let Some(above) = first.0.checked_sub(1).map(LineIndex)
+            && self.state.line(above).is_some()
+        {
+            first = above;
+        }
+        let mut last = index;
+        while last.0.saturating_sub(index.0) < reach && wraps(last.next()) {
+            last = last.next();
+        }
+        (first, last)
+    }
+
+    /// The link or the file path under `col` of line `index`, looked for over its logical
+    /// line (a link the terminal wrapped is one link), with the line's first row.
+    fn under(&self, index: LineIndex, col: u16) -> Option<(LineIndex, Under)> {
+        let (first, last) = self.logical_line(index, LINK_ROWS);
+        let rows: Vec<&slopty_grid::Line> =
+            (first.0..=last.0).map_while(|i| self.state.line(LineIndex(i))).collect();
+        let at = (usize::try_from(index.0.saturating_sub(first.0)).ok()?, col);
+        let under = url::link_at(&rows, at)
+            .map(Under::Link)
+            .or_else(|| url::path_at(&rows, at).map(Under::Path))?;
+        Some((first, under))
     }
 
     /// ⌘-click on a file path: open it in the shell's editor (`$EDITOR`, else `vi`, at the
@@ -793,15 +846,14 @@ impl TerminalView {
             return None;
         }
         let (col, row) = self.hover?;
-        let line = self.state.line(self.state.index_at_row(row))?;
-        if let Some(link) = url::link_at_col(line, col) {
-            return Some(link.url);
+        match self.under(self.state.index_at_row(row), col)?.1 {
+            Under::Link(link) => Some(link.url),
+            Under::Path(path) => {
+                Some(path.line.map_or_else(|| path.path.clone(), |n| format!("{}:{n}", path.path)))
+            }
         }
-        let path = url::path_at_col(line, col)?;
-        Some(path.line.map_or_else(|| path.path.clone(), |n| format!("{}:{n}", path.path)))
     }
 
-    /// The chip at the card's bottom-left naming the ⌘-hovered link's target.
     /// The strip that asks before a paste that could run: what it holds, Paste and Cancel.
     fn render_confirm(&self, cx: &Context<Self>) -> Option<gpui::Div> {
         let pending = self.pending.as_ref()?;
@@ -875,6 +927,7 @@ impl TerminalView {
         )
     }
 
+    /// The chip at the card's bottom-left naming the ⌘-hovered link's target.
     fn render_link_preview(&self) -> Option<gpui::Div> {
         let target = self.link_target()?;
         let theme = &self.theme;
@@ -992,12 +1045,14 @@ impl TerminalView {
         self.state.line(below)?.flags.contains(LineFlags::WRAPPED).then_some((below, 0))
     }
 
-    /// Select around `col` of line `index`: the word for two clicks, the row for more.
+    /// Select around `col` of line `index`: the word for two clicks, the line for more (the
+    /// whole of it, over the rows the terminal wrapped it onto).
     fn select_by_clicks(&mut self, index: LineIndex, col: u16, clicks: usize) {
         let (start, end) = if clicks == 2 {
             self.word_at((index, col))
         } else {
-            ((index, 0), (index, self.state.size().cols.saturating_sub(1)))
+            let (first, last) = self.logical_line(index, u64::MAX);
+            ((first, 0), (last, self.state.size().cols.saturating_sub(1)))
         };
         self.selection = Some(Selection::run(start, end));
     }
@@ -1064,37 +1119,67 @@ impl TerminalView {
         let selection = self.selection?;
         let (start, end) = selection.ordered();
         let cols = self.state.size().cols;
-        let continues = |index: LineIndex| {
-            !selection.block
-                && self
-                    .state
-                    .line(index)
-                    .is_some_and(|line| line.flags.contains(LineFlags::WRAPPED))
-        };
-        let mut out = String::new();
-        let mut index = start.0;
-        loop {
-            if index != start.0 && !continues(index) {
-                out.push('\n');
-            }
-            if let Some(range) = selection.columns(index, cols)
-                && let Some(line) = self.state.line(index)
-            {
-                let mut text = String::new();
-                for cell in line.cells.iter().skip(usize::from(range.start)).take(range.len()) {
-                    if cell.width.draws_text() {
-                        text.push_str(if cell.text.is_empty() { " " } else { cell.text.as_str() });
-                    }
-                }
-                let wraps_on = index < end.0 && continues(index.next());
-                out.push_str(if wraps_on { &text } else { text.trim_end() });
-            }
-            if index >= end.0 {
-                break;
-            }
-            index = index.next();
+        let mut text = SelectionText::new(selection);
+        for index in start.0.0..=end.0.0 {
+            text.push(LineIndex(index), self.state.line(LineIndex(index)), cols);
         }
-        Some(out)
+        Some(text.finish())
+    }
+
+    /// Whether the selection covers any text: what the block menu's Copy needs, without
+    /// building the text on every frame the menu is drawn.
+    fn selection_has_text(&self) -> bool {
+        let Some(selection) = self.selection else { return false };
+        let (start, end) = selection.ordered();
+        let cols = self.state.size().cols;
+        (start.0.0..=end.0.0).any(|index| {
+            let index = LineIndex(index);
+            selection.columns(index, cols).zip(self.state.line(index)).is_some_and(
+                |(range, line)| {
+                    line.cells
+                        .iter()
+                        .skip(usize::from(range.start))
+                        .take(range.len())
+                        .any(|cell| !cell.text.as_str().trim().is_empty())
+                },
+            )
+        })
+    }
+
+    /// Carry the copy in progress on over the lines that have arrived; once it has every
+    /// line, the text goes to the clipboard. Lines the worker no longer keeps are skipped, and
+    /// a line still missing is asked for (once: a request in flight is not repeated).
+    fn advance_copy(&mut self, cx: &Context<Self>) {
+        let Some(copy) = &mut self.copying else { return };
+        if self.state.epoch() != copy.epoch {
+            // The numbering changed under it: the lines it named are gone.
+            self.copying = None;
+            return;
+        }
+        let cols = self.state.size().cols;
+        let oldest = self.state.scrollback().oldest();
+        while copy.next <= copy.end {
+            if copy.next < oldest {
+                copy.next = oldest;
+                continue;
+            }
+            let Some(line) = self.state.line(copy.next) else { break };
+            copy.text.push(copy.next, Some(line), cols);
+            copy.next = copy.next.next();
+        }
+        if copy.next > copy.end {
+            let text = self.copying.take().map(|c| c.text.finish()).unwrap_or_default();
+            if !text.is_empty() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+            return;
+        }
+        let (next, rest) = (copy.next, copy.end.0.saturating_sub(copy.next.0).saturating_add(1));
+        for effect in self.state.request_lines(next, rest) {
+            if let Effect::Request(req) = effect {
+                self.send(req);
+            }
+        }
     }
 
     /// Drop the selection.
@@ -1104,11 +1189,19 @@ impl TerminalView {
         }
     }
 
-    /// ⌘C: the selection to the clipboard (nothing selected: nothing happens).
+    /// ⌘C: the selection to the clipboard (nothing selected: nothing happens). History the
+    /// client has not cached (a ⌘A over 50 000 lines) is fetched first, and the clipboard is
+    /// written once all of it is in.
     pub fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.selected_text().filter(|t| !t.is_empty()) {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-        }
+        let Some(selection) = self.selection else { return };
+        let (start, end) = selection.ordered();
+        self.copying = Some(Copying {
+            epoch: self.state.epoch(),
+            next: start.0,
+            end: end.0,
+            text: SelectionText::new(selection),
+        });
+        self.advance_copy(cx);
     }
 
     /// The menu's items, in order: what applies to the block under the click, then the
@@ -1241,7 +1334,6 @@ impl TerminalView {
         })
     }
 
-    /// The block menu, drawn late and anchored where the right click landed.
     /// The command whose block the viewport's top row is inside while every row of its
     /// prompt has scrolled above: what the sticky header shows. `None` on a prompt row, off
     /// a block, or for a block without a typed command. Read every frame, so only the block's
@@ -1286,6 +1378,7 @@ impl TerminalView {
             div()
                 .id("block-header")
                 .debug_selector(|| "block-header".to_owned())
+                .occlude()
                 .role(gpui::accesskit::Role::Button)
                 .aria_label(command.clone())
                 .absolute()
@@ -1319,11 +1412,12 @@ impl TerminalView {
         )
     }
 
+    /// The block menu, drawn late and anchored where the right click landed.
     fn render_block_menu(&self, menu: &BlockMenu, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = &theme.spacing;
-        let has_selection = self.selected_text().is_some_and(|t| !t.is_empty());
+        let has_selection = self.selection_has_text();
         let items = Self::block_menu_items(menu.block.as_ref(), has_selection);
         let list = div()
             .id("block-menu")
@@ -1365,9 +1459,11 @@ impl TerminalView {
                     },
                 ))
             }));
-        deferred(anchored().position(menu.at).snap_to_window_with_margin(px(8.0)).child(list))
-            .with_priority(1)
-            .into_any_element()
+        deferred(
+            anchored().position(menu.at).snap_to_window_with_margin(px(spacing.sm)).child(list),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 
     /// ⌘⇧C: the last command's output (shell integration marks it) to the clipboard.
@@ -1464,9 +1560,10 @@ impl TerminalView {
         let newest = LineIndex(total.saturating_sub(1).max(oldest.0));
         self.selection = Some(Selection::run((oldest, 0), (newest, size.cols.saturating_sub(1))));
         self.selecting = false;
-        for (start, count) in self.state.scrollback().missing(oldest, total) {
-            let count = u32::try_from(count).unwrap_or(u32::MAX);
-            self.send(TermRequest::FetchLines { start, count });
+        for effect in self.state.request_lines(oldest, total.saturating_sub(oldest.0)) {
+            if let Effect::Request(req) = effect {
+                self.send(req);
+            }
         }
         cx.notify();
     }
@@ -1898,6 +1995,7 @@ impl TerminalView {
             self.took.clear();
             self.took_epoch = self.state.epoch();
         }
+        self.advance_copy(cx);
         for effect in effects {
             match effect {
                 Effect::Request(TermRequest::Reached { marker }) => self.reached(marker, cx),
@@ -2177,10 +2275,20 @@ impl TerminalView {
 
     /// Ask the worker to make this client the driver: the PTY takes our size from now on.
     pub fn drive(&self) {
-        self.send(TermRequest::Drive { drive: true });
+        self.post(TermRequest::Drive { drive: true });
     }
 
-    fn send(&self, req: TermRequest) {
+    fn send(&mut self, req: TermRequest) {
+        // Bytes the predictor never saw as keys (a line-editing chord, a paste) move the
+        // cursor where its guesses cannot follow.
+        if matches!(req, TermRequest::Raw(_) | TermRequest::Paste(_)) {
+            self.predictor.interrupt();
+        }
+        self.post(req);
+    }
+
+    /// Queue `req` for the worker; [`Self::send`] for anything typed.
+    fn post(&self, req: TermRequest) {
         let msg = ClientMsg::Term { session: self.session, req };
         if let Err(e) = self.out.try_send(msg) {
             tracing::warn!(session = %self.session, error = %e, "outbound queue");
@@ -2430,19 +2538,19 @@ impl TerminalView {
         }
         if event.button == MouseButton::Left && (event.modifiers.platform || armed) {
             let index = self.state.index_at_row(row);
-            if let Some(span) = self.state.line(index).and_then(|line| url::link_at_col(line, col))
-            {
-                tracing::info!(url = %span.url, "open link");
-                cx.open_url(&span.url);
-            } else if let Some(span) =
-                self.state.line(index).and_then(|line| url::path_at_col(line, col))
-            {
-                self.path_press = Some((span, armed, event.position));
-            } else if armed {
-                // The phone has no right button: the armed tap on a bare row is its menu.
-                let block = self.state.command_block(index);
-                self.block_menu = Some(BlockMenu { block, at: event.position });
-                cx.notify();
+            match self.under(index, col).map(|(_, under)| under) {
+                Some(Under::Link(span)) => {
+                    tracing::info!(url = %span.url, "open link");
+                    cx.open_url(&span.url);
+                }
+                Some(Under::Path(span)) => self.path_press = Some((span, armed, event.position)),
+                None if armed => {
+                    // The phone has no right button: the armed tap on a bare row is its menu.
+                    let block = self.state.command_block(index);
+                    self.block_menu = Some(BlockMenu { block, at: event.position });
+                    cx.notify();
+                }
+                None => {}
             }
             return;
         }
@@ -2481,29 +2589,59 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        self.selection = None;
-        let button = match event.button {
-            MouseButton::Left => ProtoButton::Left,
-            MouseButton::Right => ProtoButton::Right,
-            MouseButton::Middle => ProtoButton::Middle,
-            MouseButton::Navigate(_) => return,
+        // What is left is the program's: the left or right button it asked for, the middle
+        // one when it asked (nobody else wants it).
+        let Some(button) = proto_button(event.button).filter(|_| program_wants_mouse) else {
+            return;
         };
-        let (px, py) = self.metrics.map_or((0, 0), |m| m.pixel_at(event.position));
-        self.send(TermRequest::Mouse(MouseEvent {
-            action: MouseAction::Press,
-            button: Some(button),
-            mods: keys::mods(event.modifiers),
-            col,
-            row,
-            px,
-            py,
-        }));
+        self.selection = None;
+        self.program_buttons |= button_bit(button);
+        self.reported_cell = Some((col, row));
+        self.report_mouse(MouseAction::Press, Some(button), event.position, event.modifiers);
+    }
+
+    /// Tell the program of a press, a release or a move at `position` (clamped to the grid:
+    /// a drag may leave it).
+    fn report_mouse(
+        &mut self,
+        action: MouseAction,
+        button: Option<ProtoButton>,
+        position: gpui::Point<Pixels>,
+        modifiers: gpui::Modifiers,
+    ) {
+        let Some(m) = self.metrics else { return };
+        let (col, row) = m.cell_at_clamped(position);
+        let (px, py) = m.pixel_at(position);
+        let mods = keys::mods(modifiers);
+        self.send(TermRequest::Mouse(MouseEvent { action, button, mods, col, row, px, py }));
+    }
+
+    /// The pointer moved with `button` down (or none): the program hears of it when it asked
+    /// for moves (1002 while a button of its is down, 1003 always) and the cell changed.
+    fn report_motion(&mut self, button: Option<ProtoButton>, event: &MouseMoveEvent) {
+        let modes = self.state.modes();
+        let wanted = if self.program_buttons != 0 {
+            modes.intersects(TermModes::MOUSE_DRAG | TermModes::MOUSE_MOTION)
+        } else {
+            modes.contains(TermModes::MOUSE_MOTION)
+        };
+        let Some(m) = self.metrics.filter(|_| wanted) else { return };
+        let cell = m.cell_at_clamped(event.position);
+        if self.reported_cell.replace(cell) == Some(cell) {
+            return;
+        }
+        self.report_mouse(MouseAction::Motion, button, event.position, event.modifiers);
     }
 
     /// The pointer moved over the grid: the hover for the ⌘ underline (a drag is followed by
     /// [`Self::drag_move`], and the way to the scrollbar by [`Self::pointer_near_scrollbar`],
     /// both of which the element registers on the window so they see the pointer leave).
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // A move with no button down, which a program tracking every move (1003) hears of;
+        // ⇧ keeps the pointer the human's.
+        if event.pressed_button.is_none() && self.program_buttons == 0 && !event.modifiers.shift {
+            self.report_motion(None, event);
+        }
         let hover = self.metrics.and_then(|m| m.cell_at(event.position));
         self.set_pointer(hover, event.modifiers, cx);
     }
@@ -2569,6 +2707,11 @@ impl TerminalView {
     /// viewport with it; a selection follows the pointer, and past the grid's top or bottom
     /// it keeps scrolling (`AUTOSCROLL_TICK`) at a pace set by how far past the pointer is.
     pub(super) fn drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        // A drag with a button whose press went to the program is the program's.
+        if self.program_buttons != 0 {
+            self.report_motion(event.pressed_button.and_then(proto_button), event);
+            return;
+        }
         if event.pressed_button == Some(MouseButton::Left)
             && let Some((_, _, from)) = &self.path_press
             && (event.position - *from).magnitude() >= f64::from(DRAG_OUT_SLOP)
@@ -2687,7 +2830,18 @@ impl TerminalView {
         self.scrollbar.opacity(now, reduced_motion())
     }
 
-    fn mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // The release of a button whose press the program heard goes to it too.
+        if let Some(button) = proto_button(event.button)
+            && self.program_buttons & button_bit(button) != 0
+        {
+            self.program_buttons &= !button_bit(button);
+            self.report_mouse(MouseAction::Release, Some(button), event.position, event.modifiers);
+            return;
+        }
+        if event.button != MouseButton::Left {
+            return;
+        }
         self.autoscroll = None;
         if let Some((span, armed, _)) = self.path_press.take() {
             self.open_path(&span, armed, cx);
@@ -2899,9 +3053,9 @@ impl TerminalView {
         let count: SharedString = if search.needle.is_empty() {
             SharedString::default()
         } else if search.invalid.is_some() {
-            "bad regex".into()
+            "Bad regex".into()
         } else if search.total == 0 {
-            "none".into()
+            "No matches".into()
         } else {
             let at = search.current.map_or(0, |c| c.saturating_add(1));
             let more = if search.total > SEARCH_MAX { "+" } else { "" };
@@ -2910,6 +3064,8 @@ impl TerminalView {
         div()
             .id("terminal-search")
             .debug_selector(|| "terminal-search".to_owned())
+            // Over the grid: the pointer and a touch there are the bar's, not the text's.
+            .occlude()
             .key_context("TerminalSearch")
             .absolute()
             .top(px(spacing.sm))
@@ -3026,10 +3182,15 @@ impl Render for TerminalView {
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
             .map(|el| {
                 let el = el.cursor(self.pointer());
                 let mut grid =
@@ -3047,6 +3208,98 @@ impl Render for TerminalView {
             .children(self.render_lines_below(cx))
             .children(self.block_menu.as_ref().map(|m| self.render_block_menu(m, cx)))
     }
+}
+
+/// The protocol's name for a GPUI button; `None` for the ones a terminal does not report.
+const fn proto_button(button: MouseButton) -> Option<ProtoButton> {
+    match button {
+        MouseButton::Left => Some(ProtoButton::Left),
+        MouseButton::Right => Some(ProtoButton::Right),
+        MouseButton::Middle => Some(ProtoButton::Middle),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+/// `button`'s bit in [`TerminalView::program_buttons`].
+const fn button_bit(button: ProtoButton) -> u8 {
+    match button {
+        ProtoButton::Left => 1,
+        ProtoButton::Right => 1 << 1,
+        ProtoButton::Middle => 1 << 2,
+        ProtoButton::Back => 1 << 3,
+        ProtoButton::Forward => 1 << 4,
+    }
+}
+
+/// Rows either side of the one under the pointer that a link is looked for over: a link wraps
+/// over a few rows, not a minified file's thousands.
+const LINK_ROWS: u64 = 8;
+
+/// What a ⌘-click would act on.
+enum Under {
+    /// A URL, or a program's OSC 8 link.
+    Link(url::LinkSpan),
+    /// A file path, maybe with a line.
+    Path(url::PathSpan),
+}
+
+/// A selection's text, built a line at a time in reading order: soft-wrapped rows join
+/// without a break, and a row's trailing blanks go unless the next row carries it on.
+struct SelectionText {
+    selection: Selection,
+    out: String,
+    /// The last row's text, untrimmed until the next row says whether it wraps onto it.
+    last: Option<String>,
+}
+
+impl SelectionText {
+    const fn new(selection: Selection) -> Self {
+        Self { selection, out: String::new(), last: None }
+    }
+
+    /// Line `index` of the selection, in order; `None` for a line not held (it adds nothing,
+    /// and breaks the line before it).
+    fn push(&mut self, index: LineIndex, line: Option<&slopty_grid::Line>, cols: u16) {
+        let continues =
+            !self.selection.block && line.is_some_and(|l| l.flags.contains(LineFlags::WRAPPED));
+        if let Some(last) = self.last.take() {
+            if continues {
+                self.out.push_str(&last);
+            } else {
+                self.out.push_str(last.trim_end());
+                self.out.push('\n');
+            }
+        }
+        let mut text = String::new();
+        if let Some(range) = self.selection.columns(index, cols)
+            && let Some(line) = line
+        {
+            for cell in line.cells.iter().skip(usize::from(range.start)).take(range.len()) {
+                if cell.width.draws_text() {
+                    text.push_str(if cell.text.is_empty() { " " } else { cell.text.as_str() });
+                }
+            }
+        }
+        self.last = Some(text);
+    }
+
+    fn finish(mut self) -> String {
+        if let Some(last) = self.last.take() {
+            self.out.push_str(last.trim_end());
+        }
+        self.out
+    }
+}
+
+/// A ⌘C waiting for history to arrive.
+struct Copying {
+    /// The numbering its lines are in.
+    epoch: Option<u32>,
+    /// The next line to add.
+    next: LineIndex,
+    /// The selection's last line.
+    end: LineIndex,
+    text: SelectionText,
 }
 
 /// The command-block menu a right click opened.
@@ -4797,27 +5050,38 @@ mod tests {
         cx.run_until_parked();
         let selection = view.read_with(cx, |v, _| v.selection.map(Selection::ordered));
         assert_eq!(selection, Some(((LineIndex(0), 0), (LineIndex(102), 9))));
-        assert_eq!(fetches(&mut rx), [(0, 100)], "the history not cached yet");
+        assert_eq!(
+            fetches(&mut rx),
+            [(3, 94)],
+            "the history not cached yet, less what the scrolls asked for already"
+        );
+        let lines = |start: u64, texts: &[String]| TermEvent::Lines {
+            start: LineIndex(start),
+            lines: texts.iter().map(|t| Line::from_text(t, 10, Style::DEFAULT)).collect(),
+        };
+        let numbered =
+            |range: std::ops::Range<u64>| range.map(|i| format!("l{i}")).collect::<Vec<_>>();
         view.update_in(cx, |view, _window, cx| {
-            view.apply(
-                TermEvent::Lines {
-                    start: LineIndex(98),
-                    lines: vec![
-                        Line::from_text("older", 10, Style::DEFAULT),
-                        Line::from_text("old", 10, Style::DEFAULT),
-                    ],
-                },
-                cx,
-            );
+            view.apply(lines(98, &["older".to_owned(), "old".to_owned()]), cx);
         });
+        let clipboard = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()))
+        };
         cx.simulate_keystrokes("cmd-c");
         cx.run_until_parked();
-        let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
-        assert_eq!(
-            text.as_deref().map(|t| t.trim_start_matches('\n')),
-            Some("older\nold\nhello wor\nsecond\nthird row"),
-            "what arrived, in order; lines never fetched are blank"
-        );
+        assert_eq!(clipboard(cx), None, "the copy waits for the history");
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(lines(0, &numbered(0..3)), cx);
+            view.apply(lines(3, &numbered(3..97)), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(clipboard(cx), None, "line 97 never came");
+        assert_eq!(fetches(&mut rx), [(97, 1)], "so it is asked for again");
+        view.update_in(cx, |view, _window, cx| view.apply(lines(97, &numbered(97..98)), cx));
+        cx.run_until_parked();
+        let mut all = numbered(0..98);
+        all.extend(["older", "old", "hello wor", "second", "third row"].map(str::to_owned));
+        assert_eq!(clipboard(cx), Some(all.join("\n")), "then all of it, in order");
     }
 
     /// A trackpad's fractions of a line add up to whole lines scrolled, and a gesture stays
@@ -5682,10 +5946,260 @@ mod tests {
         assert_eq!(renders(cx), before.saturating_add(1), "the cursor shown again");
 
         view.update(cx, |view, _cx| view.predictor.set_policy(Policy::Always));
+        // Guesses show once an echo has confirmed one.
+        echoed_at_the_prompt(&view, cx, "zab");
+        let before = renders(cx);
         cx.simulate_keystrokes("c");
         cx.run_until_parked();
-        assert_eq!(renders(cx), before.saturating_add(2), "the guess drawn at once");
+        assert_eq!(renders(cx), before.saturating_add(1), "the guess drawn at once");
         assert!(view.read_with(cx, |v, _| v.predictions().is_some()), "guesses on screen");
+    }
+
+    /// [`cursor_at_the_prompt`] with `typed` echoed after the prompt and every key sent so far
+    /// acknowledged: the predictor's guesses for them are confirmed.
+    fn echoed_at_the_prompt(view: &Entity<TerminalView>, cx: &mut VisualTestContext, typed: &str) {
+        let prompt = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
+        let col = 2_u16.saturating_add(u16::try_from(typed.len()).unwrap_or(0));
+        let cursor = Cursor { row: 2, col, visible: true, ..Cursor::default() };
+        view.update_in(cx, |view, _window, cx| {
+            let rows = ["2".to_owned(), String::new(), format!("$ {typed}")];
+            let TermEvent::Frame(mut frame) = screen_of(3, 10, &rows) else { panic!("a frame") };
+            frame.first_visible_line = LineIndex(6);
+            frame.total_lines = 9;
+            frame.cursor = cursor;
+            frame.input_ack = view.key_seq;
+            if let Some(last) = frame.updates.last_mut() {
+                last.line.mark = prompt;
+            }
+            view.apply(TermEvent::Frame(frame), cx);
+        });
+        cx.run_until_parked();
+    }
+
+    /// A line-editing chord goes as bytes the predictor never sees: the guesses go, and the
+    /// next key is not guessed where the cursor used to be.
+    #[gpui::test]
+    fn a_line_editing_chord_stops_the_guesses(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        cursor_at_the_prompt(&view, cx);
+        view.update(cx, |view, _cx| view.predictor.set_policy(Policy::Always));
+        cx.simulate_keystrokes("l s");
+        echoed_at_the_prompt(&view, cx, "ls");
+        cx.simulate_keystrokes("x");
+        assert_eq!(view.read_with(cx, |v, _| v.predictor.pending().len()), 1, "guessed");
+        cx.simulate_keystrokes("cmd-left");
+        assert!(view.read_with(cx, |v, _| v.predictor.pending().is_empty()), "dropped");
+        cx.simulate_keystrokes("y");
+        assert!(
+            view.read_with(cx, |v, _| v.predictor.pending().is_empty()),
+            "the cursor went to the line's start: nothing guessed until the worker says so"
+        );
+        drop(drain_words(&mut rx));
+    }
+
+    /// Every mouse action the program is told of, as (action, button, column, row).
+    fn mouse_reports(
+        rx: &mut mpsc::Receiver<ClientMsg>,
+    ) -> Vec<(MouseAction, Option<ProtoButton>, u16, u16)> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let ClientMsg::Term { req: TermRequest::Mouse(e), .. } = msg {
+                out.push((e.action, e.button, e.col, e.row));
+            }
+        }
+        out
+    }
+
+    /// A program that asked for the mouse hears a press, the drag after it when it asked for
+    /// that (1002), and the release, of the middle button too; each move once per cell. A
+    /// move with no button down only under 1003, and never with ⇧ held.
+    #[gpui::test]
+    fn a_program_hears_press_drag_and_release(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let frame = |modes| match history_frame(0, &["one", "two", "three"]) {
+            TermEvent::Frame(mut f) => {
+                f.modes = modes;
+                TermEvent::Frame(f)
+            }
+            other => other,
+        };
+        let drag = TermModes::MOUSE_TRACKING | TermModes::MOUSE_DRAG;
+        view.update_in(cx, |view, _window, cx| view.apply(frame(drag), cx));
+        cx.run_until_parked();
+        drop(mouse_reports(&mut rx));
+        let mods = gpui::Modifiers::default();
+        let (press, motion, release) =
+            (MouseAction::Press, MouseAction::Motion, MouseAction::Release);
+        for (button, proto) in
+            [(MouseButton::Middle, ProtoButton::Middle), (MouseButton::Left, ProtoButton::Left)]
+        {
+            cx.simulate_mouse_down(cell_center(&view, cx, 1.0, 0.0), button, mods);
+            cx.simulate_mouse_move(cell_center(&view, cx, 3.0, 1.0), button, mods);
+            let same_cell = cell_center(&view, cx, 3.0, 1.0) + point(px(1.0), px(1.0));
+            cx.simulate_mouse_move(same_cell, button, mods);
+            cx.simulate_mouse_up(cell_center(&view, cx, 3.0, 1.0), button, mods);
+            cx.run_until_parked();
+            assert_eq!(
+                mouse_reports(&mut rx),
+                [
+                    (press, Some(proto), 1, 0),
+                    (motion, Some(proto), 3, 1),
+                    (release, Some(proto), 3, 1)
+                ],
+                "{button:?}"
+            );
+        }
+        cx.simulate_mouse_move(cell_center(&view, cx, 2.0, 2.0), None, mods);
+        cx.run_until_parked();
+        assert_eq!(mouse_reports(&mut rx), [], "no button down: 1002 wants nothing");
+        assert_eq!(view.read_with(cx, |v, _| v.selection), None, "and nothing was selected");
+
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(frame(TermModes::MOUSE_TRACKING | TermModes::MOUSE_MOTION), cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_mouse_move(cell_center(&view, cx, 4.0, 2.0), None, mods);
+        cx.run_until_parked();
+        assert_eq!(mouse_reports(&mut rx), [(motion, None, 4, 2)], "1003: every move");
+        let shift = gpui::Modifiers { shift: true, ..gpui::Modifiers::default() };
+        cx.simulate_mouse_move(cell_center(&view, cx, 5.0, 2.0), None, shift);
+        cx.run_until_parked();
+        assert_eq!(mouse_reports(&mut rx), [], "\u{21e7} keeps the pointer the human's");
+
+        view.update_in(cx, |view, _window, cx| view.apply(frame(TermModes::empty()), cx));
+        cx.run_until_parked();
+        cx.simulate_mouse_down(cell_center(&view, cx, 1.0, 0.0), MouseButton::Middle, mods);
+        cx.simulate_mouse_up(cell_center(&view, cx, 1.0, 0.0), MouseButton::Middle, mods);
+        cx.run_until_parked();
+        assert_eq!(mouse_reports(&mut rx), [], "nobody asked for the middle button");
+    }
+
+    /// ⌘-hover and ⌘-click take a URL the terminal wrapped over two rows whole, and three
+    /// clicks select the whole wrapped line.
+    #[gpui::test]
+    fn a_wrapped_link_is_one_and_three_clicks_take_the_wrapped_line(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let mut f = history_frame(0, &["> https://", "a.b/cd", "next"]);
+        if let TermEvent::Frame(frame) = &mut f {
+            frame.updates[1].line.flags |= LineFlags::WRAPPED;
+        }
+        view.update_in(cx, |view, _window, cx| view.apply(f, cx));
+        cx.run_until_parked();
+        let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
+        view.update(cx, |view, cx| {
+            view.cmd_held = true;
+            view.set_pointer(Some((3, 1)), cmd, cx);
+        });
+        let (highlight, target) = view.read_with(cx, |v, _| (v.link_highlight(), v.link_target()));
+        assert_eq!(target.as_deref(), Some("https://a.b/cd"));
+        assert_eq!(highlight, Some(((LineIndex(0), 2), (LineIndex(1), 6))), "both rows");
+
+        let mods = gpui::Modifiers::default();
+        let at = cell_center(&view, cx, 4.0, 1.0);
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: mods,
+            click_count: 3,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(at, MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |v, _| v.selected_text()).as_deref(),
+            Some("> https://a.b/cd"),
+            "the line, not the row"
+        );
+    }
+
+    /// A long press on something drawn over the grid (the find bar) is not the grid's: it
+    /// selects nothing, and the canvas may have it; one on the text selects the word.
+    #[gpui::test]
+    fn a_long_press_over_an_overlay_is_not_the_grids(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(0, &["hello wor", "second", "third row"]), cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        let bar = cx.debug_bounds("terminal-search").expect("the find bar");
+        let press =
+            |at| LongPressEvent { phase: TouchPhase::Started, start_position: at, position: at };
+        cx.simulate_event(press(bar.center()));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| (v.selection, v.touch_selecting)), (None, false));
+        cx.simulate_event(press(cell_center(&view, cx, 1.0, 2.0)));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.selected_text()).as_deref(), Some("third"));
+    }
+
+    /// A root that holds a terminal and can let it go.
+    struct Holder(Option<Entity<TerminalView>>);
+
+    impl Render for Holder {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().children(self.0.clone())
+        }
+    }
+
+    /// A terminal that goes takes its images' textures out of the window's atlas.
+    #[gpui::test]
+    fn a_closed_terminal_drops_its_textures(cx: &mut TestAppContext) {
+        use slopty_proto::terminal::PixelRect;
+        let (tx, _rx) = mpsc::channel(64);
+        cx.update(gpui_kit::init);
+        let (holder, cx) = cx.add_window_view(|_window, cx| {
+            let size = TermSize { cols: 10, rows: 3, ..TermSize::default() };
+            Holder(Some(
+                cx.new(|cx| TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx)),
+            ))
+        });
+        cx.simulate_resize(size(px(400.0), px(300.0)));
+        let view = holder.read_with(cx, |h, _| h.0.clone()).expect("held");
+        let placement = Placement {
+            image: 7,
+            generation: 3,
+            col: 0,
+            row: 0,
+            cols: 1,
+            rows: 1,
+            x_offset: 0,
+            y_offset: 0,
+            width: 2,
+            height: 1,
+            source: PixelRect { x: 0, y: 0, width: 2, height: 1 },
+            z: 0,
+        };
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Image { id: 7, generation: 3, width: 2, height: 1, rgba: vec![255; 8] },
+                cx,
+            );
+            let TermEvent::Frame(mut frame) = history_frame(0, &["a", "b", "c"]) else {
+                panic!("a frame")
+            };
+            frame.images = vec![placement];
+            view.apply(TermEvent::Frame(frame), cx);
+        });
+        cx.run_until_parked();
+        let image = view
+            .update_in(cx, |view, window, _cx| view.placed_images(window))
+            .first()
+            .map(|p| Arc::clone(&p.image))
+            .expect("placed");
+        assert!(cx.update(|window, _cx| window.has_image_atlas_entry(&image)), "painted");
+        let gone = view.downgrade();
+        drop(view);
+        holder.update(cx, |holder, cx| {
+            holder.0 = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, _cx| window.refresh());
+        cx.run_until_parked();
+        assert!(gone.upgrade().is_none(), "released");
+        assert!(!cx.update(|window, _cx| window.has_image_atlas_entry(&image)), "dropped");
     }
 
     /// The meter reads a frame when the display shows it, not when it is painted: the

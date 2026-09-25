@@ -6,7 +6,7 @@
 //! the user scrolls, so scrolling is local and instant once a range is cached.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound;
+use std::ops::{Bound, Range};
 use std::sync::Arc;
 
 use crate::Line;
@@ -53,6 +53,9 @@ pub struct ScrollbackStats {
     pub total: u64,
 }
 
+/// No lines: what a trim that spares nothing spares.
+const NOTHING: Range<LineIndex> = LineIndex(0)..LineIndex(0);
+
 /// Sparse, bounded cache of lines by absolute index.
 #[derive(Clone, Debug)]
 pub struct Scrollback {
@@ -68,6 +71,11 @@ pub struct Scrollback {
     total: u64,
     /// The first index the worker can still serve (older lines were evicted worker-side).
     oldest: LineIndex,
+    /// The line the viewer looks at: past capacity, the lines farthest from it go first.
+    focus: LineIndex,
+    /// The screen's first row: it and every row after it are never evicted, so a screen that
+    /// moves down finds its rows here.
+    screen: LineIndex,
 }
 
 impl Scrollback {
@@ -80,7 +88,17 @@ impl Scrollback {
             capacity,
             total: 0,
             oldest: LineIndex(0),
+            // Until told otherwise the newest lines are looked at: the oldest go first.
+            focus: LineIndex(u64::MAX),
+            screen: LineIndex(u64::MAX),
         }
+    }
+
+    /// Where the viewer is: `top` is the first line it shows, `screen` the screen's first row.
+    /// Eviction keeps what is near `top` and never takes a screen row.
+    pub const fn set_view(&mut self, top: LineIndex, screen: LineIndex) {
+        self.focus = top;
+        self.screen = screen;
     }
 
     /// Record the worker's current line count and oldest retained index.
@@ -96,7 +114,7 @@ impl Scrollback {
         } else {
             self.oldest = oldest;
         }
-        self.trim();
+        self.trim(&NOTHING);
     }
 
     /// Total lines on the worker.
@@ -118,6 +136,22 @@ impl Scrollback {
 
     /// Insert or replace a line the caller already shares (with the screen, in practice).
     pub fn insert_shared(&mut self, index: LineIndex, line: Arc<Line>) {
+        self.put(index, line);
+        self.trim(&NOTHING);
+    }
+
+    /// Insert a contiguous batch starting at `start`. None of it is evicted to make room for
+    /// the rest: a fetch far from the view is still there when the batch is in.
+    pub fn insert_batch(&mut self, start: LineIndex, lines: impl IntoIterator<Item = Line>) {
+        let mut idx = start;
+        for line in lines {
+            self.put(idx, Arc::new(line));
+            idx = idx.next();
+        }
+        self.trim(&(start..idx));
+    }
+
+    fn put(&mut self, index: LineIndex, line: Arc<Line>) {
         if index < self.oldest {
             return;
         }
@@ -128,16 +162,6 @@ impl Scrollback {
         }
         self.lines.insert(index, line);
         self.total = self.total.max(index.0.saturating_add(1));
-        self.trim();
-    }
-
-    /// Insert a contiguous batch starting at `start`.
-    pub fn insert_batch(&mut self, start: LineIndex, lines: impl IntoIterator<Item = Line>) {
-        let mut idx = start;
-        for line in lines {
-            self.insert(idx, line);
-            idx = idx.next();
-        }
     }
 
     /// The start of the nearest cached prompt strictly above `index`.
@@ -196,12 +220,40 @@ impl Scrollback {
         ScrollbackStats { cached: self.lines.len(), capacity: self.capacity, total: self.total }
     }
 
-    /// Evict the oldest lines past capacity. Newest lines are the ones a user is most likely to
-    /// scroll to, so eviction is strictly oldest-first.
-    fn trim(&mut self) {
+    /// Evict past capacity, farthest from the view first, sparing `keep` and the screen.
+    /// Following the output that is the oldest line; scrolled up, it is whichever end of the
+    /// cache is farther from the top of the view, so lines fetched there stay.
+    fn trim(&mut self, keep: &Range<LineIndex>) {
         while self.lines.len() > self.capacity {
-            let Some((index, _)) = self.lines.pop_first() else { break };
-            self.prompts.remove(&index);
+            let first = self.lines.keys().next().copied();
+            let low = match first {
+                Some(index) if keep.contains(&index) => {
+                    self.lines.range(keep.end..).next().map(|(index, _)| *index)
+                }
+                other => other,
+            }
+            .filter(|index| *index < self.screen);
+            let last = self.lines.range(..self.screen).next_back().map(|(index, _)| *index);
+            let high = match last {
+                Some(index) if keep.contains(&index) => {
+                    self.lines.range(..keep.start).next_back().map(|(index, _)| *index)
+                }
+                other => other,
+            };
+            let distance = |index: LineIndex| index.0.abs_diff(self.focus.0);
+            let victim = match (low, high) {
+                (Some(low), Some(high)) => {
+                    if distance(high) > distance(low) {
+                        high
+                    } else {
+                        low
+                    }
+                }
+                (Some(only), None) | (None, Some(only)) => only,
+                (None, None) => break,
+            };
+            self.lines.remove(&victim);
+            self.prompts.remove(&victim);
         }
     }
 }
@@ -296,6 +348,29 @@ mod tests {
         sb.insert_batch(LineIndex(0), [l("a"), l("b"), l("c")]);
         assert_eq!(sb.missing(LineIndex(0), 3), vec![]);
         assert_eq!(sb.get(LineIndex(2)).map(Line::text).as_deref(), Some("c"));
+    }
+
+    /// Scrolled up, what is near the view stays and the far end goes; a batch fetched
+    /// anywhere survives its own insert; the screen's rows are never taken.
+    #[test]
+    fn eviction_is_farthest_from_the_view_and_spares_the_batch_and_the_screen() {
+        let mut sb = Scrollback::new(4);
+        sb.set_extent(LineIndex(0), 100);
+        sb.set_view(LineIndex(10), LineIndex(96));
+        for i in [8_u64, 9, 10, 11, 96, 97] {
+            sb.insert(LineIndex(i), l(&i.to_string()));
+        }
+        let held = |sb: &Scrollback| {
+            (0..100).filter(|&i| sb.get(LineIndex(i)).is_some()).collect::<Vec<u64>>()
+        };
+        assert_eq!(held(&sb), [10, 11, 96, 97], "the view's lines went last, the screen stays");
+        sb.insert_batch(LineIndex(50), [l("50"), l("51"), l("52")]);
+        assert_eq!(held(&sb), [50, 51, 52, 96, 97], "the batch is kept whole, over capacity");
+        sb.insert(LineIndex(12), l("12"));
+        assert_eq!(held(&sb), [12, 50, 96, 97], "then the farthest from the view goes");
+        sb.set_view(LineIndex(96), LineIndex(96));
+        sb.insert(LineIndex(98), l("98"));
+        assert_eq!(held(&sb), [50, 96, 97, 98], "following again: the oldest goes");
     }
 
     #[test]

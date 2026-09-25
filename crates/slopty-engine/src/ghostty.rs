@@ -7,7 +7,9 @@ use std::rc::Rc;
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
-use libghostty_vt::screen::{CellSemanticContent, GridRef, Screen as VtScreen, TrackedGridRef};
+use libghostty_vt::screen::{
+    CellContentTag, CellSemanticContent, GridRef, Screen as VtScreen, TrackedGridRef,
+};
 use libghostty_vt::style::{PaletteIndex, RgbColor};
 use libghostty_vt::terminal::{
     ClipboardLocation, ColorScheme, Mode, Point, PointCoordinate, PointSpace,
@@ -116,7 +118,15 @@ pub struct GhosttyEngine {
     /// The tail of the last chunk when it ended inside a possible alternate-screen switch
     /// (`ESC [ ? 10`), so a switch split across two reads is still seen before it completes.
     alt_prefix: Vec<u8>,
+    /// The buttons whose press the program was told of and whose release it was not, one bit
+    /// per button: a motion report under 1002 carries whether any is down.
     buttons_down: u8,
+    /// The pty's line discipline as the worker last read it (`None` until it does): whether
+    /// the kernel echoes what is typed, and whether input is line-buffered.
+    line_discipline: Option<LineDiscipline>,
+    /// The line discipline changed since the last frame: the next one goes out to say so,
+    /// though no cell moved.
+    discipline_changed: bool,
     scratch: String,
     /// Scratch for OSC 8 URIs (`ghostty_grid_ref_hyperlink_uri` wants a caller buffer).
     uri_buf: Vec<u8>,
@@ -286,6 +296,8 @@ impl GhosttyEngine {
             colours_touched: false,
             alt_prefix: Vec::new(),
             buttons_down: 0,
+            line_discipline: None,
+            discipline_changed: false,
             scratch: String::with_capacity(16),
             uri_buf: vec![0; 256],
             osc: osc133::Scanner::default(),
@@ -624,6 +636,12 @@ impl GhosttyEngine {
         let mut m = TermModes::empty();
         m.set(TermModes::ALT_SCREEN, self.on_alt);
         m.set(TermModes::MOUSE_TRACKING, t.is_mouse_tracking()?);
+        m.set(TermModes::MOUSE_DRAG, t.mode(Mode::BUTTON_MOUSE)?);
+        m.set(TermModes::MOUSE_MOTION, t.mode(Mode::ANY_MOUSE)?);
+        if let Some(discipline) = self.line_discipline {
+            m.set(TermModes::ECHO_OFF, !discipline.echo);
+            m.set(TermModes::CANONICAL, discipline.canonical);
+        }
         m.set(TermModes::ALT_SCROLL, t.mode(Mode::ALT_SCROLL)?);
         m.set(TermModes::BRACKETED_PASTE, t.mode(Mode::BRACKETED_PASTE)?);
         m.set(TermModes::FOCUS_EVENTS, t.mode(Mode::FOCUS_EVENT)?);
@@ -680,6 +698,7 @@ impl GhosttyEngine {
             && (graphics_gen == self.graphics_gen || hold.is_some())
             && !forcing
             && (hold.is_some() || self.remarked_rows.is_empty())
+            && !self.discipline_changed
         {
             return Ok(None);
         }
@@ -880,6 +899,7 @@ impl GhosttyEngine {
                     self.remarked_rows.clear();
                 }
                 snapshot.set_dirty(Dirty::Clean)?;
+                self.discipline_changed = false;
                 self.seq = self.seq.wrapping_add(1);
                 if take == Take::Everyone {
                     // Every viewer takes this frame as a resync, holding nothing yet.
@@ -1006,75 +1026,97 @@ impl GhosttyEngine {
         Ok(out)
     }
 
+    /// One row of the grid as a [`Line`]. What `FetchLines` serves, 4096 rows at a time: the
+    /// row's flags say which per-cell lookups can be skipped (no styling, no multi-codepoint
+    /// clusters, no links), a style is resolved once per run of cells sharing it, and a cell's
+    /// text never goes through a heap string (MEASUREMENTS.md "history fetch").
     fn read_line(&self, screen_y: u32, cols: u16) -> Result<Line, EngineError> {
         let mut line = Line::blank(cols);
+        if cols == 0 {
+            return Ok(line);
+        }
+        let row =
+            self.term.grid_ref(Point::Screen(PointCoordinate { x: 0, y: screen_y }))?.row()?;
+        let (styled, clusters, row_has_links) =
+            (row.is_styled()?, row.has_grapheme_cluster()?, row.has_hyperlink()?);
+        let mut prompt_row = row
+            .semantic_prompt()
+            .is_ok_and(|p| p != libghostty_vt::screen::RowSemanticPrompt::None);
         let mut chars = [char::MIN; 16];
         let mut first_semantic = None;
         let mut first_input = None;
-        let mut row_info = None;
-        let mut row_has_links = false;
         let mut links = LinkRuns::default();
-        let mut uri_buf = vec![0; 256];
+        let mut uri_buf = Vec::new();
+        // Style ids name styles within one page, and a row never spans two.
+        let mut last_style = None;
         for x in 0..cols {
             let gr = self.term.grid_ref(Point::Screen(PointCoordinate { x, y: screen_y }))?;
-            if row_info.is_none() {
-                let row = gr.row()?;
-                row_has_links = row.has_hyperlink()?;
-                row_info = Some(row);
-            }
             let rc = gr.cell()?;
-            let content = rc.semantic_content()?;
-            if first_semantic.is_none() {
-                first_semantic = Some(content);
-            }
-            if first_input.is_none() && matches!(content, CellSemanticContent::Input) {
-                first_input = Some(x);
+            // The input column matters on a prompt's rows only; an output row stops asking
+            // after its first cell.
+            if first_input.is_none() && (x == 0 || prompt_row) {
+                let content = rc.semantic_content()?;
+                if first_semantic.is_none() {
+                    first_semantic = Some(content);
+                    prompt_row |= matches!(content, CellSemanticContent::Prompt);
+                }
+                if matches!(content, CellSemanticContent::Input) {
+                    first_input = Some(x);
+                }
             }
             let width = convert::cell_width(rc.wide()?);
-            let style =
-                if rc.has_styling()? { convert::style(&gr.style()?) } else { Style::DEFAULT };
+            let style = if styled && rc.has_styling()? {
+                let id = rc.style_id()?;
+                match last_style {
+                    Some((last, style)) if last == id => style,
+                    _ => {
+                        let style = convert::style(&gr.style()?);
+                        last_style = Some((id, style));
+                        style
+                    }
+                }
+            } else {
+                Style::DEFAULT
+            };
             if row_has_links {
+                if uri_buf.is_empty() {
+                    uri_buf.resize(256, 0);
+                }
                 let uri =
                     if rc.has_hyperlink()? { hyperlink_uri(&gr, &mut uri_buf)? } else { None };
                 links.push(x, uri, width == CellWidth::SpacerTail);
             }
-            let text = if rc.has_text()? && width.draws_text() {
-                let n = match gr.graphemes(&mut chars) {
-                    Ok(n) => n,
+            // Zero for a blank cell and for one holding only a background colour.
+            let codepoint = if width.draws_text() { rc.codepoint()? } else { 0 };
+            let text = if codepoint == 0 {
+                CellText::EMPTY
+            } else if clusters && rc.content_tag()? == CellContentTag::CodepointGrapheme {
+                match gr.graphemes(&mut chars) {
+                    Ok(n) => cluster_text(chars.get(..n).unwrap_or_default()),
                     Err(libghostty_vt::Error::OutOfSpace { required }) => {
                         let mut big = vec![char::MIN; required];
                         let n = gr.graphemes(&mut big)?;
-                        let s: String = big.iter().take(n).collect();
-                        set_cell(
-                            &mut line,
-                            x,
-                            Cell { text: CellText::from_cluster(&s), style, width },
-                        );
-                        continue;
+                        cluster_text(big.get(..n).unwrap_or_default())
                     }
                     Err(e) => return Err(e.into()),
-                };
-                let s: String = chars.iter().take(n).collect();
-                CellText::from_cluster(&s)
+                }
             } else {
-                CellText::EMPTY
+                char::from_u32(codepoint).map_or(CellText::EMPTY, CellText::from_char)
             };
             set_cell(&mut line, x, Cell { text, style, width });
         }
         line.links = links.finish(cols);
-        if let Some(row) = row_info {
-            line.flags.set(LineFlags::WRAPPED, row.is_wrap_continuation()?);
-            let abs = self.base.saturating_add(u64::from(screen_y));
-            line.mark = first_semantic.map_or(SemanticMark::Unknown, |first| {
-                convert::semantic_mark(
-                    row.semantic_prompt().unwrap_or(libghostty_vt::screen::RowSemanticPrompt::None),
-                    first,
-                    self.prompt_starts.contains(&abs),
-                    exit_for(&self.exit_marks, &self.prompt_starts, abs),
-                    first_input,
-                )
-            });
-        }
+        line.flags.set(LineFlags::WRAPPED, row.is_wrap_continuation()?);
+        let abs = self.base.saturating_add(u64::from(screen_y));
+        line.mark = first_semantic.map_or(SemanticMark::Unknown, |first| {
+            convert::semantic_mark(
+                row.semantic_prompt().unwrap_or(libghostty_vt::screen::RowSemanticPrompt::None),
+                first,
+                self.prompt_starts.contains(&abs),
+                exit_for(&self.exit_marks, &self.prompt_starts, abs),
+                first_input,
+            )
+        });
         Ok(line)
     }
 }
@@ -1317,6 +1359,42 @@ fn hyperlink_uri<'b>(
     Ok((n > 0).then(|| buf.get(..n).unwrap_or_default()))
 }
 
+/// The pty's line discipline, as the worker reads it from `termios`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LineDiscipline {
+    /// `ECHO`: the kernel echoes what is typed. Off at a password prompt.
+    pub echo: bool,
+    /// `ICANON`: input is line-buffered (a shell's plain `read`, not a line editor).
+    pub canonical: bool,
+}
+
+/// `button`'s bit in the set of buttons held.
+const fn button_bit(button: slopty_proto::input::MouseButton) -> u8 {
+    use slopty_proto::input::MouseButton;
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Right => 1 << 1,
+        MouseButton::Middle => 1 << 2,
+        MouseButton::Back => 1 << 3,
+        MouseButton::Forward => 1 << 4,
+    }
+}
+
+/// A grapheme cluster's text, spelled on the stack: a cluster is almost always far shorter
+/// than the inline buffer, and only a longer one is collected into a string.
+fn cluster_text(chars: &[char]) -> CellText {
+    let mut buf = [0_u8; 64];
+    let mut len = 0_usize;
+    for &c in chars {
+        let Some(slot) = buf.get_mut(len..len.saturating_add(c.len_utf8())) else {
+            return CellText::from_cluster(&chars.iter().collect::<String>());
+        };
+        len = len.saturating_add(c.encode_utf8(slot).len());
+    }
+    std::str::from_utf8(buf.get(..len).unwrap_or_default())
+        .map_or(CellText::EMPTY, CellText::from_cluster)
+}
+
 fn set_cell(line: &mut Line, x: u16, cell: Cell) {
     if let Some(slot) = line.cells.get_mut(usize::from(x)) {
         *slot = cell;
@@ -1459,17 +1537,9 @@ fn install_render_hold(
     Ok(())
 }
 
-/// The colours a program asking with OSC 10/11/12 `?` or OSC 4 is told: the dark theme,
-/// the one every client starts in. Without defaults libghostty answers the first three with
-/// nothing, and a TUI that asks (neovim, helix, delta) waits its timeout or guesses.
-/// Whether a background reads as light: the perceived luma of `[r, g, b]` over half.
+/// Whether a background reads as light, as the theme judges its own colours.
 const fn is_light([r, g, b]: [u8; 3]) -> bool {
-    // ITU-R BT.601 weights, in thousandths (at most 255 000: no overflow).
-    let luma = (r as u32)
-        .wrapping_mul(299)
-        .wrapping_add((g as u32).wrapping_mul(587))
-        .wrapping_add((b as u32).wrapping_mul(114));
-    luma > 128 * 1000
+    slopty_theme::Rgb { r, g, b }.is_light()
 }
 
 /// The scheme a light or dark background is reported as.
@@ -1478,6 +1548,8 @@ const fn scheme(light: bool) -> ColorScheme {
 }
 
 /// Make `colors` libghostty's defaults: what OSC 10/11/12 `?` and OSC 4 queries answer.
+/// Without defaults libghostty answers the first three with nothing, and a TUI that asks
+/// (neovim, helix, delta) waits its timeout or guesses.
 fn set_colors(term: &mut Terminal<'_, '_>, colors: &TermColors) -> Result<(), EngineError> {
     let rgb = |[r, g, b]: [u8; 3]| RgbColor { r, g, b };
     term.set_default_fg_color(Some(rgb(colors.fg)))?
@@ -1656,7 +1728,9 @@ impl GhosttyEngine {
     ) -> Result<(LineIndex, Vec<Line>), EngineError> {
         let total = self.total_lines()?;
         let first = start.0.max(self.base);
-        let end = first.saturating_add(u64::from(count)).min(total);
+        // The range asked for, less what was dropped: a range wholly below the oldest line
+        // kept is empty, not the lines after it.
+        let end = start.0.saturating_add(u64::from(count)).min(total).max(first);
         let mut out = Vec::with_capacity(usize::try_from(end.saturating_sub(first)).unwrap_or(0));
         let cols = self.size.cols;
         let mut abs = first;
@@ -1785,11 +1859,14 @@ impl GhosttyEngine {
         match event.action {
             MouseAction::Press | MouseAction::Release => {
                 let press = event.action == MouseAction::Press;
-                self.buttons_down = if press {
-                    self.buttons_down.saturating_add(1)
+                // A second press of a held button, or the release of one never pressed, leaves
+                // the set as it was: a count would drift and report a drag after the release.
+                let bit = event.button.map_or(0, button_bit);
+                if press {
+                    self.buttons_down |= bit;
                 } else {
-                    self.buttons_down.saturating_sub(1)
-                };
+                    self.buttons_down &= !bit;
+                }
                 ev.set_action(if press { mouse::Action::Press } else { mouse::Action::Release });
                 ev.set_button(event.button.map(convert::mouse_button));
                 self.mouse_enc.set_any_button_pressed(self.buttons_down > 0);
@@ -1815,6 +1892,15 @@ impl GhosttyEngine {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// The pty's line discipline changed (the worker reads `termios` after each read): with
+    /// echo off, as at a password prompt, the frames say [`TermModes::ECHO_OFF`] and the
+    /// client guesses nothing. Takes effect on the next frame.
+    pub fn set_line_discipline(&mut self, discipline: LineDiscipline) {
+        if self.line_discipline.replace(discipline) != Some(discipline) {
+            self.discipline_changed = true;
         }
     }
 
@@ -2248,6 +2334,66 @@ mod tests {
         out.clear();
         e.encode_mouse(&at(MouseAction::Motion, None), &mut out).unwrap();
         assert!(out.is_empty(), "released: no motion report");
+    }
+
+    /// Every button's press, its drag and its release reach the program: the middle one too,
+    /// motion without a button only under 1003, and a second press or a stray release does not
+    /// leave a button counted as down.
+    #[test]
+    fn press_motion_and_release_follow_the_buttons_held() {
+        use slopty_proto::input::MouseButton;
+        let at = |action, button| MouseEvent {
+            action,
+            button,
+            mods: Mods::empty(),
+            col: 2,
+            row: 0,
+            px: 20,
+            py: 4,
+        };
+        let mut e = engine(10, 3);
+        e.write(b"\x1b[?1002h\x1b[?1006h");
+        let m = e.modes().unwrap();
+        assert!(m.contains(TermModes::MOUSE_DRAG) && !m.contains(TermModes::MOUSE_MOTION));
+        let mut out = Vec::new();
+        let middle = Some(MouseButton::Middle);
+        e.encode_mouse(&at(MouseAction::Press, middle), &mut out).unwrap();
+        e.encode_mouse(&at(MouseAction::Press, middle), &mut out).unwrap();
+        e.encode_mouse(&at(MouseAction::Motion, middle), &mut out).unwrap();
+        e.encode_mouse(&at(MouseAction::Release, middle), &mut out).unwrap();
+        assert_eq!(out, b"\x1b[<1;3;1M\x1b[<1;3;1M\x1b[<33;3;1M\x1b[<1;3;1m");
+        out.clear();
+        e.encode_mouse(&at(MouseAction::Motion, None), &mut out).unwrap();
+        assert!(out.is_empty(), "one release lets the button go, however many presses");
+        e.encode_mouse(&at(MouseAction::Release, Some(MouseButton::Right)), &mut out).unwrap();
+        out.clear();
+        e.encode_mouse(&at(MouseAction::Motion, None), &mut out).unwrap();
+        assert!(out.is_empty(), "a stray release holds nothing down");
+
+        e.write(b"\x1b[?1003h");
+        assert!(e.modes().unwrap().contains(TermModes::MOUSE_MOTION));
+        e.encode_mouse(&at(MouseAction::Motion, None), &mut out).unwrap();
+        assert_eq!(out, b"\x1b[<35;3;1M", "1003 reports a move with no button down");
+    }
+
+    /// The worker's reading of the pty's `termios` rides on the frames, and a change sends
+    /// one though no cell moved.
+    #[test]
+    fn the_line_discipline_is_in_the_modes_and_sends_a_frame() {
+        let mut e = engine(10, 3);
+        let _first = e.take_frame(0).unwrap();
+        let m = e.modes().unwrap();
+        assert!(!m.intersects(TermModes::ECHO_OFF | TermModes::CANONICAL), "unknown: neither");
+        assert!(e.take_frame(0).unwrap().is_none(), "nothing changed");
+        e.set_line_discipline(LineDiscipline { echo: false, canonical: true });
+        let frame = e.take_frame(0).unwrap().expect("the change is a frame");
+        assert!(frame.modes.contains(TermModes::ECHO_OFF | TermModes::CANONICAL));
+        assert!(!frame.modes.prediction_allowed());
+        e.set_line_discipline(LineDiscipline { echo: false, canonical: true });
+        assert!(e.take_frame(0).unwrap().is_none(), "the same reading is no change");
+        e.set_line_discipline(LineDiscipline { echo: true, canonical: false });
+        let frame = e.take_frame(0).unwrap().expect("echo back on");
+        assert!(frame.modes.prediction_allowed());
     }
 
     #[test]
@@ -2843,6 +2989,40 @@ mod scrollback_tests {
         e.write(out.as_bytes());
     }
 
+    /// A history row read back for `FetchLines` is the row the frame showed: styles, a
+    /// wide glyph and its tail, a multi-codepoint cluster, a link.
+    #[test]
+    fn a_fetched_row_is_the_row_the_frame_showed() {
+        let mut e = engine(1_000);
+        e.write(
+            "\x1b[1;31mred\x1b[0m \x1b[4mul\x1b[0m 字 e\u{301} 🇻🇳 \x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\\r\n"
+                .as_bytes(),
+        );
+        let shown = e.full_frame(0).unwrap();
+        let row = shown.updates.iter().find(|u| u.row == 0).expect("row 0").line.clone();
+        let index = shown.first_visible_line;
+        write_lines(&mut e, 100);
+        let (start, lines) = e.lines(index, 1).unwrap();
+        assert_eq!(start, index);
+        assert_eq!(lines, vec![row]);
+    }
+
+    /// A range wholly below the oldest line kept is empty, not the lines after it.
+    #[test]
+    fn a_range_below_the_oldest_line_is_empty() {
+        let mut e = engine(100);
+        // A little at a time, so the numbering follows the pruning rather than starting over.
+        for _ in 0..100 {
+            write_lines(&mut e, 20);
+        }
+        let oldest = LineIndex(e.base);
+        assert!(oldest.0 > 20);
+        let (_, lines) = e.lines(LineIndex(0), 10).unwrap();
+        assert!(lines.is_empty(), "{} lines", lines.len());
+        let (start, lines) = e.lines(LineIndex(oldest.0 - 5), 10).unwrap();
+        assert_eq!((start, lines.len()), (oldest, 5), "the part still kept");
+    }
+
     #[test]
     fn the_line_limit_governs_retained_history() {
         // The 10 KB byte default would keep about one page here.
@@ -2868,6 +3048,41 @@ mod scrollback_tests {
         assert_eq!(found.total, 11);
         assert_eq!(found.matches[0].line, LineIndex(7));
         assert_eq!(e.search("", false, 10).unwrap(), search::Found::default());
+    }
+
+    /// What serving one `FetchLines` chunk (4096 rows, the worker's cap) costs from the oldest
+    /// history, plain and coloured rows alike. `cargo nextest run -p slopty-engine --release
+    /// --run-ignored only fetch_lines_cost --no-capture` prints it (MEASUREMENTS.md "history
+    /// fetch").
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn fetch_lines_cost() {
+        use std::fmt::Write as _;
+        let mut e = engine(50_000);
+        let mut out = String::new();
+        for i in 0..50_000_u32 {
+            if i % 2 == 0 {
+                writeln!(out, "line {i} the quick brown fox jumps over the lazy dog\r")
+            } else {
+                writeln!(out, "\x1b[1;32mline {i}\x1b[0m the \x1b[4mquick\x1b[0m brown fox\r")
+            }
+            .expect("string");
+        }
+        e.write(out.as_bytes());
+        let oldest = LineIndex(e.base);
+        let mut us = Vec::new();
+        for _ in 0..10 {
+            let t = std::time::Instant::now();
+            let (_, lines) = e.lines(oldest, 4096).unwrap();
+            us.push(t.elapsed().as_micros());
+            assert_eq!(lines.len(), 4096);
+        }
+        us.sort_unstable();
+        eprintln!(
+            "fetch_lines_cost: 4096 rows x 80 cols from the oldest: p50 {} us max {} us",
+            us[us.len() / 2],
+            us[us.len() - 1],
+        );
     }
 
     /// What one search costs over a full history, as the text search does it today: format the

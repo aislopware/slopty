@@ -22,10 +22,16 @@ enum State {
     Ground,
     /// Saw `ESC`.
     Esc,
-    /// Saw `ESC ]`; collecting the payload.
+    /// Saw `ESC ]` and a payload that may still be `133;…`; collecting it.
     Osc {
-        payload: Vec<u8>,
+        payload: [u8; MAX_PAYLOAD],
+        len: usize,
         /// The last byte was `ESC` (an `ESC \` terminator in progress).
+        esc: bool,
+    },
+    /// Inside an OSC that is not a mark (a title, an OSC 8 link): skipped to its terminator.
+    Skip {
+        /// The last byte was `ESC`.
         esc: bool,
     },
 }
@@ -60,6 +66,7 @@ impl Scanner {
     /// ended. Bytes after it are not looked at (call again with them). `None` means the whole
     /// slice was consumed; a sequence still open at the end carries over to the next call.
     pub fn scan(&mut self, bytes: &[u8]) -> Option<Found> {
+        const PREFIX: &[u8] = b"133;";
         let mut i = 0;
         while let Some(&b) = bytes.get(i) {
             let at = i;
@@ -74,31 +81,49 @@ impl Scanner {
                 }
                 State::Esc => {
                     self.state = match b {
-                        b']' => State::Osc { payload: Vec::with_capacity(16), esc: false },
+                        b']' => State::Osc { payload: [0; MAX_PAYLOAD], len: 0, esc: false },
                         0x1b => State::Esc,
                         _ => State::Ground,
                     };
                     None
                 }
-                State::Osc { payload, esc } => {
-                    if *esc {
-                        if b == b'\\' {
-                            Some(mark(payload))
-                        } else {
-                            // Not a terminator: the OSC was cut short by another escape.
-                            self.state = if b == 0x1b { State::Esc } else { State::Ground };
-                            continue;
-                        }
-                    } else if b == 0x07 {
-                        Some(mark(payload))
+                State::Osc { esc: true, .. } | State::Skip { esc: true } if b != b'\\' => {
+                    // Not a terminator: the OSC was cut short, and this escape starts whatever
+                    // comes next.
+                    self.state = State::Esc;
+                    i = at;
+                    None
+                }
+                State::Osc { payload, len, esc } => {
+                    if *esc || b == 0x07 {
+                        Some(mark(payload.get(..*len).unwrap_or_default()))
                     } else if b == 0x1b {
                         *esc = true;
                         None
-                    } else if payload.len() >= MAX_PAYLOAD {
-                        self.state = State::Ground;
+                    } else if *len >= MAX_PAYLOAD || PREFIX.get(*len).is_some_and(|&p| p != b) {
+                        self.state = State::Skip { esc: false };
                         None
                     } else {
-                        payload.push(b);
+                        if let Some(slot) = payload.get_mut(*len) {
+                            *slot = b;
+                        }
+                        *len = len.saturating_add(1);
+                        None
+                    }
+                }
+                State::Skip { esc } => {
+                    if *esc || b == 0x07 {
+                        Some(None)
+                    } else {
+                        // Jump to the terminator's first byte: an OSC 8 target or a title is
+                        // not looked at byte by byte.
+                        let rest = bytes.get(at..).unwrap_or_default();
+                        let skip = memchr::memchr2(0x07, 0x1b, rest)?;
+                        i = at.saturating_add(skip);
+                        if rest.get(skip) == Some(&0x1b) {
+                            *esc = true;
+                            i = i.saturating_add(1);
+                        }
                         None
                     }
                 }
@@ -208,5 +233,30 @@ mod tests {
         assert_eq!(s.scan(b"\x1b]133;D;0\x07"), Some(end(10, Some(0))));
         let long = [b"\x1b]133;D;".as_slice(), &[b'9'; 64], b"\x07"].concat();
         assert_eq!(s.scan(&long), None, "overlong payloads are dropped");
+    }
+
+    /// What scanning costs per OSC that is not a mark (titles, OSC 8 links: a `ls
+    /// --hyperlink` or a prompt theme writes one per name). `cargo nextest run -p
+    /// slopty-engine --release --run-ignored only osc_scan_cost --no-capture` prints it
+    /// (MEASUREMENTS.md "OSC 133 scan").
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn osc_scan_cost() {
+        let unit = b"\x1b]8;;file:///Users/me/src/slopty/crates/a.rs\x1b\\a.rs\x1b]8;;\x1b\\  \x1b]0;t\x07";
+        let buf: Vec<u8> = unit.iter().copied().cycle().take(unit.len() * 10_000).collect();
+        let oscs = 30_000_u32;
+        let mut ns = Vec::new();
+        for _ in 0..20 {
+            let mut s = Scanner::default();
+            let t = std::time::Instant::now();
+            assert_eq!(s.scan(std::hint::black_box(&buf)), None);
+            ns.push(t.elapsed().as_nanos() / u128::from(oscs));
+        }
+        ns.sort_unstable();
+        eprintln!(
+            "osc_scan_cost: p50 {} ns per OSC, max {} ns",
+            ns[ns.len() / 2],
+            ns[ns.len() - 1]
+        );
     }
 }

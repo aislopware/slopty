@@ -30,10 +30,17 @@ bitflags! {
         const CURSOR_HIDDEN = 1 << 7;
         /// DEC 1: application cursor keys.
         const APP_CURSOR_KEYS = 1 << 8;
-        /// A password-style prompt is active (echo off); never predict here.
+        /// The pty does not echo what is typed (`termios` `ECHO` off, as at a password
+        /// prompt); never predict here.
         const ECHO_OFF = 1 << 9;
-        /// Line-buffered canonical input (a shell prompt); prediction is plausible.
+        /// The pty's input is line-buffered (`termios` `ICANON`): a plain `read`, not a line
+        /// editor.
         const CANONICAL = 1 << 10;
+        /// DEC 1002: the program wants the pointer's moves while a button it was told of is
+        /// down (a drag).
+        const MOUSE_DRAG = 1 << 11;
+        /// DEC 1003: the program wants every move of the pointer, buttons down or not.
+        const MOUSE_MOTION = 1 << 12;
     }
 }
 
@@ -44,13 +51,19 @@ impl TermModes {
         !self.contains(Self::ALT_SCREEN) && !self.contains(Self::MOUSE_TRACKING)
     }
 
-    /// Whether local echo prediction is allowed at all in these modes.
+    /// Whether typing plausibly echoes at the cursor, so local echo may be predicted: not
+    /// on the alternate screen (a full-screen program draws what it likes), not with echo off,
+    /// not with the cursor hidden, not while a program owns the mouse. The kitty keyboard
+    /// protocol does not count against it: it changes how a key is encoded, not whether the
+    /// shell echoes it (fish turns it on at every prompt).
     #[must_use]
     pub const fn prediction_allowed(self) -> bool {
-        !self.contains(Self::ALT_SCREEN)
-            && !self.contains(Self::ECHO_OFF)
-            && !self.contains(Self::MOUSE_TRACKING)
-            && !self.contains(Self::KITTY_KEYBOARD)
+        !self.intersects(
+            Self::ALT_SCREEN
+                .union(Self::ECHO_OFF)
+                .union(Self::CURSOR_HIDDEN)
+                .union(Self::MOUSE_TRACKING),
+        )
     }
 }
 
@@ -67,8 +80,16 @@ mod tests {
 
     #[test]
     fn prediction_gates() {
+        assert!(TermModes::empty().prediction_allowed());
         assert!(TermModes::CANONICAL.prediction_allowed());
-        assert!(!(TermModes::CANONICAL | TermModes::ECHO_OFF).prediction_allowed());
-        assert!(!TermModes::ALT_SCREEN.prediction_allowed());
+        assert!(TermModes::KITTY_KEYBOARD.prediction_allowed(), "fish's prompt");
+        for off in [
+            TermModes::ECHO_OFF,
+            TermModes::ALT_SCREEN,
+            TermModes::CURSOR_HIDDEN,
+            TermModes::MOUSE_TRACKING,
+        ] {
+            assert!(!(TermModes::CANONICAL | off).prediction_allowed(), "{off:?}");
+        }
     }
 }

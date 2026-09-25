@@ -11,6 +11,14 @@
 //! Visibility is adaptive: predictions are only drawn when the link is slow enough for them to
 //! matter and the recent track record is clean, so a LAN session never sees a wrong glyph.
 //!
+//! Any key that is not a plain printable one (Enter, an arrow, a control chord, ⌥ as Alt) moves
+//! the cursor where the predictor cannot follow: the guesses are dropped and none is made until
+//! the worker acknowledges that key, so the next one lands where the cursor really is. Input the
+//! predictor never sees (raw bytes, a paste) does the same through [`Predictor::interrupt`]. And
+//! after any of them the guesses are *tentative*, as in mosh: made and checked but not drawn
+//! until one is confirmed by the worker's echo, so the prompt Enter led to shows nothing typed
+//! unless it echoes (a password prompt never does).
+//!
 //! The predictor is pure: no clocks, no I/O. Callers pass `now`.
 
 #![forbid(unsafe_code)]
@@ -89,6 +97,15 @@ pub struct Predictor {
     total_misses: u64,
     muted_until: Option<Instant>,
     epoch: Option<u32>,
+    /// The highest key the worker has acknowledged.
+    acked: u64,
+    /// A key the predictor could not follow: nothing is guessed until the worker acknowledges
+    /// it, when the frames show where the cursor went.
+    barrier: Option<u64>,
+    /// Input the predictor did not see went out: the next key is a barrier, whatever it is.
+    interrupted: bool,
+    /// Guesses are made and checked but not drawn until one is confirmed.
+    tentative: bool,
 }
 
 impl Default for Predictor {
@@ -112,6 +129,12 @@ impl Predictor {
             total_misses: 0,
             muted_until: None,
             epoch: None,
+            acked: 0,
+            barrier: None,
+            interrupted: false,
+            // What the screen is waiting for when the view opens is unknown: it may be a
+            // password prompt.
+            tentative: true,
         }
     }
 
@@ -144,6 +167,9 @@ impl Predictor {
     /// confirmed.
     #[must_use]
     pub fn visible(&self, now: Instant) -> bool {
+        if self.tentative {
+            return false;
+        }
         let Some(oldest) = self.pending.front() else { return false };
         if now.saturating_duration_since(oldest.at) > STALE {
             return false;
@@ -188,17 +214,28 @@ impl Predictor {
         if key.action == KeyAction::Release {
             return None;
         }
-        // Erasing: a backspace takes back our own last prediction, and nothing more.
-        if key.code == KeyCode::Backspace && key.mods.is_empty() {
+        if std::mem::take(&mut self.interrupted) {
+            self.hold_until(key.seq);
+            return None;
+        }
+        // Erasing: a backspace takes back our own last prediction, and nothing more. With no
+        // guess to take back it erases the shell's text, which is not ours to follow.
+        if key.code == KeyCode::Backspace && key.mods.is_empty() && !self.pending.is_empty() {
             let _taken = self.pending.pop_back();
             let _uncovered = self.covered.pop_back();
             return None;
         }
-        if !safe_modes(modes) || !cursor.visible {
+        let Some(text) = printable(key) else {
+            self.hold_until(key.seq);
+            return None;
+        };
+        if self.barrier.is_some_and(|barrier| self.acked < barrier) {
+            return None;
+        }
+        if !modes.prediction_allowed() || !cursor.visible {
             self.flush();
             return None;
         }
-        let text = printable(key)?;
         if self.pending.len() >= MAX_PENDING {
             return None;
         }
@@ -234,6 +271,7 @@ impl Predictor {
         now: Instant,
     ) -> Reconciled {
         let mut out = Reconciled::default();
+        self.acked = self.acked.max(input_ack);
         let cursor = screen.cursor();
         self.cursor_line =
             screen.lines().get(usize::from(cursor.row)).map(|line| (cursor.row, Arc::clone(line)));
@@ -254,6 +292,7 @@ impl Predictor {
             if cell.is_some_and(|text| text.as_str() == front.text) {
                 let _confirmed = self.pending.pop_front();
                 let _uncovered = self.covered.pop_front();
+                self.tentative = false;
                 out.hits = out.hits.saturating_add(1);
                 self.hits = self.hits.saturating_add(1);
                 self.total_hits = self.total_hits.saturating_add(1);
@@ -280,6 +319,22 @@ impl Predictor {
         self.covered.clear();
     }
 
+    /// Input went out that the predictor does not see (raw bytes, a paste): the guesses are
+    /// dropped, the next key waits to be acknowledged before any other is guessed, and what
+    /// follows is tentative.
+    pub fn interrupt(&mut self) {
+        self.flush();
+        self.interrupted = true;
+    }
+
+    /// Key `seq` moved the cursor where no guess can follow: nothing is guessed until the
+    /// worker acknowledges it, and what follows is tentative.
+    fn hold_until(&mut self, seq: u64) {
+        self.flush();
+        self.barrier = Some(seq);
+        self.tentative = true;
+    }
+
     fn miss(&mut self, now: Instant) {
         self.total_misses = self.total_misses.saturating_add(1);
         self.hits = 0;
@@ -288,17 +343,10 @@ impl Predictor {
     }
 }
 
-/// Modes in which typing echoes at the cursor.
-const fn safe_modes(modes: TermModes) -> bool {
-    !modes.contains(TermModes::ALT_SCREEN)
-        && !modes.contains(TermModes::ECHO_OFF)
-        && !modes.contains(TermModes::CURSOR_HIDDEN)
-        && !modes.contains(TermModes::MOUSE_TRACKING)
-}
-
-/// The text a key would echo, if it is a plain printable character.
+/// The text a key would echo, if it is a plain printable character. A ⌥ that is Alt makes
+/// the key a chord (`ESC b` is a word back), whatever the text beside it.
 fn printable(key: &KeyEvent) -> Option<String> {
-    if key.mods.intersects(Mods::CTRL | Mods::SUPER) {
+    if key.mods.intersects(Mods::CTRL | Mods::SUPER) || key.option_as_alt {
         return None;
     }
     let text = key.text.as_deref()?;
@@ -339,6 +387,18 @@ mod tests {
         Cursor { row, col, shape: CursorShape::Block, visible: true, blink: false }
     }
 
+    /// A key with no text: Enter, an arrow.
+    fn special(seq: u64, code: KeyCode) -> KeyEvent {
+        KeyEvent { code, text: None, unshifted: None, ..key(seq, "") }
+    }
+
+    /// Get past the first tentative stretch: a guess at the bottom row, echoed. Leaves the
+    /// predictor at seq 1 acknowledged.
+    fn confirmed(p: &mut Predictor, now: Instant) {
+        let _guess = p.on_key(&key(1, "w"), cursor(23, 0), 80, TermModes::empty(), now);
+        assert_eq!(p.on_frame(&screen_with(23, "w"), 1, 0, now).hits, 1);
+    }
+
     fn screen_with(row: u16, text: &str) -> Screen {
         let mut screen = Screen::new(80, 24);
         let mut line = Line::blank(80);
@@ -355,18 +415,24 @@ mod tests {
     fn predicts_printables_and_advances_cursor() {
         let mut p = Predictor::new(Policy::Always);
         let now = Instant::now();
-        let a = p.on_key(&key(1, "a"), cursor(3, 5), 80, TermModes::CANONICAL, now).unwrap();
+        confirmed(&mut p, now);
+        let a = p.on_key(&key(2, "a"), cursor(3, 5), 80, TermModes::CANONICAL, now).unwrap();
         assert_eq!((a.row, a.col, a.text.as_str()), (3, 5, "a"));
-        let b = p.on_key(&key(2, "b"), cursor(3, 5), 80, TermModes::CANONICAL, now).unwrap();
+        let b = p.on_key(&key(3, "b"), cursor(3, 5), 80, TermModes::CANONICAL, now).unwrap();
         assert_eq!((b.row, b.col), (3, 6));
         assert_eq!(p.cursor(cursor(3, 5)).col, 7);
         assert!(p.visible(now));
         // Backspace retracts the last guess only.
-        let mut bs = key(3, "");
-        bs.code = KeyCode::Backspace;
-        bs.text = None;
+        let bs = special(4, KeyCode::Backspace);
         assert!(p.on_key(&bs, cursor(3, 5), 80, TermModes::CANONICAL, now).is_none());
         assert_eq!(p.pending().len(), 1);
+        assert!(p.visible(now), "still shown");
+        // With no guess left to take back it erases the shell's text: nothing follows it.
+        let _taken =
+            p.on_key(&special(5, KeyCode::Backspace), cursor(3, 5), 80, TermModes::CANONICAL, now);
+        let bs = special(6, KeyCode::Backspace);
+        assert!(p.on_key(&bs, cursor(3, 5), 80, TermModes::CANONICAL, now).is_none());
+        assert!(p.on_key(&key(7, "c"), cursor(3, 5), 80, TermModes::CANONICAL, now).is_none());
     }
 
     #[test]
@@ -404,11 +470,15 @@ mod tests {
         assert!(p.on_key(&key(1, "a"), cursor(0, 0), 80, TermModes::ALT_SCREEN, now).is_none());
         assert!(p.on_key(&key(2, "a"), cursor(0, 0), 80, TermModes::ECHO_OFF, now).is_none());
         assert!(p.on_key(&key(3, "a"), cursor(0, 79), 80, TermModes::empty(), now).is_none());
-        let mut ctrl = key(4, "c");
+        let hidden = Cursor { visible: false, ..cursor(0, 0) };
+        assert!(p.on_key(&key(4, "a"), hidden, 80, TermModes::empty(), now).is_none());
+        assert!(p.on_key(&key(5, "x"), cursor(0, 0), 80, TermModes::empty(), now).is_some());
+        let mut ctrl = key(6, "c");
         ctrl.mods = Mods::CTRL;
         assert!(p.on_key(&ctrl, cursor(0, 0), 80, TermModes::empty(), now).is_none());
-        assert!(p.on_key(&key(5, "漢"), cursor(0, 0), 80, TermModes::empty(), now).is_none());
-        assert!(p.on_key(&key(6, "x"), cursor(0, 0), 80, TermModes::empty(), now).is_some());
+        assert!(p.pending().is_empty(), "a chord drops the guesses");
+        assert!(p.on_key(&key(7, "漢"), cursor(0, 0), 80, TermModes::empty(), now).is_none());
+        assert!(p.on_key(&key(8, "x"), cursor(0, 0), 80, TermModes::empty(), now).is_none());
         // Epoch change wipes guesses.
         let _r = p.on_frame(&Screen::new(80, 24), 0, 1, now);
         let r = p.on_frame(&Screen::new(80, 24), 0, 2, now);
@@ -420,7 +490,8 @@ mod tests {
     fn a_stale_guess_is_hidden_without_a_frame() {
         let mut p = Predictor::new(Policy::Always);
         let t0 = Instant::now();
-        let _a = p.on_key(&key(1, "a"), cursor(0, 0), 80, TermModes::empty(), t0);
+        confirmed(&mut p, t0);
+        let _a = p.on_key(&key(2, "a"), cursor(0, 0), 80, TermModes::empty(), t0);
         assert!(p.visible(t0 + STALE), "at the limit it still shows");
         assert!(!p.visible(t0 + STALE + Duration::from_millis(1)), "past it, hidden");
     }
@@ -471,6 +542,90 @@ mod tests {
             p.on_frame(&screen_with(0, "$ abcX"), 5, 0, quiet + STALE + Duration::from_millis(1));
         assert_eq!(r.misses, 1, "an echo that never comes is a miss once stale");
         assert_eq!(p.stats(), (3, 2));
+    }
+
+    /// After Enter the next prompt may not echo (a password): what is typed there is guessed
+    /// and checked, never drawn, however long it goes on; once a guess is echoed again the
+    /// guesses show.
+    #[test]
+    fn a_prompt_after_enter_shows_nothing_typed_until_it_echoes() {
+        let mut p = Predictor::new(Policy::Always);
+        let t0 = Instant::now();
+        confirmed(&mut p, t0);
+        assert!(p.on_key(&key(2, "a"), cursor(0, 0), 80, TermModes::CANONICAL, t0).is_some());
+        assert!(p.visible(t0));
+        assert!(
+            p.on_key(&special(3, KeyCode::Enter), cursor(0, 1), 80, TermModes::CANONICAL, t0)
+                .is_none()
+        );
+        assert!(p.pending().is_empty() && !p.visible(t0), "Enter drops and hides");
+        assert!(
+            p.on_key(&key(4, "s"), cursor(0, 1), 80, TermModes::CANONICAL, t0).is_none(),
+            "Enter not acknowledged yet: the cursor is somewhere unknown"
+        );
+        let mut asked = screen_with(1, "Password:");
+        asked.cursor_mut().row = 1;
+        asked.cursor_mut().col = 9;
+        let _r = p.on_frame(&asked, 4, 0, t0);
+        for (seq, text) in (5..).zip(["h", "u", "n", "t", "e", "r", "2"]) {
+            let at = p.cursor(asked.cursor());
+            assert!(p.on_key(&key(seq, text), at, 80, TermModes::CANONICAL, t0).is_some());
+            let _r = p.on_frame(&asked, seq, 0, t0);
+            assert!(!p.visible(t0), "{text}: guessed, never drawn");
+        }
+        let later = t0 + STALE + Duration::from_millis(1);
+        let r = p.on_frame(&asked, 11, 0, later);
+        assert_eq!(r.misses, 1, "no echo came: a miss");
+        assert!(!p.visible(later));
+
+        let mut prompt = screen_with(2, "$ ");
+        prompt.cursor_mut().row = 2;
+        prompt.cursor_mut().col = 2;
+        let _r = p.on_frame(&prompt, 11, 0, later);
+        let _l = p.on_key(&key(12, "l"), cursor(2, 2), 80, TermModes::CANONICAL, later);
+        assert!(!p.visible(later), "still tentative");
+        let r = p.on_frame(&screen_with(2, "$ l"), 12, 0, later);
+        assert_eq!(r.hits, 1);
+        let quiet = later + MUTE;
+        let _s = p.on_key(&key(13, "s"), cursor(2, 3), 80, TermModes::CANONICAL, quiet);
+        assert!(p.visible(quiet), "an echo confirmed: shown again");
+    }
+
+    /// An arrow, a chord, ⌥ as Alt, or input the predictor never saw moves the cursor out of
+    /// its sight: the guesses go, and the next ones wait until the worker has that key, then
+    /// land where the frame put the cursor.
+    #[test]
+    fn a_key_it_cannot_follow_pauses_guessing_until_acknowledged() {
+        let mut p = Predictor::new(Policy::Always);
+        let t0 = Instant::now();
+        confirmed(&mut p, t0);
+        let modes = TermModes::CANONICAL;
+        let _a = p.on_key(&key(2, "a"), cursor(0, 5), 80, modes, t0);
+        assert!(p.on_key(&special(3, KeyCode::ArrowLeft), cursor(0, 5), 80, modes, t0).is_none());
+        assert!(p.pending().is_empty());
+        assert!(p.on_key(&key(4, "b"), cursor(0, 6), 80, modes, t0).is_none(), "waits for 3");
+        let mut moved = screen_with(0, "a");
+        moved.cursor_mut().col = 3;
+        let _r = p.on_frame(&moved, 3, 0, t0);
+        let c = p.on_key(&key(5, "c"), moved.cursor(), 80, modes, t0).expect("guessed again");
+        assert_eq!(c.col, 3, "where the frame put the cursor");
+
+        let mut word_back = key(6, "b");
+        word_back.mods = Mods::ALT;
+        word_back.option_as_alt = true;
+        assert!(p.on_key(&word_back, cursor(0, 4), 80, modes, t0).is_none(), "ESC b, not b");
+        assert!(p.pending().is_empty());
+        let _r = p.on_frame(&moved, 6, 0, t0);
+        let mut at = key(7, "@");
+        at.mods = Mods::ALT;
+        assert!(p.on_key(&at, cursor(0, 3), 80, modes, t0).is_some(), "⌥ typing a symbol");
+
+        p.interrupt();
+        assert!(p.pending().is_empty());
+        assert!(p.on_key(&key(8, "d"), cursor(0, 3), 80, modes, t0).is_none(), "after raw bytes");
+        assert!(p.on_key(&key(9, "e"), cursor(0, 3), 80, modes, t0).is_none(), "8 not acked");
+        let _r = p.on_frame(&moved, 8, 0, t0);
+        assert!(p.on_key(&key(10, "f"), cursor(0, 3), 80, modes, t0).is_some());
     }
 
     #[test]

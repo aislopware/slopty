@@ -1502,3 +1502,68 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `scrolled_up_the_pill_counts_the_lines_below_and_goes_back_to_live`,
   `the_lines_below_give_way_to_the_tiles_pill`; workspace
   `the_exited_pill_takes_the_place_of_the_lines_below`.
+
+- ✅ **Local echo waits for an echo after any key it cannot follow** (2026-09-26). The
+  predictor's only guard against drawing a password was `TermModes::ECHO_OFF`, which nothing
+  set, and a key it did not guess at (an arrow, Enter, a line-editing chord sent as bytes, ⌥ as
+  Alt) left its cursor where the key had moved away from. Ruling, after mosh: any key that is
+  not a plain printable one drops the guesses and holds the next ones back until the worker
+  acknowledges that key; bytes the predictor never sees (a chord, a paste) do the same for
+  the key after them (`Predictor::interrupt`, called from the view's `send`). From then on
+  guesses are *tentative*: made and checked, never drawn, until one is confirmed by the
+  worker's echo. A view also opens tentative, since it may attach to a password prompt. A
+  prompt that does not echo therefore never shows what is typed, whatever the link. ⌥ as Alt
+  is a chord, not a printable. The two gates that disagreed are one,
+  `TermModes::prediction_allowed` (alternate screen, echo off, cursor hidden, mouse tracking;
+  the kitty keyboard protocol does not count, since fish turns it on at every prompt).
+  The worker's reading of `termios` rides on the frames through
+  `GhosttyEngine::set_line_discipline` (`ECHO_OFF`, `CANONICAL`); a change sends a frame
+  though no cell moved. The worker calling it after each read belongs to the pty change.
+  Tests: predict `a_prompt_after_enter_shows_nothing_typed_until_it_echoes`,
+  `a_key_it_cannot_follow_pauses_guessing_until_acknowledged`; grid `prediction_gates`;
+  engine `the_line_discipline_is_in_the_modes_and_sends_a_frame`; view
+  `a_line_editing_chord_stops_the_guesses`.
+
+- ✅ **A program that asked for the mouse hears the whole click and the drag** (2026-09-26).
+  Only presses were sent, the middle button had no listener, and the engine counted presses
+  up and releases down, so without releases a program saw every button held forever. The view
+  now keeps the buttons whose press went to the program and sends their release (inside or
+  outside the tile), a move while one is down when the program asked for drags (1002) or all
+  moves (1003), and a move with no button under 1003; a move within the same cell is not
+  news, and ⇧ keeps the pointer the reader's. The middle button reaches a program that asked.
+  The frames carry `MOUSE_DRAG` and `MOUSE_MOTION` so the client asks nothing of a program
+  that wants only clicks. The engine keeps the buttons held as a set, so a doubled press or a
+  stray release cannot leave one down. Tests: engine
+  `press_motion_and_release_follow_the_buttons_held`; view
+  `a_program_hears_press_drag_and_release`.
+
+- ✅ **The history cache keeps what the view is near, and a copy waits for its lines**
+  (2026-09-26). The client's cache (20 000 lines, against the worker's 50 000) evicted the
+  lowest index first, so a fetch far up the history could evict itself in the same insert;
+  nothing remembered a fetch in flight, so every frame asked again while scrolled up; and ⌘A
+  asked for the whole history in one request the worker caps at 4096 lines, then ⌘C copied
+  blanks for whatever had not arrived. Ruling: past capacity the line farthest from the view's
+  top goes first, never a line of the batch being inserted and never a screen row (a screen
+  that moves down re-adopts its rows from the cache). Following the output that is still the
+  oldest line. The cache stays at 20 000 lines rather than growing to the worker's 50 000,
+  since a history of wide rows would cost hundreds of megabytes per shell. `TermState` keeps
+  the fetches in flight with the numbering they were asked in: a range in flight is not asked
+  again, an answer for a numbering that has gone is dropped, and a whole frame (a new stream)
+  asks again for what is still missing. Requests are at most 4096 lines
+  (`slopty_client::term::FETCH_CHUNK`). ⌘C walks the selection in order and writes the
+  clipboard once every line is in, asking for a line that never came; the text is built a
+  line at a time (`SelectionText`), so it never needs the whole history cached at once.
+  Found on the way: `GhosttyEngine::lines` answered a range wholly below its oldest line with
+  the lines after it. Tests: grid
+  `eviction_is_farthest_from_the_view_and_spares_the_batch_and_the_screen`; client
+  `a_range_in_flight_is_asked_once`, `a_long_range_is_asked_in_chunks_and_stale_answers_are_dropped`;
+  engine `a_range_below_the_oldest_line_is_empty`; view
+  `the_keys_page_through_history_and_select_it_all`.
+
+- ✅ **A wrapped line is one line to a link, a path and a triple click** (2026-09-26). ⌘-click
+  and the ⌘-hover underline looked at one row, so a URL or a path the terminal wrapped opened
+  its first half; three clicks selected one row. The link and path finders now read the
+  logical line (the row and those soft-wrapped onto it, eight rows either way for a hover),
+  an OSC 8 run carried on at the next row's start is one link, the underline spans the rows,
+  and three clicks select the whole logical line. Tests: url `a_wrapped_link_or_path_is_one`;
+  view `a_wrapped_link_is_one_and_three_clicks_take_the_wrapped_line`.
