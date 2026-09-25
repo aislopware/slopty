@@ -1139,3 +1139,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`ietf-wg-ccwg/draft-ietf-ccwg-bbr`), with Linux as the reference. The ProbeRTT cost for
   60 fps video could go to the same tracker beside issue 109, as a report with this harness's
   numbers rather than a patch.
+
+- ✅ **The bound stays: on the Tailscale mesh, bulk traffic cannot tell it from noq's patched
+  window, and noq#800 is still open** (2026-09-25, MEASUREMENTS.md "BBR3's bound on the
+  Tailscale mesh"). This is the mesh run the previous entry asked for. Eight interleaved rounds
+  ran from mac-studio to macbook-pro over the internet on a direct Tailscale path. Each round
+  timed keystroke echoes while a 1 GiB pull left the MacBook on the same path, `bbr3`
+  against `bbr3-unbounded`. Echo p50 was 10.7 against 10.5 ms and goodput 77 against 80 Mbit/s.
+  Unbounded read 10 to 30 ms lower at p90 and p99. The idle runs, where the controller has
+  nothing to hold, differed by more (p99 168 against 120 ms), so that is the path drifting.
+  Removing the bound would buy nothing measurable here, and keeping it costs nothing.
+
+  What the run could not reach is the one case the bound is still for. An app-limited flow
+  that never leaves `Startup` paces at `2.77 × initial window / 1 ms` (noq#800, open). A bulk
+  pull is not app-limited, and a worker started over ssh cannot capture the screen, so no video
+  crossed the mesh. The CLI also puts the echo and the bulk on two connections, and only the
+  echo's window is traced. Reopen when noq#800 is fixed. Then stream video over the mesh
+  from a launchd-installed worker (the 2026-09-14 recipe), bound on and off, and read the
+  worker's bytes in flight against the window.
+
+  The larger finding is not the controller's. With nothing else flowing, one key in eight took
+  over 50 ms on this path against a 10 ms median, and the worker counted no lost packets.
+  Finding that tail's cause matters more to typing over the mesh than further work on the bound.

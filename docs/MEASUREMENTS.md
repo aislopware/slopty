@@ -4467,3 +4467,106 @@ What the numbers say:
   handshake, the first keyframe follows at once, and keyframes come every second. ProbeRTT falls
   due 5 s after the minimum was last refreshed, and it often lands on a keyframe. An encoder
   whose keyframe interval divides 5 s would do the same on a real link.
+
+## 2026-09-25 — BBR3's bound on the Tailscale mesh
+
+The mesh run the "noq's BBR3 follows the draft" decision left owed: keystroke echo while bulk
+data leaves the same host over the same path, with the bound on (`bbr3`, the default) and off
+(`bbr3-unbounded`, noq's patched window alone).
+
+Setup. mac-studio drove macbook-pro (arm64, macOS 27.0) over Tailscale, direct to the
+MacBook's public endpoint, not a LAN: 100.64.0.3 to 100.64.0.2, ICMP round trip 7 to 16 ms. On the
+MacBook, ptyd, a worker (port 45650) and a server (port 45660) ran from `/tmp/slopty-meshbbr`
+with a private `HOME`, release builds of main `79fb113`. Each arm-run started the worker and
+server fresh with its `SLOPTY_CC` and then ran two things from the Studio.
+
+* **Idle.** `slopty bench echo`, 100 keys, with nothing else flowing.
+* **Loaded.** `slopty cat` pulled a 1 GiB file of random bytes on the MacBook through its
+  server, restarting when it ended. After 3 s, `slopty bench echo` sent 300 keys, and then
+  the script stopped the pull.
+
+Eight rounds, the two arms interleaved, alternating which went first. Studio load average
+11 to 22, as other sessions built. MacBook 2 to 5.
+
+Two limits of what the CLI can do. `bench echo` opens its own connection, and `cat` goes
+through the server, so the echo and the bulk ride two QUIC connections, both sent from the
+MacBook under the same `SLOPTY_CC`. They are one WireGuard UDP flow on the wire, so they share
+every queue on the path. The run measures the queue the bulk flow's controller builds, not
+scheduling inside one connection. No verb puts a bulk transfer beside an echo on one
+connection. And only the worker's client connections carry `SLOPTY_PATH_TRACE_MS`, so the bulk
+connection's window and bytes in flight could not be read. The trace below is the echo
+connection's.
+
+```sh
+# mac-studio: build and ship (the daemons' packages are slopty-workerd and slopty-serverd)
+cargo build --release -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli
+R=/tmp/slopty-meshbbr
+ssh macbook-pro "mkdir -p $R/bin $R/home $R/data $R/sdata $R/terminfo $R/drops"
+for b in slopty-ptyd slopty-worker slopty-server slopty; do
+  gzip -1 -c target/release/$b | ssh macbook-pro "gunzip -c > $R/bin/$b && chmod +x $R/bin/$b"; done
+ssh macbook-pro "dd if=/dev/urandom of=$R/bulk.bin bs=1m count=1024"
+# macbook-pro, per arm-run (ptyd once): CC is bbr3 or bbr3-unbounded
+E="HOME=$R/home SLOPTY_TERMINFO_DIR=$R/terminfo TERMINFO_DIRS=$R/terminfo: \
+  SLOPTY_PASTEBOARD=dev.aislopware.slopty.meshbbr SLOPTY_DROP_DIR=$R/drops"
+env $E nohup $R/bin/slopty-ptyd --socket $R/ptyd.sock >$R/ptyd.log 2>&1 </dev/null &
+env $E SLOPTY_CC=$CC nohup $R/bin/slopty-server --port 45660 --mcp-port 45661 \
+  --data-dir $R/sdata >$R/server.log 2>&1 </dev/null &
+env $E SLOPTY_CC=$CC SLOPTY_SERVER=127.0.0.1:45660 SLOPTY_WORKER_NAME=meshbbr \
+  SLOPTY_PATH_TRACE_MS=50 RUST_LOG=info,slopty_net=debug nohup $R/bin/slopty-worker \
+  --ptyd-socket $R/ptyd.sock --ctl-socket $R/worker.sock --data-dir $R/data --port 45650 \
+  >$R/worker-$TAG.log 2>&1 </dev/null &
+# mac-studio, per arm-run; per-key samples are the trace's `bench frame … us=`
+S="target/release/slopty --data-dir /tmp/meshbbr/cli"
+RUST_LOG=warn,slopty::bench=trace $S bench echo --worker 100.64.0.2:45650 --count 100
+( while :; do $S --server 100.64.0.2:45660 cat --worker meshbbr $R/bulk.bin; done ) | wc -c &
+sleep 3
+RUST_LOG=warn,slopty::bench=trace $S bench echo --worker 100.64.0.2:45650 --count 300
+# stop the loop, then its `slopty cat`; goodput = bytes / (end − start)
+# macbook-pro, end of an arm-run: kill the worker and server; at the end ptyd too, and rm -rf $R
+```
+
+Medians over the eight runs of each arm, the range across runs in brackets. "Pooled" puts the
+2400 loaded keys of an arm together. "srtt" is the echo connection's smoothed round trip from
+the worker's trace while the load ran.
+
+| | bbr3 (bound) | bbr3-unbounded |
+| --- | --- | --- |
+| idle echo p50 ms | 10.2 [9.6–11.1] | 10.1 [9.7–10.6] |
+| idle echo p99 ms | 168 [106–224] | 120 [97–162] |
+| idle keys over 50 ms, pooled | 12.4 % | 12.4 % |
+| loaded echo p50 ms | 10.7 [10.2–12.9] | 10.5 [10.2–11.1] |
+| loaded echo p90 ms | 85 [68–93] | 76 [43–97] |
+| loaded echo p99 ms | 197 [136–293] | 176 [134–278] |
+| loaded echo max ms | 318 [197–402] | 246 [197–787] |
+| loaded, pooled p50 / p90 / p99 ms | 10.8 / 84 / 214 | 10.5 / 76 / 181 |
+| loaded keys over 50 / 100 ms, pooled | 16.3 / 6.9 % | 13.5 / 5.4 % |
+| bulk goodput Mbit/s | 77 [55–120] | 80 [69–119] |
+| echo srtt p50 / p99 ms | 19.8 / 43 [32–76] | 20.2 / 38 [25–51] |
+| keys lost to the 2 s timeout | 0 | 0 |
+
+What the numbers say:
+
+* **On bulk traffic the bound makes no difference that this path can show.** Loaded echo p50 is
+  the same in both arms, and so is goodput. Unbounded reads 10 to 30 ms better in p90 and p99,
+  but the idle runs differ by more, 168 against 120 ms at p99. Nothing flows there but the echo
+  itself, whose window a single 240-byte frame cannot fill, so that gap is the path drifting
+  between runs, not the controller. Bounded had the higher loaded p99 in six rounds of eight,
+  and the higher idle p99 in six of eight as well. A single-host bulk pull did not make the
+  bound cost anything or save anything.
+* **The load adds to the tail, not the median.** Under load, echo p50 rose by half a millisecond
+  and pooled p90 by 14 to 21 ms. Keys over 50 ms went from 12 % to 14 to 16 %. BBR3 keeps no
+  standing queue here that the median key would wait behind, with or without the bound.
+* **The largest term is the path's idle tail.** With nothing else flowing, one key in eight took
+  over 50 ms and one in twenty-five over 100 ms, against a 10 ms median. The worker's QUIC
+  counted no lost packets in 15 of 16 runs and two in the other. ICMP ping lost 13 to 21 %
+  each way, which says more about how ICMP is treated than about the UDP path. This run does not
+  find the cause. Keys lost on the way to the MacBook would not show in the worker's counters.
+* **What this run cannot reach.** The case the bound still guards is noq#800 (open): an
+  app-limited flow that never leaves `Startup` and paces at `2.77 × initial window / 1 ms`.
+  A bulk pull is not app-limited. Video is, but a worker started over ssh has no Screen
+  Recording, so this mesh run carried no video. The echo connection is app-limited. Its window
+  sat at 5 kB and never bound, and one frame in flight cannot tell whether it would.
+
+Logs, per arm-run (`.idle.log`, `.load.log`, `.load.meta`, `.worker.log`, `.uptime`), are in
+`target/logs/meshbbr/`, with the scripts that ran the rounds (`all.sh`, `round.sh`,
+`remote-up.sh`, `remote-down.sh`) and the one that tabulates them (`summ.pl`).
