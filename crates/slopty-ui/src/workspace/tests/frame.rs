@@ -460,3 +460,93 @@ fn a_working_mark_draws_twelve_frames_a_second_and_none_at_rest(cx: &mut TestApp
     cx.run_until_parked();
     assert_eq!(frames_in_a_second(&view, cx), 0, "Reduce Motion: a still mark");
 }
+
+/// The app holding the workspace in less than its window, as an iPad's Split View does in the
+/// self-test.
+struct Narrow(Entity<WorkspaceView>);
+
+impl gpui::Render for Narrow {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{ParentElement as _, Styled as _};
+        gpui::div().w(px(NARROW)).h_full().child(self.0.clone())
+    }
+}
+
+/// The width [`Narrow`] gives the workspace: a phone's, in a desktop's window.
+const NARROW: f32 = 500.0;
+
+/// The bars and the navigator fit the workspace's own width, not the window's: laid out in
+/// 500 points of a 1200-point window, the column dots stay beside the buttons, not past the
+/// workspace's edge, and the navigator is a phone's drawer that fits in it.
+#[gpui::test]
+fn the_frame_fits_the_workspace_not_the_window(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.bind_keys(key_bindings());
+        cx.bind_keys(crate::terminal::key_bindings());
+    });
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = WorkspaceView::new(Theme::default(), None, cx);
+            view.set_animation(false);
+            view
+        });
+        let focus = view.read(cx).focus.clone();
+        window.focus(&focus, cx);
+        Narrow(view)
+    });
+    cx.simulate_resize(size(px(VIEWPORT.0), px(VIEWPORT.1)));
+    cx.run_until_parked();
+    let view = host.read_with(cx, |host, _| host.0.clone());
+    let fake = connect(&view, cx, 1, "studio");
+    let _shells = three_shells(&view, cx, &fake);
+
+    let (dots, bell, more) = (
+        cx.debug_bounds("indicator").expect("the column dots are drawn"),
+        cx.debug_bounds("bell").expect("the bell is drawn"),
+        cx.debug_bounds("more").expect("… is drawn"),
+    );
+    assert!(dots.right() <= bell.left(), "the dots run into the bell: {dots:?} {bell:?}");
+    assert!(f32::from(more.right()) <= NARROW, "… is past the edge: {more:?}");
+
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("navigator-away").is_some(), "a phone's drawer, not docked");
+    let drawer = cx.debug_bounds("navigator").expect("drawn");
+    assert!(f32::from(drawer.right()) < NARROW, "the drawer fits: {drawer:?}");
+}
+
+/// The navigator's captions end on one edge: a healthy worker's round trip keeps no empty
+/// status lane after it, so it lines up with the workspaces' counts under it.
+#[gpui::test]
+fn the_round_trip_and_the_counts_share_the_right_edge(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.set_rtt(key, Some(Duration::from_micros(4_240)), cx));
+    cx.run_until_parked();
+    let rtt = cx.debug_bounds(leak(format!("nav-rtt-{key}"))).expect("the round trip is drawn");
+    let count = cx.debug_bounds("nav-count-0").expect("the count is drawn");
+    near(f32::from(rtt.right()), f32::from(count.right()));
+}
+
+/// A window narrowed past where the navigator docks is laid out for its new width at once.
+/// Were the frame still sized by the window before, the navigator would dock for that frame,
+/// the strip would pass through a phone's width, and the view would keep a phone's strut.
+#[gpui::test]
+fn narrowing_the_window_never_lays_the_strip_out_as_a_phone(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let [(_, first), ..] = three_shells(&view, cx, &fake);
+    click(cx, selector("nav-tile", first.item));
+    let before = cx.debug_bounds(selector("item", first.item)).expect("drawn");
+    let strip_left = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.viewport.left());
+    assert_eq!(before.left(), strip_left(cx), "the first column starts the strip");
+
+    cx.simulate_resize(size(px(900.0), px(600.0)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("navigator").is_none(), "no room to dock: it waits closed");
+    let after = cx.debug_bounds(selector("item", first.item)).expect("drawn");
+    assert_eq!(after.left(), strip_left(cx), "no strut before it: {after:?}");
+}

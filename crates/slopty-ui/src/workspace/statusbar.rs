@@ -98,7 +98,7 @@ impl WorkspaceView {
             return None;
         }
         let phone = matches!(self.nav.drawn, Some(Mode::Drawer))
-            || f32::from(window.viewport_size().width) < self.layout.config().phone_below;
+            || self.width(window) < self.layout.config().phone_below;
         let frame = if phone { None } else { self.frame_readout(cx) };
         let theme = &self.theme;
         let s = &theme.surfaces;

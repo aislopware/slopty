@@ -1551,3 +1551,48 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   ruling, 22 of 22 passing. The blank-frame check in the terminal test now asks for 0.4% of
   pixels off the corner's colour, not 1%. With panes flush on a surface a shade from the title
   bar's, only text and chrome differ from it.
+
+- ✅ **On a phone and in Split View, panes meet the edges and the chrome fits the workspace**
+  (2026-09-25). A pass over the iOS goldens after the flush-panes ruling found the phone still
+  wearing the card layout's habits:
+  - **No struts.** A phone's column showed 12 pt of each neighbour. With every pane flush, the
+    slivers read as stray panes at the edges. `phone_peek` is 0, as niri's `struts` default:
+    the column meets both edges, and a neighbour is a swipe away. The column dots still say
+    there is one.
+  - **Safe area.** The band under the key bar or the status bar, over the home indicator, is
+    `panel` like the bar above it, not canvas. It continues the bar instead of showing a strip
+    of a different surface.
+  - **Overlays and the keyboard.** The backdrop is a column, and the dialog in it is `min_h_0`.
+    With a phone's keyboard and key bar up, the palette gives up height: its list scrolls and
+    its field and its foot stay in view.
+  - **Frame width.** The title bar, the status bar and the navigator measure the workspace's
+    width, not the window's. An iPad in Split View gives the workspace less than the window,
+    and the column dots had sat past its edge. The difference is measured after layout and a
+    resize is seen in the same frame, so the strip never lays out for a phone's width in
+    passing.
+  - **↩ as text.** A phone's font fallback drew ↩ as its emoji, a blue tile among plain keys.
+    The drawn text carries the text-presentation selector. What a screen reader gets keeps the
+    bare key.
+  - **Navigator lane.** A healthy worker's row reserves no status lane, so its round trip ends
+    on the edge where the workspaces' counts end.
+  - **No chords without a keyboard.** With no hardware keyboard attached, the palette prints no
+    action's chord and no key legend, since nothing there can be pressed. A worker's readout
+    and a file's kind stay. The app forwards the attach and detach it already watches for the
+    key bar.
+  - **Tolerance.** The iOS goldens allow 0.3% of pixels to differ, down from 1%. Runs differ
+    by 0.06% at most, and at 1% an iPad frame, mostly canvas, passed with its whole chrome
+    redrawn (0.84%).
+  - **Channel slack.** A pixel matches when no channel is more than 4 off, down from 24. The
+    safe-area band moved from `canvas` to `panel`, 11 apart, and the navigator golden, taken
+    before the move, still passed. At 4 the widest run-to-run difference is 0.3% of a Mac
+    frame and 0.1% of a simulator frame, except `transfers` at 0.56%: its ports and readouts.
+  - **Stable roots.** An e2e stack's temp dir is named for its test, not at random. Goldens
+    draw paths under it, and `transfers` drew one five times, enough to fail at 1.18% on a
+    run whose name happened to render wide.
+
+  Tests: client `on_a_phone_a_column_meets_both_edges`, and the struts test keeps its case with
+  `phone_peek: 12.0`. UI (`workspace/tests/frame.rs`): `the_frame_fits_the_workspace_not_the_window`,
+  `the_round_trip_and_the_counts_share_the_right_edge`,
+  `narrowing_the_window_never_lays_the_strip_out_as_a_phone`; palette
+  `the_palette_fits_above_a_phone_keyboard`, `without_a_keyboard_the_palette_prints_no_chords`.
+  e2e `ios` gains a navigator golden on each device.

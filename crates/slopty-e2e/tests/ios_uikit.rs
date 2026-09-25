@@ -207,8 +207,20 @@ mod tests {
         let drv = &mut stack.driver;
         drv.keys("cmd-n").await.unwrap();
         let two = drv
-            .wait_for("a second shell, focused", STEP, |d| {
-                d.items.len() == 2 && d.items.iter().any(|i| i.id != first.id && i.active)
+            // At rest: the columns abut. An iPad's lone column sits centred and slides left as
+            // the second opens beside it, and a dump taken in that slide is no starting point.
+            .wait_for("a second shell, focused, beside the first", STEP, |d| {
+                let first_right = d
+                    .items
+                    .iter()
+                    .find(|i| i.id == first.id)
+                    .map(|i| i.bounds[0] + i.bounds[2]);
+                d.items.len() == 2
+                    && d.items.iter().any(|i| {
+                        i.id != first.id
+                            && i.active
+                            && first_right.is_some_and(|right| (right - i.bounds[0]).abs() < 1.0)
+                    })
             })
             .await
             .unwrap();
@@ -229,7 +241,12 @@ mod tests {
             .await
             .unwrap();
         let [x1, y1, w1, _] = item_by(&back, &first.id).bounds;
-        assert!(x1 >= x0 && x1 >= 0.0 && x1 + w1 <= vw + 1.0, "in view: {x0} → {x1}");
+        assert!(
+            x1 >= x0 && x1 >= 0.0 && x1 + w1 <= vw + 1.0,
+            "in view: {x0} → {x1}\nbefore: {:#?}\nafter: {:#?}",
+            two.items,
+            back.items
+        );
         assert!((y1 - y0).abs() < 2.0, "locked to the swipe's axis: {y0} → {y1}");
         assert!(!back.overview, "a swipe is not a pinch");
 

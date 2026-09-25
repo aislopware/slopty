@@ -215,6 +215,8 @@ impl WorkspaceView {
     ) {
         self.palette_return = window.focused(cx);
         self.menu = None;
+        let chords = self.hardware_keyboard;
+        palette.update(cx, |p, _| p.set_chords(chords));
         self.subscriptions.push(cx.subscribe(&palette, |this, _palette, event, cx| {
             if let PaletteEvent::Changed(text) = event {
                 if this.find_needle.is_some() {

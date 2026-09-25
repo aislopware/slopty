@@ -13,7 +13,12 @@ use anyhow::{Context as _, Result, bail};
 use image::{Rgba, RgbaImage};
 
 /// Per-channel difference under which two pixels count as equal.
-pub const CHANNEL_SLACK: u8 = 24;
+///
+/// Small, because a theme's surfaces sit close together: `canvas` and `panel` are 11 apart in
+/// the light theme, and at 24 a band moved from one to the other still matched. At 4, runs of
+/// every golden differ by 0.3% at most on the Mac and 0.1% in the simulator, bar `transfers`
+/// (0.56%, its ports and readouts), all under their tolerances.
+pub const CHANNEL_SLACK: u8 = 4;
 
 /// Where the goldens live.
 #[must_use]

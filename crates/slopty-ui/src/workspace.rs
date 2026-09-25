@@ -354,6 +354,9 @@ pub struct WorkspaceView {
     palette_return: Option<FocusHandle>,
     palette_action: Option<Box<dyn gpui::Action>>,
     palette_extra: Vec<PaletteItem>,
+    /// A keyboard is there to press chords on: always on a Mac, only when one is attached on
+    /// a phone or tablet.
+    hardware_keyboard: bool,
     pending_focus_palette: bool,
     /// Which titlebar menu is open.
     menu: Option<titlebar::MenuKind>,
@@ -375,6 +378,9 @@ pub struct WorkspaceView {
     placed: Vec<(TileRef, Bounds<Pixels>)>,
     /// The strip's bounds in the window, as of the last frame.
     viewport: Bounds<Pixels>,
+    /// How much narrower than the window the workspace was laid out in the last frame: none,
+    /// unless the app gives it less (an iPad's Split View, as the self-test sets it).
+    width_inset: f32,
     /// The tile focused when the tiles were last drawn.
     drawn_focus: Option<TileRef>,
     /// The zoom the tiles were last drawn at (the overview's).
@@ -487,6 +493,7 @@ impl WorkspaceView {
             palette_return: None,
             palette_action: None,
             palette_extra: Vec::new(),
+            hardware_keyboard: true,
             pending_focus_palette: false,
             menu: None,
             nav: navigator::NavState::default(),
@@ -500,6 +507,7 @@ impl WorkspaceView {
             gesture: strip::Gesture::default(),
             placed: Vec::new(),
             viewport: Bounds::default(),
+            width_inset: 0.0,
             drawn_focus: None,
             drawn_zoom: 1.0,
             park_pending: false,
@@ -676,6 +684,11 @@ impl WorkspaceView {
     pub fn set_animation(&mut self, on: bool) {
         self.animate = on;
         self.layout.set_animate(on && !reduced_motion());
+    }
+
+    /// Whether a keyboard is attached, so the palette prints chords that can be pressed.
+    pub const fn set_hardware_keyboard(&mut self, attached: bool) {
+        self.hardware_keyboard = attached;
     }
 
     /// Lines the app adds to the palette after the workspace's own (settings, workers).
@@ -996,6 +1009,7 @@ impl gpui::Render for WorkspaceView {
                 this.leave_screen(window, cx);
             }))
             .on_action(cx.listener(Self::toggle_navigator))
+            .child(Self::measure_width(cx))
             .child(titlebar)
             .child(Self::render_middle(navigator, strip, toast))
             .children(statusbar)
@@ -1007,6 +1021,40 @@ impl gpui::Render for WorkspaceView {
 }
 
 impl WorkspaceView {
+    /// How wide the workspace is: the window's width less what the app kept of it last frame.
+    /// A difference, not last frame's width: the window's width is this frame's, so a resize
+    /// is seen at once and never lays the strip out for the old size.
+    pub(super) fn width(&self, window: &Window) -> f32 {
+        f32::from(window.viewport_size().width) - self.width_inset
+    }
+
+    /// Takes how much of the window's width the workspace was laid out in; a change draws one
+    /// more frame at the new width, as the strip's own measure does.
+    fn measure_width(cx: &Context<Self>) -> gpui::AnyElement {
+        use gpui::{IntoElement as _, Styled as _};
+        let entity = cx.entity();
+        gpui::canvas(
+            move |bounds, window, cx| {
+                let inset = f32::from(window.viewport_size().width - bounds.size.width);
+                entity.update(cx, |this, cx| {
+                    if (this.width_inset - inset).abs() > f32::EPSILON {
+                        this.width_inset = inset;
+                        let this = cx.weak_entity();
+                        cx.defer(move |cx| {
+                            if let Some(this) = this.upgrade() {
+                                this.update(cx, |_, cx| cx.notify());
+                            }
+                        });
+                    }
+                });
+            },
+            |_bounds, (), _window, _cx| {},
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+
     /// Between the bars: the navigator docked beside the strip, or laid over it.
     fn render_middle(
         navigator: Option<(navigator::Mode, gpui::AnyElement)>,

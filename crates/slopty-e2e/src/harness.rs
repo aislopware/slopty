@@ -42,11 +42,60 @@ pub const TRANSCRIPT_DONE: &str = concat!(
     "\n",
 );
 
+/// A stack's temporary root, named for the test that made it.
+///
+/// Goldens show paths under it (a shell's prompt, a tile's title, the status bar), so a random
+/// name made each run's frame differ from its golden wherever a path is drawn. The name is a
+/// hash of the test's name instead: the same on every run, different between tests. A lock
+/// beside it keeps a second run of the same test, another session's, off it; that run takes a
+/// random name, which costs it only its goldens.
+#[derive(Debug)]
+pub struct StackDir {
+    // Declared first so it is deleted before the lock is released.
+    dir: tempfile::TempDir,
+    _lock: Option<std::fs::File>,
+}
+
+impl StackDir {
+    fn new(prefix: &str) -> Result<Self> {
+        let parent = std::env::temp_dir();
+        // libtest runs each test on a thread named for it.
+        let test = std::thread::current().name().filter(|name| *name != "main").map(fnv1a);
+        if let Some(hash) = test {
+            let name = format!("{prefix}{hash:08x}");
+            let lock = std::fs::File::create(parent.join(format!("{name}.lock")))?;
+            if lock.try_lock().is_ok() {
+                match std::fs::remove_dir_all(parent.join(&name)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e).context("clear the last run's root"),
+                }
+                let dir =
+                    tempfile::Builder::new().prefix(&name).rand_bytes(0).tempdir_in(&parent)?;
+                return Ok(Self { dir, _lock: Some(lock) });
+            }
+        }
+        let dir = tempfile::Builder::new().prefix(prefix).tempdir()?;
+        Ok(Self { dir, _lock: None })
+    }
+
+    /// The root.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// FNV-1a over `name`: short, and stable across toolchains, as `DefaultHasher` is not.
+fn fnv1a(name: &str) -> u32 {
+    name.bytes().fold(0x811c_9dc5, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193))
+}
+
 /// The running stack.
 #[derive(Debug)]
 pub struct Stack {
     /// The temporary directory (sockets, data dirs, artifacts).
-    pub dir: tempfile::TempDir,
+    pub dir: StackDir,
     /// Where the app reaches the worker: `127.0.0.1:<port>`, the port the worker picked.
     pub address: String,
     /// Connected to the app's test socket.
@@ -491,7 +540,7 @@ impl Stack {
     ///
     /// As [`Self::launch`], plus when the fake cannot be written.
     pub async fn launch_with_fake_claude(worker_name: &str) -> Result<Self> {
-        let dir = tempfile::Builder::new().prefix("slopty-e2e-agent-").tempdir()?;
+        let dir = StackDir::new("slopty-e2e-agent-")?;
         let root = dir.path().to_path_buf();
         let home = root.join("home");
         let fake = root.join("fake");
@@ -535,7 +584,7 @@ impl Stack {
     ///
     /// As [`Self::launch`].
     pub async fn launch_with(worker_name: &str, env: &[(&str, &str)]) -> Result<Self> {
-        let dir = tempfile::Builder::new().prefix("slopty-e2e-").tempdir()?;
+        let dir = StackDir::new("slopty-e2e-")?;
         Self::launch_in(dir, worker_name, env).await
     }
 
@@ -546,7 +595,7 @@ impl Stack {
     ///
     /// As [`Self::launch`].
     pub async fn launch_first_run(worker_name: &str) -> Result<Self> {
-        let dir = tempfile::Builder::new().prefix("slopty-e2e-").tempdir()?;
+        let dir = StackDir::new("slopty-e2e-")?;
         let mut stack = Self::spawn_in(dir, worker_name, &[]).await?;
         stack.driver.ok(&crate::Command::Ping).await?;
         Ok(stack)
@@ -563,20 +612,12 @@ impl Stack {
     }
 
     /// `env` goes to the daemons and the app alike, on top of the defaults.
-    async fn launch_in(
-        dir: tempfile::TempDir,
-        worker_name: &str,
-        env: &[(&str, &str)],
-    ) -> Result<Self> {
+    async fn launch_in(dir: StackDir, worker_name: &str, env: &[(&str, &str)]) -> Result<Self> {
         Self::add(Self::spawn_in(dir, worker_name, env).await?).await
     }
 
     /// The daemons and the app, the worker not yet added.
-    async fn spawn_in(
-        dir: tempfile::TempDir,
-        worker_name: &str,
-        env: &[(&str, &str)],
-    ) -> Result<Self> {
+    async fn spawn_in(dir: StackDir, worker_name: &str, env: &[(&str, &str)]) -> Result<Self> {
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
         let (mut children, address) = daemons(root, worker_name, &log, env).await?;
@@ -719,7 +760,7 @@ impl Stack {
         simulator: Simulator,
         env: &[(&str, &str)],
     ) -> Result<Self> {
-        let dir = tempfile::Builder::new().prefix("slopty-e2e-ios-").tempdir()?;
+        let dir = StackDir::new("slopty-e2e-ios-")?;
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
         let (children, address) = daemons(root, worker_name, &log, &[]).await?;
@@ -1724,7 +1765,7 @@ pub async fn mcp_request(
 #[derive(Debug)]
 pub struct ServerStack {
     /// The temporary root.
-    pub dir: tempfile::TempDir,
+    pub dir: StackDir,
     /// The server.
     pub server: ServerDaemon,
     /// The worker.
@@ -1740,7 +1781,7 @@ impl ServerStack {
     ///
     /// When a binary is missing, a daemon dies, or the worker never comes online.
     pub async fn launch(worker_name: &str) -> Result<Self> {
-        let dir = tempfile::Builder::new().prefix("slopty-e2e-server-").tempdir()?;
+        let dir = StackDir::new("slopty-e2e-server-")?;
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
         let server_dir = root.join("server");

@@ -17,7 +17,8 @@
    `a11y`: the accessibility tree as role/label/value/focused/bounds in reading order,
    from the frame that painted the state in the same dump);
    `render` is GPUI drawing its own window to a PNG, compared numerically with
-   `crates/slopty-e2e/golden` (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden). Nothing touches another app.
+   `crates/slopty-e2e/golden` (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden). The temp dir
+   is named for its test, not at random, because a golden draws the paths under it. Nothing touches another app.
    `cargo xtask e2e ios [--sim iphone|ipad]` (gate `SLOPTY_IOS_E2E`) is the same socket with
    the app in the simulator: the way to check anything on the phone or the tablet. There the
    socket also takes `ui_key_press` / `ui_touch` / `ui_pinch` / `ui_insert_text` /

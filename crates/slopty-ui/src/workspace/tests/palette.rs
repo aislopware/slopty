@@ -118,6 +118,26 @@ fn the_palette_foot_names_its_keys(cx: &mut TestAppContext) {
     assert!((f32::from(dialog.bottom()) - f32::from(legend.bottom())).abs() < 2.0, "at the foot");
 }
 
+/// With no keyboard attached, as on a phone, the palette prints no chord that cannot be
+/// pressed: the commands lose their keys and the foot its legend. A worker's line keeps its
+/// readout, which is not a chord.
+#[gpui::test]
+fn without_a_keyboard_the_palette_prints_no_chords(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let _studio = connect(&view, cx, 1, "studio");
+    let chords = |cx: &mut VisualTestContext| {
+        (1..80).filter(|ix| cx.debug_bounds(format!("palette-keys-{ix}").leak()).is_some()).count()
+    };
+    open_palette(cx);
+    assert!(chords(cx) > 0, "a Mac prints its chords");
+    assert!(cx.debug_bounds("palette-legend").is_some(), "and the legend");
+    cx.simulate_keystrokes("escape");
+    view.update(cx, |v, _| v.set_hardware_keyboard(false));
+    open_palette(cx);
+    assert_eq!(chords(cx), 0, "no keyboard, no chords");
+    assert!(cx.debug_bounds("palette-legend").is_none(), "nor a legend");
+}
+
 /// Every line's title starts on one edge: the kind icon sits in a fixed slot, and a status
 /// mark or a worker's name goes on the right, not before the title.
 #[gpui::test]
@@ -272,4 +292,33 @@ fn the_overview_labels_keep_their_size_at_any_zoom(cx: &mut TestAppContext) {
     assert!(name > 0.0 && (name - new).abs() < 0.01, "one type size: {name} {new}");
     assert!((name - name_after).abs() < 0.01, "{name} then {name_after}");
     assert!((new - new_after).abs() < 0.01, "{new} then {new_after}");
+}
+
+/// A phone with its keyboard up leaves the workspace short: the palette gives up height to
+/// fit above the key bar, with its field on top, its foot on the bottom edge and the list
+/// scrolling between them, rather than running under the keyboard with its foot cut off. A
+/// window with room keeps the palette at its ceiling.
+#[gpui::test]
+fn the_palette_fits_above_a_phone_keyboard(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    three_shells(&view, cx, &fake);
+    open_palette(cx);
+    let tall = cx.debug_bounds("palette").expect("drawn");
+    let ceiling = crate::kit::Overlay::List.bounds().1;
+    assert!((f32::from(tall.size.height) - ceiling).abs() < 0.5, "at its ceiling: {tall:?}");
+
+    let short = 420.0;
+    cx.simulate_resize(size(px(390.0), px(short)));
+    cx.run_until_parked();
+    let palette = cx.debug_bounds("palette").expect("drawn");
+    let foot = cx.debug_bounds("palette-legend").expect("the foot is drawn");
+    let bottom = short - Theme::default().spacing.xl;
+    assert!(f32::from(palette.bottom()) <= bottom + 0.5, "over the keyboard: {palette:?}");
+    assert!(f32::from(palette.size.height) < ceiling, "{palette:?}");
+    assert!(
+        foot.bottom() <= palette.bottom() && foot.top() >= palette.top(),
+        "the foot is inside: {foot:?} in {palette:?}"
+    );
+    assert!(f32::from(palette.left()) >= 0.0 && f32::from(palette.right()) <= 390.0);
 }

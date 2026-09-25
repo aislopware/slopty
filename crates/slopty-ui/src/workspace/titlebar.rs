@@ -323,7 +323,7 @@ impl WorkspaceView {
             let buttons_w = count.mul_add(side, (count - 1.0) * spacing.xxs);
             let right = chip.map_or(buttons_w, |chip| chip + spacing.md + buttons_w);
             let x = dots_at(BarRow {
-                width: f32::from(window.viewport_size().width),
+                width: self.width(window),
                 safe: (f32::from(safe.left), f32::from(safe.right)),
                 leading,
                 trailing,

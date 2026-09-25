@@ -12,8 +12,8 @@ const STEP: f32 = HALF;
 /// 1280 pt at 1/3 and at 2/3.
 const THIRD: f32 = 1280.0 / 3.0;
 const TWO_THIRDS: f32 = 2.0 * THIRD;
-/// Split View's 511 pt less a 12 pt peek each side.
-const COMPACT_WORKING: f32 = 487.0;
+/// Split View's 511 pt, all of it the column's: a phone has no struts.
+const COMPACT_WORKING: f32 = 511.0;
 /// The overview's zoom with two workspaces (one and the empty one): two heights, a gap of a
 /// tenth above each for its name and one at either end fill the window.
 const OVERVIEW_TWO: f32 = 1.0 / 2.4;
@@ -906,7 +906,7 @@ fn a_compact_window_shows_every_column_full_width_and_keeps_the_proportions() {
     near(active.w, full);
     assert!(active.x >= 0.0 && active.right() <= 511.0, "in view: {active:?}");
     near(rect(&l, t(1)).w, full);
-    assert!(rect(&l, t(1)).right() <= 12.0 + 0.01, "the neighbour only peeks");
+    assert!(rect(&l, t(1)).right() <= 0.01, "the neighbour is out of view: panes meet the edge");
     assert_eq!(l.frame().strip.columns.len(), 2, "the dots still say two");
     // A preset while compact: the stored width moves, the shown one does not.
     l.switch_preset_width(true);
@@ -1372,8 +1372,21 @@ fn the_target_rect_is_where_a_springing_tile_comes_to_rest() {
 // ----- phone --------------------------------------------------------------------------------
 
 #[test]
-fn on_a_phone_columns_take_the_width_and_neighbours_peek() {
+fn on_a_phone_a_column_meets_both_edges() {
     let mut l = still();
+    l.set_viewport(390.0, 844.0);
+    l.open(t(1), Placement::Local);
+    l.open(t(2), Placement::Local);
+    let b = rect(&l, t(2));
+    near(b.x, 0.0);
+    near(b.w, 390.0);
+    near(rect(&l, t(1)).right(), 0.0);
+}
+
+#[test]
+fn on_a_phone_with_struts_columns_take_the_width_and_neighbours_peek() {
+    let mut l =
+        Layout::new(LayoutConfig { animate: false, phone_peek: 12.0, ..LayoutConfig::default() });
     l.set_viewport(390.0, 844.0);
     assert!(l.is_phone());
     l.open(t(1), Placement::Local);

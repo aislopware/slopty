@@ -218,7 +218,7 @@ impl WorkspaceView {
 
     /// How the navigator sits in `window`.
     pub(super) fn navigator_mode(&self, window: &Window) -> Mode {
-        let window_w = f32::from(window.viewport_size().width);
+        let window_w = self.width(window);
         let width = self.layout.navigator().width;
         mode(window_w, width, self.layout.config().phone_below, cfg!(target_os = "ios"))
     }
@@ -324,7 +324,7 @@ impl WorkspaceView {
         let safe = window.insets().effective();
         let width = match mode {
             Mode::Drawer => {
-                let room = theme.spacing.xl.mul_add(-2.0, f32::from(window.viewport_size().width));
+                let room = theme.spacing.xl.mul_add(-2.0, self.width(window));
                 self.navigator_width().min(room)
             }
             Mode::Docked | Mode::Overlay => self.navigator_width(),
@@ -523,8 +523,12 @@ impl WorkspaceView {
         .child(icon(theme, chevron, IconSize::Inline, hsla(s.text_muted)))
         .child(title(w.name.clone(), hsla(s.text)))
         .children(health.map(|(_, word)| caption(theme, word)))
-        .children(rtt.map(|rtt| caption(theme, rtt)))
-        .child(status_mark(theme, health.map(|(mark, _)| mark), 1.0))
+        .children(rtt.map(|rtt| {
+            caption(theme, rtt).debug_selector(move || format!("nav-rtt-{key}"))
+        }))
+        // The lane only for a mark: a healthy worker's round trip ends on the edge where the
+        // workspaces' counts and the waiting rows' workers end.
+        .children(health.map(|(mark, _)| status_mark(theme, Some(mark), 1.0)))
         .on_click(cx.listener(move |this, _ev, _w, cx| {
             if !this.nav.folded.remove(&key) {
                 this.nav.folded.insert(key);
@@ -612,7 +616,10 @@ impl WorkspaceView {
                 )
                 .child(icon(theme, IconName::LayoutGrid, IconSize::Inline, hsla(s.text_muted)))
                 .child(title(name, hsla(ink)))
-                .child(caption(theme, count.to_string()))
+                .child(
+                    caption(theme, count.to_string())
+                        .debug_selector(move || format!("nav-count-{ix}")),
+                )
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)))
                 .into_any_element()
             })

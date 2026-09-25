@@ -250,7 +250,8 @@ pub struct LayoutConfig {
     pub default_width: f32,
     /// A viewport narrower than this is a phone: new columns take the full width.
     pub phone_below: f32,
-    /// A phone's struts, each side: how much of each neighbouring column shows.
+    /// A phone's struts, each side: how much of each neighbouring column shows (niri's
+    /// `struts`). 0: a phone's column meets both edges, flush as every pane is.
     pub phone_peek: f32,
     /// Whether changes animate (off: Reduce Motion, the self-test).
     pub animate: bool,
@@ -265,7 +266,7 @@ impl Default for LayoutConfig {
             presets: vec![1.0 / 3.0, 0.5, 2.0 / 3.0],
             default_width: 0.5,
             phone_below: 700.0,
-            phone_peek: 12.0,
+            phone_peek: 0.0,
             animate: true,
             overview_label: 0.0,
         }

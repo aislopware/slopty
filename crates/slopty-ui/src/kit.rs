@@ -50,6 +50,8 @@ impl Overlay {
 ///
 /// Near the top so a phone's keyboard, which rises from the bottom, covers fewer of its rows;
 /// under the window's safe area, so a phone's status bar and Dynamic Island never sit on it.
+/// A column, so the dialog in it is laid out along the height it has: with a phone's keyboard
+/// up, that is less than the dialog's ceiling.
 ///
 /// The caller adds the identity, the key handling and the dismiss on a click through.
 #[must_use]
@@ -59,14 +61,19 @@ pub fn backdrop(theme: &Theme, window: &Window) -> Div {
         .absolute()
         .inset_0()
         .flex()
-        .items_start()
-        .justify_center()
+        .flex_col()
+        .items_center()
+        .px(px(theme.spacing.md))
         .pt(px(theme.spacing.xl * 2.0) + safe.top)
         .bg(hsla_alpha(theme.surfaces.canvas, alpha::SCRIM))
 }
 
 /// The shell every overlay wears: one radius, one hairline border, one elevation, the UI
-/// font. `min_w_0` so an unwrapped title cannot hold the box wider than a phone.
+/// font.
+///
+/// `min_w_0` so an unwrapped title cannot hold the box wider than a phone, and `min_h_0` so it
+/// gives up height to what is under the [`backdrop`] (a phone's keyboard and key bar) rather
+/// than run under it: its list scrolls, and its field and its foot stay in view.
 ///
 /// The caller adds the identity, the accessibility role and label, and the children.
 #[must_use]
@@ -78,7 +85,8 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
         .min_w_0()
         .max_w(px(w))
         .max_h(px(h))
-        .mx(px(theme.spacing.md))
+        .min_h_0()
+        .mb(px(theme.spacing.xl))
         .flex()
         .flex_col()
         .rounded(px(theme.radii.md))
@@ -225,7 +233,7 @@ pub fn key_cap(theme: &Theme, keys: impl Into<SharedString>) -> Div {
         .bg(hsla(s.raised))
         .text_size(px(theme.typography.small()))
         .text_color(hsla(s.text_secondary))
-        .child(keys.into())
+        .child(SharedString::from(crate::palette::drawn_keys(&keys.into())))
 }
 
 /// What a bar button does, and the key that does it, shown after a pause on the pointer.

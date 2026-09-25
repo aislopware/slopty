@@ -239,11 +239,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A keyboard was attached or removed: show or hide the key bar.
+    /// A keyboard was attached or removed: show or hide the key bar and the palette's chords.
     fn set_hardware_keyboard(&mut self, attached: bool, cx: &mut Context<Self>) {
         if self.hardware_keyboard != attached {
             tracing::info!(attached, "hardware keyboard");
             self.hardware_keyboard = attached;
+            self.view.update(cx, |v, _| v.set_hardware_keyboard(attached));
             cx.notify();
         }
     }
@@ -1188,7 +1189,9 @@ impl Render for Workspace {
                     .when_some(key_bar, |el, bar| {
                         el.child(div().w_full().px(insets.left).child(bar))
                     })
-                    .child(div().w_full().h(insets.bottom))
+                    // The home indicator's band continues whatever sits above it (the key bar
+                    // or the status bar, both on `panel`), not the canvas behind them.
+                    .child(div().w_full().h(insets.bottom).bg(hsla(surfaces.panel)))
             })
             .when_some(adding, gpui::ParentElement::child)
             .when_some(settings_editor, gpui::ParentElement::child)
@@ -1351,6 +1354,7 @@ pub fn open_workspace(
         view.extend_palette(app_palette_items());
         view.set_layout_path(layout_path());
         view.set_pasteboard(pasteboard());
+        view.set_hardware_keyboard(hardware_keyboard_attached());
         #[cfg(feature = "e2e")]
         view.set_animation(false);
         view

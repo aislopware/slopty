@@ -229,6 +229,12 @@ impl PaletteItem {
         Self { label, keys, run, icon, status: None, worker: None, section }
     }
 
+    /// Whether its right-hand text is a key chord (an action's binding), not a readout.
+    #[must_use]
+    pub const fn is_chord(&self) -> bool {
+        matches!(self.run, PaletteRun::Action(_))
+    }
+
     /// An item for `action`, its keys read from `bindings` (the first binding for it), its icon
     /// from the action's name.
     #[must_use]
@@ -585,6 +591,20 @@ pub fn keys_label(keystroke: &gpui::Keystroke) -> String {
     out
 }
 
+/// Keys as they are drawn, ↩ asking for its text form.
+///
+/// ↩ has an emoji form too, and a phone's font fallback picks it: a blue tile among plain
+/// glyphs. The text presentation selector after it asks for the glyph. Only the drawing
+/// carries the selector; what a screen reader gets keeps the bare key.
+#[must_use]
+pub fn drawn_keys(keys: &str) -> String {
+    const TEXT_PRESENTATION: char = '\u{FE0E}';
+    keys.chars()
+        .flat_map(|c| [Some(c), (c == '↩').then_some(TEXT_PRESENTATION)])
+        .flatten()
+        .collect()
+}
+
 /// The path a query spells, when it is one.
 ///
 /// A single word starting with `/`, `~/`, `./` or `../`, or holding a `/` with no empty
@@ -687,6 +707,9 @@ pub struct CommandPalette {
     selected: usize,
     /// A find in every card: the field's text is a needle, never a path.
     finding: bool,
+    /// Whether key chords are worth printing: not on a touch device with no keyboard, where
+    /// no chord can be pressed.
+    chords: bool,
     theme: Theme,
     _events: Subscription,
 }
@@ -762,9 +785,16 @@ impl CommandPalette {
             input,
             selected: 0,
             finding,
+            chords: true,
             theme,
             _events: events,
         }
+    }
+
+    /// Print the actions' key chords and the key legend, or, with no keyboard to press them
+    /// on, leave both out.
+    pub const fn set_chords(&mut self, shown: bool) {
+        self.chords = shown;
     }
 
     /// Start the field at `text` (a path to finish), its path lines listed at once.
@@ -886,12 +916,13 @@ impl CommandPalette {
                     .child(SharedString::from(worker.clone()))
             }))
             .children(item.status.map(|status| icons::status_mark(theme, Some(status), 1.0)))
-            .when(!item.keys.is_empty(), |el| {
+            .when(!item.keys.is_empty() && (self.chords || !item.is_chord()), |el| {
                 el.child(
                     div()
+                        .debug_selector(move || format!("palette-keys-{ix}"))
                         .flex_none()
                         .text_color(hsla(s.text_muted))
-                        .child(SharedString::from(item.keys.clone())),
+                        .child(SharedString::from(drawn_keys(&item.keys))),
                 )
             })
     }
@@ -977,7 +1008,7 @@ impl Render for CommandPalette {
                                 )
                             }),
                     )
-                    .child(legend(&theme)),
+                    .when(self.chords, |el| el.child(legend(&theme))),
             )
     }
 }
@@ -987,6 +1018,14 @@ mod tests {
     use gpui::Keystroke;
 
     use super::*;
+
+    #[test]
+    fn return_is_drawn_as_text_not_as_an_emoji() {
+        assert_eq!(drawn_keys("⇧⌘↩"), "⇧⌘↩\u{FE0E}");
+        assert_eq!(drawn_keys("↩"), "↩\u{FE0E}");
+        assert_eq!(drawn_keys("⌘T"), "⌘T", "nothing else changes");
+        assert_eq!(drawn_keys("↑↓"), "↑↓", "the arrows have no emoji form");
+    }
 
     #[test]
     fn a_path_in_the_field_is_told_from_a_command() {

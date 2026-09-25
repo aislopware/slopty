@@ -20,8 +20,10 @@ mod tests {
     const STEP: Duration = Duration::from_secs(30);
     /// A viewport narrower than this is a phone (`slopty_client::layout`'s `phone_below`).
     const PHONE_BELOW: f32 = 700.0;
-    /// Fraction of pixels allowed to differ from a golden (hinting, RTT readout, cursor).
-    const TOLERANCE: f64 = 0.01;
+    /// Fraction of pixels allowed to differ from a golden (hinting, RTT readout, cursor): runs
+    /// differ by 0.06 % at most. At 1 %, an iPad frame, mostly canvas, passed with its whole
+    /// chrome redrawn (0.84 %).
+    const TOLERANCE: f64 = 0.003;
     /// Long enough for a spring or the soft keyboard to come to rest before a golden.
     const SETTLE: Duration = Duration::from_millis(600);
     /// Foreground below this is a blank frame: a fitted terminal's few lines are under 1 % of
@@ -247,16 +249,46 @@ mod tests {
         })
         .await
         .unwrap();
+        // The navigator from the title bar's toggle: on a phone a drawer over a scrim that
+        // leaves an edge of the strip, on an iPad a panel over the strip. The shell's row
+        // closes it with the shell focused.
+        tap(drv, "Button", "Navigator").await;
+        let shown = drv
+            .wait_for("the navigator", STEP, |d| {
+                d.a11y_node("Navigation", Some("Navigator")).is_some()
+            })
+            .await
+            .unwrap();
+        let [nav_x, _, nav_w, _] = shown.a11y_node("Navigation", Some("Navigator")).unwrap().bounds;
+        assert!(nav_x.abs() < 1.0 && nav_w < shown.window.width * 0.9, "{nav_x} {nav_w}");
+        golden(drv, &dir, dev, "navigator", None).await;
+        let row = shown
+            .a11y
+            .iter()
+            .find(|n| {
+                n.role == "Button"
+                    && n.label.as_deref().is_some_and(|l| l.starts_with("shell"))
+                    && n.bounds[0] + n.bounds[2] <= nav_x + nav_w + 1.0
+            })
+            .unwrap_or_else(|| panic!("the shell's row: {:#?}", shown.a11y));
+        let [left, top, width, height] = row.bounds;
+        drv.ui_tap(left + width / 2.0, top + height / 2.0).await.unwrap();
+        drv.wait_for("the navigator closed on the shell", STEP, |d| {
+            d.a11y_node("Navigation", Some("Navigator")).is_none()
+                && d.item("terminal").is_some_and(|t| t.active)
+        })
+        .await
+        .unwrap();
         if dev == "pad" {
             // Split View, the app on half the screen.
             let (w, h) = (dump.window.width / 2.0 - 5.0, dump.window.height);
             drv.ok(&Command::Resize { width: w, height: h }).await.unwrap();
-            // Compact: the active column shows at full width (the window less a 12 pt peek and
-            // an 8 pt gap each side), and the other column waits off screen beside it.
+            // Compact: the active column takes the whole width, edge to edge (a phone has no
+            // struts), and the other column waits off screen beside it.
             drv.wait_for("one full-width column", STEP, |d| {
                 let Some(active) = d.items.iter().find(|i| i.active) else { return false };
                 let (left, right) = (active.bounds[0], active.bounds[0] + active.bounds[2]);
-                active.bounds[2] >= w - 41.0
+                active.bounds[2] >= w - 1.0
                     && left >= 0.0
                     && right <= w + 1.0
                     && d.items.len() >= 2
