@@ -261,6 +261,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     under a development-signed build.
   - Open: whether a hidden domain can be switched on at all, and whether other apps raise a
     privacy prompt when they read a placeholder. Both are one manual check.
+  - Withdrawn (2026-09-25): an attempt at the pasteboard route, file promises on the general
+    pasteboard, sat uncommitted in the tree. Finder pastes only files that are already on disk,
+    so it could not work, and it was taken out of the tree. Its diff is kept outside the
+    repository, at `.research/parked/`.
 
 - ✅ **The jitter estimate runs outside the playback lock, and a mute starts a fresh one**
   (2026-09-25, no protocol change).
@@ -285,3 +289,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     slices, and 60 ms mean heard delay from 4 s on. Tests:
     `a_gate_while_muted_leaves_no_lasting_cuts`,
     `a_late_packet_after_silence_starts_a_new_estimate`.
+
+- ✅ **A worker's clipboard promise fetches over the link the worker has at the paste, and a
+  fetch on a dead link fails at once** (2026-09-25, no protocol change).
+  - A promise the client put on its pasteboard captured the `Remote` of the connection its offer
+    came in on. Once that link dropped and came back, a paste of a promised representation (a
+    picture, or text past 64 KiB that the 1 MiB prefetch had not fetched) asked the dead link's
+    `ClipCache`. The fetch was never sent, the slot stayed asked, and the paste held the pasting
+    app's main thread for the whole 5 s `CLIP_WAIT` before it came back empty.
+  - The offer belongs to the worker, not to one connection: the worker keeps its last offer
+    across links. So a promise now holds the worker's link as it is now (`ClipSync::link`, a
+    `watch` that `reset_remote` updates when a link comes up or goes). A paste while the link
+    is down gets nothing at once; after the relink it is fetched over the new link. Bytes whose
+    digest is not the one offered are not pasted, because a restarted worker counts
+    generations from 1 again.
+  - `ClipCache` fails fast. A fetch it cannot send (the writer is gone) returns at once. The
+    link's end (the control reader's error, or `WorkerLink` dropped) closes the cache, which
+    wakes every waiting paste and answers later ones from what had arrived.
+  - Measured with the worker stopped until the app gave the silent link up, then resumed: a
+    3 MB promised text read from the app's pasteboard after the relink took 5010 ms and pasted
+    nothing before; 38 ms and whole after. Tests:
+    `a_worker_copy_pastes_promptly_after_the_link_drops_and_returns` (app e2e),
+    `a_promise_is_fetched_over_the_link_the_worker_has_now` (headless workspace),
+    `a_paste_on_a_dead_link_answers_at_once` (`slopty_client::clip`).

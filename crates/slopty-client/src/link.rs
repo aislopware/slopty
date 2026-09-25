@@ -68,6 +68,8 @@ pub struct WorkerLink {
     /// The runtime the link's tasks run on; screen workers join them from any thread.
     runtime: tokio::runtime::Handle,
     remote: Arc<dyn Remote>,
+    /// Closed with the link, so a paste waiting on it stops at once.
+    clips: Arc<ClipCache>,
     tasks: JoinSet<()>,
 }
 
@@ -106,6 +108,7 @@ impl WorkerLink {
                     Ok(msg) => msg,
                     Err(e) => {
                         forwards.lock().clear();
+                        control_clips.close();
                         let _sent =
                             control_events.send(LinkEvent::Disconnected(e.to_string())).await;
                         break;
@@ -185,8 +188,13 @@ impl WorkerLink {
 
         let runtime = tokio::runtime::Handle::current();
         let up = Uplink { conn: quic.clone(), out: out_tx.clone(), table };
-        let remote =
-            Arc::new(LinkRemote::new(up, clips, events_tx, runtime.clone(), shared_forwards));
+        let remote = Arc::new(LinkRemote::new(
+            up,
+            Arc::clone(&clips),
+            events_tx,
+            runtime.clone(),
+            shared_forwards,
+        ));
         Self {
             ack,
             out: out_tx,
@@ -195,6 +203,7 @@ impl WorkerLink {
             router,
             runtime,
             remote,
+            clips,
             tasks,
         }
     }
@@ -295,6 +304,7 @@ impl WorkerLink {
 
 impl Drop for WorkerLink {
     fn drop(&mut self) {
+        self.clips.close();
         self.tasks.abort_all();
     }
 }

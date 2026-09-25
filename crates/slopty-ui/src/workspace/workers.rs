@@ -45,7 +45,6 @@ impl WorkspaceView {
             .get(&key)
             .map(|w| w.sessions.keys().copied().collect())
             .unwrap_or_default();
-        self.reset_remote(key, &known, cx);
         let w = self.workers.entry(key).or_insert_with(|| Worker::new(name.clone()));
         w.name = name;
         w.status = WorkerStatus::Connected;
@@ -62,6 +61,7 @@ impl WorkspaceView {
         let agents: Vec<SessionSummary> =
             sessions.iter().filter(|s| s.agent.is_some()).cloned().collect();
         w.sessions = sessions.into_iter().map(|s| (s.id, s)).collect();
+        self.reset_remote(key, &known, cx);
         self.seed_agents(&agents, cx);
         cx.notify();
     }

@@ -13,7 +13,7 @@ use slopty_client::remote::Remote;
 use slopty_client::tunnel::Forward;
 use slopty_client::xfer::paste_paths;
 use slopty_core::{SessionId, XferId};
-use slopty_platform::pasteboard::{FILE_URL_UTI, Pasteboard, Provide};
+use slopty_platform::pasteboard::{FILE_URL_UTI, Pasteboard};
 use slopty_proto::ClientMsg;
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
@@ -21,7 +21,7 @@ use slopty_proto::transfer::{ClipMsg, Dest, XferMsg};
 
 use super::WorkspaceView;
 use super::actions::ListPorts;
-use crate::clipboard::{ClipFiles, ClipSync, file_url_paths};
+use crate::clipboard::{ClipFiles, ClipSync, file_url_paths, provider};
 use crate::palette::{CommandPalette, PaletteItem};
 use crate::screen::{PasteAhead, ScreenView};
 
@@ -302,15 +302,9 @@ impl WorkspaceView {
         let Some(clip) = self.clip.clone() else { return };
         match msg {
             ClipMsg::Offer(offer) => {
-                let Some(remote) =
-                    self.workers.get(&key).and_then(|w| w.link.as_ref()?.remote.clone())
-                else {
-                    return;
-                };
-                let generation = offer.generation;
-                let provide: Provide =
-                    Arc::new(move |uti: &str| remote.clip_data(generation, uti, CLIP_WAIT));
-                clip.borrow_mut().receive(key, &offer, provide);
+                let mut clip = clip.borrow_mut();
+                let provide = provider(clip.link(key), &offer, CLIP_WAIT);
+                clip.receive(key, &offer, provide);
             }
             ClipMsg::Fetch { generation, uti } => {
                 let bytes = clip.borrow().answer(generation, &uti);
@@ -595,7 +589,8 @@ impl WorkspaceView {
         self.drag_sink = Some(sink);
     }
 
-    /// A worker's link came up or went: its watch, its uploads and its ports start over.
+    /// A worker's link came up or went, as `workers` holds it now: its watch, its uploads and
+    /// its ports start over, and its clipboard promises fetch over the new link.
     pub(super) fn reset_remote(
         &mut self,
         key: WorkerKey,
@@ -604,7 +599,7 @@ impl WorkspaceView {
     ) {
         self.watching.remove(&key);
         if let Some(clip) = &self.clip {
-            clip.borrow_mut().forget(key);
+            clip.borrow_mut().relink(key, self.remote(key));
         }
         let gone: Vec<XferId> =
             self.uploads.iter().filter(|(_, u)| u.tile.worker == key).map(|(x, _)| *x).collect();

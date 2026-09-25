@@ -35,6 +35,8 @@ struct State {
     /// The worker's latest offer.
     generation: Option<u64>,
     slots: HashMap<(u64, String), Slot>,
+    /// The link is gone: nothing more is asked, and nothing more will answer.
+    closed: bool,
 }
 
 /// The fetched representations of the worker's latest offer.
@@ -62,20 +64,42 @@ impl ClipCache {
             let key = (offer.generation, item.uti.clone());
             if let Some(bytes) = &item.inline {
                 state.slots.insert(key, Slot::Ready(bytes.clone()));
-            } else if item.size <= PREFETCH_BYTES && !state.slots.contains_key(&key) {
+            } else if item.size <= PREFETCH_BYTES
+                && !state.closed
+                && !state.slots.contains_key(&key)
+                && self.ask(offer.generation, &item.uti)
+            {
                 state.slots.insert(key, Slot::Asked);
-                self.ask(offer.generation, &item.uti);
             }
         }
         drop(state);
         self.changed.notify_all();
     }
 
-    fn ask(&self, generation: u64, uti: &str) {
+    /// Ask the worker for `uti` of offer `generation`; whether the fetch went out.
+    fn ask(&self, generation: u64, uti: &str) -> bool {
         let fetch = ClipMsg::Fetch { generation, uti: uti.to_owned() };
-        if let Err(e) = self.out.try_send(ClientMsg::Clip(fetch)) {
-            tracing::debug!(error = %e, "clipboard fetch not sent");
+        match self.out.try_send(ClientMsg::Clip(fetch)) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!(error = %e, "clipboard fetch not sent");
+                false
+            }
         }
+    }
+
+    /// The link is gone: whatever waits on it stops now, and later waits answer from what
+    /// arrived, without asking.
+    pub fn close(&self) {
+        let mut state = self.state.lock();
+        state.closed = true;
+        for slot in state.slots.values_mut() {
+            if matches!(slot, Slot::Asked) {
+                *slot = Slot::Gone;
+            }
+        }
+        drop(state);
+        self.changed.notify_all();
     }
 
     /// Bytes of `uti` in offer `generation` arrived.
@@ -122,16 +146,19 @@ impl ClipCache {
     }
 
     /// The bytes of `uti` in offer `generation`: from the cache, else asked for and waited on
-    /// for at most `wait`. `None` when the offer is gone or the worker did not answer in time.
-    /// Blocks the calling thread; the answer arrives on the link's tasks, never this thread.
+    /// for at most `wait`. `None` when the offer is gone, the link is, or the worker did not
+    /// answer in time. Blocks the calling thread; the answer arrives on the link's tasks, never
+    /// this thread.
     #[must_use]
     pub fn wait(&self, generation: u64, uti: &str, wait: Duration) -> Option<Vec<u8>> {
         let deadline = Instant::now().checked_add(wait)?;
         let key = (generation, uti.to_owned());
         let mut state = self.state.lock();
         if !state.slots.contains_key(&key) {
+            if state.closed || !self.ask(generation, uti) {
+                return None;
+            }
             state.slots.insert(key.clone(), Slot::Asked);
-            self.ask(generation, uti);
         }
         loop {
             match state.slots.get(&key) {
@@ -225,5 +252,38 @@ mod tests {
         cache.offer(&offer(6, Vec::new()));
         cache.fill(5, "public.png".to_owned(), vec![1]);
         assert_eq!(cache.wait(5, "public.png", Duration::from_millis(10)), None, "stale data");
+    }
+
+    /// A paste waiting on a link that goes stops then, not at its deadline; one on a link that
+    /// is gone answers at once from what arrived, and asks nothing.
+    #[test]
+    fn a_paste_on_a_dead_link_answers_at_once() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let cache = std::sync::Arc::new(ClipCache::new(tx));
+        cache.offer(&offer(8, vec![item("public.tiff", PREFETCH_BYTES + 1, None)]));
+        cache.fill(8, "public.rtf".to_owned(), vec![5]);
+        let closer = std::sync::Arc::clone(&cache);
+        let close = std::thread::spawn(move || {
+            while closer.state.lock().slots.len() < 2 {
+                std::thread::yield_now();
+            }
+            closer.close();
+        });
+        let started = Instant::now();
+        assert_eq!(cache.wait(8, "public.tiff", Duration::from_secs(30)), None);
+        close.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert_eq!(fetches(&mut rx), [(8, "public.tiff".to_owned())]);
+
+        assert_eq!(cache.wait(8, "public.png", Duration::from_secs(30)), None);
+        assert_eq!(cache.wait(8, "public.rtf", Duration::from_secs(30)), Some(vec![5]));
+        assert!(fetches(&mut rx).is_empty(), "a closed link is asked nothing");
+
+        let (tx, rx) = mpsc::channel(8);
+        let orphan = ClipCache::new(tx);
+        drop(rx);
+        let started = Instant::now();
+        assert_eq!(orphan.wait(9, "public.png", Duration::from_secs(30)), None);
+        assert!(started.elapsed() < Duration::from_secs(5), "an unsendable fetch is not waited on");
     }
 }

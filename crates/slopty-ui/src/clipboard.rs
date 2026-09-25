@@ -16,13 +16,17 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
 
 use slopty_client::layout::WorkerKey;
+use slopty_client::remote::Remote;
 use slopty_core::ClientId;
 use slopty_platform::pasteboard::{
     CONCEALED_UTI, FILE_URL_UTI, ORIGIN_TYPE, Pasteboard, Provide, TEXT_UTI, TRANSIENT_UTI, Write,
 };
 use slopty_proto::transfer::{ClipItem, Hash, INLINE_CLIP_BYTES, Offer, Peer};
+use tokio::sync::watch;
 
 /// The representations synced, richest first. File URLs name files on one machine only; files
 /// move by a transfer instead.
@@ -41,6 +45,9 @@ pub enum ClipFiles {
         generation: u64,
     },
 }
+
+/// A worker's link as it is now: whichever connection is up, `None` while none is.
+pub type LinkNow = watch::Receiver<Option<Arc<dyn Remote>>>;
 
 /// A worker's offer of files, and the change count its write here left.
 #[derive(Clone, Copy, Debug)]
@@ -76,6 +83,8 @@ pub struct ClipSync {
     heard: Vec<Hash>,
     /// The files a worker's offer put here last.
     worker_files: Option<WorkerFiles>,
+    /// Each worker's link now, which its promises here fetch over.
+    links: HashMap<WorkerKey, watch::Sender<Option<Arc<dyn Remote>>>>,
 }
 
 impl std::fmt::Debug for ClipSync {
@@ -105,6 +114,7 @@ impl ClipSync {
             told: HashMap::new(),
             heard: Vec::new(),
             worker_files: None,
+            links: HashMap::new(),
         }
     }
 
@@ -240,10 +250,38 @@ impl ClipSync {
         tracing::debug!(generation = offer.generation, count, files, "clipboard from a worker");
     }
 
-    /// A worker's link is new: it has heard nothing yet.
-    pub fn forget(&mut self, worker: WorkerKey) {
+    /// A worker's link came up (`remote`) or went (`None`): the worker has heard nothing over
+    /// it yet, and what it offered before is fetched over it from now on.
+    pub fn relink(&mut self, worker: WorkerKey, remote: Option<Arc<dyn Remote>>) {
         self.told.remove(&worker);
+        self.links.entry(worker).or_insert_with(|| watch::Sender::new(None)).send_replace(remote);
     }
+
+    /// `worker`'s link, followed as it drops and comes back.
+    pub fn link(&mut self, worker: WorkerKey) -> LinkNow {
+        self.links.entry(worker).or_insert_with(|| watch::Sender::new(None)).subscribe()
+    }
+}
+
+/// What keeps the promises of worker offer `offer`: a fetch over the worker's link at the time
+/// of the paste, waiting at most `wait`.
+///
+/// A paste while the link is down gets nothing at once. Bytes other than the ones the offer listed
+/// are not pasted: a restarted worker counts its offers from 1 again, so a generation alone does
+/// not name the contents.
+#[must_use]
+pub fn provider(link: LinkNow, offer: &Offer, wait: Duration) -> Provide {
+    let generation = offer.generation;
+    let hashes: Vec<(String, Hash)> = offer.items.iter().map(|i| (i.uti.clone(), i.hash)).collect();
+    Arc::new(move |uti: &str| {
+        let remote = link.borrow().clone()?;
+        let bytes = remote.clip_data(generation, uti, wait)?;
+        let listed = hashes.iter().any(|(t, h)| t == uti && *h == digest(&bytes));
+        if !listed {
+            tracing::debug!(generation, uti, "clipboard bytes not the ones offered; dropped");
+        }
+        listed.then_some(bytes)
+    })
 }
 
 /// The path a `file://` URL names, percent escapes undone; `None` for any other URL.

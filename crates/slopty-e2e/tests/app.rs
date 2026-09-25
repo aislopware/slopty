@@ -1022,6 +1022,96 @@ mod tests {
         stack.shutdown().await;
     }
 
+    /// A worker's copy promised on the app's clipboard still pastes promptly after the link
+    /// drops and comes back: the promise fetches over the link the worker has now, not the dead
+    /// one it was made on. The worker is stopped (SIGSTOP) until the app gives the silent link
+    /// up, then resumed with its clipboard state whole, so the app reconnects to the same
+    /// process. Both ends are the run's own named pasteboards.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_worker_copy_pastes_promptly_after_the_link_drops_and_returns() {
+        use slopty_e2e::harness::pasteboard_name;
+        use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
+
+        const TEXT: &str = "public.utf8-plain-text";
+
+        /// Stop or resume the worker process.
+        async fn signal(pid: u32, which: &str) {
+            let status = tokio::process::Command::new("/bin/kill")
+                .args([which, &pid.to_string()])
+                .status()
+                .await
+                .unwrap();
+            assert!(status.success(), "kill {which} {pid}: {status}");
+        }
+
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-clip-relink").await.unwrap();
+        let worker_name = pasteboard_name(stack.dir.path(), "worker");
+        let app_name = pasteboard_name(stack.dir.path(), "app");
+        // `Stack` starts ptyd, then the worker, then the app.
+        let worker_pid = stack.children[1].id().unwrap();
+        let drv = &mut stack.driver;
+        drv.wait_for("the worker's clipboard watched", STEP, |d| {
+            d.status == "connected"
+                && d.focus.as_deref() == Some("terminal")
+                && d.workers.iter().any(|w| w.clipboard_watched)
+        })
+        .await
+        .unwrap();
+        drv.type_text("clipboard-watched").await.unwrap();
+        drv.wait_for("the keys behind the watch echoed", STEP, |d| {
+            !d.rows_containing("clipboard-watched").is_empty()
+        })
+        .await
+        .unwrap();
+
+        // Past the app's prefetch size (1 MiB, `slopty_client::clip::PREFETCH_BYTES`), so none
+        // of it is here until something pastes it.
+        let text = format!("relinked {}\n", std::process::id()).repeat(200_000);
+        assert!(text.len() > 2 << 20, "{} bytes", text.len());
+        let (worker, app) = (MacPasteboard::named(&worker_name), MacPasteboard::named(&app_name));
+        let before = app.change_count();
+        worker.copy(&[(TEXT, text.as_bytes())]);
+        let deadline = std::time::Instant::now() + STEP;
+        while app.change_count() == before && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(app.types().iter().any(|t| t == TEXT), "promised: {:?}", app.types());
+        drop(app);
+
+        signal(worker_pid, "-STOP").await;
+        let dropped = drv
+            .wait_for("the app to give the silent link up", Duration::from_secs(40), |d| {
+                d.status.ends_with("reconnecting…")
+            })
+            .await;
+        signal(worker_pid, "-CONT").await;
+        dropped.unwrap();
+        drv.wait_for("the link back and watching", STEP, |d| {
+            d.status == "connected" && d.workers.iter().any(|w| w.clipboard_watched)
+        })
+        .await
+        .unwrap();
+
+        // Reading the promise is what ⌘V in any app does: the app's provider fetches it.
+        let reader = app_name.clone();
+        let (read, took) = tokio::task::spawn_blocking(move || {
+            let started = std::time::Instant::now();
+            let read = MacPasteboard::named(&reader).data(TEXT);
+            (read, started.elapsed())
+        })
+        .await
+        .unwrap();
+        eprintln!("paste after the relink took {} ms", took.as_millis());
+        assert!(read.as_deref() == Some(text.as_bytes()), "the text arrived whole on paste");
+        assert!(took < Duration::from_secs(1), "the paste took {took:?}");
+        worker.release();
+        stack.shutdown().await;
+    }
+
     /// Files copied here, as Finder copies them, and pasted into a shell with ⌘V go up to the
     /// shell's directory, and their quoted paths are typed: a drop by the keyboard. The copy is
     /// on the run's own named pasteboard; the human's is never touched.

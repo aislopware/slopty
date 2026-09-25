@@ -372,7 +372,12 @@ fn offers_land_as_promises_and_fetches_are_answered(cx: &mut TestAppContext) {
         origin: Peer::Worker(slopty_core::WorkerId::new()),
         generation: 3,
         items: vec![
-            ClipItem { uti: "public.png".to_owned(), size: 3, hash: [2; 32], inline: None },
+            ClipItem {
+                uti: "public.png".to_owned(),
+                size: 3,
+                hash: crate::clipboard::digest(b"PNG"),
+                inline: None,
+            },
             ClipItem {
                 uti: TEXT_UTI.to_owned(),
                 size: 2,
@@ -406,6 +411,78 @@ fn offers_land_as_promises_and_fetches_are_answered(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _window, _cx| v.clip_message(key, stale));
     let sent = studio.drain();
     assert!(matches!(sent.as_slice(), [ClientMsg::Clip(ClipMsg::Unavailable { .. })]), "{sent:?}");
+}
+
+/// A worker link that serves one clipboard representation and counts the fetches.
+#[derive(Debug)]
+struct Serves(&'static [u8], Arc<std::sync::atomic::AtomicUsize>);
+
+impl Remote for Serves {
+    fn upload(&self, _xfer: XferId, _files: Vec<PathBuf>, _dest: Dest) {}
+
+    fn cancel(&self, _xfer: XferId) {}
+
+    fn download(&self, _path: String, _into: PathBuf) -> Result<Vec<PathBuf>, String> {
+        Err("clipboard only".to_owned())
+    }
+
+    fn clip_data(&self, _generation: u64, _uti: &str, _wait: Duration) -> Option<Vec<u8>> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(self.0.to_vec())
+    }
+
+    fn send_clip(&self, _generation: u64, _uti: String, _bytes: Vec<u8>) {}
+
+    fn forward(&self, _port: u16) -> Option<u16> {
+        None
+    }
+}
+
+/// A worker's promise here follows its link: pasted while the link is down it gives nothing at
+/// once; after the link comes back it is fetched over the new link, never the dead one it was
+/// made on; and bytes that are not what was offered (a restarted worker's same generation)
+/// are not pasted.
+#[gpui::test]
+fn a_promise_is_fetched_over_the_link_the_worker_has_now(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (studio, _calls, board) = connect_remote(&view, cx);
+    let key = studio.key;
+    let offer = Offer {
+        origin: Peer::Worker(slopty_core::WorkerId::new()),
+        generation: 3,
+        items: vec![ClipItem {
+            uti: "public.png".to_owned(),
+            size: 3,
+            hash: crate::clipboard::digest(b"PNG"),
+            inline: None,
+        }],
+    };
+    view.update_in(cx, |v, _window, _cx| v.clip_message(key, ClipMsg::Offer(offer)));
+    view.update_in(cx, |v, _window, cx| {
+        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
+    });
+    assert_eq!(board.data("public.png"), None, "no link, no bytes, no wait");
+
+    let relink = |serves: &'static [u8], cx: &mut VisualTestContext| {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let remote: Arc<dyn Remote> = Arc::new(Serves(serves, Arc::clone(&asked)));
+        let (tx, _rx) = mpsc::channel(256);
+        let factory: ScreenFactory =
+            Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+        let link =
+            WorkerLink { me: studio.me, out: tx, open_screen: factory, remote: Some(remote) };
+        view.update_in(cx, |v, _window, cx| {
+            v.connect_worker(key, "studio".to_owned(), link, Vec::new(), cx);
+        });
+        asked
+    };
+    let asked = relink(b"PNG", cx);
+    assert_eq!(board.data("public.png").as_deref(), Some(&b"PNG"[..]));
+    assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1, "over the new link");
+
+    let asked = relink(b"a restarted worker's", cx);
+    assert_eq!(board.data("public.png"), None, "not the offered bytes");
+    assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
 /// Files dropped on a shell go up to its directory; the tile shows how far the upload got,
