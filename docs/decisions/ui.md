@@ -1264,3 +1264,114 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   trip, who needs you, "+" and "…") with the text system and moves the dots aside as far as it
   takes to clear both. With no room between the two the dots are not drawn. Tests:
   `the_dots_centre_on_the_safe_area`, `the_dots_give_way_to_the_name_and_the_buttons`.
+
+- ✅ **The chrome gets a frame, a status vocabulary and icons** (2026-09-25). The user found the
+  app sparse, not minimal. They pointed at soloterm, Orca, diri, otty, Warp, Zed and delta as
+  apps that are minimal yet complete. Read from their source and styles, those apps share a
+  frame that Slopty lacked. A navigator lists hosts and what runs on them, sorted by attention.
+  A status bar says where the focused thing runs and how the link is. Each row carries a fixed
+  status slot with one icon and one tone per state. Pane headers name the kind, the title and
+  the place. Empty and failed states say what to do next. Slopty had only a title bar with a
+  name and a frame time, and tiles headed by a bare word. This ruling amends the de-slop rule
+  that chrome carries no decorative glyph. An icon is not decoration when it names a kind, a
+  state or an action. No emoji, and still no glyph without a meaning.
+
+  *Icons.* Lucide (ISC), from gpui-kit's asset crate. `slopty_ui::icons` embeds only the icons
+  it lists and backs them with gpui-kit's component bundle; the macOS and iOS apps register it. Sizes
+  come from the type scale: `Typography::icon()` is base + 1 beside text and `icon_large()` is
+  base + 3 standing alone. An icon takes the colour of the text it sits beside. Zed's icon crate
+  is GPL, so none of its files are used.
+
+  *Status.* `icons::Status` is the one vocabulary: `Idle`, `Working`, `NeedsYou`, `Done`,
+  `Failed` and `Away`. Each has one icon and one tone (muted, accent, warn, success, error,
+  muted). `status_mark` draws it in a fixed square slot, so titles line up whether or not a row
+  has a mark. The tile header, the navigator, the palette and toasts all use it. The agent pill
+  keeps its words (`allow? Bash`) beside the mark.
+
+  The navigator does not bring back a host switcher: every worker still shows in one workspace
+  (Workspace, "The layout is this device's"). It lists what is there and flies to it.
+
+  *Frame (desktop).* From the top down:
+  - The title bar holds the navigator toggle, then the workspace name as a button with a
+    chevron. The column dots stay. The right side holds the needs-you chip, a bell with a count,
+    then `+` and `…` as Lucide icons.
+  - A navigator on the left: 248 pt by default, resizable from 200 to 400 by a 6 pt handle,
+    toggled with ⌘B, its width and visibility kept with the layout. Three sections, in this
+    order:
+    - *Needs you* appears only when something waits on the human.
+    - *Workers*: one 28 pt row each, holding the status slot (connected is success, away is
+      warn, forgotten is muted), the name, and the round trip in caption type on the right. A
+      row discloses its tiles, each with a kind icon, a title and a status mark. Clicking one
+      flies the camera there.
+    - *Workspaces*: the name and a count of tiles.
+  - The strip.
+  - A 26 pt status bar. On the left: the focused tile's worker, then its working directory's
+    tail. On the right: active transfers, the round trip, the frame time (moved down from the
+    title bar), and an agent summary (`2 working · 1 needs you`) that jumps to the next one
+    needing the human.
+
+  On an iPad the navigator is an overlay and on a phone a drawer. On a phone the status bar
+  keeps only the readouts that fit.
+
+  *Tile header (28 pt).* From left to right:
+  - the kind icon (terminal, agent, window, display, browser, file, note);
+  - the title at base size in primary text (muted only when unfocused);
+  - the working directory's tail in muted text;
+  - on the right, a worker chip when more than one worker is connected, then the status mark and
+    pill, then an unseen dot;
+  - close and split as icon buttons that appear on hover.
+
+  The focused tile's header shares its body's surface. An unfocused header steps up to
+  `panel`, so the focused tile reads as one piece.
+
+  *In-body states.* A pill anchored at the bottom of the body says what is wrong and what to do:
+  `Reconnecting…`, `N lines below · Back to live`, `Exited · code N` with Restart and Close. A
+  dialog is never used for these.
+
+  *Empty and failed states.* An empty workspace shows a large muted icon and a noun-phrase
+  title. Below them come the three ways to begin, each with its key cap, then the recent
+  workers. The palette groups its rows into sections (Tiles, Workers, Commands), with a kind
+  icon on each row and the worker named where there is more than one.
+
+  *Toasts.* Bottom right, up to 400 pt wide. Each has an icon, a line of text and at most one
+  action. They stay 6 s, and no more than two are shown. The bell's inbox keeps what they said
+  (Needs you, Finished, All).
+
+  Every size, colour and gap still comes from the tokens, and the lint-as-tests in
+  `kit.rs` enforce them. Chrome text stays sentence case, and keybindings stay in the palette
+  and in key caps, not on buttons. Tests: `icons` unit tests (every listed icon loads and the
+  component bundle still does; every status has its own embedded icon), plus the tests each part
+  lands with. The app goldens are re-accepted for this ruling.
+
+  *Shipped: tiles.*
+  - **Header.** It is 28 pt. The kind icon is also a Mac's drag-out handle on a file. The place
+    is a shell's directory tail from `SessionSummary.cwd` or a page's address. The client is
+    never told the worker's home, so `cwd_tail` recognises a home by its shape.
+  - **Status mark.** It is chosen in this order:
+    1. the agent;
+    2. `Away` while the worker's link is down;
+    3. a finished command not yet watched;
+    4. an exited session;
+    5. the newest prompt's exit mark. That is one lookup in the prompt index, not a scan of
+       the rows.
+
+    The agent pill dropped its dot, since the mark beside it carries the tone. A failed
+    finished command is now `error`, not `warn`.
+  - **Controls.** Fullscreen and close are icon buttons. They show on header hover and always
+    on the focused tile.
+  - **Body pills.** A pill at the foot of the body says `Reconnecting…` (or that the worker is
+    unreachable or gone), `Exited · code N` with Restart and Close, or `Session ended` with
+    Close. Restart reruns the session's command in its cwd on the same worker. The Exited pill
+    shows only for a round trip today, because the client closes an exited session at once.
+  - **Toasts.** They stack in the strip's corner, two at most, 6 s each, with Go or Undo.
+
+  Not built: a "lines below · back to live" pill, because the terminal view tracks only its
+  offset. Tests (`workspace/tests/tiles.rs`):
+  `a_place_is_its_last_two_directories_with_home_as_a_tilde`,
+  `a_shell_header_names_its_directory`, `the_worker_chip_shows_only_beside_another_worker`,
+  `a_focused_header_shares_its_body_surface`,
+  `the_status_mark_follows_the_agent_the_last_exit_and_the_link`,
+  `the_header_controls_close_and_fullscreen_their_tile`,
+  `a_tile_whose_worker_dropped_says_reconnecting_at_its_foot`,
+  `an_exited_shell_offers_restart_and_close`, `notices_stack_two_in_the_corner_and_go`,
+  `the_closed_notice_takes_the_tile_back`.

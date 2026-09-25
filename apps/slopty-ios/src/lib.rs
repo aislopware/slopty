@@ -36,7 +36,7 @@ pub extern "C" fn slopty_ios_run() -> bool {
             Err(e) => tracing::error!(error = %e, "open workspace"),
         }
     }));
-    gpui_ios::ios::ffi::run_app();
+    gpui_ios::ios::ffi::run_app_with_assets(slopty_ui::icons::Assets);
     opened.get()
 }
 

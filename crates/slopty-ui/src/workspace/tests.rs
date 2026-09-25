@@ -1247,3 +1247,4 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
 }
 
 mod remote;
+mod tiles;

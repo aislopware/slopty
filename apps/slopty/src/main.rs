@@ -123,7 +123,7 @@ fn main() -> Result<()> {
     // window is covered and the direct path would be abandoned.
     let _activity = slopty_platform::Activity::latency_critical("Slopty remote session");
 
-    gpui_kit::application().run(move |cx| {
+    gpui_kit::application().with_assets(slopty_ui::icons::Assets).run(move |cx| {
         gpui_kit::init(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &Hide, cx| cx.hide());

@@ -28,6 +28,7 @@ pub mod file;
 pub mod fonts;
 pub mod frames;
 pub mod highlight;
+pub mod icons;
 pub mod keys;
 pub mod kit;
 pub mod markdown;

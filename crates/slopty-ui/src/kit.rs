@@ -161,6 +161,56 @@ pub fn button(
     crate::a11y::tab_stop(el, s.accent)
 }
 
+/// A square button around one icon: a bar's actions, a tile's close and split.
+///
+/// Ghost like a bar's text buttons, with `label` as its accessible name and its hint, since the
+/// icon alone names nothing to a screen reader.
+#[must_use]
+pub fn icon_button(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    icon: crate::icons::IconName,
+    label: &'static str,
+) -> gpui::Stateful<Div> {
+    icon_button_at(theme, id, icon, label, 1.0)
+}
+
+/// [`icon_button`] at the chrome's zoom `k`: a tile's header shrinks with the overview, and a
+/// button drawn at full size there would outgrow the bar it sits in.
+#[must_use]
+pub fn icon_button_at(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    icon: crate::icons::IconName,
+    label: &'static str,
+    k: f32,
+) -> gpui::Stateful<Div> {
+    let s = theme.surfaces;
+    let id: SharedString = id.into();
+    let selector = id.to_string();
+    let side = 2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large()) * k;
+    let el = div()
+        .id(gpui::ElementId::Name(id))
+        .debug_selector(move || selector)
+        .role(gpui::accesskit::Role::Button)
+        .aria_label(label)
+        .flex_none()
+        .size(px(side))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme.radii.sm * k))
+        .cursor_pointer()
+        .text_color(hsla(s.text_secondary))
+        .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+        .active(move |el| el.bg(hsla(s.overlay)))
+        .child(
+            crate::icons::icon(theme, icon, crate::icons::IconSize::Inline, hsla(s.text_secondary))
+                .size(px(theme.typography.icon() * k)),
+        );
+    crate::a11y::tab_stop(el, s.accent)
+}
+
 /// What a bar button does, and the key that does it, shown after a pause on the pointer.
 ///
 /// The bar prints no keys of its own. Six ⌘ chords across one strip was most of the text up

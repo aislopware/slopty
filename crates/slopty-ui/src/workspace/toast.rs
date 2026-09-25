@@ -1,28 +1,43 @@
-//! The one-line notice at the foot of the strip: another client's pointing, a closed tile to
-//! take back, a word to this client.
+//! The notices in the strip's bottom-right corner: another client's pointing, a closed tile to
+//! take back, a word to this client. Each is one line with an icon and at most one action;
+//! they stay [`SAY_FOR`] and no more than [`SHOWN`] are up at once.
 
 use std::time::Duration;
 
 use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
-    Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    Context, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use slopty_client::layout::TileRef;
 use slopty_proto::ClientMsg;
-use slopty_theme::alpha;
 
 use super::WorkspaceView;
 use super::actions::PointOthers;
 use crate::a11y::tab_stop;
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
+use crate::icons::{IconName, IconSize};
 
 /// How long a pointing or a word stays up.
-const SAY_FOR: Duration = Duration::from_secs(8);
+pub(super) const SAY_FOR: Duration = Duration::from_secs(6);
 
-/// The toast.
+/// How many notices are up at once: a third pushes the oldest out.
+pub(super) const SHOWN: usize = 2;
+
+/// The widest a notice gets, in points: past it the line ends in an ellipsis.
+const TOAST_MAX_W: f32 = 400.0;
+
+/// The notices up now, oldest first. Made with the first notice and kept from then on.
+#[derive(Default)]
 pub(super) struct Toast {
-    /// Tells a stale dismiss timer from the current toast's.
+    /// The last notice's number: it tells a stale dismiss timer from a live notice.
+    seq: u64,
+    shown: Vec<Shown>,
+}
+
+/// One notice up.
+struct Shown {
     seq: u64,
     what: ToastKind,
 }
@@ -52,21 +67,25 @@ impl WorkspaceView {
         self.show_toast_for(what, SAY_FOR, cx);
     }
 
-    /// Show `what` for `during`: a newer toast replaces it and restarts the clock.
+    /// Show `what` for `during`, under the notices already up; the oldest goes when there
+    /// would be more than [`SHOWN`].
     pub(super) fn show_toast_for(
         &mut self,
         what: ToastKind,
         during: Duration,
         cx: &mut Context<Self>,
     ) {
-        let seq = self.toast.as_ref().map_or(0, |t| t.seq).wrapping_add(1);
-        self.toast = Some(Toast { seq, what });
+        let toast = self.toast.get_or_insert_with(Toast::default);
+        toast.seq = toast.seq.wrapping_add(1);
+        let seq = toast.seq;
+        toast.shown.push(Shown { seq, what });
+        let over = toast.shown.len().saturating_sub(SHOWN);
+        toast.shown.drain(..over);
         cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(during).await;
             let _gone = this.update(cx, |this, cx| {
-                if this.toast.as_ref().is_some_and(|t| t.seq == seq) {
-                    this.toast = None;
+                if this.drop_toasts(|shown| shown.seq == seq) {
                     cx.notify();
                 }
             });
@@ -74,15 +93,24 @@ impl WorkspaceView {
         .detach();
     }
 
+    /// Take down the notices `which` picks; `true` when one went.
+    fn drop_toasts(&mut self, which: impl Fn(&Shown) -> bool) -> bool {
+        let Some(toast) = self.toast.as_mut() else { return false };
+        let before = toast.shown.len();
+        toast.shown.retain(|shown| !which(shown));
+        // The numbering carries on when the last notice goes, so a timer left from before
+        // can never take down a newer notice that happens to reuse its number.
+        toast.shown.len() != before
+    }
+
     /// A word for the human (a picture refused, a worker added, settings that did not parse).
     pub fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
         self.show_toast(ToastKind::Said(text), cx);
     }
 
-    /// The text of the toast up now, for tests and the self-test dump.
-    #[must_use]
-    pub fn toast_text(&self, cx: &gpui::App) -> Option<String> {
-        Some(match &self.toast.as_ref()?.what {
+    /// What a notice says.
+    fn toast_line(&self, what: &ToastKind, cx: &gpui::App) -> Option<String> {
+        Some(match what {
             ToastKind::Pointed { name, tile } => {
                 let item = self.item(*tile)?;
                 format!("{name} points at {}", self.card_title(*tile, item, cx))
@@ -92,15 +120,27 @@ impl WorkspaceView {
         })
     }
 
+    /// The text of the newest notice up now, for tests and the self-test dump.
+    #[must_use]
+    pub fn toast_text(&self, cx: &gpui::App) -> Option<String> {
+        let shown = self.toast.as_ref()?.shown.last()?;
+        self.toast_line(&shown.what, cx)
+    }
+
+    /// The texts of every notice up now, oldest first.
+    #[must_use]
+    pub fn toast_texts(&self, cx: &gpui::App) -> Vec<String> {
+        self.toast.as_ref().map_or_else(Vec::new, |t| {
+            t.shown.iter().filter_map(|s| self.toast_line(&s.what, cx)).collect()
+        })
+    }
+
     /// The "closed" toast goes with its offer: `seq` for one closing, `None` for any.
     pub(super) fn dismiss_closed_toast(&mut self, seq: Option<u64>) {
-        let closing = match &self.toast {
-            Some(Toast { what: ToastKind::Closed { seq: s, .. }, .. }) => Some(*s),
-            _ => None,
-        };
-        if closing.is_some_and(|s| seq.is_none_or(|seq| seq == s)) {
-            self.toast = None;
-        }
+        self.drop_toasts(|shown| match shown.what {
+            ToastKind::Closed { seq: s, .. } => seq.is_none_or(|seq| seq == s),
+            _ => false,
+        });
     }
 
     /// ⌘⇧O: point the other clients of the focused tile's worker at it. The worker relays it;
@@ -117,71 +157,112 @@ impl WorkspaceView {
         self.show_toast(ToastKind::Said(format!("Pointed the others at {title}")), cx);
     }
 
-    /// The toast, centred at the foot of the strip. One surface for every kind: a toast is a
-    /// notice that happens to be clickable, not a primary action, so the accent is only on
-    /// the words that name what a click does. At the foot because the top of the strip is
-    /// where the tiles' headers are, and a notice must not sit on the badge it is about.
+    /// One notice: an icon for what it is about, its line, and its one action. The action is
+    /// the only accent: a notice is not a primary action, only a way to one.
+    fn render_one(&self, shown: &Shown, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let line = self.toast_line(&shown.what, cx)?;
+        let action = |id: &'static str, label: &'static str| {
+            let el = div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .role(Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .px(px(theme.spacing.sm))
+                .py(px(theme.spacing.xxs))
+                .rounded(px(theme.radii.sm))
+                .text_color(hsla(s.accent))
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.raised)))
+                .child(label);
+            tab_stop(el, s.accent)
+        };
+        let (part, icon, action) = match &shown.what {
+            ToastKind::Pointed { tile, .. } => {
+                let tile = *tile;
+                let go =
+                    action("toast-go", "Go").on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.dismiss_pointed(tile);
+                        this.focus_tile(tile, cx);
+                    }));
+                ("pointed", IconName::MousePointer2, Some(go))
+            }
+            ToastKind::Closed { seq, .. } => {
+                let seq = *seq;
+                // The closed tile's kind, so the notice names what went as the header did.
+                let icon = self
+                    .closed
+                    .iter()
+                    .find(|c| c.seq == seq)
+                    .map_or(IconName::X, |c| super::tile::kind_icon(&c.item, false));
+                let undo = action("toast-undo", "Undo")
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.take_back(Some(seq), cx)));
+                ("closed", icon, Some(undo))
+            }
+            ToastKind::Said(_) => ("said", IconName::Info, None),
+        };
+        let line = SharedString::from(line);
+        Some(
+            div()
+                .id(("toast", shown.seq))
+                .debug_selector(move || part.to_owned())
+                .role(Role::Status)
+                .aria_label(line.clone())
+                .occlude()
+                .max_w(px(TOAST_MAX_W))
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.sm))
+                .pl(px(theme.spacing.md))
+                .pr(px(if action.is_some() { theme.spacing.xs } else { theme.spacing.md }))
+                .py(px(theme.spacing.xs))
+                .rounded(px(theme.radii.md))
+                .bg(hsla(s.panel))
+                .border_1()
+                .border_color(hsla(s.border))
+                .shadow_sm()
+                .text_color(hsla(s.text))
+                .text_size(px(theme.typography.small()))
+                .font_family(theme.typography.ui_family.clone())
+                .child(crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(line),
+                )
+                .when_some(action, gpui::ParentElement::child)
+                .into_any_element(),
+        )
+    }
+
+    /// A pointing at `tile` has been followed.
+    fn dismiss_pointed(&mut self, tile: TileRef) {
+        self.drop_toasts(
+            |shown| matches!(shown.what, ToastKind::Pointed { tile: t, .. } if t == tile),
+        );
+    }
+
+    /// The notices, stacked up from the strip's bottom-right corner, the newest lowest. In the
+    /// corner because the top of the strip is where the tiles' headers are, and the middle of
+    /// its foot is where a tile's own state pill sits.
     pub(super) fn render_toast(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let toast = self.toast.as_ref()?;
-        let style = |d: Stateful<Div>| {
-            d.flex()
-                .items_center()
-                .gap(px(theme.spacing.xs))
-                .px(px(theme.spacing.md))
-                .py(px(theme.spacing.xs))
-                .rounded(px(theme.radii.md))
-                .bg(hsla_alpha(theme.surfaces.panel, alpha::VEIL))
-                .border_1()
-                .border_color(hsla(theme.surfaces.border))
-                .shadow_sm()
-                .text_color(hsla(theme.surfaces.text))
-                .text_size(px(theme.typography.small()))
-                .font_family(theme.typography.ui_family.clone())
-        };
-        let offer = |text: &'static str| div().text_color(hsla(theme.surfaces.accent)).child(text);
-        let inner = match &toast.what {
-            ToastKind::Pointed { name, tile } => {
-                let tile = *tile;
-                let item = self.item(tile)?;
-                let title = self.card_title(tile, item, cx);
-                let pill = style(div().id("pointed"))
-                    .debug_selector(|| "pointed".to_owned())
-                    .role(Role::Button)
-                    .aria_label(format!("{name} points at {title}, go there"))
-                    .cursor_pointer()
-                    .child(SharedString::from(format!("{name} points at {title}")))
-                    .child(offer("· go"));
-                tab_stop(pill, theme.surfaces.accent)
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.toast = None;
-                        this.focus_tile(tile, cx);
-                    }))
-                    .into_any_element()
-            }
-            ToastKind::Closed { seq, title } => {
-                let seq = *seq;
-                let pill = style(div().id("closed"))
-                    .debug_selector(|| "closed".to_owned())
-                    .role(Role::Button)
-                    .aria_label(format!("Closed {title}, undo"))
-                    .cursor_pointer()
-                    .child(SharedString::from(format!("Closed {title}")))
-                    .child(offer("· Undo"));
-                tab_stop(pill, theme.surfaces.accent)
-                    .on_click(cx.listener(move |this, _ev, _w, cx| this.take_back(Some(seq), cx)))
-                    .into_any_element()
-            }
-            ToastKind::Said(text) => style(div().id("said"))
-                .debug_selector(|| "said".to_owned())
-                .role(Role::Status)
-                .aria_label(SharedString::from(text.clone()))
-                .child(SharedString::from(text.clone()))
-                .into_any_element(),
-        };
+        let notices: Vec<gpui::AnyElement> =
+            toast.shown.iter().filter_map(|shown| self.render_one(shown, cx)).collect();
+        if notices.is_empty() {
+            return None;
+        }
         let drawn = std::rc::Rc::clone(&self.toast_drawn);
         let frame = self.frames_drawn;
-        // Where the toast is, for a browser tile's page to stop above it.
+        // Where the notices are, for a browser tile's page to stop above them.
         let measure = gpui::canvas(
             move |bounds, _window, _cx| drawn.set(Some((frame, bounds))),
             |_bounds, (), _window, _cx| {},
@@ -192,11 +273,13 @@ impl WorkspaceView {
             div()
                 .absolute()
                 .bottom(px(theme.spacing.lg))
-                .left_0()
-                .right_0()
+                .right(px(theme.spacing.lg))
+                .max_w(px(TOAST_MAX_W))
                 .flex()
-                .justify_center()
-                .child(inner)
+                .flex_col()
+                .items_end()
+                .gap(px(theme.spacing.sm))
+                .children(notices)
                 .child(measure)
                 .into_any_element(),
         )

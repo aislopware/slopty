@@ -31,11 +31,10 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 filter = 'package(slopty-e2e) & (binary(ios) | binary(ios_uikit))'
 slow-timeout = { period = "60s", terminate-after = 5, grace-period = "10s" }
 
-# The path-flap harness: 90 s of load per shape on a machine it deliberately saturates, so it
-# gets the whole runner to itself and a timeout that fits the load, not a unit test.
+# Echo latency is measured against the frame pace; the rest of the suite competing for the
+# cores is noise in that measurement.
 [[profile.default.overrides]]
-filter = 'package(slopty-workerd) & test(/path_flap_/)'
-slow-timeout = { period = "120s", terminate-after = 4, grace-period = "15s" }
+filter = 'package(slopty-worker) & test(an_echo_beside_a_flood_is_not_held_to_the_frame_pace)'
 threads-required = "num-test-threads"
 
 # CoreAudio's first client on a fresh session takes seconds (~7 s, and past 20 s right after an

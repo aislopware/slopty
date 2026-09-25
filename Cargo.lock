@@ -7136,6 +7136,7 @@ dependencies = [
  "slopty-app",
  "slopty-e2e",
  "slopty-platform",
+ "slopty-ui",
  "tokio",
  "tracing",
  "tracing-subscriber",

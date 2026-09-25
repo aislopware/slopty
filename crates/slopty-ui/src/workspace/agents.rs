@@ -20,6 +20,7 @@ use super::{Finished, WorkspaceEvent, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
+use crate::icons::Status;
 
 /// An agent waiting on the human: where, and the tile that shows it, if one does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -394,9 +395,10 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The agent pill in a terminal's header: a coloured dot and a short line, plus a "go"
-    /// button while the agent waits on the human, which brings the terminal up so the TUI's
-    /// own prompt can be answered there. Slopty never answers for the human.
+    /// The agent pill in a terminal's header: a short line in the tone of its status, which the
+    /// status mark beside it draws as an icon. While the agent waits on the human the pill is a
+    /// button that brings the terminal up so the TUI's own prompt can be answered there. Slopty
+    /// never answers for the human.
     pub(super) fn agent_badge(
         &self,
         tile: TileRef,
@@ -407,18 +409,10 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let k = chrome.k;
-        let (label, color) = match &agent.status {
-            AgentStatus::None => return div().into_any_element(),
-            AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt) => {
-                (agent_status_text(agent), theme.surfaces.text_muted)
-            }
-            // Busy states (thinking, a tool) share the accent: the label says which.
-            AgentStatus::Working | AgentStatus::Tool { .. } => {
-                (agent_status_text(agent), theme.surfaces.accent)
-            }
-            AgentStatus::Blocked(_) => (agent_status_text(agent), theme.surfaces.warn),
-            AgentStatus::Done => (agent_status_text(agent), theme.surfaces.success),
-        };
+        // The pill's tone is its status mark's; busy states (thinking, a tool) share the
+        // accent, and the label says which.
+        let Some(status) = Status::of_agent(agent) else { return div().into_any_element() };
+        let (label, color) = (agent_status_text(agent), status.tone(theme));
         let item = tile.item;
         // An agent waiting on the human is the one state worth a click: the badge itself
         // goes to it. No second "go" beside it — a click on the tile did the same.
@@ -447,13 +441,6 @@ impl WorkspaceView {
             .text_size(px(ui_size))
             .text_color(hsla(color))
             .child(
-                div()
-                    .flex_none()
-                    .size(px((theme.spacing.xs + theme.spacing.xxs) * k))
-                    .rounded_full()
-                    .bg(hsla(color)),
-            )
-            .child(
                 div().overflow_hidden().child(
                     ChromeText::new(label, px(theme.typography.small()), k)
                         .fill()
@@ -480,7 +467,8 @@ impl WorkspaceView {
     }
 
     /// The badge for a long shell command that ended unwatched: its status and how long it
-    /// took, in the success or warn tone. A press focuses the tile (which clears it).
+    /// took, in the tone of its status mark (done or failed). A press focuses the tile (which
+    /// clears it).
     pub(super) fn finished_badge(
         &self,
         tile: TileRef,
@@ -492,9 +480,10 @@ impl WorkspaceView {
         let theme = &self.theme;
         let k = chrome.k;
         let tone = match done.exit {
-            Some(0) | None => theme.surfaces.success,
-            Some(_) => theme.surfaces.warn,
-        };
+            Some(0) | None => Status::Done,
+            Some(_) => Status::Failed,
+        }
+        .tone(theme);
         let label = done.label();
         let item = tile.item;
         let pill = div()

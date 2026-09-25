@@ -357,6 +357,18 @@ impl Typography {
         self.ui_size + 2.0
     }
 
+    /// An icon beside chrome text: a tile's kind, a status mark, a bar button (base + 1).
+    #[must_use]
+    pub fn icon(&self) -> f32 {
+        self.ui_size + 1.0
+    }
+
+    /// An icon that stands alone: an empty state, a title-bar button (base + 3).
+    #[must_use]
+    pub fn icon_large(&self) -> f32 {
+        self.ui_size + 3.0
+    }
+
     /// The heading of a page that is the whole window, the first run (base + 7).
     #[must_use]
     pub fn display(&self) -> f32 {
