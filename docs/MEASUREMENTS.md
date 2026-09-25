@@ -3903,3 +3903,54 @@ reassembled fragments, where it was a copy of them.
 
 Three runs each. The before runs were taken earlier in the same session, at a load that was not
 recorded; the after runs ran at a load average of 4 to 5.
+
+## 2026-09-25 — echo pacing and frames in flight
+
+Three session-actor tests, debug build, mac-studio with other sessions building (load 10–25).
+The echo test types 40 keys into `cat` while a background loop prints a dot every 2 ms or so,
+and times each key to the first frame that acknowledges it. The throttled test floods an
+80 × 24 shell (120 bursts of 15 lines, 10 ms apart) into one viewer whose link carries
+250 kB/s. The link holds each event until its last byte would have gone, as `send_raw` does.
+The test reads how long after the engine's screen showed `DONE` the viewer's screen did, and
+the most events it found waiting in the 256-deep sink. The reply test stops reading for 400 ms
+of a flood with a `FetchLines` sent in the middle.
+
+```
+cargo nextest run -p slopty-worker --test session_actor --no-capture \
+  -E 'test(/echo_beside|throttled|reply_reaches/)'
+```
+
+| | key → acking frame p50 / p90 / max | throttled viewer behind the program | events queued | `Lines` reply |
+| --- | --- | --- | --- | --- |
+| before (load 18) | 4.69 / 10.27 / 10.58 ms | **9 463 ms** | 157 | lost |
+| after, run 1 (load 12) | 0.07 / 0.24 / 0.68 ms | 147 ms | 1 | arrives |
+| after, run 2 (load 25) | 0.17 / 1.74 / 12.95 ms | 173 ms | 0 | arrives |
+| after, run 3 (load 20) | 0.06 / 0.10 / 0.27 ms | 162 ms | 1 | arrives |
+
+The flood beside the typing stayed paced: 40–42 frames in 400 ms before and after, against
+50 at the 8 ms pace. A frame of that flood is about 14.6 kB. Before, 157 of them (2.3 MB)
+waited in the sink, which a 250 kB/s link takes 9.4 s to drain. After, one frame waits behind
+the one on the link: 29 kB, a tenth of a second. The p90 above 8 ms before is the pace plus
+tokio rounding the pace timer up to its next millisecond.
+
+The same queue sits one layer down as well, and this change does not bound it. A frame the
+connection has written is in noq's stream buffer until the link carries it, up to the 1.25 MB
+stream window. On a real link that is about 5 s at 250 kB/s. The credit is given back when the
+connection drops the event after `send_raw`, so it bounds the channel and not QUIC.
+
+The smooth suite's (h) and (d), release, with the commands of "keystroke to glass, hop by hop"
+(`--test-threads 1`). The binaries were built from this tree with and without the change
+(`target/e2e-perf/bin-before`, `bin-after`, `SLOPTY_E2E_BIN_DIR` pointed at each). Two pairs,
+the second in reverse order, load 18–45. Both scenarios type into a quiet shell, which is not
+the path this changes, so they check that nothing regressed. p50 (p95) in ms:
+
+| run | (h) echo beside 6 floods | (d) `never` echo | (d) `always` echo | (d) `always` guess |
+| --- | --- | --- | --- | --- |
+| before, pair 1 (load 39→18) | 27.1 (43.6) | 21.8 (28.6) | 33.8 (41.0) | 20.8 (27.5) |
+| after, pair 1 (load 18→34) | 28.4 (42.4) | 23.6 (45.5) | 37.0 (44.2) | 23.6 (30.9) |
+| after, pair 2 (load 45→27) | 26.7 (41.7) | 22.2 (28.8) | 34.5 (40.7) | 21.5 (27.6) |
+| before, pair 2 (load 27→30) | 31.1 (96.4) | 24.4 (65.8) | 35.5 (42.4) | 22.2 (28.6) |
+
+The spread between runs of the same binary is larger than any difference between the arms.
+The two wide p95s (after pair 1's `never`, before pair 2's (h) and `never`) are key → arrived
+p95 of 17–68 ms, when the load peaked mid-run.

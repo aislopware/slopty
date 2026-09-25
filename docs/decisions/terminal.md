@@ -1263,3 +1263,43 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   were rejected. What remains is half a refresh of waiting on average, and a faster display
   shortens it (MEASUREMENTS 2026-09-25, "an echo beside floods waits for the tick"). Probe:
   fork `frame_latency flood`; e2e smooth `six_streaming_shells_in_view_on_the_mac` (h).
+
+- ✅ **An echo is framed as it is read, a viewer has two frames in flight, and a guess waits
+  for its echo** (2026-09-25). Three defects on the path from the PTY to the glass. (1) Output
+  read within 8 ms of the last frame waited for the pace, even when it was a key's echo. In a
+  shell beside a spinner or a redrawing TUI every echo waited up to 8 ms, and a two-write echo
+  (a highlighter that recolours the line after it) showed its first write for a frame. Now a
+  viewer's input, once written, buys two frames ahead of the pace for output read within 50 ms
+  of it (`EchoBurst`). A flood beside the typing stays paced, because the budget is per input.
+  A short wait for the second write was rejected: tokio rounds a timer up to its next
+  millisecond, so every single-write echo would pay 1–2 ms for a repaint that now goes out as
+  soon as it is read anyway. (2) Frames were pushed every 8 ms whatever the link drained, into
+  a sink 256 events deep, and a viewer counted as behind only when that filled. A throttled
+  viewer showed the end of a flood 9.5 s late. While behind it was sent nothing at all, so a
+  `Lines` or `Matches` reply was lost and fetched history stayed empty. Now each frame handed
+  to a viewer carries a `Credit`, and the connection gives it back by dropping the event once
+  written. A viewer has at most two frames not given back. The actor builds the next diff only
+  for viewers with room, the engine keeps collecting what changes meanwhile, and a viewer that
+  missed a diff is sent every row once it has room (`join_frame`, at the others' sequence
+  number). With nobody who has room, the diff waits in the engine. Every other event goes in
+  order and is never skipped: one the sink has no room for waits in the actor, and only past
+  16 MiB of those is the queue dropped and the viewer told everything again. The same
+  throttled viewer is now 147 ms behind. This replaces the "marked behind at a full sink" part
+  of the multi-client entry on joining a busy session. Nothing changed in `slopty-proto` or in
+  the connection. (3) The worker acknowledges every key written before the read a frame was
+  cut from, and that read may hold other output instead of the echo. The predictor counted the
+  guess as a miss and muted itself for 2 s, on exactly the slow links where guesses matter. A
+  guess now remembers what its cell showed when it was made (the cursor's row of the last
+  frame, kept as the `Arc` the screen already holds). An acknowledged guess whose cell still
+  shows that stays pending until the echo lands or `STALE`, and only a cell showing something
+  else is a miss. Still open: a frame the connection has written waits in noq's stream buffer,
+  up to the 1.25 MB stream window, until the link carries it. The credit bounds what
+  waits in the channel, not what waits in QUIC. Bounding that needs either a smaller window
+  for session streams or a client acknowledgement of frames (MEASUREMENTS 2026-09-25, "echo
+  pacing and frames in flight"). Tests: actor
+  `an_echo_beside_a_flood_is_not_held_to_the_frame_pace`,
+  `a_throttled_viewer_is_a_frame_or_two_behind_not_seconds`,
+  `a_reply_reaches_a_viewer_that_fell_behind_the_frames`,
+  `a_slow_viewer_is_skipped_then_caught_up_never_dropped`; session
+  `input_buys_a_few_unpaced_frames_and_only_soon_after`; predict
+  `background_output_does_not_mute_prediction`.

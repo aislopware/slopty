@@ -4,7 +4,9 @@
 //! slow link the client draws it immediately as a *prediction*, then reconciles against the next
 //! authoritative frame: `Frame::input_ack` says which keys the worker had applied when the frame
 //! was captured, so every acknowledged prediction is checked cell-for-cell. Hits raise
-//! confidence; one miss clears the overlay and mutes prediction for a while.
+//! confidence; one miss clears the overlay and mutes prediction for a while. An acknowledged
+//! guess whose cell still shows what it covered is not a miss: the frame was cut from a read
+//! that held other output, and the echo is still to come.
 //!
 //! Visibility is adaptive: predictions are only drawn when the link is slow enough for them to
 //! matter and the recent track record is clean, so a LAN session never sees a wrong glyph.
@@ -14,9 +16,10 @@
 #![forbid(unsafe_code)]
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use slopty_grid::{Cursor, Screen, TermModes};
+use slopty_grid::{CellText, Cursor, Line, Screen, TermModes};
 use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
 
 /// When to draw predictions.
@@ -75,6 +78,11 @@ pub struct Reconciled {
 pub struct Predictor {
     policy: Policy,
     pending: VecDeque<Prediction>,
+    /// What each pending guess covers on the worker's screen, in step with `pending`; `None`
+    /// when no frame had shown that cell yet.
+    covered: VecDeque<Option<CellText>>,
+    /// The cursor's row as the last frame left it: where the next guess lands.
+    cursor_line: Option<(u16, Arc<Line>)>,
     rtt: Option<Duration>,
     hits: u32,
     total_hits: u64,
@@ -96,6 +104,8 @@ impl Predictor {
         Self {
             policy,
             pending: VecDeque::new(),
+            covered: VecDeque::new(),
+            cursor_line: None,
             rtt: None,
             hits: 0,
             total_hits: 0,
@@ -181,6 +191,7 @@ impl Predictor {
         // Erasing: a backspace takes back our own last prediction, and nothing more.
         if key.code == KeyCode::Backspace && key.mods.is_empty() {
             let _taken = self.pending.pop_back();
+            let _uncovered = self.covered.pop_back();
             return None;
         }
         if !safe_modes(modes) || !cursor.visible {
@@ -197,12 +208,24 @@ impl Predictor {
             return None;
         }
         let p = Prediction { seq: key.seq, row: predicted.row, col: predicted.col, text, at: now };
+        let covered = self
+            .cursor_line
+            .as_ref()
+            .filter(|(row, _)| *row == p.row)
+            .and_then(|(_, line)| line.cells.get(usize::from(p.col)))
+            .map(|cell| cell.text.clone());
         self.pending.push_back(p.clone());
+        self.covered.push_back(covered);
         Some(p)
     }
 
     /// An authoritative frame was applied to `screen`. `input_ack` and `epoch` come from the
     /// frame. Checks every acknowledged prediction against the screen.
+    ///
+    /// The worker acknowledges every key written before the read a frame was cut from, and that
+    /// read may hold other output (a spinner, a build) instead of the echo. So a guess whose
+    /// cell still shows what it covered stays pending, until the echo lands or [`STALE`]; only
+    /// a cell showing something else is a miss.
     pub fn on_frame(
         &mut self,
         screen: &Screen,
@@ -211,6 +234,9 @@ impl Predictor {
         now: Instant,
     ) -> Reconciled {
         let mut out = Reconciled::default();
+        let cursor = screen.cursor();
+        self.cursor_line =
+            screen.lines().get(usize::from(cursor.row)).map(|line| (cursor.row, Arc::clone(line)));
         let previous = self.epoch.replace(epoch);
         if previous.is_some_and(|e| e != epoch) {
             // Numbering changed (alt screen, reset, reflow): guesses are meaningless.
@@ -221,15 +247,18 @@ impl Predictor {
             if front.seq > input_ack {
                 break;
             }
-            let Some(front) = self.pending.pop_front() else { break };
-            let cell_text = screen
+            let cell = screen
                 .line(front.row)
                 .and_then(|line| line.cells.get(usize::from(front.col)))
-                .map(|cell| cell.text.as_str().to_owned());
-            if cell_text.as_deref() == Some(front.text.as_str()) {
+                .map(|cell| &cell.text);
+            if cell.is_some_and(|text| text.as_str() == front.text) {
+                let _confirmed = self.pending.pop_front();
+                let _uncovered = self.covered.pop_front();
                 out.hits = out.hits.saturating_add(1);
                 self.hits = self.hits.saturating_add(1);
                 self.total_hits = self.total_hits.saturating_add(1);
+            } else if cell.is_some() && cell == self.covered.front().and_then(Option::as_ref) {
+                break;
             } else {
                 out.misses = out.misses.saturating_add(1);
                 self.miss(now);
@@ -248,13 +277,14 @@ impl Predictor {
     /// Drop every prediction (resize, detach, focus loss).
     pub fn flush(&mut self) {
         self.pending.clear();
+        self.covered.clear();
     }
 
     fn miss(&mut self, now: Instant) {
         self.total_misses = self.total_misses.saturating_add(1);
         self.hits = 0;
         self.muted_until = now.checked_add(MUTE);
-        self.pending.clear();
+        self.flush();
     }
 }
 
@@ -354,8 +384,8 @@ mod tests {
         let r = p.on_frame(&screen_with(0, "ab"), 2, 0, now);
         assert_eq!(r.hits, 1);
         assert!(p.visible(now), "two hits: warm");
-        // Worker disagrees on key 3 (say the shell rejected it).
-        let r = p.on_frame(&screen_with(0, "ab"), 3, 0, now);
+        // Worker disagrees on key 3 (say the shell mapped it to another character).
+        let r = p.on_frame(&screen_with(0, "abX"), 3, 0, now);
         assert_eq!((r.hits, r.misses, r.pending), (0, 1, 0));
         assert!(!p.visible(now));
         let later = now + MUTE + Duration::from_millis(1);
@@ -393,6 +423,54 @@ mod tests {
         let _a = p.on_key(&key(1, "a"), cursor(0, 0), 80, TermModes::empty(), t0);
         assert!(p.visible(t0 + STALE), "at the limit it still shows");
         assert!(!p.visible(t0 + STALE + Duration::from_millis(1)), "past it, hidden");
+    }
+
+    /// A frame that acknowledges a key but was cut from a read of other output (a spinner on
+    /// another row) leaves the guess's cell as it was: the guess waits for its echo, and
+    /// prediction stays on; a cell showing something else is still a miss.
+    #[test]
+    fn background_output_does_not_mute_prediction() {
+        let mut p = Predictor::new(Policy::Adaptive);
+        p.set_rtt(Some(Duration::from_millis(60)));
+        let t0 = Instant::now();
+        let mut shown = screen_with(0, "$ ");
+        shown.cursor_mut().col = 2;
+        let _r = p.on_frame(&shown, 0, 0, t0);
+        for (seq, text, col, echoed) in [(1, "a", 2, "$ a"), (2, "b", 3, "$ ab")] {
+            let _guess = p.on_key(&key(seq, text), cursor(0, col), 80, TermModes::CANONICAL, t0);
+            let mut echo = screen_with(0, echoed);
+            echo.cursor_mut().col = col + 1;
+            assert_eq!(p.on_frame(&echo, seq, 0, t0).hits, 1, "{text} echoed");
+        }
+        let _c = p.on_key(&key(3, "c"), cursor(0, 4), 80, TermModes::CANONICAL, t0);
+        assert!(p.visible(t0), "warm");
+
+        // The spinner's read carries the ack; the echo has not been read yet.
+        let mut spun = screen_with(0, "$ ab");
+        spun.cursor_mut().col = 4;
+        spun.apply(RowUpdate {
+            row: 3,
+            line: screen_with(3, "⠋ building").line(3).unwrap().clone(),
+        })
+        .unwrap();
+        let later = t0 + Duration::from_millis(40);
+        let r = p.on_frame(&spun, 3, 0, later);
+        assert_eq!(r, Reconciled { hits: 0, misses: 0, pending: 1 }, "not echoed yet, not a miss");
+        assert!(p.visible(later), "prediction stays on");
+
+        let r = p.on_frame(&screen_with(0, "$ abc"), 3, 0, later + Duration::from_millis(5));
+        assert_eq!((r.hits, r.misses, r.pending), (1, 0, 0), "the echo lands");
+
+        let _d = p.on_key(&key(4, "d"), cursor(0, 5), 80, TermModes::CANONICAL, later);
+        let r = p.on_frame(&screen_with(0, "$ abcX"), 4, 0, later);
+        assert_eq!(r.misses, 1, "a cell showing something else is a miss");
+
+        let quiet = later + MUTE + Duration::from_millis(1);
+        let _e = p.on_key(&key(5, "e"), cursor(0, 6), 80, TermModes::CANONICAL, quiet);
+        let r =
+            p.on_frame(&screen_with(0, "$ abcX"), 5, 0, quiet + STALE + Duration::from_millis(1));
+        assert_eq!(r.misses, 1, "an echo that never comes is a miss once stale");
+        assert_eq!(p.stats(), (3, 2));
     }
 
     #[test]

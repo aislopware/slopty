@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -13,10 +14,10 @@ use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, Text
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
 use slopty_proto::codec;
 use slopty_proto::terminal::{
-    ColorOverrides, MAX_OSC52_BYTES, TermColors, TermEvent, TermRequest, TermSize,
+    ColorOverrides, Frame, MAX_OSC52_BYTES, TermColors, TermEvent, TermRequest, TermSize,
 };
 use slopty_pty::PtyMaster;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::WorkerError;
 
@@ -30,6 +31,23 @@ use crate::WorkerError;
 /// readable when the timer fires still join the same frame, because the read arm of the
 /// actor's select comes first.
 const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(8);
+/// After a viewer's input reaches the PTY, this many frames go out as their output is read
+/// instead of at the pace: the echo, a second write that repaints it (a highlighter recolouring
+/// the line), or the echo behind a read of other output that took the acknowledgement. Beside
+/// a spinner or a redrawing TUI the pace held every echo for up to 8 ms (MEASUREMENTS
+/// 2026-09-25, "echo pacing and frames in flight"). A budget per input, so a flood beside the
+/// typing stays paced.
+const ECHO_FRAMES: u8 = 2;
+/// Output read this long after the input no longer counts as its echo.
+const ECHO_WINDOW: Duration = Duration::from_millis(50);
+/// Frames a viewer may have on their way at once: one its connection is writing, one ready
+/// behind it. The next is built only when one of them is done, so a link slower than the
+/// program is sent the newest screen rather than a queue of old ones; the engine keeps what
+/// changed meanwhile and the next diff carries all of it.
+const FRAMES_IN_FLIGHT: usize = 2;
+/// Events a viewer's sink had no room for wait in order, up to this many bytes. Past it they
+/// are dropped and the viewer is told everything again once its sink drains, as a joiner is.
+const QUEUED_MAX_BYTES: usize = 16 << 20;
 /// PTY read buffer.
 const READ_BUF: usize = 64 << 10;
 /// Search hits sent back at most; the count still covers every hit.
@@ -37,9 +55,10 @@ const MAX_SEARCH_MATCHES: u32 = 5_000;
 
 /// Where a client's events go.
 ///
-/// Bounded: a viewer whose sink fills is marked behind rather than stalling the session. It is
-/// sent nothing until the sink has drained to half, then a whole frame that picks up where the
-/// others are.
+/// A frame is done with when the connection drops its [`Outbound`], and a viewer has at most
+/// two frames not done with: so a connection holds each frame until the link has taken it. Every
+/// other event goes in order and is never skipped; one the sink has no room for waits in the actor,
+/// and a viewer that misses a diff is sent every row next.
 pub type ClientSink = mpsc::Sender<Outbound>;
 
 /// One event for the viewers, encoded once however many it goes to.
@@ -47,11 +66,25 @@ pub type ClientSink = mpsc::Sender<Outbound>;
 pub struct Outbound {
     wire: Bytes,
     frame: bool,
+    /// A frame's place among its viewer's [`FRAMES_IN_FLIGHT`], given back when it is dropped:
+    /// held only for its `Drop`.
+    _credit: Option<Arc<Credit>>,
 }
 
 impl Outbound {
     fn encode(ev: &TermEvent) -> Result<Self, codec::CodecError> {
-        Ok(Self { wire: codec::encode(ev)?, frame: matches!(ev, TermEvent::Frame(_)) })
+        Ok(Self {
+            wire: codec::encode(ev)?,
+            frame: matches!(ev, TermEvent::Frame(_)),
+            _credit: None,
+        })
+    }
+
+    /// The same bytes, holding a place in `viewer`'s frames in flight until dropped.
+    fn claimed(&self, viewer: &Viewer, room: &Arc<Notify>) -> Self {
+        viewer.in_flight.fetch_add(1, Ordering::AcqRel);
+        let credit = Credit { in_flight: Arc::clone(&viewer.in_flight), room: Arc::clone(room) };
+        Self { wire: self.wire.clone(), frame: self.frame, _credit: Some(Arc::new(credit)) }
     }
 
     /// The event as the session stream carries it (length prefix, then postcard): write it
@@ -65,6 +98,21 @@ impl Outbound {
     #[must_use]
     pub const fn is_frame(&self) -> bool {
         self.frame
+    }
+}
+
+/// A frame on its way to one viewer. Dropping it, which the connection does once the frame is
+/// written, frees the place and wakes the actor to build that viewer's next frame.
+#[derive(Debug)]
+struct Credit {
+    in_flight: Arc<AtomicUsize>,
+    room: Arc<Notify>,
+}
+
+impl Drop for Credit {
+    fn drop(&mut self) {
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        self.room.notify_one();
     }
 }
 
@@ -430,8 +478,70 @@ struct Viewer {
     size: TermSize,
     /// The colours this client paints with, once it said (the driver's reach the engine).
     colors: Option<TermColors>,
-    /// Its sink filled: it is sent nothing until it drains, then a whole frame.
-    behind: bool,
+    /// Its frames not done with yet (see [`Credit`]).
+    in_flight: Arc<AtomicUsize>,
+    /// It was not sent the last diff, or has had no frame yet: its next frame is every row.
+    stale: bool,
+    /// Events its sink had no room for, oldest first, and their bytes.
+    queued: VecDeque<Outbound>,
+    queued_bytes: usize,
+    /// A task waits for room in its sink.
+    waiting: bool,
+    /// Its queue passed [`QUEUED_MAX_BYTES`] and was dropped: it is sent nothing until its
+    /// sink has room, then told everything again.
+    lost: bool,
+}
+
+impl Viewer {
+    fn new(client: ClientId, sink: ClientSink, size: TermSize, colors: Option<TermColors>) -> Self {
+        Self {
+            client,
+            sink,
+            size,
+            colors,
+            in_flight: Arc::default(),
+            stale: true,
+            queued: VecDeque::new(),
+            queued_bytes: 0,
+            waiting: false,
+            lost: false,
+        }
+    }
+
+    /// It has room for another frame.
+    fn takes_frame(&self) -> bool {
+        !self.lost && self.in_flight.load(Ordering::Acquire) < FRAMES_IN_FLIGHT
+    }
+}
+
+/// How the input on its way to the PTY came: a viewer typed, clicked or pasted it (with the
+/// key sequence number it carried, if any), or the engine answered a query.
+#[derive(Clone, Copy, Debug)]
+enum Origin {
+    Viewer { key: Option<u64> },
+    Engine,
+}
+
+/// The frames a viewer's input buys ahead of the pace ([`ECHO_FRAMES`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct EchoBurst {
+    until: Option<tokio::time::Instant>,
+    frames: u8,
+}
+
+impl EchoBurst {
+    fn arm(&mut self, now: tokio::time::Instant) {
+        *self = Self { until: now.checked_add(ECHO_WINDOW), frames: ECHO_FRAMES };
+    }
+
+    /// Whether output read at `now` is framed at once rather than paced, spending a frame.
+    fn spend(&mut self, now: tokio::time::Instant) -> bool {
+        if self.frames == 0 || self.until.is_none_or(|until| now > until) {
+            return false;
+        }
+        self.frames = self.frames.saturating_sub(1);
+        true
+    }
 }
 
 /// Input on its way to the PTY. The tty takes what fits in its input queue; the rest waits
@@ -444,8 +554,8 @@ struct Input {
     /// Bytes queued and bytes written since the session started.
     queued: u64,
     written: u64,
-    /// Where each request's bytes end in the stream, and the key it carried if any.
-    ends: VecDeque<(u64, Option<u64>)>,
+    /// Where each request's bytes end in the stream, and where they came from.
+    ends: VecDeque<(u64, Origin)>,
 }
 
 /// Where one keystroke is on its way through the actor, for the trace that takes the echo
@@ -464,11 +574,16 @@ struct Actor {
     engine: GhosttyEngine,
     master: Arc<PtyMaster>,
     rx: mpsc::UnboundedReceiver<Cmd>,
-    /// A viewer that was behind has room again (sent by the task waiting on its sink).
+    /// A viewer's sink has room again for what waits for it (sent by the task waiting on it).
     drained_tx: mpsc::UnboundedSender<(ClientId, ClientSink)>,
     drained_rx: mpsc::UnboundedReceiver<(ClientId, ClientSink)>,
+    /// Woken when a viewer's frame is done with ([`Credit`]).
+    room: Arc<Notify>,
+    /// A diff is waiting for a viewer that follows the diffs to have room for it.
+    owed: bool,
     input: Input,
     echo: EchoTrace,
+    burst: EchoBurst,
     viewers: Vec<Viewer>,
     driver: Option<ClientId>,
     title: Option<String>,
@@ -580,6 +695,9 @@ impl Actor {
             rx,
             drained_tx,
             drained_rx,
+            room: Arc::default(),
+            owed: false,
+            burst: EchoBurst::default(),
             input: Input::default(),
             viewers: Vec::new(),
             driver: None,
@@ -613,6 +731,7 @@ impl Actor {
     async fn run(mut self) {
         let mut buf = vec![0_u8; READ_BUF];
         let pty = Arc::clone(&self.master);
+        let room = Arc::clone(&self.room);
         // The replay answered nothing yet: take its title and cwd, then checkpoint at once.
         // ptyd handed us its ring with the master, so until this lands another restart would
         // have nothing but the previous checkpoint.
@@ -628,7 +747,8 @@ impl Actor {
                         break;
                     }
                 }
-                Some((client, sink)) = self.drained_rx.recv() => self.catch_up(client, &sink),
+                Some((client, sink)) = self.drained_rx.recv() => self.sink_has_room(client, &sink),
+                () = room.notified() => self.frame_room(),
                 writable = pty.writable(), if writing => match writable {
                     Ok(()) => self.write_input(),
                     Err(e) => self.input_failed(&e),
@@ -694,11 +814,27 @@ impl Actor {
             a.commands_ended = ended;
         });
         let now = tokio::time::Instant::now();
-        // Frame right here when nothing paces it. A timer set to "now" is not now: tokio
-        // rounds a deadline up to its next millisecond tick and the driver parks until then,
-        // which put 1.4 ms between a keystroke's echo and its frame (MEASUREMENTS.md, "the
-        // keystroke path, stage by stage"). The timer is for the flood, where the next frame
-        // is owed later.
+        // Frame right here when nothing paces it, or when it may be a viewer's echo. A timer
+        // set to "now" is not now: tokio rounds a deadline up to its next millisecond tick and
+        // the driver parks until then, which put 1.4 ms between a keystroke's echo and its
+        // frame (MEASUREMENTS.md, "the keystroke path, stage by stage"). The timer is for the
+        // flood, where the next frame is owed later.
+        let due = frame_due_after(now, self.last_frame);
+        if due <= now || self.burst.spend(now) {
+            self.frame_due = None;
+            self.flush_frame();
+        } else if self.frame_due.is_none() {
+            self.frame_due = Some(due);
+        }
+    }
+
+    /// A viewer's frame was done with: build what is owed now, or when the pace allows.
+    fn frame_room(&mut self) {
+        let wanted = self.viewers.iter().any(|v| v.takes_frame() && (v.stale || self.owed));
+        if !wanted {
+            return;
+        }
+        let now = tokio::time::Instant::now();
         let due = frame_due_after(now, self.last_frame);
         if due <= now {
             self.frame_due = None;
@@ -818,7 +954,7 @@ impl Actor {
     fn after_output(&mut self) {
         for ev in self.engine.drain_events() {
             match ev {
-                EngineEvent::PtyWrite(bytes) => self.queue_input(&bytes, None),
+                EngineEvent::PtyWrite(bytes) => self.queue_input(&bytes, Origin::Engine),
                 EngineEvent::Bell => self.broadcast(&TermEvent::Bell),
                 EngineEvent::Colors(colors) => {
                     self.program_colors = colors.clone();
@@ -851,15 +987,15 @@ impl Actor {
         }
     }
 
-    /// Queue bytes for the PTY behind whatever is still waiting, and write what fits now.
-    /// `key` is the key sequence number they carry, acknowledged once they are all written.
-    fn queue_input(&mut self, bytes: &[u8], key: Option<u64>) {
+    /// Queue bytes for the PTY behind whatever is still waiting, and write what fits now. A
+    /// key sequence number they carry is acknowledged once they are all written.
+    fn queue_input(&mut self, bytes: &[u8], origin: Origin) {
         if bytes.is_empty() || self.pty_closed {
             return;
         }
         self.input.pending.extend_from_slice(bytes);
         self.input.queued = self.input.queued.saturating_add(bytes.len() as u64);
-        self.input.ends.push_back((self.input.queued, key));
+        self.input.ends.push_back((self.input.queued, origin));
         self.write_input();
     }
 
@@ -876,16 +1012,22 @@ impl Actor {
                 Err(e) => return self.input_failed(&e),
             }
         }
-        let mut done = false;
-        while let Some(&(end, key)) = self.input.ends.front() {
+        let (mut done, mut typed) = (false, false);
+        while let Some(&(end, origin)) = self.input.ends.front() {
             if end > self.input.written {
                 break;
             }
             self.input.ends.pop_front();
-            if let Some(seq) = key {
-                self.written_seq = self.written_seq.max(seq);
+            if let Origin::Viewer { key } = origin {
+                typed = true;
+                if let Some(seq) = key {
+                    self.written_seq = self.written_seq.max(seq);
+                }
             }
             done = true;
+        }
+        if typed {
+            self.burst.arm(tokio::time::Instant::now());
         }
         if done {
             let now = tokio::time::Instant::now();
@@ -910,64 +1052,144 @@ impl Actor {
         self.broadcast(&TermEvent::Error(e.to_string()));
     }
 
+    /// The next diff for the viewers that follow the diffs and have room for it, and every row
+    /// for those that missed one. With nobody to diff for, what changed is dropped: whoever
+    /// comes next is sent every row. With nobody who has room, it waits in the engine, which
+    /// keeps collecting what changes, until a frame is done with ([`Self::frame_room`]).
     fn flush_frame(&mut self) {
-        if self.viewers.iter().all(|v| v.behind) {
-            // Nobody to diff for: whoever joins or catches up next is sent every row anyway.
+        if self.viewers.iter().all(|v| v.stale) {
+            self.owed = false;
             self.engine.discard_frame();
-            return;
-        }
-        match self.engine.take_frame(self.ack_seq) {
-            Ok(Some(frame)) => {
-                let now = tokio::time::Instant::now();
-                self.last_frame = Some(now);
-                for image in self.engine.drain_images() {
-                    self.broadcast(&image_event(image));
+        } else if self.viewers.iter().any(|v| !v.stale && v.takes_frame()) {
+            self.owed = false;
+            match self.engine.take_frame(self.ack_seq) {
+                Ok(Some(frame)) => {
+                    let images = self.engine.drain_images();
+                    self.send_frame(frame, images);
+                    self.frame_sent();
                 }
-                self.broadcast(&TermEvent::Frame(frame));
-                if let (Some(input_at), Some(read_at)) =
-                    (self.echo.input_at.take(), self.echo.read_at.take())
-                {
-                    tracing::trace!(
-                        session = %self.id,
-                        read_to_frame_us = now.saturating_duration_since(read_at).as_micros(),
-                        input_to_frame_us = now.saturating_duration_since(input_at).as_micros(),
-                        "frame flushed"
-                    );
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(session = %self.id, error = %e, "frame build failed");
+                    self.broadcast(&TermEvent::Error(e.to_string()));
                 }
             }
-            Ok(None) => {}
+        } else {
+            self.owed = true;
+        }
+        self.send_whole_frames();
+    }
+
+    /// A frame left: the pace counts from here, and the echo trace ends.
+    fn frame_sent(&mut self) {
+        let now = tokio::time::Instant::now();
+        self.last_frame = Some(now);
+        if let (Some(input_at), Some(read_at)) =
+            (self.echo.input_at.take(), self.echo.read_at.take())
+        {
+            tracing::trace!(
+                session = %self.id,
+                read_to_frame_us = now.saturating_duration_since(read_at).as_micros(),
+                input_to_frame_us = now.saturating_duration_since(input_at).as_micros(),
+                "frame flushed"
+            );
+        }
+    }
+
+    /// Hand a frame everyone takes (a diff, or every row after a resize) to each viewer that
+    /// follows the diffs, the images it places first. A viewer with no room for it misses it,
+    /// and is sent every row once it has.
+    fn send_frame(&mut self, frame: Frame, images: Vec<ImageUpload>) {
+        let images: Vec<Outbound> =
+            images.into_iter().filter_map(|u| self.encode(&image_event(u))).collect();
+        let Some(frame) = self.encode(&TermEvent::Frame(frame)) else { return };
+        let mut gone = Vec::new();
+        for i in 0..self.viewers.len() {
+            let Some(v) = self.viewers.get_mut(i) else { continue };
+            if v.stale {
+                continue;
+            }
+            if !v.takes_frame() {
+                v.stale = true;
+                continue;
+            }
+            let claimed = frame.claimed(v, &self.room);
+            let open = images.iter().all(|image| self.deliver(i, image.clone()))
+                && self.deliver(i, claimed);
+            if !open {
+                gone.push(i);
+            }
+        }
+        self.remove(gone);
+    }
+
+    /// Every viewer that missed a diff and has room is sent every row, at the others'
+    /// sequence number.
+    fn send_whole_frames(&mut self) {
+        let mut gone = Vec::new();
+        for i in 0..self.viewers.len() {
+            if self.viewers.get(i).is_some_and(|v| v.stale && v.takes_frame())
+                && !self.send_whole(i)
+            {
+                gone.push(i);
+            }
+        }
+        self.remove(gone);
+    }
+
+    /// Every row for viewer `i`, with the images it needs. `false` when the viewer is gone.
+    fn send_whole(&mut self, i: usize) -> bool {
+        let (frame, images) = match self.engine.join_frame(self.ack_seq) {
+            Ok(joined) => joined,
             Err(e) => {
-                tracing::error!(session = %self.id, error = %e, "frame build failed");
-                self.broadcast(&TermEvent::Error(e.to_string()));
+                tracing::error!(session = %self.id, error = %e, "whole frame failed");
+                return self
+                    .encode(&TermEvent::Error(e.to_string()))
+                    .is_none_or(|out| self.deliver(i, out));
+            }
+        };
+        let Some(frame) = self.encode(&TermEvent::Frame(frame)) else { return true };
+        let Some(v) = self.viewers.get_mut(i) else { return true };
+        v.stale = false;
+        let claimed = frame.claimed(v, &self.room);
+        images
+            .into_iter()
+            .all(|u| self.encode(&image_event(u)).is_none_or(|image| self.deliver(i, image)))
+            && self.deliver(i, claimed)
+    }
+
+    /// Drop the viewers at `gone` (ascending indices).
+    fn remove(&mut self, gone: Vec<usize>) {
+        for i in gone.into_iter().rev() {
+            if i < self.viewers.len() {
+                let v = self.viewers.swap_remove(i);
+                self.on_viewer_gone(v.client);
             }
         }
     }
 
-    /// Encode `ev` once and hand it to every viewer that keeps up.
+    /// Encode `ev` once and hand it to every viewer.
     fn broadcast(&mut self, ev: &TermEvent) {
-        if self.viewers.iter().all(|v| v.behind) {
+        if self.viewers.is_empty() {
             return;
         }
         let Some(out) = self.encode(ev) else { return };
         let mut gone = Vec::new();
         for i in 0..self.viewers.len() {
-            if !self.deliver(i, &out) {
+            if !self.deliver(i, out.clone()) {
                 gone.push(i);
             }
         }
-        for i in gone.into_iter().rev() {
-            let v = self.viewers.swap_remove(i);
-            self.on_viewer_gone(v.client);
-        }
+        self.remove(gone);
     }
 
     fn send_to(&mut self, client: ClientId, ev: &TermEvent) {
-        let Some(i) = self.viewers.iter().position(|v| v.client == client && !v.behind) else {
+        let Some(i) = self.viewers.iter().position(|v| v.client == client) else {
             return;
         };
         if let Some(out) = self.encode(ev) {
             // A closed sink is its connection's to detach.
-            let _open = self.deliver(i, &out);
+            let _open = self.deliver(i, out);
         }
     }
 
@@ -977,51 +1199,90 @@ impl Actor {
             .ok()
     }
 
-    /// Hand `out` to viewer `i` unless it is behind, marking it behind when its sink is full.
-    /// `false` when the viewer is gone.
-    fn deliver(&mut self, i: usize, out: &Outbound) -> bool {
+    /// Hand `out` to viewer `i` behind whatever waits for it; if its sink is full it waits in
+    /// order for room. `false` when the viewer is gone.
+    fn deliver(&mut self, i: usize, out: Outbound) -> bool {
         let Some(v) = self.viewers.get_mut(i) else { return true };
-        if v.behind {
+        if v.lost {
             return true;
         }
-        match v.sink.try_send(out.clone()) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                v.behind = true;
-                tracing::warn!(session = %self.id, client = %v.client, "viewer behind; frames skipped until it drains");
-                let (client, sink, drained) = (v.client, v.sink.clone(), self.drained_tx.clone());
-                let room = (sink.max_capacity() / 2).max(1);
-                tokio::task::spawn_local(async move {
-                    if sink.reserve_many(room).await.is_ok() {
-                        let _ignored = drained.send((client, sink));
-                    }
-                });
-                true
+        let out = if v.queued.is_empty() {
+            match v.sink.try_send(out) {
+                Ok(()) => return true,
+                Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                Err(mpsc::error::TrySendError::Full(out)) => out,
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        } else {
+            out
+        };
+        v.queued_bytes = v.queued_bytes.saturating_add(out.wire.len());
+        v.queued.push_back(out);
+        if v.queued_bytes > QUEUED_MAX_BYTES {
+            tracing::warn!(session = %self.id, client = %v.client, bytes = v.queued_bytes, "viewer not reading; told everything again once it drains");
+            v.queued.clear();
+            v.queued_bytes = 0;
+            v.lost = true;
+            v.stale = true;
         }
+        self.wait_for_room(i);
+        true
     }
 
-    /// A viewer that was behind has room again: the others take the diff they are owed first,
-    /// then it is sent everything a joiner is, at their sequence number.
-    fn catch_up(&mut self, client: ClientId, sink: &ClientSink) {
+    /// Wake the actor when viewer `i`'s sink has room for what waits for it.
+    fn wait_for_room(&mut self, i: usize) {
+        let Some(v) = self.viewers.get_mut(i) else { return };
+        if v.waiting {
+            return;
+        }
+        v.waiting = true;
+        let (client, sink, drained) = (v.client, v.sink.clone(), self.drained_tx.clone());
+        let room = (sink.max_capacity() / 2).clamp(1, v.queued.len().max(1));
+        tokio::task::spawn_local(async move {
+            if sink.reserve_many(room).await.is_ok() {
+                let _ignored = drained.send((client, sink));
+            }
+        });
+    }
+
+    /// A viewer's sink has room: what waited for it goes in, in order. One whose queue was
+    /// dropped is told everything again, after the others take the diff they are owed.
+    fn sink_has_room(&mut self, client: ClientId, sink: &ClientSink) {
         let Some(i) =
             self.viewers.iter().position(|v| v.client == client && v.sink.same_channel(sink))
         else {
             return;
         };
-        self.flush_frame();
-        if let Some(v) = self.viewers.get_mut(i) {
-            v.behind = false;
+        let Some(v) = self.viewers.get_mut(i) else { return };
+        v.waiting = false;
+        if v.lost {
+            self.flush_frame();
+            if let Some(v) = self.viewers.get_mut(i) {
+                v.lost = false;
+            }
+            tracing::info!(session = %self.id, %client, "viewer caught up");
+            let driving = self.driver == Some(client);
+            self.send_to(client, &TermEvent::Driver { you: driving });
+            self.introduce(client);
+            return;
         }
-        tracing::info!(session = %self.id, %client, "viewer caught up");
-        let driving = self.driver == Some(client);
-        self.send_to(client, &TermEvent::Driver { you: driving });
-        self.introduce(client);
+        while let Some(out) = v.queued.pop_front() {
+            let len = out.wire.len();
+            match v.sink.try_send(out) {
+                Ok(()) => v.queued_bytes = v.queued_bytes.saturating_sub(len),
+                Err(mpsc::error::TrySendError::Full(out)) => {
+                    v.queued.push_front(out);
+                    self.wait_for_room(i);
+                    return;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return self.remove(vec![i]),
+            }
+        }
+        self.frame_room();
     }
 
     /// What a viewer joining is told: the title, the directory, the program's colours, every
-    /// row with the images on them, and the exit if the child is gone.
+    /// row with the images on them (now if it has room, else when it has), and the exit if the
+    /// child is gone.
     fn introduce(&mut self, client: ClientId) {
         if let Some(t) = self.title.clone() {
             self.send_to(client, &TermEvent::Title(t));
@@ -1032,14 +1293,13 @@ impl Actor {
         if self.program_colors != ColorOverrides::default() {
             self.send_to(client, &TermEvent::Colors(self.program_colors.clone()));
         }
-        match self.engine.join_frame(self.ack_seq) {
-            Ok((frame, images)) => {
-                for image in images {
-                    self.send_to(client, &image_event(image));
-                }
-                self.send_to(client, &TermEvent::Frame(frame));
+        if let Some(i) = self.viewers.iter().position(|v| v.client == client) {
+            if let Some(v) = self.viewers.get_mut(i) {
+                v.stale = true;
             }
-            Err(e) => self.send_to(client, &TermEvent::Error(e.to_string())),
+            if self.viewers.get(i).is_some_and(Viewer::takes_frame) && !self.send_whole(i) {
+                self.remove(vec![i]);
+            }
         }
         if let Some(status) = self.exited {
             self.send_to(client, &TermEvent::Exited { status });
@@ -1089,10 +1349,8 @@ impl Actor {
         self.broadcast(&TermEvent::Resized { cols: size.cols, rows: size.rows });
         match self.engine.full_frame(self.ack_seq) {
             Ok(frame) => {
-                for image in self.engine.drain_images() {
-                    self.broadcast(&image_event(image));
-                }
-                self.broadcast(&TermEvent::Frame(frame));
+                let images = self.engine.drain_images();
+                self.send_frame(frame, images);
             }
             Err(e) => tracing::error!(session = %self.id, error = %e, "full frame failed"),
         }
@@ -1109,7 +1367,7 @@ impl Actor {
                 let colors =
                     self.viewers.iter().find(|v| v.client == client).and_then(|v| v.colors);
                 self.viewers.retain(|v| v.client != client);
-                self.viewers.push(Viewer { client, sink, size, colors, behind: false });
+                self.viewers.push(Viewer::new(client, sink, size, colors));
                 if self.driver.is_none() {
                     self.driver = Some(client);
                     self.send_to(client, &TermEvent::Driver { you: true });
@@ -1282,7 +1540,7 @@ impl Actor {
             }
         };
         match result {
-            Ok(()) => self.queue_input(&bytes, key.filter(|_| !bytes.is_empty())),
+            Ok(()) => self.queue_input(&bytes, Origin::Viewer { key }),
             Err(e) => self.send_to(client, &TermEvent::Error(e.to_string())),
         }
     }
@@ -1318,6 +1576,24 @@ mod tests {
         assert_eq!(frame_due_after(now, Some(long_ago)), now);
         let at_boundary = now.checked_sub(MIN_FRAME_INTERVAL).unwrap();
         assert_eq!(frame_due_after(now, Some(at_boundary)), now);
+    }
+
+    /// Input buys at most [`ECHO_FRAMES`] frames ahead of the pace, and only while its output
+    /// could still be the echo: a flood beside the typing stays paced.
+    #[test]
+    fn input_buys_a_few_unpaced_frames_and_only_soon_after() {
+        let now = tokio::time::Instant::now();
+        let mut burst = EchoBurst::default();
+        assert!(!burst.spend(now), "no input, no burst");
+        burst.arm(now);
+        let soon = now + Duration::from_millis(3);
+        assert!(burst.spend(soon) && burst.spend(soon), "the echo and its repaint");
+        assert!(!burst.spend(soon), "then the pace again");
+        burst.arm(now);
+        assert!(
+            !burst.spend(now + ECHO_WINDOW + Duration::from_millis(1)),
+            "too late to be the echo"
+        );
     }
 
     #[test]

@@ -58,10 +58,13 @@ The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**
   that dies leaves the others streaming and reattaches on relaunch (its dead connection's cleanup
   detaches only its own sinks, `Sender::same_channel`). See DECISIONS "Multi-client" for the
   state-ownership and input-contention rulings.
-- A slow link never falls behind a fast program: the worker coalesces to one diff per tick, and a
-  viewer whose sink fills is skipped rather than dropped, then sent one whole frame at the
-  others' sequence number once it drains. A joining viewer's frame is built the same way, so
-  nobody else is made to resync.
+- A slow link never falls behind a fast program: each viewer has at most two frames in flight
+  (a credit on `session::Outbound` that returns when the connection has written the frame), the
+  actor builds the next diff only when a viewer has room, the engine coalescing meanwhile, and a
+  viewer that missed a diff is sent every row at the others' sequence number. Other events
+  (lines, matches, title, bell) are never skipped. A joining viewer's frame is built the same
+  way, so nobody else is made to resync. Input buys up to two frames outside the 8 ms pace for
+  50 ms, so an echo beside a flood is not held to it.
 - The client needs no VT engine at all. iOS never builds Zig.
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
   ranges are fetched, prefetched around the viewport; the cache indexes its prompt rows, so a

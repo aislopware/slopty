@@ -127,8 +127,9 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   its keys still reached the shell. Now an attach first sends the others the diff they are
   owed. Then the joiner's frame is built at their sequence number without touching the dirty
   state (`GhosttyEngine::join_frame`), with the images it needs from a fresh ledger. A viewer
-  whose sink is full is marked behind and sent nothing. A task waits for half its sink to
-  drain, and the viewer is then introduced again: the driver line, title, directory, colours,
+  whose sink is full is marked behind and sent nothing (superseded 2026-09-25 by frame credits,
+  `docs/decisions/terminal.md`: at most two frames in flight per viewer, other events never
+  skipped). A task waits for half its sink to drain, and the viewer is then introduced again: the driver line, title, directory, colours,
   a whole frame at the others' sequence number, and the exit. Frames are encoded once for
   every viewer (`session::Outbound`), not cloned and encoded per viewer. Tests: actor
   `viewers_joining_a_busy_session_never_make_the_others_resync`,

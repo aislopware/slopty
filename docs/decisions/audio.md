@@ -236,3 +236,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_stall_burst_does_not_leave_lasting_delay`,
     `keyframe_bursts_starve_the_ring_at_most_once_a_window`, `clock_drift_is_absorbed_by_slices`,
     `the_silence_gate_is_not_an_underrun`.
+
+- ⏸ **Worker files paste into Finder through a File Provider domain, not a pasteboard promise**
+  (2026-09-25, ruling only; nothing built yet). Finder enables Paste only for a file URL that
+  already exists on disk, so neither `NSFilePromiseProvider` nor the Carbon
+  `promised-file-url` pair gets a Paste on the general pasteboard. No shipping client uses them:
+  Microsoft's Windows App and Devolutions RDM hand out pre-made temporary files, RustDesk an
+  empty decoy it swaps after the paste, and every placeholder-and-swap scheme races the reader
+  (Windows App on macOS 26 pastes zero-filled files). A dataless file is the one mechanism where
+  the kernel holds the reader until the bytes exist ("reads trigger downloads", WWDC21 10182;
+  clonefile(2): a dataless source "must be materialized before being cloned").
+  - Design: a read-only replicated File Provider extension in Rust (objc2 `define_class!`, a
+    `no_main` bin whose `main` registers the classes and calls `NSExtensionMain`) in
+    `Slopty.app/Contents/PlugIns`, sandboxed with a `TEAMID.dev.aislopware.slopty` app group and
+    `network.client`. On a worker's file offer the app writes a manifest to the group container,
+    signals the enumerator and puts the items' user-visible URLs on the pasteboard as
+    `public.file-url`. `fetchContents` streams the bytes over a connection the extension opens
+    itself, since the system launches it without the app.
+  - Checked on this machine: a Rust appex signed with the Developer ID and no provisioning
+    profile registers with PlugInKit and fileproviderd, and the Team-prefixed group works. Its
+    domain comes up user-disabled until someone switches it on in System Settings, hidden or
+    visible; the testing-mode entitlement that skips this needs a development profile. So it
+    ships with a one-time switch-on (`showExtensionManagementInterface()`), and CI covers it only
+    under a development-signed build.
+  - Open: whether a hidden domain can be switched on at all, and whether other apps raise a
+    privacy prompt when they read a placeholder. Both are one manual check.

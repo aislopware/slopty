@@ -775,6 +775,18 @@ done
             .collect()
     }
 
+    /// What a viewer is sent until its screen shows `DONE`, read as a connection that keeps
+    /// up reads it.
+    fn until_done(
+        mut rx: mpsc::Receiver<Outbound>,
+        after: Duration,
+    ) -> tokio::task::JoinHandle<(Vec<TermEvent>, slopty_grid::Screen)> {
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            wait_for(&mut rx, |_, s| text(s).contains("DONE")).await
+        })
+    }
+
     /// A viewer joining a busy session is sent every row at the others' sequence number, so
     /// the others' frames run on without a gap: nobody is made to resync, however often
     /// someone joins.
@@ -782,22 +794,23 @@ done
     async fn viewers_joining_a_busy_session_never_make_the_others_resync() {
         let (session, mut child) = start(&["/bin/sh", "-c", &flood(150, "0.01")]);
         let a = ClientId::new();
-        let (tx_a, mut rx_a) = mpsc::channel(4096);
+        let (tx_a, rx_a) = mpsc::channel(4096);
         session.attach(a, size(40, 6), tx_a).unwrap();
+        let first = until_done(rx_a, Duration::ZERO);
         session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
         let mut joiners = Vec::new();
         for _ in 0..6 {
             tokio::time::sleep(Duration::from_millis(150)).await;
             let (tx, rx) = mpsc::channel(4096);
             session.attach(ClientId::new(), size(40, 6), tx).unwrap();
-            joiners.push(rx);
+            joiners.push(until_done(rx, Duration::ZERO));
         }
-        let (events, _) = wait_for(&mut rx_a, |_, s| text(s).contains("DONE")).await;
+        let (events, _) = first.await.unwrap();
         let seen = frames(&events);
         assert!(seen.len() > 20, "a busy session: {seen:?}");
         assert_eq!(jumps(&seen), [], "the first viewer never skips a frame");
-        for mut rx in joiners {
-            let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("DONE")).await;
+        for joiner in joiners {
+            let (events, _) = joiner.await.unwrap();
             let seen = frames(&events);
             assert!(seen.first().is_some_and(|(_, full)| *full), "{seen:?}");
             assert_eq!(jumps(&seen), [], "a joiner's frames run on from its first");
@@ -806,30 +819,32 @@ done
         let _killed = child.kill().await;
     }
 
-    /// A viewer that stops reading is not dropped: it is skipped while its sink is full, and
-    /// once it drains it is sent one whole frame at the others' sequence number and the
-    /// diffs after it.
+    /// A viewer that stops reading is not dropped and holds nobody back: it misses the diffs
+    /// while its frames are on their way, then is sent one whole frame at the others' sequence
+    /// number and the diffs after it. Only frames are skipped, so it is never introduced again.
     #[tokio::test]
     async fn a_slow_viewer_is_skipped_then_caught_up_never_dropped() {
         let (session, mut child) = start(&["/bin/sh", "-c", &flood(150, "0.01")]);
         let fast = ClientId::new();
-        let (tx_fast, mut rx_fast) = mpsc::channel(4096);
+        let (tx_fast, rx_fast) = mpsc::channel(4096);
         session.attach(fast, size(40, 6), tx_fast).unwrap();
+        let fast_seen = until_done(rx_fast, Duration::ZERO);
         let slow = ClientId::new();
-        let (tx_slow, mut rx_slow) = mpsc::channel(8);
+        let (tx_slow, rx_slow) = mpsc::channel(8);
         session.attach(slow, size(40, 6), tx_slow).unwrap();
+        // Long enough for some fifty frames.
+        let slow_seen = until_done(rx_slow, Duration::from_millis(500));
         session.request(fast, TermRequest::Raw(b"\r".to_vec())).unwrap();
-        // Long enough for some fifty frames, six times what the slow sink holds.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(session.snapshot().await.unwrap().viewers, 2, "the slow viewer stays");
-        let (events, screen) = wait_for(&mut rx_slow, |_, s| text(s).contains("DONE")).await;
+        let (events, screen) = slow_seen.await.unwrap();
         let seen = jumps(&frames(&events));
-        assert!(!seen.is_empty(), "the slow viewer skipped frames while it was full");
+        assert!(!seen.is_empty(), "the slow viewer skipped frames while it did not read");
         assert!(seen.iter().all(|&(_, _, full)| full), "each skip ends in a whole frame: {seen:?}");
-        let caught_up = events.iter().filter(|e| matches!(e, TermEvent::Driver { .. })).count();
-        assert_eq!(caught_up, seen.len(), "introduced again after each skip: {events:?}");
+        let introduced = events.iter().filter(|e| matches!(e, TermEvent::Driver { .. })).count();
+        assert_eq!(introduced, 0, "never introduced again: {events:?}");
         assert!(text(&screen).contains("line 149\nDONE"), "{}", text(&screen));
-        let (events, _) = wait_for(&mut rx_fast, |_, s| text(s).contains("DONE")).await;
+        let (events, _) = fast_seen.await.unwrap();
         assert_eq!(jumps(&frames(&events)), [], "the fast viewer is not held back");
         session.close();
         let _killed = child.kill().await;
@@ -931,5 +946,172 @@ done
         session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
         child.wait().await.unwrap();
         session.close();
+    }
+
+    /// Reads a sink as a connection that keeps up would, stamping each event as it arrives.
+    fn stamped(
+        mut rx: mpsc::Receiver<Outbound>,
+    ) -> mpsc::UnboundedReceiver<(tokio::time::Instant, TermEvent)> {
+        let (tx, stamps) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(out) = rx.recv().await {
+                if tx.send((tokio::time::Instant::now(), event(&out))).is_err() {
+                    break;
+                }
+            }
+        });
+        stamps
+    }
+
+    /// `(p50, p90, max)` of `samples`, in milliseconds.
+    fn spread(samples: &mut [Duration]) -> (f64, f64, f64) {
+        samples.sort_unstable();
+        let at = |percent: usize| {
+            samples[samples.len().saturating_sub(1).saturating_mul(percent) / 100].as_secs_f64()
+                * 1e3
+        };
+        (at(50), at(90), at(100))
+    }
+
+    /// A key typed while the program keeps printing (a spinner, a TUI redrawing) has its echo
+    /// framed as it is read, not at the next paced frame, while the printing itself stays
+    /// paced.
+    #[tokio::test]
+    async fn an_echo_beside_a_flood_is_not_held_to_the_frame_pace() {
+        let (session, mut child) = start(&[
+            "/bin/sh",
+            "-c",
+            "i=0; while [ $i -lt 3000 ]; do printf .; sleep 0.002; i=$((i+1)); done & exec cat",
+        ]);
+        let me = ClientId::new();
+        let (tx, rx) = mpsc::channel(4096);
+        session.attach(me, size(40, 6), tx).unwrap();
+        let mut stamps = stamped(rx);
+        let next = async |stamps: &mut mpsc::UnboundedReceiver<_>| {
+            tokio::time::timeout(Duration::from_secs(5), stamps.recv())
+                .await
+                .expect("an event")
+                .expect("sink open")
+        };
+        let settled = tokio::time::Instant::now() + Duration::from_millis(300);
+        while next(&mut stamps).await.0 < settled {}
+        let counted_until = tokio::time::Instant::now() + Duration::from_millis(400);
+        let mut paced = 0_u32;
+        loop {
+            let (at, ev) = next(&mut stamps).await;
+            if at >= counted_until {
+                break;
+            }
+            paced += u32::from(matches!(ev, TermEvent::Frame(_)));
+        }
+        let mut waits = Vec::new();
+        for seq in 1..=40_u64 {
+            // Keys land at every phase of the pace.
+            tokio::time::sleep(Duration::from_millis(11 + seq % 7)).await;
+            let asked = tokio::time::Instant::now();
+            session.request(me, key(seq, KeyCode::X, "x")).unwrap();
+            loop {
+                let (at, ev) = next(&mut stamps).await;
+                if let TermEvent::Frame(f) = ev
+                    && f.input_ack >= seq
+                {
+                    waits.push(at.duration_since(asked));
+                    break;
+                }
+            }
+        }
+        let (p50, p90, max) = spread(&mut waits);
+        eprintln!(
+            "MEASURE echo beside a flood: key -> acking frame p50 {p50:.2} p90 {p90:.2} max {max:.2} ms; flood frames in 400 ms: {paced}"
+        );
+        assert!((25..=55).contains(&paced), "the flood is on and paced to 8 ms: {paced}");
+        assert!(p90 < 4.0, "an echo is not held for the pace: p90 {p90:.2} ms");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A viewer whose connection drains slower than the program writes is sent frames as its
+    /// connection takes them: what it shows is a frame or two old, not a queue of seconds, and
+    /// the last frame shows where the program ended.
+    #[tokio::test]
+    async fn a_throttled_viewer_is_a_frame_or_two_behind_not_seconds() {
+        /// The link, in bytes a second.
+        const RATE: u64 = 250_000;
+        let script = "read x; i=0; while [ $i -lt 120 ]; do j=0; while [ $j -lt 15 ]; do \
+                      echo \"line $i.$j the quick brown fox jumps over the lazy dog again\"; \
+                      j=$((j+1)); done; sleep 0.01; i=$((i+1)); done; echo DONE; sleep 30";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let me = ClientId::new();
+        // The depth a connection gives its sink.
+        let (tx, mut rx) = mpsc::channel::<Outbound>(256);
+        let probe = tx.clone();
+        session.attach(me, size(80, 24), tx).unwrap();
+        let link = tokio::spawn(async move {
+            let mut screen = slopty_grid::Screen::new(80, 24);
+            let started = tokio::time::Instant::now();
+            let (mut carried, mut queued, mut frames) = (0_usize, 0_usize, 0_usize);
+            loop {
+                let out = rx.recv().await.expect("sink open");
+                queued = queued.max(probe.max_capacity() - probe.capacity());
+                carried += out.wire().len();
+                let ev = event(&out);
+                // The event is on the link until its last byte has gone: the connection
+                // holds it that long, as `send_raw` does.
+                let on_link = u64::try_from(carried).unwrap().saturating_mul(1_000_000) / RATE;
+                tokio::time::sleep_until(started + Duration::from_micros(on_link)).await;
+                drop(out);
+                if let TermEvent::Frame(f) = &ev {
+                    frames += 1;
+                    apply(&mut screen, f);
+                    if text(&screen).contains("DONE") {
+                        return (tokio::time::Instant::now(), queued, carried / frames);
+                    }
+                }
+            }
+        });
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        let ended = loop {
+            if let session::Text::Screen { screen, .. } =
+                session.read(session::Read::Screen).await.unwrap()
+                && screen.rows.iter().any(|r| r.contains("DONE"))
+            {
+                break tokio::time::Instant::now();
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        };
+        let (shown, queued, frame_bytes) =
+            tokio::time::timeout(Duration::from_secs(60), link).await.unwrap().unwrap();
+        let stale = shown.duration_since(ended);
+        eprintln!(
+            "MEASURE throttled viewer at {RATE} B/s: shown {:.0} ms after the program ended; at most {queued} events queued; {frame_bytes} B a frame",
+            stale.as_secs_f64() * 1e3
+        );
+        assert!(queued <= 2, "a frame or two waits for the link, not a queue: {queued}");
+        assert!(stale < Duration::from_millis(600), "the end shows promptly: {stale:?}");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A viewer that stopped reading still gets the rows it asked for once it reads again:
+    /// only frames are coalesced for it, never a reply.
+    #[tokio::test]
+    async fn a_reply_reaches_a_viewer_that_fell_behind_the_frames() {
+        let (session, mut child) = start(&["/bin/sh", "-c", &flood(150, "0.01")]);
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(8);
+        session.attach(me, size(40, 6), tx).unwrap();
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        // Long enough for some twenty frames, more than the sink holds.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        session.request(me, TermRequest::FetchLines { start: LineIndex(0), count: 4 }).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (events, _) =
+            wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Lines { .. })))
+                .await;
+        assert!(
+            events.iter().any(|e| matches!(e, TermEvent::Lines { lines, .. } if !lines.is_empty()))
+        );
+        session.close();
+        let _killed = child.kill().await;
     }
 }
