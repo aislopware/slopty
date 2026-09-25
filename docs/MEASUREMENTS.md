@@ -3562,3 +3562,134 @@ the predictor echoes locally reaches the glass 21–24 ms after it is typed. The
 display ("submit to glass", above), so nearly all of that is the compositor. The video pacer's
 arrival → present clock now stops at the glass the same way. It has no number here: the
 display scenarios need Screen Recording.
+
+## 2026-09-25 — keystroke to glass, hop by hop
+
+The meter now splits every key into hops on one clock (`slopty_ui::terminal::latency`,
+`LatencyInfo::echo_hops_us` / `predicted_hops_us` in the self-test `dump`). An echoed key runs
+key → its echo's batch left the link (the worker's round trip plus the hand-over to the UI
+thread) → applied to the grid → painted → submitted to the GPU → on the glass. A predicted key
+runs key → guess painted → submitted → glass. "Submitted" and "glass" come from the fork's
+`PresentedFrame`. Scenario (d): 60 keys at 15/s into one shell, window 1280 × 800, 75 Hz display
+(13.3 ms a refresh), mac-studio. Values are p50 (p95) in ms.
+
+```
+# binaries: cargo build [--release] -p slopty-ptyd -p slopty-workerd -p slopty-serverd \
+#   -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e
+D=$PWD/target/e2e-perf; mkdir -p $D/run $D/artifacts
+SLOPTY_DATA_DIR=$D SLOPTY_PTYD_SOCKET=$D/run/ptyd.sock SLOPTY_WORKER_SOCKET=$D/run/worker.sock \
+  SLOPTY_E2E_BIN_DIR=$PWD/target/release SLOPTY_E2E_ARTIFACTS=$D/artifacts SLOPTY_SMOOTH_E2E=1 \
+  cargo nextest run -p slopty-e2e --test smooth --no-capture -E 'test(typing_is_timed)'
+# prints "MEASURE (d) mac" (totals) and "MEASURE (d) mac hops" per policy
+cd .research/zed-main && MACOSX_DEPLOYMENT_TARGET=26.5 IPHONEOS_DEPLOYMENT_TARGET= \
+  cargo run -p gpui --example frame_latency --profile release-fast -- idle|echo
+```
+
+**The shell first.** The typed shell used to be the user's own login zsh. Here that zsh runs a
+syntax highlighter on every key, and the worker's trace (`slopty_worker::session=trace`) put
+PTY write → echo read at p50 8.0, p90 13.5 ms. Everything else in the round trip took about
+3 ms. With the same binaries (release, before the fixes below) and an empty `ZDOTDIR`, which
+the scenario now uses so the number is Slopty's:
+
+| typed shell | key → arrived | echo, key → glass |
+| --- | --- | --- |
+| the user's zsh (load 1.8) | 12.0 (19.9) | 39.1 (45.0) |
+| empty `ZDOTDIR` (load 1.2) | 1.9 (4.6) | 32.9 (41.4) |
+
+**Where the rest went.** Every key drew two frames (124 frames for 60 keys). The key itself
+drew one, even with nothing to show: the view notified on every key, and the self-test key
+command also forced a whole-window refresh. The echo arrived 2 ms later and waited for the next
+vsync tick (applied → painted 7.2), and then waited a whole refresh more behind the key's frame
+(submitted → glass 28.5, against 19 for a lone frame). A `CAMetalLayer` shows each drawable for
+at least a refresh, so a second frame inside one refresh is shown a refresh after the first.
+The fork's `frame_latency echo` shows the same thing with no terminal in it: a notify, then a
+second one 3 ms later. Two runs, load 4–5:
+
+| frame_latency | notify → glass p50 (p99) |
+| --- | --- |
+| `idle`: a lone frame | 18.9 (27.4), 20.5 (27.5) |
+| `echo`: the key's frame | 18.9 (27.2), 21.9 (27.3) |
+| `echo`: key → the second frame on glass | 31.9 (40.6), 35.2 (40.7) |
+
+Presenting through the Core Animation transaction (`presentsWithTransaction`) was tried for
+the same case. It was worse: idle 22.7, echo 33.8. It was not kept.
+
+**The changes.** (1) A key notifies the view only when the tile shows something new before the
+worker answers: a guess, the bottom of the history, a cursor that had blinked off, a selection
+cleared, a sticky modifier used. Committed input-method text follows the same rule. (2) The
+self-test `type` and `keys` commands no longer force a whole-window refresh. They settle on the
+next frame and draw what the views asked for, as a keyboard does. (3) Fork, measured with a
+local patch and not yet in the pinned fork (4b10eab) when this was written: the immediate frame
+an idle window gets on the next main-queue turn is kept for later when the wake that took it
+drew nothing. The self-test's own next-frame wait is such a wake, and it used to push the
+echo's frame to the next tick. (4) The self-test build's link pacer is gone (see
+decisions/ui.md, "The link applies host events once per frame").
+
+Before and after, same test binary, one row per run:
+
+| build | policy | echo, key → glass | predicted, key → glass | frames |
+| --- | --- | --- | --- | --- |
+| release, before (load 1.2) | never | 32.9 (41.4) | — | 124 |
+| release, before | always | 34.3 (42.4) | 21.0 (29.3) | 124 |
+| release, after (load 1.5) | never | **22.3** (30.7) | — | 65 |
+| release, after | always | 34.7 (43.3) | 21.4 (29.9) | 122 |
+| release, after (load 1.9) | never | **22.6** (30.9) | — | 65 |
+| release, after | always | 34.0 (42.8) | 21.8 (29.5) | 122 |
+| debug, before (load 1.2) | never | 35.0 (41.8) | — | 122 |
+| debug, before | always | 34.8 (43.3) | 21.5 (30.7) | 123 |
+| debug, after (load 11) | never | 25.7 (32.5) | — | 65 |
+| debug, after (load 8) | never | 24.5 (30.9) | — | 65 |
+| debug, after without (3) (load 2) | never | 26.5 (**43.7**) | — | 65 |
+
+The hops of an unpredicted key (`never`, the path a LAN takes, where the adaptive policy draws
+no guess), release, p50:
+
+| | key → arrived | arrived → applied | applied → painted | painted → submitted | submitted → glass |
+| --- | --- | --- | --- | --- | --- |
+| before | 1.9 | 0.0 | 7.2 | 0.4 | 28.5 |
+| after, run 1 | 1.3 | 0.0 | 1.4 | 0.5 | 19.1 |
+| after, run 2 | 1.1 | 0.0 | 1.2 | 0.5 | 19.4 |
+
+A predicted key, release, after: key → painted 1.4–1.5, painted → submitted 0.5,
+submitted → glass 19.2–19.3.
+
+**What is left.** An echoed key now reaches the glass at the compositor floor plus the round
+trip plus one draw: 19.1–19.4 ms from submission to the glass (the `idle` probe's floor, about
+1.4 refreshes), 1.1–1.3 ms from the key to the echo arriving on loopback, and 1.9 ms from
+applying the frame to submitting it (a main-queue turn, then about 1 ms of layout, prepaint and
+paint for the whole window). A guess reaches the glass at the floor plus that same draw. The
+echo of a guessed key still shows a refresh after the guess (34–35 ms) whenever the round trip
+is shorter than a refresh, because it is the second frame inside one refresh. A correct guess
+already shows the same cells, so this is only visible where the guess was wrong. On a link slow
+enough for the adaptive policy to draw guesses (25 ms or more), the echo lands more than a
+refresh after the guess, and its frame is an idle window's immediate frame again. The p95 of
+about 30 ms is the floor's own spread: a lone frame's p99 in the `idle` probe is 27–28 ms.
+
+The whole smooth suite on the same two release builds, back to back (load 4–9 from other
+sessions). Draw is p50 / p95 / p99 / max in ms; "every" is the median interval between draws.
+The self-test link pacer held the app to one link update per nominal 60 Hz frame. With floods
+running, that capped drawing at 60 a second on this 75 Hz display, and a key typed beside six
+floods waited up to a frame for its echo to be applied (arrived → applied 16.2 ms):
+
+| scenario | before: draw · every | after: draw · every |
+| --- | --- | --- |
+| (a) 20 shells, strip | 1.3 / 2.5 / 4.1 / 4.3 · 17.4 | 1.2 / 3.6 / 5.1 / 7.8 · 13.3 |
+| (b) 20 shells, overview | 1.6 / 3.6 / 6.8 / 8.5 · 18.0 | 1.3 / 2.3 / 3.9 / 7.2 · 13.3 |
+| (e) file tile + 5 shells, strip | 1.1 / 1.7 / 6.4 / 7.4 · 16.2 | 1.1 / 1.7 / 3.5 / 6.6 · 13.3 |
+| (f) file tile + 5 shells, overview | 2.0 / 2.6 / 7.4 / 9.7 · 17.6 | 2.0 / 2.6 / 7.2 / 10.0 · 13.3 |
+| (g) 6 shells flooding, still | 1.3 / 1.9 / 3.0 / 3.3 · 17.9 | 1.4 / 2.7 / 3.6 / 3.8 · 13.3 |
+| (i) 1 flooding + 5 still | 0.6 / 0.8 / 0.9 / 1.0 · 17.9 | 0.6 / 0.8 / 0.9 / 0.9 · 13.3 |
+
+| (h) typing beside 6 floods | echo p50 (p95) | key → arrived | arrived → applied | applied → painted | submitted → glass |
+| --- | --- | --- | --- | --- | --- |
+| before | 42.0 (53.1) | 0.0 | 16.2 | 4.6 | 26.6 |
+| after | **28.4** (34.2) | 1.8 | 0.0 | 9.3 | 16.5 |
+
+Before, "arrived" is when the batch's first event left the channel, ahead of the pacer's wait,
+and the echo usually joined that batch during the wait, hence 0.0 and 16.2. Beside floods the
+window draws every refresh, so an echo waits for the next tick (applied →
+painted up to a refresh) and is never an idle window's immediate frame. The draws stay under
+a quarter of the refresh at 75 frames a second. In the same run (d) read never 23.3 (32.5), and
+always 34.1 (42.5) for the echo and 20.8 (29.1) for the guess. The (d) test's own check that 58
+of 60 guesses were drawn failed on both builds at this load (57 of 60). On loopback the echo
+sometimes lands before the guess's frame is painted, and then no frame ever shows that guess.

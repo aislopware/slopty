@@ -551,11 +551,8 @@ impl Workspace {
                 // One foreground update per batch, not per event: whatever arrived while the
                 // last batch was applied goes in the next one, so a flood from many sessions
                 // costs one update (and GPUI draws at most once per display frame anyway).
-                #[cfg(feature = "e2e")]
-                let mut paced = e2e::Pacer::new(frame_nominal());
                 while let Some(first) = events.recv().await {
-                    #[cfg(feature = "e2e")]
-                    paced.wait(cx).await;
+                    let arrived = std::time::Instant::now();
                     let mut batch = Vec::with_capacity(LINK_BATCH);
                     batch.push(first);
                     while batch.len() < LINK_BATCH
@@ -564,6 +561,7 @@ impl Workspace {
                         batch.push(next);
                     }
                     let disconnected = cx.update(|cx| {
+                        cx.set_global(slopty_ui::terminal::LinkArrival(arrived));
                         batch.into_iter().fold(false, |down, event| {
                             down | apply_link_event(&this, &view, key, event, cx)
                         })

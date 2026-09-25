@@ -969,9 +969,8 @@ size; the settled frame paints exact. The item chrome's text — title, pills, b
 headings — is `slopty_ui::chrome_text::ChromeText`: shaped once at its base size (a per-app
 cache), sized by arithmetic rather than a taffy measure callback, painted glyph by glyph at
 `base × k` with GPUI's baseline and advance arithmetic, ellipsis included. Worker events reach the workspace from the
-link loop in batches (whatever queued while the last one applied, up to 256, in one update;
-the self-test build also paces them to one per nominal frame), so twenty streaming sessions
-cost one update per batch; a session itself never sends more than 125 frames a second
+link loop in batches (whatever queued while the last one applied, up to 256, in one update),
+so twenty streaming sessions cost one update per batch; a session itself never sends more than 125 frames a second
 (`MIN_FRAME_INTERVAL`). `slopty_ui::frames` times every draw (`begin` in `Workspace::render`,
 `end` in the probe) into a 1024-frame ring with nearest-rank percentiles and a count of the
 frame slots long draws swallowed; it is the fourth line of the ⌘⇧I overlay and the `frames`

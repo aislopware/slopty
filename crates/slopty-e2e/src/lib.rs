@@ -701,6 +701,8 @@ pub struct LatencyInfo {
     pub echo_p99_us: u64,
     /// Same, worst.
     pub echo_max_us: u64,
+    /// The echo's hops, `[p50, p95]` each, in the order of [`ECHO_HOPS`].
+    pub echo_hops_us: [[u64; 2]; 5],
     /// Keys predicted.
     pub predicted: u64,
     /// Key → predicted paint, median.
@@ -711,7 +713,18 @@ pub struct LatencyInfo {
     pub predicted_p99_us: u64,
     /// Same, worst.
     pub predicted_max_us: u64,
+    /// The prediction's hops, `[p50, p95]` each, in the order of [`PREDICTED_HOPS`].
+    pub predicted_hops_us: [[u64; 2]; 3],
 }
+
+/// An echoed key's hops: key → its echo's batch left the link (the worker's round trip and
+/// the hand-over to the UI thread), → applied to the grid, → painted, → submitted to the GPU,
+/// → on the glass.
+pub const ECHO_HOPS: [&str; 5] =
+    ["key→arrived", "arrived→applied", "applied→painted", "painted→submitted", "submitted→glass"];
+
+/// A predicted key's hops: key → the guess painted, → submitted, → on the glass.
+pub const PREDICTED_HOPS: [&str; 3] = ["key→painted", "painted→submitted", "submitted→glass"];
 
 impl LatencyInfo {
     /// One table row.
@@ -730,6 +743,25 @@ impl LatencyInfo {
             ms(self.predicted_p99_us),
             ms(self.predicted_max_us),
             self.predicted,
+        )
+    }
+
+    /// The hops' medians and 95th percentiles, one line.
+    #[must_use]
+    pub fn hops(&self) -> String {
+        let ms = FrameInfo::ms;
+        let line = |names: &[&str], hops: &[[u64; 2]]| {
+            names
+                .iter()
+                .zip(hops)
+                .map(|(name, [p50, p95])| format!("{name} {:.1} / {:.1}", ms(*p50), ms(*p95)))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        format!(
+            "echo: {} | predicted: {}",
+            line(&ECHO_HOPS, &self.echo_hops_us),
+            line(&PREDICTED_HOPS, &self.predicted_hops_us)
         )
     }
 }

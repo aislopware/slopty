@@ -1679,8 +1679,8 @@ impl Element for TerminalElement {
             let shown = std::mem::take(&mut prepared.shown);
             let ack = self.view.read(cx).state().input_ack();
             let view = self.view.clone();
-            crate::shown::after_paint(window, cx, move |at, cx| {
-                view.update(cx, |view, _cx| view.presented(at, &shown, ack));
+            crate::shown::after_paint(window, cx, move |frame, cx| {
+                view.update(cx, |view, _cx| view.presented(frame, &shown, ack));
             });
         }
     }

@@ -549,6 +549,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   vsync however many updates land in between, so the timer only delayed an echo by up to one
   nominal 60 Hz frame (16.7 ms) and capped a ProMotion display at 60 updates a second. The
   shipped loop still drains up to 256 queued events with `try_recv` into one update.
+  Amended 2026-09-25: the self-test build's timer is gone as well. `test-support` draws inside
+  `flush_effects` only in GPUI's test mode (`GpuiMode::Test`, which only a `TestAppContext`
+  sets), never in a running app, so the self-test build draws exactly as the shipped one
+  does. The timer only made the self-test differ from the shipped app: under floods it drew
+  60 frames a second on a 75 Hz display, and an echo typed beside them waited up to a frame to
+  be applied (42.0 → 28.4 ms, MEASUREMENTS 2026-09-25, "keystroke to glass, hop by hop").
 
 - ✅ **A session sends at most 125 frames a second** (2026-09-05). The host coalesced PTY output
   for 2 ms and then sent a frame, so a flooding shell produced 500 frames/s per session; twenty

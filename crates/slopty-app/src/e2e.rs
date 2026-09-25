@@ -131,19 +131,26 @@ pub fn serve(
                 | Command::UiPinch { .. }
                 | Command::UiInsertText { .. }
                 | Command::UiDeleteBackward => match uikit::inject(command) {
-                    Ok(()) => after_frame(window, Reply::Ok, cx).await,
+                    Ok(()) => after_frame(window, Reply::Ok, Redraw::Window, cx).await,
                     Err(message) => Reply::Error { message },
                 },
                 // Input settles on the next frame: focus moved by a click is only in the
                 // dispatch tree once it has been drawn, so a keystroke sent before that would
                 // go nowhere. Reply after the frame, and the driver never races the app.
+                // Typing draws only what the views asked for, as a keyboard's keys do: a
+                // forced frame per key would hold the echo's frame back a refresh.
                 other => {
+                    let redraw = if matches!(other, Command::Type { .. } | Command::Keys { .. }) {
+                        Redraw::Dirty
+                    } else {
+                        Redraw::Window
+                    };
                     let mut answer = None;
                     let applied = cx.update_window(window, |_root, window, cx| {
                         answer = Some(apply(&workspace, other, window, cx));
                     });
                     match (applied, answer) {
-                        (Ok(()), Some(answer)) => after_frame(window, answer, cx).await,
+                        (Ok(()), Some(answer)) => after_frame(window, answer, redraw, cx).await,
                         (Ok(()), None) => Reply::Error { message: "not applied".into() },
                         (Err(e), _) => error(&e),
                     }
@@ -155,38 +162,27 @@ pub fn serve(
     .detach();
 }
 
-/// The self-test build's link pacing: GPUI's `test-support` draws every dirty window inside
-/// `flush_effects`, so an update per burst of events would be a whole frame per burst. A batch
-/// waits until one nominal frame has passed since the last; the first after a quiet spell
-/// goes at once. The shipped app applies each batch as it comes (GPUI draws at vsync).
-#[cfg(feature = "e2e")]
-pub struct Pacer {
-    pace: std::time::Duration,
-    last: Option<std::time::Instant>,
+/// What the frame a command settles on draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Redraw {
+    /// The whole window, whatever changed.
+    Window,
+    /// Only what was notified, which may be nothing.
+    Dirty,
 }
 
-#[cfg(feature = "e2e")]
-impl Pacer {
-    pub const fn new(pace: std::time::Duration) -> Self {
-        Self { pace, last: None }
-    }
-
-    pub async fn wait(&mut self, cx: &gpui::AsyncApp) {
-        if let Some(due) = self.last.and_then(|at| at.checked_add(self.pace)) {
-            let wait = due.saturating_duration_since(std::time::Instant::now());
-            if !wait.is_zero() {
-                cx.background_executor().timer(wait).await;
-            }
-        }
-        self.last = Some(std::time::Instant::now());
-    }
-}
-
-/// `answer`, once the window has drawn a frame with everything dispatched so far.
-async fn after_frame(window: AnyWindowHandle, answer: Reply, cx: &mut gpui::AsyncApp) -> Reply {
+/// `answer`, once the window has had a frame with everything dispatched so far.
+async fn after_frame(
+    window: AnyWindowHandle,
+    answer: Reply,
+    redraw: Redraw,
+    cx: &mut gpui::AsyncApp,
+) -> Reply {
     let (done_tx, done_rx) = oneshot::channel();
     let scheduled = cx.update_window(window, |_root, window, _cx| {
-        window.refresh();
+        if redraw == Redraw::Window {
+            window.refresh();
+        }
         window.on_next_frame(move |_window, _cx| {
             let _sent = done_tx.send(answer);
         });
@@ -738,8 +734,8 @@ fn frame_info(stats: Option<slopty_ui::frames::FrameStats>) -> FrameInfo {
     })
 }
 
-/// A terminal's keystroke → paint numbers, microseconds.
-fn latency_info(s: slopty_ui::terminal::latency::LatencyStats) -> LatencyInfo {
+/// A terminal's keystroke → glass numbers, microseconds.
+fn latency_info(s: &slopty_ui::terminal::latency::LatencyStats) -> LatencyInfo {
     let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
     LatencyInfo {
         echoed: s.echoed,
@@ -747,11 +743,13 @@ fn latency_info(s: slopty_ui::terminal::latency::LatencyStats) -> LatencyInfo {
         echo_p95_us: us(s.echo_p95),
         echo_p99_us: us(s.echo_p99),
         echo_max_us: us(s.echo_max),
+        echo_hops_us: s.echo_hops.map(|h| [us(h.p50), us(h.p95)]),
         predicted: s.predicted,
         predicted_p50_us: us(s.predicted_p50),
         predicted_p95_us: us(s.predicted_p95),
         predicted_p99_us: us(s.predicted_p99),
         predicted_max_us: us(s.predicted_max),
+        predicted_hops_us: s.predicted_hops.map(|h| [us(h.p50), us(h.p95)]),
     }
 }
 
@@ -943,7 +941,7 @@ impl Workspace {
                             AgentSource::Hook => "hook",
                         })
                         .map(str::to_owned),
-                    latency: latency_info(terminal.latency()),
+                    latency: latency_info(&terminal.latency()),
                     face: terminal.metrics().map(|m| face_info(&m)),
                     driving: terminal.driving(),
                     images: terminal.state().placements().len(),

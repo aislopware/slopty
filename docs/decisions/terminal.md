@@ -1210,3 +1210,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_viewers_are_told_the_real_exit_status_of_the_child`,
   `a_resize_reaches_ptyd_and_the_next_checkpoint_is_at_it`; ptyd
   `an_exit_arrives_without_a_request_to_carry_it`.
+
+- ✅ **A key draws no frame until the tile has something new to show** (2026-09-25). Every
+  key made the view notify, so each keystroke drew a frame of its own, and on loopback the
+  echo came back 2 ms later. The echo's frame then waited for the next vsync tick, because the
+  fork draws an idle window at once only when no frame began within a refresh. It then waited
+  one refresh more behind the key's frame, because a `CAMetalLayer` shows each drawable for at
+  least a refresh. An unpredicted key reached the glass at 33 ms on a 75 Hz display (release)
+  where the floor plus the round trip is 21. The view now notifies on a key only for what shows
+  before the answer: a guess, the jump to the bottom, a cursor back from its blink, a cleared
+  selection, a sticky modifier used. Committed input-method text follows the same rule. The
+  self-test `type` and `keys` commands no longer refresh the window: a keyboard does not, and
+  the forced frame put the same refresh back into every reading. A fork fix goes with it: a
+  wake that ran only next-frame callbacks and drew nothing gives the immediate frame back, so
+  the draw that follows it still goes at once. The unpredicted key now takes 22.3–22.6 ms. A
+  predicted key still draws its guess at once (about 21 ms). Its echo, when the round trip is
+  under a refresh, is the second frame in that refresh and shows a refresh later. That shows
+  only where the guess was wrong. Rejected: presenting through the Core Animation transaction,
+  which the fork's `frame_latency echo` measured worse for both frames. The keystroke meter
+  splits every key into hops (key → arrived → applied → painted → submitted → glass) so the
+  next regression names its hop. The typing scenarios run the shell with an empty `ZDOTDIR`,
+  because the user's zsh plugins cost 8 ms a key here, and that number belongs to the shell,
+  not to Slopty (MEASUREMENTS 2026-09-25, "keystroke to glass, hop by hop"). Tests: view
+  `a_key_draws_a_frame_only_when_the_tile_shows_something_new`; latency
+  `the_hops_of_an_echo_and_a_guess_add_up_to_their_totals`; e2e smooth
+  `typing_is_timed_with_and_without_the_local_echo_on_the_mac` (prints the hops).

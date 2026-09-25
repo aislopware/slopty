@@ -1137,8 +1137,8 @@ impl Render for ScreenView {
                 // What this paint put up is timed when the display shows it.
                 if let Some(stamp) = handler.update(cx, |view, _cx| view.pacer.painted()) {
                     let view = handler.clone();
-                    crate::shown::after_paint(window, cx, move |at, cx| {
-                        view.update(cx, |view, _cx| view.pacer.shown(stamp, at));
+                    crate::shown::after_paint(window, cx, move |shown, cx| {
+                        view.update(cx, |view, _cx| view.pacer.shown(stamp, shown.presented));
                     });
                 }
                 window.handle_input(&focus, ElementInputHandler::new(bounds, handler.clone()), cx);

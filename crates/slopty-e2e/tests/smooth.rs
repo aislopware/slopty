@@ -209,6 +209,25 @@ mod tests {
         term.latency
     }
 
+    /// An empty zsh configuration for the typed shell. The login shell otherwise reads the
+    /// user's own rc files, and a plugin run on every key (syntax highlighting) put 2 to 19 ms
+    /// of its own between a key and its echo on this machine (MEASUREMENTS, "keystroke to
+    /// glass"): a number about the user's zsh, not about Slopty.
+    struct PlainZsh(tempfile::TempDir);
+
+    impl PlainZsh {
+        fn path_str(&self) -> String {
+            self.0.path().display().to_string()
+        }
+    }
+
+    fn plain_zsh() -> PlainZsh {
+        let dir = tempfile::Builder::new().prefix("slopty-e2e-zdotdir-").tempdir().unwrap();
+        // Present and empty, or zsh offers its new-user menu instead of a prompt.
+        std::fs::write(dir.path().join(".zshrc"), "").unwrap();
+        PlainZsh(dir)
+    }
+
     /// Focus the first column's shell (⌘1).
     async fn focus_first_shell(drv: &mut Driver) {
         drv.keys("cmd-1").await.unwrap();
@@ -350,7 +369,9 @@ mod tests {
         if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
             return;
         }
-        let mut stack = Stack::launch("e2e-smooth-busy").await.unwrap();
+        let rc = plain_zsh();
+        let mut stack =
+            Stack::launch_with("e2e-smooth-busy", &[("ZDOTDIR", &rc.path_str())]).await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         ready(drv).await;
@@ -364,6 +385,7 @@ mod tests {
         focus_first_shell(drv).await;
         let latency = typing(drv).await;
         println!("MEASURE (h) mac: typing beside {BUSY} streaming shells: {}", latency.row());
+        println!("MEASURE (h) mac hops: {}", latency.hops());
         stack.shutdown().await;
         assert!(after.frames.frames >= 100, "too few frames to judge: {:?}", after.frames);
         assert!(latency.echoed >= TYPED_MIN, "{latency:?}");
@@ -400,16 +422,17 @@ mod tests {
         if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
             return;
         }
+        let rc = plain_zsh();
         for policy in ["never", "always"] {
-            let mut stack = Stack::launch_with("e2e-smooth-typing", &[("SLOPTY_PREDICT", policy)])
-                .await
-                .unwrap();
+            let env = [("SLOPTY_PREDICT", policy), ("ZDOTDIR", &rc.path_str())];
+            let mut stack = Stack::launch_with("e2e-smooth-typing", &env).await.unwrap();
             let drv = &mut stack.driver;
             drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
             ready(drv).await;
             focus_first_shell(drv).await;
             let latency = typing(drv).await;
             println!("MEASURE (d) mac, SLOPTY_PREDICT={policy}: {}", latency.row());
+            println!("MEASURE (d) mac hops, SLOPTY_PREDICT={policy}: {}", latency.hops());
             stack.shutdown().await;
             assert!(latency.echoed >= TYPED_MIN, "{latency:?}");
             if policy == "always" {

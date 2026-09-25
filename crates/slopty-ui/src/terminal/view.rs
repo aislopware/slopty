@@ -290,6 +290,15 @@ struct Texture {
     image: Arc<gpui::RenderImage>,
 }
 
+/// When the batch of link events being applied now left the link's channel for the UI thread.
+///
+/// The app sets it per batch, so the latency meter can tell the worker's round trip from the
+/// wait for the UI; without it a frame counts as arriving when it is applied.
+#[derive(Clone, Copy, Debug)]
+pub struct LinkArrival(pub Instant);
+
+impl gpui::Global for LinkArrival {}
+
 /// One session's view.
 pub struct TerminalView {
     session: SessionId,
@@ -1569,10 +1578,11 @@ impl TerminalView {
         self.latency.waiting()
     }
 
-    /// A frame reached the display at `now`: its guesses showed the keys in `shown` (their
-    /// sequence numbers) and its grid the worker's state after key `input_ack`.
-    pub fn presented(&mut self, now: Instant, shown: &[u64], input_ack: u64) {
-        self.latency.painted(now, shown, input_ack);
+    /// A frame reached the display (`frame` says when it was painted, submitted and shown):
+    /// its guesses showed the keys in `guessed` (their sequence numbers) and its grid the
+    /// worker's state after key `input_ack`.
+    pub fn presented(&mut self, frame: crate::shown::Shown, guessed: &[u64], input_ack: u64) {
+        self.latency.presented(frame, guessed, input_ack);
     }
 
     /// Keystroke → paint percentiles (see [`latency`]).
@@ -1619,17 +1629,25 @@ impl TerminalView {
 
     /// Send a key as if it had been pressed with the terminal focused (key bar buttons).
     pub fn press(&mut self, keystroke: Keystroke, cx: &mut Context<Self>) {
-        self.type_key(keystroke, false, cx);
+        if self.type_key(keystroke, false, cx) {
+            cx.notify();
+        }
     }
 
     /// A key typed, first press or auto-repeat (`held`): both go to the predictor, the
     /// latency meter and the bottom of the history, so a held key echoes locally like a tap.
-    fn type_key(&mut self, mut keystroke: Keystroke, held: bool, cx: &mut Context<Self>) {
+    ///
+    /// Returns whether the tile shows something new before the worker answers: a guess, the
+    /// bottom of the history, a sticky modifier let go. A key that changes nothing on screen
+    /// must not draw a frame. The echo arrives a few milliseconds later, and a frame drawn in
+    /// between holds the echo's frame back a whole refresh (MEASUREMENTS, "keystroke to glass").
+    #[must_use]
+    fn type_key(&mut self, mut keystroke: Keystroke, held: bool, cx: &mut Context<Self>) -> bool {
         // An armed ⌘ with the bar's ↑ / ↓ is ⌘↑ / ⌘↓: between prompts, not to the program.
         if self.sticky_command && matches!(keystroke.key.as_str(), "up" | "down") {
             self.sticky_command = false;
             self.step_prompt(if keystroke.key == "up" { -1 } else { 1 }, cx);
-            return;
+            return true;
         }
         // An armed ⌘ with the bar's ← → ⌫ is the Mac's line-editing chord, as on the desktop.
         if self.sticky_command
@@ -1645,20 +1663,22 @@ impl TerminalView {
                 self.state.scroll_to_bottom();
             }
             self.send(TermRequest::Raw(bytes.to_vec()));
-            cx.notify();
-            return;
+            return true;
         }
-        if std::mem::take(&mut self.sticky_control) {
+        let unstuck = std::mem::take(&mut self.sticky_control);
+        if unstuck {
             keystroke.modifiers.control = true;
         }
         self.key_seq = self.key_seq.wrapping_add(1);
         let key = keys::key_event(self.key_seq, &keystroke, held, self.alt_is_alt());
         tracing::trace!(session = %self.session, ?key, "key");
-        if self.state.view_offset() != 0 {
+        let scrolled = self.state.view_offset() != 0;
+        if scrolled {
             self.state.scroll_to_bottom();
         }
         let now = Instant::now();
         self.latency.pressed(self.key_seq, now);
+        let guessing = self.predictor.visible(now);
         let _guess = self.predictor.on_key(
             &key,
             self.state.cursor(),
@@ -1667,7 +1687,7 @@ impl TerminalView {
             now,
         );
         self.send(TermRequest::Key(key));
-        cx.notify();
+        unstuck || scrolled || guessing || self.predictor.visible(now)
     }
 
     /// A key of the phone's bar: [`Self::press`].
@@ -1767,6 +1787,9 @@ impl TerminalView {
             self.send_search(cx);
         }
         if reconcile {
+            let now = Instant::now();
+            let arrived = cx.try_global::<LinkArrival>().map_or(now, |a| a.0);
+            self.latency.applied(self.state.input_ack(), arrived, now);
             let outcome = self.predictor.on_frame(
                 self.state.screen(),
                 self.state.input_ack(),
@@ -2055,14 +2078,17 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        self.selection = None;
+        let deselected = self.selection.take().is_some();
+        let unblinked = !self.blink_on;
         self.pin_blink();
         if self.theme.behaviour.hide_pointer_while_typing {
             slopty_platform::hide_pointer_until_moved();
         }
-        self.type_key(event.keystroke.clone(), event.is_held, cx);
+        let shown = self.type_key(event.keystroke.clone(), event.is_held, cx);
         cx.stop_propagation();
-        cx.notify();
+        if deselected || unblinked || shown {
+            cx.notify();
+        }
     }
 
     fn scroll_wheel(
@@ -2509,7 +2535,7 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.marked = None;
+        let unmarked = self.marked.take().is_some();
         if text.is_empty() {
             cx.notify();
             return;
@@ -2528,11 +2554,15 @@ impl EntityInputHandler for TerminalView {
             self.press(keystroke, cx);
             return;
         }
-        if self.state.view_offset() != 0 {
+        let scrolled = self.state.view_offset() != 0;
+        if scrolled {
             self.state.scroll_to_bottom();
         }
         self.send(TermRequest::Raw(text.as_bytes().to_vec()));
-        cx.notify();
+        // As with a typed key: nothing new on screen until the echo, so no frame before it.
+        if unmarked || scrolled {
+            cx.notify();
+        }
     }
 
     fn replace_and_mark_text_in_range(
@@ -5192,6 +5222,35 @@ mod tests {
             assert!(view.latency.waiting(), "timed");
         });
         assert_eq!(drain_words(&mut rx), ["key"], "and sent");
+    }
+
+    /// A key that changes nothing on screen draws no frame, so the echo's frame, a moment
+    /// later, is the first and is drawn at once. A key with a guess to show draws, and so
+    /// does one that brings a blinked-off cursor back.
+    #[gpui::test]
+    fn a_key_draws_a_frame_only_when_the_tile_shows_something_new(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        cursor_at_the_prompt(&view, cx);
+        // The first key switches the window to keyboard modality, which GPUI redraws for once.
+        cx.simulate_keystrokes("z");
+        drain_words(&mut rx);
+        let renders = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.renders());
+        let before = renders(cx);
+        cx.simulate_keystrokes("a");
+        cx.run_until_parked();
+        assert_eq!(renders(cx), before, "nothing new on screen: no frame");
+        assert_eq!(drain_words(&mut rx), ["key"], "the key still went out");
+
+        view.update(cx, |view, _cx| view.blink_on = false);
+        cx.simulate_keystrokes("b");
+        cx.run_until_parked();
+        assert_eq!(renders(cx), before.saturating_add(1), "the cursor shown again");
+
+        view.update(cx, |view, _cx| view.predictor.set_policy(Policy::Always));
+        cx.simulate_keystrokes("c");
+        cx.run_until_parked();
+        assert_eq!(renders(cx), before.saturating_add(2), "the guess drawn at once");
+        assert!(view.read_with(cx, |v, _| v.predictions().is_some()), "guesses on screen");
     }
 
     /// The meter reads a frame when the display shows it, not when it is painted: the

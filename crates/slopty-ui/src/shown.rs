@@ -3,10 +3,11 @@
 //! A paint runs a refresh or more before its frame is on the glass: presentation is
 //! vsync-synced and macOS composites a window about a refresh after its drawable is submitted
 //! (MEASUREMENTS, "submit to glass"). A keystroke or a video frame timed at its paint, or at
-//! the next display tick, reads low by that much. [`after_paint`] queues work to run with the
-//! instant the first frame holding the paint reached the display, from the window's own
-//! presentation reports (`Window::on_frame_presented`). The report subscription lives only while
-//! something waits: reporting costs a little on every frame.
+//! the next display tick, reads low by that much. [`after_paint`] queues work to run once the
+//! first frame holding the paint reached the display, with when that frame was submitted and
+//! shown ([`Shown`]), from the window's own presentation reports (`Window::on_frame_presented`).
+//! The report subscription lives only while something waits: reporting costs a little on every
+//! frame.
 //!
 //! The iOS simulator reports no presentation, so there the next display tick stands in.
 
@@ -14,17 +15,33 @@ use std::time::Instant;
 
 use gpui::{App, Window};
 
-/// Run `then` with the instant the frame holding what is being painted now reached the
-/// display. Call it from a paint.
-#[cfg(all(target_os = "ios", target_abi = "sim"))]
-pub fn after_paint(window: &Window, _cx: &mut App, then: impl FnOnce(Instant, &mut App) + 'static) {
-    window.on_next_frame(move |_window, cx| then(Instant::now(), cx));
+/// Where one paint went: when it ran, when the frame holding it was handed to the GPU, and
+/// when that frame reached the display.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Shown {
+    /// The paint.
+    pub painted: Instant,
+    /// The first frame after the paint was submitted.
+    pub submitted: Instant,
+    /// That frame was on the glass.
+    pub presented: Instant,
 }
 
-/// Run `then` with the instant the frame holding what is being painted now reached the
-/// display. Call it from a paint.
+/// Run `then` with where the frame holding what is being painted now went, once it reached
+/// the display. Call it from a paint.
+#[cfg(all(target_os = "ios", target_abi = "sim"))]
+pub fn after_paint(window: &Window, _cx: &mut App, then: impl FnOnce(Shown, &mut App) + 'static) {
+    let painted = Instant::now();
+    window.on_next_frame(move |_window, cx| {
+        let now = Instant::now();
+        then(Shown { painted, submitted: now, presented: now }, cx);
+    });
+}
+
+/// Run `then` with where the frame holding what is being painted now went, once it reached
+/// the display. Call it from a paint.
 #[cfg(not(all(target_os = "ios", target_abi = "sim")))]
-pub fn after_paint(window: &Window, cx: &mut App, then: impl FnOnce(Instant, &mut App) + 'static) {
+pub fn after_paint(window: &Window, cx: &mut App, then: impl FnOnce(Shown, &mut App) + 'static) {
     let painted = Instant::now();
     let waiting = cx.default_global::<Waiting>();
     waiting.queue.push((painted, Box::new(then)));
@@ -35,7 +52,7 @@ pub fn after_paint(window: &Window, cx: &mut App, then: impl FnOnce(Instant, &mu
 }
 
 #[cfg(not(all(target_os = "ios", target_abi = "sim")))]
-type Waiter = Box<dyn FnOnce(Instant, &mut App)>;
+type Waiter = Box<dyn FnOnce(Shown, &mut App)>;
 
 /// Work waiting for its paint to be shown, oldest first, and the subscription that feeds it.
 #[cfg(not(all(target_os = "ios", target_abi = "sim")))]
@@ -61,8 +78,8 @@ pub(crate) fn presented(frame: gpui::PresentedFrame, cx: &mut App) {
     if waiting.queue.is_empty() {
         waiting.reports = None;
     }
-    for (_, then) in ready {
-        then(at, cx);
+    for (painted, then) in ready {
+        then(Shown { painted, submitted: frame.submitted_at, presented: at }, cx);
     }
 }
 
@@ -99,7 +116,7 @@ mod tests {
         window
             .update(cx, |_, window, cx| {
                 let seen = Rc::clone(&seen);
-                after_paint(window, cx, move |at, _| seen.borrow_mut().push(at));
+                after_paint(window, cx, move |shown, _| seen.borrow_mut().push(shown.presented));
             })
             .unwrap();
         let after = Instant::now().checked_add(Duration::from_millis(1)).unwrap();
