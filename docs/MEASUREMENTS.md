@@ -4212,3 +4212,76 @@ What the numbers say:
 The final run with nothing set, load 10 to 21 (`target/cc-logs/final.log`): bursts echo p50 9.3
 / p99 24.3 ms, queue p99 7.8 ms, cwnd 36 kB, 787 of 789 frames whole at 12.4 Mbit/s; halved
 echo p99 39.4 ms, queue p99 22.8 ms, no overflow, 9.6 Mbit/s.
+
+## 2026-09-25 — a working mark that steps: frames drawn a second with one agent at work
+
+The headless workspace (`slopty-ui` tests, the GPUI test platform), 1200 × 800, one worker, one
+shell whose agent reports `Working`. Its mark shows in the navigator's tile row and in the
+status bar's agent summary. The harness stands in for a 120 Hz display. Each of 120 ticks
+moves the executor's clock by 1/120 s, delivers whatever frame was asked for
+(`Window::simulate_next_frame`) and runs what is due. The count is the workspace's renders
+(`frames_drawn`) in that second. Each arm ran five consecutive seconds.
+
+```
+cargo nextest run -p slopty-ui -E 'test(a_working_mark_draws_twelve_frames_a_second_and_none_at_rest)'
+# the arms: `icons::status_icon` returning the static LoaderCircle (before), or the icon under
+# `with_animation(Animation::new(1 s).repeat())` (a spinner turned on every frame), in place of
+# `Spinner`; a temporary eprintln of `frames_in_a_second` printed the counts
+```
+
+| arm | frames drawn, seconds 1–5 |
+| --- | --- |
+| before: the mark stands still | 0, 0, 0, … |
+| a spinner turned every frame (`with_animation`) | 120, 120, 120, 120, 120 |
+| **the stepped spinner (`icons::Spinner`)** | **11, 12, 12, 12, 12** |
+| the stepped spinner, the agent idle again | 1 (the step already due), then 0 |
+| the stepped spinner under Reduce Motion | 0 |
+
+A spinner that turns every frame keeps the window at the display's rate for as long as any
+agent works, so it would be 120 frames a second on this display for hours. The stepped one
+draws a frame when its twelfth of a second is up and not otherwise. It draws nothing once no
+mark is painted. The first second reads 11 because the first step's timer runs from the frame
+that painted the mark. The test asserts 11 to 13 while working and 0 at rest, so a return to
+per-frame drawing fails it. The app itself was not measured here. Its display link and view cache
+change the cost of each frame, not the count asked for.
+
+## 2026-09-25 — the lines-below pill, and reading Reduce Motion
+
+mac-studio, release build on main `1292763` plus the uncommitted UI work, load average 6–8
+from other sessions.
+
+**The lines-below pill.** Headless GPUI, one 100 × 40 terminal at 1000 × 900 pt flooding one
+line a frame (each frame moves the screen down one line and sends the one new row). Three arms
+in alternating blocks of 50 frames, ten rounds, so 500 frames each: following the output;
+scrolled up 20 lines with the pill hidden (`set_covered(true)`); scrolled up with the pill
+shown. A sample is the frame applied (`TerminalView::apply`, which now also holds the view
+still while scrolled up) and drawn. Five runs, p50 / p95 / p99 / max in µs:
+
+| run | following | scrolled, pill hidden | scrolled, pill shown |
+| --- | --- | --- | --- |
+| 1 | 177 / 210 / 235 / 319 | 161 / 178 / 223 / 263 | 177 / 216 / 271 / 389 |
+| 2 | 176 / 228 / 290 / 320 | 162 / 196 / 245 / 272 | 177 / 211 / 277 / 380 |
+| 3 | 175 / 202 / 245 / 393 | 162 / 199 / 239 / 262 | 177 / 211 / 259 / 319 |
+| 4 | 174 / 201 / 252 / 317 | 162 / 187 / 238 / 327 | 175 / 199 / 255 / 302 |
+| 5 | 176 / 209 / 259 / 309 | 162 / 189 / 231 / 285 | 178 / 212 / 244 / 306 |
+
+```
+cargo test -p slopty-ui --release --lib lines_below_cost -- --ignored --nocapture
+```
+
+The pill costs 15 µs at p50 and 15–25 µs at p95: a few boxes, an icon from the atlas and two
+labels. That is 0.2 % of a 120 Hz frame, and a frame with the pill up costs what a frame
+following the output costs. The count is `view_offset`, one read. Holding the view still is
+two reads of the state and no rows, and a scrolled frame with the pill hidden is the cheapest
+of the three.
+
+**Reduce Motion.** `slopty_platform::reduce_motion()` was asked of AppKit on every frame, by
+the canvas and by every terminal view's scrollbar. One read of
+`NSWorkspace.accessibilityDisplayShouldReduceMotion` costs 110–240 ns, averaged over 100 000
+reads in four runs, against 25–37 ns for the kept answer (a clock read and two atomics). It
+is well under a microsecond, so a once-a-second refresh is enough. The crate watches no change
+notification, and a change in System Settings shows within a second.
+
+```
+cargo test -p slopty-platform --release --lib reduce_motion -- --nocapture
+```

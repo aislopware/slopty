@@ -140,8 +140,10 @@ mod tests {
 
         // The frame the app draws, from its own renderer.
         let frame = drv.render(&render_path).await.unwrap();
+        // Panes sit flush on a surface a shade from the title bar's, so what differs from the
+        // corner pixel is the text and the chrome: about 1% of this window. Blank is none.
         let fg = foreground_fraction(&frame);
-        assert!(fg > 0.01, "frame is blank ({fg:.4} foreground)");
+        assert!(fg > 0.004, "frame is blank ({fg:.4} foreground)");
         assert_matches("terminal", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
         // A kitty graphics image typed through the shell: 16 × 16 red pixels transmitted and

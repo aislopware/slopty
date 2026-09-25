@@ -21,6 +21,38 @@ use crate::icons::{self, IconName, IconSize, Status};
 /// What the list says when the query leaves nothing.
 pub(crate) const NO_COMMAND_MATCHES: &str = "No command matches";
 
+/// The keys the palette's foot names, each with what it does.
+pub(crate) const LEGEND: [(&str, &str); 3] = [("↩", "open"), ("esc", "close"), ("↑↓", "move")];
+
+/// The palette's foot: its keys in key caps, small and muted, read as one line.
+fn legend(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let s = &theme.surfaces;
+    let said = LEGEND.map(|(key, what)| format!("{key} {what}")).join(" · ");
+    div()
+        .id("palette-legend")
+        .debug_selector(|| "palette-legend".to_owned())
+        .role(gpui::accesskit::Role::Label)
+        .aria_label(SharedString::from(said))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(theme.spacing.md))
+        .px(px(theme.spacing.lg))
+        .py(px(theme.spacing.xs))
+        .border_t_1()
+        .border_color(hsla(s.border))
+        .text_size(px(theme.typography.small()))
+        .text_color(hsla(s.text_muted))
+        .children(LEGEND.map(|(key, what)| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .child(crate::kit::key_cap(theme, key))
+                .child(what)
+        }))
+}
+
 /// What a line does when it is chosen.
 pub enum PaletteRun {
     /// Dispatch this from the element that had the keyboard.
@@ -853,7 +885,7 @@ impl CommandPalette {
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(worker.clone()))
             }))
-            .children(item.status.map(|status| icons::status_mark(theme, Some(status))))
+            .children(item.status.map(|status| icons::status_mark(theme, Some(status), 1.0)))
             .when(!item.keys.is_empty(), |el| {
                 el.child(
                     div()
@@ -944,7 +976,8 @@ impl Render for CommandPalette {
                                         .child(NO_COMMAND_MATCHES),
                                 )
                             }),
-                    ),
+                    )
+                    .child(legend(&theme)),
             )
     }
 }

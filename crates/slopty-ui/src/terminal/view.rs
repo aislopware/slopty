@@ -58,6 +58,8 @@ const BELL_FLASH: Duration = Duration::from_millis(150);
 #[cfg(test)]
 const BELL_HALF: Duration = Duration::from_millis(75);
 const AUTOSCROLL_MAX: i64 = 8;
+/// The action on the pill that counts the lines below a view scrolled up into its history.
+pub const BACK_TO_LIVE: &str = "Back to live";
 /// How far a ⌘-press on a path moves, in points, before it is a drag of the file rather than
 /// a click that opens it.
 const DRAG_OUT_SLOP: f32 = 4.0;
@@ -377,8 +379,9 @@ pub struct TerminalView {
     /// Only the newest waits: answering it answers every marker before it.
     unsent_reached: Option<u64>,
     reached_task: Option<gpui::Task<()>>,
-    /// The viewport offset the last frame drew: a frame that draws another has scrolled.
-    drawn_offset: u64,
+    /// The top line the last frame drew while scrolled up (`None` while following): a frame
+    /// that draws another has scrolled. Output arriving under a view scrolled up moves neither.
+    drawn_top: Option<LineIndex>,
     /// The fraction of a line the wheel has moved short of a whole one (a trackpad scrolls
     /// in fractions; they add up).
     wheel_remainder: f32,
@@ -412,6 +415,9 @@ pub struct TerminalView {
     /// What waits on a confirmation at the card's foot: a paste held back by paste
     /// protection, or the close of a shell whose command is still running.
     pending: Option<Pending>,
+    /// The tile shows a pill of its own at the body's foot (the worker away, the program
+    /// exited), which says more than the lines below and takes their pill's place.
+    covered: bool,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -422,8 +428,9 @@ impl std::fmt::Debug for TerminalView {
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
 
-/// Whether the system asks for motion to be reduced, read when it matters so a change takes
-/// effect at once. Always false under test, which must not turn on the machine's setting.
+/// Whether the system asks for motion to be reduced, as `slopty_platform` keeps it (read again
+/// at most once a second). Always false under test, which must not turn on the machine's
+/// setting.
 fn reduced_motion() -> bool {
     !cfg!(test) && slopty_platform::reduce_motion()
 }
@@ -501,13 +508,14 @@ impl TerminalView {
             scrollbar_task: None,
             unsent_reached: None,
             reached_task: None,
-            drawn_offset: 0,
+            drawn_top: None,
             wheel_remainder: 0.0,
             wheel_gesture: None,
             search: None,
             agent: None,
             search_regex: false,
             pending: None,
+            covered: false,
         }
     }
 
@@ -1507,9 +1515,12 @@ impl TerminalView {
 
     /// The canvas is about to close this shell: with a command running and the setting
     /// on, the bar asks first and this says so (`true`); otherwise nothing stands in the
-    /// way.
+    /// way. A shell whose program exited has nothing left to lose.
     pub fn ask_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.theme.behaviour.confirm_close || !self.state.command_running() {
+        if !self.theme.behaviour.confirm_close
+            || !self.state.command_running()
+            || self.state.exited().is_some()
+        {
             return false;
         }
         let command = self
@@ -1813,7 +1824,15 @@ impl TerminalView {
             self.predictor.flush();
             self.selection = None;
         }
+        // Scrolled up, the lines on screen hold still as output arrives below them.
+        let held = (reconcile && self.state.view_offset() != 0).then(|| self.state.index_at_row(0));
         let effects = self.state.apply(event);
+        if let Some(top) = held
+            && self.state.epoch() == epoch_before
+            && self.state.view_offset() != 0
+        {
+            self.hold_top(top);
+        }
         if self.state.epoch() != epoch_before {
             tracing::info!(session = %self.session, epoch = ?self.state.epoch(), "line numbering changed");
             // Line numbering changed (reflow, reset, alt screen): the selection means nothing,
@@ -1896,6 +1915,100 @@ impl TerminalView {
             }
         }
         cx.notify();
+    }
+
+    /// Keep `top` as the first row drawn after a frame moved the screen down the numbering:
+    /// the offset from the bottom grows by what arrived. Two reads of the state, no rows.
+    fn hold_top(&mut self, top: LineIndex) {
+        let offset = self.state.view_offset();
+        let first_visible = self.state.index_at_row(0).0.saturating_add(offset);
+        let held = first_visible.saturating_sub(top.0);
+        if held == offset {
+            return;
+        }
+        for effect in self.state.scroll_to(held) {
+            if let Effect::Request(req) = effect {
+                self.send(req);
+            }
+        }
+    }
+
+    /// Lines between the bottom of the view and the newest output: 0 while following it.
+    #[must_use]
+    pub const fn lines_below(&self) -> u64 {
+        self.state.view_offset()
+    }
+
+    /// Whether the tile draws its own pill at the body's foot, which hides the lines-below
+    /// pill. Returns whether that changed: a cached drawing of this view is then stale.
+    pub const fn set_covered(&mut self, covered: bool) -> bool {
+        let changed = self.covered != covered;
+        self.covered = covered;
+        changed
+    }
+
+    /// The pill at the foot of a view scrolled up: how many lines are below and a way back to
+    /// them, the whole pill one button (as ⇧⇲ is). It sits where the tile's state pill would,
+    /// and gives way to it. It appears and goes with the scroll, with no motion of its own.
+    fn render_lines_below(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+        let below = self.lines_below();
+        if below == 0 || self.covered {
+            return None;
+        }
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let k = self.zoom;
+        let count: SharedString =
+            if below == 1 { "1 line below".into() } else { format!("{below} lines below").into() };
+        let label = SharedString::from(format!("{count} · {BACK_TO_LIVE}"));
+        let small = px(theme.typography.small());
+        let pill = div()
+            .id("lines-below")
+            .debug_selector(|| "lines-below".to_owned())
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(label)
+            .occlude()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm * k))
+            .px(px(theme.spacing.md * k))
+            .py(px(theme.spacing.xs * k))
+            .rounded(px(theme.radii.md * k))
+            .border_1()
+            .border_color(hsla(s.border))
+            .bg(hsla(s.panel))
+            .shadow_sm()
+            .text_size(px(theme.typography.small() * k))
+            .font_family(theme.typography.ui_family.clone())
+            .text_color(hsla(s.text_secondary))
+            .cursor_pointer()
+            .hover(move |el| el.bg(hsla(s.raised)))
+            .child(
+                crate::icons::icon(
+                    theme,
+                    crate::icons::IconName::ArrowDown,
+                    crate::icons::IconSize::Inline,
+                    hsla(s.text_secondary),
+                )
+                .size(px(theme.typography.icon() * k)),
+            )
+            .child(crate::chrome_text::ChromeText::new(count, small, k).zooming(self.zooming))
+            .child(div().text_color(hsla(s.accent)).child(
+                crate::chrome_text::ChromeText::new(BACK_TO_LIVE, small, k).zooming(self.zooming),
+            ))
+            .on_click(cx.listener(|this, _ev, window, cx| {
+                this.scroll_to_bottom(&ScrollToBottom, window, cx);
+            }));
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(theme.spacing.lg * k))
+                .flex()
+                .justify_center()
+                .child(crate::a11y::tab_stop(pill, s.accent)),
+        )
     }
 
     /// A command typed at `prompt` took `elapsed`: kept for the row's caption when it is at
@@ -2397,11 +2510,11 @@ impl TerminalView {
     /// A frame is being drawn: a viewport moved since the last one (the wheel, a key, the
     /// thumb, a jump to a prompt or a hit) brings the scrollbar up.
     pub(super) fn viewport_drawn(&mut self, now: Instant, cx: &Context<Self>) {
-        let offset = self.state.view_offset();
-        if offset == self.drawn_offset {
+        let top = (self.state.view_offset() != 0).then(|| self.state.index_at_row(0));
+        if top == self.drawn_top {
             return;
         }
-        self.drawn_offset = offset;
+        self.drawn_top = top;
         self.scrollbar.scrolled(now);
         self.wake_scrollbar(cx);
     }
@@ -2917,6 +3030,7 @@ impl Render for TerminalView {
             .children(search)
             .children(self.render_link_preview())
             .children(self.render_confirm(cx))
+            .children(self.render_lines_below(cx))
             .children(self.block_menu.as_ref().map(|m| self.render_block_menu(m, cx)))
     }
 }
@@ -4271,6 +4385,88 @@ mod tests {
         })
     }
 
+    /// [`history_frame`] as frame `seq` of a stream: output has moved the screen's first line to
+    /// `first`, and every row is sent again.
+    fn moved_frame(seq: u64, first: u64, rows: &[&str]) -> TermEvent {
+        let TermEvent::Frame(frame) = history_frame(first, rows) else { panic!("a frame") };
+        TermEvent::Frame(Frame { seq, full: seq == 1, ..frame })
+    }
+
+    /// Scrolled up into its history, a view holds still while output arrives, and the pill
+    /// at its foot counts the lines below: a count read off the offset, growing with what
+    /// arrives. A click on it goes back to the output and the pill goes.
+    #[gpui::test]
+    fn scrolled_up_the_pill_counts_the_lines_below_and_goes_back_to_live(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(moved_frame(1, 10, &["a", "b", "c"]), cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("lines-below").is_none(), "following: no pill");
+        view.update_in(cx, |view, _window, cx| view.scroll_lines(4, cx));
+        cx.run_until_parked();
+        let label = |cx: &mut VisualTestContext| {
+            cx.update(|window, _cx| window.set_a11y_active(true));
+            cx.run_until_parked();
+            let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+            tree.into_iter()
+                .find(|n| {
+                    n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains("below"))
+                })
+                .and_then(|n| n.label)
+        };
+        assert_eq!(label(cx).as_deref(), Some("4 lines below · Back to live"));
+        let top = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.state.index_at_row(0));
+        assert_eq!(top(cx), LineIndex(6));
+
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(moved_frame(2, 15, &["f", "g", "h"]), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(top(cx), LineIndex(6), "the lines read hold still");
+        assert_eq!(label(cx).as_deref(), Some("9 lines below · Back to live"));
+
+        let at = cx.debug_bounds("lines-below").expect("the pill is drawn").center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.lines_below()), 0, "back to live");
+        assert!(cx.debug_bounds("lines-below").is_none(), "and the pill goes");
+        assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the click selected nothing");
+
+        view.update_in(cx, |view, _window, cx| view.scroll_lines(1, cx));
+        cx.run_until_parked();
+        assert_eq!(label(cx).as_deref(), Some("1 line below · Back to live"));
+        cx.simulate_keystrokes("shift-end");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("lines-below").is_none(), "⇧⇲ goes back to live too");
+    }
+
+    /// The tile's own pill (the worker away, the program exited) takes the place of the
+    /// lines below: covered, the view draws none, and uncovered it draws it again.
+    #[gpui::test]
+    fn the_lines_below_give_way_to_the_tiles_pill(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(moved_frame(1, 10, &["a", "b", "c"]), cx);
+            view.scroll_lines(2, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("lines-below").is_some());
+        let changed = view.update_in(cx, |view, _window, cx| {
+            cx.notify();
+            view.set_covered(true)
+        });
+        cx.run_until_parked();
+        assert!(changed, "a cached drawing is stale");
+        assert!(cx.debug_bounds("lines-below").is_none(), "covered");
+        view.update_in(cx, |view, _window, cx| {
+            cx.notify();
+            view.set_covered(false)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("lines-below").is_some(), "uncovered");
+    }
+
     /// The window point at the middle of cell (`col`, `row`).
     fn cell_center(
         view: &Entity<TerminalView>,
@@ -5585,6 +5781,86 @@ mod tests {
              words reshaped on the return {reshaped}"
         );
         assert_eq!(reshaped, 0, "the first screen is still shaped");
+    }
+
+    /// What the lines-below pill costs a frame: a 100 × 40 shell flooding one line a frame,
+    /// drawn while following, scrolled up with the pill hidden (`covered`), and scrolled up with
+    /// it shown, in alternating blocks. Each sample is the frame applied and drawn. Prints the
+    /// numbers MEASUREMENTS records; run by hand, in release:
+    /// `cargo test -p slopty-ui --release --lib lines_below_cost -- --ignored --nocapture`.
+    #[gpui::test]
+    #[ignore = "measurement, run by hand"]
+    fn lines_below_cost(cx: &mut TestAppContext) {
+        const ROWS: usize = 40;
+        const BLOCK: usize = 50;
+        const ROUNDS: u64 = 10;
+        let (tx, _rx) = mpsc::channel(1 << 16);
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let size = TermSize { cols: 100, rows: 40, ..TermSize::default() };
+            let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(1000.0), px(900.0)));
+        cx.run_until_parked();
+        let lines = prose(0x2545_f491, 4_000, 90);
+        let flood = |seq: u64| {
+            let first = seq.saturating_sub(1);
+            let at =
+                |row: usize| lines[usize::try_from(first).unwrap().saturating_add(row)].clone();
+            let rows: Vec<String> = (0..ROWS).map(at).collect();
+            let TermEvent::Frame(frame) = screen_of(seq, 100, &rows) else { panic!("a frame") };
+            let changed = if seq == 1 { frame.updates } else { frame.updates[ROWS - 1..].to_vec() };
+            TermEvent::Frame(Frame {
+                full: seq == 1,
+                first_visible_line: LineIndex(first),
+                total_lines: first.saturating_add(ROWS as u64),
+                updates: changed,
+                ..frame
+            })
+        };
+        let mut seq = 0_u64;
+        let mut draw = |cx: &mut VisualTestContext| {
+            seq = seq.saturating_add(1);
+            let event = flood(seq);
+            let started = Instant::now();
+            view.update_in(cx, |view, _window, cx| view.apply(event, cx));
+            cx.run_until_parked();
+            started.elapsed()
+        };
+        for _ in 0..60 {
+            draw(cx);
+        }
+        let (mut following, mut hidden, mut shown) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..ROUNDS {
+            view.update_in(cx, |view, _window, cx| view.scroll_lines(i64::MIN, cx));
+            following.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
+            view.update_in(cx, |view, _window, cx| {
+                view.scroll_lines(20, cx);
+                view.set_covered(true);
+            });
+            hidden.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
+            let renders = view.read_with(cx, |v, _| v.renders());
+            view.update_in(cx, |view, _window, _cx| view.set_covered(false));
+            shown.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
+            let drawn = view.read_with(cx, |v, _| v.renders()).saturating_sub(renders);
+            assert!(usize::try_from(drawn).is_ok_and(|d| d >= BLOCK), "every frame drew: {drawn}");
+            assert!(cx.debug_bounds("lines-below").is_some(), "the pill is up");
+        }
+        let row = |samples: &mut Vec<Duration>| {
+            samples.sort_unstable();
+            let at = |q: usize| samples[(samples.len().saturating_sub(1)).saturating_mul(q) / 100];
+            format!("{:?} / {:?} / {:?} / {:?}", at(50), at(95), at(99), at(100))
+        };
+        println!(
+            "MEASURE lines-below pill, frame applied and drawn (p50 / p95 / p99 / max, {} frames \
+             each): following {} · scrolled, pill hidden {} · scrolled, pill shown {}",
+            following.len(),
+            row(&mut following),
+            row(&mut hidden),
+            row(&mut shown),
+        );
     }
 
     /// Every message the worker received that types or clears, oldest first, as one word each.

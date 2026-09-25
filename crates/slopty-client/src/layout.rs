@@ -12,7 +12,8 @@
 //! # Coordinates
 //!
 //! * **Strip** coordinates: x = 0 at the left edge of a workspace's first column; y = 0 at the top
-//!   of the workspace. Column `i` starts at `Σ (width + gaps)` of the columns before it.
+//!   of the workspace. Column `i` starts at `Σ width` of the columns before it: columns touch, with
+//!   no gap between them, around them or between the tiles of a column.
 //! * **View** coordinates: strip x minus the view position (`column_x(active) + view_offset`).
 //! * **Viewport** coordinates (what [`Frame`] reports): view coordinates placed into the
 //!   workspace's rectangle, scaled by the overview zoom. `(0, 0)` is the top-left of the area given
@@ -206,7 +207,7 @@ impl Rect {
 /// How wide a column is.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ColumnWidth {
-    /// A share of the working width: `(working − gaps) × p − gaps`.
+    /// A share of the working width: `working × p`.
     Proportion(f32),
     /// Points.
     Fixed(f32),
@@ -243,8 +244,6 @@ impl Default for TileHeight {
 /// The layout's constants.
 #[derive(Clone, PartialEq, Debug)]
 pub struct LayoutConfig {
-    /// Between columns, between tiles, and around them.
-    pub gaps: f32,
     /// Column widths ⌘R cycles through, as proportions.
     pub presets: Vec<f32>,
     /// A new column's width, as a proportion.
@@ -263,7 +262,6 @@ pub struct LayoutConfig {
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
-            gaps: 8.0,
             presets: vec![1.0 / 3.0, 0.5, 2.0 / 3.0],
             default_width: 0.5,
             phone_below: 700.0,
@@ -504,7 +502,6 @@ struct Geom {
     view_w: f32,
     view_h: f32,
     strut: f32,
-    gaps: f32,
     /// Narrower than `phone_below`: every column shows at full width (see `normal_width`).
     compact: bool,
 }
@@ -520,9 +517,7 @@ impl Geom {
 
     fn resolve(&self, width: ColumnWidth) -> f32 {
         match width {
-            ColumnWidth::Proportion(p) => {
-                (self.working_w() - self.gaps).mul_add(p, -self.gaps).max(1.0)
-            }
+            ColumnWidth::Proportion(p) => (self.working_w() * p).max(1.0),
             ColumnWidth::Fixed(w) => w.max(1.0),
         }
     }
@@ -563,19 +558,18 @@ impl Ctx {
 
 /// niri's `compute_new_view_offset`: the offset (relative to the column) that shows the column
 /// with the least movement from `cur_x`, or keeps the view when it is already fully visible.
-fn compute_new_view_offset(cur_x: f32, view_w: f32, col_x: f32, col_w: f32, gaps: f32) -> f32 {
+/// niri pads the column by its gaps; with none, the column lands flush on the nearer edge.
+fn compute_new_view_offset(cur_x: f32, view_w: f32, col_x: f32, col_w: f32) -> f32 {
     if view_w <= col_w {
         return 0.0;
     }
-    let padding = ((view_w - col_w) / 2.0).clamp(0.0, gaps);
-    let new_x = col_x - padding;
-    let new_right_x = col_x + col_w + padding;
-    if cur_x <= new_x && new_right_x <= cur_x + view_w {
+    let right_x = col_x + col_w;
+    if cur_x <= col_x && right_x <= cur_x + view_w {
         return -(col_x - cur_x);
     }
-    let dist_to_left = (cur_x - new_x).abs();
-    let dist_to_right = ((cur_x + view_w) - new_right_x).abs();
-    if dist_to_left <= dist_to_right { -padding } else { -(view_w - padding - col_w) }
+    let dist_to_left = (cur_x - col_x).abs();
+    let dist_to_right = ((cur_x + view_w) - right_x).abs();
+    if dist_to_left <= dist_to_right { 0.0 } else { -(view_w - col_w) }
 }
 
 /// A tile's slide from where it was: an offset that springs from full to nothing.
@@ -732,17 +726,16 @@ impl Column {
         if self.fullscreen {
             return self.tiles.iter().map(|_| g.viewport()).collect();
         }
-        let gaps = g.gaps;
         if self.mode == DisplayMode::Tabbed {
-            let height = 2.0_f32.mul_add(-gaps, g.view_h).max(1.0);
+            let height = g.view_h.max(1.0);
             return self
                 .tiles
                 .iter()
-                .map(|_| Rect { x: 0.0, y: gaps, w: width, h: height })
+                .map(|_| Rect { x: 0.0, y: 0.0, w: width, h: height })
                 .collect();
         }
         let tiles = count(self.tiles.len());
-        let available = (tiles + 1.0).mul_add(-gaps, g.view_h).max(0.0);
+        let available = g.view_h.max(0.0);
         let fixed = self
             .tiles
             .iter()
@@ -761,7 +754,7 @@ impl Column {
             })
             .sum();
         let left = (available - fixed).max(0.0);
-        let mut top = gaps;
+        let mut top = 0.0;
         self.tiles
             .iter()
             .map(|tile| {
@@ -774,7 +767,7 @@ impl Column {
                 }
                 .max(1.0);
                 let rect = Rect { x: 0.0, y: top, w: width, h: height };
-                top += height + gaps;
+                top += height;
                 rect
             })
             .collect()
@@ -904,7 +897,7 @@ impl ViewOffset {
     }
 }
 
-/// A column being resized by dragging the gap to its right.
+/// A column being resized by dragging the divider on its right.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Resize {
     column: usize,
@@ -1004,7 +997,7 @@ impl Workspace {
     }
 
     fn column_x(&self, idx: usize, g: &Geom) -> f32 {
-        self.columns.iter().take(idx).map(|c| c.resolved_width(g) + g.gaps).sum()
+        self.columns.iter().take(idx).map(|c| c.resolved_width(g)).sum()
     }
 
     fn view_pos(&self, ctx: &Ctx) -> f32 {
@@ -1036,7 +1029,6 @@ impl Workspace {
             g.working_w(),
             self.column_x(idx, g),
             col.resolved_width(g),
-            g.gaps,
         ) - g.working_x()
     }
 
@@ -1338,12 +1330,9 @@ impl Workspace {
         let current = if col.full_width { ColumnWidth::Proportion(1.0) } else { col.width };
         let proportion = match current {
             ColumnWidth::Proportion(p) => p,
-            ColumnWidth::Fixed(_) => {
-                let full = g.working_w() - g.gaps;
-                if full <= 0.0 { 1.0 } else { (g.resolve(current) + g.gaps) / full }
-            }
+            ColumnWidth::Fixed(_) => g.resolve(current) / g.working_w(),
         };
-        let min = (g.min_width() + g.gaps) / (g.working_w() - g.gaps).max(1.0);
+        let min = g.min_width() / g.working_w();
         let proportion = (proportion + percent / 100.0).clamp(min.min(1.0), 1.0);
         col.width = ColumnWidth::Proportion(proportion);
         col.preset = None;
@@ -1410,11 +1399,11 @@ impl Workspace {
         self.resize = None;
     }
 
-    /// The columns fully inside the working area as the view will be: `(width taken with
-    /// gaps, leftmost x, the active column's x, whether another column counted)`.
+    /// The columns fully inside the working area as the view will be: `(width taken, leftmost
+    /// x, the active column's x, whether another column counted)`.
     fn fully_visible(&self, g: &Geom) -> (f32, Option<f32>, Option<f32>, bool) {
         let view_x = self.target_view_pos(g);
-        let (wx, ww, gap) = (g.working_x(), g.working_w(), g.gaps);
+        let (wx, ww) = (g.working_x(), g.working_w());
         let mut taken = 0.0;
         let mut leftmost = None;
         let mut active_x = None;
@@ -1423,12 +1412,12 @@ impl Workspace {
         for (idx, col) in self.columns.iter().enumerate() {
             let w = col.resolved_width(g);
             let col_x = x;
-            x += w + gap;
-            if col_x < view_x + wx + gap {
+            x += w;
+            if col_x < view_x + wx {
                 continue;
             }
             leftmost.get_or_insert(col_x);
-            if view_x + wx + ww < col_x + w + gap {
+            if view_x + wx + ww < col_x + w {
                 break;
             }
             if idx == self.active {
@@ -1436,7 +1425,7 @@ impl Workspace {
             } else {
                 other = true;
             }
-            taken += w + gap;
+            taken += w;
         }
         (taken, leftmost, active_x, other)
     }
@@ -1445,7 +1434,7 @@ impl Workspace {
         let g = ctx.g;
         let (taken, leftmost, active_x, _) = self.fully_visible(&g);
         let (Some(leftmost), Some(active_x)) = (leftmost, active_x) else { return };
-        let free = g.working_w() - taken + g.gaps;
+        let free = g.working_w() - taken;
         let new_view_x = leftmost - free / 2.0 - g.working_x();
         self.resize = None;
         self.animate_view(ctx, self.active, new_view_x - active_x);
@@ -1460,7 +1449,7 @@ impl Workspace {
         }
         let (taken, leftmost, active_x, other) = self.fully_visible(&g);
         let (Some(leftmost), Some(active_x)) = (leftmost, active_x) else { return };
-        let available = g.working_w() - g.gaps - taken;
+        let available = g.working_w() - taken;
         if available <= 0.0 {
             return;
         }
@@ -1475,7 +1464,7 @@ impl Workspace {
         col.width = ColumnWidth::Fixed(active_w + available);
         col.preset = None;
         col.full_width = false;
-        let new_view_x = leftmost - g.gaps - g.working_x();
+        let new_view_x = leftmost - g.working_x();
         self.animate_view(ctx, self.active, new_view_x - active_x);
         self.animate_view_to_column(ctx, None, self.active);
     }
@@ -1523,22 +1512,20 @@ impl Workspace {
             return true;
         }
         let g = ctx.g;
-        let gaps = g.gaps;
         let (left_strut, right_strut) = (g.working_x(), g.view_w - g.working_w() - g.working_x());
         let snaps_of = |col_x: f32, col: &Column| {
             let w = col.resolved_width(&g);
             if col.fullscreen {
                 (col_x, col_x + w)
             } else {
-                let padding = ((g.working_w() - w) / 2.0).clamp(0.0, gaps);
-                (col_x - padding - left_strut, col_x + w + padding + right_strut)
+                (col_x - left_strut, col_x + w + right_strut)
             }
         };
         let mut xs = Vec::with_capacity(self.columns.len());
         let mut x = 0.0;
         for col in &self.columns {
             xs.push(x);
-            x += col.resolved_width(&g) + gaps;
+            x += col.resolved_width(&g);
         }
         let (Some(first), Some(last), Some(&last_x)) =
             (self.columns.first(), self.columns.last(), xs.last())
@@ -1577,27 +1564,20 @@ impl Workspace {
                     if snap_pos + g.view_w < col_x + w {
                         break;
                     }
-                } else {
-                    let padding = ((g.working_w() - w) / 2.0).clamp(0.0, gaps);
-                    if snap_pos + left_strut + g.working_w() < col_x + w + padding {
-                        break;
-                    }
+                } else if snap_pos + left_strut + g.working_w() < col_x + w {
+                    break;
                 }
                 new_col = idx;
             }
         } else {
             for (idx, (col, &col_x)) in self.columns.iter().zip(&xs).enumerate().take(new_col).rev()
             {
-                let w = col.resolved_width(&g);
                 if col.fullscreen {
                     if col_x < snap_pos {
                         break;
                     }
-                } else {
-                    let padding = ((g.working_w() - w) / 2.0).clamp(0.0, gaps);
-                    if col_x - padding < snap_pos + left_strut {
-                        break;
-                    }
+                } else if col_x < snap_pos + left_strut {
+                    break;
                 }
                 new_col = idx;
             }
@@ -1714,7 +1694,7 @@ impl Workspace {
         // Compact shows every column full width, so the drag only means anything as a share of
         // the window; points taken here would pin a phone-sized column into the wide window.
         col.width = if g.compact {
-            ColumnWidth::Proportion((stored + g.gaps) / (g.working_w() - g.gaps).max(1.0))
+            ColumnWidth::Proportion(stored / g.working_w())
         } else {
             ColumnWidth::Fixed(stored)
         };
@@ -1751,7 +1731,7 @@ impl Workspace {
             for (tile, r) in col.tiles.iter().zip(col.tile_rects(g)) {
                 out.push((tile.key, Rect { x: r.x + x - view_pos, ..r }));
             }
-            x += col.resolved_width(g) + g.gaps;
+            x += col.resolved_width(g);
         }
         out
     }
@@ -2042,13 +2022,7 @@ impl Layout {
 
     fn geom(&self) -> Geom {
         let strut = if self.is_phone() { self.config.phone_peek.max(0.0) } else { 0.0 };
-        Geom {
-            view_w: self.view_w,
-            view_h: self.view_h,
-            strut,
-            gaps: self.config.gaps.max(0.0),
-            compact: self.is_phone(),
-        }
+        Geom { view_w: self.view_w, view_h: self.view_h, strut, compact: self.is_phone() }
     }
 
     fn ctx(&self) -> Ctx {
@@ -2642,7 +2616,7 @@ impl Layout {
             return pos;
         }
         let g = &ctx.g;
-        let strip_w = ws.column_x(ws.columns.len(), g) - g.gaps;
+        let strip_w = ws.column_x(ws.columns.len(), g);
         if strip_w > g.view_w / self.overview_zoom() {
             return pos;
         }
@@ -2864,7 +2838,7 @@ impl Layout {
                 };
                 return DropTarget::IntoColumn { workspace, column: idx, index };
             }
-            col_x += width + g.gaps;
+            col_x += width;
         }
         DropTarget::NewColumn { workspace, index: ws.columns.len() }
     }
@@ -2985,13 +2959,13 @@ impl Layout {
 
     // ----- interactive resize ----------------------------------------------------------------
 
-    /// Dragging the gap right of `column` in the active workspace begins.
+    /// Dragging the divider right of `column` in the active workspace begins.
     pub fn resize_begin(&mut self, column: usize) -> bool {
         let ctx = self.ctx();
         self.workspaces.get_mut(self.active).is_some_and(|ws| ws.resize_begin(&ctx, column))
     }
 
-    /// The gap moved `dx` points from where the drag began.
+    /// The divider moved `dx` points from where the drag began.
     pub fn resize_update(&mut self, dx: f32) -> bool {
         let ctx = self.ctx();
         self.workspaces.get_mut(self.active).is_some_and(|ws| ws.resize_update(&ctx, dx))
@@ -3074,8 +3048,8 @@ impl Layout {
             if let Some(out) = panels.get_mut(wi)
                 && !ws.columns.is_empty()
             {
-                let strip_w = ws.column_x(ws.columns.len(), &g) + g.gaps;
-                let left = (-g.gaps - view_pos).mul_add(zoom, panel.x);
+                let strip_w = ws.column_x(ws.columns.len(), &g);
+                let left = (-view_pos).mul_add(zoom, panel.x);
                 if (view_pos - ws.view_pos(&ctx)).abs() > f32::EPSILON && strip_w * zoom > out.w {
                     *out = Rect { x: left, w: strip_w * zoom, ..*out };
                 }
@@ -3091,7 +3065,7 @@ impl Layout {
                 if shown && right > 0.0 && left < g.view_w {
                     visible = Some(visible.map_or((ci, ci), |(lo, hi)| (lo.min(ci), hi.max(ci))));
                 }
-                x += width + g.gaps;
+                x += width;
             }
             let near_col = |ci: usize| {
                 visible.is_some_and(|(lo, hi)| {
@@ -3151,7 +3125,7 @@ impl Layout {
                 .map(|c| {
                     let w = c.resolved_width(&g);
                     let at = x;
-                    x += w + g.gaps;
+                    x += w;
                     (at, w)
                 })
                 .collect();

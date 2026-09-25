@@ -82,7 +82,7 @@ impl WorkspaceView {
                     label,
                     false,
                 )
-                .child(status_mark(theme, Some(status)))
+                .child(status_mark(theme, Some(status), 1.0))
                 .child(title(what, hsla(s.text)))
                 .child(caption(theme, worker))
                 .on_click(cx.listener(move |this, _ev, _w, cx| {

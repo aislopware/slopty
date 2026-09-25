@@ -30,9 +30,11 @@ use crate::icons::{IconName, IconSize, Status};
 /// A tile's header height, in points at zoom 1.
 pub(super) const HEADER_H: f32 = 28.0;
 
-/// The width of the focus ring, in points at zoom 1: the one accent hairline of the design
-/// system, laid over the tile's own hairline, so the focused tile's frame turns accent.
-const RING: f32 = 1.0;
+/// The divider between neighbouring tiles: one hairline, whatever the zoom.
+const HAIRLINE: f32 = 1.0;
+
+/// The bar along the top of the header of a tile that needs the human, in points at zoom 1.
+const ATTENTION_BAR: f32 = 2.0;
 
 /// The widest a page's address gets beside its title, in points at zoom 1: the title is what
 /// tells tiles apart, the address only says where.
@@ -78,6 +80,17 @@ pub const NOTE_TITLE_CHARS: usize = 40;
 pub(super) struct Chrome {
     pub k: f32,
     pub zooming: bool,
+}
+
+/// What surrounds a tile on the strip.
+#[derive(Clone, Copy, Debug)]
+struct Edges {
+    /// A column continues to its right: it draws the divider on its right edge.
+    right: bool,
+    /// A tile is stacked below it in its column: it draws the divider on its bottom edge.
+    below: bool,
+    /// It is the only tile in view (the one tile of its workspace, or fullscreen).
+    alone: bool,
 }
 
 /// A note's title, "note" while it is empty.
@@ -279,14 +292,7 @@ impl WorkspaceView {
         let tile = placed.tile;
         let item = self.item(tile)?.clone();
         let theme = &self.theme;
-        let k = chrome.k;
         let id = item.id;
-        let focused = placed.focused;
-        let agent = match item.kind {
-            ItemKind::Terminal { session } => self.agent_state(session).map(|a| (session, a)),
-            _ => None,
-        };
-        let needs_you = agent.is_some_and(|(_, a)| needs_human(a));
         let worker_up = self.workers.get(&tile.worker).is_some_and(|w| w.link.is_some());
 
         let header = self.render_header(placed, &item, chrome, cx);
@@ -304,14 +310,6 @@ impl WorkspaceView {
         let rect = placed.rect;
         let (width, height) = (rect.w * placed.scale, rect.h * placed.scale);
         let (left, top) = (rect.x + (rect.w - width) / 2.0, rect.y + (rect.h - height) / 2.0);
-        let radius = theme.radii.md * k;
-        // The ring is drawn over the tile, so gaining or losing the focus never moves the
-        // content by a point (a terminal would re-fit its grid).
-        let ring = (focused || needs_you).then(|| {
-            div().absolute().inset_0().rounded(px(radius)).border(px(RING * k)).border_color(hsla(
-                if needs_you { theme.surfaces.warn } else { theme.surfaces.accent },
-            ))
-        });
         Some(
             div()
                 .id(ElementId::Uuid(*id.as_uuid()))
@@ -328,9 +326,6 @@ impl WorkspaceView {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .rounded(px(radius))
-                .border_1()
-                .border_color(hsla(theme.surfaces.border))
                 .bg(hsla(theme.terminal.bg))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -338,7 +333,7 @@ impl WorkspaceView {
                 )
                 .when(takes_files, |el| {
                     el.drag_over::<ExternalPaths>(move |style, _, _, _| {
-                        style.border_color(hsla(accent))
+                        style.border_1().border_color(hsla(accent))
                     })
                     .on_drop(cx.listener(
                         move |this, paths: &ExternalPaths, _w, cx| {
@@ -348,9 +343,56 @@ impl WorkspaceView {
                 })
                 .child(header)
                 .child(body)
-                .when_some(ring, gpui::ParentElement::child)
                 .into_any_element(),
         )
+    }
+
+    /// The hairlines a tile owes its neighbours: on its right edge where a column follows, on
+    /// its bottom edge where a tile is stacked below. Laid over the tile's own edge, so a
+    /// neighbour coming or going never moves its content by a point (a terminal would re-fit
+    /// its grid). The strip draws them above every tile: a neighbour's edge, rounded to the same
+    /// pixel at a fractional zoom, would otherwise paint over a line its tile drew.
+    pub(super) fn render_dividers(&self, placed: &Placed) -> Vec<gpui::AnyElement> {
+        let edges = self.edges(placed);
+        let id = placed.tile.item;
+        let rect = placed.rect;
+        let (width, height) = (rect.w * placed.scale, rect.h * placed.scale);
+        let (left, top) = (rect.x + (rect.w - width) / 2.0, rect.y + (rect.h - height) / 2.0);
+        let line = || div().absolute().opacity(placed.alpha).bg(hsla(self.theme.surfaces.border));
+        let right = edges.right.then(|| {
+            line()
+                .debug_selector(move || format!("divider-right-{}", id.as_uuid()))
+                .left(px(left + width - HAIRLINE))
+                .top(px(top))
+                .w(px(HAIRLINE))
+                .h(px(height))
+                .into_any_element()
+        });
+        let below = edges.below.then(|| {
+            line()
+                .debug_selector(move || format!("divider-below-{}", id.as_uuid()))
+                .left(px(left))
+                .top(px(top + height - HAIRLINE))
+                .w(px(width))
+                .h(px(HAIRLINE))
+                .into_any_element()
+        });
+        right.into_iter().chain(below).collect()
+    }
+
+    /// Where another tile continues from this one, and whether it is the one tile in view.
+    /// Read off its place in the layout: two lengths, no walk over the tiles.
+    fn edges(&self, placed: &Placed) -> Edges {
+        let pos = placed.pos;
+        let columns = self.layout.workspaces().get(pos.workspace).map_or(&[][..], |w| w.columns());
+        let stacked = columns.get(pos.column).map_or(1, |c| c.tiles().len());
+        // A tabbed column shows one tile at a time: nothing is below it.
+        let stacked = if placed.tabs.is_some() { 1 } else { stacked };
+        Edges {
+            right: !placed.fullscreen && pos.column.saturating_add(1) < columns.len(),
+            below: pos.tile.saturating_add(1) < stacked,
+            alone: placed.fullscreen || (columns.len() <= 1 && stacked <= 1),
+        }
     }
 
     /// Whether a tile's body may be drawn from its cached view. A cached view replays last
@@ -362,13 +404,13 @@ impl WorkspaceView {
         !placed.focused && self.drawn_focus != Some(placed.tile)
     }
 
-    /// A tile fading out where it stood: its frame only, the content already gone.
+    /// A tile fading out where it stood: its surface only, the content already gone. Square and
+    /// frameless at any zoom, as every tile is, so the zoom has nothing to scale.
     pub(super) fn render_closing(
         &self,
         rect: slopty_client::layout::Rect,
         alpha: f32,
         scale: f32,
-        k: f32,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let (w, h) = (rect.w * scale, rect.h * scale);
@@ -379,9 +421,6 @@ impl WorkspaceView {
             .w(px(w))
             .h(px(h))
             .opacity(alpha)
-            .rounded(px(theme.radii.md * k))
-            .border_1()
-            .border_color(hsla(theme.surfaces.border))
             .bg(hsla(theme.terminal.bg))
             .into_any_element()
     }
@@ -407,7 +446,8 @@ impl WorkspaceView {
         };
         let ink = if focused { s.text } else { s.text_muted };
         let status = self.tile_status(tile, item, cx);
-        let mark = status_slot(theme, status, id, k);
+        let mark = crate::icons::status_mark(theme, status, k)
+            .debug_selector(move || format!("status-{}", id.as_uuid()));
         let badge = agent.map(|(session, a)| self.agent_badge(tile, session, a, chrome, cx));
         let unwatched = match &item.kind {
             ItemKind::Terminal { session } => self.finished.get(session).map(|f| (*session, f)),
@@ -590,13 +630,18 @@ impl WorkspaceView {
             .gap(px(theme.spacing.sm * k))
             .child(name)
             .children(place);
-        // The focused tile's header is its body's surface, so the tile reads as one piece; the
-        // others step up to the panel with a hairline under them.
-        let (surface, rule) = if focused {
-            (gpui::transparent_black(), gpui::transparent_black())
-        } else {
-            (hsla(s.panel), hsla(s.border))
-        };
+        // Every header is its body's surface with a hairline under it: focus is told by the
+        // veil over the other tiles' bodies. One that needs the human says so along its top.
+        let attention = agent.is_some_and(|(_, a)| needs_human(a)).then(|| {
+            div()
+                .debug_selector(move || format!("attention-{}", id.as_uuid()))
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(ATTENTION_BAR * k))
+                .bg(hsla(s.warn))
+        });
         div()
             .id("title")
             .debug_selector(move || format!("title-{}", id.as_uuid()))
@@ -611,9 +656,8 @@ impl WorkspaceView {
             .items_center()
             .px(px(theme.spacing.sm * k))
             .gap(px(theme.spacing.sm * k))
-            .bg(surface)
             .border_b_1()
-            .border_color(rule)
+            .border_color(hsla(s.border))
             .text_size(px(theme.typography.ui_size * k))
             .text_color(hsla(ink))
             .font_family(theme.typography.ui_family.clone())
@@ -646,6 +690,7 @@ impl WorkspaceView {
             .child(actions)
             .child(controls)
             .when_some(progress, gpui::ParentElement::child)
+            .when_some(attention, gpui::ParentElement::child)
             .into_any_element()
     }
 
@@ -1050,9 +1095,11 @@ impl WorkspaceView {
         None
     }
 
-    /// The body. A terminal's grid is sized from where its tile comes to rest, not from the
+    /// The body: its content, a veil over it while another tile has the focus, and the state
+    /// pill. A terminal's grid is sized from where its tile comes to rest, not from the
     /// rectangle in motion, so a sliding or springing column resizes no PTY frame by frame:
-    /// the grid is laid out at the resting size and clipped to the moving one.
+    /// the grid is laid out at the resting size and clipped to the moving one. The veil is an
+    /// element of its own over the content, so a cached body stays cached as the focus moves.
     fn render_body(
         &self,
         placed: &Placed,
@@ -1061,27 +1108,37 @@ impl WorkspaceView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let state = self.body_state(placed.tile, item);
         let content = self.render_content(placed, item, chrome, window, cx);
-        match self.body_state(placed.tile, item) {
-            Some(state) => {
-                let pill = self.render_state_pill(placed.tile, item, &state, chrome, cx);
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .child(content)
-                    .child(pill)
-                    .into_any_element()
-            }
-            None => content,
+        let id = item.id;
+        let veiled = !placed.focused && !self.edges(placed).alone;
+        let veil = veiled.then(|| {
+            div()
+                .debug_selector(move || format!("veil-{}", id.as_uuid()))
+                .absolute()
+                .inset_0()
+                .bg(hsla_alpha(self.theme.surfaces.canvas, alpha::FAINT))
+        });
+        let pill = state.map(|state| self.render_state_pill(placed.tile, item, &state, chrome, cx));
+        if veil.is_none() && pill.is_none() {
+            return content;
         }
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(content)
+            .when_some(veil, gpui::ParentElement::child)
+            .when_some(pill, gpui::ParentElement::child)
+            .into_any_element()
     }
 
     /// What the body shows under any state pill: the view, or an empty well where the pill
-    /// says why there is none.
+    /// says why there is none. A terminal under a state pill leaves out its own lines-below
+    /// pill, which would sit in the same place.
     fn render_content(
         &self,
         placed: &Placed,
@@ -1093,8 +1150,8 @@ impl WorkspaceView {
         let theme = &self.theme;
         let k = chrome.k;
         let worker_up = self.workers.get(&placed.tile.worker).is_some_and(|w| w.link.is_some());
-        let rest_w = placed.target.w.mul_add(k, -2.0).max(1.0);
-        let rest_h = (placed.target.h - HEADER_H).mul_add(k, -2.0).max(1.0);
+        let rest_w = (placed.target.w * k).max(1.0);
+        let rest_h = ((placed.target.h - HEADER_H) * k).max(1.0);
         let fixed = |el: gpui::AnyElement| {
             div()
                 .flex_1()
@@ -1135,9 +1192,11 @@ impl WorkspaceView {
         match &item.kind {
             ItemKind::Terminal { session } => match self.terminals.get(session) {
                 Some(view) => {
+                    let covered = self.body_state(placed.tile, item).is_some();
                     let restyled = view.update(cx, |v, _| {
                         v.set_zoom(k);
-                        v.set_zooming(chrome.zooming)
+                        let covered = v.set_covered(covered);
+                        v.set_zooming(chrome.zooming) || covered
                     });
                     let body = if self.cacheable(placed) && !restyled {
                         view.clone()
@@ -1225,41 +1284,6 @@ impl WorkspaceView {
                 None => muted_line("reading…".into()),
             },
         }
-    }
-}
-
-/// A tile's status in its fixed slot, as [`crate::icons::status_mark`] draws it everywhere
-/// else, but at the chrome's zoom `k` (the overview shrinks the header) and named for a
-/// screen reader.
-fn status_slot(
-    theme: &Theme,
-    status: Option<Status>,
-    item: slopty_core::ItemId,
-    k: f32,
-) -> gpui::AnyElement {
-    let slot = div()
-        .id("status")
-        .debug_selector(move || format!("status-{}", item.as_uuid()))
-        .flex_none()
-        .size(px(theme.typography.icon_large() * k))
-        .flex()
-        .items_center()
-        .justify_center();
-    match status {
-        Some(status) => slot
-            .role(Role::Image)
-            .aria_label(status.label())
-            .child(
-                crate::icons::icon(
-                    theme,
-                    status.icon(),
-                    IconSize::Inline,
-                    hsla(status.tone(theme)),
-                )
-                .size(px(theme.typography.icon() * k)),
-            )
-            .into_any_element(),
-        None => slot.into_any_element(),
     }
 }
 

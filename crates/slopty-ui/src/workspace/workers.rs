@@ -9,7 +9,7 @@ use slopty_proto::ClientMsg;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::items::{ItemKind, ItemSync};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
-use slopty_proto::terminal::{SessionSummary, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{SessionState, SessionSummary, TermEvent, TermRequest, TermSize};
 
 use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView};
 use crate::file::{FileView, FileViewEvent};
@@ -310,6 +310,18 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// A session's program exited: the tile stays with its last screen and says so, until the
+    /// human closes or restarts it. The worker announces the exit too; this is the attached
+    /// view's word for it, a round trip sooner.
+    fn session_exited(&mut self, session: SessionId, status: i32, cx: &mut Context<Self>) {
+        for w in self.workers.values_mut() {
+            if let Some(summary) = w.sessions.get_mut(&session) {
+                summary.state = SessionState::Exited { status };
+            }
+        }
+        cx.notify();
+    }
+
     /// A session changed directory (OSC 7), and the worker says which repository that is in.
     pub fn session_moved(&mut self, session: SessionId, cwd: &str, repo: Option<&str>) {
         for w in self.workers.values_mut() {
@@ -405,9 +417,7 @@ impl WorkspaceView {
             TerminalViewEvent::Notification { title, body } => {
                 this.notify_program(sid, title, body, cx);
             }
-            TerminalViewEvent::Exited(_) => {
-                this.send_session(sid, ClientMsg::Term { session: sid, req: TermRequest::Close });
-            }
+            TerminalViewEvent::Exited(status) => this.session_exited(sid, *status, cx),
             TerminalViewEvent::CloseConfirmed => this.close_shell(sid, cx),
             TerminalViewEvent::Title(_) => cx.notify(),
             TerminalViewEvent::Cwd { path, repo } => {

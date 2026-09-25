@@ -37,11 +37,16 @@ impl WorkspaceView {
             .flatten()
     }
 
-    /// A line per worker: `Go to <name>`, its link marked and spelled on the right.
-    fn worker_lines(&self) -> impl Iterator<Item = PaletteItem> + '_ {
+    /// A line per worker: `Go to <name>`, with its round trip on the right while its link is
+    /// up, else a mark and a word for what is wrong.
+    pub(super) fn worker_lines(&self) -> impl Iterator<Item = PaletteItem> + '_ {
         self.workers.iter().map(|(key, w)| {
-            PaletteItem::worker(&w.name, &w.status.text(), *key)
-                .with_status(Some(super::navigator::worker_status(&w.status)))
+            let health = super::navigator::worker_health(&w.status);
+            let detail = match health {
+                Some((_, word)) => word.to_owned(),
+                None => w.rtt.map(super::navigator::rtt_label).unwrap_or_default(),
+            };
+            PaletteItem::worker(&w.name, &detail, *key).with_status(health.map(|(mark, _)| mark))
         })
     }
 

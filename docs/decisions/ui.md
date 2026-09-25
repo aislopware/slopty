@@ -1439,3 +1439,115 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   now widens the window to 1280 × 800 for one more golden, `workspace-navigator`, with the
   navigator docked. Every app golden was re-accepted for this ruling
   (`cargo xtask e2e app --accept-all`, 22 of 22 passing).
+
+- ✅ **Panes sit flush, divided by hairlines, like Warp's splits on niri's strip** (2026-09-25).
+  The user still found the app unattractive. They asked for Warp and niri together: no space
+  and no rounded corners between panes, one divider between each pair, modern and minimal the
+  way Warp is. Tiles had been cards: 8 pt gaps, `radii.md` corners, a hairline frame each, an
+  accent ring on the focused one, and canvas showing between them. That reads as a canvas of
+  cards, not one working surface. The strip is now one surface:
+  - **Layout.** `LayoutConfig::gaps` is 0. Columns and the tiles stacked in a column touch, and
+    the strip meets the title bar, the navigator and the status bar edge to edge. niri's
+    scrolling, the presets and the phone's struts are unchanged. A peeking neighbour is simply
+    cut by the window's edge.
+  - **Dividers.** One `border` hairline between neighbouring columns and between stacked tiles.
+    A tile draws the line on its right and bottom edges only where another tile continues, so
+    nothing doubles. No tile has a frame of its own and no corner is rounded, in the strip or
+    in fullscreen.
+  - **Focus.** Warp shows the active pane by leaving it alone and quieting the rest. Every
+    unfocused tile's body lies under the canvas colour at `alpha::FAINT`, and its title is
+    muted. The focused tile has no ring. A single visible tile is never veiled.
+  - **Attention.** A tile that needs the human gets a 2 pt `warn` bar along the top of its
+    header in place of the old outline.
+  - **Headers.** Every header, focused or not, is on the body's surface with a hairline under
+    it. Focus comes from the veil, so the header surface rule of the frame entry is withdrawn.
+  - **Resize and drop.** The handle straddles the divider: a 6 pt hit area centred on the line,
+    which turns accent on hover and while dragging. A drop between columns draws a 2 pt accent
+    line on the divider it will open. A drop into a column washes that column with no corner.
+  - **Overview.** Each workspace is one flush block of its panes inside a single hairline
+    frame, with no radius. The new-workspace zone keeps its dashed outline, square.
+
+  Rejected: keeping the focus ring with flush panes. On shared edges it doubles the divider and
+  sits half on the neighbour. Also rejected: an opacity dim of the focused pane's neighbours.
+  Opacity dims video and terminal glyphs unevenly, which is the same reason Orca mixes colours
+  for sleep rather than fading them.
+
+- ✅ **Health is silent when it is good; lists sort by attention; the working mark steps**
+  (2026-09-25). Orca's source puts it plainly: a healthy host is the silent default. A
+  connected worker now shows nothing but its round trip, in caption type, in the navigator,
+  the palette and the empty workspace. A worker that is down shows a short word and a mark in
+  a status lane on the right: `connecting` with the working mark, or `silent`, `reconnecting`,
+  `unreachable` or `gone` with `Away`. The status bar says the same when the focused tile's
+  worker is down.
+  - **Order.** A worker's tile rows come in order of attention: needs you, then done, failed or
+    unseen, then working, then idle, each class in reading order. A tile row whose long
+    command finished unwatched carries an accent unseen dot on its lane. The dot hides while
+    the tile works or needs you.
+  - **Marks.** `status_mark(theme, status, k)` takes the chrome's zoom and is an Image named by
+    its status.
+  - **Spinner.** The working mark turns in 12 steps a second, driven by one app-wide clock. A
+    timer wakes only the views that painted a mark, so nothing repaints once none shows, and
+    the mark stands still under Reduce Motion. Headless at a simulated 120 Hz with one agent
+    working, the workspace rendered 12 frames a second against 120 for a per-frame animation,
+    and 0 at rest (MEASUREMENTS, "a working mark that steps").
+  - **Palette and first run.** The palette gains a foot legend in key caps, and `kit::key_cap`
+    is now the one key-cap element. The first-run page shows a large muted Server icon above
+    its heading.
+
+  Tests: icons `the_working_mark_steps_twelve_times_a_turn_and_stands_under_reduce_motion`,
+  `a_status_mark_is_an_image_named_by_its_status`,
+  `a_working_mark_wakes_its_view_only_while_it_shows`; frame
+  `a_healthy_worker_says_nothing_and_a_lost_one_says_what_is_wrong`,
+  `a_workers_tiles_come_in_order_of_attention`,
+  `an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at`,
+  `a_working_mark_draws_twelve_frames_a_second_and_none_at_rest`; palette
+  `the_palette_foot_names_its_keys`.
+
+  *Shipped: the flush layout.* The gap is gone from the model: `LayoutConfig::gaps` and
+  `Geom::gaps` are deleted, not set to 0. A proportional column is the working width times its
+  preset. Columns start where the previous one ends, and stacked tiles fill their column from
+  its top.
+  - **niri.** `compute_new_view_offset` lost its padding, so a column that must move lands
+    flush on the nearer edge of the view. The presets, the phone's struts, fullscreen, the
+    swipe snaps and the overview's labelled gaps behave as before.
+  - **Handle and drops.** Each column divider carries a 6 pt handle centred on its line. The
+    handle's 1 pt accent line lies over the divider on hover and while its column is dragged.
+    A drop that opens a column draws its 2 pt line on that divider, and a join washes the
+    column with no corner.
+  - **Overview.** A workspace is one square hairline frame laid 1 pt outside its block of panes.
+
+  Tests: client `a_peeking_neighbour_is_cut_by_the_window_edge`, and every layout test re-derived
+  so that columns and stacked tiles abut. UI (`workspace/tests/strip_marks.rs`, named so it
+  does not shadow `workspace::strip`):
+  - `the_handle_straddles_the_divider_and_resizes_the_column`
+  - `the_drop_line_sits_on_the_divider_and_a_join_washes_the_column`
+  - `the_overview_draws_no_rounded_quads`
+  - `a_healthy_worker_shows_no_word_in_the_empty_workspace`
+
+  *Shipped: flush tiles.* A tile has no corner, no frame and no ring, in the strip, fullscreen
+  and its closing fade.
+  - **Dividers.** Its dividers come from its layout position (two lengths, no walk over the
+    tiles). The strip draws them in a layer above every tile. The first build had each tile
+    draw its own lines, and at the overview's fractional zoom the next column's edge rounded
+    to the same pixel and painted over the line between the second and third columns.
+  - **Veil.** It is a separate quad over the body, so cached bodies stay cached. A tile alone
+    in its workspace or fullscreen is never veiled.
+  - **Status mark.** The header uses the shared `status_mark`, and the status bar names the
+    place with the header's `cwd_tail`.
+  - **Scrolled back.** A terminal scrolled into its history shows `N lines below · Back to
+    live` at the foot of its body, and a click returns to the bottom. Showing it exposed a bug:
+    a scrolled-up view drifted with incoming output, because its offset counts lines up from
+    the bottom. It now keeps its top line fixed. The pill costs about 15 µs at p50 per frame
+    (MEASUREMENTS, "the lines-below pill").
+  - **Exited shells.** An exited shell keeps its tile and its `Exited · code N` pill until
+    Close or Restart (terminal.md).
+
+  Tests (`workspace/tests/tiles.rs`): `tiles_have_no_frame_or_corner_and_headers_sit_on_their_bodies`,
+  `a_divider_runs_only_between_neighbours`, `unfocused_bodies_are_veiled_and_a_lone_tile_is_not`,
+  `a_tile_that_needs_you_has_a_warn_bar_on_its_header`, `an_exited_shell_stays_until_it_is_closed`,
+  `the_exited_pill_takes_the_place_of_the_lines_below`; view
+  `scrolled_up_the_pill_counts_the_lines_below_and_goes_back_to_live`,
+  `the_lines_below_give_way_to_the_tiles_pill`. Every app golden was re-accepted for this
+  ruling, 22 of 22 passing. The blank-frame check in the terminal test now asks for 0.4% of
+  pixels off the corner's colour, not 1%. With panes flush on a surface a shade from the title
+  bar's, only text and chrome differ from it.

@@ -406,7 +406,7 @@ impl WindowPicker {
             .children(worker.map(|worker| {
                 div().flex_none().text_color(hsla(s.text_muted)).child(SharedString::from(worker))
             }))
-            .children(mark.map(|mark| icons::status_mark(theme, Some(mark))));
+            .children(mark.map(|mark| icons::status_mark(theme, Some(mark), 1.0)));
         tab_stop(row, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
             cx.emit(on_pick.clone());
         }))

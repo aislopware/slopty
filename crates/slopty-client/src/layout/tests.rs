@@ -1,17 +1,19 @@
-//! The layout model against niri's numbers. Desktop default: a 1280 × 800 viewport, gaps 8, so
-//! a half-width column is `(1280 − 8) × 0.5 − 8 = 628` wide and column `i` starts at `636 i`.
+//! The layout model against niri's numbers. Desktop default: a 1280 × 800 viewport and no gaps,
+//! so a half-width column is 640 wide and column `i` starts at `640 i`.
 
 use std::str::FromStr as _;
 
 use super::*;
 
 const MS: fn(u64) -> Duration = Duration::from_millis;
-const HALF: f32 = 628.0;
-const STEP: f32 = 636.0;
-/// 1280 pt less one gap, at 2/3, less the gap.
-const TWO_THIRDS: f32 = 840.0;
-/// Split View's 511 pt less a 12 pt peek each side, less one gap.
-const COMPACT_WORKING: f32 = 479.0;
+const HALF: f32 = 640.0;
+/// Columns touch: each starts where the one before it ends.
+const STEP: f32 = HALF;
+/// 1280 pt at 1/3 and at 2/3.
+const THIRD: f32 = 1280.0 / 3.0;
+const TWO_THIRDS: f32 = 2.0 * THIRD;
+/// Split View's 511 pt less a 12 pt peek each side.
+const COMPACT_WORKING: f32 = 487.0;
 /// The overview's zoom with two workspaces (one and the empty one): two heights, a gap of a
 /// tenth above each for its name and one at either end fill the window.
 const OVERVIEW_TWO: f32 = 1.0 / 2.4;
@@ -91,17 +93,16 @@ fn width_of(l: &Layout, tile: TileRef) -> f32 {
 #[test]
 fn compute_new_view_offset_moves_the_view_as_little_as_it_can() {
     // Wider than the view: its left edge at the view's.
-    near(compute_new_view_offset(100.0, 1280.0, 0.0, 1300.0, 8.0), 0.0);
-    // Already fully visible, padding included: the view stays (offset = cur − col).
-    near(compute_new_view_offset(-8.0, 1280.0, 636.0, 628.0, 8.0), -644.0);
-    // Off to the right: right-aligned with the padding.
-    near(compute_new_view_offset(-8.0, 1280.0, 1272.0, 628.0, 8.0), -644.0);
-    // Off to the left: left-aligned with the padding.
-    near(compute_new_view_offset(628.0, 1280.0, 0.0, 628.0, 8.0), -8.0);
-    // The padding shrinks to what is left: a 1276 column in a 1280 view gets 2 each side.
-    near(compute_new_view_offset(500.0, 1280.0, 0.0, 1276.0, 8.0), -2.0);
-    // Equidistant: left wins.
-    near(compute_new_view_offset(-100.0, 1000.0, 400.0, 1000.0 - 800.0 + 600.0, 100.0), -100.0);
+    near(compute_new_view_offset(100.0, 1280.0, 0.0, 1300.0), 0.0);
+    // Already fully visible, edge to edge: the view stays (offset = cur − col).
+    near(compute_new_view_offset(0.0, 1280.0, 640.0, 640.0), -640.0);
+    // Off to the right: flush with the view's right edge.
+    near(compute_new_view_offset(0.0, 1280.0, 1280.0, 640.0), -640.0);
+    // Off to the left: flush with the view's left edge.
+    near(compute_new_view_offset(640.0, 1280.0, 0.0, 640.0), 0.0);
+    // No padding: a column nearly as wide as the view lands flush on the nearer edge.
+    near(compute_new_view_offset(500.0, 1280.0, 0.0, 1276.0), 0.0);
+    near(compute_new_view_offset(-500.0, 1280.0, 0.0, 1276.0), -4.0);
 }
 
 #[test]
@@ -150,20 +151,23 @@ fn local_tiles_open_right_of_the_focus_and_the_view_moves_the_least() {
     let a = rect(&l, t(1));
     near(a.x, (1280.0 - HALF) / 2.0);
     near(a.w, HALF);
-    near(a.y, 8.0);
-    near(a.h, 800.0 - 16.0);
+    near(a.y, 0.0);
+    near(a.h, 800.0);
     assert_eq!(l.focused(), Some(t(1)));
 
-    // The second: the view leaves the lone column's centre only as far as showing both needs.
+    // The second: the view leaves the lone column's centre only as far as showing both needs,
+    // and the pair fills the window edge to edge.
     l.open(t(2), Placement::Local);
-    near(view_pos(&l), -8.0);
-    near(rect(&l, t(2)).x, 8.0 + STEP);
+    near(view_pos(&l), 0.0);
+    near(rect(&l, t(1)).x, 0.0);
+    near(rect(&l, t(2)).x, STEP);
+    near(rect(&l, t(2)).right(), 1280.0);
     assert_eq!(l.focused(), Some(t(2)));
 
-    // The third does not: the view right-aligns it (636 instead of 1272 to left-align).
+    // The third does not: the view right-aligns it (640 instead of 1280 to left-align).
     l.open(t(3), Placement::Local);
-    near(view_pos(&l), col_x(2) - 644.0);
-    near(rect(&l, t(3)).right(), 1280.0 - 8.0);
+    near(view_pos(&l), col_x(2) - 640.0);
+    near(rect(&l, t(3)).right(), 1280.0);
 
     // Local opens next to the focus, not at the end.
     l.focus_column_first();
@@ -242,12 +246,12 @@ fn there_is_always_exactly_one_trailing_empty_workspace() {
 #[test]
 fn closing_a_just_opened_column_goes_back_to_where_the_view_was() {
     let mut l = columns(2);
-    near(view_pos(&l), -8.0);
+    near(view_pos(&l), 0.0);
     l.open(t(3), Placement::Local);
-    near(view_pos(&l), 628.0);
+    near(view_pos(&l), 640.0);
     l.remove(t(3));
     assert_eq!(l.focused(), Some(t(2)), "the one it was opened from");
-    near(view_pos(&l), -8.0);
+    near(view_pos(&l), 0.0);
 }
 
 #[test]
@@ -258,7 +262,7 @@ fn closing_after_the_focus_moved_takes_the_next_column_in_place() {
     // The memory is gone: the right neighbour, or the last one, takes the focus.
     l.remove(t(3));
     assert_eq!(l.focused(), Some(t(2)));
-    near(view_pos(&l), 628.0);
+    near(view_pos(&l), 640.0);
     l.focus_column_first();
     l.remove(t(1));
     assert_eq!(l.focused(), Some(t(2)), "the column that slid into its place");
@@ -286,7 +290,7 @@ fn closing_a_tile_in_a_column_keeps_the_column() {
     l.remove(t(1));
     assert_eq!(shape(&l)[0], vec![vec![t(2)]]);
     assert_eq!(l.focused(), Some(t(2)));
-    near(rect(&l, t(2)).h, 784.0);
+    near(rect(&l, t(2)).h, 800.0);
 }
 
 #[test]
@@ -360,7 +364,7 @@ fn focusing_a_tile_brings_its_workspace_and_column() {
     assert_eq!(l.active_workspace(), 1);
     l.focus(t(1));
     assert_eq!((l.active_workspace(), active_col(&l)), (0, 0));
-    near(view_pos(&l), -8.0);
+    near(view_pos(&l), 0.0);
     l.focus_workspace_previous();
     assert_eq!(l.active_workspace(), 1);
     l.focus_workspace_previous();
@@ -381,7 +385,7 @@ fn moving_a_column_keeps_the_camera() {
     near(view_pos(&l), view);
     l.move_column_to_first();
     assert_eq!(shape(&l)[0], vec![vec![t(3)], vec![t(1)], vec![t(2)]]);
-    near(view_pos(&l), -8.0);
+    near(view_pos(&l), 0.0);
     l.move_column_left();
     assert_eq!(shape(&l)[0][0], vec![t(3)], "nothing left of the first");
     l.move_column_to_last();
@@ -422,7 +426,7 @@ fn moving_a_column_to_another_workspace_keeps_its_width_and_tiles() {
     // Workspace 0 emptied and was dropped once left.
     assert_eq!(shape(&l), vec![vec![vec![t(1), t(2)]], vec![]]);
     assert_eq!(l.focused(), Some(t(2)));
-    near(width_of(&l, t(1)), 416.0);
+    near(width_of(&l, t(1)), THIRD);
     l.move_column_to_workspace_up();
     assert_eq!(shape(&l), vec![vec![vec![t(1), t(2)]], vec![]], "nothing above");
 }
@@ -455,9 +459,12 @@ fn consume_or_expel_joins_a_lone_tile_to_its_neighbour_and_splits_a_stacked_one(
     l.consume_or_expel_window_left();
     assert_eq!(shape(&l)[0], vec![vec![t(1)], vec![t(2), t(3)]]);
     assert_eq!(l.focused(), Some(t(3)));
+    // Stacked tiles touch and share the column's whole height.
     let (a, b) = (rect(&l, t(2)), rect(&l, t(3)));
-    near(a.h, (800.0 - 24.0) / 2.0);
-    near(b.y, a.bottom() + 8.0);
+    near(a.y, 0.0);
+    near(a.h, 400.0);
+    near(b.y, a.bottom());
+    near(b.bottom(), 800.0);
     // Stacked: out into a new column on the left.
     l.consume_or_expel_window_left();
     assert_eq!(shape(&l)[0], vec![vec![t(1)], vec![t(3)], vec![t(2)]]);
@@ -500,31 +507,31 @@ fn consume_into_and_expel_from_the_focused_column() {
 #[test]
 fn presets_cycle_both_ways_from_a_preset_and_from_any_width() {
     let mut l = columns(1);
-    // 628 is not marked as a preset: forward goes to the first one wider.
+    // 640 is not marked as a preset: forward goes to the first one wider.
     l.switch_preset_width(true);
-    near(width_of(&l, t(1)), 840.0);
+    near(width_of(&l, t(1)), TWO_THIRDS);
     l.switch_preset_width(true);
-    near(width_of(&l, t(1)), 416.0);
+    near(width_of(&l, t(1)), THIRD);
     l.switch_preset_width(true);
     near(width_of(&l, t(1)), HALF);
     l.switch_preset_width(false);
-    near(width_of(&l, t(1)), 416.0);
+    near(width_of(&l, t(1)), THIRD);
     l.switch_preset_width(false);
-    near(width_of(&l, t(1)), 840.0);
+    near(width_of(&l, t(1)), TWO_THIRDS);
     // From a width between presets.
     l.set_width_delta(-10.0);
     let w = width_of(&l, t(1));
-    assert!(w > HALF && w < 840.0, "{w}");
+    assert!(w > HALF && w < TWO_THIRDS, "{w}");
     l.switch_preset_width(false);
     near(width_of(&l, t(1)), HALF);
     l.set_width_delta(10.0);
     l.switch_preset_width(true);
-    near(width_of(&l, t(1)), 840.0);
+    near(width_of(&l, t(1)), TWO_THIRDS);
     // Backward from narrower than every preset: round to the widest.
     let mut l = columns(1);
     l.set_width_delta(-100.0);
     l.switch_preset_width(false);
-    near(width_of(&l, t(1)), 840.0);
+    near(width_of(&l, t(1)), TWO_THIRDS);
     assert_eq!(l.workspaces()[0].columns()[0].preset(), Some(2));
 }
 
@@ -532,9 +539,9 @@ fn presets_cycle_both_ways_from_a_preset_and_from_any_width() {
 fn width_steps_clamp_and_turn_a_fixed_width_proportional() {
     let mut l = columns(1);
     l.set_width_delta(10.0);
-    near(width_of(&l, t(1)), 1272.0_f32.mul_add(0.6, -8.0));
+    near(width_of(&l, t(1)), 1280.0 * 0.6);
     l.set_width_delta(100.0);
-    near(width_of(&l, t(1)), 1264.0);
+    near(width_of(&l, t(1)), 1280.0);
     l.set_width_delta(-200.0);
     near(width_of(&l, t(1)), 128.0);
     assert_eq!(l.workspaces()[0].columns()[0].preset(), None);
@@ -546,16 +553,16 @@ fn width_steps_clamp_and_turn_a_fixed_width_proportional() {
     assert_eq!(l.workspaces()[0].columns()[0].width(), ColumnWidth::Fixed(500.0));
     l.set_width_delta(10.0);
     let ColumnWidth::Proportion(p) = l.workspaces()[0].columns()[0].width() else { panic!() };
-    near(p, 508.0 / 1272.0 + 0.1);
-    near(width_of(&l, t(1)), 500.0 + 127.2);
+    near(p, 500.0 / 1280.0 + 0.1);
+    near(width_of(&l, t(1)), 500.0 + 128.0);
 }
 
 #[test]
 fn full_width_maximises_and_comes_back() {
     let mut l = columns(2);
     l.toggle_full_width();
-    near(width_of(&l, t(2)), 1264.0);
-    near(rect(&l, t(2)).x, 8.0);
+    near(width_of(&l, t(2)), 1280.0);
+    near(rect(&l, t(2)).x, 0.0);
     assert!(l.workspaces()[0].columns()[1].is_full_width());
     l.toggle_full_width();
     near(width_of(&l, t(2)), HALF);
@@ -563,7 +570,7 @@ fn full_width_maximises_and_comes_back() {
     l.toggle_full_width();
     l.switch_preset_width(true);
     assert!(!l.workspaces()[0].columns()[1].is_full_width());
-    near(width_of(&l, t(2)), 416.0);
+    near(width_of(&l, t(2)), THIRD);
 }
 
 #[test]
@@ -607,18 +614,18 @@ fn fullscreen_on_and_off_puts_the_view_back_exactly() {
 fn expand_and_centre_fill_and_balance_the_visible_space() {
     let mut l = columns(2);
     l.switch_preset_width(false);
-    // [628][416] visible; the active 416 takes what is free.
+    // [640][427] visible; the active 427 takes what is free.
     l.focus_column_first();
     l.focus_column_right();
     l.expand_to_available_width();
     let (a, b) = (rect(&l, t(1)), rect(&l, t(2)));
-    near(a.x, 8.0);
-    near(b.right(), 1272.0);
-    near(b.x, a.right() + 8.0);
+    near(a.x, 0.0);
+    near(b.right(), 1280.0);
+    near(b.x, a.right());
     // Alone on screen: full width.
     let mut l = columns(1);
     l.expand_to_available_width();
-    near(width_of(&l, t(1)), 1264.0);
+    near(width_of(&l, t(1)), 1280.0);
     // Centre one column, then the visible pair.
     let mut l = columns(2);
     l.switch_preset_width(true);
@@ -632,10 +639,11 @@ fn expand_and_centre_fill_and_balance_the_visible_space() {
     l.focus_column_left();
     l.switch_preset_width(true);
     l.switch_preset_width(true);
-    // Two 416s: 840 with the gap between, centred.
+    // Two thirds side by side: two thirds of the window, touching, centred.
     l.center_visible_columns();
-    near(rect(&l, t(1)).x, (1280.0 - 840.0) / 2.0);
-    near(rect(&l, t(2)).right(), 1280.0 - (1280.0 - 840.0) / 2.0);
+    near(rect(&l, t(1)).x, (1280.0 - TWO_THIRDS) / 2.0);
+    near(rect(&l, t(2)).x, rect(&l, t(1)).right());
+    near(rect(&l, t(2)).right(), 1280.0 - (1280.0 - TWO_THIRDS) / 2.0);
 }
 
 #[test]
@@ -643,14 +651,31 @@ fn tile_heights_split_by_weight_after_fixed_ones() {
     let mut col = Column::new(Tile::new(t(1)), ColumnWidth::Proportion(0.5), false);
     col.tiles.push(Tile { height: TileHeight::Fixed(200.0), ..Tile::new(t(2)) });
     col.tiles.push(Tile { height: TileHeight::Auto { weight: 2.0 }, ..Tile::new(t(3)) });
-    let g = Geom { view_w: 1280.0, view_h: 800.0, strut: 0.0, gaps: 8.0, compact: false };
+    let g = Geom { view_w: 1280.0, view_h: 800.0, strut: 0.0, compact: false };
     let r = col.tile_rects(&g);
-    let left = 800.0 - 32.0 - 200.0;
+    let left = 800.0 - 200.0;
+    near(r[0].y, 0.0);
     near(r[0].h, left / 3.0);
     near(r[1].h, 200.0);
     near(r[2].h, left * 2.0 / 3.0);
-    near(r[2].bottom(), 792.0);
-    near(r[1].y, r[0].bottom() + 8.0);
+    near(r[2].bottom(), 800.0);
+    near(r[1].y, r[0].bottom());
+    near(r[2].y, r[1].bottom());
+}
+
+/// With no margin a neighbour that does not fit is not shrunk or pushed off: the window's edge
+/// simply cuts it, and it still touches the column beside it.
+#[test]
+fn a_peeking_neighbour_is_cut_by_the_window_edge() {
+    let mut l = columns(3);
+    l.switch_preset_width(true);
+    let (peek, focused) = (rect(&l, t(2)), rect(&l, t(3)));
+    near(focused.w, TWO_THIRDS);
+    near(focused.right(), 1280.0);
+    near(peek.w, HALF);
+    near(peek.right(), focused.x);
+    near(peek.x, 1280.0 - TWO_THIRDS - HALF);
+    assert!(peek.x < 0.0 && peek.right() > 0.0, "cut by the left edge: {peek:?}");
 }
 
 // ----- tabbed -------------------------------------------------------------------------------
@@ -667,8 +692,8 @@ fn a_tabbed_column_shows_one_tile_at_full_height() {
     let f = l.frame();
     for p in &f.tiles {
         assert_eq!(p.tabs, Some((0, 3)));
-        near(p.rect.h, 784.0);
-        near(p.rect.y, 8.0);
+        near(p.rect.h, 800.0);
+        near(p.rect.y, 0.0);
         assert_eq!(p.hidden, p.tile != t(1), "{p:?}");
     }
     l.focus_window_down();
@@ -876,7 +901,7 @@ fn a_compact_window_shows_every_column_full_width_and_keeps_the_proportions() {
     near(rect(&l, t(1)).w, HALF);
     near(rect(&l, t(2)).w, HALF);
     l.set_viewport(511.0, 800.0);
-    let full = COMPACT_WORKING - 8.0;
+    let full = COMPACT_WORKING;
     let active = rect(&l, t(2));
     near(active.w, full);
     assert!(active.x >= 0.0 && active.right() <= 511.0, "in view: {active:?}");
@@ -902,14 +927,14 @@ fn a_resize_while_compact_changes_the_stored_proportion() {
     let mut l = columns(2);
     l.set_viewport(511.0, 800.0);
     let full = rect(&l, t(2)).w;
-    let half = COMPACT_WORKING / 2.0 - 8.0;
+    let half = COMPACT_WORKING / 2.0;
     assert!(l.resize_begin(1));
     l.resize_update(-100.0);
     l.resize_end();
     near(rect(&l, t(2)).w, full);
     l.set_viewport(1280.0, 800.0);
-    let share = (half - 100.0 + 8.0) / COMPACT_WORKING;
-    near(rect(&l, t(2)).w, (1280.0_f32 - 8.0).mul_add(share, -8.0));
+    let share = (half - 100.0) / COMPACT_WORKING;
+    near(rect(&l, t(2)).w, 1280.0 * share);
 }
 
 /// In the overview a strip that fits the zoomed-out window is centred in it, whatever column
@@ -923,13 +948,15 @@ fn the_overview_centres_a_strip_that_fits() {
     let (first, last) = (rect(&l, t(1)), rect(&l, t(3)));
     near(first.x, 1280.0 - last.right());
     near(view_pos(&l), before);
+    // The panel is the strip's own block: flush with its first and last column.
     let panel = l.frame().workspaces[0].1;
-    assert!(panel.x < first.x && panel.right() > last.right(), "the panel holds it: {panel:?}");
+    near(panel.x, first.x);
+    near(panel.right(), last.right());
     let hit = l.drop_target(first.x + first.w / 2.0, first.y + first.h / 2.0);
     assert!(matches!(hit, Some(DropTarget::IntoColumn { workspace: 0, column: 0, .. })), "{hit:?}");
     l.set_overview(false);
     near(view_pos(&l), before);
-    near(rect(&l, t(3)).right(), 1280.0 - 8.0);
+    near(rect(&l, t(3)).right(), 1280.0);
 }
 
 #[test]
@@ -937,13 +964,13 @@ fn overview_drops_land_in_columns_between_columns_and_between_workspaces() {
     let mut l = columns(2);
     l.consume_or_expel_window_left();
     l.open(t(3), Placement::Local);
-    // Workspace 0: [1, 2], [3], view at -8.
+    // Workspace 0: [1, 2], [3], view at 0.
     l.set_overview(true);
     let f = l.frame();
     let (row, next, z) = (f.workspaces[0].1, f.workspaces[1].1, f.zoom);
     // A point given in the unzoomed view of workspace 0, where it is drawn.
     let at = |x: f32, y: f32| l.drop_target(x.mul_add(z, row.x), y.mul_add(z, row.y));
-    // Column 0 spans view x 8..636; tile 1 is its top half.
+    // Column 0 spans view x 0..640; tile 1 is its top half.
     assert_eq!(
         at(320.0, 120.0),
         Some(DropTarget::IntoColumn { workspace: 0, column: 0, index: 0 })
@@ -959,8 +986,10 @@ fn overview_drops_land_in_columns_between_columns_and_between_workspaces() {
     // The outer 20 % of a column: a new column beside it.
     assert_eq!(at(20.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 0 }));
     assert_eq!(at(620.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 1 }));
-    // The gap between columns, and past the last one.
-    assert_eq!(at(638.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 1 }));
+    // Either side of the divider between columns opens the same new column there; so does
+    // the far edge of the last one.
+    assert_eq!(at(639.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 1 }));
+    assert_eq!(at(641.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 1 }));
     assert_eq!(at(1270.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 2 }));
     // A row reaches the full width of the viewport.
     assert_eq!(at(1760.0, 200.0), Some(DropTarget::NewColumn { workspace: 0, index: 2 }));
@@ -1023,21 +1052,21 @@ fn moving_a_tile_to_a_drop_target() {
 fn dragging_to_the_edge_scrolls_the_strip_after_a_delay() {
     let mut l = columns(4);
     l.focus_column_first();
-    near(view_pos(&l), -8.0);
+    near(view_pos(&l), 0.0);
     l.set_clock(MS(1000));
     assert!(!l.dnd_edge_scroll(640.0), "the middle does not scroll");
     assert!(l.dnd_edge_scroll(1275.0));
     l.set_clock(MS(1050));
     assert!(l.dnd_edge_scroll(1275.0));
-    near(view_pos(&l), -8.0);
+    near(view_pos(&l), 0.0);
     // Past the 100 ms delay: 5 of 30 pt from the edge is 5/6 of 1500 pt/s, for the 100 ms
     // since the last call.
     l.set_clock(MS(1150));
     l.dnd_edge_scroll(1275.0);
-    near(view_pos(&l), -8.0 + 125.0);
+    near(view_pos(&l), 125.0);
     l.set_clock(MS(1250));
     l.dnd_edge_scroll(1275.0);
-    near(view_pos(&l), -8.0 + 250.0);
+    near(view_pos(&l), 250.0);
     // Far to the right it stops with the view's left edge on the last column's right edge.
     for step in 13..60 {
         l.set_clock(MS(step * 100));
@@ -1046,13 +1075,13 @@ fn dragging_to_the_edge_scrolls_the_strip_after_a_delay() {
     near(view_pos(&l), col_x(3) + HALF);
     // Letting go snaps like a swipe.
     l.dnd_scroll_end();
-    near(view_pos(&l), col_x(3) - 644.0);
+    near(view_pos(&l), col_x(3) - 640.0);
     assert_eq!(active_col(&l), 3);
     // A drag that never scrolled leaves the view alone.
     l.set_clock(MS(7000));
     l.dnd_edge_scroll(640.0);
     l.dnd_scroll_end();
-    near(view_pos(&l), col_x(3) - 644.0);
+    near(view_pos(&l), col_x(3) - 640.0);
 }
 
 // ----- gestures -----------------------------------------------------------------------------
@@ -1078,13 +1107,13 @@ fn a_slow_drag_snaps_to_the_nearest_column_edge() {
     // furthest column fully in view (niri).
     swipe(&mut l, 0, 200.0, 10, 100, 1300);
     l.set_clock(MS(5000));
-    near(view_pos(&l), -8.0);
+    near(view_pos(&l), 0.0);
     assert_eq!(active_col(&l), 1);
     l.focus_column_first();
     // Most of the way to the end snap: there, the last column focused.
     swipe(&mut l, 6000, 400.0, 10, 100, 7300);
     l.set_clock(MS(10_000));
-    near(view_pos(&l), 628.0);
+    near(view_pos(&l), 640.0);
     assert_eq!(active_col(&l), 2);
     assert!(!l.view_gesture_active());
 }
@@ -1098,18 +1127,18 @@ fn a_fling_carries_further_than_the_fingers_went() {
     l.set_clock(MS(1000));
     l.focus_column_first();
     l.set_clock(MS(3000));
-    near(view_pos(&l), -8.0);
+    near(view_pos(&l), 0.0);
     // 100 pt in 50 ms: 2500 pt/s, about 830 pt more.
     swipe(&mut l, 3000, 100.0, 5, 10, 3050);
     assert!(l.frame().animating);
     l.set_clock(MS(6000));
     let pos = view_pos(&l);
     assert!(pos > 600.0, "{pos}");
-    // Every rest is a snap: some column's padded edge on a view edge.
+    // Every rest is a snap: some column's edge on a view edge.
     let snaps: Vec<f32> = (0..5_u8)
         .flat_map(|i| {
             let x = col_x(i);
-            [x - 8.0, x + HALF + 8.0 - 1280.0]
+            [x, x + HALF - 1280.0]
         })
         .collect();
     assert!(snaps.iter().any(|s| (s - pos).abs() < 0.01), "{pos}");
@@ -1122,16 +1151,16 @@ fn a_fling_carries_further_than_the_fingers_went() {
 fn a_fling_past_either_end_stops_at_the_end_snap() {
     let mut l = columns(3);
     swipe(&mut l, 0, 3000.0, 5, 10, 50);
-    near(view_pos(&l), 628.0);
+    near(view_pos(&l), 640.0);
     assert_eq!(active_col(&l), 2);
     swipe(&mut l, 1000, -5000.0, 5, 10, 1050);
-    near(view_pos(&l), -8.0);
+    near(view_pos(&l), 0.0);
     assert_eq!(active_col(&l), 0);
     // A cancelled drag settles with the focus in view, moving the least: right-aligned.
     l.view_gesture_begin();
     l.view_gesture_update(-900.0, MS(2000));
     assert!(l.view_gesture_end(true));
-    near(view_pos(&l), -644.0);
+    near(view_pos(&l), -640.0);
     assert_eq!(active_col(&l), 0);
     // No gesture: updates and ends are refused.
     assert!(!l.view_gesture_update(10.0, MS(3000)));
@@ -1207,18 +1236,18 @@ fn a_retargeted_view_keeps_its_place_and_its_speed() {
         l.open(t(i), Placement::Local);
     }
     l.set_clock(MS(2000));
-    near(view_pos(&l), 628.0);
+    near(view_pos(&l), 640.0);
     l.focus_column_first();
     l.set_clock(MS(2050));
     let before = view_pos(&l);
-    assert!(before < 628.0 && before > -8.0, "{before}");
+    assert!(before < 640.0 && before > 0.0, "{before}");
     l.focus_column_last();
     near(view_pos(&l), before);
     // Still heading left for a moment: the speed carried over.
     l.set_clock(MS(2055));
     assert!(view_pos(&l) < before, "{} !< {before}", view_pos(&l));
     l.set_clock(MS(5000));
-    near(view_pos(&l), 628.0);
+    near(view_pos(&l), 640.0);
 }
 
 #[test]
@@ -1229,14 +1258,14 @@ fn view_springs_run_niris_critically_damped_curve() {
     }
     l.set_clock(MS(2000));
     l.focus_column_first();
-    let spring = Spring { from: 636.0, to: 0.0, initial_velocity: 0.0, params: view_spring() };
+    let spring = Spring { from: 640.0, to: 0.0, initial_velocity: 0.0, params: view_spring() };
     for ms in [0_u64, 16, 50, 100, 200, 300] {
         l.set_clock(MS(2000 + ms));
-        let expected = narrow(spring.value_at(MS(ms))) - 8.0;
+        let expected = narrow(spring.value_at(MS(ms)));
         assert!((view_pos(&l) - expected).abs() < 0.01, "{ms} ms: {} vs {expected}", view_pos(&l));
     }
     l.set_clock(MS(2400));
-    near(view_pos(&l), -8.0);
+    near(view_pos(&l), 0.0);
     assert!(!l.is_animating());
 }
 
@@ -1327,8 +1356,8 @@ fn the_target_rect_is_where_a_springing_tile_comes_to_rest() {
     l.switch_preset_width(true);
     l.set_clock(MS(1050));
     let p = placed(&l, t(1));
-    near(p.target.w, 840.0);
-    assert!(p.rect.w < 840.0, "{p:?}");
+    near(p.target.w, TWO_THIRDS);
+    assert!(p.rect.w < TWO_THIRDS, "{p:?}");
     l.set_clock(MS(2000));
     let p = placed(&l, t(1));
     assert_eq!(p.rect, p.target);
@@ -1336,8 +1365,8 @@ fn the_target_rect_is_where_a_springing_tile_comes_to_rest() {
     l.set_overview(true);
     l.set_clock(MS(3000));
     let p = placed(&l, t(1));
-    near(p.rect.w, 840.0 * OVERVIEW_TWO);
-    near(p.target.w, 840.0);
+    near(p.rect.w, TWO_THIRDS * OVERVIEW_TWO);
+    near(p.target.w, TWO_THIRDS);
 }
 
 // ----- phone --------------------------------------------------------------------------------
@@ -1349,11 +1378,11 @@ fn on_a_phone_columns_take_the_width_and_neighbours_peek() {
     assert!(l.is_phone());
     l.open(t(1), Placement::Local);
     l.open(t(2), Placement::Local);
-    // Working width 390 − 2 × 12; full width in it is 366 − 16 = 350.
+    // Working width 390 − 2 × 12, all of it the column's: it meets both struts.
     let (a, b) = (rect(&l, t(1)), rect(&l, t(2)));
-    near(b.w, 350.0);
-    near(b.x, 20.0);
-    near(b.right(), 370.0);
+    near(b.w, 366.0);
+    near(b.x, 12.0);
+    near(b.right(), 378.0);
     // The left neighbour shows its last 12 pt.
     near(a.right(), 12.0);
     l.focus_column_left();
@@ -1418,10 +1447,11 @@ fn an_interactive_resize_follows_the_pointer_and_clamps() {
     assert!(!l.resize_begin(1), "one at a time");
     l.resize_update(100.0);
     near(width_of(&l, t(1)), HALF + 100.0);
-    near(rect(&l, t(1)).x, 8.0);
+    near(rect(&l, t(1)).x, 0.0);
     near(rect(&l, t(2)).x, b.x + 100.0);
+    near(rect(&l, t(2)).x, rect(&l, t(1)).right());
     l.resize_update(5000.0);
-    near(width_of(&l, t(1)), 1264.0);
+    near(width_of(&l, t(1)), 1280.0);
     l.resize_update(-5000.0);
     near(width_of(&l, t(1)), 128.0);
     l.resize_end();

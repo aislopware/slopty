@@ -1,7 +1,8 @@
 //! The bar along the bottom: where the focused tile runs, and how things are going.
 //!
 //! On the left, the focused tile's worker and the tail of its working directory. On the
-//! right, the uploads in flight, the round trip to that worker, the frame time, and the
+//! right, the uploads in flight, what is wrong with that worker's link when something is (a
+//! link that is up says nothing), the round trip to it, the frame time, and the
 //! agents at work and waiting, which jumps to the next one waiting when clicked. Each readout
 //! is lowercase, a number rather than chrome. A phone keeps the worker, the round trip and the
 //! agents.
@@ -17,10 +18,10 @@ use gpui::{
 use slopty_proto::items::ItemKind;
 
 use super::WorkspaceView;
-use super::navigator::{Mode, rtt_label};
+use super::navigator::{Mode, rtt_label, worker_health};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize, Status, icon};
+use crate::icons::{IconName, IconSize, Status, icon, status_icon};
 
 /// The bar's height.
 const STATUSBAR_H: f32 = 26.0;
@@ -28,16 +29,6 @@ const STATUSBAR_H: f32 = 26.0;
 /// How long a frame-time readout stands before it is worked out again: the percentile sorts
 /// the probe's ring, which is not work for every frame.
 const FRAME_READOUT_EVERY: Duration = Duration::from_secs(1);
-
-/// The last part of a working directory: `slopty` for `/w/oss/slopty`, `/` for the root.
-#[must_use]
-fn cwd_tail(cwd: &str) -> &str {
-    let trimmed = cwd.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return "/";
-    }
-    trimmed.rsplit('/').next().unwrap_or(trimmed)
-}
 
 /// The agents at a glance: `2 working · 1 needs you`; empty when none works or waits.
 #[must_use]
@@ -132,7 +123,7 @@ impl WorkspaceView {
             .flatten()
             .filter(|item| matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::File { .. }))
             .and_then(|item| self.cwd_of(item))
-            .map(|cwd| SharedString::from(cwd_tail(&cwd).to_owned()));
+            .map(|cwd| SharedString::from(super::tile::cwd_tail(&cwd)));
         let left = div()
             .flex_1()
             .min_w_0()
@@ -154,10 +145,20 @@ impl WorkspaceView {
                 .gap(px(spacing.xs))
                 .child(icon(theme, IconName::Upload, IconSize::Inline, hsla(s.text_muted)))
         });
-        let rtt = worker
-            .and_then(|k| self.workers.get(&k))
+        let link = worker.and_then(|k| self.workers.get(&k));
+        let rtt = link
             .and_then(|w| w.rtt.filter(|_| w.status.is_up()))
             .map(|rtt| readout("status-rtt", format!("rtt {}", rtt_label(rtt)).into()));
+        // The link says something only when it is not up.
+        let health = link.and_then(|w| worker_health(&w.status)).map(|(mark, word)| {
+            let tone = hsla(mark.tone(theme));
+            readout("status-link", word.into())
+                .flex()
+                .items_center()
+                .gap(px(spacing.xs))
+                .text_color(tone)
+                .child(status_icon(theme, mark, px(theme.typography.icon()), tone))
+        });
         let frame = frame.map(|text| readout("status-frame", text));
         let (working, waiting) = (self.working_count(), self.needs_you_count());
         let agents = (working > 0 || waiting > 0).then(|| {
@@ -173,10 +174,10 @@ impl WorkspaceView {
                 .text_color(hsla(tone))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.raised)))
-                .child(icon(
+                .child(status_icon(
                     theme,
-                    if waiting > 0 { Status::NeedsYou.icon() } else { Status::Working.icon() },
-                    IconSize::Inline,
+                    if waiting > 0 { Status::NeedsYou } else { Status::Working },
+                    px(theme.typography.icon()),
                     hsla(tone),
                 ));
             tab_stop(pill, s.accent).on_click(cx.listener(|this, _ev, window, cx| {
@@ -189,6 +190,7 @@ impl WorkspaceView {
             .items_center()
             .gap(px(spacing.md))
             .children(transfers)
+            .children(health)
             .children(rtt)
             .children(frame)
             .children(agents);
@@ -226,9 +228,6 @@ mod tests {
 
     #[test]
     fn the_readouts_say_what_they_count() {
-        assert_eq!(cwd_tail("/w/oss/slopty/"), "slopty");
-        assert_eq!(cwd_tail("/"), "/");
-        assert_eq!(cwd_tail("relative"), "relative");
         assert_eq!(agent_summary(2, 1), "2 working · 1 needs you");
         assert_eq!(agent_summary(0, 3), "3 need you");
         assert_eq!(agent_summary(1, 0), "1 working");

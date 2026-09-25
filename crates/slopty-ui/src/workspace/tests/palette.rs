@@ -97,6 +97,27 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("palette").is_none());
 }
 
+/// The palette's foot names its keys: ↩ opens, esc closes, ↑↓ move. It sits under the list,
+/// across the dialog, and reads as one line.
+#[gpui::test]
+fn the_palette_foot_names_its_keys(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let _studio = connect(&view, cx, 1, "studio");
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    open_palette(cx);
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("Label", Some("↩ open · esc close · ↑↓ move"))), "{tree:#?}");
+    let (dialog, legend, list) = (
+        cx.debug_bounds("palette").expect("the dialog"),
+        cx.debug_bounds("palette-legend").expect("the foot"),
+        cx.debug_bounds("palette-item-0").expect("a line"),
+    );
+    assert!(legend.top() > list.bottom(), "under the list: {legend:?} {list:?}");
+    assert!((f32::from(dialog.bottom()) - f32::from(legend.bottom())).abs() < 2.0, "at the foot");
+}
+
 /// Every line's title starts on one edge: the kind icon sits in a fixed slot, and a status
 /// mark or a worker's name goes on the right, not before the title.
 #[gpui::test]
@@ -141,7 +162,7 @@ fn the_empty_workspace_begins_a_terminal_an_agent_or_a_window(cx: &mut TestAppCo
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    for label in ["New terminal", "New agent", "Add a window or display", "studio, connected"] {
+    for label in ["New terminal", "New agent", "Add a window or display", "studio"] {
         assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
     }
     assert_eq!(*strip::BEGIN_KEYS, ["⌘T".to_owned(), "⇧⌘T".to_owned(), "⌘O".to_owned()]);

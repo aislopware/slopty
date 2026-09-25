@@ -278,17 +278,23 @@ mod tests {
         ensure!(refused["result"]["isError"] == json!(true), "an online worker stays: {refused}");
         clock.lap("mcp events, resize");
 
-        // 5. Closed, and exited on its own: both leave the list.
+        // 5. A closed terminal leaves the list. One whose program exited stays, exited with its
+        //    status, until it is closed.
         let closed = stack.slopty(&["close", &term]).await?;
         ensure!(closed == json!({ "ok": true }), "{closed}");
         ensure!(!is_listed(stack, &term).await?, "a closed terminal is not listed");
         let quitter = open_bash(stack, "e2e exit").await?;
         ensure!(is_listed(stack, &quitter).await?, "the new terminal is listed");
-        send_text(stack, &quitter, "exit\n").await?;
-        until("the exited terminal leaving the list", STEP, async || {
-            Ok((!is_listed(stack, &quitter).await?).then_some(()))
+        send_text(stack, &quitter, "exit 3\n").await?;
+        let exited = until("the terminal listed as exited", STEP, async || {
+            let entry = terminal_entry(stack, &quitter).await?;
+            Ok((entry["running"] == json!(false)).then_some(entry))
         })
         .await?;
+        ensure!(exited["exit_status"] == json!(3), "its status is kept: {exited}");
+        let closed = stack.slopty(&["close", &quitter]).await?;
+        ensure!(closed == json!({ "ok": true }), "{closed}");
+        ensure!(!is_listed(stack, &quitter).await?, "closed, it leaves the list");
         clock.lap("close, exit");
 
         // 6. The worker dies without a goodbye: unreachable within the lease; back under the same

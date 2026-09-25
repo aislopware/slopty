@@ -34,6 +34,7 @@ use slopty_settings::{Loaded, Settings};
 use slopty_theme::{Theme, Typography};
 use slopty_ui::a11y::{key_name, tab_stop};
 use slopty_ui::colors::hsla;
+use slopty_ui::icons::{IconName, IconSize, icon};
 use slopty_ui::kit::{self, ButtonKind};
 use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
@@ -740,9 +741,10 @@ impl Workspace {
     }
 
     /// The way in: a heading, one line on what it is, the address, one primary action, and the
-    /// other way in as a quiet link. On the first run it stands alone on the canvas; later
-    /// ("Add a worker…", "Connect to a server…") it is a dialog over the workspace with a
-    /// Cancel. The phone gets a Paste, since it has no ⌘V; the Mac's field takes ⌘V.
+    /// other way in as a quiet link. On the first run it stands alone on the canvas under a
+    /// large muted mark; later ("Add a worker…", "Connect to a server…") it is a dialog over the
+    /// workspace with a Cancel. The phone gets a Paste, since it has no ⌘V; the Mac's field
+    /// takes ⌘V.
     fn add_worker_panel(
         &self,
         adding: &Adding,
@@ -753,8 +755,9 @@ impl Workspace {
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
         let button = |id, text, kind| kit::button(theme, id, text, kind);
-        let (title, blurb, field, go, other, other_mode) = match adding.mode {
+        let (mark, title, blurb, field, go, other, other_mode) = match adding.mode {
             Panel::Server => (
+                IconName::Server,
                 "Connect to a server",
                 "Slopty finds your workers through a server on your tailnet or VPN.",
                 "Server address",
@@ -763,6 +766,7 @@ impl Workspace {
                 Panel::Worker,
             ),
             Panel::Worker => (
+                IconName::Monitor,
                 "Add a worker",
                 "A Mac running the Slopty worker, on your tailnet or VPN.",
                 "Worker address",
@@ -798,6 +802,18 @@ impl Workspace {
                     .border_1()
                     .border_color(hsla(s.border))
                     .shadow_sm()
+            })
+            // The first run is an empty state: a large muted mark over the heading. Over the
+            // workspace the dialog's frame already says what it is.
+            .when(welcome, |el| {
+                el.child(
+                    div().debug_selector(|| "welcome-mark".to_owned()).flex().child(icon(
+                        theme,
+                        mark,
+                        IconSize::Large,
+                        hsla(s.text_muted),
+                    )),
+                )
             })
             .child(
                 div()

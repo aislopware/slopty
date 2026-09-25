@@ -29,7 +29,7 @@ use slopty_agent::AgentTable;
 use slopty_core::{ClientId, SessionId, WorkerId};
 use slopty_net::admission::{Admission, Cidr};
 use slopty_net::worker::WorkerListener;
-use slopty_proto::terminal::{CloseReason, SessionState};
+use slopty_proto::terminal::CloseReason;
 use slopty_worker::{ItemStore, Worker, WorkerError};
 use tokio::sync::broadcast;
 
@@ -146,9 +146,9 @@ impl Daemon {
     /// End `session` (kill its program if it still runs) and tell every client and the server
     /// why, on behalf of `by` (whose item delta is not echoed back to it).
     ///
-    /// Only the call that takes the session out of the table announces it, so a program that
-    /// exits while a client closes it is announced once. `NoSuchSession` when it was already
-    /// gone.
+    /// Only the call that takes the session out of the table announces it, so a session two
+    /// clients close at once, or one the unwatched sweep closes as a client does, is announced
+    /// once. `NoSuchSession` when it was already gone.
     pub async fn end_session(
         &self,
         session: SessionId,
@@ -167,6 +167,29 @@ impl Daemon {
             let _sent = self.events.send(slopty_proto::WorkerMsg::Items(delta));
         }
         closed
+    }
+}
+
+/// How often the exited sessions are checked for a viewer. The bound is a day, so ten minutes
+/// late is nothing.
+const EXIT_SWEEP: std::time::Duration = std::time::Duration::from_mins(10);
+
+/// Close the exited sessions nobody has watched for [`slopty_worker::manager::EXITED_UNWATCHED`],
+/// until the daemon stops.
+async fn close_stale_exits(daemon: Daemon) -> ! {
+    let mut sweep = tokio::time::interval(EXIT_SWEEP);
+    sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        sweep.tick().await;
+        let now = std::time::Instant::now();
+        let after = slopty_worker::manager::EXITED_UNWATCHED;
+        for session in daemon.worker.stale_exits(now, after).await {
+            tracing::info!(%session, "closing an exited session nobody watched for a day");
+            match daemon.end_session(session, CloseReason::Exited, ClientId::nil()).await {
+                Ok(()) | Err(WorkerError::NoSuchSession) => {}
+                Err(e) => tracing::warn!(%session, error = %e, "closing an exited session"),
+            }
+        }
     }
 }
 
@@ -304,32 +327,24 @@ async fn main() -> Result<()> {
     // Agents the hooks never report: the foreground process, the title, the transcript.
     tokio::spawn(agents::watch(daemon.clone()));
 
-    // A terminal ends with its program: the viewers see the exit status, then the session is
-    // closed and announced like a close. Programs that exited while this daemon was down end
-    // here too, before the server hears of them.
-    for summary in daemon.worker.summaries().await {
-        if let SessionState::Exited { status } = summary.state {
-            tracing::info!(session = %summary.id, status, "ended while the daemon was down");
-            if let Err(e) =
-                daemon.end_session(summary.id, CloseReason::Exited, ClientId::nil()).await
-            {
-                tracing::warn!(session = %summary.id, error = %e, "closing an ended session");
-            }
-        }
-    }
+    // A terminal whose program exits stays, its last screen and its status kept, until a client
+    // closes it (`docs/decisions/terminal.md`, "An exited shell stays until it is closed"). The
+    // exit reaches the viewers on the session stream and everyone else as the session's changed
+    // summary. Nobody watching it for `EXITED_UNWATCHED` closes it here.
     if let Some(mut exits) = daemon.worker.take_exits() {
         let daemon = daemon.clone();
         tokio::spawn(async move {
             while let Some((session, status)) = exits.recv().await {
                 tracing::info!(%session, status, "child exited");
                 daemon.worker.on_exit(session, status);
-                match daemon.end_session(session, CloseReason::Exited, ClientId::nil()).await {
-                    Ok(()) | Err(WorkerError::NoSuchSession) => {}
-                    Err(e) => tracing::warn!(%session, error = %e, "closing an exited session"),
+                let summaries = daemon.worker.summaries().await;
+                if let Some(summary) = summaries.into_iter().find(|s| s.id == session) {
+                    let _sent = daemon.events.send(slopty_proto::WorkerMsg::SessionOpened(summary));
                 }
             }
         });
     }
+    tokio::spawn(close_stale_exits(daemon.clone()));
 
     let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
     // Sessions (and the `slopty hook` relay inside them) find this daemon through its socket.

@@ -19,7 +19,7 @@ use slopty_proto::handshake::{Caps, HelloAck};
 use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::items::ItemSync;
 use slopty_proto::screen::{Feedback, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest};
-use slopty_proto::terminal::{CloseReason, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{CloseReason, SessionState, TermEvent, TermRequest, TermSize};
 use slopty_proto::transfer::{ClipMsg, Dest, XferMsg};
 use slopty_worker::WorkerError;
 use slopty_worker::clip::Paste;
@@ -139,7 +139,9 @@ struct Asked {
 /// has (in the `HelloAck`, the first snapshot or a resync) is not sent to it twice.
 #[derive(Debug, Default)]
 struct Heard {
-    sessions: HashSet<SessionId>,
+    /// Each session told of, in the state it was told in: a summary in another state (the
+    /// program exited) is news.
+    sessions: HashMap<SessionId, SessionState>,
     /// The item registry version of the last snapshot sent: deltas up to it are in it.
     items_floor: u64,
 }
@@ -148,7 +150,9 @@ impl Heard {
     /// Whether `msg` still tells the client something; what it tells is noted either way.
     fn admit(&mut self, msg: &WorkerMsg) -> bool {
         match msg {
-            WorkerMsg::SessionOpened(summary) => self.sessions.insert(summary.id),
+            WorkerMsg::SessionOpened(summary) => {
+                self.sessions.insert(summary.id, summary.state) != Some(summary.state)
+            }
             WorkerMsg::SessionClosed { session, .. } => {
                 self.sessions.remove(session);
                 true
@@ -203,8 +207,10 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         caps: Caps::empty(),
         sessions: daemon.worker.summaries().await,
     };
-    let mut heard =
-        Heard { sessions: ack.sessions.iter().map(|s| s.id).collect(), ..Heard::default() };
+    let mut heard = Heard {
+        sessions: ack.sessions.iter().map(|s| (s.id, s.state)).collect(),
+        ..Heard::default()
+    };
     let mut greeting = vec![WorkerMsg::HelloAck(ack), WorkerMsg::Items(daemon.items.snapshot())];
     // Collected first: the locks must not be held across the sends.
     let agents = daemon.agents.lock().snapshot();
@@ -434,7 +440,8 @@ async fn resync(
     let now: HashSet<SessionId> = summaries.iter().map(|s| s.id).collect();
     let mut msgs: Vec<WorkerMsg> = heard
         .sessions
-        .difference(&now)
+        .keys()
+        .filter(|session| !now.contains(session))
         // Why each ended was among what was missed.
         .map(|&session| WorkerMsg::SessionClosed { session, reason: CloseReason::Exited })
         .collect();
@@ -1023,7 +1030,7 @@ impl Peer<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
     use slopty_core::{ClientId, ItemId, SessionId};
     use slopty_net::WorkerMsg;
@@ -1064,7 +1071,8 @@ mod tests {
     #[test]
     fn an_event_the_greeting_carried_is_not_told_again() {
         let (told, new) = (SessionId::new(), SessionId::new());
-        let mut heard = Heard { sessions: HashSet::from([told]), ..Heard::default() };
+        let mut heard =
+            Heard { sessions: HashMap::from([(told, SessionState::Running)]), ..Heard::default() };
         let snapshot = WorkerMsg::Items(ItemSync::Snapshot { version: 5, items: Vec::new() });
         assert!(heard.admit(&snapshot));
 
@@ -1073,9 +1081,16 @@ mod tests {
         assert!(heard.admit(&delta(6)));
         assert!(heard.admit(&opened(new)));
         assert!(!heard.admit(&opened(new)), "told once");
+        let mut exited = opened(new);
+        if let WorkerMsg::SessionOpened(summary) = &mut exited {
+            summary.state = SessionState::Exited { status: 3 };
+        }
+        assert!(heard.admit(&exited), "its program exited: the new state is news");
+        assert!(!heard.admit(&exited), "and told once");
         let closed = WorkerMsg::SessionClosed { session: told, reason: CloseReason::Exited };
         assert!(heard.admit(&closed));
-        assert_eq!(heard.sessions, HashSet::from([new]));
+        let exited = SessionState::Exited { status: 3 };
+        assert_eq!(heard.sessions, HashMap::from([(new, exited)]));
     }
 
     /// A paste holds only the window it went to, in order; another window's input goes on, and a

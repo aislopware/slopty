@@ -564,7 +564,7 @@ fn the_width_keys_resize_the_column_and_its_grid(cx: &mut TestAppContext) {
     };
     let strip = f32::from(cx.debug_bounds("strip").unwrap().size.width);
     let half = width(cx);
-    assert!((half - 8.0_f32.mul_add(-3.0, strip) / 2.0).abs() < 2.0, "half the strip: {half}");
+    assert!((half - strip / 2.0).abs() < 2.0, "half the strip, edge to edge: {half}");
     let half_cols = cols(cx);
     cx.simulate_keystrokes("cmd-r");
     cx.run_until_parked();
@@ -1215,7 +1215,7 @@ fn the_worker_list_goes_to_a_worker(cx: &mut TestAppContext) {
                 .collect::<Vec<_>>()
         })
     });
-    assert_eq!(lines, Some(vec![("Go to studio".to_owned(), "connected".to_owned())]));
+    assert_eq!(lines, Some(vec![("Go to studio".to_owned(), String::new())]), "up: no word");
     studio.drain();
     view.update_in(cx, |v, _w, cx| v.go_to_worker(studio.key, cx));
     cx.run_until_parked();
@@ -1250,4 +1250,5 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
 mod frame;
 mod palette;
 mod remote;
+mod strip_marks;
 mod tiles;

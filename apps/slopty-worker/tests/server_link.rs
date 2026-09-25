@@ -18,12 +18,12 @@ mod tests {
         ErrorCode, Input, Outcome, Size, TermRef, Verb, WaitUntil, Waited,
     };
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer};
-    use slopty_proto::terminal::CloseReason;
+    use slopty_proto::terminal::{CloseReason, SessionState};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
 
     const STEP: Duration = Duration::from_secs(20);
-    /// From `exit` typed to the worker announcing the session's end: ptyd reaps the child and
+    /// From `exit` typed to the worker announcing the exit: ptyd reaps the child and
     /// tells the worker at once, so this is slack for a loaded machine, not a wait.
     const EXIT_BOUND: Duration = Duration::from_secs(5);
 
@@ -306,8 +306,8 @@ mod tests {
         assert_eq!(again.worker, worker);
         assert!(again.sessions.iter().any(|s| s.id == term.session), "{:?}", again.sessions);
 
-        // A shell that exits on its own is announced as exited, once, without a verb closing
-        // it.
+        // A shell that exits on its own is announced as exited and stays, its last screen still
+        // readable, until a verb closes it.
         let mut sized = open(worker, dir.path());
         if let Verb::OpenTerminal { size, .. } = &mut sized {
             *size = Some(Size { cols: 90, rows: 20 });
@@ -323,10 +323,17 @@ mod tests {
             peer.ask(Verb::SendInput { term: quitter, input: text("exit\n") }).await,
             Outcome::Done
         );
-        let exited = |m: &ToServer| matches!(m, ToServer::SessionClosed { session, reason: CloseReason::Exited } if *session == quitter.session);
+        let exited = |m: &ToServer| matches!(m, ToServer::SessionOpened(s) if s.id == quitter.session && matches!(s.state, SessionState::Exited { .. }));
         tokio::time::timeout(EXIT_BOUND, peer.heard(exited))
             .await
             .expect("the exit is announced within the bound");
+        let kept = peer.ask(Verb::ReadScreen { term: quitter }).await;
+        assert!(matches!(kept, Outcome::Screen(_)), "the last screen is kept: {kept:?}");
+        assert_eq!(peer.ask(Verb::Close { term: quitter }).await, Outcome::Done);
+        peer.heard(|m| {
+            matches!(m, ToServer::SessionClosed { session, reason: CloseReason::Requested } if *session == quitter.session)
+        })
+        .await;
         let gone = peer.ask(Verb::ReadScreen { term: quitter }).await;
         assert!(
             matches!(gone, Outcome::Error { code: ErrorCode::UnknownTerminal, .. }),

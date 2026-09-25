@@ -1,10 +1,12 @@
 //! The navigator: what is there and where it runs, down the left of the strip.
 //!
 //! Three sections, in this order. *Needs you* appears only while an agent waits on the human.
-//! *Workers* has one row per worker, with its link's state and round trip, disclosing its
-//! tiles. *Workspaces* names each workspace with its count of tiles. A row flies the camera to
-//! what it names. It never brings back a host switcher: every worker's tiles stay in the one
-//! workspace, and the navigator only lists them.
+//! *Workers* has one row per worker, disclosing its tiles. A worker whose link is up shows only
+//! its round trip; one that is not shows a mark and a word for what is wrong. Its tiles come
+//! in order of attention: what needs the human, then what finished unseen, then what is
+//! working, then the rest, each class in reading order. *Workspaces* names each workspace with
+//! its count of tiles. A row flies the camera to what it names. It never brings back a host
+//! switcher: every worker's tiles stay in the one workspace, and the navigator only lists them.
 //!
 //! On a window wide enough it docks beside the strip, 248 pt by default, dragged from 200 to
 //! 400 by the handle on its right edge; ⌘B shows or hides it, and both are kept with the
@@ -85,17 +87,46 @@ pub(super) fn rtt_label(rtt: std::time::Duration) -> String {
     if ms < 10.0 { format!("{ms:.1} ms") } else { format!("{ms:.0} ms") }
 }
 
-/// A worker's link as a status mark: up is done, on its way up is working, anything else is
-/// away.
-pub(super) const fn worker_status(status: &WorkerStatus) -> Status {
+/// A worker's link where it is not simply up: a mark and a short word. A link that is up
+/// shows neither, so a list of workers that are fine is a list of names; the word says what
+/// is wrong only when something is.
+pub(super) const fn worker_health(status: &WorkerStatus) -> Option<(Status, &'static str)> {
     match status {
-        WorkerStatus::Connected => Status::Done,
-        WorkerStatus::Connecting => Status::Working,
-        WorkerStatus::Silent(_)
-        | WorkerStatus::Reconnecting(_)
-        | WorkerStatus::Unreachable
-        | WorkerStatus::Gone => Status::Away,
+        WorkerStatus::Connected => None,
+        WorkerStatus::Connecting => Some((Status::Working, "connecting")),
+        WorkerStatus::Silent(_) => Some((Status::Away, "silent")),
+        WorkerStatus::Reconnecting(_) => Some((Status::Away, "reconnecting")),
+        WorkerStatus::Unreachable => Some((Status::Away, "unreachable")),
+        WorkerStatus::Gone => Some((Status::Away, "gone")),
     }
+}
+
+/// Where a tile's row stands among its worker's: what needs the human first, then what
+/// finished or has news not yet seen, then what is working, then the rest.
+pub(super) const fn attention(status: Option<Status>, unseen: bool) -> u8 {
+    match status {
+        Some(Status::NeedsYou) => 0,
+        _ if unseen => 1,
+        Some(Status::Done | Status::Failed) => 1,
+        Some(Status::Working) => 2,
+        Some(Status::Idle | Status::Away) | None => 3,
+    }
+}
+
+/// The unseen dot on the edge of a row's status lane: something ended there while the human
+/// was elsewhere. `ring` is the row's own surface, so the dot stands clear of the mark.
+pub(super) fn unseen_dot(theme: &Theme, selector: String, ring: slopty_theme::Rgb) -> Div {
+    let s = &theme.surfaces;
+    div()
+        .debug_selector(move || selector)
+        .absolute()
+        .top_0()
+        .right_0()
+        .size(px(theme.spacing.xs + theme.spacing.xxs))
+        .rounded_full()
+        .border_1()
+        .border_color(hsla(ring))
+        .bg(hsla(s.accent))
 }
 
 /// One row of a list in the frame: the navigator's and the inbox's. A tab stop named `label`;
@@ -305,8 +336,9 @@ impl WorkspaceView {
             sections.extend(waiting.into_iter().map(|w| self.waiting_row("nav", w, cx)));
         }
         sections.push(heading(theme, "nav-workers", "Workers").into_any_element());
+        let order = self.reading_order();
         for key in self.workers.keys() {
-            sections.extend(self.worker_rows(*key, cx));
+            sections.extend(self.worker_rows(*key, &order, cx));
         }
         sections.push(heading(theme, "nav-workspaces", "Workspaces").into_any_element());
         sections.extend(self.workspace_rows(cx));
@@ -453,25 +485,31 @@ impl WorkspaceView {
             label,
             false,
         )
-        .child(status_mark(theme, Some(Status::NeedsYou)))
+        .child(status_mark(theme, Some(Status::NeedsYou), 1.0))
         .child(title(what, hsla(s.text)))
         .child(caption(theme, worker))
         .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_waiting(waiting, cx)))
         .into_any_element()
     }
 
-    /// A worker's row, and its tiles' rows beneath it unless it is folded.
-    fn worker_rows(&self, key: WorkerKey, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
+    /// A worker's row, and its tiles' rows beneath it unless it is folded. `order` is every
+    /// tile in reading order.
+    fn worker_rows(
+        &self,
+        key: WorkerKey,
+        order: &[TileRef],
+        cx: &Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let Some(w) = self.workers.get(&key) else { return Vec::new() };
         let folded = self.nav.folded.contains(&key);
-        let status = worker_status(&w.status);
-        let rtt = w.rtt.filter(|_| w.status.is_up()).map(rtt_label);
+        let health = worker_health(&w.status);
+        let rtt = w.rtt.filter(|_| health.is_none()).map(rtt_label);
         let label = SharedString::from(format!(
-            "{}, {}{}",
+            "{}{}{}",
             w.name,
-            w.status.text(),
+            health.map(|(_, word)| format!(", {word}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
         let chevron = if folded { IconName::ChevronRight } else { IconName::ChevronDown };
@@ -483,9 +521,10 @@ impl WorkspaceView {
             false,
         )
         .child(icon(theme, chevron, IconSize::Inline, hsla(s.text_muted)))
-        .child(status_mark(theme, Some(status)))
         .child(title(w.name.clone(), hsla(s.text)))
+        .children(health.map(|(_, word)| caption(theme, word)))
         .children(rtt.map(|rtt| caption(theme, rtt)))
+        .child(status_mark(theme, health.map(|(mark, _)| mark), 1.0))
         .on_click(cx.listener(move |this, _ev, _w, cx| {
             if !this.nav.folded.remove(&key) {
                 this.nav.folded.insert(key);
@@ -498,18 +537,37 @@ impl WorkspaceView {
             return rows;
         }
         let focused = self.focused();
-        for tile in self.layout.tiles().filter(|t| t.worker == key) {
-            let Some(item) = w.doc.get(tile.item) else { continue };
+        let mut tiles: Vec<(u8, TileRef, &Item, Option<Status>, bool)> = order
+            .iter()
+            .filter(|t| t.worker == key)
+            .filter_map(|&tile| {
+                let item = w.doc.get(tile.item)?;
+                let mark = self.tile_status(tile, item, cx);
+                let unwatched = match item.kind {
+                    ItemKind::Terminal { session } => self.finished.contains_key(&session),
+                    _ => false,
+                };
+                let unseen = unwatched && !matches!(mark, Some(Status::Working | Status::NeedsYou));
+                Some((attention(mark, unseen), tile, item, mark, unseen))
+            })
+            .collect();
+        // Stable: within a class the tiles keep their reading order.
+        tiles.sort_by_key(|(class, ..)| *class);
+        for (_, tile, item, mark, unseen) in tiles {
             let name = self.card_title(tile, item, cx);
             let selected = focused == Some(tile);
-            let mark = self.tile_status(tile, item, cx);
-            let label = match mark {
-                Some(mark) => format!("{name}, {}", mark.label()),
-                None => name.clone(),
-            };
+            let label = [Some(name.as_str()), mark.map(Status::label), unseen.then_some("unseen")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
             let kind = kind_icon(item, self.runs_agent(item));
             let ink = if selected { s.text } else { s.text_secondary };
             let id = tile.item.as_uuid();
+            let ring = if selected { s.overlay } else { s.panel };
+            let lane = status_mark(theme, mark, 1.0)
+                .relative()
+                .children(unseen.then(|| unseen_dot(theme, format!("nav-unseen-{id}"), ring)));
             rows.push(
                 row(
                     theme,
@@ -521,7 +579,7 @@ impl WorkspaceView {
                 .pl(px(theme.spacing.xl))
                 .child(icon(theme, kind, IconSize::Inline, hsla(s.text_muted)))
                 .child(title(name, hsla(ink)))
-                .child(status_mark(theme, mark))
+                .child(lane)
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_tile(tile, cx)))
                 .into_any_element(),
             );

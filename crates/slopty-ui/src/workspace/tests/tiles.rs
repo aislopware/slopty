@@ -103,9 +103,25 @@ fn the_worker_chip_shows_only_beside_another_worker(cx: &mut TestAppContext) {
     assert!(nodes.iter().any(|n| n.is("Label", Some("studio"))), "{nodes:#?}");
 }
 
-/// The focused tile's header is its body's surface; another tile's steps up to the panel.
+/// The quads painted at `bounds` (points), as the window drew them (device pixels).
+fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Quad> {
+    let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+    let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
+    quads
+        .into_iter()
+        .filter(|q| {
+            near(q.bounds.origin.x.0, bounds.origin.x)
+                && near(q.bounds.origin.y.0, bounds.origin.y)
+                && near(q.bounds.size.width.0, bounds.size.width)
+                && near(q.bounds.size.height.0, bounds.size.height)
+        })
+        .collect()
+}
+
+/// Panes sit flush: no tile is rounded or framed, the focused one included, and every header
+/// lies on its body's surface with one hairline under it.
 #[gpui::test]
-fn a_focused_header_shares_its_body_surface(cx: &mut TestAppContext) {
+fn tiles_have_no_frame_or_corner_and_headers_sit_on_their_bodies(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
@@ -113,21 +129,117 @@ fn a_focused_header_shares_its_body_surface(cx: &mut TestAppContext) {
     assert_eq!(focused(&view, cx), Some(second));
     cx.run_until_parked();
     let panel = gpui::Background::from(crate::colors::hsla(Theme::default().surfaces.panel));
-    let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-    let first_header = cx.debug_bounds(selector("title", first.item)).expect("drawn");
-    let second_header = cx.debug_bounds(selector("title", second.item)).expect("drawn");
-    let on_panel = |header: Bounds<Pixels>| {
-        let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
-        quads.iter().any(|q| {
-            near(q.bounds.origin.x.0, header.origin.x)
-                && near(q.bounds.origin.y.0, header.origin.y)
-                && near(q.bounds.size.width.0, header.size.width)
-                && near(q.bounds.size.height.0, header.size.height)
-                && q.background == panel
-        })
+    for tile in [first, second] {
+        let bounds = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
+        let quads = quads_at(cx, bounds);
+        assert!(!quads.is_empty(), "the tile paints its surface");
+        for q in &quads {
+            let r = q.corner_radii;
+            let w = q.border_widths;
+            assert!(
+                [r.top_left, r.top_right, r.bottom_left, r.bottom_right].iter().all(|c| c.0 == 0.0),
+                "a square tile: {q:?}"
+            );
+            assert!(
+                [w.top, w.right, w.bottom, w.left].iter().all(|b| b.0 == 0.0),
+                "no frame: {q:?}"
+            );
+        }
+        let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
+        let quads = quads_at(cx, header);
+        assert!(quads.iter().all(|q| q.background != panel), "on the body's surface");
+        assert!(quads.iter().any(|q| q.border_widths.bottom.0 > 0.0), "a hairline under it");
+    }
+}
+
+/// One divider between each pair of neighbours: a tile draws it on its right edge where a
+/// column follows and on its bottom edge where a tile is stacked below, and nowhere else.
+#[gpui::test]
+fn a_divider_runs_only_between_neighbours(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let [(_, first), (_, second), (_, third)] = three_shells(&view, cx, &fake);
+    cx.simulate_keystrokes("cmd-[");
+    cx.run_until_parked();
+    assert_eq!(column_of(&view, cx, third), column_of(&view, cx, second), "stacked");
+    let drawn = |cx: &mut VisualTestContext, part: &str, tile: TileRef| {
+        cx.debug_bounds(selector(part, tile.item)).is_some()
     };
-    assert!(on_panel(first_header), "an unfocused header sits on the panel");
-    assert!(!on_panel(second_header), "the focused one is its body's surface");
+    assert!(drawn(cx, "divider-right", first), "a column follows the first");
+    assert!(!drawn(cx, "divider-below", first));
+    assert!(!drawn(cx, "divider-right", second), "the last column: nothing to its right");
+    assert!(drawn(cx, "divider-below", second), "the third is below it");
+    assert!(!drawn(cx, "divider-right", third) && !drawn(cx, "divider-below", third));
+
+    let border = gpui::Background::from(crate::colors::hsla(Theme::default().surfaces.border));
+    let line = cx.debug_bounds(selector("divider-below", second.item)).expect("drawn");
+    assert!((f32::from(line.size.height) - 1.0).abs() < 0.01, "a hairline");
+    assert!(quads_at(cx, line).iter().any(|q| q.background == border), "in the border colour");
+}
+
+/// The focused tile is left alone and the others lie under the canvas colour, a quad over
+/// the body and not an opacity; a tile alone in view is never veiled.
+#[gpui::test]
+fn unfocused_bodies_are_veiled_and_a_lone_tile_is_not(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let lone = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    assert!(cx.debug_bounds(selector("veil", lone.item)).is_none(), "alone: no veil");
+    let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(lone, cx));
+    cx.run_until_parked();
+    let veil = cx.debug_bounds(selector("veil", second.item)).expect("the other tile is veiled");
+    let body = cx.debug_bounds(selector("title", second.item)).expect("drawn");
+    assert!(veil.top() >= body.bottom(), "over the body, not the header");
+    let theme = Theme::default();
+    let wash = gpui::Background::from(crate::colors::hsla_alpha(
+        theme.surfaces.canvas,
+        slopty_theme::alpha::FAINT,
+    ));
+    assert!(quads_at(cx, veil).iter().any(|q| q.background == wash), "canvas at FAINT");
+    assert!(cx.debug_bounds(selector("veil", lone.item)).is_none(), "the focused one is not");
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(second, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("veil", lone.item)).is_some(), "the veil follows the focus");
+    assert!(cx.debug_bounds(selector("veil", second.item)).is_none());
+}
+
+/// A tile whose agent waits on the human carries a warn bar along the top of its header, and
+/// no outline.
+#[gpui::test]
+fn a_tile_that_needs_you_has_a_warn_bar_on_its_header(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let agent = SessionId::new();
+    let waiting = opens(&view, cx, &fake, agent, fake.me, 1);
+    let other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    assert!(cx.debug_bounds(selector("attention", waiting.item)).is_none(), "not yet");
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(
+            AgentEvent {
+                session: agent,
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
+                agent_session: None,
+                detail: None,
+                attention: false,
+                source: AgentSource::Hook,
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let bar = cx.debug_bounds(selector("attention", waiting.item)).expect("the bar");
+    let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
+    assert_eq!(bar.top(), header.top(), "along the top");
+    assert_eq!(bar.size.width, header.size.width);
+    assert!((f32::from(bar.size.height) - 2.0).abs() < 0.01, "2 pt");
+    let warn = gpui::Background::from(crate::colors::hsla(Theme::default().surfaces.warn));
+    assert!(quads_at(cx, bar).iter().any(|q| q.background == warn));
+    assert!(cx.debug_bounds(selector("attention", other.item)).is_none(), "only on that one");
+    let tile = cx.debug_bounds(selector("item", waiting.item)).expect("drawn");
+    assert!(quads_at(cx, tile).iter().all(|q| q.border_widths.left.0 == 0.0), "no outline");
 }
 
 /// One mark says how each tile is doing: its agent's state, a shell's failed last command,
@@ -137,8 +249,8 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let (agent, shell) = (SessionId::new(), SessionId::new());
-    opens(&view, cx, &fake, agent, fake.me, 1);
-    opens(&view, cx, &fake, shell, fake.me, 2);
+    let agent_tile = opens(&view, cx, &fake, agent, fake.me, 1);
+    let shell_tile = opens(&view, cx, &fake, shell, fake.me, 2);
     assert!(marks(cx).iter().all(|m| m != "Needs you" && m != "Failed"), "nothing to say yet");
 
     view.update_in(cx, |v, _w, cx| {
@@ -166,8 +278,17 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
     view.update_in(cx, |v, _w, cx| {
         v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
     });
-    let drawn = marks(cx);
-    assert_eq!(drawn.iter().filter(|m| *m == "Away").count(), 2, "both are away: {drawn:?}");
+    let nodes = tree(cx);
+    let headers: Vec<Bounds<Pixels>> = [agent_tile, shell_tile]
+        .iter()
+        .filter_map(|t| cx.debug_bounds(selector("title", t.item)))
+        .collect();
+    let in_a_header = |n: &crate::a11y::Node| {
+        let [x, y, ..] = n.bounds;
+        headers.iter().any(|h| h.contains(&point(px(x), px(y))))
+    };
+    let away = nodes.iter().filter(|n| n.is("Image", Some("Away")) && in_a_header(n)).count();
+    assert_eq!(away, 2, "both headers say away: {nodes:#?}");
 }
 
 /// Close and fullscreen on the header do what ⌘W and ⌃⌘F do to their tile.
@@ -259,6 +380,73 @@ fn an_exited_shell_offers_restart_and_close(cx: &mut TestAppContext) {
         "{sent:?}"
     );
     assert!(!view.read_with(cx, |v, _| v.layout().contains(tile)), "the old tile goes");
+}
+
+/// A shell whose program exits keeps its tile, its last screen and the pill until the human
+/// closes it: nothing is sent to the worker until then, and Close then takes the tile off and
+/// the session after the undo window, as ⌘W does.
+#[gpui::test]
+fn an_exited_shell_stays_until_it_is_closed(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &fake, session, fake.me, 1);
+    view.update_in(cx, |v, _w, cx| {
+        v.term_event(session, frame(&["$ exit 1"]), cx);
+        v.term_event(session, TermEvent::Exited { status: 1 }, cx);
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(UNDO_CLOSE);
+    cx.run_until_parked();
+    let closes = |sent: &[ClientMsg]| {
+        sent.iter()
+            .filter(|m| matches!(m, ClientMsg::Term { session: s, req: TermRequest::Close } if *s == session))
+            .count()
+    };
+    assert_eq!(closes(&fake.drain()), 0, "the exit alone closes nothing");
+    assert!(view.read_with(cx, |v, _| v.layout().contains(tile)), "the tile stays");
+    assert!(view.read_with(cx, |v, _| v.terminal(session).is_some()), "with its screen");
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Status", Some("Exited · code 1"))), "{nodes:#?}");
+    assert!(cx.debug_bounds(selector("restart", tile.item)).is_some(), "Restart is offered");
+
+    click(cx, selector("close-ended", tile.item));
+    let sent = fake.drain();
+    assert!(
+        sent.iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Remove(i)) if *i == tile.item)),
+        "Close takes the tile off at once: {sent:?}"
+    );
+    assert!(cx.debug_bounds("close-confirm").is_none(), "an exited shell does not ask");
+    cx.executor().advance_clock(UNDO_CLOSE);
+    cx.run_until_parked();
+    assert_eq!(closes(&fake.drain()), 1, "and the worker closes the session after the undo");
+}
+
+/// A shell scrolled up into its history shows how many lines are below at the body's foot;
+/// once its program exits, the tile's `Exited` pill takes that place and the count goes.
+#[gpui::test]
+fn the_exited_pill_takes_the_place_of_the_lines_below(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &fake, session, fake.me, 1);
+    let TermEvent::Frame(screen) = frame(&["$ make", "built", "$"]) else { panic!("a frame") };
+    let with_history = Frame { first_visible_line: LineIndex(40), total_lines: 43, ..screen };
+    view.update_in(cx, |v, _w, cx| {
+        v.term_event(session, TermEvent::Frame(with_history), cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    assert!(terminal_focused(&view, cx, session));
+    cx.simulate_keystrokes("shift-pageup");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("lines-below").is_some(), "scrolled up: the count shows");
+    assert!(cx.debug_bounds(selector("state", tile.item)).is_none());
+
+    view.update_in(cx, |v, _w, cx| v.term_event(session, TermEvent::Exited { status: 0 }, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("state", tile.item)).is_some(), "the tile's pill");
+    assert!(cx.debug_bounds("lines-below").is_none(), "in the count's place");
 }
 
 /// Notices stack in the strip's bottom-right corner, no wider than 400 pt, two at most (a

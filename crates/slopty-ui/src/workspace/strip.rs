@@ -31,12 +31,27 @@ const DRAG_SLOP: f32 = 4.0;
 /// How much pinch it takes to open or close the overview.
 const PINCH_STEP: f32 = 0.15;
 
+/// The resize handle's width, centred on the divider it drags so either side of the line
+/// takes the press.
+const HANDLE_W: f32 = 6.0;
+
+/// One hairline: the divider a tile draws inside its right edge, and the accent line a
+/// handle lays over it.
+const HAIRLINE: f32 = 1.0;
+
+/// The line that marks where a drop opens a new column or workspace.
+const DROP_LINE: f32 = 2.0;
+
+/// The group every resize handle belongs to, so its line lights while the pointer is on it.
+const HANDLE_GROUP: &str = "column-divider";
+
 /// The pointer in progress over the strip.
 pub(super) enum Drag {
     /// A header pressed: a move once it travels [`DRAG_SLOP`].
     Move { tile: TileRef, grab: Point<Pixels>, moving: bool, target: Option<DropTarget> },
-    /// The gap right of a column pressed.
+    /// The divider right of `column` pressed.
     Resize {
+        column: usize,
         grab: Point<Pixels>,
         /// Every remote window's size before, to ask them to follow afterwards.
         before: Vec<(ItemId, (f32, f32))>,
@@ -99,7 +114,7 @@ impl WorkspaceView {
         self.tick();
         let before = self.column_sizes();
         if self.layout.resize_begin(column) {
-            self.drag = Some(Drag::Resize { grab: ev.position, before });
+            self.drag = Some(Drag::Resize { column, grab: ev.position, before });
             cx.notify();
         }
         cx.stop_propagation();
@@ -356,12 +371,13 @@ impl WorkspaceView {
         }
     }
 
-    /// Where a drop would land, drawn as a bar between columns or a wash over a column.
+    /// Where a drop would land: an accent line on the divider a new column or workspace would
+    /// open, or a faint accent wash over the column it would join. Neither has a corner or a
+    /// frame, since the panes they mark have none.
     fn drop_hint(&self, frame: &Frame) -> Option<gpui::AnyElement> {
         let Some(Drag::Move { moving: true, target: Some(target), .. }) = &self.drag else {
             return None;
         };
-        let gaps = self.layout.config().gaps * frame.zoom;
         let column = |ws: usize, col: usize| -> Option<Rect> {
             let rects: Vec<Rect> = frame
                 .tiles
@@ -374,47 +390,59 @@ impl WorkspaceView {
             let bottom = rects.iter().map(Rect::bottom).fold(f32::MIN, f32::max);
             Some(Rect { x, y, w: first.w, h: bottom - y })
         };
-        let rect = match *target {
-            DropTarget::IntoColumn { workspace, column: col, .. } => column(workspace, col)?,
+        let row = |ix: usize| frame.workspaces.iter().find(|(i, _)| *i == ix).map(|(_, r)| *r);
+        let accent = self.theme.surfaces.accent;
+        let (rect, ink) = match *target {
+            DropTarget::IntoColumn { workspace, column: col, .. } => {
+                (column(workspace, col)?, hsla_alpha(accent, alpha::FAINT))
+            }
             DropTarget::NewColumn { workspace, index } => {
-                // A bar centred in the gap the new column opens.
-                let bar = |centre: f32, r: Rect| Rect { x: centre - 1.5, y: r.y, w: 3.0, h: r.h };
+                // The line straddles the divider the new column opens.
+                let line =
+                    |x: f32, r: Rect| Rect { x: x - DROP_LINE / 2.0, y: r.y, w: DROP_LINE, h: r.h };
                 let before = index.checked_sub(1).and_then(|i| column(workspace, i));
                 match (column(workspace, index), before) {
-                    (Some(r), _) => bar(r.x - gaps / 2.0, r),
-                    (None, Some(r)) => bar(r.right() + gaps / 2.0, r),
-                    (None, None) => frame.workspaces.iter().find(|(i, _)| *i == workspace)?.1,
+                    (Some(r), _) => (line(r.x, r), hsla(accent)),
+                    (None, Some(r)) => (line(r.right(), r), hsla(accent)),
+                    // An empty workspace: the whole of it is the new column.
+                    (None, None) => (row(workspace)?, hsla_alpha(accent, alpha::FAINT)),
                 }
             }
             DropTarget::NewWorkspace { index } => {
-                let r = frame.workspaces.iter().find(|(i, _)| *i == index).map(|(_, r)| *r)?;
-                Rect { x: r.x, y: r.y - gaps, w: r.w, h: 3.0 }
+                // Midway down the free band between the workspace above and this one's name.
+                let r = row(index)?;
+                let above = index.checked_sub(1).and_then(row).map_or(0.0, |a| a.bottom());
+                let centre = f32::midpoint(above, r.y - self.theme.spacing.xl);
+                let rect = Rect { x: r.x, y: centre - DROP_LINE / 2.0, w: r.w, h: DROP_LINE };
+                (rect, hsla(accent))
             }
         };
-        let theme = &self.theme;
         Some(
             div()
+                .debug_selector(|| "drop-hint".to_owned())
                 .absolute()
                 .left(px(rect.x))
                 .top(px(rect.y))
                 .w(px(rect.w))
                 .h(px(rect.h))
-                .rounded(px(theme.radii.md))
-                .bg(hsla_alpha(theme.surfaces.accent, alpha::FAINT))
-                .border_1()
-                .border_color(hsla(theme.surfaces.accent))
+                .bg(ink)
                 .into_any_element(),
         )
     }
 
-    /// The handles on the gaps right of each column of the active workspace: a drag resizes
-    /// the column on its left.
+    /// A handle on the divider right of each column of the active workspace, straddling the
+    /// line: a drag resizes the column on its left. Its accent line lies over the divider while
+    /// the pointer is on it and while it is dragged.
     fn resize_handles(&self, frame: &Frame, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
         if frame.overview > 0.0 {
             return Vec::new();
         }
         let active = self.layout.active_workspace();
-        let gaps = self.layout.config().gaps;
+        let dragged = match self.drag {
+            Some(Drag::Resize { column, .. }) => Some(column),
+            _ => None,
+        };
+        let accent = hsla(self.theme.surfaces.accent);
         let mut columns: Vec<(usize, Rect)> = Vec::new();
         for p in frame.tiles.iter().filter(|p| p.pos.workspace == active && !p.hidden) {
             match columns.iter_mut().find(|(c, _)| *c == p.pos.column) {
@@ -430,15 +458,30 @@ impl WorkspaceView {
             .into_iter()
             .filter(|(_, r)| r.right() > 0.0 && r.right() < self.layout.viewport().0)
             .map(|(column, r)| {
-                div()
-                    .id(("gap", column))
-                    .debug_selector(move || format!("gap-{column}"))
+                // The divider is drawn inside the column's right edge; the line covers it.
+                let line = div()
+                    .debug_selector(move || format!("divider-line-{column}"))
                     .absolute()
-                    .left(px(r.right()))
+                    .top_0()
+                    .bottom_0()
+                    .left(px(HANDLE_W / 2.0 - HAIRLINE))
+                    .w(px(HAIRLINE));
+                let line = if dragged == Some(column) {
+                    line.bg(accent)
+                } else {
+                    line.group_hover(HANDLE_GROUP, move |st| st.bg(accent))
+                };
+                div()
+                    .id(("divider", column))
+                    .debug_selector(move || format!("divider-{column}"))
+                    .group(HANDLE_GROUP)
+                    .absolute()
+                    .left(px(r.right() - HANDLE_W / 2.0))
                     .top(px(r.y))
-                    .w(px(gaps))
+                    .w(px(HANDLE_W))
                     .h(px(r.h))
                     .cursor_ew_resize()
+                    .child(line)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
@@ -481,12 +524,14 @@ impl WorkspaceView {
         };
         let mut placed = Vec::new();
         let mut tiles = Vec::new();
+        let mut dividers = Vec::new();
         for p in &frame.tiles {
             if p.hidden || !(p.near || p.focused || dragged == Some(p.tile)) {
                 continue;
             }
             if let Some(el) = self.render_tile(p, chrome, window, cx) {
                 tiles.push(el);
+                dividers.extend(self.render_dividers(p));
                 let r = p.rect;
                 placed.push((
                     p.tile,
@@ -499,16 +544,14 @@ impl WorkspaceView {
         }
         self.placed = placed;
         self.drawn_focus = self.layout.focused();
-        let closing: Vec<gpui::AnyElement> = frame
-            .closing
-            .iter()
-            .map(|c| self.render_closing(c.rect, c.alpha, c.scale, frame.zoom))
-            .collect();
+        let closing: Vec<gpui::AnyElement> =
+            frame.closing.iter().map(|c| self.render_closing(c.rect, c.alpha, c.scale)).collect();
         let theme = &self.theme;
-        // In the overview each workspace is a tray the tiles sit on, a step off the canvas so
-        // the tiles' own edges still read on it, with its name above; an empty one (the one
-        // kept at the end for what comes next) is only its dashed outline, a place and not a
-        // blank slab, with a plus and its name inside to say what dropping there does.
+        // In the overview each workspace is one flush block of its panes in a single hairline
+        // frame, laid just outside the block so no pane covers it, with its name above; an
+        // empty one (the one kept at the end for what comes next) is only its dashed outline,
+        // a place and not a blank slab, with a plus and its name inside to say what dropping
+        // there does. Nothing has a corner: the panes it holds have none.
         let backdrops: Vec<gpui::AnyElement> = if frame.overview > 0.0 {
             let workspaces = self.layout.workspaces();
             let active = self.layout.active_workspace();
@@ -522,18 +565,17 @@ impl WorkspaceView {
                     let tiles: usize = workspaces
                         .get(ix)
                         .map_or(0, |ws| ws.columns().iter().map(|c| c.tiles().len()).sum());
-                    let panel = div()
-                        .absolute()
-                        .left(px(r.x))
-                        .top(px(r.y))
-                        .w(px(r.w))
-                        .h(px(r.h))
-                        .rounded(px(theme.radii.md));
                     // The labels are chrome: drawn at the type scale whatever the zoom, so a
                     // name stays readable however many workspaces the overview fits.
                     if tiles == 0 {
                         let muted = hsla_alpha(s.text_muted, fade);
-                        let zone = panel
+                        let zone = div()
+                            .debug_selector(move || format!("overview-block-{ix}"))
+                            .absolute()
+                            .left(px(r.x))
+                            .top(px(r.y))
+                            .w(px(r.w))
+                            .h(px(r.h))
                             .border_1()
                             .border_dashed()
                             .border_color(hsla_alpha(s.text_muted, fade * alpha::TINT))
@@ -562,7 +604,16 @@ impl WorkspaceView {
                         let ink = if ix == active { s.text } else { s.text_secondary };
                         let count =
                             if tiles == 1 { "1 tile".to_owned() } else { format!("{tiles} tiles") };
-                        let tray = panel.bg(hsla_alpha(s.raised, fade)).into_any_element();
+                        let block = div()
+                            .debug_selector(move || format!("overview-block-{ix}"))
+                            .absolute()
+                            .left(px(r.x - HAIRLINE))
+                            .top(px(r.y - HAIRLINE))
+                            .w(px(2.0_f32.mul_add(HAIRLINE, r.w)))
+                            .h(px(2.0_f32.mul_add(HAIRLINE, r.h)))
+                            .border_1()
+                            .border_color(hsla_alpha(s.border, fade))
+                            .into_any_element();
                         let label = div()
                             .absolute()
                             .left(px(r.x))
@@ -592,7 +643,7 @@ impl WorkspaceView {
                                     .text_color(hsla_alpha(s.text_muted, fade))
                                     .child(SharedString::from(count)),
                             );
-                        vec![tray, label.into_any_element()]
+                        vec![block, label.into_any_element()]
                     }
                 })
                 .collect()
@@ -634,6 +685,7 @@ impl WorkspaceView {
             .children(backdrops)
             .children(closing)
             .children(tiles)
+            .children(dividers)
             .children(handles)
             .children(hint)
             .children(empty)
@@ -642,8 +694,8 @@ impl WorkspaceView {
 
     /// An empty workspace: a large muted mark and what this is, then the three ways to begin,
     /// each with its key cap (a key cap teaches the chord where the chord is the way in), the
-    /// first the accented one, then the workers with how they are doing. With no worker there
-    /// is nothing to open, and the page says where one comes from.
+    /// first the accented one, then the workers, each marked only where its link is not up. With
+    /// no worker there is nothing to open, and the page says where one comes from.
     fn render_empty(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -698,11 +750,16 @@ impl WorkspaceView {
                 );
             let workers = self.workers.iter().enumerate().map(|(ix, (key, w))| {
                 let key = *key;
+                let health = super::navigator::worker_health(&w.status);
+                let label = match health {
+                    Some((_, word)) => format!("{}, {word}", w.name),
+                    None => w.name.clone(),
+                };
                 let row = div()
                     .id(("empty-worker", ix))
                     .debug_selector(move || format!("empty-worker-{ix}"))
                     .role(gpui::accesskit::Role::Button)
-                    .aria_label(SharedString::from(format!("{}, {}", w.name, w.status.text())))
+                    .aria_label(SharedString::from(label))
                     .w_full()
                     .px(px(spacing.md))
                     .py(px(spacing.xs))
@@ -713,10 +770,7 @@ impl WorkspaceView {
                     .cursor_pointer()
                     .hover(|st| st.bg(hsla(s.raised)))
                     .active(|st| st.bg(hsla(s.overlay)))
-                    .child(crate::icons::status_mark(
-                        theme,
-                        Some(super::navigator::worker_status(&w.status)),
-                    ))
+                    .child(crate::palette::icon_slot(theme, IconName::Server, muted))
                     .child(
                         div()
                             .flex_1()
@@ -727,13 +781,14 @@ impl WorkspaceView {
                             .text_color(hsla(s.text))
                             .child(SharedString::from(w.name.clone())),
                     )
-                    .child(
+                    .children(health.map(|(_, word)| {
                         div()
                             .flex_none()
                             .text_size(px(theme.typography.small()))
                             .text_color(muted)
-                            .child(SharedString::from(w.status.text())),
-                    );
+                            .child(word)
+                    }))
+                    .child(crate::icons::status_mark(theme, health.map(|(mark, _)| mark), 1.0));
                 crate::a11y::tab_stop(row, s.accent)
                     .on_click(cx.listener(move |this, _ev, _window, cx| this.go_to_worker(key, cx)))
                     .into_any_element()
@@ -802,18 +857,7 @@ impl WorkspaceView {
             .active(|st| st.bg(hsla(s.overlay)))
             .child(crate::palette::icon_slot(theme, icon, hsla(icon_ink)))
             .child(div().flex_1().text_color(hsla(ink)).child(label))
-            .child(
-                div()
-                    .flex_none()
-                    .px(px(spacing.xs))
-                    .rounded(px(theme.radii.xs))
-                    .border_1()
-                    .border_color(hsla(s.border))
-                    .bg(hsla(s.raised))
-                    .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_secondary))
-                    .child(SharedString::from(keys.to_owned())),
-            );
+            .child(crate::kit::key_cap(theme, keys.to_owned()));
         crate::a11y::tab_stop(row, s.accent)
     }
 }

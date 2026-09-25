@@ -248,17 +248,68 @@ pub fn open_url(url: &str) {
     }
 }
 
-/// Whether the system asks for motion to be reduced.
+/// How long [`reduce_motion`] trusts its last read of the system setting.
+pub const REDUCE_MOTION_FRESH: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether the system asks for motion to be reduced, as read at most [`REDUCE_MOTION_FRESH`]
+/// ago.
 ///
-/// Read fresh at each use rather than cached: both platforms let it change while the app runs, and
-/// the call is a property read. The canvas is what it governs — pan momentum and zoom settling are
-/// the only motion Slopty invents, and a person who turned this on wants the view where they put
-/// it rather than gliding there.
+/// The canvas and the terminal ask on every frame, so the answer is kept rather than asked of
+/// AppKit each time; a change in System Settings shows within a second. This crate does not
+/// watch the system's change notification, so a clock it is. The canvas is what the setting
+/// governs: pan momentum and zoom settling are the only motion Slopty invents, and a person
+/// who turned this on wants the view where they put it rather than gliding there.
+pub fn reduce_motion() -> bool {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    static KEPT: Kept = Kept::new();
+    let now = EPOCH.get_or_init(std::time::Instant::now).elapsed();
+    KEPT.get(now, REDUCE_MOTION_FRESH, system_reduce_motion)
+}
+
+/// A yes or no read from the system and trusted for a while, shared without a lock.
+struct Kept {
+    /// Nanoseconds after the caller's epoch of the last read; `u64::MAX` before the first.
+    read_at: std::sync::atomic::AtomicU64,
+    value: std::sync::atomic::AtomicBool,
+}
+
+impl Kept {
+    const fn new() -> Self {
+        Self {
+            read_at: std::sync::atomic::AtomicU64::new(u64::MAX),
+            value: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// The kept answer at `now` (time since the caller's epoch), or `read`'s when the kept one
+    /// is `fresh` old or older. Two threads racing past a stale answer both read and store the
+    /// same thing.
+    fn get(
+        &self,
+        now: std::time::Duration,
+        fresh: std::time::Duration,
+        read: fn() -> bool,
+    ) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let nanos = |d: std::time::Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        let now = nanos(now).min(u64::MAX.saturating_sub(1));
+        let read_at = self.read_at.load(Relaxed);
+        if read_at != u64::MAX && now.saturating_sub(read_at) < nanos(fresh) {
+            return self.value.load(Relaxed);
+        }
+        let value = read();
+        self.value.store(value, Relaxed);
+        self.read_at.store(now, Relaxed);
+        value
+    }
+}
+
+/// The setting as the system holds it now: one AppKit or UIKit property read.
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "ios")),
     expect(clippy::missing_const_for_fn, reason = "constant only off Apple platforms")
 )]
-pub fn reduce_motion() -> bool {
+fn system_reduce_motion() -> bool {
     #[cfg(target_os = "macos")]
     {
         objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
@@ -286,5 +337,53 @@ pub fn hardware_keyboard_attached() -> bool {
     #[cfg(not(target_os = "ios"))]
     {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
+
+    use super::Kept;
+
+    /// The answer is read once and kept until it is a whole `fresh` old, then read again.
+    #[test]
+    fn an_answer_is_kept_until_it_goes_stale() {
+        static READS: AtomicU32 = AtomicU32::new(0);
+        fn read() -> bool {
+            READS.fetch_add(1, Ordering::Relaxed).is_multiple_of(2)
+        }
+        let kept = Kept::new();
+        let fresh = Duration::from_secs(1);
+        let at = Duration::from_millis;
+        assert!(kept.get(at(5_000), fresh, read), "the first call reads");
+        assert!(kept.get(at(5_999), fresh, read), "kept");
+        assert_eq!(READS.load(Ordering::Relaxed), 1);
+        assert!(!kept.get(at(6_000), fresh, read), "a second on, read again");
+        assert_eq!(READS.load(Ordering::Relaxed), 2);
+    }
+
+    /// What one read of the system setting costs against one read of the kept answer; prints
+    /// the numbers MEASUREMENTS records (`cargo test -p slopty-platform --release --lib
+    /// reduce_motion -- --nocapture`). The kept answer is the system's.
+    #[test]
+    fn reduce_motion_is_kept_as_the_system_says() {
+        const READS: u32 = 100_000;
+        let time = |read: fn() -> bool| {
+            let started = Instant::now();
+            let mut on = 0_u32;
+            for _ in 0..READS {
+                on = on.wrapping_add(u32::from(std::hint::black_box(read())));
+            }
+            std::hint::black_box(on);
+            started.elapsed() / READS
+        };
+        let asked = time(super::system_reduce_motion);
+        let kept = time(super::reduce_motion);
+        println!(
+            "MEASURE reduce motion: asking the system {asked:?} a read, the kept answer {kept:?}"
+        );
+        assert_eq!(super::reduce_motion(), super::system_reduce_motion());
     }
 }

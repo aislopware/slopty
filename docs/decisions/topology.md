@@ -294,8 +294,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - A test sends the same calls to the server's endpoint and to `slopty mcp` dialled to that
     server, over one fake worker, and requires identical results.
 
-- ✅ **A terminal ends with its program** (2026-09-25). When a session's program exits, the worker
-  shows the viewers the exit status, then closes the session and announces
+- ✅ **Superseded 2026-09-25: a terminal ends with its program** (see terminal.md, "An exited
+  shell stays until it is closed": the exit is now announced as the session's summary in the
+  `Exited` state, and the session stays until a client or the unwatched bound closes it; the
+  exactly-once path below still holds for every close). When a session's program exits, the
+  worker shows the viewers the exit status, then closes the session and announces
   `SessionClosed { reason: Exited }` to its clients and the server. Before, only a verb or a
   client's close announced an end, so a shell that ran `exit` stayed listed on the server
   until the worker registered again. The app already closed a terminal on seeing its exit, so

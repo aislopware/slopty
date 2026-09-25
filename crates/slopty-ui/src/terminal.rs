@@ -12,7 +12,7 @@ pub use element::{CellMetrics, Prepared, TerminalElement};
 #[cfg(test)]
 pub(crate) use element::{captions_drawn, family_picks, rows_prepared};
 pub use view::{
-    ClearScreen, CloseFind, Copy, CopyLastOutput, FilesHook, Find, FindNext, FindPrev, LinkArrival,
-    NextPrompt, NoteLastBlock, Paste, PlacedImage, PrevPrompt, RerunLast, Selection, TOOK_MIN,
-    TerminalView, TerminalViewEvent, key_bindings, took_label,
+    BACK_TO_LIVE, ClearScreen, CloseFind, Copy, CopyLastOutput, FilesHook, Find, FindNext,
+    FindPrev, LinkArrival, NextPrompt, NoteLastBlock, Paste, PlacedImage, PrevPrompt, RerunLast,
+    Selection, TOOK_MIN, TerminalView, TerminalViewEvent, key_bindings, took_label,
 };

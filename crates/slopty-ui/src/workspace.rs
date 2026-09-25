@@ -430,9 +430,9 @@ impl Focusable for WorkspaceView {
     }
 }
 
-/// Whether the system asks for motion to be reduced, read afresh each frame so a change takes
-/// effect at once. Always false under test: an assertion about a spring must not turn on the
-/// machine's setting.
+/// Whether the system asks for motion to be reduced, as `slopty_platform` keeps it (read again
+/// at most once a second, so a change shows within one). Always false under test: an assertion
+/// about a spring must not turn on the machine's setting.
 fn reduced_motion() -> bool {
     !cfg!(test) && slopty_platform::reduce_motion()
 }

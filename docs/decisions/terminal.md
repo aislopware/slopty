@@ -1447,3 +1447,58 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `an_interactive_zsh_emits_prompt_marks`,
   `an_interactive_bash_emits_prompt_marks_and_runs_the_users_bashrc` and the fish one, each
   moving into `a b%`; engine `cwd_from_osc7` cases, including this machine's name.
+
+- ✅ **An exited shell stays until it is closed** (2026-09-25). The client sent `Close` the
+  moment its view heard `Exited`, and the worker daemon ended the session on the child's exit
+  by itself as well. So the tile's `Exited · code N` pill with Restart and Close showed for a
+  round trip, and a build that failed took its last screen with it. Warp, Orca and ghostty
+  keep a finished surface until the human closes it, and tmux does with `remain-on-exit`.
+  Ruling: an exit ends nothing. The worker records it, tells the attached viewers on the
+  session stream, and sends everyone else the session's summary again with
+  `SessionState::Exited`. A repeated `SessionOpened` was already how a known session reports a
+  change to the server, so the protocol is unchanged. The per-client dedupe (`Heard`) now
+  remembers each session's state, so a summary in a new state gets through. The client
+  marks its copy of the summary exited as soon as its view hears it. The tile keeps its view
+  and its last screen, and the pill stays until Close or Restart. Close is ⌘W's path: the
+  tile goes at once, the session after the five-second undo, which now works for an exited
+  shell too, since its view is still attached. An exited shell never asks before it closes.
+  A reconnecting client gets the exited session in its `HelloAck`, and a second client
+  attaching gets the `Exited` event on attach. Both show the same pill, and a Close from any
+  client closes the session for all of them, as with a live shell. Orchestration can still
+  `ReadScreen` an exited terminal until something closes it.
+
+  The bound: an exited session that no client has watched for `EXITED_UNWATCHED` (24 h) is
+  closed by the worker daemon, with `CloseReason::Exited`. A sweep every ten minutes reads the
+  viewers of the exited sessions only (`Worker::stale_exits`); any viewer restarts the clock.
+  A day outlasts a night and a working day away from the machine, so a tile left on a screen
+  is still there the next morning, while terminals opened by orchestration, which nobody
+  attaches to, do not pile up. A session whose program exited while the daemon was down is
+  no longer ended at start; the sweep takes it in its turn. Rejected: closing on the exit
+  with the tile kept locally, since a second client or a reconnect would lose the screen, and
+  a count bound, since what matters is whether anyone will come back to it. Tests: worker
+  `an_exited_session_goes_only_after_the_bound_unwatched`; daemon
+  `an_event_the_greeting_carried_is_not_told_again` (a new state is news once) and
+  `a_worker_registers_answers_forwarded_verbs_and_comes_back` (the exit is announced as a
+  summary, the screen stays readable, `Close` ends it); workspace
+  `an_exited_shell_stays_until_it_is_closed`, `an_exited_shell_offers_restart_and_close`.
+
+- ✅ **A view scrolled up holds still, and a pill counts the lines below** (2026-09-25). The
+  view's offset counts lines up from the bottom, so the rows it showed slid up under the
+  reader as output arrived, although `TermState::apply` said it kept them anchored. Every Mac
+  terminal holds a scrolled view still. Ruling: when a frame moves the screen down the
+  numbering in the same epoch while the view is scrolled up, the view keeps the top line it
+  drew (`TerminalView::hold_top`) and the offset grows by what arrived. That is two reads of
+  the state and no rows. A new epoch still returns to the bottom. The scrollbar's "scrolled"
+  flash now keys on the top line drawn, not the offset, so output arriving under a still view
+  does not flash it. The fix lives in the view because `slopty-client` belonged to another
+  change this round; `TermState::apply` is where it should move.
+
+  While scrolled up, a pill at the foot of the body says `N lines below · Back to live`. N is
+  the offset, one read per frame. The whole pill is a button, and ⇧⇲ / ⌘⇲ do the same. It sits
+  where the tile's state pill goes. The tile tells the view when its own pill shows
+  (`set_covered`), and the view then draws none. The pill appears and goes with the scroll and
+  has no motion of its own, so Reduce Motion has nothing to take away. It costs 15 µs of a
+  170 µs frame (MEASUREMENTS, "the lines-below pill"). Tests: view
+  `scrolled_up_the_pill_counts_the_lines_below_and_goes_back_to_live`,
+  `the_lines_below_give_way_to_the_tiles_pill`; workspace
+  `the_exited_pill_takes_the_place_of_the_lines_below`.

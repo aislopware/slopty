@@ -154,7 +154,7 @@ fn the_navigator_lists_what_needs_you_then_the_workers_then_the_workspaces(
     let waiting_row = leak(format!("nav-waiting-{session}"));
     assert!(cx.debug_bounds(waiting_row).is_some());
     let names = labels(&view, cx);
-    assert!(names.iter().any(|l| l.starts_with("studio, connected")), "{names:#?}");
+    assert!(names.iter().any(|l| l == "studio"), "a worker that is fine is its name: {names:#?}");
     assert!(names.iter().any(|l| l == "shell, Needs you"), "the waiting tile's row: {names:#?}");
     assert!(names.iter().any(|l| l == "Workspace 1, 2 tiles"), "{names:#?}");
 
@@ -225,7 +225,8 @@ fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     let names = labels(&view, cx);
-    for readout in ["studio", "slopty", "rtt 4.2 ms", "1 working · 1 needs you"] {
+    // The same place the header names: the last two directories, a home as `~`.
+    for readout in ["studio", "oss/slopty", "rtt 4.2 ms", "1 working · 1 needs you"] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
     assert!(cx.debug_bounds("rtt").is_none(), "the round trip left the title bar");
@@ -296,4 +297,166 @@ fn the_column_dots_keep_clear_of_the_toggle_and_the_name(cx: &mut TestAppContext
     assert!(dots.right() <= bell.left(), "the dots cover the bell: {dots:?} {bell:?}");
     let centred = (VIEWPORT.0 - f32::from(dots.size.width)) / 2.0;
     assert!(f32::from(dots.left()) > centred, "pushed right of the middle by the name");
+}
+
+/// A worker whose link is up says nothing about it: no word and no mark in the navigator, the
+/// palette or the empty workspace, only its round trip. Once the link drops, each says what is
+/// wrong with the warn mark and a word, and so does the status bar.
+#[gpui::test]
+fn a_healthy_worker_says_nothing_and_a_lost_one_says_what_is_wrong(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _laptop = connect(&view, cx, 2, "laptop");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.set_rtt(key, Some(Duration::from_micros(4_240)), cx));
+    cx.run_until_parked();
+    let names = labels(&view, cx);
+    assert!(names.iter().any(|l| l == "studio") && names.iter().any(|l| l == "laptop"));
+    assert!(!names.iter().any(|l| l.contains("connected")), "{names:#?}");
+    let marks = |cx: &mut VisualTestContext| {
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        tree.into_iter().filter(|n| n.role == "Image").filter_map(|n| n.label).collect::<Vec<_>>()
+    };
+    assert!(!marks(cx).iter().any(|m| m == "Done"), "no success mark: {:?}", marks(cx));
+    let workers = view.read_with(cx, |v, _| {
+        v.worker_lines().map(|l| (l.label, l.keys, l.status)).collect::<Vec<_>>()
+    });
+    assert_eq!(
+        workers,
+        [
+            ("Go to studio".to_owned(), "4.2 ms".to_owned(), None),
+            ("Go to laptop".to_owned(), String::new(), None),
+        ]
+    );
+
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
+    });
+    cx.run_until_parked();
+    let names = labels(&view, cx);
+    assert!(names.iter().any(|l| l == "studio, reconnecting"), "{names:#?}");
+    assert!(names.iter().any(|l| l == "reconnecting"), "the status bar says so: {names:#?}");
+    assert!(marks(cx).iter().any(|m| m == "Away"), "{:?}", marks(cx));
+    let studio_line = view.read_with(cx, |v, _| {
+        v.worker_lines().find(|l| l.label == "Go to studio").map(|l| (l.keys, l.status))
+    });
+    assert_eq!(studio_line, Some(("reconnecting".to_owned(), Some(crate::icons::Status::Away))));
+}
+
+/// A worker's tiles are listed by what they want: the one that needs the human, then the one
+/// that finished unseen, then the one at work, then the idle ones in reading order.
+#[gpui::test]
+fn a_workers_tiles_come_in_order_of_attention(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let sessions: [SessionId; 5] = std::array::from_fn(|_| SessionId::new());
+    let tiles: Vec<TileRef> = (1_u64..)
+        .zip(sessions)
+        .map(|(version, session)| opens(&view, cx, &studio, session, studio.me, version))
+        .collect();
+    let [_idle, busy, built, asking, _last] = sessions;
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(busy) }, cx);
+        v.agent_event(blocked(asking), cx);
+        let done = Finished {
+            command: "cargo build".into(),
+            exit: Some(0),
+            elapsed: Duration::from_secs(40),
+        };
+        v.command_finished(built, done, cx);
+    });
+    cx.run_until_parked();
+    let mut rows: Vec<(f32, usize)> = tiles
+        .iter()
+        .enumerate()
+        .map(|(ix, t)| {
+            let at = cx.debug_bounds(selector("nav-tile", t.item)).expect("a row per tile");
+            (f32::from(at.origin.y), ix)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let order: Vec<usize> = rows.into_iter().map(|(_, ix)| ix).collect();
+    assert_eq!(order, [3, 2, 1, 0, 4], "needs you, unseen, working, then idle in reading order");
+}
+
+/// A tile whose long command finished while the human looked elsewhere carries the unseen
+/// dot on its row's status lane. The dot stands aside while the tile is at work, and goes once
+/// the tile is looked at.
+#[gpui::test]
+fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let built = SessionId::new();
+    let tile = opens(&view, cx, &studio, built, studio.me, 1);
+    let _last = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    let dot = selector("nav-unseen", tile.item);
+    assert!(cx.debug_bounds(dot).is_none(), "nothing unseen yet");
+    view.update_in(cx, |v, _w, cx| {
+        let done =
+            Finished { command: "make".into(), exit: Some(2), elapsed: Duration::from_secs(9) };
+        v.command_finished(built, done, cx);
+    });
+    cx.run_until_parked();
+    let (lane, at) = (
+        cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row"),
+        cx.debug_bounds(dot).expect("the dot"),
+    );
+    assert!(lane.right() >= at.right() && at.left() > lane.center().x, "on the lane's edge");
+    assert!(labels(&view, cx).iter().any(|l| l == "shell, Failed, unseen"));
+
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(built) }, cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(dot).is_none(), "not while it works");
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(built) }, cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(dot).is_some(), "back once it rests");
+    click(cx, selector("nav-tile", tile.item));
+    assert!(cx.debug_bounds(dot).is_none(), "looked at");
+}
+
+/// How many times the workspace draws in one second of a 120 Hz display: each tick delivers
+/// whatever frame was asked for, then runs what is due.
+fn frames_in_a_second(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> u64 {
+    let before = view.read_with(cx, |v, _| v.frames_drawn);
+    for _ in 0..120 {
+        cx.executor().advance_clock(Duration::from_nanos(8_333_333));
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+    }
+    view.read_with(cx, |v, _| v.frames_drawn).wrapping_sub(before)
+}
+
+/// A working agent in view turns its mark twelve steps a second, and the workspace draws
+/// twelve frames a second for it, not one per display refresh. With nothing at work it draws
+/// none, and under Reduce Motion the mark stands still and draws none either.
+#[gpui::test]
+fn a_working_mark_draws_twelve_frames_a_second_and_none_at_rest(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let busy = SessionId::new();
+    let _busy = opens(&view, cx, &studio, busy, studio.me, 1);
+    assert_eq!(frames_in_a_second(&view, cx), 0, "at rest, nothing draws");
+
+    let working = AgentEvent { status: AgentStatus::Working, ..blocked(busy) };
+    view.update_in(cx, |v, _w, cx| v.agent_event(working.clone(), cx));
+    cx.run_until_parked();
+    let turning = frames_in_a_second(&view, cx);
+    assert!((11..=13).contains(&turning), "{turning} frames in a second");
+
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(busy) }, cx);
+    });
+    cx.run_until_parked();
+    assert!(frames_in_a_second(&view, cx) <= 1, "the last step's timer at most");
+    assert_eq!(frames_in_a_second(&view, cx), 0, "then nothing");
+
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    view.update_in(cx, |v, _w, cx| v.agent_event(working, cx));
+    cx.run_until_parked();
+    assert_eq!(frames_in_a_second(&view, cx), 0, "Reduce Motion: a still mark");
 }

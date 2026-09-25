@@ -211,6 +211,23 @@ pub fn icon_button_at(
     crate::a11y::tab_stop(el, s.accent)
 }
 
+/// A key cap: the keys on a small raised plate, the way the empty workspace teaches its chords
+/// and the palette's foot names its keys. `keys` comes from the key tables, or is a lone key.
+#[must_use]
+pub fn key_cap(theme: &Theme, keys: impl Into<SharedString>) -> Div {
+    let s = &theme.surfaces;
+    div()
+        .flex_none()
+        .px(px(theme.spacing.xs))
+        .rounded(px(theme.radii.xs))
+        .border_1()
+        .border_color(hsla(s.border))
+        .bg(hsla(s.raised))
+        .text_size(px(theme.typography.small()))
+        .text_color(hsla(s.text_secondary))
+        .child(keys.into())
+}
+
 /// What a bar button does, and the key that does it, shown after a pause on the pointer.
 ///
 /// The bar prints no keys of its own. Six ⌘ chords across one strip was most of the text up
@@ -331,6 +348,7 @@ mod tests {
             crate::picker::NOTHING_MATCHES,
             crate::picker::NOTHING_TO_JUMP_TO,
             crate::picker::LOADING_WINDOWS,
+            crate::terminal::BACK_TO_LIVE,
             crate::workspace::RECONNECTING,
             crate::workspace::SESSION_ENDED,
             crate::workspace::CLOSE_TILE,

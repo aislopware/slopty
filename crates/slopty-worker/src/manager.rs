@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use slopty_core::SessionId;
@@ -18,6 +19,13 @@ use crate::session::{self, Probe, SessionHandle, SessionStart, Tap};
 
 /// Scrollback lines the engine retains per session.
 pub const SCROLLBACK_LINES: u32 = 50_000;
+
+/// How long a session whose program exited is kept while no client watches it.
+///
+/// An exited shell stays with its last screen until a human closes its tile
+/// (`docs/decisions/terminal.md`, "An exited shell stays until it is closed"); this bounds the
+/// ones nobody comes back to. A day outlasts a night and a working day away from the machine.
+pub const EXITED_UNWATCHED: Duration = Duration::from_hours(24);
 
 struct Entry {
     handle: SessionHandle,
@@ -47,6 +55,8 @@ struct Inner {
     port_hints_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
     /// The coding agents seen in the sessions, which every summary carries.
     agents: Arc<dyn Agents>,
+    /// Since when each exited session has had no viewer.
+    unwatched: Mutex<Unwatched>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -77,6 +87,7 @@ impl Worker {
                 port_hints,
                 port_hints_rx: Mutex::new(Some(port_hints_rx)),
                 agents,
+                unwatched: Mutex::new(Unwatched::default()),
             }),
         };
         tokio::spawn(tap_loop(Arc::downgrade(&worker.inner), tap_rx));
@@ -238,12 +249,64 @@ impl Worker {
         Ok(infos.into_iter().filter(|i| i.exited.is_none()).map(|i| (i.id, i.pid)).collect())
     }
 
+    /// The exited sessions no client has watched for `after` by `now`: the ones to close.
+    /// Called on a slow sweep; each call reads the viewers of the exited sessions only.
+    pub async fn stale_exits(&self, now: Instant, after: Duration) -> Vec<SessionId> {
+        let exited: Vec<(SessionId, SessionHandle)> = self
+            .inner
+            .sessions
+            .lock()
+            .iter()
+            .filter(|(_id, e)| e.exited.is_some())
+            .map(|(id, e)| (*id, e.handle.clone()))
+            .collect();
+        let mut viewers = Vec::with_capacity(exited.len());
+        for (id, handle) in exited {
+            // A session whose actor is gone has nobody watching it.
+            let watching = handle.snapshot().await.map_or(0, |snap| snap.viewers);
+            viewers.push((id, watching));
+        }
+        self.inner.unwatched.lock().sweep(now, &viewers, after)
+    }
+
     /// Kill the child and drop the session everywhere.
     pub async fn close(&self, id: SessionId) -> Result<(), WorkerError> {
         let entry = self.inner.sessions.lock().remove(&id).ok_or(WorkerError::NoSuchSession)?;
         entry.handle.close();
         self.inner.ptyd.lock().await.close(id).await?;
         Ok(())
+    }
+}
+
+/// Since when each exited session has had no viewer: the clock [`Worker::stale_exits`] reads.
+#[derive(Debug, Default)]
+pub struct Unwatched {
+    since: HashMap<SessionId, Instant>,
+}
+
+impl Unwatched {
+    /// Note who watches each exited session now (`exited` holds them all, with their viewer
+    /// counts) and return the ones unwatched for `after` or longer. A viewer restarts the
+    /// clock; a session no longer listed is forgotten.
+    pub fn sweep(
+        &mut self,
+        now: Instant,
+        exited: &[(SessionId, u16)],
+        after: Duration,
+    ) -> Vec<SessionId> {
+        self.since.retain(|id, _since| exited.iter().any(|(e, _viewers)| e == id));
+        let mut stale = Vec::new();
+        for &(id, viewers) in exited {
+            if viewers > 0 {
+                self.since.remove(&id);
+                continue;
+            }
+            let since = *self.since.entry(id).or_insert(now);
+            if now.saturating_duration_since(since) >= after {
+                stale.push(id);
+            }
+        }
+        stale
     }
 }
 
@@ -272,5 +335,34 @@ async fn send_tap(ptyd: &mut PtydClient, tap: Tap) -> Result<(), slopty_pty::Pty
         Tap::Output { id, bytes } => ptyd.output(id, &bytes).await,
         Tap::Checkpoint { id, state } => ptyd.checkpoint(id, state).await,
         Tap::Resize { id, size } => ptyd.resize(id, size).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use slopty_core::SessionId;
+
+    use super::Unwatched;
+
+    /// An exited session goes once nobody has watched it for the whole bound: a viewer
+    /// restarts the clock, and a session closed meanwhile is forgotten.
+    #[test]
+    fn an_exited_session_goes_only_after_the_bound_unwatched() {
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let hour = Duration::from_hours(1);
+        let bound = 24 * hour;
+        let t0 = Instant::now();
+        let mut clock = Unwatched::default();
+        assert!(clock.sweep(t0, &[(a, 0), (b, 1)], bound).is_empty(), "the clock starts");
+        assert!(clock.sweep(t0 + 23 * hour, &[(a, 0), (b, 0)], bound).is_empty());
+        assert_eq!(clock.sweep(t0 + bound, &[(a, 0), (b, 0)], bound), vec![a], "a's day is up");
+        // b was watched at t0, so its clock began at 23 h; a viewer at 30 h restarts it.
+        assert!(clock.sweep(t0 + 30 * hour, &[(b, 2)], bound).is_empty());
+        assert!(clock.sweep(t0 + 50 * hour, &[(b, 0)], bound).is_empty(), "20 h unwatched");
+        assert_eq!(clock.sweep(t0 + 74 * hour, &[(b, 0)], bound), vec![b]);
+        assert!(clock.sweep(t0 + 75 * hour, &[], bound).is_empty());
+        assert!(clock.since.is_empty(), "closed sessions are forgotten");
     }
 }
