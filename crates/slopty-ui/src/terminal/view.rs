@@ -1824,15 +1824,7 @@ impl TerminalView {
             self.predictor.flush();
             self.selection = None;
         }
-        // Scrolled up, the lines on screen hold still as output arrives below them.
-        let held = (reconcile && self.state.view_offset() != 0).then(|| self.state.index_at_row(0));
         let effects = self.state.apply(event);
-        if let Some(top) = held
-            && self.state.epoch() == epoch_before
-            && self.state.view_offset() != 0
-        {
-            self.hold_top(top);
-        }
         if self.state.epoch() != epoch_before {
             tracing::info!(session = %self.session, epoch = ?self.state.epoch(), "line numbering changed");
             // Line numbering changed (reflow, reset, alt screen): the selection means nothing,
@@ -1915,22 +1907,6 @@ impl TerminalView {
             }
         }
         cx.notify();
-    }
-
-    /// Keep `top` as the first row drawn after a frame moved the screen down the numbering:
-    /// the offset from the bottom grows by what arrived. Two reads of the state, no rows.
-    fn hold_top(&mut self, top: LineIndex) {
-        let offset = self.state.view_offset();
-        let first_visible = self.state.index_at_row(0).0.saturating_add(offset);
-        let held = first_visible.saturating_sub(top.0);
-        if held == offset {
-            return;
-        }
-        for effect in self.state.scroll_to(held) {
-            if let Effect::Request(req) = effect {
-                self.send(req);
-            }
-        }
     }
 
     /// Lines between the bottom of the view and the newest output: 0 while following it.

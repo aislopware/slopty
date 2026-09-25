@@ -424,6 +424,8 @@ impl TermState {
             return effects;
         }
         self.frames = self.frames.saturating_add(1);
+        let (epoch_before, top) =
+            (self.epoch, (self.view_offset != 0).then(|| self.index_at_row(0)));
         let held = self.epoch == Some(frame.epoch) || self.change_numbering(&frame);
         let gap = match self.last_seq {
             Some(prev) => frame.seq != prev.wrapping_add(1),
@@ -470,9 +472,13 @@ impl TermState {
         self.placements = frame.images;
         self.input_ack = frame.input_ack;
         self.track_command(&mut effects);
-        // Keep the viewport anchored on content while scrolled (offset counts from the bottom, so
-        // nothing to do); clamp if history shrank.
-        self.view_offset = self.view_offset.min(self.history_len());
+        // Scrolled up, the lines on screen hold still as output arrives below them: the offset
+        // counts from the bottom, so it grows by what arrived. In another numbering the old top
+        // names nothing, and the offset is only kept within the history.
+        match top.filter(|_| self.epoch == epoch_before) {
+            Some(top) => effects.extend(self.scroll_to_line(top)),
+            None => self.view_offset = self.view_offset.min(self.history_len()),
+        }
         effects
     }
 
@@ -1369,6 +1375,22 @@ mod tests {
         assert_eq!((s.epoch(), s.input_ack(), s.frames()), (Some(3), 7, 1));
         s.apply(TermEvent::Frame(frame(9, false, 3, 0, 1, &[(0, "b")])));
         assert_eq!((s.epoch(), s.input_ack(), s.frames()), (Some(3), 9, 2));
+    }
+
+    /// Scrolled up, the lines on screen hold still as output arrives: the offset from the
+    /// bottom grows by what scrolled in. A new numbering only keeps it within the history.
+    #[test]
+    fn scrolled_up_the_view_holds_its_lines_as_output_arrives() {
+        let mut s = TermState::new(size());
+        s.apply(TermEvent::Frame(frame(1, true, 0, 0, 3, &[(0, "a"), (1, "b"), (2, "c")])));
+        s.apply(TermEvent::Frame(frame(2, false, 0, 2, 5, &[(0, "c"), (1, "d"), (2, "e")])));
+        s.scroll(2);
+        assert_eq!(texts(&s), vec![Some("a".into()), Some("b".into()), Some("c".into())]);
+        s.apply(TermEvent::Frame(frame(3, false, 0, 3, 6, &[(0, "d"), (1, "e"), (2, "f")])));
+        assert_eq!(s.view_offset(), 3, "grown by the line that arrived");
+        assert_eq!(texts(&s), vec![Some("a".into()), Some("b".into()), Some("c".into())]);
+        s.apply(TermEvent::Frame(frame(4, true, 1, 0, 3, &[(0, "x"), (1, "y"), (2, "z")])));
+        assert_eq!(s.view_offset(), 0, "a new numbering with no history to stay in");
     }
 
     #[test]

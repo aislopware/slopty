@@ -1537,7 +1537,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Scrolled back.** A terminal scrolled into its history shows `N lines below · Back to
     live` at the foot of its body, and a click returns to the bottom. Showing it exposed a bug:
     a scrolled-up view drifted with incoming output, because its offset counts lines up from
-    the bottom. It now keeps its top line fixed. The pill costs about 15 µs at p50 per frame
+    the bottom. It now keeps its top line fixed. The rule lives in the client's `TermState`,
+    so `slopty attach` holds still too (test `scrolled_up_the_view_holds_its_lines_as_output_arrives`). The pill costs about 15 µs at p50 per frame
     (MEASUREMENTS, "the lines-below pill").
   - **Exited shells.** An exited shell keeps its tile and its `Exited · code N` pill until
     Close or Restart (terminal.md).

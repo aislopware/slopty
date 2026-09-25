@@ -2,9 +2,13 @@
 //!
 //! Keys go to the worker as raw bytes (the local terminal already encoded them), so this is the
 //! exact bytes-in/rows-out path the GPUI apps use minus the prediction layer. Detach with `^]`.
+//!
+//! As with `ssh`, a program that exits ends the command with its status, so a script can run
+//! `slopty attach -- make test` and branch on it. The session stays, exited, until it is closed.
 
 use std::io::Write as _;
 use std::path::Path;
+use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
 use rustix::termios::{self, OptionalActions, Termios};
@@ -25,7 +29,7 @@ pub async fn open(
     worker: Option<&str>,
     cwd: Option<String>,
     command: Vec<String>,
-) -> Result<()> {
+) -> Result<ExitCode> {
     let mut session = connect_to(data_dir, worker).await?;
     let size = local_size()?;
     session
@@ -50,7 +54,7 @@ pub async fn open(
     run(session, id).await
 }
 
-pub async fn attach(data_dir: &Path, worker: Option<&str>, needle: &str) -> Result<()> {
+pub async fn attach(data_dir: &Path, worker: Option<&str>, needle: &str) -> Result<ExitCode> {
     let mut session = connect_to(data_dir, worker).await?;
     let needle = needle.to_lowercase();
     let mut hits =
@@ -109,7 +113,7 @@ fn enter_raw() -> Result<RawGuard> {
     Ok(RawGuard(saved))
 }
 
-async fn run(session: Session, id: SessionId) -> Result<()> {
+async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
     let Session { conn, endpoint, .. } = session;
     let size = local_size()?;
     let mut link = WorkerLink::start(conn);
@@ -119,7 +123,7 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
     let mut stdin = tokio::io::stdin();
     let mut input = vec![0_u8; 4096];
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
-    let outcome: Result<&'static str> = loop {
+    let outcome: Result<(String, u8)> = loop {
         tokio::select! {
             ev = events.recv() => match ev {
                 Some(LinkEvent::Term { session, event }) if session == id => {
@@ -139,9 +143,7 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                                 out.write_all(relay_notification(&title, &body).as_bytes())?;
                                 out.flush()?;
                             }
-                            Effect::Exited(status) => {
-                                done = Some(if status == 0 { "exited" } else { "exited with error" });
-                            }
+                            Effect::Exited(status) => done = Some(exited(status)),
                             Effect::Error(e) => tracing::warn!(error = %e, "worker error"),
                             Effect::Title(_)
                             | Effect::Cwd { .. }
@@ -158,11 +160,15 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                     }
                 }
                 Some(LinkEvent::Control(WorkerMsg::SessionClosed { session, reason })) if session == id => {
-                    break Ok(match reason {
-                        CloseReason::Requested => "closed",
-                        CloseReason::Exited => "exited",
-                        CloseReason::WorkerShutdown => "worker shut down",
-                    });
+                    break Ok((
+                        match reason {
+                            CloseReason::Requested => "closed",
+                            CloseReason::Exited => "exited",
+                            CloseReason::WorkerShutdown => "worker shut down",
+                        }
+                        .to_owned(),
+                        0,
+                    ));
                 }
                 Some(
                     LinkEvent::Control(_)
@@ -171,16 +177,16 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                     | LinkEvent::XferFailed { .. },
                 ) => {}
                 Some(LinkEvent::Disconnected(why)) => break Err(anyhow::anyhow!("disconnected: {why}")),
-                None => break Ok("link closed"),
+                None => break Ok(("link closed".to_owned(), 0)),
             },
             read = tokio::io::AsyncReadExt::read(&mut stdin, &mut input) => {
                 let n = read?;
                 if n == 0 {
-                    break Ok("stdin closed");
+                    break Ok(("stdin closed".to_owned(), 0));
                 }
                 let bytes = input.get(..n).unwrap_or_default();
                 if bytes.contains(&DETACH) {
-                    break Ok("detached");
+                    break Ok(("detached".to_owned(), 0));
                 }
                 let req = TermRequest::Raw(bytes.to_vec());
                 link.send(ClientMsg::Term { session: id, req }).await?;
@@ -196,15 +202,25 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
     };
     drop(raw);
     let rtt = link.rtt().map_or_else(|| "?".to_owned(), |d| format!("{d:.1?}"));
-    let why = outcome?;
+    let (why, code) = outcome?;
     println!("[{why}; {} frames; rtt {rtt}]", state.frames());
     let _detached = link.send(ClientMsg::Term { session: id, req: TermRequest::Detach }).await;
     link.close();
     crate::client::close_endpoint(&endpoint).await;
-    Ok(())
+    Ok(ExitCode::from(code))
 }
 
-/// Redraw every row and place the cursor.
+/// What ends an attach when the program exits with `status`, and the code this command exits
+/// with: the status itself, as a shell reports it, or 1 when it does not fit one.
+fn exited(status: i32) -> (String, u8) {
+    match status {
+        0 => ("exited".to_owned(), 0),
+        _ => {
+            (format!("exited {status}"), u8::try_from(status).ok().filter(|c| *c != 0).unwrap_or(1))
+        }
+    }
+}
+
 /// A program's notification handed on to the terminal we sit in as OSC 777 `notify`, so it
 /// posts the banner; control characters are dropped so the payload cannot end or fake
 /// the sequence.
@@ -213,6 +229,7 @@ fn relay_notification(title: &str, body: &str) -> String {
     format!("\x1b]777;notify;{};{}\x07", clean(title), clean(body))
 }
 
+/// Redraw every row and place the cursor.
 fn paint(state: &TermState) -> Result<()> {
     let mut buf = Vec::with_capacity(8192);
     buf.extend_from_slice(b"\x1b[?25l");
@@ -296,7 +313,17 @@ fn color(params: &mut Vec<String>, base: u8, c: Color) {
 
 #[cfg(test)]
 mod tests {
-    use super::relay_notification;
+    use super::{exited, relay_notification};
+
+    /// The command exits as the program did, as `ssh` does; a status no exit code can carry
+    /// (a signal's negative, or past 255) is still a failure.
+    #[test]
+    fn an_exited_program_hands_its_status_on() {
+        assert_eq!(exited(0), ("exited".to_owned(), 0));
+        assert_eq!(exited(3), ("exited 3".to_owned(), 3));
+        assert_eq!(exited(256), ("exited 256".to_owned(), 1));
+        assert_eq!(exited(-9), ("exited -9".to_owned(), 1));
+    }
 
     #[test]
     fn a_relayed_notification_is_one_clean_osc_777() {

@@ -25,6 +25,7 @@ mod verbs;
 mod workerctl;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -178,7 +179,7 @@ enum BenchCmd {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<ExitCode> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -188,7 +189,7 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     let data_dir = cli.data_dir.unwrap_or_else(client::data_dir);
-    match cli.cmd {
+    let done = match cli.cmd {
         Cmd::Worker { cmd } => workerctl::run(cmd, cli.server.as_deref()).await,
         Cmd::Hook { cmd: None } => {
             hook::relay().await;
@@ -216,10 +217,10 @@ async fn main() -> Result<()> {
         Cmd::Forget { worker } => client::forget(&data_dir, &worker),
         Cmd::Sessions { worker } => client::sessions(&data_dir, worker.as_deref()).await,
         Cmd::Attach { worker, session: Some(session), .. } => {
-            attach::attach(&data_dir, worker.as_deref(), &session).await
+            return attach::attach(&data_dir, worker.as_deref(), &session).await;
         }
         Cmd::Attach { worker, session: None, cwd, command } => {
-            attach::open(&data_dir, worker.as_deref(), cwd, command).await
+            return attach::open(&data_dir, worker.as_deref(), cwd, command).await;
         }
         Cmd::Ping { worker, count } => client::ping(&data_dir, worker.as_deref(), count).await,
         Cmd::Bench { cmd: BenchCmd::Echo { worker, count } } => {
@@ -238,7 +239,8 @@ async fn main() -> Result<()> {
                 bench::ScreenBench { window, display, seconds, scale, fps, mbit, max_stalls };
             bench::screen(&data_dir, worker.as_deref(), spec).await
         }
-    }
+    };
+    done.map(|()| ExitCode::SUCCESS)
 }
 
 #[cfg(test)]

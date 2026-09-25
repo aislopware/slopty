@@ -161,7 +161,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     carries a progress token.
   - The CLI's direct-to-worker `slopty open` (open and attach a raw terminal) became
     `slopty attach` without a session: `open` is now the verb. The local `slopty workers`
-    listing of added workers is gone; the server's directory replaces it.
+    listing of added workers is gone; the server's directory replaces it. Either form exits
+    with the program's status once it exits, as `ssh` does, so a script can branch on
+    `slopty attach -- make test` (2026-09-25). The session stays, exited, until it is closed.
 
 - ✅ **The server's lease timings, state file and MCP endpoint** (2026-09-25).
   - **Lease.** Every server link runs a 1 s QUIC keep-alive and a 5 s idle timeout
