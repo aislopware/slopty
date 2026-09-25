@@ -6,6 +6,10 @@
 //! [`GONE_AFTER`] later, with no reconnect, [`Liveness::Gone`]. Every change goes out to every
 //! client and agent link as [`FromServer::Worker`] or [`FromServer::Event`].
 //!
+//! A worker set up again (a new data directory) registers under a new id with its old name,
+//! from its old address. Nothing else can be listening there, so the entries it replaces are
+//! dropped and every link gets the directory again without them.
+//!
 //! [`Hub::dispatch`] is the one verb dispatch both front ends call (QUIC links and MCP): the
 //! directory verbs are answered here, the rest go down the owning worker's link.
 
@@ -112,10 +116,7 @@ impl Hub {
     /// Every worker, by name.
     #[must_use]
     pub fn directory(&self) -> Vec<WorkerInfo> {
-        let mut out: Vec<WorkerInfo> =
-            self.inner.state.lock().workers.values().map(|e| e.info.clone()).collect();
-        out.sort_by(|a, b| a.name.cmp(&b.name).then(a.worker.cmp(&b.worker)));
-        out
+        listing(&self.inner.state.lock())
     }
 
     /// Directory changes and worker events, as they happen. Subscribe before reading
@@ -161,6 +162,17 @@ impl Hub {
             last_seen_ms: now_ms(),
         };
         let link = Some(Link { tx, pending: HashMap::new() });
+        let replaced: Vec<WorkerId> = state
+            .workers
+            .values()
+            .filter(|e| e.info.worker != worker && e.link.is_none())
+            .filter(|e| e.info.name == info.name && e.info.address == info.address)
+            .map(|e| e.info.worker)
+            .collect();
+        for old in &replaced {
+            tracing::info!(worker = %old, name = %info.name, by = %worker, "worker replaced");
+            state.workers.remove(old);
+        }
         let (reshaped, gone, opened) = if let Some(entry) = state.workers.get_mut(&worker) {
             let reshaped = !same_shape(&entry.info, &info);
             let gone: Vec<SessionId> = entry
@@ -186,13 +198,16 @@ impl Hub {
             (true, Vec::new(), opened)
         };
         self.announce(FromServer::Worker(info));
+        if !replaced.is_empty() {
+            self.announce(FromServer::Directory(listing(&state)));
+        }
         for session in gone {
             self.announce(FromServer::Event(Event::SessionClosed { worker, session }));
         }
         for summary in opened {
             self.announce(FromServer::Event(Event::SessionOpened { worker, summary }));
         }
-        if reshaped {
+        if reshaped || !replaced.is_empty() {
             self.persist(&state);
         }
         drop(state);
@@ -357,6 +372,21 @@ impl Lease {
         self.worker
     }
 
+    /// Answer forwarded request `id` here, in the worker's place: it could not be sent.
+    pub fn answer(&self, id: RequestId, outcome: Outcome) {
+        let mut state = self.hub.inner.state.lock();
+        let waiter = state
+            .workers
+            .get_mut(&self.worker)
+            .filter(|e| e.generation == self.generation)
+            .and_then(|e| e.link.as_mut())
+            .and_then(|l| l.pending.remove(&id));
+        drop(state);
+        if let Some(waiter) = waiter {
+            let _gave_up = waiter.send(outcome);
+        }
+    }
+
     /// Take in one message from the worker.
     pub fn handle(&self, msg: ToServer) {
         let hub = &self.hub;
@@ -434,6 +464,13 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::AgentStatus { term }
         | Verb::Close { term } => Some(term.worker),
     }
+}
+
+/// Every worker, by name.
+fn listing(state: &State) -> Vec<WorkerInfo> {
+    let mut out: Vec<WorkerInfo> = state.workers.values().map(|e| e.info.clone()).collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name).then(a.worker.cmp(&b.worker)));
+    out
 }
 
 /// Whether two infos persist the same: name, address and capabilities but for the load.
@@ -773,5 +810,44 @@ pub(crate) mod tests {
         };
         let hub = Hub::new("server".to_owned(), vec![info.clone()]);
         assert_eq!(hub.directory(), vec![WorkerInfo { liveness: Liveness::Gone, ..info }]);
+    }
+
+    /// A worker set up again registers a new id under its old name from its old address: the
+    /// old entry, known from the last run, is dropped and every link hears the directory
+    /// without it. A namesake elsewhere, and an entry still on a live link, stay.
+    #[tokio::test]
+    async fn a_worker_set_up_again_replaces_its_old_entry() {
+        let known = |name: &str, address: &str| WorkerInfo {
+            worker: WorkerId::new(),
+            name: name.to_owned(),
+            address: address.to_owned(),
+            liveness: Liveness::Online,
+            caps: caps(),
+            last_seen_ms: 1,
+        };
+        let old = known("studio", "100.64.0.7:45550");
+        let namesake = known("studio", "100.64.0.8:45550");
+        let hub = Hub::new("server".to_owned(), vec![old.clone(), namesake.clone()]);
+        let mut persisted = hub.persisted();
+        let mut events = hub.subscribe();
+
+        let first = WorkerId::new();
+        let (tx, _rx) = mpsc::channel(8);
+        let _first = hub.register(registration(first, Vec::new()), ip(), tx).unwrap();
+        let listed: Vec<WorkerId> = hub.directory().iter().map(|w| w.worker).collect();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert!(listed.contains(&first) && listed.contains(&namesake.worker), "{listed:?}");
+        assert!(matches!(events.recv().await.unwrap(), FromServer::Worker(w) if w.worker == first));
+        let FromServer::Directory(heard) = events.recv().await.unwrap() else {
+            panic!("the directory again, without the replaced entry")
+        };
+        assert_eq!(heard, hub.directory());
+        assert!(!persisted.borrow_and_update().iter().any(|w| w.worker == old.worker));
+
+        // Two live links on one address are two workers, whatever their names.
+        let second = WorkerId::new();
+        let (tx, _rx) = mpsc::channel(8);
+        let _second = hub.register(registration(second, Vec::new()), ip(), tx).unwrap();
+        assert_eq!(hub.directory().len(), 3);
     }
 }

@@ -100,6 +100,9 @@ pub fn split_term(needle: &str) -> Result<(Option<&str>, &str), ToolError> {
 
 /// The worker `needle` names: an exact id, then an exact name, then a case-blind name, then a
 /// unique id prefix. Without a needle, the only worker online.
+///
+/// A name several workers share means the one of them online, when one is: a worker set up
+/// again keeps its name under a new id, and the server lists the old id until it replaces it.
 pub fn pick_worker(workers: &[WorkerInfo], needle: Option<&str>) -> Result<WorkerId, ToolError> {
     let Some(needle) = needle.map(str::trim) else {
         let online: Vec<_> = workers.iter().filter(|w| w.liveness == Liveness::Online).collect();
@@ -120,12 +123,18 @@ pub fn pick_worker(workers: &[WorkerInfo], needle: Option<&str>) -> Result<Worke
         &|w| w.name.eq_ignore_ascii_case(needle),
         &|w| w.worker.to_string().starts_with(&lower),
     ];
-    for matches in tiers {
+    let by_name = [false, true, true, false];
+    for (matches, by_name) in tiers.into_iter().zip(by_name) {
         let hits: Vec<_> = workers.iter().filter(|w| matches(w)).collect();
         match hits.as_slice() {
             [] => {}
             [one] => return Ok(one.worker),
             many => {
+                let online: Vec<_> =
+                    many.iter().filter(|w| w.liveness == Liveness::Online).collect();
+                if by_name && let [one] = online.as_slice() {
+                    return Ok(one.worker);
+                }
                 return Err(ToolError::invalid(format!(
                     "{needle:?} matches {} workers: {}",
                     many.len(),
@@ -224,6 +233,24 @@ mod tests {
         let w = vec![info(STUDIO, "box", Liveness::Online), info(LAPTOP, "Box", Liveness::Online)];
         assert_eq!(pick_worker(&w, Some("Box")).unwrap(), LAPTOP.parse().unwrap());
         let err = pick_worker(&w, Some("BOX")).unwrap_err();
+        assert!(err.message.contains("matches 2 workers"), "{err}");
+    }
+
+    /// A worker set up again: its old id, gone, and its new one, online, under one name. The
+    /// name means the one online; two online under it is still a question.
+    #[test]
+    fn a_shared_name_means_the_one_online() {
+        let w =
+            vec![info(STUDIO, "studio", Liveness::Gone), info(LAPTOP, "studio", Liveness::Online)];
+        assert_eq!(pick_worker(&w, Some("studio")).unwrap(), LAPTOP.parse().unwrap());
+        assert_eq!(pick_worker(&w, Some("STUDIO")).unwrap(), LAPTOP.parse().unwrap());
+        let err = pick_worker(&w, Some("0199")).unwrap_err();
+        assert!(err.message.contains("matches 2 workers"), "an id prefix stays exact: {err}");
+        let both = vec![
+            info(STUDIO, "studio", Liveness::Online),
+            info(LAPTOP, "studio", Liveness::Online),
+        ];
+        let err = pick_worker(&both, Some("studio")).unwrap_err();
         assert!(err.message.contains("matches 2 workers"), "{err}");
     }
 

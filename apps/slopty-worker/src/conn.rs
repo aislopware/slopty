@@ -22,12 +22,15 @@ use slopty_proto::transfer::{ClipMsg, Dest, XferMsg};
 use slopty_worker::WorkerError;
 use slopty_worker::clip::Paste;
 use slopty_worker::screen::{StreamControl, listing};
-use slopty_worker::session::{ClientSink, Outbound};
+use slopty_worker::session::Outbound;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::Daemon;
 use crate::screens::{Command, Told};
+
+/// The weak end of a session's sink, as the connection keeps it.
+type WeakClientSink = mpsc::WeakSender<Outbound>;
 
 /// Events buffered per attached session before the client is considered stuck.
 const SINK_DEPTH: usize = 256;
@@ -148,6 +151,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         caps: Caps::empty(),
         sessions: daemon.worker.summaries().await,
     };
+    let sessions: HashSet<SessionId> = ack.sessions.iter().map(|s| s.id).collect();
     out.send(WorkerMsg::HelloAck(ack)).await.map_err(|_gone| NetError::Closed)?;
     out.send(WorkerMsg::Items(daemon.items.snapshot())).await.map_err(|_gone| NetError::Closed)?;
     // Collected first: the lock must not be held across the sends.
@@ -185,6 +189,8 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         client: hello.client,
         name: hello.name,
         out,
+        sessions,
+        items_floor: 0,
         attached: HashMap::new(),
         screens: HashMap::new(),
         streams: JoinSet::new(),
@@ -223,13 +229,21 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
                 match ev {
                     // The worker's clipboard goes only to the clients that want it now.
                     Ok(WorkerMsg::Clip(ClipMsg::Offer(_))) if !daemon.clip.is_watching(peer.link) => {}
+                    // Already in the snapshot a resync sent.
+                    Ok(WorkerMsg::Items(ItemSync::Delta { version, .. })) if version <= peer.items_floor => {}
                     Ok(msg) => {
+                        peer.heard(&msg);
                         if peer.out.send(msg).await.is_err() {
                             break Ok("writer gone");
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(client = %peer.client, lagged = n, "missed worker events");
+                        tracing::warn!(client = %peer.client, lagged = n, "missed worker events; sending the state again");
+                        // What is queued is older than the state about to be read; skip it.
+                        events = events.resubscribe();
+                        if peer.resync().await.is_err() {
+                            break Ok("writer gone");
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         break Ok("daemon shutting down");
@@ -334,8 +348,14 @@ struct Peer<'d> {
     /// Its name from `Hello`, for the pointings it relays.
     name: String,
     out: mpsc::Sender<WorkerMsg>,
-    /// Per attached session: the stream pump and the sink the actor writes into.
-    attached: HashMap<SessionId, (JoinHandle<()>, ClientSink)>,
+    /// The sessions this client was told exist, for a resync to tell it which ones it missed
+    /// opening or closing.
+    sessions: HashSet<SessionId>,
+    /// The item registry version of the last resync's snapshot: deltas up to it are in it.
+    items_floor: u64,
+    /// Per attached session: the stream pump and the sink the actor writes into. The sink is
+    /// weak, so the pump ends once the session's actor lets go of its end, whoever closed it.
+    attached: HashMap<SessionId, (JoinHandle<()>, WeakClientSink)>,
     screens: HashMap<StreamId, Screen>,
     /// The screen streams' own tasks, awaited when the connection ends.
     streams: JoinSet<()>,
@@ -360,8 +380,10 @@ impl Drop for Peer<'_> {
         // new connection, and its viewers must survive the old one idling out.
         for (session, (task, sink)) in &self.attached {
             task.abort();
-            if let Ok(handle) = self.daemon.worker.get(*session) {
-                let _ignored = handle.detach_sink(self.client, sink);
+            if let Some(sink) = sink.upgrade()
+                && let Ok(handle) = self.daemon.worker.get(*session)
+            {
+                let _ignored = handle.detach_sink(self.client, &sink);
             }
         }
         for task in self.downloads.values() {
@@ -373,6 +395,57 @@ impl Drop for Peer<'_> {
 }
 
 impl Peer<'_> {
+    /// Keep track of what a broadcast event told the client. A closed session's pump is let go
+    /// of rather than aborted: it sends what the actor left in the sink, then finishes its
+    /// stream.
+    fn heard(&mut self, msg: &WorkerMsg) {
+        match msg {
+            WorkerMsg::SessionOpened(summary) => {
+                self.sessions.insert(summary.id);
+            }
+            WorkerMsg::SessionClosed { session, .. } => {
+                self.sessions.remove(session);
+                drop(self.attached.remove(session));
+            }
+            _ => {}
+        }
+    }
+
+    /// Send the client the state the broadcast carries, for events it missed: the sessions
+    /// opened and closed since, the item registry, the agents and the ports. Clipboard offers
+    /// are not repeated; the next copy offers again. `Err` when the writer is gone.
+    async fn resync(&mut self) -> Result<(), ()> {
+        let summaries = self.daemon.worker.summaries().await;
+        let now: HashSet<SessionId> = summaries.iter().map(|s| s.id).collect();
+        let mut msgs: Vec<WorkerMsg> = self
+            .sessions
+            .difference(&now)
+            // Why each ended was among what was missed.
+            .map(|&session| WorkerMsg::SessionClosed { session, reason: CloseReason::Exited })
+            .collect();
+        msgs.extend(
+            summaries
+                .into_iter()
+                .filter(|s| !self.sessions.contains(&s.id))
+                .map(WorkerMsg::SessionOpened),
+        );
+        let items = self.daemon.items.snapshot();
+        if let ItemSync::Snapshot { version, .. } = &items {
+            self.items_floor = *version;
+        }
+        msgs.push(WorkerMsg::Items(items));
+        // Collected first: the lock must not be held across the sends.
+        let agents = self.daemon.agents.lock().snapshot();
+        msgs.extend(agents.into_iter().map(WorkerMsg::Agent));
+        let ports = self.daemon.ports.lock().known();
+        msgs.extend(ports.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
+        for msg in msgs {
+            self.heard(&msg);
+            self.out.send(msg).await.map_err(|_gone| ())?;
+        }
+        Ok(())
+    }
+
     async fn handle(&mut self, msg: ClientMsg) {
         match msg {
             ClientMsg::Hello(_) => {
@@ -785,7 +858,8 @@ impl Peer<'_> {
             }
         };
         let (sink, mut events) = mpsc::channel::<Outbound>(SINK_DEPTH);
-        if let Err(e) = handle.attach(self.client, size, sink.clone()) {
+        let weak = sink.downgrade();
+        if let Err(e) = handle.attach(self.client, size, sink) {
             return report(&self.out, self.client, session, &e).await;
         }
         let client = self.client;
@@ -808,7 +882,7 @@ impl Peer<'_> {
             }
             let _finished = stream.finish();
         });
-        self.attached.insert(session, (task, sink));
+        self.attached.insert(session, (task, weak));
     }
 }
 

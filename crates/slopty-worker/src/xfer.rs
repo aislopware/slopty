@@ -4,9 +4,14 @@
 //! [`Transfers`] holds every transfer a client began ([`Transfers::begin`]) until its last file
 //! landed. Each top-level entry of a drop (a file, or a directory and everything under it) goes
 //! to the transfer's base directory, or to `<drop>/<xfer>/` when that name is taken there; the
-//! choice is made once per entry, on its first file. A file is written to `name.partial`
-//! ([`Receiving`]), synced, and renamed into place, so a retried file resumes from the bytes the
-//! partial holds ([`durable`]).
+//! choice is made once per entry, on its first file, and a name another transfer in flight
+//! claimed there counts as taken, so two drops of the same name never share a partial file. A
+//! file is written to `name.partial` ([`Receiving`]), synced, and renamed into place, so a
+//! retried file resumes from the bytes the partial holds ([`durable`]).
+//!
+//! The entries of unfinished transfers are listed in a ledger in the drop directory, and
+//! [`Transfers::sweep`] removes the partial files under them that nothing wrote to for
+//! [`STALE_PARTIAL`]: an upload cut for good leaves nothing behind in the directory it went to.
 //!
 //! A download goes the other way, and resumes the same way: a retried fetch names the bytes the
 //! client holds of each file, and [`Transfers::resume_points`] sends a file from there when
@@ -25,6 +30,13 @@ use tokio::sync::{Notify, watch};
 
 /// Progress is reported at most this often per transfer.
 pub const PROGRESS_EVERY: Duration = Duration::from_millis(100);
+
+/// A partial file nothing wrote to for this long belongs to an upload nobody will resume.
+pub const STALE_PARTIAL: Duration = Duration::from_hours(24);
+
+/// The ledger of unfinished transfers' entries, in the drop directory: one JSON array of the
+/// transfer id and the entry's path per line.
+const LEDGER: &str = ".partials";
 
 /// Why a transfer or one of its files failed.
 #[derive(Debug, thiserror::Error)]
@@ -99,12 +111,20 @@ struct Transfer {
 }
 
 impl Transfer {
-    /// The directory top-level entry `top` lands in, chosen on its first sight.
-    fn root(&mut self, top: &str) -> PathBuf {
-        if let Some((_top, root)) = self.roots.iter().find(|(n, _root)| n == top) {
-            return root.clone();
-        }
-        let taken = std::fs::symlink_metadata(self.base.join(top)).is_ok();
+    /// The directory top-level entry `top` landed in, once chosen.
+    fn known_root(&self, top: &str) -> Option<&PathBuf> {
+        self.roots.iter().find(|(n, _root)| n == top).map(|(_top, root)| root)
+    }
+
+    /// Whether this transfer put a top-level entry at `entry`.
+    fn claims(&self, entry: &Path) -> bool {
+        self.roots.iter().any(|(top, root)| root.join(top) == entry)
+    }
+
+    /// Choose where `top` lands: the base directory, unless the name is there already or
+    /// `claimed` by another transfer.
+    fn choose_root(&mut self, top: &str, claimed: bool) -> PathBuf {
+        let taken = claimed || std::fs::symlink_metadata(self.base.join(top)).is_ok();
         let root = if taken { self.fallback.clone() } else { self.base.clone() };
         self.roots.push((top.to_owned(), root.clone()));
         root
@@ -167,6 +187,8 @@ pub struct Transfers {
     /// Woken on every [`Transfers::begin`]: a file's stream can overtake its transfer's
     /// `Begin`, which rides the control stream.
     begun: Notify,
+    /// Held while the ledger is read or written.
+    ledger: Mutex<()>,
 }
 
 /// `name` as a relative path: `/`-separated, no empty, `.` or `..` component, not absolute.
@@ -182,6 +204,48 @@ fn relative(name: &str) -> Result<PathBuf, XferError> {
         return Err(refused());
     }
     Ok(path)
+}
+
+/// One ledger line: `["<xfer>","<entry>"]` and a newline; `None` for a path that is not UTF-8.
+fn ledger_line(xfer: XferId, entry: &Path) -> Option<String> {
+    let mut line = serde_json::to_string(&(xfer.to_string(), entry.to_str()?)).ok()?;
+    line.push('\n');
+    Some(line)
+}
+
+/// The partial files of top-level entry `entry`: its own, and every one under it when it is a
+/// directory. Symbolic links are not followed.
+fn partials_under(entry: &Path, out: &mut Vec<PathBuf>) {
+    let own = partial_of(entry);
+    if std::fs::symlink_metadata(&own).is_ok_and(|m| m.is_file()) {
+        out.push(own);
+    }
+    if !std::fs::symlink_metadata(entry).is_ok_and(|m| m.is_dir()) {
+        return;
+    }
+    let Ok(dir) = std::fs::read_dir(entry) else { return };
+    for child in dir.flatten() {
+        let Ok(kind) = child.file_type() else { continue };
+        let path = child.path();
+        if kind.is_dir() {
+            partials_under(&path, out);
+        } else if path.extension().is_some_and(|x| x == "partial") {
+            out.push(path);
+        }
+    }
+}
+
+/// Remove `dir` and every directory under it that holds nothing else, bottom up.
+fn remove_empty_dirs(dir: &Path) {
+    if let Ok(children) = std::fs::read_dir(dir) {
+        for child in children.flatten() {
+            if child.file_type().is_ok_and(|k| k.is_dir()) {
+                remove_empty_dirs(&child.path());
+            }
+        }
+    }
+    // Fails, as it should, while anything is left in it.
+    let _not_empty = std::fs::remove_dir(dir);
 }
 
 /// Where `target`'s bytes are written until it is whole.
@@ -207,7 +271,13 @@ impl Transfers {
     /// Transfers whose clashing and staged entries go under `drop_root/<xfer>/`.
     #[must_use]
     pub fn new(drop_root: PathBuf) -> Self {
-        Self { drop_root, inner: Mutex::default(), sent: Mutex::default(), begun: Notify::new() }
+        Self {
+            drop_root,
+            inner: Mutex::default(),
+            sent: Mutex::default(),
+            begun: Notify::new(),
+            ledger: Mutex::default(),
+        }
     }
 
     /// `~/.slopty/drop`.
@@ -266,11 +336,21 @@ impl Transfers {
     }
 
     /// Where file `name` of `xfer` lands. The first file of a top-level entry decides for the
-    /// whole entry: the base directory, or the fallback when the name is taken there.
+    /// whole entry: the base directory, or the fallback when the name is taken there or
+    /// another transfer in flight put an entry of that name there.
     pub fn target(&self, xfer: XferId, name: &str) -> Result<PathBuf, XferError> {
         let rel = relative(name)?;
         let top = name.split('/').next().unwrap_or(name);
-        let root = self.inner.lock().get_mut(&xfer).ok_or(XferError::Unknown)?.root(top);
+        let mut inner = self.inner.lock();
+        let transfer = inner.get(&xfer).ok_or(XferError::Unknown)?;
+        if let Some(root) = transfer.known_root(top) {
+            return Ok(root.join(rel));
+        }
+        let entry = transfer.base.join(top);
+        let claimed = inner.iter().any(|(id, other)| *id != xfer && other.claims(&entry));
+        let root = inner.get_mut(&xfer).ok_or(XferError::Unknown)?.choose_root(top, claimed);
+        drop(inner);
+        self.record(xfer, &root.join(top));
         Ok(root.join(rel))
     }
 
@@ -290,8 +370,110 @@ impl Transfers {
             return None;
         }
         let t = self.inner.lock().remove(&xfer)?;
+        self.unrecord(xfer);
         let paths = t.roots.iter().map(|(top, root)| root.join(top)).collect();
         Some(Finished { paths, staging: t.staging })
+    }
+
+    /// Remove the partial files of unfinished transfers that nothing wrote to for `stale`, and
+    /// the directories in the drop directory that leaves empty. The ledger keeps the entries
+    /// that still hold a younger partial. Returns the partial files removed.
+    pub fn sweep(&self, stale: Duration) -> usize {
+        // Not held over the walk: a transfer placing an entry meanwhile only appends.
+        let listed = {
+            let _held = self.ledger.lock();
+            self.read_ledger()
+        };
+        let now = SystemTime::now();
+        let mut removed: usize = 0;
+        let mut kept: Vec<(XferId, PathBuf)> = Vec::new();
+        for (xfer, entry) in listed.iter().cloned() {
+            let mut young = false;
+            let mut partials = Vec::new();
+            partials_under(&entry, &mut partials);
+            for partial in partials {
+                let written = std::fs::symlink_metadata(&partial).and_then(|m| m.modified());
+                let age = written
+                    .map_or(Duration::MAX, |at| now.duration_since(at).unwrap_or(Duration::ZERO));
+                if age >= stale && std::fs::remove_file(&partial).is_ok() {
+                    removed = removed.saturating_add(1);
+                } else {
+                    young = true;
+                }
+            }
+            if let Ok(inside) = entry.strip_prefix(&self.drop_root)
+                && let Some(Component::Normal(first)) = inside.components().next()
+            {
+                let dir = self.drop_root.join(first);
+                remove_empty_dirs(&dir);
+            }
+            if young && !kept.contains(&(xfer, entry.clone())) {
+                kept.push((xfer, entry));
+            }
+        }
+        let _held = self.ledger.lock();
+        let appended: Vec<(XferId, PathBuf)> =
+            self.read_ledger().into_iter().filter(|line| !listed.contains(line)).collect();
+        for line in appended {
+            if !kept.contains(&line) {
+                kept.push(line);
+            }
+        }
+        self.write_ledger(&kept);
+        removed
+    }
+
+    fn ledger_path(&self) -> PathBuf {
+        self.drop_root.join(LEDGER)
+    }
+
+    /// List `entry` of `xfer` in the ledger, so a sweep finds its partial files if it never
+    /// finishes. A path that is not UTF-8 is not listed.
+    fn record(&self, xfer: XferId, entry: &Path) {
+        use std::io::Write as _;
+        let Some(line) = ledger_line(xfer, entry) else { return };
+        let _held = self.ledger.lock();
+        let appended = std::fs::create_dir_all(&self.drop_root).and_then(|()| {
+            let mut file = File::options().create(true).append(true).open(self.ledger_path())?;
+            file.write_all(line.as_bytes())
+        });
+        if let Err(e) = appended {
+            tracing::warn!(%xfer, entry = %entry.display(), error = %e, "partial ledger");
+        }
+    }
+
+    /// Drop `xfer`'s entries from the ledger: every file of it landed.
+    fn unrecord(&self, xfer: XferId) {
+        let _held = self.ledger.lock();
+        let rest: Vec<(XferId, PathBuf)> =
+            self.read_ledger().into_iter().filter(|(x, _entry)| *x != xfer).collect();
+        self.write_ledger(&rest);
+    }
+
+    /// The ledger's entries; a line that does not read is skipped.
+    fn read_ledger(&self) -> Vec<(XferId, PathBuf)> {
+        let Ok(text) = std::fs::read_to_string(self.ledger_path()) else { return Vec::new() };
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<(String, PathBuf)>(line).ok())
+            .filter_map(|(xfer, entry)| Some((xfer.parse().ok()?, entry)))
+            .collect()
+    }
+
+    /// Replace the ledger with `entries`: a temporary file renamed over it, so a crash leaves
+    /// the old list or the new. No entries removes it.
+    fn write_ledger(&self, entries: &[(XferId, PathBuf)]) {
+        let path = self.ledger_path();
+        if entries.is_empty() {
+            let _absent = std::fs::remove_file(&path);
+            return;
+        }
+        let text: String = entries.iter().filter_map(|(x, e)| ledger_line(*x, e)).collect();
+        let mut tmp = path.clone().into_os_string();
+        tmp.push(".tmp");
+        let written = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &path));
+        if let Err(e) = written {
+            tracing::warn!(path = %path.display(), error = %e, "partial ledger");
+        }
     }
 
     /// `bytes` more of `xfer` arrived; the total when a progress report is due (at most every
@@ -567,6 +749,78 @@ mod tests {
         assert_eq!(done.paths, [cwd.join("new.txt"), fallback.join("taken")]);
         assert!(!done.staging);
         assert!(matches!(t.target(xfer, "x"), Err(XferError::Unknown)), "forgotten once done");
+    }
+
+    /// Two drops of one name into one directory at once: the second lands in its own drop
+    /// directory, so their partial files are two.
+    #[test]
+    fn two_drops_of_one_name_never_share_a_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let t = transfers(dir.path());
+        let (first, second) = (XferId::new(), XferId::new());
+        let dest = Dest::SessionCwd(SessionId::new());
+        t.begin(first, &dest, cwd.to_str(), 1);
+        t.begin(second, &dest, cwd.to_str(), 1);
+        let a = t.target(first, "a.txt").unwrap();
+        let b = t.target(second, "a.txt").unwrap();
+        assert_eq!(a, cwd.join("a.txt"));
+        assert_eq!(b, dir.path().join("drop").join(second.to_string()).join("a.txt"));
+        assert_ne!(partial_of(&a), partial_of(&b));
+        assert_eq!(t.target(first, "a.txt").unwrap(), a, "a retry keeps its place");
+    }
+
+    /// A worker start sweeps the partial files of transfers that never finished once nothing
+    /// wrote to them for a day: in the directory they went to and in the drop directory, whose
+    /// emptied transfer directory goes too. A younger partial stays, listed for the next sweep;
+    /// a finished transfer leaves nothing listed.
+    #[test]
+    fn a_sweep_removes_the_stale_partials_of_unfinished_transfers() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let dest = Dest::SessionCwd(SessionId::new());
+        let t = transfers(dir.path());
+        let cut = |xfer: XferId, name: &str, age: Duration| {
+            let target = t.target(xfer, name).unwrap();
+            let mut rx = Receiving::open(&target, 0, 10).unwrap();
+            rx.write(b"half").unwrap();
+            let _held = rx.keep();
+            let written = SystemTime::now().checked_sub(age).unwrap();
+            File::options()
+                .write(true)
+                .open(partial_of(&target))
+                .unwrap()
+                .set_modified(written)
+                .unwrap();
+            partial_of(&target)
+        };
+        let day = STALE_PARTIAL;
+        let (old, young, staged, done) =
+            (XferId::new(), XferId::new(), XferId::new(), XferId::new());
+        t.begin(old, &dest, cwd.to_str(), 2);
+        t.begin(young, &dest, cwd.to_str(), 1);
+        t.begin(staged, &Dest::Staging, None, 1);
+        t.begin(done, &dest, cwd.to_str(), 1);
+        let old_file = cut(old, "report.pdf", day.saturating_mul(2));
+        let old_nested = cut(old, "proj/src/lib.rs", day.saturating_mul(2));
+        let young_file = cut(young, "notes.txt", Duration::from_secs(60));
+        let staged_file = cut(staged, "shot.png", day.saturating_mul(3));
+        let landed = t.target(done, "whole.txt").unwrap();
+        let mut rx = Receiving::open(&landed, 0, 4).unwrap();
+        rx.write(b"four").unwrap();
+        let whole = rx.finish(0, 0).unwrap();
+        assert!(t.landed(done, "whole.txt", whole).is_some());
+
+        let fresh = transfers(dir.path());
+        assert_eq!(fresh.sweep(day), 3);
+        assert!(!old_file.exists() && !old_nested.exists() && !staged_file.exists());
+        assert!(cwd.join("proj/src").is_dir(), "a directory the drop made in place stays");
+        assert!(!dir.path().join("drop").join(staged.to_string()).exists());
+        assert!(young_file.exists() && landed.exists());
+        assert_eq!(fresh.sweep(day), 0, "the young one waits");
+        assert_eq!(fresh.sweep(Duration::ZERO), 1);
+        assert!(!young_file.exists());
+        assert!(!dir.path().join("drop").join(LEDGER).exists(), "nothing left to list");
     }
 
     #[test]

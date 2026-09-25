@@ -34,6 +34,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   attached session opened by the host, first message `StreamHeader { session }`; datagrams for
   media. Transport config: idle 45 s, keep-alive 5 s, 4 MiB datagram buffers.
 
+- ✅ **1024 streams each way, and a stream that never comes is a reset** (2026-09-25). Every
+  forwarded TCP connection is a bidirectional stream, and the limit was 16 with the control
+  stream taking one. A browser keeps six sockets per origin plus its hot-reload websockets, so
+  the sixteenth connection waited for a stream with no deadline and the page hung. Both
+  directions now allow `slopty_net::endpoint::MAX_STREAMS` (1024). Flow control stays at
+  noq's defaults: 1.25 MB per stream bounds what one stalled stream holds, and the
+  connection window stays unbounded. A shared bound would let a few stalled streams block the
+  control stream. The client gives a tunnel stream 10 s to open. After that it resets the
+  accepted socket with a zero linger, so the browser sees a refused request rather than an
+  empty answer. The accepted socket also gets `TCP_NODELAY`, as the worker's end already
+  had. Tests: `sixty_four_forwarded_connections_at_once_are_all_served` (`slopty-workerd`
+  e2e, 64 connections held open together through a real worker) and
+  `a_connection_with_no_stream_to_be_had_is_reset` (`slopty-client`).
+
+- ✅ **A session stream ends with its session, whoever closed it** (2026-09-25). The
+  connection kept a strong clone of each attached session's sink, so the pump never saw the
+  channel close. A session closed by another client or by an agent left its pump task and its
+  unidirectional stream open for the life of the connection. At the old limit of 256 the next
+  attach then waited in the connection's loop, and every keystroke waited behind it. The
+  connection now keeps a weak sender, and `SessionClosed` lets go of the pump rather than
+  aborting it. The pump sends what the actor left in the sink and finishes the stream. Test:
+  `a_session_another_client_closes_ends_the_watchers_stream`.
+
+- ✅ **A client that falls behind the worker's events gets the state again** (2026-09-25). The
+  daemon's broadcast held 64 events, and a connection that lagged only logged it, so the
+  client silently missed sessions, item changes and agent states. The broadcast now holds
+  1024. On a lag the connection resubscribes and sends what the broadcast carries as it is
+  now: `SessionClosed` for the sessions it had told of that are gone (with `Exited`, since
+  the real reason was among what was missed), `SessionOpened` for the new ones, the item
+  `Snapshot` the protocol already sends "after a gap", every agent's state, and the ports.
+  Item deltas at or below that snapshot's version are skipped. Clipboard offers are not
+  repeated, because the next copy offers again. The server link keeps its rule: it registers
+  again. Test: `a_client_that_falls_behind_gets_the_items_again`, where one client floods
+  pointings while the other stops reading.
+
 - ✅ **Congestion controller**: noq default (Cubic); BBR3 measured 2026-09-05 (MEASUREMENTS.md),
   revisit once noq marks it stable (superseded 2026-09-05: BBR3 installed as default for both
   roles with `SLOPTY_CC=cubic` override; see line 683). The media path runs its own bitrate

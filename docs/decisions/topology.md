@@ -183,6 +183,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     is a new worker, a new name or address, capabilities that changed in more than their load,
     or a lease that ended. A restarted server lists every known worker as *gone* until it
     registers again.
+  - **A worker set up again replaces its old entry** (2026-09-25). A new data directory gives
+    a worker a new id under its old name, and the server used to keep the old id forever. A
+    name then matched two workers, and clients kept dialling the dead one. On registration
+    the server drops every entry without a live link that has the same name and the same
+    address. Nothing else can be listening on that address and port, so the old worker is not
+    running any more. Every link then gets the whole `Directory` again, which clients already
+    read as a replacement, and the state file is rewritten. The tools' resolver also takes the
+    one online worker when a name matches several. An entry at another address stays until
+    something removes it by hand, which needs a `ForgetWorker` verb and a protocol change
+    that are still owed. Tests: `a_worker_set_up_again_replaces_its_old_entry`
+    (`slopty-server` hub) and `a_shared_name_means_the_one_online` (`slopty-tools`).
   - **MCP.** Streamable HTTP on TCP 45561 (`MCP_PORT`, next to `SERVER_PORT`), path `/mcp`,
     stateless, with JSON responses.
     - The listener binds `[::]` dual-stack and admits each TCP peer with the QUIC listener's
@@ -245,6 +256,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     marks survive a full-screen program.
   - `ReadFile` refuses files over 16 MiB, since a reply is one frame. `WriteFile` writes a
     temporary file beside the target, fsyncs it and renames it over, keeping the old mode.
+  - A message too large for one frame is never written; an error goes in its place and the
+    link carries on (2026-09-25). The frame holds more than the file's bytes, so a file just
+    under 16 MiB passed the check above and its answer broke the worker's writer while the
+    lease stayed up, and every later verb timed out. Now the worker's writer answers such a
+    reply with `Failed`, the server's writer to a worker answers such a request (a
+    `write_file` of a frame's worth) with `Invalid`, and its writer to a client does the same
+    for a reply. Any other write failure ends the link: on the worker it ends the session and
+    it redials, and on the server it ends the lease. The MCP endpoint's request body limit is
+    a frame's worth of bytes in base64 plus 1 MiB (`slopty_server::mcp::MAX_BODY_BYTES`), up
+    from rmcp's 4 MiB, so HTTP takes the same files as `slopty mcp` over stdio. Tests:
+    `an_answer_too_large_for_the_link_is_an_error_and_the_link_goes_on` (`slopty-workerd`
+    `server_link`) and `a_file_too_large_for_the_link_is_refused_and_the_link_stays_up`
+    (`slopty-server` `mcp`).
     `ListPorts` walks each terminal's process tree with libproc and reports the TCP sockets
     in the listening state.
 

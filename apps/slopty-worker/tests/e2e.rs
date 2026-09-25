@@ -601,6 +601,113 @@ mod tests {
         drop(endpoint_b);
     }
 
+    /// A terminal one client watches and another closes: the watcher's session stream finishes
+    /// once the session's last events are through, rather than staying open for the life of
+    /// the connection (each one held a stream the worker could not open again).
+    #[tokio::test]
+    async fn a_session_another_client_closes_ends_the_watchers_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, addr) = daemons(dir.path()).await;
+        let (endpoint_a, mut a) = dial(addr).await;
+        guard.1 = Some(endpoint_a);
+        let (_endpoint_b, mut b) = dial(addr).await;
+        let (session, mut events) = open_shell_and_see(&mut a, "watched-42").await;
+
+        b.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+        let ended = tokio::time::timeout(STEP, async {
+            loop {
+                if let Err(e) = events.recv().await {
+                    break e;
+                }
+            }
+        })
+        .await
+        .expect("the session stream ends");
+        assert!(matches!(ended, slopty_net::NetError::Closed), "a clean end: {ended}");
+    }
+
+    /// A client that stops reading while another floods the worker with pointings falls behind
+    /// the worker's events; once it reads again it gets the item registry whole, not a silent
+    /// gap.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_that_falls_behind_gets_the_items_again() {
+        use slopty_proto::items::ItemSync;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, addr) = daemons(dir.path()).await;
+        let (endpoint_a, mut a) = dial(addr).await;
+        guard.1 = Some(endpoint_a);
+        next_items(&mut a, |s| matches!(s, ItemSync::Snapshot { .. })).await;
+        let (_endpoint_b, b) = dial(addr).await;
+        let WorkerConn { tx: mut b_tx, rx: mut b_rx, .. } = b;
+        let reader = tokio::spawn(async move { while b_rx.recv().await.is_ok() {} });
+
+        // Several times what the client's stream window, the worker's queue and its broadcast
+        // hold together (about 30 000 pointings), well past what the worker's own receive window
+        // lets this loop buffer ahead of it.
+        let item = slopty_core::ItemId::new();
+        for _ in 0..300_000 {
+            b_tx.send(&ClientMsg::Point { item }).await.unwrap();
+        }
+        // Only a resync sends a snapshot after the first.
+        next_items(&mut a, |s| matches!(s, ItemSync::Snapshot { .. })).await;
+        reader.abort();
+    }
+
+    /// Port forwarding serves as many connections at once as a browser on a dev server opens,
+    /// and more: 64 held open together, every one answered in full.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sixty_four_forwarded_connections_at_once_are_all_served() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        const CONNECTIONS: usize = 64;
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+
+        // The dev server: answers no one until every connection is in.
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = server.local_addr().unwrap().port();
+        let all_in = std::sync::Arc::new(tokio::sync::Barrier::new(CONNECTIONS));
+        let serving = tokio::spawn(async move {
+            loop {
+                let (socket, _from) = server.accept().await.unwrap();
+                let all_in = std::sync::Arc::clone(&all_in);
+                tokio::spawn(async move {
+                    let (rd, mut wr) = socket.into_split();
+                    let mut asked = String::new();
+                    BufReader::new(rd).read_line(&mut asked).await.unwrap();
+                    all_in.wait().await;
+                    wr.write_all(format!("answer to {asked}").as_bytes()).await.unwrap();
+                    wr.shutdown().await.unwrap();
+                });
+            }
+        });
+
+        let mut forwards = slopty_client::tunnel::Forwards::new(worker.conn.clone());
+        let local = forwards.pin(port).expect("a local port for the forward");
+        let browsers: Vec<_> = (0..CONNECTIONS)
+            .map(|i| {
+                tokio::spawn(async move {
+                    let mut tcp =
+                        tokio::net::TcpStream::connect(("127.0.0.1", local)).await.unwrap();
+                    tcp.write_all(format!("request {i}\n").as_bytes()).await.unwrap();
+                    let mut answer = String::new();
+                    tcp.read_to_string(&mut answer).await.unwrap();
+                    assert_eq!(answer, format!("answer to request {i}\n"));
+                })
+            })
+            .collect();
+        tokio::time::timeout(STEP, async {
+            for browser in browsers {
+                browser.await.unwrap();
+            }
+        })
+        .await
+        .expect("all 64 connections answered");
+        forwards.clear();
+        serving.abort();
+    }
+
     /// A file behind a file card is watched: a write on the worker reaches the client as a
     /// fresh `WorkerMsg::File` unasked, its removal too, and an emptied watch list stops it.
     #[tokio::test]

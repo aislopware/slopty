@@ -162,6 +162,31 @@ mod tests {
         Input::Text(s.to_owned())
     }
 
+    /// A file the worker may read but whose answer is too large for one message on the link:
+    /// the server gets an error in its place, and the link goes on answering.
+    #[tokio::test]
+    async fn an_answer_too_large_for_the_link_is_an_error_and_the_link_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+        let worker = reg.worker;
+
+        let big = dir.path().join("big.bin");
+        let size = slopty_worker::orchestrate::MAX_FILE_BYTES;
+        std::fs::File::create(&big).unwrap().set_len(size).unwrap();
+        let path = big.to_string_lossy().into_owned();
+        let read = peer.ask(Verb::ReadFile { worker, path }).await;
+        let Outcome::Error { code: ErrorCode::Failed, message } = read else { panic!("{read:?}") };
+        assert!(message.contains("more than the"), "{message}");
+
+        let ports = peer.ask(Verb::ListPorts { worker }).await;
+        assert!(matches!(ports, Outcome::Ports(_)), "the link still answers: {ports:?}");
+    }
+
     #[tokio::test]
     async fn a_worker_registers_answers_forwarded_verbs_and_comes_back() {
         let dir = tempfile::tempdir().unwrap();

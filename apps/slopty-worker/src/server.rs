@@ -12,11 +12,13 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use slopty_core::SessionId;
-use slopty_net::HostAddr;
 use slopty_net::framed::FramedSend;
 use slopty_net::server::{DialError, ServerLink};
+use slopty_net::{HostAddr, NetError};
 use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentKind, AgentStatus};
+use slopty_proto::codec::CodecError;
+use slopty_proto::orchestration::{ErrorCode, Outcome};
 use slopty_proto::server::{FromServer, Refusal, Registration, Role, ToServer, WorkerCaps};
 use slopty_worker::orchestrate::{Agents, Orchestrator};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -147,7 +149,7 @@ async fn session(
     let ServerLink { conn, remote, name, tx, mut rx } = link;
     tracing::info!(server = %name, %remote, "registered with the server");
     let (out, out_rx) = mpsc::channel::<ToServer>(OUT_DEPTH);
-    let writer = tokio::spawn(write(tx, out_rx));
+    let mut writer = tokio::spawn(write(tx, out_rx));
     let mut requests = JoinSet::new();
     let why = loop {
         tokio::select! {
@@ -160,7 +162,7 @@ async fn session(
                     });
                 }
                 Ok(other) => tracing::debug!(?other, "server message a worker does not take"),
-                Err(slopty_net::NetError::Closed) => break "the server closed the link",
+                Err(NetError::Closed) => break "the server closed the link",
                 Err(e) => return Err(e.into()),
             },
             ev = events.recv() => {
@@ -193,6 +195,8 @@ async fn session(
                     tracing::warn!(error = %e, "a forwarded verb's task failed");
                 }
             }
+            // A link that can no longer write is no lease: the server must see it end.
+            _ended = &mut writer => break "the writer stopped",
             reason = conn.closed() => {
                 tracing::info!(%reason, "server connection closed");
                 break "the connection closed";
@@ -205,12 +209,32 @@ async fn session(
     Ok(why)
 }
 
+/// Send what is queued until the link fails. A reply too large for one message goes as an
+/// error in its place: nothing of it was written, and the caller hears why.
 async fn write(mut tx: FramedSend<ToServer>, mut rx: mpsc::Receiver<ToServer>) {
     while let Some(msg) = rx.recv().await {
-        if let Err(e) = tx.send(&msg).await {
-            tracing::debug!(error = %e, "server link write failed");
+        let sent = match tx.send(&msg).await {
+            Err(NetError::Codec(CodecError::TooLarge { len, max })) => match msg {
+                ToServer::Reply { id, .. } => {
+                    tracing::warn!(id, len, max, "a reply too large for the link");
+                    tx.send(&ToServer::Reply { id, outcome: too_large(len, max) }).await
+                }
+                _ => Err(NetError::Codec(CodecError::TooLarge { len, max })),
+            },
+            other => other,
+        };
+        if let Err(e) = sent {
+            tracing::warn!(error = %e, "server link write failed");
             return;
         }
+    }
+}
+
+/// The error sent instead of an answer of `len` bytes, over the `max` one message carries.
+fn too_large(len: usize, max: usize) -> Outcome {
+    Outcome::Error {
+        code: ErrorCode::Failed,
+        message: format!("the answer is {len} bytes, more than the {max} one message carries"),
     }
 }
 

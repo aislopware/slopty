@@ -183,6 +183,79 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// A `write_file` of more bytes than one message to a worker carries gets through HTTP (the
+    /// body limit holds a whole message's worth in base64, as stdio does) and is refused with an
+    /// error a model can read. The worker's link stays up: nothing of the file went down it, and
+    /// the next verb reaches the worker.
+    #[tokio::test]
+    async fn a_file_too_large_for_the_link_is_refused_and_the_link_stays_up() {
+        use slopty_proto::codec::MAX_FRAME_BYTES;
+        use slopty_proto::orchestration::{Outcome, Screen, Verb};
+        use slopty_proto::server::{FromServer, ToServer};
+
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::start(Config {
+            name: "test-server".to_owned(),
+            quic: "127.0.0.1:0".parse().unwrap(),
+            mcp: "127.0.0.1:0".parse().unwrap(),
+            data_dir: dir.path().to_path_buf(),
+            admission: Admission::default(),
+        })
+        .await
+        .unwrap();
+        let worker = WorkerId::new();
+        let endpoint = bind_client().unwrap();
+        let role = Role::Worker(Registration {
+            worker,
+            name: "fake-worker".to_owned(),
+            port: 45550,
+            caps: caps(),
+            sessions: Vec::new(),
+        });
+        let mut link =
+            slopty_net::server::connect(&endpoint, &HostAddr::from(server.quic_addr()), role)
+                .await
+                .unwrap();
+        let mcp = server.mcp_addr();
+
+        // A frame's worth of zero bytes, a multiple of three so the base64 has no padding.
+        let bytes = MAX_FRAME_BYTES - 1;
+        assert_eq!(bytes % 3, 0);
+        let content = "A".repeat(bytes / 3 * 4);
+        let arguments = json!({
+            "worker": worker.to_string(),
+            "path": "/tmp/too-large",
+            "content": content,
+            "encoding": "base64",
+        });
+        let params = json!({ "name": "write_file", "arguments": arguments });
+        let called = rpc(mcp, 1, "tools/call", Some("write_file"), params).await;
+        let text = called["result"]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(called["result"]["isError"], json!(true), "{text}");
+        assert!(text.contains("more than the"), "{text}");
+
+        let term = format!("{worker}/{}", WorkerId::new());
+        let params = json!({ "name": "read_screen", "arguments": { "term": term } });
+        let worker_side = async {
+            let msg = tokio::time::timeout(Duration::from_secs(10), link.rx.recv()).await;
+            let Ok(Ok(FromServer::Request { id, verb: Verb::ReadScreen { .. } })) = msg else {
+                panic!("the next request down the link is the read: {msg:?}")
+            };
+            let screen = Screen {
+                lines: Vec::new(),
+                cursor: (0, 0),
+                title: String::new(),
+                cwd: None,
+                alternate: false,
+            };
+            link.tx.send(&ToServer::Reply { id, outcome: Outcome::Screen(screen) }).await.unwrap();
+        };
+        let (called, ()) =
+            tokio::join!(rpc(mcp, 2, "tools/call", Some("read_screen"), params), worker_side);
+        assert_ne!(called["result"]["isError"], json!(true), "{called}");
+        server.shutdown().await;
+    }
+
     /// This machine's link-local address on `lo0` is not loopback, so a listener that admits
     /// only 10/8 turns it away; loopback is let in whatever the list says.
     #[tokio::test]

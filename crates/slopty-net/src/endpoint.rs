@@ -70,6 +70,14 @@ pub const INITIAL_WINDOW_ENV: &str = "SLOPTY_QUIC_IW";
 /// starts with. The first keyframe is tens to hundreds of kilobytes and every window's worth
 /// of it costs a round trip (MEASUREMENTS.md, "start-up over the mesh").
 const INITIAL_WINDOW_PACKETS: u64 = 32;
+/// Streams of each direction the peer may have open at once.
+///
+/// Every forwarded TCP connection is a bidirectional stream, and a browser on a dev server keeps
+/// six sockets per origin plus its hot-reload websockets; every attached terminal and every file
+/// in flight is a unidirectional one. A stream past the limit does not fail, it waits for one
+/// to close, so a low limit shows up as a page that never loads. Each stream's receive window
+/// (noq's 1.25 MB default) still bounds what one stalled stream can hold.
+pub const MAX_STREAMS: u32 = 1024;
 
 /// Transport config shared by both roles.
 ///
@@ -93,8 +101,8 @@ pub fn transport_config() -> TransportConfig {
         .keep_alive_interval(Some(KEEP_ALIVE))
         .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
         .datagram_send_buffer_size(DATAGRAM_BUFFER)
-        .max_concurrent_bidi_streams(VarInt::from_u32(16))
-        .max_concurrent_uni_streams(VarInt::from_u32(256));
+        .max_concurrent_bidi_streams(VarInt::from_u32(MAX_STREAMS))
+        .max_concurrent_uni_streams(VarInt::from_u32(MAX_STREAMS));
     config
 }
 

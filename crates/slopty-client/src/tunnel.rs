@@ -22,6 +22,11 @@ const NEXT_FREE: u16 = 20;
 /// Bytes moved per read in either direction.
 const CHUNK: usize = 64 * 1024;
 
+/// How long an accepted connection waits for its tunnel stream before it is reset. Opening
+/// waits only while the worker grants no more streams; a reset lets the browser retry rather
+/// than hang on a socket nothing will ever answer.
+const OPEN_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// One port of a worker, as this client serves it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Forward {
@@ -193,7 +198,7 @@ async fn accept(tcp: TcpListener, conn: Connection, port: u16) {
                 tracing::debug!(port, %from, "tunnel");
                 let conn = conn.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = splice(socket, &conn, port).await {
+                    if let Err(e) = splice(socket, &conn, port, OPEN_WITHIN).await {
                         tracing::debug!(port, error = %e, "tunnel ended");
                     }
                 });
@@ -206,10 +211,26 @@ async fn accept(tcp: TcpListener, conn: Connection, port: u16) {
     }
 }
 
-/// Join a local connection to a tunnel stream until both directions finish.
-async fn splice(socket: TcpStream, conn: &Connection, port: u16) -> Result<(), String> {
-    let (mut send, mut recv) =
-        slopty_net::streams::open_tunnel(conn, port).await.map_err(|e| e.to_string())?;
+/// Join a local connection to a tunnel stream until both directions finish. A stream not had
+/// `within` resets the connection.
+async fn splice(
+    socket: TcpStream,
+    conn: &Connection,
+    port: u16,
+    within: std::time::Duration,
+) -> Result<(), String> {
+    // Keystrokes into a forwarded dev server's websocket are as latency-bound as a terminal's.
+    let _nodelay = socket.set_nodelay(true);
+    let opened = tokio::time::timeout(within, slopty_net::streams::open_tunnel(conn, port)).await;
+    let (mut send, mut recv) = match opened {
+        Ok(opened) => opened.map_err(|e| e.to_string())?,
+        Err(_elapsed) => {
+            // A zero linger turns the close into a reset: the peer sees a refused request, not
+            // an empty answer.
+            let _linger = socket.set_zero_linger();
+            return Err(format!("no tunnel stream within {within:?}"));
+        }
+    };
     let (mut from_app, mut to_app) = socket.into_split();
     let up = async {
         let mut buf = vec![0_u8; CHUNK];
@@ -229,4 +250,43 @@ async fn splice(socket: TcpStream, conn: &Connection, port: u16) -> Result<(), S
     };
     let (up, down) = tokio::join!(up, down);
     up.and(down)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    use tokio::io::AsyncReadExt as _;
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::splice;
+
+    /// A connection to a peer that grants every stream it allows and never closes one: the next
+    /// tunnel has to wait for a stream that will not come.
+    #[tokio::test]
+    async fn a_connection_with_no_stream_to_be_had_is_reset() {
+        let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
+        let worker = slopty_net::endpoint::bind(loopback, true).unwrap();
+        let client = slopty_net::endpoint::bind(loopback, false).unwrap();
+        let at = worker.local_addr().unwrap();
+        let (conn, _worker_side) =
+            tokio::join!(async { client.connect(at, "worker").unwrap().await.unwrap() }, async {
+                worker.accept().await.unwrap().await.unwrap()
+            },);
+        let mut held = Vec::new();
+        for _ in 0..slopty_net::endpoint::MAX_STREAMS {
+            held.push(conn.open_bi().await.unwrap());
+        }
+
+        let local = TcpListener::bind(loopback).await.unwrap();
+        let mut browser = TcpStream::connect(local.local_addr().unwrap()).await.unwrap();
+        let (accepted, _from) = local.accept().await.unwrap();
+        let ended = splice(accepted, &conn, 80, Duration::from_millis(200)).await;
+        assert_eq!(held.len(), usize::try_from(slopty_net::endpoint::MAX_STREAMS).unwrap());
+        assert!(ended.unwrap_err().contains("no tunnel stream"));
+        let mut byte = [0_u8; 1];
+        let read = browser.read(&mut byte).await;
+        assert_eq!(read.unwrap_err().kind(), std::io::ErrorKind::ConnectionReset);
+    }
 }

@@ -1,13 +1,16 @@
 //! The QUIC front end: one task per link, by role.
 //!
-//! A worker link holds a [`Lease`] for as long as it reads; what the server sends it (requests)
-//! goes through a queue to a writer task. A client or agent link gets the directory, then every
-//! change, and the answers to its requests, each request dispatched on a task of its own so a
-//! long `WaitFor` holds up nothing behind it.
+//! A worker link holds a [`Lease`] for as long as it both reads and writes; what the server sends
+//! it (requests) goes through a queue to its writer. A client or agent link gets the directory,
+//! then every change, and the answers to its requests, each request dispatched on a task of its
+//! own so a long `WaitFor` holds up nothing behind it.
 
+use slopty_net::NetError;
 use slopty_net::framed::FramedSend;
 use slopty_net::server::{AcceptedLink, ServerListener};
 use slopty_proto::PROTOCOL_VERSION;
+use slopty_proto::codec::CodecError;
+use slopty_proto::orchestration::{ErrorCode, Outcome};
 use slopty_proto::server::{FromServer, Role, ToServer};
 use tokio::sync::{broadcast, mpsc};
 
@@ -47,9 +50,11 @@ async fn worker(hub: Hub, link: AcceptedLink, registration: slopty_proto::server
     };
     tracing::info!(worker = %id, %name, %remote, "worker online");
     let AcceptedLink { conn, tx, mut rx, .. } = link;
-    let writer = tokio::spawn(write(tx, queue));
-    read_worker(&lease, &mut rx).await;
-    writer.abort();
+    // Either half failing ends the lease: a worker the server cannot write to answers nothing.
+    tokio::select! {
+        () = read_worker(&lease, &mut rx) => {}
+        () = write_worker(&lease, tx, queue) => {}
+    }
     conn.close(slopty_net::worker::close_code::NORMAL.into(), b"lease ended");
     drop(lease);
 }
@@ -66,11 +71,51 @@ async fn read_worker(lease: &Lease, rx: &mut slopty_net::framed::FramedRecv<ToSe
     }
 }
 
-async fn write(mut tx: FramedSend<FromServer>, mut queue: mpsc::Receiver<FromServer>) {
+/// Send the worker what is queued until the link fails. A request too large for one message
+/// is answered here with an error: nothing of it was written.
+async fn write_worker(
+    lease: &Lease,
+    mut tx: FramedSend<FromServer>,
+    mut queue: mpsc::Receiver<FromServer>,
+) {
     while let Some(msg) = queue.recv().await {
-        if tx.send(&msg).await.is_err() {
-            return;
-        }
+        let failed = match tx.send(&msg).await {
+            Ok(()) => continue,
+            Err(NetError::Codec(CodecError::TooLarge { len, max })) => match msg {
+                FromServer::Request { id, .. } => {
+                    tracing::warn!(worker = %lease.worker(), id, len, max, "a request too large for the link");
+                    lease.answer(id, too_large(ErrorCode::Invalid, len, max));
+                    continue;
+                }
+                _ => NetError::Codec(CodecError::TooLarge { len, max }),
+            },
+            Err(e) => e,
+        };
+        tracing::info!(worker = %lease.worker(), error = %failed, "worker link write failed");
+        return;
+    }
+}
+
+/// Send `msg`; a reply too large for one message goes as an error in its place.
+async fn send_to_client(tx: &mut FramedSend<FromServer>, msg: FromServer) -> Result<(), NetError> {
+    match tx.send(&msg).await {
+        Err(NetError::Codec(CodecError::TooLarge { len, max })) => match msg {
+            FromServer::Reply { id, .. } => {
+                tracing::warn!(id, len, max, "a reply too large for the link");
+                tx.send(&FromServer::Reply { id, outcome: too_large(ErrorCode::Failed, len, max) })
+                    .await
+            }
+            _ => Err(NetError::Codec(CodecError::TooLarge { len, max })),
+        },
+        sent => sent,
+    }
+}
+
+/// The error in place of a message of `len` bytes, over the `max` one message carries.
+fn too_large(code: ErrorCode, len: usize, max: usize) -> Outcome {
+    Outcome::Error {
+        code,
+        message: format!("the message is {len} bytes, more than the {max} one message carries"),
     }
 }
 
@@ -121,7 +166,8 @@ async fn client(hub: Hub, link: AcceptedLink, name: String) {
                 Err(broadcast::error::RecvError::Closed) => break,
             },
         };
-        if tx.send(&msg).await.is_err() {
+        if let Err(e) = send_to_client(&mut tx, msg).await {
+            tracing::info!(%name, %remote, error = %e, "client link write failed");
             reader.abort();
             break;
         }

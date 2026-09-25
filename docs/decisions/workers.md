@@ -231,3 +231,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and reconnect loop (`slopty_app::workers`); a dropped worker's tiles stay and say so, and the
   titlebar names only the workers that are down. Cross-host attention holds unchanged: the pill
   and the badge count every worker's agents and ⌘⇧A goes to the next one wherever it is.
+
+- ✅ **Two uploads never share a partial file, and abandoned partials are swept** (2026-09-25).
+  Two drops of one name into one directory at once both chose the directory, since neither
+  name existed yet, and wrote the same `name.partial`. A name another transfer in flight put
+  in a directory now counts as taken there, so the second goes to `<drop>/<xfer>/`
+  (`audio.md`, "Uploads are written as `.partial`"). Partials were never removed either, and
+  an upload cut for good left one in the shell's directory. Each top-level entry a transfer
+  places is listed in `<drop>/.partials`, and the list loses a transfer's entries when its
+  last file lands. At start the worker removes the `.partial` files under the listed entries
+  that nothing wrote to for a day (`slopty_worker::xfer::STALE_PARTIAL`), then the drop
+  directories that leaves empty. An entry with a younger partial stays listed for the next
+  start. Directories an unfinished drop made in place stay. Resuming a transfer across a
+  client reconnect is still the client's to do. Tests: `two_drops_of_one_name_never_share_a_partial`
+  and `a_sweep_removes_the_stale_partials_of_unfinished_transfers` (`slopty_worker::xfer`).

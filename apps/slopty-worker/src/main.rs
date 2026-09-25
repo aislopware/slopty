@@ -33,6 +33,11 @@ use slopty_proto::terminal::{CloseReason, SessionState};
 use slopty_worker::{ItemStore, Worker, WorkerError};
 use tokio::sync::broadcast;
 
+/// Events the daemon's broadcast holds for a connection that has not taken them yet. A client
+/// that falls further behind is sent the state again (`conn`), and the server link registers
+/// again; both cost more than the few hundred kilobytes a deeper queue does.
+const EVENT_BUFFER: usize = 1024;
+
 /// Command line.
 #[derive(Parser, Debug)]
 #[command(name = "slopty-worker", version, about)]
@@ -251,7 +256,7 @@ async fn main() -> Result<()> {
         Worker::connect(args.ptyd_socket, Arc::new(server::DaemonAgents(Arc::clone(&agents))))
             .await
             .context("connect to slopty-ptyd")?;
-    let (events, _keep) = broadcast::channel(64);
+    let (events, _keep) = broadcast::channel(EVENT_BUFFER);
     let items = ItemStore::open(&data_dir.join("items.json"))?;
     let holds: Box<dyn slopty_worker::wake::Holds> = Box::new(Assertions::default());
     let wake = Arc::new(parking_lot::Mutex::new(slopty_worker::wake::Wake::new(holds)));
@@ -283,6 +288,13 @@ async fn main() -> Result<()> {
         screens,
         wake,
     };
+    let transfers = Arc::clone(&daemon.transfers);
+    tokio::task::spawn_blocking(move || {
+        let removed = transfers.sweep(slopty_worker::xfer::STALE_PARTIAL);
+        if removed > 0 {
+            tracing::info!(removed, "swept the partial files of abandoned uploads");
+        }
+    });
     tokio::spawn(clip::watch(daemon.clone()));
     tokio::spawn(ports::watch(daemon.clone()));
     // Agents the hooks never report: the foreground process, the title, the transcript.
