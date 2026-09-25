@@ -1259,6 +1259,84 @@ done
         let _killed = child.kill().await;
     }
 
+    /// A viewer whose queue passed the cap while frames it had not confirmed waited in it
+    /// (with the markers after them) is told everything again once it reads: what was dropped
+    /// with the queue does not hold its frames back for good.
+    #[tokio::test]
+    async fn a_viewer_whose_queue_was_dropped_gets_frames_again_once_it_reads() {
+        /// Reads the sink as the app does, answering the markers, until `done` holds of the
+        /// screen; then until the sink is quiet.
+        async fn read_until(
+            rx: &mut mpsc::Receiver<Outbound>,
+            state: &mut TermState,
+            answer: impl Fn(TermRequest),
+            done: impl Fn(&slopty_grid::Screen) -> bool,
+        ) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let wait = if done(state.screen()) {
+                    tokio::time::Instant::now() + Duration::from_millis(100)
+                } else {
+                    deadline
+                };
+                let Ok(out) = tokio::time::timeout_at(wait, rx.recv()).await else {
+                    assert!(done(state.screen()), "never shown:\n{}", text(state.screen()));
+                    return;
+                };
+                for effect in state.apply(event(&out.expect("sink open"))) {
+                    if let Effect::Request(req @ TermRequest::Reached { .. }) = effect {
+                        answer(req);
+                    }
+                }
+            }
+        }
+        let rows_of = |c: char| {
+            let row = c.to_string().repeat(250);
+            move |s: &slopty_grid::Screen| s.lines().iter().filter(|l| l.text() == row).count()
+        };
+        // No echo, and output long enough after the input to be paced, so the screenful
+        // reaches the queue as two frames past the unconfirmed budget.
+        let script = "stty -echo; read x; yes \"$(printf '%250s' '' | tr ' ' a)\" | head -n 100; \
+                      read x; sleep 0.3; yes \"$(printf '%250s' '' | tr ' ' b)\" | head -n 100; \
+                      read x; echo DONE; sleep 30";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let me = ClientId::new();
+        let screen = size(250, 100);
+        let (tx, mut rx) = mpsc::channel::<Outbound>(1);
+        session.attach(me, screen, tx).unwrap();
+        let mut state = TermState::new(screen);
+        let answer = |req| session.request(me, req).unwrap();
+        // Enough frames for markers, each answered: the viewer is held to what it confirms.
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        let a = rows_of('a');
+        read_until(&mut rx, &mut state, answer, |s| a(s) == 99).await;
+        // The sink fills with a reply, and a screenful of frames waits behind it with the
+        // markers that would open the viewer again.
+        session.request(me, TermRequest::FetchLines { start: LineIndex(0), count: 1 }).unwrap();
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        let b = rows_of('b');
+        loop {
+            if let session::Text::Screen { screen, .. } =
+                session.read(session::Read::Screen).await.unwrap()
+                && screen.rows.iter().filter(|r| r.starts_with('b')).count() == 99
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Replies past the cap: the queue, frames and markers with it, is dropped.
+        for _ in 0..80 {
+            session
+                .request(me, TermRequest::FetchLines { start: LineIndex(0), count: 4096 })
+                .unwrap();
+        }
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        read_until(&mut rx, &mut state, answer, |s| b(s) > 0 && text(s).contains("DONE")).await;
+        session.close();
+        let _killed = child.kill().await;
+    }
+
     /// A viewer that stopped reading still gets the rows it asked for once it reads again:
     /// only frames are coalesced for it, never a reply.
     #[tokio::test]

@@ -823,6 +823,13 @@ impl GhosttyEngine {
         let total = scrollback.saturating_add(u64::from(rows));
         let images = match take {
             Take::Joiner => {
+                if !known {
+                    // The record is of another numbering or size, which the joiner never held
+                    // (and a viewer catching up holds an older version of): should the
+                    // numbering come back, as the primary's does after the alternate screen,
+                    // its next diff has to be whole.
+                    self.shown = Shown::default();
+                }
                 // The joiner holds no image, and what it is sent it holds alongside the other
                 // viewers: from here on the ledger is those, and whatever else the others hold
                 // is shipped again when it is placed again.

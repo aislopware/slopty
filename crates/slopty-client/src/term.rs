@@ -424,14 +424,14 @@ impl TermState {
             return effects;
         }
         self.frames = self.frames.saturating_add(1);
-        if self.epoch != Some(frame.epoch) {
-            self.change_numbering(&frame);
-        }
+        let held = self.epoch == Some(frame.epoch) || self.change_numbering(&frame);
         let gap = match self.last_seq {
             Some(prev) => frame.seq != prev.wrapping_add(1),
             None => false,
         };
-        if gap && !frame.full && !self.resync_pending {
+        // A diff in a numbering whose lines this client does not hold cannot be filled in
+        // from them, like one after a gap.
+        if (gap || !held) && !frame.full && !self.resync_pending {
             self.resync_pending = true;
             effects.push(Effect::Request(TermRequest::Attach { size: self.size }));
         }
@@ -478,21 +478,24 @@ impl TermState {
 
     /// A frame in another numbering: the lines held are put aside, kept for the primary
     /// screen while the alternate one is up, and taken back when the worker returns to the
-    /// numbering they were held under.
-    fn change_numbering(&mut self, frame: &Frame) {
+    /// numbering they were held under. `true` when they were taken back.
+    fn change_numbering(&mut self, frame: &Frame) -> bool {
         let held = std::mem::replace(&mut self.scrollback, Scrollback::new(CACHE_LINES));
         let parked = self.parked.take();
         let to_alt = frame.modes.contains(TermModes::ALT_SCREEN)
             && !self.screen.modes().contains(TermModes::ALT_SCREEN);
         let latest_prompt = self.latest_prompt.take();
+        let mut taken_back = false;
         if to_alt {
             self.parked = self.epoch.map(|epoch| Parked { epoch, scrollback: held, latest_prompt });
         } else if let Some(back) = parked.filter(|p| p.epoch == frame.epoch) {
             self.scrollback = back.scrollback;
             self.latest_prompt = back.latest_prompt;
+            taken_back = true;
         }
         self.epoch = Some(frame.epoch);
         self.view_offset = 0;
+        taken_back
     }
 
     /// The screen moved down the numbering without being sent again (output scrolled it):
@@ -1540,6 +1543,26 @@ mod tests {
         s.apply(TermEvent::Frame(alt(frame(5, true, 6, 0, 3, &[(0, "~")]))));
         s.apply(TermEvent::Frame(frame(6, true, 7, 2, 5, &[(0, "C"), (1, "D"), (2, "$ ")])));
         assert_eq!(s.scroll(2).len(), 1, "a new numbering: nothing taken back");
+    }
+
+    /// A diff in a numbering the client holds no lines for cannot be filled from its cache
+    /// (it joined on the alternate screen, so it never held the primary's): it asks for every
+    /// row. A diff on the primary it put aside is filled from what it took back.
+    #[test]
+    fn a_diff_in_a_numbering_not_held_asks_for_every_row() {
+        let alt = |f: Frame| Frame { modes: TermModes::ALT_SCREEN, ..f };
+        let resync = vec![Effect::Request(TermRequest::Attach { size: size() })];
+        let mut joined = TermState::new(size());
+        joined.apply(TermEvent::Frame(alt(frame(3, true, 5, 0, 3, &[(0, "~"), (1, "~")]))));
+        assert_eq!(joined.apply(TermEvent::Frame(frame(4, false, 4, 2, 5, &[(2, "$ ")]))), resync);
+        assert!(!joined.synced());
+
+        let mut held = TermState::new(size());
+        held.apply(TermEvent::Frame(frame(1, true, 4, 2, 5, &[(0, "c"), (1, "d"), (2, "$ ")])));
+        held.apply(TermEvent::Frame(alt(frame(2, true, 5, 0, 3, &[(0, "~")]))));
+        assert!(held.apply(TermEvent::Frame(frame(3, false, 4, 2, 5, &[(2, "$ x")]))).is_empty());
+        let shown: Vec<String> = held.screen().lines().iter().map(|l| l.text()).collect();
+        assert_eq!(shown, ["c", "d", "$ x"]);
     }
 
     /// The worker asks, after enough frames, whether they arrived; the answer names the marker.

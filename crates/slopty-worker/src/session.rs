@@ -1205,12 +1205,18 @@ impl Actor {
     /// it when the frames since the last one call for it. `false` when the viewer is gone.
     fn deliver_frame(&mut self, i: usize, frame: &Outbound) -> bool {
         let Some(v) = self.viewers.get_mut(i) else { return true };
+        if v.lost {
+            // An image ahead of it overflowed the queue: the frame would be dropped, and
+            // counting it would hold the viewer to frames it can never confirm.
+            return true;
+        }
         let claimed = frame.claimed(v, &self.room);
         let marker_due = v.reach.frame(frame.wire.len());
         if !self.deliver(i, claimed) {
             return false;
         }
-        if !marker_due {
+        // The frame itself may have overflowed the queue, which starts its count again.
+        if !marker_due || self.viewers.get(i).is_none_or(|v| v.lost) {
             return true;
         }
         let id = self.next_marker;
@@ -1325,6 +1331,8 @@ impl Actor {
             v.queued_bytes = 0;
             v.lost = true;
             v.stale = true;
+            // The frames and markers dropped with the queue will never be confirmed.
+            v.reach = Reach::default();
         }
         self.wait_for_room(i);
         true

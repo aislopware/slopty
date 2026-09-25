@@ -373,6 +373,10 @@ pub struct TerminalView {
     /// cancelled, with the view).
     scrollbar: Visibility,
     scrollbar_task: Option<gpui::Task<()>>,
+    /// A marker answer the outbound queue had no room for, and the wait for room to send it.
+    /// Only the newest waits: answering it answers every marker before it.
+    unsent_reached: Option<u64>,
+    reached_task: Option<gpui::Task<()>>,
     /// The viewport offset the last frame drew: a frame that draws another has scrolled.
     drawn_offset: u64,
     /// The fraction of a line the wheel has moved short of a whole one (a trackpad scrolls
@@ -495,6 +499,8 @@ impl TerminalView {
             thumb_drag: None,
             scrollbar: Visibility::default(),
             scrollbar_task: None,
+            unsent_reached: None,
+            reached_task: None,
             drawn_offset: 0,
             wheel_remainder: 0.0,
             wheel_gesture: None,
@@ -1845,6 +1851,7 @@ impl TerminalView {
         }
         for effect in effects {
             match effect {
+                Effect::Request(TermRequest::Reached { marker }) => self.reached(marker, cx),
                 Effect::Request(req) => self.send(req),
                 Effect::Title(t) => cx.emit(TerminalViewEvent::Title(t)),
                 Effect::Bell => {
@@ -2050,6 +2057,34 @@ impl TerminalView {
         let msg = ClientMsg::Term { session: self.session, req };
         if let Err(e) = self.out.try_send(msg) {
             tracing::warn!(session = %self.session, error = %e, "outbound queue");
+        }
+    }
+
+    /// Answer a marker. The worker sends this view no more frames until it hears, so an
+    /// answer the outbound queue has no room for waits for room rather than being dropped.
+    fn reached(&mut self, marker: u64, cx: &Context<Self>) {
+        if self.unsent_reached.is_some() {
+            self.unsent_reached = Some(marker);
+            return;
+        }
+        let msg = ClientMsg::Term { session: self.session, req: TermRequest::Reached { marker } };
+        match self.out.try_send(msg) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.unsent_reached = Some(marker);
+                let out = self.out.clone();
+                self.reached_task = Some(cx.spawn(async move |this, cx| {
+                    let Ok(permit) = out.reserve().await else { return };
+                    // A gone view has nothing left to answer.
+                    let _gone = this.update(cx, |view, _cx| {
+                        if let Some(marker) = view.unsent_reached.take() {
+                            let req = TermRequest::Reached { marker };
+                            permit.send(ClientMsg::Term { session: view.session, req });
+                        }
+                    });
+                }));
+            }
+            Err(e) => tracing::warn!(session = %self.session, error = %e, "outbound queue"),
         }
     }
 
@@ -4835,6 +4870,33 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The worker holds this view's frames until it hears a marker was reached, so the answer
+    /// is never lost to a full outbound queue: it goes once there is room, the newest standing
+    /// for the ones before it.
+    #[gpui::test]
+    fn a_marker_answer_waits_for_room_in_a_full_outbound_queue(cx: &mut TestAppContext) {
+        let (tx, mut rx) = mpsc::channel(1);
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            TerminalView::new(SessionId::new(), TermSize::default(), tx, Theme::default(), cx)
+        });
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        view.update_in(cx, |view, _window, cx| {
+            view.send(TermRequest::Raw(b"x".to_vec()));
+            view.apply(TermEvent::Marker { id: 1 }, cx);
+            view.apply(TermEvent::Marker { id: 2 }, cx);
+        });
+        let mut sent = || match rx.try_recv() {
+            Ok(ClientMsg::Term { req, .. }) => Some(req),
+            _ => None,
+        };
+        assert_eq!(sent(), Some(TermRequest::Raw(b"x".to_vec())), "the queue was full");
+        cx.run_until_parked();
+        assert_eq!(sent(), Some(TermRequest::Reached { marker: 2 }));
+        cx.run_until_parked();
+        assert_eq!(sent(), None, "one answer for both");
     }
 
     /// An input method previews its composition at the cursor and nothing reaches the worker

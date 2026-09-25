@@ -94,10 +94,19 @@ mod diffs {
         }
     }
 
+    /// Someone joins: every row for them, nothing taken from the others.
+    fn join(subject: &mut GhosttyEngine) -> Viewer {
+        let (frame, _) = subject.join_frame(0).unwrap();
+        let mut joiner = Viewer::default();
+        joiner.apply(&frame);
+        joiner
+    }
+
     #[test]
     fn every_diff_applied_by_index_shows_the_terminal() {
         for seed in 1..=12_u64 {
             let mut rng = Lcg(seed);
+            let mut joins = Lcg(seed.wrapping_add(1_000));
             let (mut subject, mut mirror) = (engine(30, 8), engine(30, 8));
             let mut viewers = vec![Viewer::default()];
             viewers[0].apply(&subject.full_frame(0).unwrap());
@@ -109,14 +118,15 @@ mod diffs {
                 subject.write(&bytes);
                 mirror.write(&bytes);
                 if rng.next(3) == 0 {
+                    // Nobody takes a diff; someone may join meanwhile (a separate generator,
+                    // so the output stays the same for a seed).
+                    if joins.next(4) == 0 {
+                        viewers.push(join(&mut subject));
+                    }
                     continue;
                 }
                 if rng.next(40) == 0 {
-                    // Someone joins: every row for them, nothing taken from the others.
-                    let (join, _) = subject.join_frame(0).unwrap();
-                    let mut joiner = Viewer::default();
-                    joiner.apply(&join);
-                    viewers.push(joiner);
+                    viewers.push(join(&mut subject));
                 }
                 let Some(frame) = subject.take_frame(0).unwrap() else { continue };
                 diffs += 1;
@@ -182,5 +192,36 @@ mod diffs {
         let expected = truth(&mirror.full_frame(0).unwrap());
         assert_eq!(others.screen(&f), expected);
         assert_eq!(joiner.screen(&f), expected);
+    }
+
+    /// A program takes the alternate screen while no viewer takes a diff, and a viewer joins
+    /// there: it holds nothing of the primary's numbering, and a viewer that missed the diffs
+    /// before holds an older version of it. The primary coming back is sent whole.
+    #[test]
+    fn a_viewer_that_joined_on_the_alternate_screen_is_sent_the_primary_whole() {
+        let (mut e, mut mirror) = (engine(20, 4), engine(20, 4));
+        let both = |e: &mut GhosttyEngine, mirror: &mut GhosttyEngine, bytes: &[u8]| {
+            e.write(bytes);
+            mirror.write(bytes);
+        };
+        both(&mut e, &mut mirror, b"l0\r\nl1\r\nl2\r\n$ ");
+        let mut behind = Viewer::default();
+        behind.apply(&e.full_frame(0).unwrap());
+        let _first = mirror.full_frame(0).unwrap();
+        both(&mut e, &mut mirror, b"\x1b[1;1Hm0\x1b[4;3H");
+        // Taken by the others, missed by `behind`.
+        let _edit = e.take_frame(0).unwrap().expect("the edit");
+        both(&mut e, &mut mirror, b"less\r\n\x1b[?1049h\x1b[Hpage");
+        let (join, _) = e.join_frame(0).unwrap();
+        let mut joiner = Viewer::default();
+        joiner.apply(&join);
+        behind.apply(&join);
+        both(&mut e, &mut mirror, b"\x1b[?1049l");
+        let f = e.take_frame(0).unwrap().expect("the primary again");
+        let expected = truth(&mirror.full_frame(0).unwrap());
+        for (who, v) in [("joiner", &mut joiner), ("behind", &mut behind)] {
+            v.apply(&f);
+            assert_eq!(v.screen(&f), expected, "{who}, full {}", f.full);
+        }
     }
 }

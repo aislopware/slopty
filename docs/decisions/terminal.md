@@ -1390,3 +1390,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_throttled_viewer_behind_the_stream_window_is_under_a_second_behind`, session
   `a_viewer_is_held_to_the_frames_it_confirmed_once_it_answers`; client
   `a_marker_is_answered_once_the_events_before_it_are_applied`.
+
+- ✅ **A dropped queue, a joiner on the alternate screen and a full outbound queue no longer
+  stall or blank a viewer** (2026-09-25). Three holes in the frame credits, markers and scroll
+  deltas above. (1) A viewer whose queue passed 16 MiB (a kitty upload, a large `Lines` or
+  `Matches` reply) lost the frames and markers queued with it, but its `Reach` still counted
+  those frames as sent. Once the sink drained it was more than `FRAMES_UNREACHED_BYTES` behind
+  with no marker left to answer, so it was never sent a frame again. Its count now starts
+  again when the queue is dropped, and a frame for a viewer already lost is neither claimed nor
+  counted. (2) `Shown` is kept by the diffs, and a joiner only forgot rows from it when the
+  record was of its own numbering. With no diff taken while a program took the alternate
+  screen, a viewer joining there held nothing of the primary's numbering, yet the diff after
+  the program left was not full, because the record still held that numbering. The viewer
+  filled its screen from a cache it did not have and showed blank rows. A viewer catching up
+  the same way restored an older cache. A joiner whose frame is in another numbering or size
+  now clears the record, so that diff is full. The client also asks for every row when a diff
+  arrives in a numbering it holds no lines for, as it does after a gap. (3) The view dropped
+  a `Reached` answer when the link's queue was full, which could hold its frames until the
+  next marker, and no marker comes while it is held. An answer now waits for room, and only
+  the newest waits, since it confirms every marker before it. Tests: actor
+  `a_viewer_whose_queue_was_dropped_gets_frames_again_once_it_reads`; engine
+  `a_viewer_that_joined_on_the_alternate_screen_is_sent_the_primary_whole`, with
+  `every_diff_applied_by_index_shows_the_terminal` now also joining while no diff is taken;
+  client `a_diff_in_a_numbering_not_held_asks_for_every_row`; view
+  `a_marker_answer_waits_for_room_in_a_full_outbound_queue`.
