@@ -3619,8 +3619,7 @@ worker answers: a guess, the bottom of the history, a cursor that had blinked of
 cleared, a sticky modifier used. Committed input-method text follows the same rule. (2) The
 self-test `type` and `keys` commands no longer force a whole-window refresh. They settle on the
 next frame and draw what the views asked for, as a keyboard does. (3) Fork, measured with a
-local patch and not yet in the pinned fork (4b10eab) when this was written: the immediate frame
-an idle window gets on the next main-queue turn is kept for later when the wake that took it
+local patch and pinned since as 6fbee65: the immediate frame an idle window gets on the next main-queue turn is kept for later when the wake that took it
 drew nothing. The self-test's own next-frame wait is such a wake, and it used to push the
 echo's frame to the next tick. (4) The self-test build's link pacer is gone (see
 decisions/ui.md, "The link applies host events once per frame").
