@@ -43,11 +43,27 @@ in its `HelloAck`; it admits a connection by source address alone — loopback, 
 | Control | one bidirectional stream, length-prefixed `postcard` messages | hello, open/close, resize, item registry sync, agent events |
 | Terminal | one unidirectional stream per session, worker→client; input on the control stream | grid **row diffs** from the worker-side VT engine, scrollback line pages on demand |
 | Media | unreliable datagrams (RFC 9221) | HEVC fragments + Reed–Solomon parity, Opus audio, cursor position/shape; client → worker: `Feedback` (NACK, refresh), each datagram standing alone so a lost one never holds the next back |
+| Echo copies | one datagram per keystroke and per echo, 2 ms after its stream copy | client → worker: every input request again (`ClientDatagram::Input`, numbered per session in the order the control stream carries them); worker → client: every diff built while input is being answered, when it fits one datagram (a `Kind::Term` header, then `TermDatagram`) |
 
 Inside a packet, the control and session streams go first, then media datagrams, then tunnels and
 files (`slopty_net::streams::AHEAD_OF_DATAGRAMS`, on a noq patched with
 `stream_priority_before_datagrams`). Stock noq writes every datagram first, and an echo waited
 behind a keyframe (MEASUREMENTS.md, "an echo ahead of the datagrams").
+
+A keystroke and its echo are one small packet each, and when one is lost nothing behind it
+tells QUIC, so it waits for the probe timeout. Each therefore also goes once as a datagram,
+2 ms after its stream copy so the two never share a packet (`slopty_net::echo`,
+`SLOPTY_ECHO_COPY=off|<ms>|<ms>,<ms>`). Each end takes whichever copy comes first, and only in
+order: the worker applies a key's copy only when it is the session's next input, and skips the
+stream copy of an input already applied (`conn::InputOrder`); the client's session pump passes
+a frame's copy on only when it follows the last frame passed on, and drops the stream copy
+after it (`link::FrameOrder`), so an early copy never opens a gap that would ask for every row
+again. A copy goes only onto an empty datagram queue: behind queued video it would arrive after
+the stream's own retransmission, and noq makes room by dropping the oldest datagram, video's.
+The copies pay off only because the vendored noq's pacer holds BBR3's send quantum
+(`vendor/noq-proto/SLOPTY.md`, patch 4): at the rates BBR3 paces a lossy, app-limited
+connection, a second small packet otherwise waited 15 to 30 ms (MEASUREMENTS.md, "datagram
+copies of a keystroke and its echo").
 
 ## 2. Terminal: the VT engine lives on the worker
 

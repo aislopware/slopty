@@ -1161,3 +1161,53 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   The larger finding is not the controller's. With nothing else flowing, one key in eight took
   over 50 ms on this path against a 10 ms median, and the worker counted no lost packets.
   Finding that tail's cause matters more to typing over the mesh than further work on the bound.
+
+- ✅ **A keystroke and its echo each also go once as a datagram, 2 ms after the stream copy, and
+  noq's pacer holds the controller's send quantum** (2026-09-25, MEASUREMENTS.md "datagram
+  copies of a keystroke and its echo"). The mesh's echo tail had one cause: packets lost on the
+  way into the MacBook, one at a time, about one in eight. A key or an echo is a lone small
+  packet, so when it is lost nothing behind it tells QUIC, and the stream waits for the probe
+  timeout. Retransmitting sooner would not help, because the loss is only learned late. A copy
+  that races the stream copy does.
+
+  *Numbering.* Nothing new goes on the control stream. Each end counts the requests that are
+  input (`TermRequest::is_input`: keys, mouse, paste, raw bytes, clear, focus) per session in
+  control-stream order, from 1, and a copy names its input by that count
+  (`ClientDatagram::Input`). The worker applies a copy only when it is the next input it has
+  not applied, and then skips that input's stream copy. A copy that arrives early or late is
+  dropped, so every input lands once and in order. Worker to client, a copy is a `Kind::Term`
+  media datagram holding the session and the frame, built from the bytes already written to the
+  session stream. The client's pump takes it only when it is a diff whose seq follows the last
+  frame applied, and then drops the stream copy. A copy never reaches `TermState` out of order,
+  so it can never ask for a resync. Only diffs built within 50 ms of input are copied, and not
+  when an event the frame depends on (an image, colours, a resize, scrolled-off lines) went
+  since the last frame.
+
+  *When a copy goes.* A copy written with its stream copy shares its packet and is lost with
+  it: the worker took 1 of 2014. Two milliseconds later it goes in a packet of its own. A second
+  copy at 10 ms bought nothing, and delays of 5 and 10 ms did worse than 2. A copy goes only
+  when it fits one datagram and at most two packets of datagrams are queued. Behind queued
+  video it would arrive after the stream's own retransmission, and noq would drop video's
+  oldest datagram to make room for it. So with video flowing the copies mostly stay home, and
+  that is intended. Both directions are on, because the lossy direction depends on where the
+  client sits: with roles reversed on the same mesh, the echo copies cut keys over 50 ms from
+  12.3 to 4.1 %. `SLOPTY_ECHO_COPY=off` turns them off per process, or `<ms>` or `<ms>,<ms>`
+  sets the delays.
+
+  *The pacer.* Copies alone cost the loaded median a millisecond on the mesh and 4 ms on the
+  shaped loopback. The cause was noq's pacer. A send asks for a whole MTU of credit, and below
+  125 kB/s the bucket held one MTU, so a second small packet waited for the first one's bytes
+  to drain at the pacing rate. BBR3 on a lossy connection that sends now and then paces at tens
+  of kB/s, so a copy or its ACK waited 15 to 30 ms. The vendored noq-proto now lets the bucket
+  hold the controller's send quantum, which BBR3 keeps at two packets or more
+  (`vendor/noq-proto/SLOPTY.md`, patch 4). With both, keys over 50 ms fell from 24.7 to 2.2 % on
+  the shaped loopback (8 ms round trip, 13 % loss each way) and from 13.5 to 0.5 % idle and
+  11.8 to 0.7 % loaded on the mesh. Clean loopback is unchanged: p50 0.90 ms before, 0.80 after.
+
+  *Open.* The mesh after-run stopped at four of six rounds when the MacBook left the network;
+  its rerun command is in MEASUREMENTS.md. With the pacer patch the bulk pull beside the echo
+  ran at 180 instead of 80 Mbit/s, which is not explained yet; the patch changes nothing above
+  about 250 kB/s, so the bulk connection must spend time below that. A connect over the lossy
+  direction sometimes misses the 5 s handshake timeout (4 of 24 with roles reversed). BBR3's
+  low pacing rate on an app-limited lossy connection is the deeper cause the pacer patch works
+  around. *Upstream:* propose patch 4 to noq with its test.

@@ -4570,3 +4570,183 @@ What the numbers say:
 Logs, per arm-run (`.idle.log`, `.load.log`, `.load.meta`, `.worker.log`, `.uptime`), are in
 `target/logs/meshbbr/`, with the scripts that ran the rounds (`all.sh`, `round.sh`,
 `remote-up.sh`, `remote-down.sh`) and the one that tabulates them (`summ.pl`).
+
+## 2026-09-25 — datagram copies of a keystroke and its echo
+
+The mesh run above left the idle tail unexplained: one key in eight over 50 ms against a 10 ms
+median, with the worker counting no lost packets. `slopty bench echo` now also prints the
+client's own counters (`keys: … lost N pkts`), and they answer it. On the way to the MacBook
+the Studio lost 20 to 93 packets per 100 idle keys, and 60 to 250 per 300 loaded keys, while
+the worker lost at most 4 in any run on the way back. The lossy direction is the one into the
+MacBook, most likely its Wi-Fi. A key is one sparse packet, and when it is lost nothing behind
+it tells QUIC, so it waits for the probe timeout.
+
+**What was built** (`docs/decisions/transport.md`). Each input request also goes once as a
+datagram, and each diff the worker builds while it is answering input goes once as a datagram
+too when it fits one. A copy leaves 2 ms after its stream copy, in a packet of its own. Each end
+takes whichever copy comes first, in order only. `SLOPTY_ECHO_COPY` (`off`, a delay in ms,
+or two delays such as `2,10`) switches it; the client reads it for the keys and the worker for
+the echoes. The arms below are named by it: `off`, `0` (the copy written with its stream copy,
+so the two share a packet), `2`, `2,10` (a second copy at 10 ms).
+
+**Setup.** As in "BBR3's bound on the Tailscale mesh": mac-studio drove macbook-pro over a
+direct Tailscale path (ICMP 7 to 16 ms), release builds of this change, ptyd, worker (port
+45650) and server (45660) under `/tmp/slopty-echocopy` with a private `HOME`, the worker and
+server restarted for each arm-run. Each arm-run was 100 idle keys, then 300 keys while `slopty
+cat` pulled a 1 GiB file through the MacBook's server. Arms interleaved, the order rotating each
+round. Load averages: Studio 3 to 21 (other sessions building), MacBook 2 to 6. The scripts
+(`round.sh`, `remote-up.sh`, `remote-down.sh`, `reverse.sh`, `local.sh`, `all*.sh`) ran from
+`/tmp/echocopy` and are kept, with every log, in `target/logs/echocopy/`; `summ.py` and
+`summ_local.py` tabulate them.
+
+```sh
+# The scripts expect to live in /tmp/echocopy, the tree's release builds (slopty, slopty-ptyd,
+# slopty-worker, slopty-server, slopty-shape) in target/release, and the same builds with
+# pacing.rs.orig in place of the patched pacer in /tmp/echocopy/bin-a. On macbook-pro:
+# /tmp/slopty-echocopy/{bin,bin-a} with the same binaries, remote-up.sh, remote-down.sh, and a
+# 1 GiB bulk.bin.
+cp target/logs/echocopy/*.sh target/logs/echocopy/*.py /tmp/echocopy/
+/tmp/echocopy/round.sh 2 2 r1-2 full p     # one mesh arm-run: worker's copies, client's, tag
+/tmp/echocopy/reverse.sh 2 off r1-w2-coff 150   # roles reversed: worker here, client there
+SEED=1 /tmp/echocopy/local.sh q1-p2 2 2 yes 200   # loopback through the shaper (no: clean)
+/tmp/echocopy/all.sh       # run 1; all2.sh run 2, all3.sh run 3, all4.sh run 4, all8.sh run 5
+ROUNDS="1 2 3 4 5 6" /tmp/echocopy/all7.sh      # the shaped loopback
+ROUNDS="$(seq -s ' ' 1 12)" /tmp/echocopy/all9.sh   # the clean loopback
+python3 /tmp/echocopy/summ.py /tmp/echocopy/mesh
+python3 /tmp/echocopy/summ_local.py q aoff a2 poff p2
+/tmp/echocopy/stop-local.sh; ssh macbook-pro '/tmp/slopty-echocopy/remote-down.sh all'
+```
+
+Medians over runs with the range across them in brackets; "pooled" puts every key of an arm
+together.
+
+**Run 1, the delay** (six rounds):
+
+| | off | 0 | 2 | 2,10 |
+| --- | --- | --- | --- | --- |
+| idle p50 ms | 11.2 [10.9–11.7] | 11.7 [10.9–12.5] | 11.9 [11.6–12.1] | 11.6 [11.1–12.0] |
+| idle, pooled p50 / p90 / p99 ms | 11.3 / 66.9 / 189 | 11.6 / 62.5 / 159 | 11.8 / 30.7 / 159 | 11.5 / 30.6 / 115 |
+| idle keys over 50 / 100 ms | 12.7 / 4.8 % | 12.0 / 3.8 % | 4.5 / 2.8 % | 4.7 / 2.3 % |
+| loaded p50 ms | 11.6 [11.5–12.0] | 11.7 [11.3–11.8] | 12.6 [12.2–13.8] | 13.5 [12.7–14.5] |
+| loaded, pooled p50 / p90 / p99 ms | 11.6 / 106 / 354 | 11.5 / 88.0 / 254 | 12.6 / 43.9 / 149 | 13.5 / 43.8 / 164 |
+| loaded keys over 50 / 100 ms | 19.1 / 10.9 % | 16.3 / 8.0 % | 8.2 / 3.6 % | 8.3 / 3.5 % |
+| key copies taken / late | 0 / 0 | 1 / 2013 | 312 / 1652 | 350 / 3517 |
+
+A copy written with its stream copy shares its packet and is lost with it: of 2014 such copies
+the worker took one. Sent two milliseconds later it goes alone, and the worker took 16 % of
+them, each one a key whose stream packet was lost or late. A second copy at 10 ms bought nothing past
+50 ms. Both separate-packet arms cost the loaded median a millisecond or two; that is taken up
+below.
+
+**Run 2, which direction** (six rounds, both at 2 ms):
+
+| | off | echoes only | keys only | both |
+| --- | --- | --- | --- | --- |
+| idle, pooled p50 / p90 / p99 ms | 11.2 / 70.3 / 169 | 11.2 / 65.5 / 158 | 10.7 / 32.6 / 174 | 11.5 / 35.5 / 151 |
+| idle keys over 50 ms | 14.5 % | 13.8 % | 5.5 % | 5.3 % |
+| loaded p50 ms | 11.5 [11.2–12.2] | 11.6 [11.3–12.2] | 12.6 [12.3–13.4] | 12.2 [12.1–13.2] |
+| loaded, pooled p50 / p90 / p99 ms | 11.5 / 95.5 / 240 | 11.6 / 76.8 / 184 | 12.7 / 43.1 / 172 | 12.4 / 40.1 / 178 |
+| loaded keys over 50 ms | 18.6 % | 17.7 % | 7.8 % | 6.7 % |
+
+The keys' copies carry the whole gain here, as they should when nothing is lost on the way
+back. The echoes' copies cost nothing measurable, and the loaded median's millisecond comes
+with the keys' copies.
+
+**Run 3, roles reversed** (worker on the Studio at port 45750, client on the MacBook, 150 idle
+keys a run, six rounds less the connects that failed): now the echoes cross the lossy direction. The worker lost 54 to 118
+packets a run and the client none.
+
+| | off | keys only | echoes only | both |
+| --- | --- | --- | --- | --- |
+| pooled p50 / p90 / p99 ms | 11.4 / 58.7 / 131 | 10.6 / 49.1 / 133 | 11.3 / 31.9 / 110 | 11.0 / 27.5 / 108 |
+| keys over 50 / 100 ms | 12.3 / 2.2 % | 9.9 / 2.3 % | 4.1 / 1.3 % | 3.0 / 1.2 % |
+| echoes shown from their copy | 0 | 0 | 118 | 114 |
+| runs | 4 | 5 | 5 | 6 |
+
+Four connects of 24 failed QUIC's 5 s handshake timeout on this direction (`no answer`) and are
+left out; that is outside this change. One run in each copy arm had a single key of 0.96 and
+1.66 s, a spell in which nothing at all reached the MacBook, stream or copy.
+
+**Run 4, the delay again** (six rounds, both ends):
+
+| | off | 2 | 5 | 10 |
+| --- | --- | --- | --- | --- |
+| idle, pooled p50 / p90 / p99 ms | 10.9 / 71.3 / 165 | 10.7 / 30.3 / 113 | 11.1 / 31.5 / 118 | 10.9 / 36.9 / 133 |
+| idle keys over 50 ms | 14.0 % | 3.2 % | 4.0 % | 5.5 % |
+| loaded p50 ms | 11.7 [10.7–12.2] | 12.7 [11.6–14.1] | 13.0 [12.1–13.6] | 12.5 [11.4–14.1] |
+| loaded, pooled p50 / p90 / p99 ms | 11.6 / 85.2 / 232 | 12.5 / 36.6 / 138 | 12.8 / 38.9 / 145 | 12.6 / 38.6 / 146 |
+| loaded keys over 50 ms | 16.9 % | 4.9 % | 6.3 % | 5.2 % |
+
+Two milliseconds is best in the tail, and a later copy does not remove the loaded median's cost,
+so the copy is not colliding with its own echo on the air.
+
+**Where the millisecond went: noq's pacer.** On `slopty-shape` (4 ms each way, 13 % loss
+each way, independent, so a round trip like the mesh's) the cost was larger: copies raised the
+median from 14 to 18 ms while they cut p90 (the table below, `a`). Traced on one clock,
+the copies of slow keys reached the worker 20 to 40 ms after they were sent. The worker's noq trace counted 170
+`blocked by pacing` with copies and 80 without, each up to 33 ms. A send asks noq's pacer for a
+whole MTU of credit, since the packet is not built yet, and below 125 kB/s the bucket held one
+MTU, so every packet waited for the bucket to fill completely. BBR3 on a lossy connection that
+sends a key now and then paces at tens of kB/s, so a small packet right after another waited for
+the first one's bytes: 300 B at 20 kB/s is 15 ms. The copies added such second packets, and the
+ACKs of copies did too. BBR3 reports `send_quantum`, the aggregate it means to let out together,
+at least two packets; the vendored pacer now holds it (`vendor/noq-proto/SLOPTY.md`, patch 4;
+`a_low_rate_lets_the_send_quantum_out_together` fails without it). Below 125 kB/s the bucket
+held one MTU and now holds two; up to about 250 kB/s it holds the larger of the two; above that
+nothing changes.
+
+Loopback through the shaper, the pacer as shipped (`a`) or holding the quantum (`p`), copies off
+and on, six rounds of 200 keys:
+
+| | a, off (before) | a, copies | p, off | p, copies (after) |
+| --- | --- | --- | --- | --- |
+| p50 ms | 13.7 [13.5–15.0] | 18.0 [13.2–23.5] | 13.2 [12.1–13.6] | 12.4 [11.7–13.5] |
+| p90 ms | 117 [111–143] | 73.9 [41.3–92.5] | 59.9 [47.3–79.2] | 18.1 [16.0–22.2] |
+| pooled p50 / p90 / p99 / max ms | 14.0 / 124 / 363 / 654 | 16.6 / 67.7 / 238 / 590 | 13.1 / 58.6 / 148 / 806 | 12.3 / 18.5 / 77.0 / 169 |
+| keys over 50 / 100 ms | 24.7 / 15.2 % | 16.7 / 6.6 % | 15.4 / 3.4 % | 2.2 / 0.7 % |
+
+**Run 5, the mesh with both** (the same four arms; the MacBook went off the network during round
+4, so four rounds idle and four loaded, three for the last arm, whose fourth pull broke):
+
+| | a, off (before) | a, copies | p, off | p, copies (after) |
+| --- | --- | --- | --- | --- |
+| idle p50 ms | 12.3 [9.9–14.9] | 10.2 [9.8–10.6] | 10.6 [10.1–10.7] | 10.4 [10.0–12.8] |
+| idle, pooled p50 / p90 / p99 ms | 11.4 / 66.7 / 134 | 10.2 / 19.5 / 57.9 | 10.4 / 36.9 / 65.7 | 10.5 / 16.4 / 40.6 |
+| idle keys over 50 / 100 ms | 13.5 / 2.2 % | 1.5 / 0.2 % | 2.5 / 0.2 % | 0.5 / 0.0 % |
+| loaded p50 ms | 10.9 [10.5–11.1] | 11.8 [10.9–12.5] | 13.1 [12.3–14.2] | 12.2 [11.5–12.6] |
+| loaded, pooled p50 / p90 / p99 ms | 10.8 / 64.7 / 200 | 11.6 / 32.0 / 111 | 13.1 / 49.6 / 128 | 12.2 / 19.6 / 36.7 |
+| loaded keys over 50 / 100 ms | 11.8 / 5.2 % | 2.9 / 1.3 % | 9.8 / 2.0 % | 0.7 / 0.1 % |
+| bulk goodput Mbit/s | 82 [76–96] | 73 [67–92] | 178 [147–203] | 184 [168–197] |
+
+The loaded medians are not comparable across the pacers: with the quantum held, the bulk pull
+beside the echo ran at 2.3 times the rate, and the echo queued behind a pull that fast. Why the
+bulk connection gained is not measured here. The patch changes the pacer only below 250 kB/s,
+so it must spend time at such rates, perhaps after its losses. The run was cut short, and a
+full six rounds with the bulk's pacing traced is owed (below).
+
+**Clean loopback** (no shaper, 12 rounds of 200 keys): nothing lost, nothing copied too late to
+matter, and no regression.
+
+| | a, off (before) | p, off | p, copies (after) |
+| --- | --- | --- | --- |
+| p50 ms | 0.90 [0.68–1.08] | 0.87 [0.69–1.05] | 0.82 [0.58–1.09] |
+| p90 ms | 1.94 [1.46–2.44] | 1.86 [1.38–2.28] | 1.84 [1.20–2.39] |
+| pooled p50 / p90 / p99 / max ms | 0.90 / 1.93 / 10.4 / 38 | 0.83 / 1.90 / 7.5 / 56 | 0.80 / 1.85 / 9.6 / 48 |
+
+`typing_through_a_lossy_link_lands_once_in_order` (`cargo test -p slopty-workerd --test e2e`)
+types 150 keys 4 ms apart through the shaper at 20 % loss each way into a raw `cat`. The screen
+shows each key once and in order, no frame asks for a resync, and both ends take copies (the
+worker took 14 and 48 key copies in two runs, the client showed 8 echoes from theirs in the
+first).
+
+**Owed.** Run 5 stopped after four rounds, and the MacBook was unreachable when this was written,
+so the mesh has no full after-run yet. Six rounds of its four arms, set up as above:
+
+```sh
+rm -rf /tmp/echocopy/mesh
+/tmp/echocopy/all8.sh > /tmp/echocopy/all8.log 2>&1   # round.sh "off|2" … "a|p", 6 rotations
+python3 /tmp/echocopy/summ.py /tmp/echocopy/mesh
+ssh macbook-pro '/tmp/slopty-echocopy/remote-down.sh all; pgrep -fl slopty-echocopy'
+```
+
+The bulk connection's pacing is worth tracing beside it, to explain its goodput.

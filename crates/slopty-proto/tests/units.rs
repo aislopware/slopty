@@ -38,11 +38,12 @@ mod units {
             (2, Kind::Audio),
             (3, Kind::Cursor),
             (4, Kind::Heartbeat),
+            (5, Kind::Term),
         ] {
             assert_eq!(Kind::from_u8(v), Some(kind));
             assert_eq!(kind as u8, v);
         }
-        assert_eq!(Kind::from_u8(5), None);
+        assert_eq!(Kind::from_u8(6), None);
         assert_eq!(
             [flags::KEYFRAME, flags::LTR, flags::LTR_REFRESH, flags::RETRANSMIT],
             [1, 2, 4, 8]

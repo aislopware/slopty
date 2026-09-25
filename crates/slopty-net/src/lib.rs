@@ -5,6 +5,7 @@
 //!
 //! * [`crypto`] — the null QUIC crypto provider: parameters exchanged, nothing encrypted.
 //! * [`endpoint`] — bind a tuned endpoint; read a connection's path.
+//! * [`echo`] — when a keystroke's and an echo's datagram copies go.
 //! * [`addr`] — `host[:port]`, as a person types it.
 //! * [`admission`] — which source addresses a worker lets in.
 //! * [`framed`] — typed, length-prefixed messages over QUIC streams.
@@ -18,7 +19,7 @@
 //!
 //! One QUIC connection carries: the control stream (bidirectional, opened by the client), one
 //! unidirectional session stream per attached terminal (opened by the worker), and unreliable
-//! datagrams for media.
+//! datagrams for media, loss feedback and the copies of keystrokes and their echoes.
 
 #![forbid(unsafe_code)]
 
@@ -27,6 +28,7 @@ pub mod admission;
 pub mod client;
 pub mod congestion;
 pub mod crypto;
+pub mod echo;
 pub mod endpoint;
 pub mod framed;
 pub mod known;

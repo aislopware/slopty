@@ -101,6 +101,9 @@ pub async fn echo(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
     println!("keystroke → first frame ({count} bytes to /bin/cat):");
     println!("  {}", quantiles(&mut samples));
     println!("  timeouts {timeouts}  quic rtt {rtt}  path: {}", link.path());
+    // Echoes shown from their datagram copy, and this side's sending: the keys' packets lost
+    // on the way to the worker show here, and nowhere on the worker.
+    println!("  echo copies taken {}  keys: {}", link.echo_copies_taken(), link.health());
     let _closed = link.send(ClientMsg::Term { session: id, req: TermRequest::Close }).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     link.close();

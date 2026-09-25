@@ -13,6 +13,9 @@
 //!   forwarded TCP connection, opening with [`transfer::TunnelOpen`].
 //! * **Media datagrams** — unreliable QUIC datagrams with a fixed [`media::MediaHeader`] followed
 //!   by a fragment of an encoded video frame, an audio packet, or a cursor update.
+//! * **Echo copies** — a keystroke's input request and the small frame that answers it also go once
+//!   as a datagram each ([`datagram`]), taken only in order, so a lost packet costs a datagram's
+//!   trip rather than QUIC's probe timeout.
 //!
 //! Compatibility: [`PROTOCOL_VERSION`] is negotiated in `Hello`. Encoded bytes of representative
 //! messages are pinned under `src/snapshots`; a changed snapshot is a protocol change.
@@ -21,6 +24,7 @@
 
 pub mod agent;
 pub mod codec;
+pub mod datagram;
 pub mod file;
 pub mod handshake;
 pub mod input;
@@ -36,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Workers serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 57;
+pub const PROTOCOL_VERSION: u16 = 58;
 
 /// Everything a client sends on the control stream.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

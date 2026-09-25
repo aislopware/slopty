@@ -172,6 +172,32 @@ pub enum TermRequest {
     },
 }
 
+impl TermRequest {
+    /// Whether the request writes to the PTY. These are numbered per session on a connection's
+    /// control stream, from 1 in the order it carries them, by both ends alike: a datagram copy
+    /// names its request by that number (`datagram::ClientDatagram::Input`).
+    #[must_use]
+    pub const fn is_input(&self) -> bool {
+        match self {
+            Self::Key(_)
+            | Self::Mouse(_)
+            | Self::Paste(_)
+            | Self::Raw(_)
+            | Self::Clear
+            | Self::Focus { .. } => true,
+            Self::Attach { .. }
+            | Self::Detach
+            | Self::Close
+            | Self::Resize(_)
+            | Self::Drive { .. }
+            | Self::FetchLines { .. }
+            | Self::Search { .. }
+            | Self::Colors(_)
+            | Self::Reached { .. } => false,
+        }
+    }
+}
+
 /// Bytes of frames a viewer that answers markers may have on their way unconfirmed. At
 /// 250 kB/s a quarter of a second; the transport's own stream window (1.25 MB) was five.
 pub const FRAMES_UNREACHED_BYTES: usize = 64 * 1024;

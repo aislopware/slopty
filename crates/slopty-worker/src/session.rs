@@ -73,6 +73,11 @@ pub type ClientSink = mpsc::Sender<Outbound>;
 pub struct Outbound {
     wire: Bytes,
     frame: bool,
+    /// A diff that answers a viewer's input: a datagram may carry a copy of it.
+    echo: bool,
+    /// A later frame may depend on it having arrived (the pixels it places, the colours or
+    /// size it paints with, lines it shows), so no copy of that frame may overtake it.
+    ahead: bool,
     /// A frame's place among its viewer's [`FRAMES_IN_FLIGHT`], given back when it is dropped:
     /// held only for its `Drop`.
     _credit: Option<Arc<Credit>>,
@@ -83,6 +88,14 @@ impl Outbound {
         Ok(Self {
             wire: codec::encode(ev)?,
             frame: matches!(ev, TermEvent::Frame(_)),
+            echo: false,
+            ahead: matches!(
+                ev,
+                TermEvent::Image { .. }
+                    | TermEvent::Colors(_)
+                    | TermEvent::Resized { .. }
+                    | TermEvent::Lines { .. }
+            ),
             _credit: None,
         })
     }
@@ -91,7 +104,7 @@ impl Outbound {
     fn claimed(&self, viewer: &Viewer, room: &Arc<Notify>) -> Self {
         viewer.in_flight.fetch_add(1, Ordering::AcqRel);
         let credit = Credit { in_flight: Arc::clone(&viewer.in_flight), room: Arc::clone(room) };
-        Self { wire: self.wire.clone(), frame: self.frame, _credit: Some(Arc::new(credit)) }
+        Self { wire: self.wire.clone(), _credit: Some(Arc::new(credit)), ..*self }
     }
 
     /// The event as the session stream carries it (length prefix, then postcard): write it
@@ -105,6 +118,19 @@ impl Outbound {
     #[must_use]
     pub const fn is_frame(&self) -> bool {
         self.frame
+    }
+
+    /// Whether it is a diff built soon after a viewer's input reached the PTY: an echo, which
+    /// a datagram may copy (`slopty_proto::datagram::TermDatagram`).
+    #[must_use]
+    pub const fn is_echo(&self) -> bool {
+        self.echo
+    }
+
+    /// Whether the next frame depends on it, so a copy of that frame must not overtake it.
+    #[must_use]
+    pub const fn goes_ahead_of_frames(&self) -> bool {
+        self.ahead
     }
 }
 
@@ -601,6 +627,11 @@ struct EchoBurst {
 impl EchoBurst {
     fn arm(&mut self, now: tokio::time::Instant) {
         *self = Self { until: now.checked_add(ECHO_WINDOW), frames: ECHO_FRAMES };
+    }
+
+    /// Whether output read at `now` still counts as the echo of the last input.
+    fn open(&self, now: tokio::time::Instant) -> bool {
+        self.until.is_some_and(|until| now <= until)
     }
 
     /// Whether output read at `now` is framed at once rather than paced, spending a frame.
@@ -1181,7 +1212,9 @@ impl Actor {
     fn send_frame(&mut self, frame: Frame, images: Vec<ImageUpload>) {
         let images: Vec<Outbound> =
             images.into_iter().filter_map(|u| self.encode(&image_event(u))).collect();
-        let Some(frame) = self.encode(&TermEvent::Frame(frame)) else { return };
+        let echo = !frame.full && self.burst.open(tokio::time::Instant::now());
+        let Some(mut frame) = self.encode(&TermEvent::Frame(frame)) else { return };
+        frame.echo = echo;
         let mut gone = Vec::new();
         for i in 0..self.viewers.len() {
             let Some(v) = self.viewers.get_mut(i) else { continue };
@@ -1722,13 +1755,32 @@ mod tests {
         assert!(!burst.spend(now), "no input, no burst");
         burst.arm(now);
         let soon = now + Duration::from_millis(3);
+        assert!(burst.open(soon));
         assert!(burst.spend(soon) && burst.spend(soon), "the echo and its repaint");
+        assert!(burst.open(soon), "spent, but still the echo's window");
+        assert!(!burst.open(now + ECHO_WINDOW + Duration::from_millis(1)));
         assert!(!burst.spend(soon), "then the pace again");
         burst.arm(now);
         assert!(
             !burst.spend(now + ECHO_WINDOW + Duration::from_millis(1)),
             "too late to be the echo"
         );
+    }
+
+    /// A frame's datagram copy must not overtake what the frame depends on: the pixels it
+    /// places, the colours and size it paints with, the lines it shows.
+    #[test]
+    fn the_events_a_frame_depends_on_hold_its_copy_back() {
+        let ahead = |ev: TermEvent| Outbound::encode(&ev).unwrap().goes_ahead_of_frames();
+        let image =
+            TermEvent::Image { id: 1, generation: 1, width: 1, height: 1, rgba: vec![0; 4] };
+        assert!(ahead(image));
+        assert!(ahead(TermEvent::Colors(ColorOverrides::default())));
+        assert!(ahead(TermEvent::Resized { cols: 80, rows: 24 }));
+        assert!(ahead(TermEvent::Lines { start: slopty_grid::LineIndex(0), lines: Vec::new() }));
+        assert!(!ahead(TermEvent::Marker { id: 1 }));
+        assert!(!ahead(TermEvent::Title("t".to_owned())));
+        assert!(!ahead(TermEvent::Bell));
     }
 
     /// A viewer that never answers a marker is sent frames as its connection writes them and

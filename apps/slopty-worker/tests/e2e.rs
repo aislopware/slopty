@@ -1679,6 +1679,128 @@ mod tests {
         assert_eq!((carried.up.lost, carried.down.lost), (0, 0), "a clear link lost nothing");
     }
 
+    /// Keys typed quickly through a link that loses a fifth of its packets each way reach the
+    /// program once each and in order, and the screen they draw arrives without a resync,
+    /// while some echoes are shown from their datagram copies: the copies race the streams on
+    /// both ends and neither end may apply one twice or out of turn.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn typing_through_a_lossy_link_lands_once_in_order() {
+        use slopty_client::term::{Effect, TermState};
+
+        const KEYS: usize = 150;
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker_addr) = daemons(dir.path()).await;
+        let link = slopty_shape::Link {
+            delay: Duration::from_millis(5),
+            loss: 0.2,
+            ..slopty_shape::Link::CLEAR
+        };
+        let relay = std::sync::Arc::new(
+            slopty_shape::relay::Relay::bind(wildcard(), worker_addr, link, 7).await.unwrap(),
+        );
+        let addr = relay.addr().unwrap();
+        tokio::spawn({
+            let relay = std::sync::Arc::clone(&relay);
+            async move { relay.run().await }
+        });
+        let (endpoint, mut worker) = dial(addr).await;
+        let size = TermSize { cols: 200, rows: 4, ..TermSize::default() };
+        worker
+            .tx
+            .send(&ClientMsg::OpenSession(OpenSession {
+                size,
+                cwd: None,
+                // Raw and silent: each byte comes back once, from `cat`, as it is read.
+                command: vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "stty raw -echo; exec cat".to_owned(),
+                ],
+                env: Vec::new(),
+                title: None,
+                attach: true,
+            }))
+            .await
+            .unwrap();
+        let session = next_msg(&mut worker, |m| match m {
+            WorkerMsg::SessionOpened(summary) => Some(summary.id),
+            _ => None,
+        })
+        .await;
+        let mut link = slopty_client::WorkerLink::start(worker);
+        let mut events = link.events().unwrap();
+        let mut state = TermState::new(size);
+        let mut resyncs = 0_usize;
+        let mut apply = |state: &mut TermState, event: TermEvent| {
+            let effects = state.apply(event);
+            resyncs += effects
+                .iter()
+                .filter(|e| matches!(e, Effect::Request(TermRequest::Attach { .. })))
+                .count();
+        };
+        // The attach's whole frame first, and `stty` done with before the first key.
+        while state.frames() == 0 {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Term { session: s, event } if s == session => apply(&mut state, event),
+                _other => {}
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let typed: String = (0..KEYS)
+            .map(|i| char::from(b'a'.saturating_add(u8::try_from(i % 26).unwrap())))
+            .collect();
+        let sender = link.sender();
+        let keys = typed.clone();
+        tokio::spawn(async move {
+            for key in keys.bytes() {
+                let req = TermRequest::Raw(vec![key]);
+                sender.send(ClientMsg::Term { session, req }).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(4)).await;
+            }
+        });
+        let shown = |state: &TermState| {
+            state
+                .screen()
+                .lines()
+                .first()
+                .map(|l| l.text().trim_end().to_owned())
+                .unwrap_or_default()
+        };
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(30)).unwrap();
+        while shown(&state).len() < KEYS {
+            match tokio::time::timeout_at(deadline, events.recv()).await {
+                Ok(Some(LinkEvent::Term { session: s, event })) if s == session => {
+                    apply(&mut state, event);
+                }
+                Ok(Some(_other)) => {}
+                Ok(None) | Err(_) => panic!("typed {typed:?}, shown {:?}", shown(&state)),
+            }
+        }
+        // Anything doubled would show past the last key.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(Duration::from_millis(100), events.recv()).await
+        {
+            if let LinkEvent::Term { session: s, event } = ev
+                && s == session
+            {
+                apply(&mut state, event);
+            }
+        }
+        let carried = relay.carried().await;
+        let taken = link.echo_copies_taken();
+        eprintln!(
+            "MEASURE {KEYS} keys at 20% loss: {taken} echoes shown from their copy; relay {carried:?}"
+        );
+        assert_eq!(shown(&state), typed, "each key once and in order");
+        assert_eq!(resyncs, 0, "no frame was missed");
+        assert!(carried.up.lost > 0 && carried.down.lost > 0, "the link lost packets: {carried:?}");
+        assert!(taken > 0, "no echo was shown from its copy");
+        link.close();
+        close_endpoint(&endpoint).await;
+    }
+
     /// One rung of the shaped ladder: the link, what got through, and what the shaper did.
     #[derive(Debug)]
     struct Rung {

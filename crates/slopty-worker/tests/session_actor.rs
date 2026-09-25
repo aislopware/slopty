@@ -151,6 +151,44 @@ mod actor {
         session.close();
     }
 
+    /// A diff built while a viewer's input is still being answered is an echo, which the
+    /// connection copies into a datagram; the attach's whole frame and output long after the
+    /// input are not.
+    #[tokio::test]
+    async fn only_the_diffs_that_answer_input_are_echoes() {
+        let script = "read x; echo typed; sleep 0.3; echo later; sleep 30";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel::<Outbound>(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        let mut state = TermState::new(size(40, 6));
+        // Every frame, as (echo, whole, the screen after it).
+        let mut frames: Vec<(bool, bool, String)> = Vec::new();
+        let mut typed = false;
+        while !frames.last().is_some_and(|(_, _, shown)| shown.contains("later")) {
+            let out = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("no frame showing `later`: {frames:?}"))
+                .expect("sink open");
+            let ev = event(&out);
+            if let TermEvent::Frame(f) = &ev {
+                let whole = f.full;
+                let _effects = state.apply(ev.clone());
+                frames.push((out.is_echo(), whole, text(state.screen())));
+            }
+            if !typed && !frames.is_empty() {
+                typed = true;
+                session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+            }
+        }
+        let (first, last) = (frames.first().unwrap(), frames.last().unwrap());
+        assert!(first.1 && !first.0, "the attach's whole frame is no echo: {frames:?}");
+        assert!(!last.0, "output 300 ms after the input is no echo: {frames:?}");
+        assert!(frames.iter().any(|(echo, ..)| *echo), "the input's echo is: {frames:?}");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
     /// Orchestration resizes a terminal only while no client shows it, checked and applied in
     /// one step, so a client that attached first keeps the size its window set.
     #[tokio::test]

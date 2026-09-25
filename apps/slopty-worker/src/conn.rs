@@ -15,6 +15,7 @@ use slopty_core::{ClientId, SessionId, StreamId, XferId};
 use slopty_net::worker::AcceptedClient;
 use slopty_net::{ClientMsg, Connection, NetError, WorkerMsg};
 use slopty_proto::PROTOCOL_VERSION;
+use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::handshake::{Caps, HelloAck};
 use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::items::ItemSync;
@@ -41,6 +42,9 @@ const SINK_DEPTH: usize = 256;
 const CONTROL_DEPTH: usize = 1024;
 /// Loss feedback datagrams buffered between the reader and the peer loop.
 const FEEDBACK_DEPTH: usize = 256;
+/// Input copies buffered between the reader and the peer loop. One that finds the queue full
+/// is dropped: its stream copy comes regardless.
+const COPY_DEPTH: usize = 256;
 /// Clipboard representations the client sent up as streams, queued for the peer loop.
 const CLIP_DEPTH: usize = 8;
 /// Receiver reports waiting for the task that applies them. Reports come a few times a second
@@ -230,7 +234,8 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     tasks.spawn(answer_reports(conn.clone(), out.clone(), asked));
     tasks.spawn(slopty_net::endpoint::trace_path_health(conn.clone(), "worker"));
     let (feedback_tx, mut feedback_rx) = mpsc::channel::<Feedback>(FEEDBACK_DEPTH);
-    tasks.spawn(read_feedback(conn.clone(), feedback_tx));
+    let (copies_tx, mut copies_rx) = mpsc::channel::<InputCopy>(COPY_DEPTH);
+    tasks.spawn(read_datagrams(conn.clone(), feedback_tx, copies_tx));
     let (clips_tx, mut clips_rx) = mpsc::channel::<crate::xfer::ClipData>(CLIP_DEPTH);
     tasks.spawn(crate::xfer::accept(
         daemon.clone(),
@@ -261,6 +266,8 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         downloads: HashMap::new(),
         held: None,
         link,
+        order: InputOrder::default(),
+        copies: slopty_net::echo::Copies::from_env(),
     };
     daemon.wake.lock().client_joined();
 
@@ -275,6 +282,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
                 peer.handle(msg);
             }
             Some(feedback) = feedback_rx.recv() => peer.feedback(feedback),
+            Some(copy) = copies_rx.recv() => peer.input_copy(copy),
             Some(clip) = clips_rx.recv() => peer.clip_data(clip.generation, &clip.uti, clip.bytes),
             Some(done) = done_rx.recv() => {
                 if let Some(why) = peer.done(done) {
@@ -294,6 +302,8 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
             }
         }
     };
+    let InputOrder { taken, late, .. } = peer.order;
+    tracing::info!(client = %peer.client, taken, late, "input copies");
     // Nothing more goes to this client, and nothing the streams still say may wait on it.
     writer.abort();
     peer.close_screens().await;
@@ -345,8 +355,20 @@ async fn install_hooks() -> (bool, String) {
     }
 }
 
-/// Read the client's loss feedback datagrams until the connection ends.
-async fn read_feedback(conn: Connection, out: mpsc::Sender<Feedback>) {
+/// A copy of one of a session's inputs (`ClientDatagram::Input`).
+struct InputCopy {
+    session: SessionId,
+    seq: u64,
+    req: TermRequest,
+}
+
+/// Read the client's datagrams until the connection ends: loss feedback for the loop, and
+/// input copies, which the loop takes only in order ([`InputOrder`]).
+async fn read_datagrams(
+    conn: Connection,
+    feedback: mpsc::Sender<Feedback>,
+    copies: mpsc::Sender<InputCopy>,
+) {
     loop {
         let datagram = match conn.read_datagram().await {
             Ok(d) => d,
@@ -355,14 +377,74 @@ async fn read_feedback(conn: Connection, out: mpsc::Sender<Feedback>) {
                 break;
             }
         };
-        match slopty_proto::codec::decode_body::<Feedback>(&datagram) {
-            Ok(feedback) => {
-                if out.send(feedback).await.is_err() {
+        match slopty_proto::codec::decode_body::<ClientDatagram>(&datagram) {
+            Ok(ClientDatagram::Feedback(f)) => {
+                if feedback.send(f).await.is_err() {
                     break;
                 }
             }
-            Err(e) => tracing::debug!(error = %e, len = datagram.len(), "bad feedback datagram"),
+            Ok(ClientDatagram::Input { session, seq, req }) if req.is_input() => {
+                match copies.try_send(InputCopy { session, seq, req }) {
+                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                }
+            }
+            Ok(ClientDatagram::Input { .. }) => {
+                tracing::debug!(len = datagram.len(), "input copy of a request that is not input");
+            }
+            Err(e) => tracing::debug!(error = %e, len = datagram.len(), "bad datagram"),
         }
+    }
+}
+
+/// Where each session's inputs stand on this connection, numbered as `TermRequest::is_input`
+/// says both ends number them. The stream brings every input, in order; a datagram copy may
+/// bring one sooner. A copy is applied only when it is the next input not yet applied, and the
+/// stream copy of an input already applied is skipped, so each input reaches the PTY once and
+/// in the order it was sent.
+#[derive(Debug, Default)]
+struct InputOrder {
+    sessions: HashMap<SessionId, Applied>,
+    /// Copies applied ahead of their stream copy.
+    taken: u64,
+    /// Copies dropped: their stream copy had come, or an input before them had not.
+    late: u64,
+}
+
+/// One session's inputs: how many the stream has brought, and the highest number applied.
+#[derive(Clone, Copy, Debug, Default)]
+struct Applied {
+    heard: u64,
+    applied: u64,
+}
+
+impl InputOrder {
+    /// The stream brought `session`'s next input: whether it is to be applied, which it is
+    /// unless its copy was.
+    fn stream(&mut self, session: SessionId) -> bool {
+        let at = self.sessions.entry(session).or_default();
+        at.heard = at.heard.saturating_add(1);
+        let fresh = at.heard > at.applied;
+        at.applied = at.applied.max(at.heard);
+        fresh
+    }
+
+    /// A datagram brought a copy of `session`'s input `seq`: whether it is to be applied, which
+    /// it is only when it is the next one.
+    fn copy(&mut self, session: SessionId, seq: u64) -> bool {
+        let at = self.sessions.entry(session).or_default();
+        let next = seq == at.applied.saturating_add(1);
+        if next {
+            at.applied = seq;
+            self.taken = self.taken.saturating_add(1);
+        } else {
+            self.late = self.late.saturating_add(1);
+        }
+        next
+    }
+
+    fn forget(&mut self, session: SessionId) {
+        self.sessions.remove(&session);
     }
 }
 
@@ -511,6 +593,23 @@ struct Pipe {
     conn: Connection,
     out: mpsc::Sender<WorkerMsg>,
     client: ClientId,
+    /// How an echo's datagram copy goes, when it does.
+    copies: Option<slopty_net::echo::Copies>,
+}
+
+/// Send a datagram copy of an echo the session stream has just taken (`wire`, as the stream
+/// carries it).
+fn copy_frame(
+    conn: &Connection,
+    copies: slopty_net::echo::Copies,
+    session: SessionId,
+    wire: &[u8],
+) {
+    let body = wire.get(slopty_proto::codec::PREFIX_BYTES..).unwrap_or_default();
+    match slopty_proto::datagram::term_datagram(session, body) {
+        Ok(datagram) => copies.send(conn, datagram),
+        Err(e) => tracing::debug!(%session, error = %e, "echo copy not encoded"),
+    }
 }
 
 /// Open `session`'s stream to the client and pump the actor's events into it. The actor already
@@ -523,7 +622,7 @@ async fn pump(
     sink: ClientSink,
     mut events: mpsc::Receiver<Outbound>,
 ) {
-    let Pipe { conn, out, client } = pipe;
+    let Pipe { conn, out, client, copies } = pipe;
     let session = handle.id();
     let wait = slopty_net::streams::SESSION_STREAM_WAIT;
     let mut stream = match slopty_net::streams::open_session(&conn, session, wait).await {
@@ -535,6 +634,9 @@ async fn pump(
     };
     // Only the actor holds the sink from here, so the pump ends when it lets go.
     drop(sink);
+    // Something a later frame depends on went since the last frame: that frame is not copied,
+    // since its copy could overtake it.
+    let mut depended_on = false;
     while let Some(event) = events.recv().await {
         let send_from = std::time::Instant::now();
         if let Err(e) = stream.send_raw(event.wire()).await {
@@ -548,6 +650,15 @@ async fn pump(
                 send_us = send_from.elapsed().as_micros(),
                 "frame sent"
             );
+            if let Some(copies) = copies
+                && event.is_echo()
+                && !depended_on
+            {
+                copy_frame(&conn, copies, session, event.wire());
+            }
+            depended_on = false;
+        } else if event.goes_ahead_of_frames() {
+            depended_on = true;
         }
     }
     let _finished = stream.finish();
@@ -582,6 +693,10 @@ struct Peer<'d> {
     held: Option<Held>,
     /// This connection, as clipboard sync tells clients apart.
     link: slopty_worker::clip::Link,
+    /// Which inputs of each session have been applied, from the stream or a copy.
+    order: InputOrder,
+    /// How echoes' datagram copies go, if they do.
+    copies: Option<slopty_net::echo::Copies>,
 }
 
 impl Drop for Peer<'_> {
@@ -646,6 +761,10 @@ impl Peer<'_> {
                 });
             }
             ClientMsg::Term { session, req } => {
+                if req.is_input() && !self.order.stream(session) {
+                    tracing::trace!(client = %self.client, %session, "term input: its copy came first");
+                    return;
+                }
                 if matches!(req, TermRequest::Raw(_) | TermRequest::Key(_)) {
                     tracing::trace!(client = %self.client, %session, "term input received");
                 }
@@ -718,7 +837,10 @@ impl Peer<'_> {
                 tracing::debug!(client = %self.client, "pasteboard set for a paste");
                 self.release_held();
             }
-            Done::SessionClosed(session) => drop(self.attached.remove(&session)),
+            Done::SessionClosed(session) => {
+                self.order.forget(session);
+                drop(self.attached.remove(&session));
+            }
             Done::Ended(why) => return Some(why),
         }
         None
@@ -939,6 +1061,15 @@ impl Peer<'_> {
         }
     }
 
+    /// A datagram copy of an input: applied now if it is the session's next, else left to its
+    /// stream copy.
+    fn input_copy(&mut self, InputCopy { session, seq, req }: InputCopy) {
+        if self.order.copy(session, seq) {
+            tracing::trace!(client = %self.client, %session, seq, "term input copy received");
+            self.term(session, req);
+        }
+    }
+
     /// Loss feedback from a datagram: retransmit or refresh.
     fn feedback(&self, feedback: Feedback) {
         let control = |stream| self.screens.get(&stream).and_then(|s| s.control.as_ref());
@@ -1022,7 +1153,12 @@ impl Peer<'_> {
         if let Err(e) = handle.attach(self.client, size, sink.clone()) {
             return self.fail(session, &e);
         }
-        let pipe = Pipe { conn: self.conn.clone(), out: self.out.clone(), client: self.client };
+        let pipe = Pipe {
+            conn: self.conn.clone(),
+            out: self.out.clone(),
+            client: self.client,
+            copies: self.copies,
+        };
         let task = tokio::spawn(pump(pipe, handle, sink, events));
         self.attached.insert(session, (task, weak));
     }
@@ -1039,7 +1175,7 @@ mod tests {
     use slopty_proto::screen::ScreenInput;
     use slopty_proto::terminal::{CloseReason, SessionState, SessionSummary};
 
-    use super::{Heard, Route, StreamId, route};
+    use super::{Heard, InputOrder, Route, StreamId, route};
 
     fn key(code: KeyCode, mods: Mods) -> ScreenInput {
         ScreenInput::Key { code, action: KeyAction::Press, mods, text: None }
@@ -1091,6 +1227,48 @@ mod tests {
         assert!(heard.admit(&closed));
         let exited = SessionState::Exited { status: 3 };
         assert_eq!(heard.sessions, HashMap::from([(new, exited)]));
+    }
+
+    /// Each input reaches the PTY once and in the order it was sent, whichever copy of it came
+    /// first: a copy goes only when it is the next, and a stream copy after it is skipped.
+    #[test]
+    fn each_input_is_applied_once_in_order_from_the_first_copy() {
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let mut order = InputOrder::default();
+        // (from the stream, session, the copy's number), and whether it is applied.
+        let arrivals = [
+            (true, a, 0, true),
+            (false, a, 2, true),
+            (false, a, 4, false),
+            (true, a, 0, false),
+            (false, a, 3, true),
+            (false, b, 1, true),
+            (true, a, 0, false),
+            (true, a, 0, true),
+            (false, a, 4, false),
+            (false, a, 1, false),
+            (true, b, 0, false),
+            (false, b, 3, false),
+            (true, b, 0, true),
+            (true, b, 0, true),
+        ];
+        let mut applied: Vec<(SessionId, u64)> = Vec::new();
+        let mut counts = HashMap::<SessionId, u64>::new();
+        for (i, (stream, session, seq, expected)) in arrivals.into_iter().enumerate() {
+            let heard = counts.entry(session).or_default();
+            let (goes, n) = if stream {
+                *heard += 1;
+                (order.stream(session), *heard)
+            } else {
+                (order.copy(session, seq), seq)
+            };
+            assert_eq!(goes, expected, "arrival {i}");
+            if goes {
+                applied.push((session, n));
+            }
+        }
+        assert_eq!(applied, [(a, 1), (a, 2), (a, 3), (b, 1), (a, 4), (b, 2), (b, 3)]);
+        assert_eq!((order.taken, order.late), (3, 4));
     }
 
     /// A paste holds only the window it went to, in order; another window's input goes on, and a

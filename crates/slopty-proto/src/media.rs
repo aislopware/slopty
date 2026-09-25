@@ -1,4 +1,5 @@
-//! Datagram header for media (video fragments, parity, audio, cursor position).
+//! Datagram header for media (video fragments, parity, audio, cursor position), and the kind
+//! byte that tells a terminal frame's copy from them.
 //!
 //! Fixed 16-byte layout, little-endian, `zerocopy` so a receiver reads it in place with no parsing
 //! and a sender writes it into the front of a buffer with no allocation. Everything after the
@@ -33,6 +34,9 @@ pub enum Kind {
     /// datagram left for a while, so the receiver's stall clock keeps running on silence from
     /// the link alone.
     Heartbeat = 4,
+    /// Not media: a copy of a terminal frame, a [`crate::datagram::TermDatagram`] in postcard
+    /// after the header, whose other fields are zero.
+    Term = 5,
 }
 
 impl Kind {
@@ -45,6 +49,7 @@ impl Kind {
             2 => Some(Self::Audio),
             3 => Some(Self::Cursor),
             4 => Some(Self::Heartbeat),
+            5 => Some(Self::Term),
             _ => None,
         }
     }

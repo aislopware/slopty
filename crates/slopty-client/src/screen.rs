@@ -22,6 +22,7 @@ use slopty_media::{
     Action, Config, Ingest, Reassembler, ReassemblerStats, STALL_GAP, StallAttribution,
 };
 use slopty_proto::ClientMsg;
+use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::media::{MAX_DATAGRAM, MediaHeader};
 use slopty_proto::screen::{Feedback, ScreenRequest, VideoCodec};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
@@ -909,18 +910,27 @@ fn observed_parity(stats: &ReassemblerStats) -> u16 {
 /// Encode loss feedback for one datagram. A fragment list too long for a datagram degrades to
 /// "every fragment", which the worker answers with the whole frame.
 fn encode_feedback(feedback: Feedback) -> Bytes {
-    if let Ok(body) = slopty_proto::codec::encode_body(&feedback)
-        && body.len() <= MAX_DATAGRAM
-    {
-        return Bytes::from(body);
-    }
+    let encode = |feedback| slopty_proto::codec::encode_body(&ClientDatagram::Feedback(feedback));
+    let feedback = match encode(feedback.clone()) {
+        Ok(body) if body.len() <= MAX_DATAGRAM => return Bytes::from(body),
+        Ok(_) | Err(_) => feedback,
+    };
     let whole = match feedback {
         Feedback::Nack { stream, frame, .. } => {
             Feedback::Nack { stream, frame, fragments: Vec::new() }
         }
         refresh @ Feedback::Refresh { .. } => refresh,
     };
-    slopty_proto::codec::encode_body(&whole).map(Bytes::from).unwrap_or_default()
+    encode(whole).map(Bytes::from).unwrap_or_default()
+}
+
+/// The feedback in a datagram [`encode_feedback`] made.
+#[cfg(test)]
+fn decode_feedback(bytes: &[u8]) -> Option<Feedback> {
+    match slopty_proto::codec::decode_body(bytes).ok()? {
+        ClientDatagram::Feedback(feedback) => Some(feedback),
+        ClientDatagram::Input { .. } => None,
+    }
 }
 
 #[cfg(test)]
@@ -1023,7 +1033,7 @@ mod feedback_tests {
         let fragments: Vec<u16> = (0..2000).collect();
         let bytes = encode_feedback(Feedback::Nack { stream: StreamId(3), frame: 9, fragments });
         assert!(bytes.len() <= MAX_DATAGRAM);
-        let decoded: Feedback = slopty_proto::codec::decode_body(&bytes).unwrap();
+        let decoded = decode_feedback(&bytes).unwrap();
         assert_eq!(decoded, Feedback::Nack { stream: StreamId(3), frame: 9, fragments: vec![] });
     }
 
@@ -1044,7 +1054,7 @@ mod feedback_tests {
     fn a_short_one_round_trips() {
         let nack = Feedback::Nack { stream: StreamId(3), frame: 9, fragments: vec![1, 4] };
         let bytes = encode_feedback(nack.clone());
-        let decoded: Feedback = slopty_proto::codec::decode_body(&bytes).unwrap();
+        let decoded = decode_feedback(&bytes).unwrap();
         assert_eq!(decoded, nack);
     }
 }
@@ -1202,7 +1212,7 @@ mod worker_tests {
             let uplink = Uplink {
                 control: control_tx,
                 feedback: Box::new(move |bytes| {
-                    if let Ok(fb) = slopty_proto::codec::decode_body::<Feedback>(&bytes) {
+                    if let Some(fb) = decode_feedback(&bytes) {
                         caught.lock().push(fb);
                     }
                     up.load(Ordering::Relaxed)

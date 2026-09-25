@@ -7,6 +7,7 @@ mod golden {
     use slopty_grid::{
         Cursor, CursorShape, Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes,
     };
+    use slopty_proto::datagram::{ClientDatagram, term_datagram};
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
     use slopty_proto::orchestration::Port;
@@ -162,12 +163,53 @@ mod golden {
     fn feedback() {
         let nack =
             Feedback::Nack { stream: StreamId(7), frame: 0x0102_0304, fragments: vec![2, 5] };
-        let bytes = codec::encode_body(&nack).expect("encodes");
+        let bytes = codec::encode_body(&ClientDatagram::Feedback(nack)).expect("encodes");
         insta::assert_snapshot!("client_nack", hex(&bytes));
         let refresh =
             Feedback::Refresh { stream: StreamId(7), last_good_frame: 300, keyframe: true };
-        let bytes = codec::encode_body(&refresh).expect("encodes");
+        let bytes = codec::encode_body(&ClientDatagram::Feedback(refresh)).expect("encodes");
         insta::assert_snapshot!("client_refresh", hex(&bytes));
+    }
+
+    /// A keystroke's copy: the session, its place among the session's inputs, the request.
+    #[test]
+    fn input_copy() {
+        let copy = ClientDatagram::Input {
+            session: session(),
+            seq: 12,
+            req: TermRequest::Raw(b"x".to_vec()),
+        };
+        let bytes = codec::encode_body(&copy).expect("encodes");
+        insta::assert_snapshot!("client_input_copy", hex(&bytes));
+    }
+
+    /// An echo's copy: a `Term` media header, then the session and the event.
+    #[test]
+    fn frame_copy() {
+        let event = TermEvent::Frame(Frame {
+            seq: 3,
+            full: false,
+            epoch: 1,
+            cols: 8,
+            rows: 2,
+            cursor: Cursor {
+                row: 0,
+                col: 2,
+                shape: CursorShape::Block,
+                visible: true,
+                blink: false,
+            },
+            modes: TermModes::empty(),
+            oldest_line: slopty_grid::LineIndex(0),
+            first_visible_line: slopty_grid::LineIndex(0),
+            total_lines: 2,
+            input_ack: 0,
+            updates: vec![RowUpdate { row: 0, line: Line::from_text("$ x", 8, Style::DEFAULT) }],
+            images: Vec::new(),
+        });
+        let body = codec::encode_body(&event).expect("encodes");
+        let bytes = term_datagram(session(), &body).expect("encodes");
+        insta::assert_snapshot!("worker_frame_copy", hex(&bytes));
     }
 
     #[test]

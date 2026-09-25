@@ -2,17 +2,21 @@
 //!
 //! Runs on tokio; a UI on another executor just holds the receiver and the sender.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use bytes::Bytes;
 use parking_lot::Mutex;
 use slopty_core::{SessionId, StreamId, XferId};
 use slopty_net::client::WorkerConn;
 use slopty_net::framed::FramedRecv;
 use slopty_net::streams::{RawRecv, Uni, accept_uni};
 use slopty_net::{ClientMsg, NetError, WorkerMsg};
+use slopty_proto::datagram::{ClientDatagram, TermDatagram, parse_term_datagram};
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::screen::VideoCodec;
-use slopty_proto::terminal::TermEvent;
+use slopty_proto::terminal::{Frame, TermEvent, TermRequest};
 use slopty_proto::transfer::{BulkHeader, Purpose};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -26,6 +30,9 @@ use crate::xfer::{Table, Uplink};
 /// Bounded queues: a client that cannot keep up sees backpressure, not unbounded memory.
 const EVENT_DEPTH: usize = 4096;
 const OUT_DEPTH: usize = 1024;
+/// Frame copies waiting for their session's pump. One that finds it full is dropped: the
+/// stream brings the frame regardless.
+const COPY_DEPTH: usize = 16;
 
 /// Everything the UI hears from one worker.
 #[derive(Debug)]
@@ -70,6 +77,8 @@ pub struct WorkerLink {
     remote: Arc<dyn Remote>,
     /// Closed with the link, so a paste waiting on it stops at once.
     clips: Arc<ClipCache>,
+    /// Frames shown from their datagram copy, ahead of the session stream.
+    copies_taken: Arc<AtomicU64>,
     tasks: JoinSet<()>,
 }
 
@@ -130,8 +139,11 @@ impl WorkerLink {
             }
         });
 
+        let echoes = Echoes::default();
+        let copies_taken = Arc::new(AtomicU64::new(0));
         let acceptor_conn = quic.clone();
         let stream_events = events_tx.clone();
+        let (pump_echoes, pump_taken) = (echoes.clone(), Arc::clone(&copies_taken));
         let (bulk_table, bulk_clips) = (Arc::clone(&table), Arc::clone(&clips));
         tasks.spawn(async move {
             loop {
@@ -147,7 +159,14 @@ impl WorkerLink {
                 };
                 match uni {
                     Uni::Session { session, rx } => {
-                        tokio::spawn(pump_session(session, rx, stream_events.clone()));
+                        let copies = pump_echoes.open(session);
+                        let pump = Pump {
+                            session,
+                            events: stream_events.clone(),
+                            echoes: pump_echoes.clone(),
+                            taken: Arc::clone(&pump_taken),
+                        };
+                        tokio::spawn(pump_session(pump, rx, copies));
                     }
                     Uni::Bulk { header, rx } => {
                         tokio::spawn(receive_bulk(
@@ -161,12 +180,22 @@ impl WorkerLink {
             }
         });
 
+        let copy_conn = quic.clone();
+        let copies = slopty_net::echo::Copies::from_env();
         tasks.spawn(async move {
+            let mut inputs = InputNumbers::default();
             while let Some(msg) = out_rx.recv().await {
                 tracing::trace!(kind = msg.kind(), "control send");
+                let copy = inputs
+                    .number(&msg)
+                    .filter(|_numbered| copies.is_some())
+                    .and_then(|(session, seq, req)| input_copy(session, seq, req));
                 if let Err(e) = tx.send(&msg).await {
                     tracing::debug!(error = %e, "control write failed");
                     break;
+                }
+                if let (Some(copies), Some(copy)) = (copies, copy) {
+                    copies.send(&copy_conn, copy);
                 }
             }
         });
@@ -177,7 +206,10 @@ impl WorkerLink {
         tasks.spawn(async move {
             loop {
                 match datagram_conn.read_datagram().await {
-                    Ok(datagram) => datagram_router.route(datagram, std::time::Instant::now()),
+                    Ok(datagram) => match parse_term_datagram(&datagram) {
+                        Some(copy) => echoes.deliver(copy),
+                        None => datagram_router.route(datagram, std::time::Instant::now()),
+                    },
                     Err(e) => {
                         tracing::debug!(error = %e, "read_datagram ended");
                         break;
@@ -204,8 +236,15 @@ impl WorkerLink {
             runtime,
             remote,
             clips,
+            copies_taken,
             tasks,
         }
+    }
+
+    /// Frames shown from their datagram copy because it came before the session stream's.
+    #[must_use]
+    pub fn echo_copies_taken(&self) -> u64 {
+        self.copies_taken.load(Ordering::Relaxed)
     }
 
     /// Start receiving a screen stream the worker has `Opened`. Drop the handle to stop; send
@@ -214,7 +253,7 @@ impl WorkerLink {
     pub fn screen(&self, stream: StreamId, codec: VideoCodec) -> ScreenHandle {
         let conn = self.conn.clone();
         let feedback_conn = self.conn.clone();
-        let feedback = move |datagram: bytes::Bytes| match feedback_conn.send_datagram(datagram) {
+        let feedback = move |datagram: Bytes| match feedback_conn.send_datagram(datagram) {
             Ok(()) => true,
             Err(e) => {
                 tracing::debug!(%stream, error = %e, "feedback datagram");
@@ -309,29 +348,149 @@ impl Drop for WorkerLink {
     }
 }
 
-/// A session's terminal events, onto the link's event channel until the stream ends.
-async fn pump_session(
-    session: SessionId,
-    mut stream: FramedRecv<TermEvent>,
-    events: mpsc::Sender<LinkEvent>,
-) {
-    loop {
-        match stream.recv().await {
-            Ok(event) => {
-                if matches!(event, TermEvent::Frame(_)) {
-                    tracing::trace!(%session, "frame received");
-                }
-                if events.send(LinkEvent::Term { session, event }).await.is_err() {
-                    break;
-                }
-            }
-            Err(NetError::Closed) => break,
-            Err(e) => {
-                tracing::debug!(%session, error = %e, "session stream ended");
-                break;
-            }
+/// Numbers each session's inputs as the control stream carries them
+/// (`TermRequest::is_input`), for their datagram copies.
+#[derive(Debug, Default)]
+struct InputNumbers(HashMap<SessionId, u64>);
+
+impl InputNumbers {
+    /// `msg`'s session, its number among that session's inputs, and the request, when it is
+    /// one. Every message the stream carries goes through here, in order.
+    fn number<'m>(&mut self, msg: &'m ClientMsg) -> Option<(SessionId, u64, &'m TermRequest)> {
+        let ClientMsg::Term { session, req } = msg else { return None };
+        if !req.is_input() {
+            return None;
+        }
+        let seq = self.0.entry(*session).or_default();
+        *seq = seq.saturating_add(1);
+        Some((*session, *seq, req))
+    }
+}
+
+/// The datagram copy of input `seq`, unless it is too large for one datagram.
+fn input_copy(session: SessionId, seq: u64, req: &TermRequest) -> Option<Bytes> {
+    let long = |len: usize| len > slopty_proto::media::MAX_DATAGRAM;
+    if matches!(req, TermRequest::Paste(text) if long(text.len()))
+        || matches!(req, TermRequest::Raw(bytes) if long(bytes.len()))
+    {
+        return None;
+    }
+    let copy = ClientDatagram::Input { session, seq, req: req.clone() };
+    slopty_proto::codec::encode_body(&copy).ok().map(Bytes::from)
+}
+
+/// Where each session's frame copies go: the pump of its newest stream.
+#[derive(Clone, Debug, Default)]
+struct Echoes(Arc<Mutex<HashMap<SessionId, mpsc::Sender<Frame>>>>);
+
+impl Echoes {
+    /// Route `session`'s copies to a new pump from now on.
+    fn open(&self, session: SessionId) -> mpsc::Receiver<Frame> {
+        let (tx, rx) = mpsc::channel(COPY_DEPTH);
+        self.0.lock().insert(session, tx);
+        rx
+    }
+
+    /// A pump is done and has let its copies go; they go nowhere now, unless a newer pump
+    /// took them.
+    fn close(&self, session: SessionId) {
+        let mut routes = self.0.lock();
+        if routes.get(&session).is_some_and(mpsc::Sender::is_closed) {
+            routes.remove(&session);
         }
     }
+
+    fn deliver(&self, TermDatagram { session, event }: TermDatagram) {
+        let TermEvent::Frame(frame) = event else { return };
+        if let Some(tx) = self.0.lock().get(&session) {
+            let _full_or_gone = tx.try_send(frame);
+        }
+    }
+}
+
+/// Which frames of one session stream go on to the app: each frame once, in order, from
+/// whichever copy came first. The stream carries every frame; a datagram copy may come sooner
+/// and is taken only when it follows the last frame passed on, so it never opens a gap (which
+/// would ask for every row again). The stream copy of a frame already passed on is dropped.
+#[derive(Debug, Default)]
+struct FrameOrder {
+    last: Option<u64>,
+}
+
+impl FrameOrder {
+    /// The stream brought `frame`: whether it goes on.
+    fn stream(&mut self, frame: &Frame) -> bool {
+        // A stream's own diffs only climb, so a diff at or below the last number passed on is
+        // the one a copy brought. A whole frame always goes: a joiner's carries the others'
+        // number.
+        if !frame.full && self.last.is_some_and(|last| frame.seq <= last) {
+            return false;
+        }
+        self.last = Some(frame.seq);
+        true
+    }
+
+    /// A datagram brought a copy of `frame`: whether it goes on.
+    fn copy(&mut self, frame: &Frame) -> bool {
+        let next =
+            !frame.full && self.last.is_some_and(|last| last.checked_add(1) == Some(frame.seq));
+        if next {
+            self.last = Some(frame.seq);
+        }
+        next
+    }
+}
+
+/// What a session stream's pump sends to, and where it hears its frames' copies.
+struct Pump {
+    session: SessionId,
+    events: mpsc::Sender<LinkEvent>,
+    echoes: Echoes,
+    taken: Arc<AtomicU64>,
+}
+
+/// A session's terminal events, onto the link's event channel until the stream ends, with the
+/// copies of its frames that come first ([`FrameOrder`]).
+async fn pump_session(
+    pump: Pump,
+    mut stream: FramedRecv<TermEvent>,
+    mut copies: mpsc::Receiver<Frame>,
+) {
+    let Pump { session, events, echoes, taken } = pump;
+    let mut order = FrameOrder::default();
+    loop {
+        let event = tokio::select! {
+            received = stream.recv() => match received {
+                Ok(event) => {
+                    if let TermEvent::Frame(frame) = &event {
+                        tracing::trace!(%session, seq = frame.seq, "frame received");
+                        if !order.stream(frame) {
+                            continue;
+                        }
+                    }
+                    event
+                }
+                Err(NetError::Closed) => break,
+                Err(e) => {
+                    tracing::debug!(%session, error = %e, "session stream ended");
+                    break;
+                }
+            },
+            Some(frame) = copies.recv() => {
+                if !order.copy(&frame) {
+                    continue;
+                }
+                tracing::trace!(%session, seq = frame.seq, "frame copy received");
+                taken.fetch_add(1, Ordering::Relaxed);
+                TermEvent::Frame(frame)
+            }
+        };
+        if events.send(LinkEvent::Term { session, event }).await.is_err() {
+            break;
+        }
+    }
+    drop(copies);
+    echoes.close(session);
 }
 
 /// A bulk stream the worker opened: a file of a download, or a clipboard representation too
@@ -382,7 +541,7 @@ static DECODER_WARM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// created while the first stream is already starting still delays that stream's own
 /// session, so the apps call it at launch, before any worker is dialed.
 pub fn warm_up_decoder() {
-    if DECODER_WARM.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    if DECODER_WARM.swap(true, Ordering::Relaxed) {
         return;
     }
     let spawned = std::thread::Builder::new().name("decoder-warm-up".to_owned()).spawn(|| {
@@ -393,5 +552,124 @@ pub fn warm_up_decoder() {
     });
     if let Err(e) = spawned {
         tracing::debug!(error = %e, "decoder warm-up thread");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_grid::{Cursor, LineIndex, TermModes};
+    use slopty_proto::terminal::TermSize;
+
+    use super::*;
+    use crate::term::{Effect, TermState};
+
+    fn frame(seq: u64, full: bool) -> Frame {
+        Frame {
+            seq,
+            full,
+            epoch: 1,
+            cols: 80,
+            rows: 24,
+            cursor: Cursor::default(),
+            modes: TermModes::empty(),
+            oldest_line: LineIndex(0),
+            first_visible_line: LineIndex(0),
+            total_lines: 24,
+            input_ack: 0,
+            updates: Vec::new(),
+            images: Vec::new(),
+        }
+    }
+
+    /// Each frame goes on once, in order, from whichever copy came first; a copy that would
+    /// skip a frame waits for the stream.
+    #[test]
+    fn a_frame_goes_on_once_in_order_from_the_first_copy() {
+        let mut order = FrameOrder::default();
+        assert!(!order.copy(&frame(4, false)), "nothing shown yet: a diff has no base");
+        assert!(order.stream(&frame(4, true)));
+        assert!(order.copy(&frame(5, false)), "the next one, early");
+        assert!(!order.stream(&frame(5, false)), "its stream copy is dropped");
+        assert!(!order.copy(&frame(7, false)), "6 has not come: 7 would open a gap");
+        assert!(!order.copy(&frame(5, false)), "a copy twice");
+        assert!(order.stream(&frame(6, false)));
+        assert!(order.stream(&frame(7, false)), "7's copy was dropped, so its stream copy goes");
+        assert!(!order.copy(&frame(8, true)), "a whole frame is never a copy");
+        assert!(order.stream(&frame(8, true)));
+        assert!(order.stream(&frame(8, true)), "a joiner's whole frame at the same number");
+    }
+
+    /// What the app sees of copies that come early, late and out of order: every frame once, and
+    /// never a request for every row again.
+    #[test]
+    fn copies_out_of_order_never_make_the_app_resync() {
+        let mut order = FrameOrder::default();
+        let mut state = TermState::new(TermSize::default());
+        let arrivals = [
+            (false, frame(1, true)),
+            (true, frame(3, false)),
+            (true, frame(2, false)),
+            (false, frame(2, false)),
+            (true, frame(3, false)),
+            (false, frame(3, false)),
+            (true, frame(5, false)),
+            (false, frame(4, false)),
+            (false, frame(5, false)),
+            (true, frame(6, false)),
+            (false, frame(6, false)),
+        ];
+        let mut shown = Vec::new();
+        for (copy, frame) in arrivals {
+            let goes = if copy { order.copy(&frame) } else { order.stream(&frame) };
+            if goes {
+                shown.push(frame.seq);
+                let effects = state.apply(TermEvent::Frame(frame));
+                assert!(
+                    !effects
+                        .iter()
+                        .any(|e| matches!(e, Effect::Request(TermRequest::Attach { .. }))),
+                    "a resync after {shown:?}"
+                );
+            }
+        }
+        assert_eq!(shown, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(state.frames(), 6);
+    }
+
+    /// The link numbers inputs per session as the worker does, and nothing else.
+    #[test]
+    fn inputs_are_numbered_per_session_and_nothing_else_is() {
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let term = |session, req| ClientMsg::Term { session, req };
+        let mut numbers = InputNumbers::default();
+        let seqs: Vec<Option<(SessionId, u64)>> = [
+            term(a, TermRequest::Raw(b"x".to_vec())),
+            term(a, TermRequest::Resize(TermSize::default())),
+            term(b, TermRequest::Paste("p".to_owned())),
+            ClientMsg::Ping { sent_at: slopty_core::MonoTime::from_nanos(1) },
+            term(a, TermRequest::Clear),
+            term(a, TermRequest::Reached { marker: 3 }),
+            term(b, TermRequest::Focus { focused: true }),
+        ]
+        .iter()
+        .map(|msg| numbers.number(msg).map(|(session, seq, _req)| (session, seq)))
+        .collect();
+        assert_eq!(
+            seqs,
+            [Some((a, 1)), None, Some((b, 1)), None, Some((a, 2)), None, Some((b, 2))]
+        );
+    }
+
+    /// A keystroke's copy decodes as the worker reads it; a paste too long for a datagram has
+    /// none.
+    #[test]
+    fn a_keystroke_has_a_copy_and_a_long_paste_does_not() {
+        let session = SessionId::new();
+        let req = TermRequest::Raw(b"x".to_vec());
+        let copy = input_copy(session, 7, &req).unwrap();
+        let decoded: ClientDatagram = slopty_proto::codec::decode_body(&copy).unwrap();
+        assert_eq!(decoded, ClientDatagram::Input { session, seq: 7, req });
+        let long = TermRequest::Paste("x".repeat(slopty_proto::media::MAX_DATAGRAM + 1));
+        assert_eq!(input_copy(session, 8, &long), None);
     }
 }
