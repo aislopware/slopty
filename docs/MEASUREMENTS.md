@@ -4341,3 +4341,129 @@ notification, and a change in System Settings shows within a second.
 ```
 cargo test -p slopty-platform --release --lib reduce_motion -- --nocapture
 ```
+
+## 2026-09-25 — noq's BBR3 against the draft: aggregation, ProbeBW_UP, ProbeRTT
+
+"BBR3's window under bursty video" left three suspects in noq-proto 1.3.0's BBR3. This entry
+checks each against draft-ietf-ccwg-bbr-06 (July 2026) and the editor's copy of 3 August,
+Linux BBRv3 (`google/bbr` branch `v3`, `net/ipv4/tcp_bbr.c`) and Google's QUIC BBRv2
+(`quiche`, `congestion_control/bbr2_*`). noq has had no BBR change since 1.3.0. Quinn's
+BBRv3 is the PR noq's came from (quinn-rs/quinn#2481).
+
+**The aggregation count.** The draft's `HandleRestartFromIdle` moves
+`extra_acked_interval_start` to now and leaves `extra_acked_delivered` alone, and noq does the
+same. Every byte delivered after an idle gap then counts as aggregation. Linux clears
+`ack_epoch_acked` together with `ack_epoch_mstamp` on `CA_EVENT_TX_START`, and the draft's own
+`OnInit` sets both. Slopty's noq now clears the count too (`vendor/noq-proto/SLOPTY.md`, patch
+2). Linux also caps the allowance at 100 ms of bandwidth. The draft has no such cap, and with
+the count cleared it does not bind here, so noq still has none.
+
+**ProbeBW_UP.** The draft leaves `ProbeBW_UP` on loss, or on `full_bw_now`.
+`CheckFullBWReached` counts only rounds that are not app-limited, and Linux does the same
+(`bbr_check_full_bw_reached`, `case BBR_BW_PROBE_UP`). Neither has any other way out. noq's
+pacer releases ten packets at once, so a 25 kB P-frame is out in about 4 ms, under one round
+trip. The ACK that comes back finds nothing left to send and marks the next round app-limited,
+as the draft's `CheckIfApplicationLimited` would. Only a keyframe gives non-app-limited rounds.
+So video like Slopty's stays in `UP`, as the draft specifies. "BBR3's window under bursty
+video" planned an exit in `UP` for an app-limited flow and called it Linux's. Linux has no such
+exit. The check it had in mind is BBRv1's gain cycling, which does not leave the 1.25 phase for
+an app-limited flow either. Nothing changed.
+
+**ProbeRTT.** Every 5 s the draft and Linux cap the window at `max(0.5 × BDP, 4 packets)` for
+200 ms and a round trip. The draft makes one exception, and noq has it. It skips ProbeRTT when
+the expiry is found on the first ACK after a restart from idle (`idle_restart`). The draft also
+expects quiet spells to refresh the round-trip estimate first. In its pseudocode only a sample
+strictly below the minimum does that, and a clean round trip that only matches the minimum does
+not. At 60 fps the connection is idle for only part of each frame period, and the expiry often
+falls inside a burst. noq was faithful to the draft here but for one line. `HandleProbeRTT` starts
+with `MarkConnectionAppLimited()`, so the low rates of a window held to half a BDP are not taken
+for the path's, and noq left it out. Slopty's noq has it now (patch 3). quiche is not the draft.
+It pushes the round-trip timestamp forward by each quiet spell (`avoid_unnecessary_probe_rtt`,
+on by default) and checks for expiry only as `ProbeBW_DOWN` ends. That stretches the interval
+by the share of time spent idle, and ProbeRTT still comes.
+
+### The model, in noq-proto's unit tests
+
+`VideoSim` (`vendor/noq-proto/src/congestion/bbr3/mod.rs`, tests) drives BBR3 through the calls
+the connection makes. It sends the harness's traffic: 25 kB P-frames at 60 fps, a 130 kB
+keyframe each second, a 20 Mbit/s link with 4 ms of round trip, and an ACK every second packet
+or 2 ms after an odd one. A token bucket shaped like noq's pacer does the pacing. With
+"1 ms ticks" the bottleneck releases packets on a 1 ms grid, as `slopty-shape` does, so ACKs
+arrive in clumps. Sixty seconds after two of start-up, fixed seed:
+
+| link | noq | Up / Cruise / ProbeRTT | ProbeRTT entries | window max | extra_acked max | P-frame p50 / p99 ms | P-frames handed over in ProbeRTT, p50 / max ms |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| ACKs as served | 1.3.0 | 37 / 42 / 3.2 % | 9 | 390 kB | 363 kB | 12.1 / 87.6 | 76.6 / 149 (113 frames) |
+| ACKs as served | patched | 38 / 40 / 3.1 % | 9 | 76 kB | 9.0 kB | 12.1 / 96.4 | 86.2 / 128 (113 frames) |
+| 1 ms ticks | 1.3.0 | 64 / 24 / 1.4 % | 4 | 359 kB | 330 kB | 12.7 / 63.0 | 72.0 / 109 (51 frames) |
+| 1 ms ticks | patched | 64 / 22 / 2.5 % | 7 | 76 kB | 10.3 kB | 12.7 / 85.3 | 81.7 / 116 (85 frames) |
+
+```
+cd vendor/noq-proto && CARGO_TARGET_DIR=../../target/noq-vendor cargo test --lib \
+  video_through_one_bottleneck -- --ignored --nocapture
+rm Cargo.lock    # cargo writes one here; the vendored crate carries none
+```
+
+The "1.3.0" rows are the patched file with the two fixed lines taken out. The patch keeps the
+window within a few times the 10 kB bandwidth-delay product. It does not touch the time in `UP`.
+A P-frame handed over during ProbeRTT takes 70 to 90 ms against 12, because 60 % of the link is
+more than half a BDP per round trip carries. That sets P-frame p99, and it moves with how many
+ProbeRTTs a run happens to take. One keyframe landed in ProbeRTT in these four runs, and it took
+156 ms. `restart_from_idle_starts_an_empty_ack_aggregation_interval` fails on 1.3.0 (extra_acked
+155 kB against a 40 kB limit). `probe_rtt_marks_its_samples_app_limited` fails on 1.3.0 (ten of
+ten packets sent in ProbeRTT unmarked).
+
+### The harness
+
+`echo_beside_a_video_flood`, release, 100 ms of queue, no loss. The unpatched arm used a
+temporary `SLOPTY_BBR3_UNFIXED=1` switch in the vendored crate, since removed. Eight rounds of
+four runs, patched against unpatched, bounded (`bbr3`, the default) against noq's window
+(`bbr3-unbounded`), alternating which went first. The load average ran from 13 to 415, since
+other sessions were building. An arm-run whose goodput fell below 12 Mbit/s (9 when halved) was
+starved of CPU and is left out: 10 of 128. That leaves 6 to 8 runs a cell. Medians over runs,
+echo p99's range across runs in brackets, "missing" is frames not delivered whole per run. Logs
+are in `target/logs/bbr3fix/`.
+
+```
+SLOPTY_CC=<bbr3|bbr3-unbounded> \
+  cargo nextest run -p slopty-net --release --test echo_beside_flood --run-ignored only --no-capture
+```
+
+| arm | controller | noq | echo p50 / p99 [runs] / max ms | queue p99 / max ms | lost | window p50 | keyframe p50 / p99 ms | missing | Mbit/s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| bursts | bbr3 | patched | 9.7 / 19.1 [16.4–37.3] / 36.9 | 9.9 / 12.4 | 0 | 39 kB | 55.9 / 167 | 2–5 | 12.4–12.5 |
+| bursts | bbr3 | 1.3.0 | 9.8 / 19.6 [14.9–51.2] / 24.2 | 9.5 / 11.1 | 0 | 37 kB | 55.7 / 76 | 2–4 | 12.5–12.6 |
+| bursts | unbounded | patched | 10.2 / 23.9 [18.5–59.3] / 39.2 | **11.8 / 26.9** | 0 | **45 kB** | 56.0 / 131 | 2–4 | 12.1–12.6 |
+| bursts | unbounded | 1.3.0 | 10.0 / 26.1 [20.3–54.4] / 48.8 | 17.4 / 48.6 | 0 | 5.4 MB | 55.8 / 162 | 2–3 | 12.4–12.6 |
+| laned | bbr3 | patched | 9.8 / 22.8 [13.8–43.8] / 33.0 | 10.1 / 13.6 | 0 | 40 kB | 55.9 / 85 | 2–4 | 12.5–12.6 |
+| laned | bbr3 | 1.3.0 | 10.2 / 27.6 [16.4–57.8] / 48.0 | 11.7 / 16.1 | 0 | 45 kB | 55.9 / 160 | 2–4 | 12.2–12.6 |
+| laned | unbounded | patched | 9.9 / 25.5 [18.5–67.1] / 36.6 | **12.6 / 24.5** | 0 | **42 kB** | 55.5 / 168 | 2 | 12.3–12.6 |
+| laned | unbounded | 1.3.0 | 9.7 / 26.4 [23.0–62.7] / 48.5 | 17.1 / 39.5 | 0 | 5.0 MB | 55.8 / 139 | 2 | 12.3–12.6 |
+| metered | bbr3 | patched | 9.4 / 31.6 [12.1–48.6] / 49.9 | 5.9 / 9.4 | 0 | 38 kB | 63.3 / 104 | 2 | 12.2–12.5 |
+| metered | bbr3 | 1.3.0 | 9.3 / 21.6 [11.8–49.7] / 40.7 | 5.3 / 8.8 | 0 | 44 kB | 62.7 / 101 | 1–2 | 12.4–12.6 |
+| metered | unbounded | patched | 9.3 / 18.4 [13.3–31.1] / 28.2 | 5.3 / 8.7 | 0 | 41 kB | 63.0 / 110 | 2–3 | 12.4–12.5 |
+| metered | unbounded | 1.3.0 | 9.3 / 22.9 [13.0–34.6] / 34.0 | 5.4 / 9.1 | 0 | 2.4 MB | 63.4 / 149 | 1–2 | 12.3–12.4 |
+| halved | bbr3 | patched | 20.3 / 38.7 [26.8–45.6] / 52.7 | 28.4 / 30.4 | 0 | 25 kB | 157 / 281 | 1–5 | 9.3–9.7 |
+| halved | bbr3 | 1.3.0 | 21.4 / 45.5 [32.2–80.1] / 57.4 | 25.7 / 27.6 | 0 | 30 kB | 159 / 280 | 3–4 | 9.0–9.7 |
+| halved | unbounded | patched | 19.9 / **47.2** [32.0–72.8] / 67.0 | **27.0 / 57.6** | **0 in 8 runs** | 24 kB | 156 / 280 | 1–4 | 9.3–9.7 |
+| halved | unbounded | 1.3.0 | 19.1 / 168 [27.5–201] / 211 | 195 / 201 | 107–241 in 6 of 8 | 24 kB | 156 / 254 | 3–41 | 9.5–9.6 |
+
+What the numbers say:
+
+* **The aggregation fix does what the bound did.** noq's own window went from 2.4 to 5.4 MB to
+  41 to 45 kB, beside the bound's 37 to 45 kB. Unbounded, the bottleneck queue's p99 fell by
+  a third in the bursts and laned arms and its maximum by half. When the link halved, noq's
+  window as shipped filled the 100 ms buffer in six of eight runs and dropped 107 to 241
+  packets. Patched, it filled none, and the queue peaked at 58 ms. Video gave nothing up:
+  the same goodput, and the same frames delivered whole. The halved arm lost fewer frames
+  (1 to 4 against up to 41).
+* **Bounded, the patch changes nothing measurable.** The bound was already holding the window
+  under noq's. Every bounded difference above sits inside the run-to-run spread at this load.
+* **Keyframe p99 did not move, as expected.** It is two-valued. A run whose keyframes all miss
+  ProbeRTT reads 55 to 77 ms, and one that catches ProbeRTT reads mostly 100 to 250 ms. About two
+  arm-runs in three caught it in all four columns (16, 16, 17 and 18 of 24). The ProbeRTT mark
+  changes what BBR3 learns from those rounds, not how long they hold the window.
+* **Why the harness catches ProbeRTT so often.** The first round trip is sampled at the
+  handshake, the first keyframe follows at once, and keyframes come every second. ProbeRTT falls
+  due 5 s after the minimum was last refreshed, and it often lands on a keyframe. An encoder
+  whose keyframe interval divides 5 s would do the same on a real link.

@@ -1,17 +1,17 @@
 //! The congestion controller every connection runs: one of noq's, its window held to twice the
 //! path's measured bandwidth-delay product, and its bytes in flight readable beside the window.
 //!
-//! noq's BBR3 grows its window without bound under Slopty's traffic (MEASUREMENTS.md, "BBR3's
-//! window under bursty video"). Video leaves in one burst per frame and the connection goes idle
-//! between frames. Each restart from idle moves BBR's ACK-aggregation interval to the present
-//! without clearing the bytes counted in it (`noq-proto` 1.3.0, `congestion/bbr3/mod.rs`,
-//! `handle_restart_from_idle` and `update_ack_aggregation`), so every byte delivered counts as
-//! aggregation, and the window (twice the product plus that allowance) climbs at the video's
-//! rate, to megabytes against a 20 kB product. An app-limited flow can also stay in `Startup`
-//! for good, pacing at the rate its initial window implies (2.77 × 38 400 B per millisecond, far
-//! above any link). Nothing then holds the bytes in flight to the path, and a burst lands in the
-//! bottleneck's queue, where an echo written after it waits and nothing on this host can reorder
-//! it.
+//! noq-proto 1.3.0's BBR3 grew its window without bound under Slopty's traffic (MEASUREMENTS.md,
+//! "BBR3's window under bursty video"). Video leaves in one burst per frame and the connection
+//! goes idle between frames, and each restart from idle kept the bytes counted in BBR's
+//! ACK-aggregation interval while moving its start to the present, so the window climbed at the
+//! video's rate. Slopty's noq clears the count (`vendor/noq-proto/SLOPTY.md`), and unbounded its
+//! window now stays near this bound (MEASUREMENTS.md, "noq's BBR3 against the draft"). The bound
+//! stays for what that fix does not reach: an app-limited flow can stay in `Startup` for good,
+//! pacing at the rate its initial window implies (2.77 × 38 400 B per millisecond, far above any
+//! link), and then nothing but the bound holds the bytes in flight to the path. A burst would
+//! land in the bottleneck's queue, where an echo written after it waits and nothing on this host
+//! can reorder it.
 //!
 //! The bound is measured here, not read from BBR3, whose model is private and is what went
 //! wrong: the fastest the peer has acknowledged data over a round trip in the last ten seconds,

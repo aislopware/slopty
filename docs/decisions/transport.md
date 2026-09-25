@@ -1099,3 +1099,43 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Worth proposing upstream: it is opt-in, keeps the default, and is a few lines. Upstream may
   prefer to give datagrams a priority of their own in the stream order, which says the same
   thing.
+
+- ✅ **noq's BBR3 follows the draft: clear the aggregation count on idle restart, mark ProbeRTT
+  app-limited, and leave ProbeBW_UP and the ProbeRTT dip as specified** (2026-09-25,
+  MEASUREMENTS.md "noq's BBR3 against the draft"). This settles items 2 and 3 of the
+  "BBR3 stays the default" entry. Checked against draft-ietf-ccwg-bbr-06 and its editor's copy,
+  Linux BBRv3 (`google/bbr` `v3`) and quiche's BBRv2.
+
+  *Taken.* Two patches to `vendor/noq-proto`, each with a unit test that fails without it
+  (`SLOPTY.md` lists them). `handle_restart_from_idle` zeroes `extra_acked_delivered` when it
+  moves `extra_acked_interval_start`, as Linux does on `CA_EVENT_TX_START`. The draft's
+  pseudocode resets only the start, which reads as an omission, since its `OnInit` sets the two
+  together. On the 20 Mbit/s shaper noq's own window fell from 2.4 to 5.4 MB to 41 to 45 kB. When
+  the link halved it no longer overflowed the 100 ms buffer, which it had done in six of eight
+  runs. Goodput and frames delivered whole did not change. `handle_probe_rtt` now marks the
+  connection app-limited, the first line of the draft's `HandleProbeRTT`. That is a
+  correctness fix with no measurable effect on this harness, and none was expected. Linux's cap
+  of 100 ms of bandwidth on the aggregation allowance is not in the draft, and it does not bind
+  once the count is cleared, so it was not taken.
+
+  *Left as specified.* Item 3 of the earlier entry rested on a misreading. The draft keeps
+  an app-limited flow in `ProbeBW_UP`: `full_bw_now` counts only rounds that are not
+  app-limited, and loss is the only other way out. Linux BBRv3 does the same, and no probe-up
+  exit exists there for such a flow. The draft's only concession to app-limited flows in ProbeRTT
+  is the skip when a restart from idle finds the interval expired, and noq has it. Skipping or
+  shortening ProbeRTT for video that is idle part of each frame goes beyond the draft. quiche's
+  `avoid_unnecessary_probe_rtt`, which pushes the interval out by each quiet spell, is one such
+  rule, and it only spreads ProbeRTT out. So BBR3's keyframe p99 stays two-valued. It reads 55 to
+  77 ms when no keyframe meets ProbeRTT and mostly 100 to 250 ms when one does, about two
+  arm-runs in three on this harness.
+
+  *The bound stays.* Patched, noq's window no longer needs it. Unbounded, patched BBR3 matched
+  the bounded one on every arm. It still guards the case the patches do not reach, an
+  app-limited flow that never leaves `Startup` and paces at `2.77 × initial window / 1 ms`
+  (noq#800). Removing it waits for that fix and a mesh run.
+
+  *Upstream.* Propose both patches to noq (and quinn#2481, where the code came from), each
+  with its test. Propose the `HandleRestartFromIdle` reset to the draft
+  (`ietf-wg-ccwg/draft-ietf-ccwg-bbr`), with Linux as the reference. The ProbeRTT cost for
+  60 fps video could go to the same tracker beside issue 109, as a report with this harness's
+  numbers rather than a patch.

@@ -1180,6 +1180,8 @@ impl Bbr3 {
 
     /// equivalent to BBRHandleProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3-4>
     fn handle_probe_rtt(&mut self, now: Instant) {
+        // Ignore low rate samples during ProbeRTT: MarkConnectionAppLimited()
+        self.app_limited = Ord::max(self.delivered + self.inflight, 1);
         if self.probe_rtt_done_stamp.is_none() && self.inflight <= self.probe_rtt_cwnd() {
             self.probe_rtt_done_stamp =
                 Some(now.checked_add(self.probe_rtt_duration).unwrap_or(now));
@@ -1267,6 +1269,9 @@ impl Bbr3 {
         if self.inflight == 0 && self.app_limited != 0 {
             self.idle_restart = true;
             self.extra_acked_interval_start = Some(now);
+            // The count belongs to the interval: kept, every byte delivered after an idle gap
+            // reads as aggregation. Linux clears both on CA_EVENT_TX_START.
+            self.extra_acked_delivered = 0;
             match self.state {
                 BbrState::ProbeBw(_) => {
                     self.set_pacing_rate_with_gain(1.0);
@@ -6990,5 +6995,375 @@ mod test {
             "max_bw after subsequent probing ({max_bw_final}) should still be within 10% of the \
              simulated {BW} (rel err {final_err})"
         );
+    }
+
+    /// A screen encoder's traffic through one bottleneck. The application hands over one
+    /// frame every `FRAME_NS` and nothing between, a keyframe every `KEY_EVERY` frames. The
+    /// link serves `BW` behind an unbounded FIFO with `RTT_NS` of propagation, and releases
+    /// what it has served on a `release_tick_ns` grid, as a relay on a timer does, so ACKs can
+    /// come back in clumps. The receiver acknowledges every second packet, or `ACK_DELAY_NS`
+    /// after an odd one. The sender paces with noq's token bucket and drives BBR through
+    /// `on_packet_sent`/`on_ack`/`on_end_acks` as the connection does, with `app_limited` set
+    /// whenever it has nothing left to send.
+    struct VideoSim {
+        bbr: Bbr3,
+        base: Instant,
+        rtt_est: RttEstimator,
+        release_tick_ns: u64,
+        now_ns: u64,
+        /// The pacer's bucket, in bytes, as of `tokens_ns`.
+        tokens: f64,
+        tokens_ns: u64,
+        btl_free_ns: u64,
+        pn: u64,
+        inflight: u64,
+        /// Handed over and not yet sent: (frame, bytes left).
+        backlog: VecDeque<(usize, u64)>,
+        /// Sent and not yet at the receiver: (pn, sent, arrives, frame).
+        in_network: VecDeque<(u64, u64, u64, usize)>,
+        /// At the receiver and not yet acknowledged: (pn, sent).
+        unacked: Vec<(u64, u64)>,
+        ack_timer_ns: Option<u64>,
+        /// ACKs on their way back: (arrives, [(pn, sent)]).
+        acks: VecDeque<(u64, Vec<(u64, u64)>)>,
+        frames: Vec<SimFrame>,
+        /// Nanoseconds spent in each state since the statistics were cleared, by
+        /// `state_index`.
+        state_ns: [u64; 7],
+        probe_rtt_entries: u32,
+        max_cwnd: u64,
+        max_extra_acked: u64,
+    }
+
+    struct SimFrame {
+        handed_ns: u64,
+        packets_left: u64,
+        key: bool,
+        /// Whether BBR was in ProbeRTT when the frame was handed over.
+        in_probe_rtt: bool,
+        /// When its last packet reached the receiver, if after the statistics were cleared.
+        done_ns: Option<u64>,
+    }
+
+    impl VideoSim {
+        const MSS: u64 = 1200;
+        /// 20 Mbit/s.
+        const BW: f64 = 2_500_000.0;
+        const RTT_NS: u64 = 4_000_000;
+        const ACK_DELAY_NS: u64 = 2_000_000;
+        /// 60 frames a second.
+        const FRAME_NS: u64 = 16_666_667;
+        const KEY_EVERY: usize = 60;
+        /// 12 Mbit/s of P-frames, and a keyframe of 52 ms of the link.
+        const P_FRAME: u64 = 25_000;
+        const KEYFRAME: u64 = 130_000;
+
+        fn new(release_tick_ns: u64) -> Self {
+            let mut config = Bbr3Config::default();
+            config.initial_window(32 * Self::MSS);
+            config.probe_rng_seed = Some([7; 16]);
+            Self {
+                bbr: Bbr3::new(Arc::new(config), Self::MSS as u16),
+                base: Instant::now(),
+                rtt_est: RttEstimator::new(Duration::from_nanos(Self::RTT_NS)),
+                release_tick_ns,
+                now_ns: 0,
+                tokens: 0.0,
+                tokens_ns: 0,
+                btl_free_ns: 0,
+                pn: 0,
+                inflight: 0,
+                backlog: VecDeque::new(),
+                in_network: VecDeque::new(),
+                unacked: Vec::new(),
+                ack_timer_ns: None,
+                acks: VecDeque::new(),
+                frames: Vec::new(),
+                state_ns: [0; 7],
+                probe_rtt_entries: 0,
+                max_cwnd: 0,
+                max_extra_acked: 0,
+            }
+        }
+
+        fn state_index(state: BbrState) -> usize {
+            match state {
+                BbrState::Startup => 0,
+                BbrState::Drain => 1,
+                BbrState::ProbeBw(ProbeBwSubstate::Down) => 2,
+                BbrState::ProbeBw(ProbeBwSubstate::Cruise) => 3,
+                BbrState::ProbeBw(ProbeBwSubstate::Refill) => 4,
+                BbrState::ProbeBw(ProbeBwSubstate::Up) => 5,
+                BbrState::ProbeRtt => 6,
+            }
+        }
+
+        fn at(&self, ns: u64) -> Instant {
+            self.base + Duration::from_nanos(ns)
+        }
+
+        /// Share of the time since the statistics were cleared spent in `state`.
+        fn share(&self, state: BbrState) -> f64 {
+            let total: u64 = self.state_ns.iter().sum();
+            self.state_ns[Self::state_index(state)] as f64 / total as f64
+        }
+
+        /// When the pacer lets the next packet go, refilling the bucket as noq's
+        /// `Pacer::delay_at_rate` does: at the pacing rate, up to 2 ms of it, but never under
+        /// ten packets nor over 10 ms.
+        fn pacer_ready_ns(&mut self) -> u64 {
+            let rate = self.bbr.pacing_rate.max(1.0);
+            let mss = Self::MSS as f64;
+            let capacity = (rate * 0.002)
+                .clamp(10.0 * mss, 256.0 * mss)
+                .min((rate * 0.01).max(mss));
+            let elapsed = (self.now_ns - self.tokens_ns) as f64 / 1e9;
+            self.tokens = (self.tokens + rate * elapsed).min(capacity);
+            self.tokens_ns = self.now_ns;
+            match self.tokens >= mss {
+                true => self.now_ns,
+                false => self.now_ns + ((mss - self.tokens) / rate * 1e9).ceil() as u64,
+            }
+        }
+
+        /// Runs the link until `end_ns`, clearing the statistics at `settle_ns`.
+        fn run(&mut self, settle_ns: u64, end_ns: u64) {
+            let mut settled = false;
+            loop {
+                let frame_ns = self.frames.len() as u64 * Self::FRAME_NS;
+                let window_open = self.inflight + Self::MSS <= self.bbr.window();
+                if !self.backlog.is_empty() && !window_open {
+                    self.bbr.on_cwnd_limited();
+                }
+                let send_ns = match !self.backlog.is_empty() && window_open {
+                    true => self.pacer_ready_ns(),
+                    false => u64::MAX,
+                };
+                let arrive_ns = self.in_network.front().map_or(u64::MAX, |p| p.2);
+                let timer_ns = self.ack_timer_ns.unwrap_or(u64::MAX);
+                let ack_ns = self.acks.front().map_or(u64::MAX, |a| a.0);
+                let next = frame_ns
+                    .min(send_ns)
+                    .min(arrive_ns)
+                    .min(timer_ns)
+                    .min(ack_ns);
+                if next > end_ns {
+                    return;
+                }
+                if !settled && next >= settle_ns {
+                    settled = true;
+                    self.state_ns = [0; 7];
+                    self.probe_rtt_entries = 0;
+                    self.max_cwnd = 0;
+                    self.max_extra_acked = 0;
+                }
+                self.state_ns[Self::state_index(self.bbr.state)] += next - self.now_ns;
+                self.now_ns = next;
+
+                if next == ack_ns {
+                    self.receive_ack();
+                } else if next == arrive_ns {
+                    let (pn, sent, _, frame) = self.in_network.pop_front().unwrap();
+                    let frame = &mut self.frames[frame];
+                    frame.packets_left -= 1;
+                    if frame.packets_left == 0 && settled {
+                        frame.done_ns = Some(next);
+                    }
+                    self.unacked.push((pn, sent));
+                    if self.unacked.len() >= 2 {
+                        self.send_ack();
+                    } else if self.ack_timer_ns.is_none() {
+                        self.ack_timer_ns = Some(next + Self::ACK_DELAY_NS);
+                    }
+                } else if next == timer_ns {
+                    self.send_ack();
+                } else if next == frame_ns {
+                    let key = self.frames.len().is_multiple_of(Self::KEY_EVERY);
+                    let bytes = if key { Self::KEYFRAME } else { Self::P_FRAME };
+                    self.backlog.push_back((self.frames.len(), bytes));
+                    self.frames.push(SimFrame {
+                        handed_ns: next,
+                        packets_left: bytes.div_ceil(Self::MSS),
+                        key,
+                        in_probe_rtt: self.bbr.state == BbrState::ProbeRtt,
+                        done_ns: None,
+                    });
+                } else {
+                    self.send();
+                }
+            }
+        }
+
+        fn send(&mut self) {
+            let Some((frame, left)) = self.backlog.front_mut() else {
+                return;
+            };
+            let frame = *frame;
+            *left = left.saturating_sub(Self::MSS);
+            if *left == 0 {
+                self.backlog.pop_front();
+            }
+            self.bbr.on_packet_sent(
+                self.at(self.now_ns),
+                Self::MSS as u16,
+                self.pn,
+                SpaceKind::Data,
+            );
+            self.inflight += Self::MSS;
+            self.tokens -= Self::MSS as f64;
+            let service_ns = (Self::MSS as f64 / Self::BW * 1e9).round() as u64;
+            let start = (self.now_ns + Self::RTT_NS / 2).max(self.btl_free_ns);
+            self.btl_free_ns = start + service_ns;
+            let arrives = self.btl_free_ns.div_ceil(self.release_tick_ns) * self.release_tick_ns;
+            self.in_network
+                .push_back((self.pn, self.now_ns, arrives, frame));
+            self.pn += 1;
+        }
+
+        fn send_ack(&mut self) {
+            self.ack_timer_ns = None;
+            let packets = std::mem::take(&mut self.unacked);
+            self.acks
+                .push_back((self.now_ns + Self::RTT_NS / 2, packets));
+        }
+
+        fn receive_ack(&mut self) {
+            let (_, packets) = self.acks.pop_front().unwrap();
+            let now = self.at(self.now_ns);
+            let app_limited = self.backlog.is_empty();
+            let was_probe_rtt = self.bbr.state == BbrState::ProbeRtt;
+            let mut largest = None;
+            for (pn, sent) in packets {
+                self.inflight -= Self::MSS;
+                self.rtt_est
+                    .update(Duration::ZERO, Duration::from_nanos(self.now_ns - sent));
+                self.bbr.on_ack(
+                    now,
+                    self.at(sent),
+                    Self::MSS,
+                    pn,
+                    SpaceKind::Data,
+                    app_limited,
+                    &self.rtt_est,
+                );
+                largest = Some(pn);
+            }
+            self.bbr
+                .on_end_acks(now, self.inflight, app_limited, largest, SpaceKind::Data);
+            if !was_probe_rtt && self.bbr.state == BbrState::ProbeRtt {
+                self.probe_rtt_entries += 1;
+            }
+            self.max_cwnd = self.max_cwnd.max(self.bbr.window());
+            self.max_extra_acked = self.max_extra_acked.max(self.bbr.extra_acked);
+        }
+
+        /// Handover to last packet received, in ms, of the frames received whole since the
+        /// statistics were cleared that match `filter`.
+        fn frame_ms(&self, filter: impl Fn(&SimFrame) -> bool) -> Vec<f64> {
+            let mut ms: Vec<f64> = self
+                .frames
+                .iter()
+                .filter(|f| filter(f))
+                .filter_map(|f| f.done_ns.map(|done| (done - f.handed_ns) as f64 / 1e6))
+                .collect();
+            ms.sort_by(f64::total_cmp);
+            ms
+        }
+    }
+
+    /// Video that leaves the connection idle between frames, through a bottleneck that releases
+    /// packets on a 1 ms timer, so ACKs come back in clumps. A restart from idle starts a new
+    /// ACK-aggregation interval, and the bytes counted in the old one must go with it, as
+    /// Linux's `tcp_bbr.c` clears `ack_epoch_acked` beside `ack_epoch_mstamp` on
+    /// `CA_EVENT_TX_START`. Keeping the count while moving the interval's start reads every
+    /// byte delivered since as aggregation: `extra_acked` then tracks the window, the window
+    /// grows by `extra_acked`, and both climb at the video's rate, to tens of megabytes on a
+    /// path whose bandwidth-delay product is 10 kB.
+    #[test]
+    fn restart_from_idle_starts_an_empty_ack_aggregation_interval() {
+        let mut sim = VideoSim::new(1_000_000);
+        sim.run(2_000_000_000, 20_000_000_000);
+        let bdp = (VideoSim::BW * VideoSim::RTT_NS as f64 / 1e9) as u64;
+        assert!(
+            sim.max_extra_acked <= 4 * bdp,
+            "extra_acked reached {} B against a {bdp} B bandwidth-delay product",
+            sim.max_extra_acked
+        );
+        assert!(
+            sim.max_cwnd < VideoSim::KEYFRAME,
+            "the window reached {} B against a {bdp} B bandwidth-delay product",
+            sim.max_cwnd
+        );
+    }
+
+    /// HandleProbeRTT marks the connection app-limited on every ACK, so the low delivery rates
+    /// of a flow held to half a BDP do not read as the path's
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3>.
+    #[test]
+    fn probe_rtt_marks_its_samples_app_limited() {
+        const MSS: u64 = 1200;
+        const BW: f64 = 1_250_000.0;
+        const RTT_NS: u64 = 20_000_000;
+        let mut sim = Sim::new(Bbr3Config::default(), MSS, BW, RTT_NS);
+        let mut sent_in_probe_rtt = Vec::new();
+        sim.run(
+            1_000_000,
+            |bbr| {
+                if bbr.state != BbrState::ProbeRtt {
+                    return ControlFlow::Continue(());
+                }
+                let packet = bbr.packets[SpaceKind::Data as usize].back().unwrap();
+                sent_in_probe_rtt.push(packet.is_app_limited);
+                match sent_in_probe_rtt.len() {
+                    10 => ControlFlow::Break(()),
+                    _ => ControlFlow::Continue(()),
+                }
+            },
+            |_, _, _, _| ControlFlow::Continue(()),
+        );
+        assert_eq!(sent_in_probe_rtt, [true; 10]);
+    }
+
+    /// What the draft's BBR does with a screen encoder's traffic: shares of time by state,
+    /// ProbeRTT entries, the window, and how long frames took, overall and when handed over
+    /// in ProbeRTT (docs/MEASUREMENTS.md in Slopty, "noq's BBR3 against the draft").
+    #[test]
+    #[ignore = "diagnostic: prints the simulated statistics"]
+    fn video_through_one_bottleneck() {
+        let pct = |ms: &[f64], p: f64| {
+            let rank = ((p * ms.len() as f64).ceil() as usize).clamp(1, ms.len().max(1));
+            ms.get(rank - 1).copied().unwrap_or(f64::NAN)
+        };
+        for (release_tick_ns, link) in [(1, "ACKs as served"), (1_000_000, "1 ms release ticks")] {
+            let mut sim = VideoSim::new(release_tick_ns);
+            sim.run(2_000_000_000, 62_000_000_000);
+            let key = sim.frame_ms(|f| f.key);
+            let p = sim.frame_ms(|f| !f.key);
+            let p_rtt = sim.frame_ms(|f| !f.key && f.in_probe_rtt);
+            let key_rtt = sim.frame_ms(|f| f.key && f.in_probe_rtt);
+            println!(
+                "{link}: Up {:.1} % / Cruise {:.1} % / ProbeRTT {:.1} %, {} ProbeRTT entries in \
+                 60 s, window max {} B, extra_acked max {} B\n  keyframes {}: p50 {:.1} / p99 \
+                 {:.1} ms, {} handed over in ProbeRTT: max {:.1} ms\n  P-frames {}: p50 {:.1} / \
+                 p99 {:.1} ms, {} handed over in ProbeRTT: p50 {:.1} / max {:.1} ms",
+                sim.share(BbrState::ProbeBw(ProbeBwSubstate::Up)) * 100.0,
+                sim.share(BbrState::ProbeBw(ProbeBwSubstate::Cruise)) * 100.0,
+                sim.share(BbrState::ProbeRtt) * 100.0,
+                sim.probe_rtt_entries,
+                sim.max_cwnd,
+                sim.max_extra_acked,
+                key.len(),
+                pct(&key, 0.5),
+                pct(&key, 0.99),
+                key_rtt.len(),
+                pct(&key_rtt, 1.0),
+                p.len(),
+                pct(&p, 0.5),
+                pct(&p, 0.99),
+                p_rtt.len(),
+                pct(&p_rtt, 0.5),
+                pct(&p_rtt, 1.0),
+            );
+        }
     }
 }

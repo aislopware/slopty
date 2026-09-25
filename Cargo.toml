@@ -328,8 +328,9 @@ ignore = "0.4.33"
 pretty_assertions = "1.4.1"
 
 # noq-proto 1.3.0 with `TransportConfig::stream_priority_before_datagrams`, so a keystroke's
-# echo is not written behind a keyframe's datagrams (docs/decisions/transport.md). Vendored with
-# the one commit on top; `vendor/noq-proto/SLOPTY.md` says what it is and how to move it.
+# echo is not written behind a keyframe's datagrams, and two BBR3 fixes against the draft
+# (docs/decisions/transport.md). `vendor/noq-proto/SLOPTY.md` lists the patches and how to
+# move them.
 [patch.crates-io]
 noq-proto = { path = "vendor/noq-proto" }
 
