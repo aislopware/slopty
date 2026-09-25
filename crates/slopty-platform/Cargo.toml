@@ -20,6 +20,8 @@ block2.workspace = true
 dispatch2.workspace = true
 # A drop's landing, shared by the callbacks its files arrive on (`file_drop`).
 parking_lot.workspace = true
+# Whether the run that left a drop's landing behind is still alive (`file_drop::sweep`).
+rustix.workspace = true
 objc2-foundation = { workspace = true, features = [
     "NSURL",
     "NSURLRequest",

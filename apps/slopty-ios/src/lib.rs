@@ -8,36 +8,29 @@
 
 #![cfg(target_os = "ios")]
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use gpui::WindowOptions;
 
-/// Entry point for the UIKit shell. Returns whether the workspace window opened.
+/// Entry point for the UIKit shell. A failure to start is logged; UIKit has no use for it.
 #[unsafe(no_mangle)]
-pub extern "C" fn slopty_ios_run() -> bool {
+pub extern "C" fn slopty_ios_run() {
     init_logging();
     slopty_platform::playback_audio_session();
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(e) => {
             tracing::error!(error = %e, "tokio runtime");
-            return false;
+            return;
         }
     };
     // The runtime lives as long as the process; UIKit never returns from `UIApplicationMain`.
     let handle = Box::leak(Box::new(runtime)).handle().clone();
-    let opened = Rc::new(Cell::new(false));
-    let flag = Rc::clone(&opened);
     gpui_ios::ios::ffi::set_app_callback(Box::new(move |cx| {
         gpui_kit::init(cx);
-        match slopty_app::open_workspace(cx, handle, WindowOptions::default()) {
-            Ok(()) => flag.set(true),
-            Err(e) => tracing::error!(error = %e, "open workspace"),
+        if let Err(e) = slopty_app::open_workspace(cx, handle, WindowOptions::default()) {
+            tracing::error!(error = %e, "open workspace");
         }
     }));
     gpui_ios::ios::ffi::run_app_with_assets(slopty_ui::icons::Assets);
-    opened.get()
 }
 
 /// Logs go to stderr, which `simctl launch --console-pty` and `devicectl --console` stream.

@@ -313,11 +313,6 @@ impl UntilArgs {
     }
 }
 
-/// This machine's name, for the server's logs.
-pub fn machine_name() -> String {
-    rustix::system::uname().nodename().to_string_lossy().into_owned()
-}
-
 /// Connect to the server, run `cmd`, print its answer.
 pub async fn run(cmd: VerbCmd, server: Option<&str>, data_dir: &Path, json: bool) -> Result<()> {
     let address = link::locate(server, data_dir)?;
@@ -325,7 +320,7 @@ pub async fn run(cmd: VerbCmd, server: Option<&str>, data_dir: &Path, json: bool
     let role = Role::Client {
         client,
         kind: ClientKind::Tool,
-        name: format!("slopty @ {}", machine_name()),
+        name: format!("slopty @ {}", crate::client::machine_name()),
     };
     let endpoint = bind_client()?;
     let result = match Link::connect(&endpoint, &address, role).await {

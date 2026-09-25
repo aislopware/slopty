@@ -3,7 +3,7 @@
 // must be Objective-C classes. The gpui_ios_* symbols come from the gpui_ios crate.
 #import <UIKit/UIKit.h>
 
-extern bool slopty_ios_run(void);
+extern void slopty_ios_run(void);
 extern void gpui_ios_will_enter_foreground(void *application);
 extern void gpui_ios_did_become_active(void *application);
 extern void gpui_ios_will_resign_active(void *application);

@@ -26,22 +26,15 @@ fn hello(client: ClientId) -> Hello {
     Hello {
         client,
         kind: ClientKind::Tool,
-        name: format!("slopty cli @ {}", host_name()),
+        name: format!("slopty cli @ {}", machine_name()),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         caps: Caps::empty(),
     }
 }
 
-fn host_name() -> String {
-    std::process::Command::new("scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "mac".to_owned())
+/// This machine's name as its peers' logs show it: the host name, one `uname` call.
+pub fn machine_name() -> String {
+    rustix::system::uname().nodename().to_string_lossy().into_owned()
 }
 
 /// Close `endpoint`, giving its connections a moment to tell their peers.

@@ -48,7 +48,7 @@ const REVISION: ProtocolVersion = ProtocolVersion::V_2026_07_28;
 pub async fn run(server: Option<&str>, data_dir: &Path) -> Result<()> {
     let address = link::locate(server, data_dir)?;
     let endpoint = bind_client()?;
-    let role = Role::Agent { name: format!("slopty mcp @ {}", crate::verbs::machine_name()) };
+    let role = Role::Agent { name: format!("slopty mcp @ {}", crate::client::machine_name()) };
     let (link, events) = Link::persistent(endpoint.clone(), address, role);
     let running = Slopty { link }
         .serve(rmcp::transport::stdio())

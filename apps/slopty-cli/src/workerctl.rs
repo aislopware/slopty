@@ -1,6 +1,6 @@
 //! `slopty worker …`: the daemon's local control socket.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
@@ -23,47 +23,42 @@ pub enum WorkerCmd {
     /// Run `slopty-ptyd` and `slopty-worker` as `LaunchAgents` (starts now and at every login).
     Install(service::InstallOpts),
     /// Stop the `LaunchAgents` and remove them (open sessions die with ptyd).
-    Uninstall {
-        /// Data directory the agents were installed with.
-        #[arg(long)]
-        data_dir: Option<PathBuf>,
-    },
+    Uninstall,
     /// Whether the `LaunchAgents` are installed and running.
-    Service {
-        /// Data directory the agents were installed with.
-        #[arg(long)]
-        data_dir: Option<PathBuf>,
-    },
+    Service,
 }
 
-/// `$SLOPTY_WORKER_SOCKET`, else the installed agents' socket under the data dir when it
+/// `$SLOPTY_WORKER_SOCKET`, else the installed agents' socket under `data_dir` when it
 /// exists, else the dev default `$TMPDIR/slopty/worker.sock`.
-fn socket() -> PathBuf {
-    if let Some(p) = std::env::var_os("SLOPTY_WORKER_SOCKET") {
+fn socket(data_dir: &Path) -> PathBuf {
+    socket_in(std::env::var_os("SLOPTY_WORKER_SOCKET"), data_dir)
+}
+
+/// [`socket`] with the environment's say given.
+fn socket_in(env: Option<std::ffi::OsString>, data_dir: &Path) -> PathBuf {
+    if let Some(p) = env {
         return PathBuf::from(p);
     }
-    let installed = crate::client::data_dir().join("run").join("worker.sock");
+    let installed = data_dir.join("run").join("worker.sock");
     if installed.exists() {
         return installed;
     }
     std::env::temp_dir().join("slopty").join("worker.sock")
 }
 
-pub async fn run(cmd: WorkerCmd, server: Option<&str>) -> Result<()> {
+pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path) -> Result<()> {
     let req = match cmd {
         WorkerCmd::Status => CtlRequest::Status,
         WorkerCmd::Doctor => CtlRequest::Doctor,
         WorkerCmd::Screens => CtlRequest::Screens,
-        WorkerCmd::Install(opts) => return service::install(&opts, server).await,
-        WorkerCmd::Uninstall { data_dir } => {
-            return service::uninstall(data_dir.as_deref()).await;
-        }
-        WorkerCmd::Service { data_dir } => {
-            service::status(data_dir.as_deref());
+        WorkerCmd::Install(opts) => return service::install(&opts, server, data_dir).await,
+        WorkerCmd::Uninstall => return service::uninstall(data_dir).await,
+        WorkerCmd::Service => {
+            service::status(data_dir);
             return Ok(());
         }
     };
-    match call(req).await? {
+    match call(data_dir, req).await? {
         CtlReply::Status { id, name, sessions } => {
             println!("{name}  {id}");
             for s in sessions {
@@ -105,12 +100,13 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub async fn call(req: CtlRequest) -> Result<CtlReply> {
-    call_at(&socket(), req).await
+/// One request to the local daemon, found as [`socket`] says.
+pub async fn call(data_dir: &Path, req: CtlRequest) -> Result<CtlReply> {
+    call_at(&socket(data_dir), req).await
 }
 
 /// One request over the daemon's control socket at `path`.
-pub async fn call_at(path: &std::path::Path, req: CtlRequest) -> Result<CtlReply> {
+pub async fn call_at(path: &Path, req: CtlRequest) -> Result<CtlReply> {
     let stream = UnixStream::connect(path)
         .await
         .with_context(|| format!("is slopty-worker running? ({})", path.display()))?;
@@ -157,6 +153,19 @@ fn doctor_report(h: &slopty_worker::ctl::Health) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--data-dir` names the installed daemon's socket, unless the environment names one.
+    #[test]
+    fn the_socket_is_the_data_dirs_when_its_daemon_is_installed() {
+        let data = tempfile::tempdir().unwrap();
+        let dev = std::env::temp_dir().join("slopty").join("worker.sock");
+        assert_eq!(socket_in(None, data.path()), dev, "nothing installed there");
+        let installed = data.path().join("run").join("worker.sock");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, b"").unwrap();
+        assert_eq!(socket_in(None, data.path()), installed);
+        assert_eq!(socket_in(Some("/x.sock".into()), data.path()), PathBuf::from("/x.sock"));
+    }
 
     #[test]
     fn doctor_report_names_the_binary_and_flags_missing_permissions() {

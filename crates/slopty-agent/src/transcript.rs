@@ -27,9 +27,10 @@ pub fn last_assistant_line(path: &Path) -> Option<String> {
     let len = file.metadata().ok()?.len();
     let start = len.saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut tail = String::new();
-    BufReader::new(file).read_to_string(&mut tail).ok()?;
-    last_assistant_line_in(&tail, start > 0)
+    let mut tail = Vec::new();
+    BufReader::new(file).read_to_end(&mut tail).ok()?;
+    // The cut may land inside a character; that line is skipped whole anyway.
+    last_assistant_line_in(&String::from_utf8_lossy(&tail), start > 0)
 }
 
 /// [`last_assistant_line`] over text already in memory; `cut` says the first line may be a
@@ -77,8 +78,9 @@ fn assistant_text(line: &str) -> Option<String> {
 pub struct Tail {
     /// Bytes consumed so far.
     offset: u64,
-    /// The last line seen without its newline, waiting for the rest.
-    partial: String,
+    /// The last line seen without its newline, waiting for the rest. Bytes, since a read may
+    /// end inside a character the writer has not finished.
+    partial: Vec<u8>,
 }
 
 /// What one [`Tail::read`] found.
@@ -129,16 +131,16 @@ impl Tail {
             return Ok(Read { restarted, ..Read::default() });
         }
         file.seek(SeekFrom::Start(self.offset))?;
-        let mut text = std::mem::take(&mut self.partial);
-        BufReader::new(file).read_to_string(&mut text)?;
-        self.offset = len;
-        let Some(end) = text.rfind('\n') else {
-            self.partial = text;
+        let mut appended = Vec::new();
+        BufReader::new(file).read_to_end(&mut appended)?;
+        self.offset = self.offset.saturating_add(appended.len().try_into().unwrap_or(u64::MAX));
+        self.partial.append(&mut appended);
+        let Some(end) = self.partial.iter().rposition(|b| *b == b'\n') else {
             return Ok(Read { restarted, ..Read::default() });
         };
-        let (complete, rest) = text.split_at(end);
-        rest.get(1..).unwrap_or_default().clone_into(&mut self.partial);
-        Ok(Read { restarted, progress: progress(complete) })
+        let rest = self.partial.split_off(end.saturating_add(1));
+        let complete = std::mem::replace(&mut self.partial, rest);
+        Ok(Read { restarted, progress: progress(&String::from_utf8_lossy(&complete)) })
     }
 }
 
@@ -489,6 +491,48 @@ mod tests {
         let later = format!("{big}{result}\n");
         std::fs::write(&path, &later).expect("write");
         assert_eq!(last_assistant_line(&path).as_deref(), Some("Running the tests now."));
+    }
+
+    /// A tail read that starts inside a multi-byte character still finds the last words.
+    #[test]
+    fn a_cut_inside_a_character_still_reads_the_tail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("t.jsonl");
+        let last =
+            r#"{"type":"assistant","message":{"role":"assistant","content":"Xong rồi — đã sửa."}}"#;
+        // One long line of three-byte characters reaching past the tail, then ASCII to move the
+        // tail's first byte onto the second byte of one of them.
+        let tail: usize = TAIL_BYTES.try_into().expect("fits");
+        let wide = "ở".repeat(tail / 3 + 8);
+        let body = (0..3)
+            .map(|pad| format!("{{\"x\":\"{wide}{}\"}}\n{last}\n", "a".repeat(pad)))
+            .find(|body| !body.is_char_boundary(body.len() - tail))
+            .expect("one of three paddings");
+        let cut = body.len() - tail;
+        assert!(!body.is_char_boundary(cut), "the cut lands inside a character");
+        std::fs::write(&path, &body).expect("write");
+        assert_eq!(last_assistant_line(&path).as_deref(), Some("Xong rồi — đã sửa."));
+    }
+
+    /// A read that ends inside a character keeps its bytes for the next one, and a failed read
+    /// loses nothing already kept.
+    #[test]
+    fn a_tail_keeps_a_character_split_across_reads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("t.jsonl");
+        let line = concat!(
+            r#"{"type":"assistant","message":{"role":"assistant","content":"Đang chạy thử"}}"#,
+            "\n"
+        );
+        let split = line.find('Đ').expect("Đ") + 1;
+        assert!(!line.is_char_boundary(split));
+        let mut tail = Tail::default();
+        std::fs::write(&path, &line.as_bytes()[..split]).expect("write");
+        assert_eq!(tail.read(&path).expect("read"), Read::default(), "no whole line yet");
+        let _error = tail.read(dir.path()).expect_err("a directory is not a transcript");
+        std::fs::write(&path, line).expect("write the rest");
+        let read = tail.read(&path).expect("read");
+        assert_eq!(read.progress.and_then(|p| p.detail).as_deref(), Some("Đang chạy thử"));
     }
 
     #[test]

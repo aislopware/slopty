@@ -6,7 +6,7 @@
 //! As with `ssh`, a program that exits ends the command with its status, so a script can run
 //! `slopty attach -- make test` and branch on it. The session stays, exited, until it is closed.
 
-use std::io::Write as _;
+use std::io::{Read, Write as _};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -120,8 +120,7 @@ async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
     let mut events = link.events().context("events taken")?;
     let mut state = TermState::new(size);
     let raw = enter_raw()?;
-    let mut stdin = tokio::io::stdin();
-    let mut input = vec![0_u8; 4096];
+    let mut stdin = read_on_a_thread(std::io::stdin())?;
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let outcome: Result<(String, u8)> = loop {
         tokio::select! {
@@ -179,17 +178,14 @@ async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
                 Some(LinkEvent::Disconnected(why)) => break Err(anyhow::anyhow!("disconnected: {why}")),
                 None => break Ok(("link closed".to_owned(), 0)),
             },
-            read = tokio::io::AsyncReadExt::read(&mut stdin, &mut input) => {
-                let n = read?;
-                if n == 0 {
+            read = stdin.recv() => {
+                let Some(bytes) = read.transpose()? else {
                     break Ok(("stdin closed".to_owned(), 0));
-                }
-                let bytes = input.get(..n).unwrap_or_default();
+                };
                 if bytes.contains(&DETACH) {
                     break Ok(("detached".to_owned(), 0));
                 }
-                let req = TermRequest::Raw(bytes.to_vec());
-                link.send(ClientMsg::Term { session: id, req }).await?;
+                link.send(ClientMsg::Term { session: id, req: TermRequest::Raw(bytes) }).await?;
             }
             _sig = winch.recv() => {
                 for effect in state.resize(local_size()?) {
@@ -208,6 +204,34 @@ async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
     link.close();
     crate::client::close_endpoint(&endpoint).await;
     Ok(ExitCode::from(code))
+}
+
+/// Read `input` on a thread of its own, a chunk per read, until it ends (the channel closes)
+/// or fails (the error, then it closes).
+///
+/// Not `tokio::io::stdin`: its read blocks a runtime thread that nothing can interrupt, and the
+/// runtime's shutdown waits for it, so `slopty attach -- make test` would hang after the
+/// program exited until a key was pressed. A plain thread is left behind when `main` returns.
+fn read_on_a_thread(
+    mut input: impl Read + Send + 'static,
+) -> std::io::Result<tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    std::thread::Builder::new().name("slopty-stdin".to_owned()).spawn(move || {
+        let mut buf = vec![0_u8; 4096];
+        loop {
+            let chunk = match input.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) => Ok(buf.get(..n).unwrap_or_default().to_vec()),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => Err(e),
+            };
+            let failed = chunk.is_err();
+            if tx.blocking_send(chunk).is_err() || failed {
+                return;
+            }
+        }
+    })?;
+    Ok(rx)
 }
 
 /// What ends an attach when the program exits with `status`, and the code this command exits
@@ -313,7 +337,32 @@ fn color(params: &mut Vec<String>, base: u8, c: Color) {
 
 #[cfg(test)]
 mod tests {
-    use super::{exited, relay_notification};
+    use std::io::Write as _;
+    use std::time::{Duration, Instant};
+
+    use super::{exited, read_on_a_thread, relay_notification};
+
+    /// Input arrives as it is typed and its end closes the channel; a read still blocked when
+    /// the session ends does not hold the runtime's shutdown, so the command exits at once.
+    #[test]
+    fn stdin_is_read_on_a_thread_the_runtime_does_not_wait_for() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let mut input = read_on_a_thread(reader).unwrap();
+        writer.write_all(b"ls\r").unwrap();
+        let first = runtime.block_on(input.recv()).unwrap().unwrap();
+        assert_eq!(first, b"ls\r");
+        // Nothing more is typed: the thread sits in `read`, as it does on a terminal.
+        let started = Instant::now();
+        drop(runtime);
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let (reader, writer) = std::io::pipe().unwrap();
+        let mut input = read_on_a_thread(reader).unwrap();
+        drop(writer);
+        assert!(runtime.block_on(input.recv()).is_none(), "an ended input closes the channel");
+    }
 
     /// The command exits as the program did, as `ssh` does; a status no exit code can carry
     /// (a signal's negative, or past 255) is still a failure.

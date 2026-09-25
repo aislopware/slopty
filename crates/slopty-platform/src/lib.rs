@@ -2,11 +2,12 @@
 //! a session is live, and raise the user's attention.
 //!
 //! macOS throttles timers and network work of applications whose windows are occluded or
-//! hidden (App Nap) and coalesces timers of background processes. The QUIC keep-alive is 5 s
-//! and the app gives a silent worker up after 15 s, so a throttled peer can go quiet long enough
-//! for the other side to drop the link. An [`Activity`] with `LatencyCritical` tells the system
-//! this process must keep its timers sharp; the app and the worker daemon hold one for their
-//! whole run.
+//! hidden (App Nap) and coalesces timers of background processes. The app gives a silent worker
+//! up after a handful of missed QUIC keep-alives (`slopty_net::endpoint::KEEP_ALIVE`, and the
+//! app's `SILENCE_DROP`), so a peer whose timers are throttled by even a few seconds can go
+//! quiet long enough for the other side to drop the link. An [`Activity`] with
+//! `LatencyCritical` tells the system this process must keep its timers sharp; the app and the
+//! worker daemon hold one for their whole run.
 
 #![cfg(any(target_os = "macos", target_os = "ios"))]
 

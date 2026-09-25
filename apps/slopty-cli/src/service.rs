@@ -13,7 +13,7 @@
 //! dev-tree build gets overwritten by the next `cargo build`, and a binary on an external
 //! volume hangs in dyld under launchd (the "removable volume" consent has no one to click it).
 //! `install` is idempotent: it stops the agents, recopies, rewrites the plists, bootstraps
-//! them again, then waits for the daemon and prints a pairing ticket.
+//! them again, then waits for the daemon and says how clients will find it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,7 +33,7 @@ use crate::workerctl;
 pub const PTYD_LABEL: &str = "dev.aislopware.slopty.ptyd";
 /// launchd label of the worker daemon.
 pub const WORKER_LABEL: &str = "dev.aislopware.slopty.worker";
-/// How long `install` waits for the daemon's control socket before giving up on the ticket.
+/// How long `install` waits for the daemon's control socket before it gives up.
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `slopty worker install` options.
@@ -43,9 +43,6 @@ pub struct InstallOpts {
     /// directory).
     #[arg(long)]
     bin_dir: Option<PathBuf>,
-    /// Data directory (default: `$SLOPTY_DATA_DIR` or `~/Library/Application Support/Slopty`).
-    #[arg(long)]
-    data_dir: Option<PathBuf>,
     /// UDP port for the worker (default: the daemon's fixed port).
     #[arg(long)]
     port: Option<u16>,
@@ -198,7 +195,7 @@ fn save_worker_server(data_dir: &Path, server: &str) -> Result<HostAddr> {
 
 /// Copy the binaries, write the plists, (re)bootstrap both agents and wait for the daemon.
 /// `server` (the global `--server`) is saved as the server the worker registers with.
-pub async fn install(opts: &InstallOpts, server: Option<&str>) -> Result<()> {
+pub async fn install(opts: &InstallOpts, server: Option<&str>, data_dir: &Path) -> Result<()> {
     let source = binaries_source(opts.bin_dir.as_deref())?;
     for bin in BINARIES {
         let p = source.join(bin);
@@ -206,15 +203,12 @@ pub async fn install(opts: &InstallOpts, server: Option<&str>) -> Result<()> {
             bail!("{} not found; pass --bin-dir", p.display());
         }
     }
-    let data_dir = opts.data_dir.clone().unwrap_or_else(crate::client::data_dir);
     if let Some(server) = server {
-        save_worker_server(&data_dir, server)?;
+        save_worker_server(data_dir, server)?;
     }
-    let registers_with = slopty_settings::Settings::load(&slopty_settings::path_in(&data_dir))
-        .settings
-        .worker
-        .server;
-    let layout = Layout::new(&data_dir);
+    let registers_with =
+        slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings.worker.server;
+    let layout = Layout::new(data_dir);
     let bin_dir = layout.bin();
     for dir in [&layout.run, &layout.logs, &layout.agents, &bin_dir] {
         std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
@@ -232,7 +226,7 @@ pub async fn install(opts: &InstallOpts, server: Option<&str>) -> Result<()> {
                 .with_context(|| format!("copy {} to {}", from.display(), to.display()))?;
         }
     }
-    for (label, value) in plists(opts, &bin_dir, &data_dir) {
+    for (label, value) in plists(opts, &bin_dir, data_dir) {
         let path = layout.plist(&label);
         plist::to_file_xml(&path, &value).with_context(|| format!("write {}", path.display()))?;
         launchctl(&["bootstrap", &format!("gui/{uid}"), &path.to_string_lossy()])
@@ -270,9 +264,8 @@ pub async fn install(opts: &InstallOpts, server: Option<&str>) -> Result<()> {
 }
 
 /// Stop both agents and remove their plists. Sessions die with `slopty-ptyd`.
-pub async fn uninstall(data_dir: Option<&Path>) -> Result<()> {
-    let data_dir = data_dir.map_or_else(crate::client::data_dir, Path::to_path_buf);
-    let layout = Layout::new(&data_dir);
+pub async fn uninstall(data_dir: &Path) -> Result<()> {
+    let layout = Layout::new(data_dir);
     let uid = rustix::process::getuid().as_raw();
     for label in [WORKER_LABEL, PTYD_LABEL] {
         bootout(uid, label).await;
@@ -287,9 +280,8 @@ pub async fn uninstall(data_dir: Option<&Path>) -> Result<()> {
 }
 
 /// One line per agent: installed or not, and launchd's pid when it runs.
-pub fn status(data_dir: Option<&Path>) {
-    let data_dir = data_dir.map_or_else(crate::client::data_dir, Path::to_path_buf);
-    let layout = Layout::new(&data_dir);
+pub fn status(data_dir: &Path) {
+    let layout = Layout::new(data_dir);
     let uid = rustix::process::getuid().as_raw();
     for label in [PTYD_LABEL, WORKER_LABEL] {
         let installed = layout.plist(label).is_file();

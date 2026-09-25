@@ -120,15 +120,31 @@ pub fn write(path: &Path, doc: &Value) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Is a hook entry ours? Any `slopty` binary with the single argument `hook`.
+/// Is a hook entry ours? Any `slopty` binary with the single argument `hook`: the program in
+/// `command` with `args: ["hook"]`, or, without `args`, a shell command line `<program> hook`.
+///
+/// The program is the whole `command` in the first form, spaces and all: the standard install
+/// lives under `~/Library/Application Support`. In the shell form it may be quoted.
 #[must_use]
 pub fn is_relay(entry: &Value) -> bool {
     let command = entry.get("command").and_then(Value::as_str).unwrap_or("");
-    let args = entry.get("args").and_then(Value::as_array);
-    let by_args = args.is_some_and(|a| a.len() == 1 && a.first() == Some(&json!("hook")));
-    let shell_form = args.is_none() && command.ends_with(" hook");
-    Path::new(command.split(' ').next().unwrap_or("")).file_name().is_some_and(|n| n == "slopty")
-        && (by_args || shell_form)
+    let program = match entry.get("args").and_then(Value::as_array) {
+        Some(args) if args.len() == 1 && args.first() == Some(&json!("hook")) => command,
+        Some(_) => return false,
+        None => match command.trim_end().strip_suffix(" hook") {
+            Some(program) => unquote(program.trim()),
+            None => return false,
+        },
+    };
+    Path::new(program).file_name().is_some_and(|n| n == "slopty")
+}
+
+/// A shell word without the one pair of quotes around it, if it has them.
+fn unquote(word: &str) -> &str {
+    ['"', '\'']
+        .iter()
+        .find_map(|q| word.strip_prefix(*q).and_then(|w| w.strip_suffix(*q)))
+        .unwrap_or(word)
 }
 
 fn relay_entry(command: &str) -> Value {
@@ -174,22 +190,33 @@ pub fn install(doc: &mut Value, command: &str) -> bool {
         let Some(groups) = groups.as_array_mut() else {
             continue;
         };
+        // The first relay entry is repointed and any later ones go, with a group they leave
+        // empty: settings an older install duplicated collapse to one entry per event.
         let wanted = relay_entry(command);
         let mut found = false;
-        let entries = groups
-            .iter_mut()
-            .filter_map(|g| g.get_mut("hooks"))
-            .filter_map(Value::as_array_mut)
-            .flatten();
-        for entry in entries {
-            if is_relay(entry) {
+        groups.retain_mut(|group| {
+            let Some(entries) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            let before = entries.len();
+            entries.retain_mut(|entry| {
+                if !is_relay(entry) {
+                    return true;
+                }
+                if found {
+                    return false;
+                }
                 found = true;
                 if *entry != wanted {
                     entry.clone_from(&wanted);
                     changed = true;
                 }
-            }
-        }
+                true
+            });
+            let shrank = entries.len() != before;
+            changed |= shrank;
+            !(shrank && entries.is_empty())
+        });
         if !found {
             groups.push(json!({ "hooks": [wanted] }));
             changed = true;
@@ -277,6 +304,58 @@ mod tests {
             &json!({"type":"command","command":"/a/b/slopty hook","args":["worker"]})
         ));
         assert!(!is_relay(&json!({"type":"command","command":"/a/b/slopty"})));
+    }
+
+    /// The standard install lives under `~/Library/Application Support`: a space in the path
+    /// is still our relay, in either form, so installing twice adds nothing and uninstalling
+    /// finds it.
+    #[test]
+    fn a_relay_under_a_path_with_spaces_is_recognised_installed_once_and_removed() {
+        let spaced = "/Users/me/Library/Application Support/Slopty/bin/slopty";
+        assert!(is_relay(&json!({"type":"command","command":spaced,"args":["hook"]})));
+        for shell in
+            [format!("{spaced} hook"), format!("\"{spaced}\" hook"), format!("'{spaced}' hook")]
+        {
+            assert!(is_relay(&json!({"type":"command","command":shell})), "{shell}");
+        }
+        assert!(!is_relay(
+            &json!({"type":"command","command":"/Users/me/Application Support/other hook"})
+        ));
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = settings_path(home.path());
+        assert_eq!(install_at(&path, spaced).expect("install"), Outcome::Changed);
+        assert_eq!(install_at(&path, spaced).expect("install"), Outcome::Unchanged);
+        let doc = read(&path).expect("read");
+        for event in HOOK_EVENTS {
+            assert_eq!(doc["hooks"][event].as_array().map(Vec::len), Some(1), "{event}");
+        }
+        assert_eq!(registered(&path).expect("read").len(), HOOK_EVENTS.len());
+        assert_eq!(uninstall_at(&path).expect("uninstall"), Outcome::Changed);
+        assert!(registered(&path).expect("read").is_empty());
+        assert_eq!(read(&path).expect("read"), json!({}));
+    }
+
+    /// Settings an older install filled with one relay group per run collapse to one entry;
+    /// a user's hook sharing a group with a duplicate stays.
+    #[test]
+    fn install_collapses_duplicate_relays() {
+        let spaced = "/Users/me/Library/Application Support/Slopty/bin/slopty";
+        let ours = json!({"type":"command","command":spaced,"args":["hook"]});
+        let mut doc = json!({ "hooks": { "Stop": [
+            { "hooks": [ours] },
+            { "hooks": [ours] },
+            { "matcher": "x", "hooks": [ { "type": "command", "command": "echo hi" }, ours ] },
+        ] } });
+        assert!(install(&mut doc, spaced));
+        assert_eq!(
+            doc["hooks"]["Stop"],
+            json!([
+                { "hooks": [relay_entry(spaced)] },
+                { "matcher": "x", "hooks": [ { "type": "command", "command": "echo hi" } ] },
+            ])
+        );
+        assert!(!install(&mut doc, spaced), "collapsed for good");
     }
 
     #[test]

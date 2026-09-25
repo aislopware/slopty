@@ -44,9 +44,11 @@ pub fn editable_text(path: &Path) -> String {
 }
 
 /// The editor's Save: parse `text`, and only when it holds write it to `path` and hand back
-/// what was loaded (its unknown-key warnings included). The error is the message shown
-/// under the field.
-pub fn save(path: &Path, text: &str) -> Result<Loaded, String> {
+/// what was loaded (its unknown-key warnings included).
+///
+/// The error is the message shown under the field. `seen` takes the written file's stamp, so
+/// the watcher does not load the app's own write a second time.
+pub fn save(path: &Path, text: &str, seen: &mut Seen) -> Result<Loaded, String> {
     let mut loaded = Settings::parse(text);
     if let Some(error) = loaded.error.take() {
         // A parse error names no path (the text came from the field, not a file).
@@ -59,6 +61,7 @@ pub fn save(path: &Path, text: &str) -> Result<Loaded, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
     std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+    seen.0 = Stamp::of(path);
     Ok(loaded)
 }
 /// Sizes outside this range are typos; the default applies instead.
@@ -212,6 +215,26 @@ impl Stamp {
     }
 }
 
+/// The file's stamp as the app last loaded or wrote it: what the watcher compares against.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Seen(Stamp);
+
+impl Seen {
+    /// The file at `path` as it is now, about to be loaded.
+    #[must_use]
+    pub fn of(path: &Path) -> Self {
+        Self(Stamp::of(path))
+    }
+
+    /// Whether the file at `path` changed since it was last seen; it is seen now either way.
+    pub fn changed(&mut self, path: &Path) -> bool {
+        let now = Stamp::of(path);
+        let changed = now != self.0;
+        self.0 = now;
+        changed
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::float_cmp, reason = "the values are literals passed through, not arithmetic")]
 mod tests {
@@ -290,11 +313,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("app").join("settings.toml");
         assert_eq!(editable_text(&path), Settings::default_file());
-        let refused = save(&path, "[font]\nmono_size = \"big\"\n").expect_err("a string size");
+        let mut seen = Seen::of(&path);
+        let refused =
+            save(&path, "[font]\nmono_size = \"big\"\n", &mut seen).expect_err("a string size");
         assert!(refused.contains("\"big\""), "{refused}");
         assert!(!refused.starts_with(':'), "no empty path in front: {refused}");
         assert!(!path.exists());
-        let loaded = save(&path, "[font]\nmono_size = 20\nkerning = true\n").expect("parses");
+        let loaded =
+            save(&path, "[font]\nmono_size = 20\nkerning = true\n", &mut seen).expect("parses");
         assert_eq!(loaded.settings.font.mono_size, 20.0);
         assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
         assert_eq!(editable_text(&path), "[font]\nmono_size = 20\nkerning = true\n");
@@ -372,6 +398,24 @@ mod tests {
         assert!(!stream.muted);
         s.remote.muted = true;
         assert!(theme_for(&s, true).behaviour.stream.muted);
+    }
+
+    /// The app's own save is not a change for the watcher, so its warnings are not shown twice;
+    /// an edit from elsewhere is, once.
+    #[test]
+    fn the_watcher_sees_edits_from_elsewhere_and_not_the_apps_own_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let mut seen = Seen::of(&path);
+        assert!(!seen.changed(&path), "nothing yet");
+        let loaded = save(&path, "[font]\nnot_a_key = 1\n", &mut seen).unwrap();
+        assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+        assert!(!seen.changed(&path), "the app's own save");
+        std::fs::write(&path, "[font]\nnot_a_key = 22\n").unwrap();
+        assert!(seen.changed(&path), "an edit from elsewhere");
+        assert!(!seen.changed(&path), "seen once");
+        save(&path, "[font\n", &mut seen).unwrap_err();
+        assert!(!seen.changed(&path), "a save that did not parse wrote nothing");
     }
 
     #[test]

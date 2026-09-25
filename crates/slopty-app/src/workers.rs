@@ -82,6 +82,22 @@ impl WorkerSlot {
     }
 }
 
+/// A link came up for worker `id`: its slot takes the link and the answered name.
+///
+/// The workspace's key for it comes back, or `None` when the slot went while the dial was in
+/// flight (the worker forgotten, or no longer listed): the link is to be dropped, not shown.
+pub fn adopt(
+    slots: &mut [WorkerSlot],
+    id: WorkerId,
+    link: std::sync::Weak<WorkerLink>,
+    name: String,
+) -> Option<WorkerKey> {
+    let slot = slots.iter_mut().find(|w| w.id == id)?;
+    slot.link = Some(link);
+    slot.name = name;
+    Some(slot.key)
+}
+
 /// Nothing heard from a worker for this long shows as silent: three keep-alives missed.
 pub const SILENCE_WARN: Duration = slopty_net::endpoint::KEEP_ALIVE.saturating_mul(3);
 /// Nothing heard for this long and the link is given up, so the redial takes over instead of
@@ -172,6 +188,21 @@ impl Heard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker forgotten while its dial was in flight gets no link and no key, so the
+    /// workspace shows nothing for it; one still there takes the link and its answered name.
+    #[test]
+    fn a_link_is_adopted_only_by_a_slot_that_is_still_there() {
+        let (kept, gone) = (WorkerId::new(), WorkerId::new());
+        let mut slots = vec![WorkerSlot::new(kept, "stored".to_owned(), true)];
+        assert_eq!(adopt(&mut slots, gone, std::sync::Weak::new(), "ghost".to_owned()), None);
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0].link.is_none(), "the other slot is untouched");
+        let key = adopt(&mut slots, kept, std::sync::Weak::new(), "studio".to_owned());
+        assert_eq!(key, Some(worker_key(kept)));
+        assert_eq!(slots[0].name, "studio");
+        assert!(slots[0].link.is_some());
+    }
 
     #[test]
     fn the_silence_bars_are_three_and_five_keep_alives() {

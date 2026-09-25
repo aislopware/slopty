@@ -141,12 +141,6 @@ pub async fn connect_to(id: WorkerId, address: Option<HostAddr>) -> Result<Conne
     Ok(Connected { me: me.client(), ack, sender, events, link })
 }
 
-/// Whether worker `id` was added by address (rather than listed by the server).
-#[must_use]
-pub fn is_added(id: WorkerId) -> bool {
-    known().is_ok_and(|k| k.get(id).is_some())
-}
-
 /// Who this app is to the server.
 fn server_role(client: ClientId) -> Role {
     let Hello { client, kind, name, .. } = hello(client);

@@ -162,6 +162,8 @@ pub struct Workspace {
     window: Option<gpui::AnyWindowHandle>,
     /// Where `settings.toml` lives (the data directory's).
     settings_path: std::path::PathBuf,
+    /// Its stamp as last loaded or written here, for the watcher.
+    settings_seen: settings::Seen,
     /// The in-app settings editor while it is open.
     settings_editor: Option<Entity<SettingsEditor>>,
     /// Focus the editor's field on the next frame (it needs a frame to exist).
@@ -203,9 +205,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The editor's Save: a text that parses is written and applied at once (the watcher
-    /// would see it within a second anyway); one that does not stays in the editor with
-    /// the reason under it.
+    /// The editor's Save: a text that parses is written and applied at once, and the watcher
+    /// takes it as seen; one that does not stays in the editor with the reason under it.
     fn save_settings(
         &mut self,
         text: &str,
@@ -213,7 +214,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match settings::save(&self.settings_path, text) {
+        match settings::save(&self.settings_path, text, &mut self.settings_seen) {
             Ok(loaded) => {
                 tracing::info!(path = %self.settings_path.display(), "settings saved");
                 self.apply_loaded(loaded, cx);
@@ -495,15 +496,19 @@ impl Workspace {
                 let worker_link = WorkerLink { me, out: sender, open_screen, remote };
                 let name = ack.name.clone();
                 let sessions = ack.sessions.clone();
-                view.update(cx, |v, cx| v.connect_worker(key, name.clone(), worker_link, sessions, cx));
+                // The slot is checked and the tiles connected in one step: a worker forgotten
+                // while the dial was in flight must not come back as a tile holding this link.
                 let alive = this.update(cx, |ws, cx| {
-                    let Some(slot) = ws.slot_mut(id) else { return false };
-                    slot.link = Some(weak_link);
-                    slot.name = name;
+                    let Some(key) = workers::adopt(&mut ws.workers, id, weak_link, name.clone())
+                    else {
+                        return false;
+                    };
+                    ws.view.update(cx, |v, cx| v.connect_worker(key, name, worker_link, sessions, cx));
                     ws.refresh_menu(cx);
                     true
                 });
                 if !matches!(alive, Ok(true)) {
+                    link.abandon("worker dropped");
                     break;
                 }
                 // Twice a keep-alive: RTT for the bar and the predictors, and whether the
@@ -715,7 +720,7 @@ impl Workspace {
     fn save_server(&mut self, server: Option<&slopty_net::HostAddr>) -> Result<(), String> {
         let text = settings::editable_text(&self.settings_path);
         let text = slopty_settings::with_server(&text, slopty_settings::ServerOf::Client, server)?;
-        let loaded = settings::save(&self.settings_path, &text)?;
+        let loaded = settings::save(&self.settings_path, &text, &mut self.settings_seen)?;
         self.settings = loaded.settings;
         Ok(())
     }
@@ -1343,6 +1348,7 @@ pub fn open_workspace(
     kit::sync(&Theme::default(), cx);
     slopty_ui::frames::install(cx, frame_nominal());
     let settings_path = slopty_settings::path();
+    let settings_seen = settings::Seen::of(&settings_path);
     let loaded = Settings::load(&settings_path);
     // Under the self-test a frame is a step, not a moment: the layout lands at once so a
     // `dump` reads where things went, not where they were passing through. Each run starts
@@ -1398,7 +1404,8 @@ pub fn open_workspace(
             adding: None,
             runtime: handle,
             window: None,
-            settings_path: settings_path.clone(),
+            settings_path,
+            settings_seen,
             settings_editor: None,
             pending_focus_editor: false,
             split_view: None,
@@ -1429,7 +1436,7 @@ pub fn open_workspace(
         });
         cx.new(|cx| Root::new(root_view, window, cx))
     })?;
-    watch_settings(settings_path, workspace.clone(), cx);
+    watch_settings(workspace.clone(), cx);
     // A tap on an agent banner brings the app and that session forward, on whichever worker
     // the session lives.
     let for_notifications = workspace.clone();
@@ -1512,22 +1519,21 @@ fn pasteboard() -> Rc<dyn slopty_platform::pasteboard::Pasteboard> {
 }
 
 /// Reload `settings.toml` whenever its stamp changes (see [`settings`] for why this polls),
-/// and notice a hardware keyboard coming or going on the same tick.
-fn watch_settings(path: std::path::PathBuf, workspace: Entity<Workspace>, cx: &App) {
+/// and notice a hardware keyboard coming or going on the same tick. The app's own saves are
+/// already applied and seen ([`settings::save`]), so they are not reloaded.
+fn watch_settings(workspace: Entity<Workspace>, cx: &App) {
     cx.spawn(async move |cx| {
-        let mut last = settings::Stamp::of(&path);
         loop {
             cx.background_executor().timer(settings::POLL).await;
             let keyboard = hardware_keyboard_attached();
-            workspace.update(cx, |ws, cx| ws.set_hardware_keyboard(keyboard, cx));
-            let now = settings::Stamp::of(&path);
-            if now == last {
-                continue;
-            }
-            last = now;
-            tracing::info!(path = %path.display(), "settings changed; reloading");
-            let loaded = Settings::load(&path);
-            workspace.update(cx, |ws, cx| ws.apply_loaded(loaded, cx));
+            workspace.update(cx, |ws, cx| {
+                ws.set_hardware_keyboard(keyboard, cx);
+                if ws.settings_seen.changed(&ws.settings_path) {
+                    tracing::info!(path = %ws.settings_path.display(), "settings changed; reloading");
+                    let loaded = Settings::load(&ws.settings_path);
+                    ws.apply_loaded(loaded, cx);
+                }
+            });
         }
     })
     .detach();

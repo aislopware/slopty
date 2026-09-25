@@ -6,9 +6,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow};
+use slopty_client::redial::Redial;
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_net::server::{DialError, ServerLink, connect};
 use slopty_net::{Endpoint, HostAddr, NetError};
@@ -20,13 +21,6 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Environment variable naming the server, between `--server` and the settings file.
 pub const SERVER_ENV: &str = "SLOPTY_SERVER";
-
-/// First retry after the server drops; doubles up to [`MAX_BACKOFF`].
-const MIN_BACKOFF: Duration = Duration::from_millis(250);
-/// Longest wait between reconnect attempts.
-const MAX_BACKOFF: Duration = Duration::from_secs(5);
-/// A link that lived this long was healthy, and its loss restarts the backoff.
-const HEALTHY: Duration = Duration::from_secs(10);
 
 /// Where the server is: `--server`, else [`SERVER_ENV`], else `[client] server` in the
 /// settings file. The port is [`SERVER_PORT`] unless the address names one.
@@ -102,8 +96,9 @@ impl Link {
     }
 
     /// A link held for the process lifetime: it dials in the background and redials whenever
-    /// the connection drops. A call made while the server is down tries a dial at once and
-    /// fails with the reason when that does not get through.
+    /// the connection drops, on the backoff every link follows ([`slopty_client::redial`]). A
+    /// call made while the server is down tries a dial at once and fails with the reason when
+    /// that does not get through.
     ///
     /// The receiver sees everything the server pushes from the first connection on.
     pub fn persistent(
@@ -114,20 +109,16 @@ impl Link {
         let (calls, mut rx) = mpsc::channel(64);
         let (events, heard) = broadcast::channel(256);
         tokio::spawn(async move {
-            let mut backoff = MIN_BACKOFF;
+            let mut redial = Redial::default();
             let mut held: Option<Call> = None;
             loop {
                 match dial(&endpoint, &server, role.clone()).await {
                     Ok(link) => {
                         tracing::info!(%server, "connected to the server");
-                        let since = Instant::now();
+                        redial.linked(Instant::now());
                         match serve(link, held.take(), &mut rx, &events).await {
                             Ended::Released => return,
                             Ended::Lost(e) => tracing::warn!(%server, error = %e, "server lost"),
-                        }
-                        if since.elapsed() >= HEALTHY {
-                            backoff = MIN_BACKOFF;
-                            continue;
                         }
                     }
                     Err(e) => {
@@ -138,13 +129,12 @@ impl Link {
                     }
                 }
                 tokio::select! {
-                    () = tokio::time::sleep(backoff) => {}
+                    () = tokio::time::sleep(redial.next(Instant::now())) => {}
                     call = rx.recv() => match call {
                         Some(call) => held = Some(call),
                         None => return,
                     },
                 }
-                backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
             }
         });
         (Self { calls }, heard)

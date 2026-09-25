@@ -363,7 +363,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     // window is a mistake that has been made here before; the worker's window is in its own log
     // (`SLOPTY_PATH_TRACE_MS`), not in this line.
     println!("  quic path (client→worker, feedback only): {}", link.health());
-    print_worker_side(session.client, stream).await;
+    print_worker_side(data_dir, session.client, stream).await;
 
     out.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await?;
     drop(handle);
@@ -389,13 +389,18 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     Ok(())
 }
 
-/// The worker's own view of the stream (capture and encode latency, the capture path) when a
-/// The worker answers on this machine's control socket; nothing when there is none (a remote
+/// The worker's own view of the stream (capture and encode latency, the capture path) when the
+/// worker answers on this machine's control socket; nothing when there is none (a remote
 /// worker) or the stream is not its. Stream ids are per connection, so the match is on our
 /// client id too: another client's stream 1 is not ours.
-async fn print_worker_side(client: slopty_core::ClientId, stream: slopty_core::StreamId) {
+async fn print_worker_side(
+    data_dir: &Path,
+    client: slopty_core::ClientId,
+    stream: slopty_core::StreamId,
+) {
     use slopty_worker::ctl::{CtlReply, CtlRequest};
-    let Ok(CtlReply::Screens { live, .. }) = crate::workerctl::call(CtlRequest::Screens).await
+    let Ok(CtlReply::Screens { live, .. }) =
+        crate::workerctl::call(data_dir, CtlRequest::Screens).await
     else {
         println!(
             "  worker side: no local worker answered (remote worker, or not the one streaming)"

@@ -37,7 +37,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
 
@@ -64,8 +64,9 @@ pub const HOOK_EVENTS: [&str; 12] = [
 /// Longest `detail` string sent to clients.
 pub const DETAIL_MAX: usize = 60;
 
-/// A Claude Code hook payload, the fields Slopty reads.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+/// A Claude Code hook payload, the fields Slopty reads. Serialized, it is the payload cut down
+/// to them, which is what the relay forwards (a tool's output can run to megabytes).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Hook {
     /// Claude Code's session id.
     #[serde(default)]

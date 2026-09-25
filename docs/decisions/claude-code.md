@@ -959,3 +959,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_summary_carries_the_agent_a_hook_reported` (worker e2e),
   `an_agent_reads_the_same_in_json_and_text` and the `terminals_as_*` snapshots (tools), the
   CLI's `terminals` and MCP `list_terminals` checks, the `worker_session_opened` golden.
+
+- ✅ **The relay knows its own entry by the whole program path, and forwards only what the
+  tracker reads** (2026-09-26). `is_relay` took the program as the text before the command's
+  first space, so the standard install under `~/Library/Application Support/Slopty/bin/slopty`
+  never matched: each `hook install` appended another group to all 12 events, `uninstall`
+  removed nothing and `status` said not installed. Now the program is the whole `command` when
+  `args` is `["hook"]`, and the command line before ` hook` (quotes allowed) in the shell form.
+  `install` keeps the first relay entry of an event and drops the rest, with any group that
+  leaves empty, so settings the old install filled collapse to one entry. The relay also cut
+  stdin at 1 MiB, which turned a large `PostToolUse` (the tool's output rides along) into
+  invalid JSON. It now reads the payload whole and forwards `slopty_agent::Hook` serialized:
+  the fields the tracker reads, a few hundred bytes. The relay and `slopty worker` reach the
+  daemon under the global `--data-dir`. Tests:
+  `a_relay_under_a_path_with_spaces_is_recognised_installed_once_and_removed`,
+  `install_collapses_duplicate_relays`,
+  `a_large_tool_payload_is_forwarded_as_the_fields_the_daemon_reads`,
+  `the_socket_is_the_data_dirs_when_its_daemon_is_installed`, `the_data_dir_is_global`.

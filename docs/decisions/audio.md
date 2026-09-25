@@ -312,3 +312,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_worker_copy_pastes_promptly_after_the_link_drops_and_returns` (app e2e),
     `a_promise_is_fetched_over_the_link_the_worker_has_now` (headless workspace),
     `a_paste_on_a_dead_link_answers_at_once` (`slopty_client::clip`).
+
+- ✅ **A drop's landing is deleted once nothing in it is going anywhere, and a gone run's are
+  swept** (2026-09-26). Files that Mail and Photos promise, and every iPad drop, are received
+  under `$TMPDIR/slopty-drops/<pid>-<n>/`, and nothing ever deleted those copies. Now a landing
+  whose files all failed goes at once, as does one no view took. Otherwise `Dropped::landing`
+  names it for whoever uploads the files to `file_drop::discard` when the upload ends. Starting
+  the app sweeps the landings of processes that no longer exist (signal 0). The iPad copied each
+  file under a name it had checked was free. Its completions run at once on threads of their
+  own, so two files of one name could overwrite each other. `file_drop::reserve` now creates
+  the name with `create_new`, numbering on a clash, before the copy. Tests:
+  `files_arriving_at_once_under_one_name_never_share_it`,
+  `landings_are_discarded_and_a_dead_runs_are_swept`,
+  `a_failure_never_removes_anything_outside_the_drop`.

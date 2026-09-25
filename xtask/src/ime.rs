@@ -10,6 +10,9 @@ use std::ptr::NonNull;
 use anyhow::{Context as _, Result, bail};
 use objc2_core_foundation::{CFArray, CFDictionary, CFRetained, CFString, CFType};
 
+// The declarations follow HIToolbox's `TextInputSources.h`: the property key is a `CFStringRef`
+// constant that lives for the process, `TISInputSourceRef` a `CFTypeRef`, `Boolean` a `u8` and
+// `OSStatus` an `i32`. They are called on the main thread, as that header asks.
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C-unwind" {
     static kTISPropertyInputSourceID: &'static CFString;

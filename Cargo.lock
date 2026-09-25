@@ -7192,6 +7192,7 @@ dependencies = [
  "objc2-ui-kit",
  "objc2-web-kit",
  "parking_lot",
+ "rustix",
  "slopty-proto",
  "tempfile",
  "tracing",

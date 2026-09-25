@@ -124,7 +124,7 @@ enum Cmd {
     },
 }
 
-/// Benchmarks.
+/// `slopty settings …`.
 #[derive(Subcommand, Debug)]
 enum SettingsCmd {
     /// Print where the app reads its settings from.
@@ -133,6 +133,7 @@ enum SettingsCmd {
     Init,
 }
 
+/// Benchmarks.
 #[derive(Subcommand, Debug)]
 enum BenchCmd {
     /// Keystroke round trip: a byte to a `cat` session on the worker, timed to the first frame
@@ -190,12 +191,12 @@ async fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
     let data_dir = cli.data_dir.unwrap_or_else(client::data_dir);
     let done = match cli.cmd {
-        Cmd::Worker { cmd } => workerctl::run(cmd, cli.server.as_deref()).await,
+        Cmd::Worker { cmd } => workerctl::run(cmd, cli.server.as_deref(), &data_dir).await,
         Cmd::Hook { cmd: None } => {
-            hook::relay().await;
+            hook::relay(&data_dir).await;
             Ok(())
         }
-        Cmd::Hook { cmd: Some(cmd) } => hook::run(cmd).await,
+        Cmd::Hook { cmd: Some(cmd) } => hook::run(cmd, &data_dir).await,
         Cmd::Settings { cmd } => {
             let path = slopty_settings::path_in(&data_dir);
             match cmd {
@@ -250,5 +251,19 @@ mod tests {
     #[test]
     fn the_command_line_is_well_formed() {
         super::Cli::command().debug_assert();
+    }
+
+    /// The one `--data-dir` reaches every command, before or after its name.
+    #[test]
+    fn the_data_dir_is_global() {
+        use clap::Parser as _;
+        for args in [
+            &["slopty", "--data-dir", "/d", "worker", "status"][..],
+            &["slopty", "worker", "uninstall", "--data-dir", "/d"],
+            &["slopty", "hook", "--data-dir", "/d"],
+        ] {
+            let cli = super::Cli::try_parse_from(args).unwrap();
+            assert_eq!(cli.data_dir.as_deref(), Some(std::path::Path::new("/d")), "{args:?}");
+        }
     }
 }

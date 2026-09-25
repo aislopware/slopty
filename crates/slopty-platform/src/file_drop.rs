@@ -7,6 +7,11 @@
 //! to the sink as one [`Dropped`], with where the drop was, for the app to hand to the tile
 //! there as an ordinary file drop, which uploads them. A file that failed is reported by name
 //! and left out, and whatever it wrote is deleted.
+//!
+//! A landing is deleted as soon as nothing in it is going anywhere: every file failed, or no
+//! view took the drop. Otherwise it is [`Dropped::landing`], for whoever uploads the files to
+//! [`discard`] once the upload ends. Landings a run of the app left behind (it quit mid-upload,
+//! or crashed) are swept when the next one starts ([`sweep`]).
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -20,6 +25,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct Dropped {
     /// The files that arrived whole, in the order they did.
     pub paths: Vec<PathBuf>,
+    /// The drop's own directory the files are in, to [`discard`] once they are uploaded;
+    /// `None` when the drop named files where they already were.
+    pub landing: Option<PathBuf>,
     /// The files that did not, each as `name: why`.
     pub failed: Vec<String>,
     /// Where the drop was, in the GPUI view's points from its top left.
@@ -29,10 +37,75 @@ pub struct Dropped {
 }
 
 /// Where each drop's files are received: a directory of its own under the system's temporary
-/// directory, which the system clears of files nobody touched for days.
+/// directory, named `<pid>-<n>` for the process that received it.
 #[must_use]
 pub fn root() -> PathBuf {
     std::env::temp_dir().join("slopty-drops")
+}
+
+/// Delete a drop's landing, files and all, once they are uploaded or will not be. Nothing
+/// outside [`root`] is touched, whatever `landing` says.
+pub fn discard(landing: &Path) {
+    discard_in(&root(), landing);
+}
+
+fn discard_in(root: &Path, landing: &Path) {
+    if landing.parent() != Some(root) {
+        tracing::warn!(landing = %landing.display(), "not a drop's landing; kept");
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(landing)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(landing = %landing.display(), error = %e, "remove a drop's landing");
+    }
+}
+
+/// Delete the landings under `root` of processes that are gone: a run that quit before its
+/// uploads ended, or crashed. Another running app's, and this one's, stay.
+pub fn sweep(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let pid =
+            name.to_str().and_then(|n| n.split_once('-')).and_then(|(pid, _)| pid.parse().ok());
+        if let Some(pid) = pid.and_then(rustix::process::Pid::from_raw)
+            && !alive(pid)
+        {
+            discard_in(root, &entry.path());
+        }
+    }
+}
+
+/// Whether a process with this id exists (signal 0 checks without sending anything; a process
+/// of another user's answers "not permitted", which is still alive).
+fn alive(pid: rustix::process::Pid) -> bool {
+    !matches!(rustix::process::test_kill_process(pid), Err(rustix::io::Errno::SRCH))
+}
+
+/// `name` in `dir`, numbered `name 2`, `name 3`… when a file already took it.
+///
+/// It is created empty, so no other file of the drop can take it too: the iPad's files arrive
+/// on threads of their own, at once, often under one name.
+///
+/// # Errors
+///
+/// When a file cannot be created in `dir` for another reason than the name being taken.
+pub fn reserve(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    let candidates = std::iter::once(dir.join(name))
+        .chain((2..=u32::MAX).map(|n| dir.join(format!("{stem} {n}{ext}"))));
+    for path in candidates {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_file) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("every {name} is taken")))
 }
 
 /// One drop's files arriving, each resolved once: whole, or failed.
@@ -92,8 +165,19 @@ impl Landing {
             }
         }
         self.resolved = self.resolved.saturating_add(1);
-        (self.resolved >= self.expected).then(|| Dropped {
+        if self.resolved < self.expected {
+            return None;
+        }
+        // Nothing arrived, so nothing will be uploaded from here.
+        let landing = if self.paths.is_empty() {
+            discard_in(self.dir.parent().unwrap_or(&self.dir), &self.dir);
+            None
+        } else {
+            Some(self.dir.clone())
+        };
+        Some(Dropped {
             paths: std::mem::take(&mut self.paths),
+            landing,
             failed: std::mem::take(&mut self.failed),
             x: self.at.0,
             y: self.at.1,
@@ -124,6 +208,9 @@ fn deliver(host: usize, dropped: Dropped) {
             sink(dropped);
         } else {
             tracing::warn!(files = dropped.paths.len(), "a drop for a view that is gone");
+            if let Some(landing) = &dropped.landing {
+                discard(landing);
+            }
         }
     });
 }
@@ -143,6 +230,11 @@ pub fn install(host: NonNull<c_void>, sink: Rc<dyn Fn(Dropped)>) -> bool {
     let keep = ios::install(host, key);
     let Some(keep) = keep else { return false };
     SINKS.with(|s| s.borrow_mut().push((key, sink, keep)));
+    let spawned =
+        std::thread::Builder::new().name("slopty-drop-sweep".to_owned()).spawn(|| sweep(&root()));
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "sweep old drops");
+    }
     true
 }
 
@@ -242,7 +334,7 @@ mod macos {
                 let (x, y) = self.location(sender);
                 deliver(
                     self.ivars().host,
-                    super::Dropped { paths: named, failed: Vec::new(), x, y },
+                    super::Dropped { paths: named, landing: None, failed: Vec::new(), x, y },
                 );
                 return true;
             }
@@ -347,7 +439,7 @@ mod macos {
 #[cfg(target_os = "ios")]
 mod ios {
     use std::ffi::c_void;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::ptr::NonNull;
     use std::sync::Arc;
 
@@ -362,7 +454,7 @@ mod ios {
     };
     use parking_lot::Mutex;
 
-    use super::{Landing, deliver, root};
+    use super::{Landing, deliver, reserve, root};
 
     /// The type every file representation conforms to.
     const DATA_UTI: &str = "public.data";
@@ -424,22 +516,6 @@ mod ios {
         }
     }
 
-    /// `name` in `dir`, numbered when a file of the drop already took it.
-    fn free_name(dir: &Path, name: &str) -> PathBuf {
-        let first = dir.join(name);
-        if !first.exists() {
-            return first;
-        }
-        let (stem, ext) = match name.rsplit_once('.') {
-            Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
-            _ => (name, String::new()),
-        };
-        (2..=u32::MAX)
-            .map(|n| dir.join(format!("{stem} {n}{ext}")))
-            .find(|p| !p.exists())
-            .unwrap_or(first)
-    }
-
     impl Delegate {
         /// Load each item's first file representation into a landing of their own.
         fn receive(
@@ -489,10 +565,12 @@ mod ios {
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .or_else(|| suggested.clone())
                                 .unwrap_or_else(|| "dropped".to_owned());
-                            let to = free_name(&dir, &name);
-                            match std::fs::copy(&from, &to) {
-                                Ok(_bytes) => Ok(to),
-                                Err(e) => Err((Some(to), e.to_string())),
+                            match reserve(&dir, &name) {
+                                Ok(to) => match std::fs::copy(&from, &to) {
+                                    Ok(_bytes) => Ok(to),
+                                    Err(e) => Err((Some(to), e.to_string())),
+                                },
+                                Err(e) => Err((None, format!("{name}: {e}"))),
                             }
                         }
                         (_from, Some(error)) => {
@@ -566,6 +644,7 @@ mod tests {
         std::fs::write(&photo, b"whole").unwrap();
         let dropped = landing.resolve(Ok(photo.clone())).unwrap();
         assert_eq!(dropped.paths, [mail, photo], "whole files, in the order they arrived");
+        assert_eq!(dropped.landing.as_deref(), Some(landing.dir()), "kept for the upload");
         assert_eq!(dropped.failed, ["IMG_0001.heic: The photo is not downloaded"]);
         assert_eq!((dropped.x, dropped.y), (40.0, 12.5));
     }
@@ -582,5 +661,66 @@ mod tests {
         let dropped = landing.resolve(Err((None, "cancelled".to_owned()))).unwrap();
         assert!(dropped.paths.is_empty());
         assert_eq!(dropped.failed, ["mine.txt: no", "A file: cancelled"]);
+        assert_eq!(dropped.landing, None, "nothing arrived, so nothing is uploaded from it");
+        assert!(!landing.dir().exists(), "and its directory is gone at once");
+    }
+
+    /// Files of one drop arriving at once under one name each get a name of their own: none
+    /// overwrites another.
+    #[test]
+    fn files_arriving_at_once_under_one_name_never_share_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let start = std::sync::Barrier::new(16);
+        let mut names: Vec<PathBuf> = std::thread::scope(|s| {
+            let mut racers = Vec::new();
+            for _ in 0..16 {
+                racers.push(s.spawn(|| {
+                    start.wait();
+                    reserve(dir, "IMG_0001.heic").unwrap()
+                }));
+            }
+            racers.into_iter().map(|r| r.join().unwrap()).collect()
+        });
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 16, "{names:?}");
+        assert!(names.contains(&dir.join("IMG_0001.heic")));
+        assert!(names.contains(&dir.join("IMG_0001 16.heic")));
+        assert_eq!(reserve(dir, "notes").unwrap(), dir.join("notes"));
+        assert_eq!(reserve(dir, "notes").unwrap(), dir.join("notes 2"));
+        assert_eq!(reserve(dir, ".env").unwrap(), dir.join(".env"));
+        assert_eq!(reserve(dir, ".env").unwrap(), dir.join(".env 2"));
+        reserve(&dir.join("missing"), "a").unwrap_err();
+    }
+
+    /// A landing is deleted once it is done with, and nothing outside the drops' root ever is;
+    /// the landings of a run that is gone are swept, a live one's are not.
+    #[test]
+    fn landings_are_discarded_and_a_dead_runs_are_swept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("drops");
+        let landing = Landing::new(&root, 1, (0.0, 0.0)).unwrap();
+        std::fs::write(landing.dir().join("a.txt"), b"a").unwrap();
+        discard_in(&root, landing.dir());
+        assert!(!landing.dir().exists());
+        let elsewhere = tmp.path().join("mine");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        discard_in(&root, &elsewhere);
+        assert!(elsewhere.exists(), "not a landing");
+
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let gone = child.id();
+        child.wait().unwrap();
+        let dead = root.join(format!("{gone}-3"));
+        std::fs::create_dir_all(dead.join("sub")).unwrap();
+        let ours = Landing::new(&root, 1, (0.0, 0.0)).unwrap();
+        let stray = root.join("not-a-pid");
+        std::fs::create_dir_all(&stray).unwrap();
+        sweep(&root);
+        assert!(!dead.exists(), "a run that is gone");
+        assert!(ours.dir().exists(), "this run's");
+        assert!(stray.exists(), "not a landing's name");
+        sweep(&tmp.path().join("none"));
     }
 }
