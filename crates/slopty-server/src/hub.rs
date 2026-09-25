@@ -77,6 +77,8 @@ struct Inner {
 #[derive(Debug)]
 struct Log {
     ring: VecDeque<HubEvent>,
+    /// This run's first sequence number ([`run_seed`]).
+    first: u64,
     next: u64,
 }
 
@@ -135,8 +137,9 @@ impl Hub {
         }
         let (events, _none) = broadcast::channel(EVENT_BUFFER);
         let (persist, _none) = watch::channel(Vec::new());
-        let log = Mutex::new(Log { ring: VecDeque::new(), next: 1 });
-        let (head, _none) = watch::channel(1);
+        let first = run_seed();
+        let log = Mutex::new(Log { ring: VecDeque::new(), first, next: first });
+        let (head, _none) = watch::channel(first);
         let state = Mutex::new(state);
         Self { inner: Arc::new(Inner { name, state, events, persist, log, head }) }
     }
@@ -151,6 +154,27 @@ impl Hub {
     #[must_use]
     pub fn directory(&self) -> Vec<WorkerInfo> {
         listing(&self.inner.state.lock())
+    }
+
+    /// The directory and every terminal with its agent, read together.
+    #[must_use]
+    pub fn state(&self) -> (Vec<WorkerInfo>, Vec<(WorkerId, SessionSummary)>) {
+        let state = self.inner.state.lock();
+        let directory = listing(&state);
+        let mut terminals: Vec<(WorkerId, SessionSummary)> = state
+            .workers
+            .values()
+            .flat_map(|e| e.sessions.iter().map(|s| (e.info.worker, s.clone())))
+            .collect();
+        drop(state);
+        terminals.sort_by_key(|(worker, s)| (*worker, s.id));
+        (directory, terminals)
+    }
+
+    /// How many [`Verb::Events`] are waiting.
+    #[cfg(test)]
+    pub(crate) fn events_waiting(&self) -> usize {
+        self.inner.head.receiver_count()
     }
 
     /// Directory changes and worker events, as they happen. Subscribe before reading
@@ -206,6 +230,7 @@ impl Hub {
         for old in &replaced {
             tracing::info!(worker = %old, name = %info.name, by = %worker, "worker replaced");
             if let Some(gone) = state.workers.remove(old) {
+                self.close_all(*old, &gone.sessions);
                 self.happen(Happening::WorkerRemoved { worker: *old, name: gone.info.name });
             }
         }
@@ -275,12 +300,13 @@ impl Hub {
         let deadline = tokio::time::Instant::now().checked_add(wait);
         let mut head = self.inner.head.subscribe();
         let mut from = since.unwrap_or_else(|| *head.borrow_and_update());
-        let mut missed = None;
+        let mut missed = 0_u64;
         loop {
             // Seen before the read: an event logged after it wakes the wait below.
             head.borrow_and_update();
             let page = self.read_log(from, filter);
-            let missed = *missed.get_or_insert(page.missed);
+            // The log can wrap past the cursor between two reads of one long wait.
+            missed = missed.saturating_add(page.missed);
             if !page.events.is_empty() {
                 return Outcome::Events { events: page.events, next: page.next, missed };
             }
@@ -298,9 +324,13 @@ impl Hub {
     fn read_log(&self, from: u64, filter: EventFilter) -> Page {
         let log = self.inner.log.lock();
         let oldest = log.ring.front().map_or(log.next, |e| e.seq);
-        // A cursor ahead of the log is from before a restart: everything held is new to it.
-        let from = if from > log.next { oldest } else { from.max(1) };
-        let missed = oldest.saturating_sub(from);
+        let (from, missed) = if (log.first..=log.next).contains(&from) {
+            (from.max(oldest), oldest.saturating_sub(from))
+        } else {
+            // From another run (or a clock set back): everything held is new to it, and what
+            // that run logged after the cursor is unknown, so it missed at least one.
+            (oldest, oldest.saturating_sub(log.first).saturating_add(1))
+        };
         let skip = usize::try_from(from.saturating_sub(oldest)).unwrap_or(usize::MAX);
         let mut page = Page { events: Vec::new(), next: log.next, missed };
         for event in log.ring.iter().skip(skip) {
@@ -333,10 +363,7 @@ impl Hub {
         }
         let Some(gone) = state.workers.remove(&worker) else { return unknown_worker(worker) };
         tracing::info!(%worker, name = %gone.info.name, "worker forgotten");
-        for summary in &gone.sessions {
-            let term = TermRef { worker, session: summary.id };
-            self.happen(Happening::SessionClosed { term });
-        }
+        self.close_all(worker, &gone.sessions);
         self.happen(Happening::WorkerRemoved { worker, name: gone.info.name });
         self.announce(FromServer::Directory(listing(&state)));
         self.persist(&state);
@@ -423,6 +450,15 @@ impl Hub {
             && let Some(link) = entry.link.as_mut()
         {
             link.pending.remove(&id);
+        }
+    }
+
+    /// Every session of a removed worker ended, for the log and every link: its agents stop
+    /// counting as waiting anywhere.
+    fn close_all(&self, worker: WorkerId, sessions: &[SessionSummary]) {
+        for session in sessions.iter().map(|s| s.id) {
+            self.happen(Happening::SessionClosed { term: TermRef { worker, session } });
+            self.announce(FromServer::Event(Event::SessionClosed { worker, session }));
         }
     }
 
@@ -661,6 +697,15 @@ fn unreachable(info: &WorkerInfo) -> Outcome {
         code: ErrorCode::WorkerUnreachable,
         message: format!("worker {} ({}) is {:?}", info.name, info.worker, info.liveness),
     }
+}
+
+/// Where this run's event sequence starts: microseconds since the Unix epoch. A run logs far
+/// fewer than one event a microsecond, so each run numbers above everything an earlier one did,
+/// and a cursor kept across a restart is never mistaken for one of this run.
+fn run_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(1, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX).max(1))
 }
 
 /// Milliseconds since the Unix epoch.
@@ -998,7 +1043,7 @@ pub(crate) mod tests {
     async fn events_are_read_from_a_cursor_and_waited_for() {
         let hub = Hub::new("server".to_owned(), Vec::new());
         let (none, now, missed) = events(&hub, None, 0).await;
-        assert_eq!((none.len(), now, missed), (0, 1, 0), "nothing yet; from now is 1");
+        assert_eq!((none.len(), missed), (0, 0), "nothing yet");
 
         let (worker, session) = (WorkerId::new(), SessionId::new());
         let (tx, _rx) = mpsc::channel(8);
@@ -1013,7 +1058,7 @@ pub(crate) mod tests {
             ] if summary.id == session),
             "{whats:?}"
         );
-        assert_eq!((seen[0].seq, seen[1].seq, next), (1, 2, 3));
+        assert_eq!((seen[0].seq, seen[1].seq, next), (now, now + 1, now + 2));
         lease.handle(ToServer::SessionOpened(summary(session)));
         assert!(events(&hub, Some(next), 0).await.0.is_empty(), "a known session's update");
 
@@ -1078,6 +1123,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_event_log_is_bounded_and_says_what_was_missed() {
         let hub = Hub::new("server".to_owned(), Vec::new());
+        let (_, first, _) = events(&hub, None, 0).await;
         let (worker, session) = (WorkerId::new(), SessionId::new());
         let (tx, _rx) = mpsc::channel(8);
         let lease = hub.register(registration(worker, vec![summary(session)]), ip(), tx).unwrap();
@@ -1088,16 +1134,142 @@ pub(crate) mod tests {
         }
         // The worker coming online and its terminal opening, then the agent's flips.
         let logged = u64::try_from(EVENT_LOG + extra + 2).unwrap();
-        let (page, next, missed) = events(&hub, Some(1), 0).await;
-        let oldest = logged + 1 - u64::try_from(EVENT_LOG).unwrap();
-        assert_eq!(missed, oldest - 1);
+        let (page, next, missed) = events(&hub, Some(first), 0).await;
+        let oldest = first + logged - u64::try_from(EVENT_LOG).unwrap();
+        assert_eq!(missed, oldest - first);
         assert_eq!(page.len(), EVENTS_PER_ANSWER);
         assert_eq!(page[0].seq, oldest);
         assert_eq!(next, oldest + u64::try_from(EVENTS_PER_ANSWER).unwrap());
         let (_page, _next, missed) = events(&hub, Some(next), 0).await;
         assert_eq!(missed, 0, "a cursor inside the log missed nothing");
-        let (from_before, ..) = events(&hub, Some(logged + 1_000), 0).await;
-        assert_eq!(from_before[0].seq, oldest, "a cursor from before a restart");
+        let (ahead, _next, missed) = events(&hub, Some(first + logged + 1_000), 0).await;
+        assert_eq!(ahead[0].seq, oldest, "a cursor from another run reads from the oldest");
+        assert_eq!(missed, oldest - first + 1);
+    }
+
+    /// A cursor kept across a restart, below where the new run's sequence starts, reads the
+    /// new run's events from its first and is told it missed some; it never lands inside the
+    /// new run's range and skips its first events unannounced.
+    #[tokio::test]
+    async fn a_cursor_from_before_a_restart_misses_nothing_unannounced() {
+        let flips = |hub: &Hub, n: usize| {
+            let (worker, session) = (WorkerId::new(), SessionId::new());
+            let (tx, _rx) = mpsc::channel(8);
+            let lease =
+                hub.register(registration(worker, vec![summary(session)]), ip(), tx).unwrap();
+            for i in 0..n {
+                let status = if i % 2 == 0 { AgentStatus::Working } else { AgentStatus::Idle };
+                lease.handle(agent_report(session, status));
+            }
+            lease
+        };
+        let before = Hub::new("server".to_owned(), Vec::new());
+        let _lease = flips(&before, 28);
+        let (_, kept, _) = events(&before, None, 0).await;
+        drop(before);
+        // A restart takes far longer than this; the sequence starts from the wall clock.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+
+        let after = Hub::new("server".to_owned(), Vec::new());
+        let (_, first, _) = events(&after, None, 0).await;
+        let _lease = flips(&after, 38);
+        let (seen, _next, missed) = events(&after, Some(kept), 0).await;
+        assert_eq!(seen.first().map(|e| e.seq), Some(first), "from the new run's first");
+        assert_eq!(seen.len(), 40, "every event of the new run");
+        assert!(missed > 0, "told it missed what the old run logged after the cursor");
+    }
+
+    /// A long wait that sees the log wrap past its cursor while it waits reports the events
+    /// dropped, not only what was missing at its first look.
+    #[tokio::test(start_paused = true)]
+    async fn a_long_wait_counts_what_the_log_dropped_while_it_waited() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let (worker, session) = (WorkerId::new(), SessionId::new());
+        let (tx, _rx) = mpsc::channel(8);
+        let lease = hub.register(registration(worker, vec![summary(session)]), ip(), tx).unwrap();
+        let (_, from, _) = events(&hub, None, 0).await;
+        let waiting = tokio::spawn({
+            let hub = hub.clone();
+            let filter = EventFilter::AgentNeedsInput;
+            async move {
+                hub.dispatch(Verb::Events { since: Some(from), timeout_ms: 60_000, filter }).await
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!waiting.is_finished(), "nothing it wants yet");
+        // Past the log's size in one go, none of it what the wait wants, then one it does.
+        let extra = 10;
+        for i in 0..EVENT_LOG + extra {
+            let status = if i % 2 == 0 {
+                AgentStatus::Working
+            } else {
+                AgentStatus::Tool { tool: "Bash".to_owned() }
+            };
+            lease.handle(agent_report(session, status));
+        }
+        lease.handle(agent_report(session, AgentStatus::Idle));
+        let Outcome::Events { events, missed, .. } = waiting.await.unwrap() else {
+            panic!("events")
+        };
+        assert!(
+            matches!(
+                events.as_slice(),
+                [HubEvent { what: Happening::Agent { status: AgentStatus::Idle, .. }, .. }]
+            ),
+            "{events:?}"
+        );
+        assert_eq!(missed, u64::try_from(extra + 1).unwrap(), "the events dropped mid-wait");
+    }
+
+    /// A worker removed, forgotten or replaced by its reinstall, takes its terminals with it:
+    /// every link hears each one closed, and so does the event log, so no agent badge outlives
+    /// the entry.
+    #[tokio::test]
+    async fn a_removed_worker_closes_its_sessions_everywhere() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let closed = |links: &mut broadcast::Receiver<FromServer>| {
+            let mut closed = Vec::new();
+            while let Ok(msg) = links.try_recv() {
+                if let FromServer::Event(Event::SessionClosed { worker, session }) = msg {
+                    closed.push(TermRef { worker, session });
+                }
+            }
+            closed
+        };
+        let logged = async |from| {
+            let (heard, ..) = events(&hub, Some(from), 0).await;
+            heard
+                .into_iter()
+                .filter_map(|e| match e.what {
+                    Happening::SessionClosed { term } => Some(term),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let (forgotten, session) = (WorkerId::new(), SessionId::new());
+        let (tx, _rx) = mpsc::channel(8);
+        let lease =
+            hub.register(registration(forgotten, vec![summary(session)]), ip(), tx).unwrap();
+        drop(lease);
+        let mut links = hub.subscribe();
+        let (_, from, _) = events(&hub, None, 0).await;
+        assert_eq!(hub.dispatch(Verb::ForgetWorker { worker: forgotten }).await, Outcome::Done);
+        let term = TermRef { worker: forgotten, session };
+        assert_eq!(closed(&mut links), [term], "forgotten");
+        assert_eq!(logged(from).await, [term]);
+
+        let (old, session) = (WorkerId::new(), SessionId::new());
+        let (tx, _rx) = mpsc::channel(8);
+        drop(hub.register(registration(old, vec![summary(session)]), ip(), tx).unwrap());
+        drop(closed(&mut links));
+        let (_, from, _) = events(&hub, None, 0).await;
+        let (tx, _rx) = mpsc::channel(8);
+        let _reinstalled =
+            hub.register(registration(WorkerId::new(), Vec::new()), ip(), tx).unwrap();
+        let term = TermRef { worker: old, session };
+        assert_eq!(closed(&mut links), [term], "replaced by its reinstall");
+        assert_eq!(logged(from).await, [term]);
     }
 
     /// A worker without a lease is forgotten: gone from the directory, the state file and every

@@ -22,6 +22,11 @@ const NEXT_FREE: u16 = 20;
 /// Bytes moved per read in either direction.
 const CHUNK: usize = 64 * 1024;
 
+/// The shortest and the longest pause after an accept that failed for want of descriptors or
+/// memory; the pause doubles while the failures last.
+const ACCEPT_PAUSE: (std::time::Duration, std::time::Duration) =
+    (std::time::Duration::from_millis(10), std::time::Duration::from_secs(1));
+
 /// How long an accepted connection waits for its tunnel stream before it is reset. Opening
 /// waits only while the worker grants no more streams; a reset lets the browser retry rather
 /// than hang on a socket nothing will ever answer.
@@ -192,27 +197,57 @@ fn exclusive(port: u16) -> std::io::Result<TcpListener> {
 }
 
 async fn accept(tcp: TcpListener, conn: Connection, port: u16) {
-    loop {
-        match tcp.accept().await {
-            Ok((socket, from)) => {
-                tracing::debug!(port, %from, "tunnel");
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = splice(socket, &conn, port, OPEN_WITHIN).await {
-                        tracing::debug!(port, error = %e, "tunnel ended");
-                    }
-                });
+    let take = |(socket, from): (TcpStream, std::net::SocketAddr)| {
+        tracing::debug!(port, %from, "tunnel");
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            if let Err(e) = splice(socket, &conn, port, OPEN_WITHIN).await {
+                tracing::debug!(port, error = %e, "tunnel ended");
             }
+        });
+    };
+    keep_accepting(port, || tcp.accept(), take).await;
+}
+
+/// Take every connection `next` accepts for as long as the forward lives (its task is aborted
+/// when the forward goes). A failed accept is a connection gone before it was taken, tried
+/// again at once, or the machine short of descriptors or memory (EMFILE, ENFILE, ENOBUFS),
+/// tried again after a pause that grows while the failures last. None of them ends the
+/// forward: the port would stay unserved until the link came back.
+async fn keep_accepting<T, F: Future<Output = std::io::Result<T>>>(
+    port: u16,
+    mut next: impl FnMut() -> F,
+    mut take: impl FnMut(T),
+) -> ! {
+    let mut pause = std::time::Duration::ZERO;
+    loop {
+        match next().await {
+            Ok(accepted) => {
+                pause = std::time::Duration::ZERO;
+                take(accepted);
+            }
+            Err(e) if gone_before_taken(&e) => tracing::debug!(port, error = %e, "forward accept"),
             Err(e) => {
-                tracing::warn!(port, error = %e, "forward accept");
-                return;
+                if pause.is_zero() {
+                    tracing::warn!(port, error = %e, "forward accept; pausing");
+                }
+                pause = pause.saturating_mul(2).clamp(ACCEPT_PAUSE.0, ACCEPT_PAUSE.1);
+                tokio::time::sleep(pause).await;
             }
         }
     }
 }
 
+/// An accept that failed on the one connection, not the listener.
+fn gone_before_taken(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{ConnectionAborted, ConnectionReset, Interrupted};
+    matches!(e.kind(), ConnectionAborted | ConnectionReset | Interrupted)
+}
+
 /// Join a local connection to a tunnel stream until both directions finish. A stream not had
-/// `within` resets the connection.
+/// `within` resets the connection. A clean end of one direction half-closes it and the other
+/// goes on; a failure of either ends both, each side reset so neither waits on the other: the
+/// browser's socket when the worker's side failed, the stream when the browser's did.
 async fn splice(
     socket: TcpStream,
     conn: &Connection,
@@ -235,32 +270,192 @@ async fn splice(
     let up = async {
         let mut buf = vec![0_u8; CHUNK];
         loop {
-            let n = from_app.read(&mut buf).await.map_err(|e| e.to_string())?;
+            let n = from_app.read(&mut buf).await.map_err(Broke::app)?;
             let Some(chunk) = buf.get(..n).filter(|c| !c.is_empty()) else {
-                return send.finish().map_err(|e| e.to_string());
+                return send.finish().map_err(Broke::tunnel);
             };
-            send.write_all(chunk).await.map_err(|e| e.to_string())?;
+            send.write_all(chunk).await.map_err(Broke::tunnel)?;
         }
     };
     let down = async {
-        while let Some(chunk) = recv.chunk(CHUNK).await.map_err(|e| e.to_string())? {
-            to_app.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        while let Some(chunk) = recv.chunk(CHUNK).await.map_err(Broke::tunnel)? {
+            to_app.write_all(&chunk).await.map_err(Broke::app)?;
         }
-        to_app.shutdown().await.map_err(|e| e.to_string())
+        to_app.shutdown().await.map_err(Broke::app)
     };
-    let (up, down) = tokio::join!(up, down);
-    up.and(down)
+    let broke = match tokio::try_join!(up, down) {
+        Ok(((), ())) => return Ok(()),
+        Err(broke) => broke,
+    };
+    match &broke {
+        Broke::Tunnel(_) => {
+            // A zero linger turns the close into a reset, as when no stream could be had.
+            let _linger = to_app.as_ref().set_zero_linger();
+        }
+        Broke::App(_) => {
+            let _reset = send.reset(0_u32.into());
+            recv.stop();
+        }
+    }
+    Err(broke.to_string())
+}
+
+/// Which side of a tunnel failed.
+#[derive(Debug)]
+enum Broke {
+    /// The local connection.
+    App(String),
+    /// The stream to the worker.
+    Tunnel(String),
+}
+
+impl Broke {
+    fn app(e: impl std::fmt::Display) -> Self {
+        Self::App(e.to_string())
+    }
+
+    fn tunnel(e: impl std::fmt::Display) -> Self {
+        Self::Tunnel(e.to_string())
+    }
+}
+
+impl std::fmt::Display for Broke {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::App(e) => write!(f, "local connection: {e}"),
+            Self::Tunnel(e) => write!(f, "tunnel stream: {e}"),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::net::SocketAddr;
     use std::time::Duration;
 
-    use tokio::io::AsyncReadExt as _;
+    use slopty_net::Connection;
+    use slopty_net::streams::accept_tunnel;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::task::JoinHandle;
 
-    use super::splice;
+    use super::{keep_accepting, splice};
+
+    const PATIENCE: Duration = Duration::from_secs(5);
+
+    /// A client's connection to a worker, and the worker's end of it.
+    async fn linked() -> (Connection, Connection) {
+        let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
+        let worker = slopty_net::endpoint::bind(loopback, true).unwrap();
+        let client = slopty_net::endpoint::bind(loopback, false).unwrap();
+        let at = worker.local_addr().unwrap();
+        tokio::join!(async { client.connect(at, "worker").unwrap().await.unwrap() }, async {
+            worker.accept().await.unwrap().await.unwrap()
+        })
+    }
+
+    /// A browser's socket, and a tunnel splicing the other end of it to the worker.
+    async fn tunnel(conn: &Connection) -> (TcpStream, JoinHandle<Result<(), String>>) {
+        let local = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.unwrap();
+        let browser = TcpStream::connect(local.local_addr().unwrap()).await.unwrap();
+        let (accepted, _from) = local.accept().await.unwrap();
+        let conn = conn.clone();
+        let splicing = tokio::spawn(async move { splice(accepted, &conn, 80, PATIENCE).await });
+        (browser, splicing)
+    }
+
+    async fn ended(splicing: JoinHandle<Result<(), String>>) -> Result<(), String> {
+        tokio::time::timeout(PATIENCE, splicing).await.expect("the tunnel ended").unwrap()
+    }
+
+    /// Nothing listens on the worker's port, so the worker resets the stream: the browser's
+    /// connection is reset too rather than left waiting for an answer.
+    #[tokio::test]
+    async fn a_stream_the_worker_resets_resets_the_browser() {
+        let (conn, worker) = linked().await;
+        let (mut browser, splicing) = tunnel(&conn).await;
+        browser.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+        let (_open, mut send, mut rx) = accept_tunnel(&worker).await.unwrap();
+        send.reset(0_u32.into()).unwrap();
+        rx.stop();
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(PATIENCE, browser.read(&mut byte)).await;
+        let read = read.expect("the browser hears at once");
+        assert_eq!(read.unwrap_err().kind(), std::io::ErrorKind::ConnectionReset);
+        assert!(ended(splicing).await.is_err());
+    }
+
+    /// The browser resets its connection (a long poll or websocket given up on): the worker's
+    /// stream is reset too rather than left open with the tunnel waiting on it.
+    #[tokio::test]
+    async fn a_browser_that_resets_resets_the_stream() {
+        let (conn, worker) = linked().await;
+        let (browser, splicing) = tunnel(&conn).await;
+        let (_open, _send, mut rx) = accept_tunnel(&worker).await.unwrap();
+        browser.set_zero_linger().unwrap();
+        drop(browser);
+        let heard = tokio::time::timeout(PATIENCE, rx.chunk(1024)).await;
+        assert!(heard.expect("the worker hears at once").is_err(), "reset, not a clean end");
+        assert!(ended(splicing).await.is_err());
+    }
+
+    /// Clean ends still half-close: the browser's request ends, the worker answers after it
+    /// and ends, and the browser reads the whole answer.
+    #[tokio::test]
+    async fn clean_ends_half_close_each_way() {
+        let (conn, worker) = linked().await;
+        let (mut browser, splicing) = tunnel(&conn).await;
+        browser.write_all(b"ping").await.unwrap();
+        browser.shutdown().await.unwrap();
+        let (_open, mut send, mut rx) = accept_tunnel(&worker).await.unwrap();
+        let mut request = Vec::new();
+        while let Some(chunk) = rx.chunk(1024).await.unwrap() {
+            request.extend_from_slice(&chunk);
+        }
+        assert_eq!(request, b"ping");
+        send.write_all(b"pong").await.unwrap();
+        send.finish().unwrap();
+        let mut answer = Vec::new();
+        browser.read_to_end(&mut answer).await.unwrap();
+        assert_eq!(answer, b"pong");
+        ended(splicing).await.unwrap();
+    }
+
+    /// Accepting fails when the machine runs out of descriptors (EMFILE) or a connection is
+    /// gone before it is taken: the port stays served, after a pause while descriptors are
+    /// short rather than in a hot loop.
+    #[tokio::test]
+    async fn a_failed_accept_keeps_the_port_served() {
+        const EMFILE: i32 = 24;
+        let mut script: VecDeque<std::io::Result<u32>> = VecDeque::from([
+            Err(std::io::Error::from_raw_os_error(EMFILE)),
+            Err(std::io::Error::from_raw_os_error(EMFILE)),
+            Err(std::io::ErrorKind::ConnectionAborted.into()),
+            Ok(1),
+            Err(std::io::Error::from_raw_os_error(EMFILE)),
+            Ok(2),
+        ]);
+        let next = move || {
+            let answer = script.pop_front();
+            async move {
+                match answer {
+                    Some(answer) => answer,
+                    None => std::future::pending().await,
+                }
+            }
+        };
+        let (took, mut taken) = tokio::sync::mpsc::unbounded_channel();
+        let started = tokio::time::Instant::now();
+        let serving = tokio::spawn(keep_accepting(80, next, move |n| {
+            let _gone = took.send(n);
+        }));
+        assert_eq!(taken.recv().await, Some(1));
+        let paused = started.elapsed();
+        assert!(paused >= Duration::from_millis(20), "paused while short: {paused:?}");
+        assert_eq!(taken.recv().await, Some(2));
+        serving.abort();
+    }
 
     /// A connection to a peer that grants every stream it allows and never closes one: the next
     /// tunnel has to wait for a stream that will not come.

@@ -14,7 +14,10 @@
 pub mod keys;
 mod wait;
 
+use std::collections::BinaryHeap;
+use std::ffi::OsString;
 use std::io::{Read as _, Seek as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -578,10 +581,22 @@ fn io_failure(path: &Path, e: &std::io::Error) -> Failure {
 /// The bytes of a file from `offset` on, `length` of them or the rest, [`MAX_FILE_BYTES`] at
 /// most; and the file's size.
 fn read_file(path: &Path, offset: u64, length: Option<u64>) -> Result<(Vec<u8>, u64), Failure> {
-    let mut file = std::fs::File::open(path).map_err(|e| io_failure(path, &e))?;
+    // Non-blocking, so opening a named pipe answers at once instead of waiting for a writer;
+    // what was opened is then looked at, not the path, which could change in between.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| io_failure(path, &e))?;
     let meta = file.metadata().map_err(|e| io_failure(path, &e))?;
     if meta.is_dir() {
         return Err(Failure::new(ErrorCode::Failed, format!("{} is a directory", path.display())));
+    }
+    if !meta.is_file() {
+        return Err(Failure::new(
+            ErrorCode::Failed,
+            format!("{} is not a regular file", path.display()),
+        ));
     }
     let size = meta.len();
     let want = if let Some(length) = length {
@@ -612,22 +627,41 @@ fn read_file(path: &Path, offset: u64, length: Option<u64>) -> Result<(Vec<u8>, 
 /// The first `max` entries of a directory by name ([`MAX_DIR_ENTRIES`] at most), and how many
 /// it holds.
 fn list_dir(path: &Path, max: u32) -> Result<(Vec<DirEntry>, u32), Failure> {
-    let read = std::fs::read_dir(path).map_err(|e| io_failure(path, &e))?;
-    let mut entries = Vec::new();
-    for entry in read {
-        let entry = entry.map_err(|e| io_failure(path, &e))?;
+    first_entries(path, max, |entry| std::fs::symlink_metadata(entry))
+}
+
+/// [`list_dir`], with `look` reading an entry's metadata: only the names are gathered from the
+/// whole directory, the first `max` of them kept, and only those looked at.
+fn first_entries(
+    path: &Path,
+    max: u32,
+    mut look: impl FnMut(&Path) -> std::io::Result<std::fs::Metadata>,
+) -> Result<(Vec<DirEntry>, u32), Failure> {
+    let keep = usize::try_from(max.min(MAX_DIR_ENTRIES)).unwrap_or(usize::MAX);
+    // The greatest kept name on top, to be pushed out by a smaller one.
+    let mut first: BinaryHeap<OsString> = BinaryHeap::with_capacity(keep.saturating_add(1));
+    let mut total = 0_u32;
+    for entry in std::fs::read_dir(path).map_err(|e| io_failure(path, &e))? {
+        let name = entry.map_err(|e| io_failure(path, &e))?.file_name();
+        total = total.saturating_add(1);
+        if first.len() < keep {
+            first.push(name);
+        } else if first.peek().is_some_and(|last| name < *last) {
+            first.pop();
+            first.push(name);
+        }
+    }
+    let mut entries = Vec::with_capacity(first.len());
+    for name in first.into_sorted_vec() {
         // Gone between the listing and the look: it is not in the directory any more.
-        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(meta) = look(&path.join(&name)) else { continue };
         entries.push(DirEntry {
-            name: entry.file_name().to_string_lossy().into_owned(),
+            name: name.to_string_lossy().into_owned(),
             kind: kind(meta.file_type()),
             size: meta.len(),
             modified_ms: modified_ms(&meta),
         });
     }
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    let total = u32::try_from(entries.len()).unwrap_or(u32::MAX);
-    entries.truncate(usize::try_from(max.min(MAX_DIR_ENTRIES)).unwrap_or(usize::MAX));
     Ok((entries, total))
 }
 
@@ -773,6 +807,40 @@ mod tests {
         let a = stat(&dir.path().join("a")).unwrap().unwrap();
         assert_eq!((a.kind, a.mode), (FileKind::Dir, 0o750));
         assert_eq!(stat(&dir.path().join("nope")).unwrap(), None);
+    }
+
+    /// A named pipe (or any other file that is not a regular one) is refused at once: opening
+    /// one for reading waits for a writer, and would hold a blocking thread for good.
+    #[test]
+    fn a_named_pipe_is_refused_not_waited_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.is_ok_and(|s| s.success()), "mkfifo");
+        let (done, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || done.send(read_file(&fifo, 0, None)));
+        let read = answer.recv_timeout(Duration::from_secs(5)).expect("answered, not blocked");
+        let refused = read.unwrap_err();
+        assert!(refused.message.contains("not a regular file"), "{refused:?}");
+    }
+
+    /// Only the entries answered are looked at: a huge directory costs its names, not a stat
+    /// of each, and its count is still whole.
+    #[test]
+    fn a_directory_is_stat_only_for_the_entries_it_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in (0..50).rev() {
+            std::fs::write(dir.path().join(format!("f{i:02}")), b"").unwrap();
+        }
+        let looked = std::cell::Cell::new(0);
+        let (entries, total) = first_entries(dir.path(), 3, |p| {
+            looked.set(looked.get() + 1);
+            std::fs::symlink_metadata(p)
+        })
+        .unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!((names, total), (vec!["f00", "f01", "f02"], 50));
+        assert_eq!(looked.get(), 3, "a stat for each entry answered, none for the rest");
     }
 
     #[test]

@@ -263,7 +263,8 @@ impl EventFilter {
 /// Something the server heard, numbered in the order it heard it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct HubEvent {
-    /// Its place in the server's one sequence, from 1.
+    /// Its place in the server's one sequence. Each run starts it at the run's start time in
+    /// microseconds, so a cursor from an earlier run never falls inside the new one's range.
     pub seq: u64,
     /// Milliseconds since the Unix epoch when the server heard it.
     pub at_ms: u64,

@@ -995,3 +995,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   That costs a keyframe its delivery time, so it needs the rate controller's number and a
   shaped-ladder run on hardware before it lands. BBR3's window on the shaper is part of the
   BBR3 against Cubic comparison still owed above.
+
+- ✅ **A tunnel ends both ways when either side fails; a failed accept keeps the port**
+  (2026-09-25). When nothing listened on a pinned port, the worker reset the stream, but the
+  client kept waiting on the browser's socket, so the browser hung. When the browser reset a
+  long poll or a websocket, the other direction waited on the worker for good and leaked a
+  task and a stream. `splice` now runs both directions under `try_join!`. A failure on the
+  stream side closes the browser's socket with a zero linger, which the browser sees as a
+  reset. A failure on the browser's side resets and stops the stream. A clean end of one
+  direction still half-closes it and the other goes on. The accept loop used to return on
+  any error and never bind the port again. It now retries a connection-level failure at once
+  and pauses on anything else, 10 ms doubling to 1 s while the failures last. That covers
+  EMFILE, ENFILE and ENOBUFS. The loop never ends by itself; it stops when the forward is
+  dropped, as hyper and axum do. Tests: `a_stream_the_worker_resets_resets_the_browser`,
+  `a_browser_that_resets_resets_the_stream`, `a_failed_accept_keeps_the_port_served` (each
+  failed on the old code) and `clean_ends_half_close_each_way` (`slopty-client`).

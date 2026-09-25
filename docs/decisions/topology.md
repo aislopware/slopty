@@ -446,3 +446,37 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and the resize in `a_worker_registers_answers_forwarded_verbs_and_comes_back`
     (`slopty-workerd` `server_link`); the events, resize, range, `ls` and `stat` steps of
     `cargo xtask e2e server`.
+
+- ✅ **Orchestration holes a review found** (2026-09-25, protocol unchanged).
+  - **Event cursors across a restart.** Each run started its sequence at 1, so a cursor kept
+    from the last run landed inside the new range and skipped its first events with `missed`
+    at 0. A run's sequence now starts at its start time in microseconds since the epoch. A run
+    logs far fewer than one event a microsecond, so every earlier cursor sits below the new
+    run's first number. A cursor outside this run's range reads from the oldest event held
+    and reports at least one missed. `missed` also adds up over every read of one long wait,
+    where it used to keep the first read's count.
+  - **Agent state on a client link.** A link that fell behind the broadcast got the directory
+    again and nothing else, so agent badges went stale. A link now gets the state on connect
+    and again after a lag: the directory, then every terminal with its agent as a quiet
+    `Agent` event (no attention). The link also remembers which agents it told the client
+    of, and takes back each one the registry no longer has, with `SessionClosed` or a `None`
+    status.
+  - **A removed worker's terminals.** `ForgetWorker` and a reinstall replacing an entry now
+    send `SessionClosed` for each of the worker's terminals to the log and to every link.
+  - **Requests of a link that left.** Each request ran on a detached task, so a CLI or MCP
+    client that disconnected left its `WaitFor` or `Events` running for up to 255 s. The
+    requests now live in a `JoinSet` owned by the link's reader, and ending the link aborts
+    them.
+  - **Files.** `ReadFile` opens with `O_NONBLOCK` and checks what it opened. A named pipe or
+    a device is refused at once, where opening a pipe used to hold a blocking thread for
+    good. `ListDir` keeps only the first `max` names in a bounded heap and stats those alone,
+    so a directory of a million entries costs a pass over its names. `total` still counts
+    every name.
+  - Tests: `a_cursor_from_before_a_restart_misses_nothing_unannounced`,
+    `a_long_wait_counts_what_the_log_dropped_while_it_waited`,
+    `a_removed_worker_closes_its_sessions_everywhere` (hub);
+    `a_client_gets_the_agents_on_connect_and_again_after_it_lagged`,
+    `a_client_that_leaves_takes_its_requests_with_it` (link);
+    `a_named_pipe_is_refused_not_waited_on`,
+    `a_directory_is_stat_only_for_the_entries_it_answers` (`slopty-worker`). Each failed on
+    the old code.
