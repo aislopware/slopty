@@ -10,7 +10,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_core::SessionId;
@@ -141,6 +142,10 @@ pub struct WindowPicker {
     query: String,
     /// Which visible row ↑/↓ have chosen; ↩ picks it.
     selected: usize,
+    /// The list's scroll, so the chosen row can be brought into view.
+    scroll: ScrollHandle,
+    /// The choice moved (a step, a new filter): the next frame scrolls to it.
+    reveal: bool,
 }
 
 impl std::fmt::Debug for WindowPicker {
@@ -193,6 +198,8 @@ impl WindowPicker {
             events: None,
             query: String::new(),
             selected: 0,
+            scroll: ScrollHandle::new(),
+            reveal: false,
         }
     }
 
@@ -301,6 +308,7 @@ impl WindowPicker {
         }
         let at = i64::try_from(self.selected(usize::try_from(count).unwrap_or(0))).unwrap_or(0);
         self.selected = usize::try_from(at.saturating_add(delta).rem_euclid(count)).unwrap_or(0);
+        self.reveal = true;
         cx.notify();
     }
 
@@ -323,6 +331,7 @@ impl WindowPicker {
             InputEvent::Change => {
                 this.query = input.read(cx).value().to_string();
                 this.selected = 0;
+                this.reveal = true;
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => this.pick(cx),
@@ -492,6 +501,10 @@ impl Render for WindowPicker {
                 rows.push(self.heading(row.section).into_any_element());
             }
             let Row { id, line, on_pick, .. } = row;
+            if ix == chosen && std::mem::take(&mut self.reveal) {
+                // Its place among the list's children, headings counted.
+                self.scroll.scroll_to_item(rows.len());
+            }
             rows.push(self.row(id, line, on_pick, ix == chosen, cx).into_any_element());
         }
         if self.loading {
@@ -548,6 +561,8 @@ impl Render for WindowPicker {
                     .child(
                         div()
                             .id("picker-list")
+                            .debug_selector(|| "picker-list".to_owned())
+                            .track_scroll(&self.scroll)
                             .flex_1()
                             .overflow_y_scroll()
                             .p(px(theme.spacing.xs))
@@ -796,5 +811,40 @@ mod tests {
             p.set_listing(Vec::new(), Vec::new(), cx);
         });
         assert_eq!(outline(cx), [format!("Status {NOTHING_TO_JUMP_TO}")]);
+    }
+
+    /// ↓ past the rows in view scrolls the list with the choice: the row ↩ would pick is
+    /// always one the human can see, and wrapping round to the top brings the top back.
+    #[gpui::test]
+    fn the_chosen_row_is_scrolled_into_view(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let windows: Vec<WindowInfo> =
+            (0..40).map(|n| window(n, "Terminal", &format!("tab {n:02}"), true)).collect();
+        let (picker, cx) = cx.add_window_view(|_window, cx| {
+            WindowPicker::new(vec![shell("zsh")], windows, Vec::new(), Theme::default(), cx)
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+        cx.run_until_parked();
+        let inside = |cx: &mut gpui::VisualTestContext, row: &'static str| {
+            let list = cx.debug_bounds("picker-list").expect("the list is drawn");
+            let row = cx.debug_bounds(row).expect("the row is laid out");
+            row.top() >= list.top() && row.bottom() <= list.bottom()
+        };
+        assert!(!inside(cx, "picker-window-35"), "far down the list at first");
+        picker.update(cx, |p, cx| {
+            for _ in 0..36 {
+                p.step(1, cx);
+            }
+        });
+        cx.run_until_parked();
+        assert!(inside(cx, "picker-window-35"), "stepped to, and scrolled to");
+        assert!(!inside(cx, "picker-session-0"), "the top scrolled away");
+        picker.update(cx, |p, cx| {
+            for _ in 0..5 {
+                p.step(1, cx);
+            }
+        });
+        cx.run_until_parked();
+        assert!(inside(cx, "picker-session-0"), "wrapped round to the top");
     }
 }

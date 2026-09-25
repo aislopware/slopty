@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use gpui::{App, IntoElement as _, Styled as _, canvas};
+use slopty_client::pacing::percentile;
 
 /// Frames kept for the percentiles: sixteen seconds at 60 Hz, eight at 120 Hz.
 pub const RING: usize = 1024;
@@ -170,15 +171,6 @@ impl FrameProbe {
             nominal: self.nominal,
         }
     }
-}
-
-/// The `p`th percentile of a sorted slice (nearest rank), or zero when it is empty.
-fn percentile(sorted: &[Duration], p: usize) -> Duration {
-    if sorted.is_empty() {
-        return Duration::ZERO;
-    }
-    let rank = p.saturating_mul(sorted.len()).div_ceil(100).max(1);
-    sorted.get(rank.saturating_sub(1)).copied().unwrap_or_default()
 }
 
 /// The app's probe.
@@ -354,16 +346,6 @@ mod tests {
         let mut probe = FrameProbe::new(FRAME);
         probe.end(Instant::now());
         assert_eq!(probe.stats().frames, 0);
-    }
-
-    #[test]
-    fn nearest_rank_percentiles() {
-        let v: Vec<Duration> = (1..=100).map(|i| i * MS).collect();
-        assert_eq!(percentile(&v, 50), 50 * MS);
-        assert_eq!(percentile(&v, 95), 95 * MS);
-        assert_eq!(percentile(&v, 99), 99 * MS);
-        assert_eq!(percentile(&v[..1], 99), MS);
-        assert_eq!(percentile(&[], 50), Duration::ZERO);
     }
 
     #[test]

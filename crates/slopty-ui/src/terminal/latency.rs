@@ -21,6 +21,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use slopty_client::pacing::percentile;
+
 use crate::shown::Shown;
 
 /// Keys kept for the percentiles.
@@ -235,15 +237,6 @@ fn sorted(ring: &VecDeque<Duration>) -> Vec<Duration> {
 fn spread(ring: &VecDeque<Duration>) -> Spread {
     let all = sorted(ring);
     Spread { p50: percentile(&all, 50), p95: percentile(&all, 95) }
-}
-
-/// The `p`th percentile of a sorted slice (nearest rank), or zero when it is empty.
-fn percentile(sorted: &[Duration], p: usize) -> Duration {
-    if sorted.is_empty() {
-        return Duration::ZERO;
-    }
-    let rank = p.saturating_mul(sorted.len()).div_ceil(100).max(1);
-    sorted.get(rank.saturating_sub(1)).copied().unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -4832,3 +4832,35 @@ connect loop at once, and the dial is a single handshake over the shaped link. T
 path waits for a ping to draw the reset and then for the 250 ms redial. The first row, 0.03 s
 from Enter to both workers connected, is short because the link the panel dials to prove the
 server is kept as the directory's link, and each worker's dial is one handshake.
+
+## 2026-09-26 — a workspace frame over a large registry
+
+A frame of the headless workspace (GPUI test window, 1200 × 800, debug profile) with one worker
+holding 120 notes of 4 KB, 60 file cards and 12 shells, few of them near the view: the work a
+frame does that grows with the registry rather than with what is drawn. The test notifies the
+workspace and times the draw that follows, 20 frames of warm-up then 400 (nearest-rank
+percentiles). Both builds ran from a scratch export of `HEAD` with only this change's files on
+top (`/tmp/slopty-measure`, its own target dir), so other sessions' edits in the checkout
+did not enter either number. Other builds were running on the machine (162 to 211
+`cargo`/`rustc` processes).
+
+| build | mean | p50 | p95 | max |
+| --- | --- | --- | --- | --- |
+| before, run 1 | 17.5 ms | 15.5 ms | 31.1 ms | 93.7 ms |
+| before, run 2 | 15.4 ms | 15.0 ms | 16.0 ms | 57.6 ms |
+| after, run 1 | 9.2 ms | 9.2 ms | 10.5 ms | 12.5 ms |
+| after, run 2 | 9.3 ms | 9.2 ms | 10.7 ms | 11.5 ms |
+
+The change (`docs/decisions/workspace.md`, "A frame does only the work its drawing needs"):
+notes, file cards and pages are matched to the items only on the frame after a registry or a
+link changed, instead of every frame cloning every note's text and rebuilding the file lists;
+the layout's frame is built once per draw, not twice; the waiting agents are counted once, not
+four times; note bodies are drawn from GPUI's view cache. What is left of the 9 ms is the
+drawing itself (the navigator lists every tile) and the layout's frame over 192 tiles.
+
+```sh
+# the measurement test; prints one MEASURE line
+cargo test -p slopty-ui --lib measure_a_frame -- --ignored --nocapture
+```
+
+Logs: `target/logs/agent-ui-measure-before.log`, `target/logs/agent-ui-measure-after.log`.

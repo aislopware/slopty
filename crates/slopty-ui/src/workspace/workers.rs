@@ -61,8 +61,19 @@ impl WorkspaceView {
         let agents: Vec<SessionSummary> =
             sessions.iter().filter(|s| s.agent.is_some()).cloned().collect();
         w.sessions = sessions.into_iter().map(|s| (s.id, s)).collect();
+        self.items_dirty = true;
         self.reset_remote(key, &known, cx);
         self.seed_agents(&agents, cx);
+        // The disk may have moved on while the worker was away: every card of it reads again,
+        // and one holding an edit weighs it against what is there now.
+        let cards: Vec<ItemId> = self
+            .workers
+            .get(&key)
+            .map(|w| w.doc.items().map(|i| i.id).filter(|id| self.files.contains_key(id)).collect())
+            .unwrap_or_default();
+        for id in cards {
+            self.request_file(id);
+        }
         cx.notify();
     }
 
@@ -91,9 +102,31 @@ impl WorkspaceView {
         }
         for item in &items {
             self.screens.remove(item);
+            // A save sent on the link that dropped has no answer coming.
+            if let Some(view) = self.files.get(item) {
+                view.update(cx, FileView::link_lost);
+            }
         }
+        for closed in self.closed.iter().filter(|c| c.tile.worker == key) {
+            if let Some(view) = &closed.file {
+                view.update(cx, FileView::link_lost);
+            }
+        }
+        self.items_dirty = true;
         if self.picker.as_ref().is_some_and(|(k, _)| *k == key) {
             self.picker = None;
+            self.pending_focus_self = true;
+        }
+        // The focused shell's or window's view went with the link: the workspace takes the
+        // keyboard, so ⌘W, ⌘T and the rest still answer while the worker is away. A note or a
+        // file card keeps its view, and the keyboard with it.
+        let viewless = self.focused().filter(|t| t.worker == key).and_then(|t| self.item(t));
+        if viewless.is_some_and(|i| {
+            matches!(
+                i.kind,
+                ItemKind::Terminal { .. } | ItemKind::Window { .. } | ItemKind::Display { .. }
+            )
+        }) {
             self.pending_focus_self = true;
         }
         self.update_awake(cx);
@@ -138,7 +171,15 @@ impl WorkspaceView {
         let Some(w) = self.workers.remove(&key) else { return };
         for item in w.doc.items() {
             self.drop_item_views(item.id);
+            if let ItemKind::Terminal { session } = item.kind {
+                self.finished.remove(&session);
+            }
         }
+        for session in w.sessions.keys() {
+            self.finished.remove(session);
+        }
+        self.closed.retain(|c| c.tile.worker != key);
+        self.items_dirty = true;
         self.tick();
         self.layout.retain_worker(key, |_| false);
         self.layout_touched(cx);
@@ -194,6 +235,25 @@ impl WorkspaceView {
         tracing::debug!(?change, version = w.doc.version(), "item sync");
         if snapshot {
             w.awaiting_snapshot = false;
+            // What was done here while the worker was away goes over its snapshot, here at
+            // once and to the worker in the order it was done. A session closed meanwhile is
+            // closed only if the worker still runs it.
+            let queued = std::mem::take(&mut w.queued);
+            if !queued.is_empty() {
+                tracing::info!(ops = queued.len(), "replaying what was done while away");
+            }
+            for msg in queued {
+                match &msg {
+                    ClientMsg::Items(op) => {
+                        w.doc.apply_op(op, true);
+                    }
+                    ClientMsg::Term { session, .. } if !w.sessions.contains_key(session) => {
+                        continue;
+                    }
+                    _ => {}
+                }
+                w.send(msg);
+            }
         }
         self.item_changed(key, change, cx);
         if snapshot {
@@ -208,6 +268,7 @@ impl WorkspaceView {
         change: ItemChange,
         cx: &mut Context<Self>,
     ) {
+        self.items_dirty = true;
         self.tick();
         match change {
             ItemChange::Reset => {
@@ -308,6 +369,8 @@ impl WorkspaceView {
             w.sessions.remove(&session);
         }
         self.agents.remove(&session);
+        // Its "finished" badge has no tile to clear it by looking: the bell must not keep it.
+        self.finished.remove(&session);
         self.shell_recency.retain(|s| *s != session);
         self.update_awake(cx);
         self.reconcile(cx);
@@ -417,7 +480,7 @@ impl WorkspaceView {
             view
         });
         let sid = session;
-        self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| match event {
+        cx.subscribe(&view, move |this, _view, event, cx| match event {
             TerminalViewEvent::Bell => cx.emit(WorkspaceEvent::Bell(sid)),
             TerminalViewEvent::Notification { title, body } => {
                 this.notify_program(sid, title, body, cx);
@@ -447,7 +510,8 @@ impl WorkspaceView {
             TerminalViewEvent::PasteFiles(files) => {
                 this.paste_files_in_shell(sid, files.clone(), cx);
             }
-        }));
+        })
+        .detach();
         w.send(ClientMsg::Term { session, req: TermRequest::Attach { size } });
         // What this client paints with, so the driver's colours answer colour queries.
         w.send(ClientMsg::Term { session, req: TermRequest::Colors(self.theme.terminal.wire()) });
@@ -577,17 +641,15 @@ impl WorkspaceView {
                     }
                 });
                 let tile = TileRef { worker: key, item: id };
-                self.subscriptions.push(cx.subscribe(
-                    &view,
-                    move |this, view, event, cx| match event {
-                        crate::screen::ScreenViewEvent::Pressed => this.focus_tile(tile, cx),
-                        crate::screen::ScreenViewEvent::Ready => cx.notify(),
-                        crate::screen::ScreenViewEvent::PasteFiles(files) => {
-                            let view = view.downgrade();
-                            this.paste_files_in_window(tile, &view, files.clone(), cx);
-                        }
-                    },
-                ));
+                cx.subscribe(&view, move |this, view, event, cx| match event {
+                    crate::screen::ScreenViewEvent::Pressed => this.focus_tile(tile, cx),
+                    crate::screen::ScreenViewEvent::Ready => cx.notify(),
+                    crate::screen::ScreenViewEvent::PasteFiles(files) => {
+                        let view = view.downgrade();
+                        this.paste_files_in_window(tile, &view, files.clone(), cx);
+                    }
+                })
+                .detach();
                 self.screens.insert(id, view);
             }
             ScreenEvent::Closed { stream, reason } => {
@@ -678,101 +740,148 @@ impl WorkspaceView {
         }
     }
 
-    /// The tiles showing `path` on `key`.
+    /// The tiles showing `path` on `key`, and those closed a moment ago that ⌘Z may bring
+    /// back: a save sent before the close is answered to the buffer that sent it.
     fn files_at(&self, key: WorkerKey, path: &str, cx: &Context<Self>) -> Vec<Entity<FileView>> {
         let Some(w) = self.workers.get(&key) else { return Vec::new() };
+        let closed = self.closed.iter().filter(|c| c.tile.worker == key);
         w.doc
             .items()
             .filter_map(|item| self.files.get(&item.id))
+            .chain(closed.filter_map(|c| c.file.as_ref()))
             .filter(|view| view.read(cx).path() == path)
             .cloned()
             .collect()
     }
 
     /// Editors for note items and cards for file items; the ones whose items are gone go.
-    /// Needs the window (a note's editor does), so it runs from `render`.
+    /// Needs the window (a note's editor does), so it runs from `render`, and only on a frame
+    /// after a registry or a link changed ([`WorkspaceView::items_dirty`]).
     pub(super) fn reconcile_notes_and_files(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut notes: Vec<(ItemId, String)> = Vec::new();
-        let mut files: Vec<(WorkerKey, ItemId, String)> = Vec::new();
+        let mut notes: Vec<ItemId> = Vec::new();
+        let mut files: Vec<(WorkerKey, ItemId, &str)> = Vec::new();
         for (key, item) in self.items() {
             match &item.kind {
-                ItemKind::Note { text } => notes.push((item.id, text.clone())),
-                ItemKind::File { path } => files.push((key, item.id, path.clone())),
+                ItemKind::Note { text } => {
+                    notes.push(item.id);
+                    // A note another client changed: taken now, or once this one stops editing.
+                    if let Some(view) = self.notes.get(&item.id) {
+                        view.update(cx, |v, cx| v.offer_text(text, window, cx));
+                    }
+                }
+                ItemKind::File { path } => files.push((key, item.id, path)),
                 _ => {}
             }
         }
-        for (id, text) in &notes {
-            if let Some(view) = self.notes.get(id) {
-                let editing = view.read(cx).editing(window, cx);
-                if !editing && view.read(cx).synced() != text {
-                    view.update(cx, |v, cx| v.set_text(text, window, cx));
-                }
-                continue;
-            }
-            let theme = self.theme.clone();
-            let view = cx.new(|cx| NoteView::new(*id, text, theme, window, cx));
-            let item = *id;
-            self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
-                match event {
-                    NoteViewEvent::Commit(text) => this.commit_note(item, text.clone(), cx),
-                    NoteViewEvent::Run(code) => this.run_in_shell(code.clone(), cx),
-                }
-                cx.notify();
-            }));
-            view.update(cx, |n, cx| n.set_can_run(self.run_target().is_some(), cx));
-            self.notes.insert(*id, view);
-        }
-        self.notes.retain(|id, _| notes.iter().any(|(n, _)| n == id));
-        for (key, id, path) in &files {
-            if self.files.contains_key(id) {
-                continue;
-            }
-            let Some(w) = self.workers.get(key) else { continue };
-            if w.link.is_none() {
-                continue;
-            }
-            let theme = self.theme.clone();
-            let view = cx.new(|cx| FileView::new(*id, path, theme, window, cx));
-            let (item, worker, file) = (*id, *key, path.clone());
-            self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
-                match event {
-                    FileViewEvent::FindClosed => this.pending_focus_file = Some(item),
-                    FileViewEvent::Save { text, base_modified_ms } => this.send(
-                        worker,
-                        ClientMsg::WriteFile {
-                            path: file.clone(),
-                            text: text.clone(),
-                            base_modified_ms: *base_modified_ms,
-                        },
-                    ),
-                    FileViewEvent::Reload => this.request_file(item),
-                }
-                cx.notify();
-            }));
-            if let Some(line) = self.file_focus.remove(id) {
-                view.update(cx, |v, cx| v.focus_line(Some(line), cx));
-            }
-            self.files.insert(*id, view);
-            w.send(ClientMsg::ReadFile { path: path.clone() });
-        }
-        self.files.retain(|id, _| files.iter().any(|(_, f, _)| f == id));
+        let new_notes: Vec<(ItemId, String)> = notes
+            .iter()
+            .filter(|id| !self.notes.contains_key(id))
+            .filter_map(|id| match self.tile_of(*id).and_then(|t| self.item(t)).map(|i| &i.kind) {
+                Some(ItemKind::Note { text }) => Some((*id, text.clone())),
+                _ => None,
+            })
+            .collect();
+        let new_files: Vec<(WorkerKey, ItemId, String)> = files
+            .iter()
+            .filter(|(key, id, _)| {
+                !self.files.contains_key(id)
+                    && self.workers.get(key).is_some_and(|w| w.link.is_some())
+            })
+            .map(|(key, id, path)| (*key, *id, (*path).to_owned()))
+            .collect();
         // Each worker watches the set behind its cards and re-reads one that changes on disk.
-        for (key, w) in &mut self.workers {
+        let mut watch: Vec<(WorkerKey, Vec<String>)> = Vec::new();
+        for (key, w) in &self.workers {
             if w.link.is_none() {
                 continue;
             }
-            let mut paths: Vec<String> =
-                files.iter().filter(|(k, ..)| k == key).map(|(_, _, p)| p.clone()).collect();
+            let mut paths: Vec<&str> =
+                files.iter().filter(|(k, ..)| k == key).map(|(_, _, p)| *p).collect();
             paths.sort_unstable();
             paths.dedup();
             if paths != w.watched {
+                watch.push((*key, paths.into_iter().map(str::to_owned).collect()));
+            }
+        }
+        let file_ids: Vec<ItemId> = files.iter().map(|(_, id, _)| *id).collect();
+        for (key, paths) in watch {
+            if let Some(w) = self.workers.get_mut(&key) {
                 w.watched.clone_from(&paths);
                 w.send(ClientMsg::WatchFiles { paths });
             }
+        }
+        for (id, text) in new_notes {
+            self.make_note(id, &text, window, cx);
+        }
+        self.notes.retain(|id, _| notes.contains(id));
+        for (key, id, path) in new_files {
+            self.make_file(key, id, path, window, cx);
+        }
+        self.files.retain(|id, _| file_ids.contains(id));
+    }
+
+    /// The editor of note `id`.
+    fn make_note(&mut self, id: ItemId, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let theme = self.theme.clone();
+        let view = cx.new(|cx| NoteView::new(id, text, theme, window, cx));
+        // Detached: GPUI drops a subscription with the view it listens to.
+        cx.subscribe(&view, move |this, _view, event, cx| {
+            match event {
+                NoteViewEvent::Commit(text) => this.commit_note(id, text.clone(), cx),
+                NoteViewEvent::Run(code) => this.run_in_shell(code.clone(), cx),
+            }
+            cx.notify();
+        })
+        .detach();
+        view.update(cx, |n, cx| n.set_can_run(self.run_target().is_some(), cx));
+        self.notes.insert(id, view);
+    }
+
+    /// The card of file item `id` at `path` on `worker`, which it asks for the text.
+    fn make_file(
+        &mut self,
+        worker: WorkerKey,
+        id: ItemId,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let theme = self.theme.clone();
+        let view = cx.new(|cx| FileView::new(id, &path, theme, window, cx));
+        let file = path.clone();
+        cx.subscribe(&view, move |this, view, event, cx| {
+            match event {
+                FileViewEvent::FindClosed => this.pending_focus_file = Some(id),
+                FileViewEvent::Save { text, base_modified_ms } => {
+                    let write = ClientMsg::WriteFile {
+                        path: file.clone(),
+                        text: text.clone(),
+                        base_modified_ms: *base_modified_ms,
+                    };
+                    let sent = this.workers.get(&worker).is_some_and(|w| w.send(write));
+                    // Out of reach: said at once, not left saving for an answer never coming.
+                    if !sent {
+                        let name =
+                            this.workers.get(&worker).map_or("The worker", |w| w.name.as_str());
+                        let error = format!("{name} is out of reach");
+                        view.update(cx, |v, cx| v.written(WriteResult::Failed { error }, cx));
+                    }
+                }
+                FileViewEvent::Reload => this.request_file(id),
+            }
+            cx.notify();
+        })
+        .detach();
+        if let Some(line) = self.file_focus.remove(&id) {
+            view.update(cx, |v, cx| v.focus_line(Some(line), cx));
+        }
+        self.files.insert(id, view);
+        if let Some(w) = self.workers.get(&worker) {
+            w.send(ClientMsg::ReadFile { path });
         }
     }
 

@@ -655,3 +655,49 @@ fn a_browser_item_is_the_worker_s_address_served_at_each_client_s_own_port(
         ]
     );
 }
+
+/// A drop's landing (where the platform received files an app promised) lives exactly as long
+/// as something uploads from it: a drop on a note deletes it at once, and a drop on a window
+/// uploads from it and deletes it once the upload is over.
+#[gpui::test]
+fn a_drops_landing_goes_once_nothing_uploads_from_it(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (studio, mut calls, _board) = connect_remote(&view, cx);
+    let note = arrives(&view, cx, &studio, ItemKind::Note { text: "n".to_owned() }, 1);
+    let window =
+        arrives(&view, cx, &studio, ItemKind::Window { window: slopty_core::WindowId(9) }, 2);
+    let landing = |name: &str| {
+        let root = slopty_platform::file_drop::root();
+        let dir = root.join(format!("{}-test-{name}-{}", std::process::id(), XferId::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shot.png");
+        std::fs::write(&file, b"png").unwrap();
+        (dir, file)
+    };
+
+    let (on_note, file) = landing("note");
+    view.update_in(cx, |v, _window, cx| {
+        v.drop_landing = Some(on_note.clone());
+        v.drop_files(note, &[file], cx);
+    });
+    cx.run_until_parked();
+    assert!(!on_note.exists(), "a note takes nothing, and the landing goes");
+    assert!(calls.try_recv().ok().is_none(), "nothing was sent");
+
+    let (on_window, file) = landing("window");
+    view.update_in(cx, |v, _window, cx| {
+        v.drop_landing = Some(on_window.clone());
+        v.drop_files(window, &[file], cx);
+    });
+    cx.run_until_parked();
+    let Call::Upload(xfer, ..) = calls.try_recv().unwrap() else { panic!("an upload") };
+    let scratch =
+        view.read_with(cx, |v, _| v.upload_on(window).and_then(|(_, u)| u.scratch.clone()));
+    assert_eq!(scratch.as_ref(), Some(&on_window), "the upload holds the landing");
+    assert!(on_window.exists(), "kept while the files go up");
+    view.update_in(cx, |v, _window, cx| {
+        v.xfer_message(XferMsg::Finished { xfer, paths: vec!["/tmp/shot.png".to_owned()] }, cx);
+    });
+    cx.run_until_parked();
+    assert!(!on_window.exists(), "gone once the upload is over");
+}

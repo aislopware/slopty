@@ -160,7 +160,7 @@ impl WorkspaceView {
                 .child(status_icon(theme, mark, px(theme.typography.icon()), tone))
         });
         let frame = frame.map(|text| readout("status-frame", text));
-        let (working, waiting) = (self.working_count(), self.needs_you_count());
+        let (working, waiting) = (self.working_count(), self.drawn_waiting.len());
         let agents = (working > 0 || waiting > 0).then(|| {
             let text: SharedString = agent_summary(working, waiting).into();
             let tone = if waiting > 0 { s.warn } else { s.text_secondary };

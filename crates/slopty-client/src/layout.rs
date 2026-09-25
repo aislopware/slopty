@@ -1090,6 +1090,12 @@ impl Workspace {
         } else if idx <= self.active {
             self.active = self.active.saturating_add(1);
         }
+        // A divider being dragged stays on its column when one opens left of it.
+        if let Some(resize) = self.resize.as_mut()
+            && idx <= resize.column
+        {
+            resize.column = resize.column.saturating_add(1);
+        }
         if activate {
             let prev = (!was_empty && idx == self.active.saturating_add(1))
                 .then(|| self.view.stationary());
@@ -2303,11 +2309,6 @@ impl Layout {
     /// Focus column `n` (0-based, clamped to the last): ⌘1…⌘9.
     pub fn focus_column(&mut self, n: usize) {
         self.in_active(|ws, ctx| ws.focus_column(ctx, n));
-    }
-
-    /// The titlebar indicator's click: [`Self::focus_column`].
-    pub fn strip_jump(&mut self, column: usize) {
-        self.focus_column(column);
     }
 
     /// Focus the tile above in the column.

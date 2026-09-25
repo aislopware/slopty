@@ -65,11 +65,34 @@ pub const CLOSE_TILE: &str = "Close tile";
 /// The accessible name of a tile's fullscreen button.
 pub const FULLSCREEN_TILE: &str = "Fullscreen tile";
 
-/// The accessible name of the "hooks" pill.
+/// The accessible name of the [`HOOKS`] pill.
 pub const INSTALL_HOOKS: &str = "Install hooks";
 
-/// The accessible name of the "take" pill.
+/// The accessible name of the [`TAKE`] pill.
 pub const TAKE_OVER: &str = "Take over";
+
+/// The pill offering the hooks that make an agent's status precise.
+pub const HOOKS: &str = "Hooks";
+/// The pill that takes a PTY's size from the client driving it.
+pub const TAKE: &str = "Take";
+/// A remote window's audio pill while it plays here.
+pub const MUTE: &str = "Mute";
+/// The same pill while this client has silenced it.
+pub const MUTED: &str = "Muted";
+/// The muted pill's accessible name: what a press does.
+pub const UNMUTE: &str = "Unmute";
+/// A shell's body while its view attaches.
+pub const ATTACHING: &str = "Attaching…";
+/// A window or display asleep in the registry.
+pub const SLEEPING: &str = "Sleeping";
+/// A window or display whose stream was let go while it was off screen.
+pub const PAUSED: &str = "Paused off screen";
+/// A stream or a page on its way.
+pub const OPENING: &str = "Opening…";
+/// A file card waiting for its text.
+pub const READING: &str = "Reading…";
+/// A note whose editor is not made yet.
+pub const NOTE: &str = "Note";
 
 /// How much of a note's first line the header shows.
 pub const NOTE_TITLE_CHARS: usize = 40;
@@ -472,7 +495,7 @@ impl WorkspaceView {
             .filter(|(_, a)| a.source != AgentSource::Hook && !self.hooks_offered(tile.worker))
             .map(|_| {
                 let worker = tile.worker;
-                let pill = pill("hooks", id, "hooks", s.warn, theme, chrome)
+                let pill = pill("hooks", id, HOOKS, s.warn, theme, chrome)
                     .role(Role::Button)
                     .aria_label(INSTALL_HOOKS);
                 tab_stop(pill, s.accent)
@@ -791,7 +814,7 @@ impl WorkspaceView {
             ItemKind::Terminal { session } => {
                 // Another client's size rules this PTY: offer to take it.
                 if self.terminals.get(session).is_some_and(|v| !v.read(cx).driving()) {
-                    let pill = pill("take", id, "take", theme.surfaces.accent, theme, chrome)
+                    let pill = pill("take", id, TAKE, theme.surfaces.accent, theme, chrome)
                         .role(Role::Button)
                         .aria_label(TAKE_OVER);
                     actions.push(
@@ -808,13 +831,13 @@ impl WorkspaceView {
                     && (muted || view.has_audio())
                 {
                     let (label, tone) = if muted {
-                        ("muted", theme.surfaces.warn)
+                        (MUTED, theme.surfaces.warn)
                     } else {
-                        ("mute", theme.surfaces.text_secondary)
+                        (MUTE, theme.surfaces.text_secondary)
                     };
                     let pill = pill("mute", id, label, tone, theme, chrome)
                         .role(Role::Button)
-                        .aria_label(if muted { "unmute" } else { "mute" });
+                        .aria_label(if muted { UNMUTE } else { MUTE });
                     actions.push(
                         tab_stop(pill, theme.surfaces.accent)
                             .on_click(cx.listener(move |this, _ev, _w, cx| {
@@ -1208,14 +1231,14 @@ impl WorkspaceView {
                     fixed(body)
                 }
                 None if !worker_up => well(),
-                None if self.summary(*session).is_some() => muted_line("attaching…".into()),
+                None if self.summary(*session).is_some() => muted_line(ATTACHING.into()),
                 None => well(),
             },
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
                 match self.screens.get(&item.id) {
                     Some(view) => {
                         let painted = placed.rect.w * window.scale_factor();
-                        view.update(cx, |v, _| v.set_painted_width(painted));
+                        view.update(cx, |v, cx| v.set_painted_width(painted, cx));
                         let body = if self.cacheable(placed) {
                             view.clone()
                                 .cached(StyleRefinement::default().size_full())
@@ -1226,27 +1249,34 @@ impl WorkspaceView {
                         div().flex_1().w_full().overflow_hidden().child(body).into_any_element()
                     }
                     None if !worker_up => picture_well(),
-                    None if item.sleeping => picture_wait("sleeping".into()),
-                    None if self.parked.contains(&item.id) => {
-                        picture_wait("paused off screen".into())
-                    }
-                    None => picture_wait("opening…".into()),
+                    None if item.sleeping => picture_wait(SLEEPING.into()),
+                    None if self.parked.contains(&item.id) => picture_wait(PAUSED.into()),
+                    None => picture_wait(OPENING.into()),
                 }
             }
             ItemKind::Note { .. } => match self.notes.get(&item.id) {
                 Some(view) => {
                     let (pad, text_size) = (theme.spacing.inset(), theme.typography.ui_size);
-                    view.update(cx, |v, _| v.set_layout(k, pad, text_size));
+                    view.update(cx, |v, cx| v.set_layout(k, pad, text_size, cx));
+                    // Cached as a file card is: a note's Markdown is laid out again only when
+                    // the note changes, not on every frame a shell or a stream draws.
+                    let body = if self.cacheable(placed) {
+                        view.clone()
+                            .cached(StyleRefinement::default().size_full())
+                            .into_any_element()
+                    } else {
+                        view.clone().into_any_element()
+                    };
                     div()
                         .flex_1()
                         .w_full()
                         .overflow_hidden()
                         .font_family(theme.typography.ui_family.clone())
                         .text_color(hsla(theme.surfaces.text))
-                        .child(view.clone())
+                        .child(body)
                         .into_any_element()
                 }
-                None => muted_line("note".into()),
+                None => muted_line(NOTE.into()),
             },
             ItemKind::Browser { .. } => match self.browsers.get(&item.id) {
                 Some(view) => {
@@ -1259,7 +1289,7 @@ impl WorkspaceView {
                         .child(view.clone())
                         .into_any_element()
                 }
-                None => muted_line("opening…".into()),
+                None => muted_line(OPENING.into()),
             },
             ItemKind::File { .. } => match self.files.get(&item.id) {
                 Some(view) => {
@@ -1281,7 +1311,7 @@ impl WorkspaceView {
                         .into_any_element()
                 }
                 None if !worker_up => well(),
-                None => muted_line("reading…".into()),
+                None => muted_line(READING.into()),
             },
         }
     }

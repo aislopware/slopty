@@ -217,7 +217,7 @@ impl WorkspaceView {
         self.menu = None;
         let chords = self.hardware_keyboard;
         palette.update(cx, |p, _| p.set_chords(chords));
-        self.subscriptions.push(cx.subscribe(&palette, |this, _palette, event, cx| {
+        cx.subscribe(&palette, |this, _palette, event, cx| {
             if let PaletteEvent::Changed(text) = event {
                 if this.find_needle.is_some() {
                     this.find_changed(text, cx);
@@ -291,7 +291,8 @@ impl WorkspaceView {
                 PaletteEvent::Dismiss | PaletteEvent::Changed(_) => {}
             }
             cx.notify();
-        }));
+        })
+        .detach();
         self.pending_focus_palette = true;
         self.palette = Some(palette);
         cx.notify();
@@ -449,7 +450,7 @@ impl WorkspaceView {
         picker: &Entity<WindowPicker>,
         cx: &mut Context<Self>,
     ) {
-        self.subscriptions.push(cx.subscribe(picker, move |this, _picker, event, cx| {
+        cx.subscribe(picker, move |this, _picker, event, cx| {
             match event {
                 PickerEvent::Pick { target, title, .. } => {
                     this.add_screen_item(key, *target, title.clone(), cx);
@@ -465,7 +466,8 @@ impl WorkspaceView {
             // The jump focuses its terminal; every other outcome hands focus back.
             this.pending_focus_self = !matches!(event, PickerEvent::Jump(_));
             cx.notify();
-        }));
+        })
+        .detach();
         self.pending_focus_picker = true;
         self.picker = Some((key, picker.clone()));
         cx.notify();

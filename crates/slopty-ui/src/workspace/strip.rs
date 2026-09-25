@@ -9,6 +9,7 @@
 //! window takes every swipe over its picture (on a phone, every remote picture does). ⌘⌥ and
 //! the wheel steps columns and workspaces. A pinch in opens the overview; out closes it.
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Bounds, Context, DispatchPhase, FontWeight, InteractiveElement as _, IntoElement as _,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent,
@@ -493,12 +494,9 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// The strip, drawn from the layout's frame at the clock.
-    pub(super) fn render_strip(
-        &mut self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    /// The layout's frame for this draw: the clock moved to now, a drag held in an edge band
+    /// scrolled on, then the frame worked out once for the bar and the strip.
+    pub(super) fn frame_at_clock(&mut self, window: &Window) -> Frame {
         self.tick();
         // The overview's gaps hold the names drawn in them.
         self.layout.set_overview_label(self.theme.spacing.xl);
@@ -513,10 +511,20 @@ impl WorkspaceView {
         if frame.animating {
             window.request_animation_frame();
         }
+        frame
+    }
+
+    /// The strip, drawn from the frame of [`Self::frame_at_clock`].
+    pub(super) fn render_strip(
+        &mut self,
+        frame: &Frame,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let zooming = frame.overview > 0.0 && frame.overview < 1.0;
         let chrome = Chrome { k: frame.zoom, zooming };
         self.drawn_zoom = frame.zoom;
-        self.track_visibility(&frame, cx);
+        self.track_visibility(frame, cx);
         let origin = self.viewport.origin;
         let dragged = match &self.drag {
             Some(Drag::Move { tile, moving: true, .. }) => Some(*tile),
@@ -650,8 +658,8 @@ impl WorkspaceView {
         } else {
             Vec::new()
         };
-        let hint = self.drop_hint(&frame);
-        let handles = self.resize_handles(&frame, cx);
+        let hint = self.drop_hint(frame);
+        let handles = self.resize_handles(frame, cx);
         let entity = cx.entity();
         let measure = canvas(
             {
@@ -826,7 +834,8 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// One way to begin: its icon, what it does and its key cap; `primary` is the accented one.
+    /// One way to begin: its icon, what it does and, with a keyboard to press it on, its key cap;
+    /// `primary` is the accented one.
     fn begin_row(
         &self,
         id: &'static str,
@@ -857,7 +866,8 @@ impl WorkspaceView {
             .active(|st| st.bg(hsla(s.overlay)))
             .child(crate::palette::icon_slot(theme, icon, hsla(icon_ink)))
             .child(div().flex_1().text_color(hsla(ink)).child(label))
-            .child(crate::kit::key_cap(theme, keys.to_owned()));
+            // A chord is only worth printing where there are keys to press it on.
+            .when(self.hardware_keyboard, |el| el.child(crate::kit::key_cap(theme, keys.to_owned())));
         crate::a11y::tab_stop(row, s.accent)
     }
 }

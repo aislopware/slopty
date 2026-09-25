@@ -347,6 +347,17 @@ mod tests {
             FIND_PLACEHOLDER,
             crate::workspace::INSTALL_HOOKS,
             crate::workspace::TAKE_OVER,
+            crate::workspace::HOOKS,
+            crate::workspace::TAKE,
+            crate::workspace::MUTE,
+            crate::workspace::MUTED,
+            crate::workspace::UNMUTE,
+            crate::workspace::ATTACHING,
+            crate::workspace::SLEEPING,
+            crate::workspace::PAUSED,
+            crate::workspace::OPENING,
+            crate::workspace::READING,
+            crate::workspace::NOTE,
             crate::note::WRITE_PLACEHOLDER,
             crate::file::CHANGED_ON_DISK,
             crate::file::RELOAD,
@@ -521,6 +532,77 @@ mod tests {
         literals(line)
             .into_iter()
             .find(|text| text.contains(['⌘', '⌥', '⌃', '⇧']) && text.chars().count() > 1)
+    }
+
+    /// Where a string literal on a line is drawn as chrome text or read out as an accessible
+    /// name: the first literal after one of these calls. The helpers whose first argument is
+    /// an element id (`pill`, a text button) draw a later literal instead.
+    const DRAWN: [&str; 8] = [
+        ".child(\"",
+        "ChromeText::new(\"",
+        ".aria_label(\"",
+        ".placeholder(\"",
+        "muted_line(\"",
+        "picture_wait(\"",
+        "notice(\"",
+        "title(\"",
+    ];
+    const DRAWN_AFTER_ID: [&str; 3] = ["pill(", "button(", "heading("];
+
+    /// A literal drawn as chrome text that starts lowercase: `"take"` on a pill, `"opening…"`
+    /// in a body. Sentence case is checked on the text drawn, not only on the names a screen
+    /// reader reads, so a lowercase label cannot come back unseen.
+    fn lowercase_label(line: &str) -> Option<String> {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            return None;
+        }
+        // A word, not a name: a file (`settings.toml`), a host (`mac-studio`) or a number is
+        // written as it is spelled.
+        let lower = |text: &String| {
+            let word = text.split_whitespace().next().unwrap_or_default();
+            word.chars().next().is_some_and(char::is_lowercase)
+                && !word.contains(['.', '-', '_', '/'])
+                && !word.contains(|c: char| c.is_ascii_digit())
+        };
+        let drawn = DRAWN.iter().filter_map(|call| {
+            line.split_once(call)
+                .and_then(|(_, rest)| literals(&format!("\"{rest}")).into_iter().next())
+        });
+        let after_id = DRAWN_AFTER_ID.iter().flat_map(|call| {
+            line.split_once(call)
+                .map(|(_, rest)| literals(rest).into_iter().skip(1).collect::<Vec<_>>())
+                .unwrap_or_default()
+        });
+        drawn.chain(after_id).find(lower)
+    }
+
+    /// Chrome text is drawn in sentence case, as the constants above are written.
+    #[test]
+    fn a_drawn_label_is_sentence_case() {
+        let wrong: Vec<String> = chrome_lines("slopty-ui/src")
+            .into_iter()
+            .filter_map(|(file, line_no, line)| {
+                lowercase_label(&line).map(|text| format!("{file}:{line_no}: lowercase: {text:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn the_label_check_knows_a_label_from_an_id() {
+        assert!(lowercase_label(r#"pill("take", id, "take", tone, theme, chrome)"#).is_some());
+        assert!(lowercase_label(r#"pill("take", id, TAKE, tone, theme, chrome)"#).is_none());
+        assert!(lowercase_label(r#"muted_line("attaching…".into())"#).is_some());
+        assert!(lowercase_label(r#".child("Nothing new")"#).is_none());
+        assert!(lowercase_label(r#"button(copy_id, "Copy code", "copy")"#).is_some());
+        assert!(lowercase_label(r#"button(copy_id, "Copy code", "Copy")"#).is_none());
+        assert!(lowercase_label(r#"kit::button(theme, "new-shell", "New shell", kind)"#).is_none());
+        assert!(lowercase_label(r#".aria_label("mute")"#).is_some());
+        assert!(lowercase_label(r#".id("file-bar").child(text)"#).is_none(), "an id");
+        assert!(lowercase_label(r#"// .child("a comment")"#).is_none());
+        assert!(lowercase_label(r#".aria_label("settings.toml")"#).is_none(), "a file name");
+        assert!(lowercase_label(r#".placeholder("mac-studio or 100.64.0.3")"#).is_none(), "a host");
     }
 
     /// The ruling in `docs/decisions/ui.md`: keys live in the palette, the menus and the

@@ -91,7 +91,7 @@ impl WorkspaceView {
             let theme = self.theme.clone();
             let view = cx.new(|_cx| BrowserView::new(*id, *key, url, theme));
             let item = *id;
-            self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
+            cx.subscribe(&view, move |this, _view, event, cx| {
                 match event {
                     BrowserEvent::Focused => {
                         if let Some(tile) = this.tile_of(item)
@@ -103,9 +103,10 @@ impl WorkspaceView {
                     BrowserEvent::Released => this.pending_focus_self = true,
                 }
                 cx.notify();
-            }));
+            })
+            .detach();
             // The header shows the page's title and address, and it is the workspace's.
-            self.subscriptions.push(cx.observe(&view, |_this, _view, cx| cx.notify()));
+            cx.observe(&view, |_this, _view, cx| cx.notify()).detach();
             self.browsers.insert(*id, view);
         }
         self.browsers.retain(|id, _| wanted.iter().any(|(w, ..)| w == id));

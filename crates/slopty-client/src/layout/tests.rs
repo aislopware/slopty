@@ -321,7 +321,7 @@ fn focus_moves_stop_at_the_ends() {
     assert_eq!(active_col(&l), 1);
     l.focus_column(99);
     assert_eq!(active_col(&l), 2, "clamped to the last");
-    l.strip_jump(0);
+    l.focus_column(0);
     assert_eq!(active_col(&l), 0);
     l.focus_column_last();
     assert_eq!(active_col(&l), 2);
@@ -919,6 +919,26 @@ fn a_compact_window_shows_every_column_full_width_and_keeps_the_proportions() {
     near(rect(&l, t(2)).w, full);
     l.set_viewport(1280.0, 800.0);
     near(rect(&l, t(2)).w, TWO_THIRDS);
+}
+
+/// A column that opens left of the divider being dragged does not hand the drag to its
+/// neighbour: the drag stays on the column it began on.
+#[test]
+fn a_column_opened_during_a_drag_leaves_the_drag_on_its_column() {
+    let mut l = columns(3);
+    l.focus_column(0);
+    l.consume_into_column();
+    // Column 0 holds t1 over t2; column 1 is t3.
+    assert!(l.resize_begin(1));
+    let before = width_of(&l, t(3));
+    // Expelling t2 opens a column at 1, between t1's and t3's.
+    l.expel_from_column();
+    assert_eq!(l.position(t(3)).map(|p| p.column), Some(2));
+    let expelled = width_of(&l, t(2));
+    l.resize_update(-100.0);
+    l.resize_end();
+    near(width_of(&l, t(3)), before - 100.0);
+    near(width_of(&l, t(2)), expelled);
 }
 
 /// A resize dragged while compact changes the stored proportion, not the width shown.

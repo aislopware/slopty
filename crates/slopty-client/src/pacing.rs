@@ -277,11 +277,18 @@ impl<C: Clock> Pacer<C> {
     }
 }
 
-/// The `p`th percentile of a sorted slice, or zero when it is empty.
-fn percentile(sorted: &[Duration], p: usize) -> Duration {
-    let index = sorted.len().saturating_mul(p) / 100;
-    let index = index.min(sorted.len().saturating_sub(1));
-    sorted.get(index).copied().unwrap_or_default()
+/// The `p`th percentile of a sorted slice by nearest rank, or zero when it is empty.
+///
+/// The smallest value at least `p` % of the slice is no greater than. The one definition every
+/// readout uses (the frame probe, the keystroke timings, the stream's pacing), so a p95 means
+/// the same thing wherever it is printed.
+#[must_use]
+pub fn percentile(sorted: &[Duration], p: usize) -> Duration {
+    if sorted.is_empty() {
+        return Duration::ZERO;
+    }
+    let rank = p.saturating_mul(sorted.len()).div_ceil(100).max(1);
+    sorted.get(rank.saturating_sub(1)).copied().unwrap_or_default()
 }
 
 /// Mean absolute deviation of `values` from `centre`.
@@ -388,6 +395,21 @@ mod tests {
         assert_eq!(pacer.age(), Some(Duration::ZERO));
     }
 
+    /// Nearest rank: the median of an even count is the lower middle, a p99 of 100 samples is
+    /// the 99th and not the largest, and a single sample is every percentile.
+    #[test]
+    fn percentiles_are_nearest_rank() {
+        let v: Vec<Duration> = (1..=100).map(|i| i * MS).collect();
+        assert_eq!(percentile(&v, 50), 50 * MS);
+        assert_eq!(percentile(&v, 95), 95 * MS);
+        assert_eq!(percentile(&v, 99), 99 * MS);
+        assert_eq!(percentile(&v, 100), 100 * MS);
+        assert_eq!(percentile(&v[..4], 50), 2 * MS, "the lower middle of four");
+        assert_eq!(percentile(&v[..1], 99), MS);
+        assert_eq!(percentile(&v[..1], 0), MS, "rank 0 is the first, not before it");
+        assert_eq!(percentile(&[], 50), Duration::ZERO);
+    }
+
     /// A steady 60 fps source painted at 60 Hz: every frame goes up on the paint that follows
     /// it, one interval apart, and nothing is skipped or repeated.
     #[test]
@@ -437,7 +459,8 @@ mod tests {
         // The second paint showed frame 2, so its latency is measured from *its* arrival — a
         // frame interval less eight milliseconds, which is under frame 0's whole interval.
         assert_eq!(stats.latency_max, FRAME);
-        assert_eq!(stats.latency_p50, FRAME);
+        // The median of the two by nearest rank is the lower one.
+        assert_eq!(stats.latency_p50, FRAME.saturating_sub(8 * MS));
         // Nothing is left over: the next paint has no new frame, so it repeats.
         present(&mut pacer, &clock);
         assert_eq!(pacer.stats().repeats, 1);

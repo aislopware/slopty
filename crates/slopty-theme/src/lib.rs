@@ -455,11 +455,9 @@ pub mod alpha {
     pub const PRESSED: f32 = 0.4;
     /// A modal backdrop.
     pub const SCRIM: f32 = 0.6;
-    /// A mark that must read over whatever it covers: the separator after a failed command,
-    /// the minimap's item blocks.
+    /// A mark that must read over whatever it covers: the separator after a failed command.
     pub const STRONG: f32 = 0.7;
-    /// A panel or tag laid over content and read through only barely: the stream HUD, the
-    /// minimap, another client's viewport outline and its name tag.
+    /// A panel laid over content and read through only barely: the stream HUD.
     pub const VEIL: f32 = 0.9;
 }
 

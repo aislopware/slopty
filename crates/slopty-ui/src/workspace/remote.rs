@@ -321,14 +321,30 @@ impl WorkspaceView {
     /// Files dropped on `tile`: to the shell's directory for a terminal, whose paths are typed
     /// into it once they are there; to the worker's staging for a remote window, where they
     /// wait on its clipboard. Nothing happens on a note, a file or a page.
+    ///
+    /// Files the platform received for the drop wait in its landing: the upload deletes it
+    /// when it ends, and a tile that takes nothing deletes it at once.
     pub fn drop_files(&mut self, tile: TileRef, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let Some(item) = self.item(tile) else { return };
-        let upload = match item.kind {
-            ItemKind::Terminal { session } => Upload::to_shell(tile, session),
-            ItemKind::Window { .. } | ItemKind::Display { .. } => Upload::to_staging(tile),
-            ItemKind::Note { .. } | ItemKind::File { .. } | ItemKind::Browser { .. } => return,
+        let landing = self.drop_landing.take();
+        let upload = match self.item(tile).map(|i| &i.kind) {
+            Some(ItemKind::Terminal { session }) => Upload::to_shell(tile, *session),
+            Some(ItemKind::Window { .. } | ItemKind::Display { .. }) => Upload::to_staging(tile),
+            Some(ItemKind::Note { .. } | ItemKind::File { .. } | ItemKind::Browser { .. })
+            | None => {
+                Self::discard_landing(landing, cx);
+                return;
+            }
         };
-        let _started = self.upload(tile, paths, upload, cx);
+        let _started = self.upload(tile, paths, Upload { scratch: landing, ..upload }, cx);
+    }
+
+    /// Delete a drop's landing that nothing will upload from, off the main thread.
+    fn discard_landing(landing: Option<PathBuf>, cx: &Context<Self>) {
+        if let Some(landing) = landing {
+            cx.background_executor()
+                .spawn(async move { slopty_platform::file_drop::discard(&landing) })
+                .detach();
+        }
     }
 
     /// Send `paths` to `tile`'s worker as `upload` says: to its shell's directory when it names
@@ -376,9 +392,12 @@ impl WorkspaceView {
         let (handle, view, app) = (window.window_handle(), cx.entity().downgrade(), cx.to_async());
         let sink = Rc::new(move |dropped: slopty_platform::file_drop::Dropped| {
             let mut app = app.clone();
+            let landing = dropped.landing.clone();
             let delivered = handle.update(&mut app, |_root, window, cx| {
                 #[expect(clippy::cast_possible_truncation, reason = "points in a window")]
                 let position = gpui::point(gpui::px(dropped.x as f32), gpui::px(dropped.y as f32));
+                // The tile the drop lands on takes the landing with the paths.
+                let _gone = view.update(cx, |v, _cx| v.drop_landing.clone_from(&dropped.landing));
                 if !dropped.paths.is_empty() {
                     let paths = gpui::ExternalPaths(dropped.paths.iter().cloned().collect());
                     for event in [
@@ -390,6 +409,9 @@ impl WorkspaceView {
                             window.dispatch_event(gpui::PlatformInput::FileDrop(event), cx);
                     }
                 }
+                // No tile took it (a drop on the bars, or between tiles): nothing uploads it.
+                let _gone =
+                    view.update(cx, |v, cx| Self::discard_landing(v.drop_landing.take(), cx));
                 if !dropped.failed.is_empty() {
                     let text = format!("Not sent: {}", dropped.failed.join("; "));
                     let _gone = view.update(cx, |v, cx| v.show_notice(text, cx));
@@ -397,6 +419,9 @@ impl WorkspaceView {
             });
             if let Err(e) = delivered {
                 tracing::warn!(error = %e, "a drop for a window that is gone");
+                if let Some(landing) = &landing {
+                    slopty_platform::file_drop::discard(landing);
+                }
             }
         });
         slopty_platform::file_drop::install(host, sink);

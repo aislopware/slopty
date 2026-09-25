@@ -322,3 +322,28 @@ fn the_palette_fits_above_a_phone_keyboard(cx: &mut TestAppContext) {
     );
     assert!(f32::from(palette.left()) >= 0.0 && f32::from(palette.right()) <= 390.0);
 }
+
+/// ↓ past the lines in view scrolls the palette's list with the selection, and a query that
+/// moves the selection back to the first line brings that line back into view.
+#[gpui::test]
+fn the_palette_scrolls_to_the_selected_line(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let _studio = connect(&view, cx, 1, "studio");
+    open_palette(cx);
+    let inside = |cx: &mut VisualTestContext, line: &'static str| {
+        let list = cx.debug_bounds("palette-list").expect("the list is drawn");
+        let line = cx.debug_bounds(line).expect("the line is laid out");
+        line.top() >= list.top() && line.bottom() <= list.bottom()
+    };
+    let far = "palette-item-30";
+    assert!(!inside(cx, far), "far down the list at first");
+    for _ in 0..30 {
+        cx.simulate_keystrokes("down");
+    }
+    cx.run_until_parked();
+    assert!(inside(cx, far), "stepped to, and scrolled to");
+    assert!(!inside(cx, "palette-item-0"), "the top scrolled away");
+    cx.simulate_input("n");
+    cx.run_until_parked();
+    assert!(inside(cx, "palette-item-0"), "a new query selects the first line, in view");
+}

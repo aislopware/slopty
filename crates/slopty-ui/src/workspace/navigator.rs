@@ -330,7 +330,7 @@ impl WorkspaceView {
             Mode::Docked | Mode::Overlay => self.navigator_width(),
         };
         let mut sections: Vec<gpui::AnyElement> = Vec::new();
-        let waiting = self.needs_you();
+        let waiting = self.drawn_waiting.clone();
         if !waiting.is_empty() {
             sections.push(heading(theme, "nav-needs-you", "Needs you").into_any_element());
             sections.extend(waiting.into_iter().map(|w| self.waiting_row("nav", w, cx)));

@@ -34,6 +34,14 @@ use crate::pacing::{CaptureClock, FrameStamp};
 const STREAM_DEPTH: usize = 2048;
 /// Datagrams kept for a stream nobody has attached yet.
 const PENDING_DEPTH: usize = 512;
+/// Streams that may wait unattached at once. An `Opened` nobody asked for is closed without a
+/// view ever attaching, so its backlog is never taken; past this many, the stream heard from
+/// longest ago lets its backlog go.
+const PENDING_STREAMS: usize = 8;
+/// Detached streams remembered, so the datagrams still in flight when a view lets go of its
+/// stream are dropped rather than backlogged as a stream not attached yet. Stream ids count up
+/// per connection, so the oldest can be forgotten once this many newer ones have gone.
+const TOMBSTONES: usize = 64;
 /// How often a receiver report goes to the worker.
 const REPORT_EVERY: Duration = Duration::from_millis(50);
 /// Reassembler timer resolution while frames are pending.
@@ -81,6 +89,8 @@ type Arrival = (Instant, Bytes);
 struct Routes {
     attached: HashMap<StreamId, mpsc::Sender<Arrival>>,
     pending: HashMap<StreamId, VecDeque<Arrival>>,
+    /// Streams let go of, newest last ([`TOMBSTONES`] at most).
+    detached: VecDeque<StreamId>,
 }
 
 impl Routes {
@@ -89,6 +99,19 @@ impl Routes {
             // A full queue means the stream task is behind; dropping is the right call.
             let _dropped = tx.try_send(arrival);
             return;
+        }
+        if self.detached.contains(&stream) {
+            return;
+        }
+        if !self.pending.contains_key(&stream) && self.pending.len() >= PENDING_STREAMS {
+            let stalest = self
+                .pending
+                .iter()
+                .min_by_key(|(_, backlog)| backlog.back().map(|(at, _)| *at))
+                .map(|(id, _)| *id);
+            if let Some(id) = stalest {
+                self.pending.remove(&id);
+            }
         }
         let backlog = self.pending.entry(stream).or_default();
         if backlog.len() >= PENDING_DEPTH {
@@ -165,6 +188,7 @@ impl ScreenRouter {
     pub fn attach(&self, stream: StreamId) -> mpsc::Receiver<Arrival> {
         let (tx, rx) = mpsc::channel(STREAM_DEPTH);
         let mut routes = self.inner.lock();
+        routes.detached.retain(|id| *id != stream);
         if let Some(backlog) = routes.pending.remove(&stream) {
             for datagram in backlog {
                 let _full = tx.try_send(datagram);
@@ -174,16 +198,18 @@ impl ScreenRouter {
         rx
     }
 
-    /// Stop routing `stream`.
+    /// Stop routing `stream`: what is in flight for it from here on is dropped, not kept for
+    /// an attach that will not come.
     pub fn detach(&self, stream: StreamId) {
         let mut routes = self.inner.lock();
         routes.attached.remove(&stream);
         routes.pending.remove(&stream);
-    }
-
-    /// Drop backlogs for streams nobody attached (call when a `Closed` arrives).
-    pub fn forget(&self, stream: StreamId) {
-        self.inner.lock().pending.remove(&stream);
+        if !routes.detached.contains(&stream) {
+            if routes.detached.len() >= TOMBSTONES {
+                routes.detached.pop_front();
+            }
+            routes.detached.push_back(stream);
+        }
     }
 }
 
@@ -1099,28 +1125,55 @@ mod tests {
         assert_eq!(rx.try_recv().ok().as_ref().map(frame_of), Some(9_999));
     }
 
+    /// A detached stream keeps nothing: the datagrams still in flight after its view let go
+    /// are dropped, not backlogged for an attach that will not come. The tombstones are
+    /// bounded, and an attach of the same id (a new connection counting from one again) lifts
+    /// its tombstone.
     #[test]
-    fn detach_and_forget_stop_the_stream_and_a_short_datagram_is_ignored() {
+    fn a_detached_stream_drops_what_arrives_late_and_the_tombstones_are_bounded() {
         let router = ScreenRouter::with_loss(0);
         let now = Instant::now();
         let mut rx = router.attach(StreamId(1));
         router.route(datagram(1, 1), now);
         assert_eq!(rx.try_recv().ok().as_ref().map(frame_of), Some(1));
         router.detach(StreamId(1));
-        router.route(datagram(1, 2), now);
+        for frame in 2..600 {
+            router.route(datagram(1, frame), now);
+        }
         assert!(rx.try_recv().is_err(), "detached: nothing delivered");
-        // What lands between the detach and the worker's `Closed` backlogs like a stream nobody
-        // attached yet (a re-attach would want it); `forget` on `Closed` lets it go.
-        assert!(router.inner.lock().pending.contains_key(&StreamId(1)));
-        router.forget(StreamId(1));
+        assert!(router.inner.lock().pending.is_empty(), "and nothing kept for it");
 
-        router.route(datagram(2, 1), now);
-        assert!(router.inner.lock().pending.contains_key(&StreamId(2)));
-        router.forget(StreamId(2));
-        assert!(router.inner.lock().pending.is_empty(), "a Closed stream keeps no backlog");
+        let mut again = router.attach(StreamId(1));
+        router.route(datagram(1, 700), now);
+        assert_eq!(again.try_recv().ok().as_ref().map(frame_of), Some(700), "a new attach");
+        router.detach(StreamId(1));
+
+        let tombstones = u32::try_from(TOMBSTONES).unwrap_or(u32::MAX);
+        for id in 10..10 + tombstones * 2 {
+            drop(router.attach(StreamId(id)));
+            router.detach(StreamId(id));
+        }
+        assert_eq!(router.inner.lock().detached.len(), TOMBSTONES);
 
         router.route(Bytes::from_static(&[1, 2, 3]), now);
         assert!(router.inner.lock().pending.is_empty(), "too short for a header");
+    }
+
+    /// Streams nobody attaches (an `Opened` the client did not ask for, closed at once) cannot
+    /// pile up backlogs: past [`PENDING_STREAMS`], the one heard from longest ago goes.
+    #[test]
+    fn unattached_backlogs_are_bounded_in_number() {
+        let router = ScreenRouter::with_loss(0);
+        let t0 = Instant::now();
+        let streams = u32::try_from(PENDING_STREAMS).unwrap_or(u32::MAX);
+        for (n, id) in (100..100 + streams + 3).enumerate() {
+            let at = t0 + Duration::from_millis(u64::try_from(n).unwrap_or(0));
+            router.route(datagram(id, 1), at);
+        }
+        let waiting: Vec<StreamId> = router.inner.lock().pending.keys().copied().collect();
+        assert_eq!(waiting.len(), PENDING_STREAMS);
+        assert!(!waiting.contains(&StreamId(100)), "the stalest went first");
+        assert!(waiting.contains(&StreamId(100 + streams + 2)), "the newest stays");
     }
 
     #[test]

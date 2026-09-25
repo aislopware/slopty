@@ -58,7 +58,8 @@ use slopty_theme::Theme;
 pub(crate) use strip::{EMPTY_WORKSPACE, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
 #[cfg(test)]
 pub(crate) use tile::{
-    CLOSE_TILE, FULLSCREEN_TILE, INSTALL_HOOKS, RECONNECTING, SESSION_ENDED, TAKE_OVER,
+    ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, HOOKS, INSTALL_HOOKS, MUTE, MUTED, NOTE, OPENING,
+    PAUSED, READING, RECONNECTING, SESSION_ENDED, SLEEPING, TAKE, TAKE_OVER, UNMUTE,
 };
 pub use tile::{NOTE_TITLE_CHARS, file_title, note_progress, note_title};
 pub use titlebar::TITLEBAR_H;
@@ -191,7 +192,14 @@ struct Worker {
     pending_opens: HashMap<CaptureTarget, ItemId>,
     /// The first snapshot since the link came up has not been applied yet.
     awaiting_snapshot: bool,
+    /// What the human did to this worker's items while it was out of reach (or before its
+    /// first snapshot): replayed over the next snapshot and sent, in order.
+    queued: Vec<ClientMsg>,
 }
+
+/// The most a worker out of reach holds for its return: far more than a human closes, names
+/// and writes in a sitting, and a bound all the same.
+const QUEUE_MAX: usize = 1024;
 
 impl Worker {
     fn new(name: String) -> Self {
@@ -209,17 +217,41 @@ impl Worker {
             display_wanted: false,
             pending_opens: HashMap::new(),
             awaiting_snapshot: false,
+            queued: Vec::new(),
         }
     }
 
-    fn send(&self, msg: ClientMsg) {
+    /// Whether the worker can hear this client right now.
+    const fn is_linked(&self) -> bool {
+        self.link.is_some()
+    }
+
+    /// Send `msg` if the worker is linked; otherwise it is lost. For what only means anything
+    /// now (a read, a key, a stream request): see [`Self::send_or_queue`] for what must land.
+    fn send(&self, msg: ClientMsg) -> bool {
         let Some(link) = &self.link else {
             tracing::debug!(kind = msg.kind(), "worker down; not sent");
-            return;
+            return false;
         };
         if let Err(e) = link.out.try_send(msg) {
             tracing::warn!(error = %e, "outbound queue");
         }
+        true
+    }
+
+    /// Send what the human did to the worker's items (an item op, a session closed): now if
+    /// the worker is linked and has sent its snapshot, else when it next has, replayed over
+    /// that snapshot so the tile closed or the note written meanwhile stays as it was left.
+    fn send_or_queue(&mut self, msg: ClientMsg) {
+        if self.is_linked() && !self.awaiting_snapshot {
+            self.send(msg);
+            return;
+        }
+        if self.queued.len() >= QUEUE_MAX {
+            tracing::warn!(kind = msg.kind(), "worker away too long; oldest queued op dropped");
+            self.queued.remove(0);
+        }
+        self.queued.push(msg);
     }
 }
 
@@ -284,6 +316,9 @@ struct ClosedTile {
     at: Option<slopty_client::layout::Pos>,
     /// The session kept alive for the wait, for a live shell.
     session: Option<SessionId>,
+    /// A file tile's editor, kept for the wait: its edit is not on the worker's disk, so a
+    /// tile taken back must come back with the buffer it closed with, not the file's text.
+    file: Option<Entity<FileView>>,
     seq: u64,
 }
 
@@ -318,6 +353,12 @@ pub struct WorkspaceView {
     toast_drawn: crate::browser::Drawn,
     /// The line a file card opened at, for a view not made yet.
     file_focus: HashMap<ItemId, u32>,
+    /// A registry or a link changed since the notes, file cards and pages were last matched
+    /// to the items: the next frame matches them. Only then, since a frame comes with every
+    /// terminal and video update, and the matching walks every item.
+    items_dirty: bool,
+    /// Who needs the human, worked out once per frame for everything that frame draws.
+    drawn_waiting: Vec<agents::Waiting>,
     /// Window titles the picker or a listing gave (the registry stores ids).
     titles: HashMap<ItemId, String>,
     /// Coding agents the workers observed, by session.
@@ -412,6 +453,9 @@ pub struct WorkspaceView {
     watching: std::collections::HashSet<WorkerKey>,
     /// Uploads in flight.
     uploads: HashMap<slopty_core::XferId, remote::Upload>,
+    /// The landing of the drop being handed to the tiles, for the tile that takes it to upload
+    /// from and delete once the upload ends.
+    drop_landing: Option<std::path::PathBuf>,
     /// Where a drag of worker files out of the app goes: a system drag, unless the self-test
     /// keeps the promises itself.
     #[cfg(target_os = "macos")]
@@ -419,7 +463,6 @@ pub struct WorkspaceView {
     /// Forwarded ports, by session.
     ports: HashMap<SessionId, Vec<slopty_client::tunnel::Forward>>,
     focus: FocusHandle,
-    subscriptions: Vec<gpui::Subscription>,
 }
 
 impl std::fmt::Debug for WorkspaceView {
@@ -472,6 +515,8 @@ impl WorkspaceView {
             frames_drawn: 0,
             toast_drawn: Rc::default(),
             file_focus: HashMap::new(),
+            items_dirty: true,
+            drawn_waiting: Vec::new(),
             titles: HashMap::new(),
             agents: HashMap::new(),
             server_agents: HashMap::new(),
@@ -528,11 +573,11 @@ impl WorkspaceView {
             app_active: true,
             watching: std::collections::HashSet::new(),
             uploads: HashMap::new(),
+            drop_landing: None,
             #[cfg(target_os = "macos")]
             drag_sink: None,
             ports: HashMap::new(),
             focus: cx.focus_handle(),
-            subscriptions: Vec::new(),
         }
     }
 
@@ -736,12 +781,24 @@ impl WorkspaceView {
         }
     }
 
-    /// Apply an item op here at once and propose it to its worker.
+    /// Apply an item op here at once and propose it to its worker, now or, while the worker
+    /// is out of reach, once it is back.
     fn propose(&mut self, worker: WorkerKey, op: ItemOp, cx: &mut Context<Self>) {
         let Some(w) = self.workers.get_mut(&worker) else { return };
         let change = w.doc.apply_op(&op, true);
-        w.send(ClientMsg::Items(op));
+        w.send_or_queue(ClientMsg::Items(op));
         self.item_changed(worker, change, cx);
+    }
+
+    /// Close `session` on `worker` for good, now or once the worker is back: a shell closed
+    /// while its worker was away must not keep running there unseen.
+    fn close_session_on(&mut self, worker: WorkerKey, session: SessionId) {
+        if let Some(w) = self.workers.get_mut(&worker) {
+            w.send_or_queue(ClientMsg::Term {
+                session,
+                req: slopty_proto::terminal::TermRequest::Close,
+            });
+        }
     }
 
     /// The layout's clock, advanced to now.
@@ -944,17 +1001,23 @@ impl gpui::Render for WorkspaceView {
         if self.layout.config().animate != animate {
             self.layout.set_animate(animate);
         }
-        self.reconcile_notes_and_files(window, cx);
-        self.reconcile_browsers(cx);
+        if std::mem::take(&mut self.items_dirty) {
+            self.reconcile_notes_and_files(window, cx);
+            self.reconcile_browsers(cx);
+        }
         self.frames_drawn = self.frames_drawn.wrapping_add(1);
         cx.set_global(crate::browser::FrameCount(self.frames_drawn));
         self.apply_pending_focus(window, cx);
         self.sync_clipboard_watch();
-        let titlebar = self.render_titlebar(window, cx);
+        // One clock, one frame and one count of who needs the human for everything this
+        // frame draws: the bar's column dots and the strip agree, and none is worked out twice.
+        let frame = self.frame_at_clock(window);
+        self.drawn_waiting = self.needs_you();
+        let titlebar = self.render_titlebar(&frame.strip, window, cx);
         // Before the strip: a docked navigator narrows it.
         let navigator = self.render_navigator(window, cx);
         let statusbar = self.render_statusbar(window, cx);
-        let strip = self.render_strip(window, cx);
+        let strip = self.render_strip(&frame, window, cx);
         let toast = self.render_toast(cx);
         let menu = self.render_menu(window, cx);
         let picker = self.picker.as_ref().map(|(_, p)| p.clone());

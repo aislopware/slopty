@@ -175,6 +175,9 @@ pub struct ScreenView {
     native: (f32, f32),
     quality: Quality,
     quality_changed: Instant,
+    /// The painted width a change asked for inside the cooldown, taken when it ends: without
+    /// it a window left at a small scale by the overview stays there until something repaints.
+    wanted_width: Option<f32>,
     cursor: CursorState,
     /// The worker's cursor as it is drawn at that position.
     pointer: Pointer,
@@ -496,6 +499,7 @@ impl ScreenView {
             native,
             quality,
             quality_changed: Instant::now(),
+            wanted_width: None,
             cursor: CursorState::default(),
             pointer: Pointer::Arrow,
             mapped: size,
@@ -683,15 +687,32 @@ impl ScreenView {
     }
 
     /// The canvas reports how wide the view is painted (device pixels) so the stream can be
-    /// downscaled at the worker when zoomed out. Quantised to quarter steps and rate limited.
-    pub fn set_painted_width(&mut self, device_px: f32) {
+    /// downscaled at the worker when zoomed out. Quantised to quarter steps and rate limited: a
+    /// change inside the cooldown is taken when it ends, the latest width asked for winning.
+    pub fn set_painted_width(&mut self, device_px: f32, cx: &Context<Self>) {
         let wanted = (device_px / self.native.0).clamp(MIN_SCALE, 1.0);
         let bucket = (wanted * 4.0).ceil() / 4.0;
-        if (bucket - self.quality.scale).abs() < f32::EPSILON
-            || self.quality_changed.elapsed() < QUALITY_COOLDOWN
-        {
+        if (bucket - self.quality.scale).abs() < f32::EPSILON {
+            self.wanted_width = None;
             return;
         }
+        let since = self.quality_changed.elapsed();
+        if since < QUALITY_COOLDOWN {
+            if self.wanted_width.replace(device_px).is_none() {
+                let wait = QUALITY_COOLDOWN.saturating_sub(since);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    let _gone = this.update(cx, |this, cx| {
+                        if let Some(width) = this.wanted_width.take() {
+                            this.set_painted_width(width, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+            return;
+        }
+        self.wanted_width = None;
         self.quality.scale = bucket;
         self.quality_changed = Instant::now();
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
@@ -1881,18 +1902,18 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (view, mut rx) = view(cx);
-        view.update(cx, |v, _| {
+        view.update(cx, |v, cx| {
             assert_eq!(v.native(), (800.0, 600.0));
             assert_eq!(v.a11y_label(), "Remote display 2");
             // Pinned here, not left to `new`: a loaded machine can spend the cooldown before
             // the ask.
             v.quality_changed = Instant::now();
-            v.set_painted_width(300.0);
+            v.set_painted_width(300.0, cx);
         });
         assert!(sent(&mut rx).is_empty(), "within the cooldown: nothing asked");
-        view.update(cx, |v, _| {
+        view.update(cx, |v, cx| {
             v.quality_changed = past_cooldown();
-            v.set_painted_width(300.0);
+            v.set_painted_width(300.0, cx);
             assert_eq!(v.size(), (400, 300), "300/800 = 0.375 → the 0.5 bucket");
         });
         let asked = sent(&mut rx);
@@ -1900,12 +1921,12 @@ mod tests {
             matches!(asked.as_slice(), [ScreenRequest::SetQuality { stream: StreamId(4), quality }] if (quality.scale - 0.5).abs() < f32::EPSILON),
             "{asked:?}"
         );
-        view.update(cx, |v, _| {
+        view.update(cx, |v, cx| {
             v.quality_changed = past_cooldown();
-            v.set_painted_width(10.0);
+            v.set_painted_width(10.0, cx);
             assert_eq!(v.size(), (200, 150), "never below the minimum scale");
             v.quality_changed = past_cooldown();
-            v.set_painted_width(10.0);
+            v.set_painted_width(10.0, cx);
         });
         assert_eq!(sent(&mut rx).len(), 1, "the same bucket again asks nothing");
         view.update(cx, |v, _| {
@@ -1913,6 +1934,30 @@ mod tests {
             assert_eq!(v.size(), (100, 50));
             assert_eq!(v.native(), (400.0, 200.0), "native follows the scale in force (0.25)");
         });
+    }
+
+    /// A width asked for inside the cooldown is not dropped: it is taken when the cooldown
+    /// ends, even with nothing drawing the view again, and the latest width asked for wins.
+    /// (The overview closing is such a width: without it the window stayed small.)
+    #[gpui::test]
+    fn a_width_asked_for_inside_the_cooldown_is_taken_when_it_ends(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx) = view(cx);
+        view.update(cx, |v, cx| {
+            v.quality_changed = Instant::now();
+            v.set_painted_width(300.0, cx);
+            v.set_painted_width(100.0, cx);
+        });
+        assert!(sent(&mut rx).is_empty(), "within the cooldown: nothing asked yet");
+        // The cooldown's clock is the wall's; the timer is the executor's.
+        view.update(cx, |v, _| v.quality_changed = past_cooldown());
+        cx.executor().advance_clock(QUALITY_COOLDOWN);
+        cx.run_until_parked();
+        let asked = sent(&mut rx);
+        assert!(
+            matches!(asked.as_slice(), [ScreenRequest::SetQuality { quality, .. }] if (quality.scale - MIN_SCALE).abs() < f32::EPSILON),
+            "the latest width, once: {asked:?}"
+        );
+        view.update(cx, |v, _| assert_eq!(v.wanted_width, None));
     }
 
     /// The phone's key bar presses and releases a key in one go; an armed modifier rides on
@@ -2439,9 +2484,9 @@ mod tests {
     #[gpui::test]
     fn input_maps_with_the_scale_asked_for_not_the_frame_in_flight(cx: &mut gpui::TestAppContext) {
         let (view, mut rx, cx) = windowed(cx);
-        view.update(cx, |v, _| {
+        view.update(cx, |v, cx| {
             v.quality_changed = past_cooldown();
-            v.set_painted_width(300.0);
+            v.set_painted_width(300.0, cx);
             // A frame at the old scale lands after the ask, and the picture takes its size.
             v.size = (800, 600);
         });
@@ -2486,9 +2531,9 @@ mod tests {
         );
         view.update(cx, |v, _| v.cursor = CursorState { x: 400, y: 150, visible: true });
         assert_eq!(caret(&view, cx), Some(half_quarter), "on the 800×600 stream");
-        view.update(cx, |v, _| {
+        view.update(cx, |v, cx| {
             v.quality_changed = past_cooldown();
-            v.set_painted_width(300.0);
+            v.set_painted_width(300.0, cx);
             v.size = (800, 600);
         });
         assert_eq!(caret(&view, cx), Some(half_quarter), "the sample sent before the ask");

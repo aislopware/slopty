@@ -51,7 +51,7 @@ impl WorkspaceView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
-        let waiting = self.needs_you();
+        let waiting = self.drawn_waiting.clone();
         if !waiting.is_empty() {
             rows.push(heading(theme, "inbox-needs-you", "Needs you").into_any_element());
             rows.extend(waiting.into_iter().map(|w| self.waiting_row("inbox", w, cx)));

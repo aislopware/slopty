@@ -644,23 +644,32 @@ impl WorkspaceView {
                 }
                 self.remember_closed(tile, item, None, cx);
             }
-            ItemKind::Window { .. }
-            | ItemKind::Display { .. }
-            | ItemKind::File { .. }
-            | ItemKind::Browser { .. } => {
+            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Browser { .. } => {
                 self.remember_closed(tile, item, None, cx);
+            }
+            // A file's edit lives in its editor, not in the registry: the editor waits with the
+            // closed tile, so ⌘Z brings back the edit and not the disk's text.
+            ItemKind::File { .. } => {
+                let file = self.files.get(&tile.item).cloned();
+                self.remember_closed(tile, item, None, cx);
+                if let Some(closed) = self.closed.last_mut() {
+                    closed.file = file;
+                }
             }
         }
         cx.notify();
     }
 
     /// Take a live shell off, its session kept for [`UNDO_CLOSE`]. A shell without a view has
-    /// nothing to keep and closes at once.
+    /// nothing to keep and closes at once, unless its worker is out of reach: then the tile
+    /// goes now, and the session is closed when the worker is back.
     pub(super) fn close_shell(&mut self, session: SessionId, cx: &mut Context<Self>) {
         let tile = self.tile_of_session(session);
         let item = tile.and_then(|t| self.item(t)).cloned();
-        let (Some(tile), Some(item), true) = (tile, item, self.terminals.contains_key(&session))
-        else {
+        let away =
+            tile.is_some_and(|t| self.workers.get(&t.worker).is_some_and(|w| !w.is_linked()));
+        let keep = self.terminals.contains_key(&session) || away;
+        let (Some(tile), Some(item), true) = (tile, item, keep) else {
             self.send_session(session, ClientMsg::Term { session, req: TermRequest::Close });
             return;
         };
@@ -679,7 +688,7 @@ impl WorkspaceView {
         let seq = self.closed_seq;
         let title = self.card_title(tile, &item, cx);
         let at = self.layout.position(tile);
-        self.closed.push(ClosedTile { tile, item, at, session, seq });
+        self.closed.push(ClosedTile { tile, item, at, session, file: None, seq });
         self.propose(tile.worker, ItemOp::Remove(tile.item), cx);
         self.show_toast_for(ToastKind::Closed { seq, title }, UNDO_CLOSE, cx);
         cx.spawn(async move |this, cx| {
@@ -695,7 +704,7 @@ impl WorkspaceView {
         let closed = self.closed.remove(ix);
         if let Some(session) = closed.session {
             if self.summary(session).is_some() {
-                self.send(closed.tile.worker, ClientMsg::Term { session, req: TermRequest::Close });
+                self.close_session_on(closed.tile.worker, session);
             }
             self.terminals.remove(&session);
         }
@@ -716,10 +725,19 @@ impl WorkspaceView {
         };
         let Some(ix) = ix else { return };
         let closed = self.closed.remove(ix);
-        self.dismiss_closed_toast(None);
+        // Only this closing's offer goes: another tile closed meanwhile can still be taken back.
+        self.dismiss_closed_toast(Some(closed.seq));
         tracing::debug!(item = %closed.item.id, session = ?closed.session, "tile taken back");
         let tile = closed.tile;
+        // The editor the file tile closed with, edit and all, is its view again; it reads the
+        // file once more, and weighs its edit against what the disk has now.
+        if let Some(file) = closed.file {
+            self.files.insert(tile.item, file);
+        }
         self.propose(tile.worker, ItemOp::Upsert(closed.item), cx);
+        if matches!(self.item(tile).map(|i| &i.kind), Some(ItemKind::File { .. })) {
+            self.request_file(tile.item);
+        }
         if let Some(at) = closed.at {
             self.tick();
             self.layout.move_tile(

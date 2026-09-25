@@ -227,6 +227,40 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   made. The summary does not say whether the status came from hooks or from the process
   table, so a seed counts as the process table's until the first event.
 
+- ✅ **What is done to a worker's tiles while it is away lands when it is back** (2026-09-26).
+  A close, a rename or a note written while a worker's link was down used to show here at once
+  and never reach the worker: its next snapshot put the tile back, and a shell closed within
+  the undo window ran on there unseen. Refusing the action with a notice was the other way,
+  and the worse one: a link drops for seconds at a time on a laptop's Wi-Fi, and a workspace
+  that will not close a tile or keep a note meanwhile feels remote, which Slopty is not meant
+  to. So item ops and a session's close are queued per worker (`Worker::send_or_queue`),
+  bounded at 1024, and replayed in order over the worker's first snapshot after the link comes
+  back, locally first and then on the wire; a close for a session the worker no longer runs is
+  dropped. A save is the exception: whether it landed matters now, so ⌘S with the worker away
+  says at once that it cannot reach it, a save whose link drops before the answer says the
+  link dropped, and the tile is never left waiting for a reply (which held ⌘S, "Overwrite" and
+  "Reload"). The file cards read their files again when the link returns. The focused shell's
+  view goes with the link, so the workspace takes the keyboard and ⌘W still answers.
+
+- ✅ **A closed file tile keeps its edit for the undo window** (2026-09-26). A note's text is
+  in the registry, so a closed note comes back as it was; a file's edit is only in its editor,
+  and ⌘Z brought back the disk's text. The closed tile now holds its editor for the five
+  seconds, ⌘Z puts that editor back with its edit and dirty mark, and the file is read again
+  so the edit is weighed against the disk as usual. A save answered while the tile is closed
+  goes to the held editor. A confirm on close was the alternative; it adds a step to every
+  close of a dirty file for a case the undo already covers.
+
+- ✅ **A frame does only the work its drawing needs** (2026-09-26). Every terminal and video
+  frame redraws the workspace, and its `render` was walking the registry each time: note
+  texts cloned and file lists rebuilt to match views to items, the layout's frame built twice
+  (once for the bar's dots before the clock moved, so they lagged a frame), and the agents
+  waiting on the human worked out four times. Views are now matched to items only on the frame
+  after a registry or a link changed; a note's view takes another client's text itself, now
+  or when its editor lets go; the clock moves and the frame is built once for the bar and the
+  strip; the waiting agents are counted once per frame. Note bodies are drawn from GPUI's view
+  cache, as file cards were. Numbers in MEASUREMENTS.md (2026-09-26, "a workspace frame over
+  a large registry").
+
 ## Evidence: niri v26.04
 
 Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).

@@ -43,6 +43,9 @@ pub struct NoteView {
     text: Entity<TextareaState>,
     /// Text as last committed to or received from the document.
     synced: String,
+    /// The document's text, changed by another client while this one was editing: taken on
+    /// blur if nothing was typed meanwhile.
+    offered: Option<String>,
     /// Bumped on every change; a scheduled commit only fires if it is still current.
     generation: u64,
     zoom: f32,
@@ -81,20 +84,19 @@ impl NoteView {
                 .placeholder(WRITE_PLACEHOLDER)
                 .default_value(text.to_owned())
         });
-        let subscription = cx.subscribe(&state, |this, _state, event, cx| match event {
-            InputEvent::Change => this.schedule_commit(cx),
-            // Focus and blur swap the reader for the editor and back.
-            InputEvent::Blur => {
-                this.commit(cx);
-                cx.notify();
-            }
-            InputEvent::Focus => cx.notify(),
-            InputEvent::PressEnter { .. } => {}
-        });
+        let subscription =
+            cx.subscribe_in(&state, window, |this, _state, event, window, cx| match event {
+                InputEvent::Change => this.schedule_commit(cx),
+                // Focus and blur swap the reader for the editor and back.
+                InputEvent::Blur => this.blurred(window, cx),
+                InputEvent::Focus => cx.notify(),
+                InputEvent::PressEnter { .. } => {}
+            });
         Self {
             id,
             text: state,
             synced: text.to_owned(),
+            offered: None,
             generation: 0,
             zoom: 1.0,
             pad: 8.0,
@@ -140,11 +142,18 @@ impl NoteView {
         self.text.read(cx).focus_handle(cx).is_focused(window)
     }
 
-    /// Paint scale (the canvas's zoom) and the theme's inset and type size at scale 1.
-    pub const fn set_layout(&mut self, zoom: f32, pad: f32, text_size: f32) {
-        self.zoom = zoom;
-        self.pad = pad;
-        self.text_size = text_size;
+    /// Paint scale (the canvas's zoom) and the theme's inset and type size at scale 1. The
+    /// note is drawn from a cached view, so a change here draws it afresh.
+    pub fn set_layout(&mut self, zoom: f32, pad: f32, text_size: f32, cx: &mut Context<Self>) {
+        let changed = [(self.zoom, zoom), (self.pad, pad), (self.text_size, text_size)]
+            .iter()
+            .any(|(was, now)| (was - now).abs() > f32::EPSILON);
+        if changed {
+            self.zoom = zoom;
+            self.pad = pad;
+            self.text_size = text_size;
+            cx.notify();
+        }
     }
 
     /// Draw by another theme (the canvas swapped it).
@@ -153,6 +162,34 @@ impl NoteView {
             return;
         }
         self.theme = theme;
+        cx.notify();
+    }
+
+    /// The document's text for this note, as the registry has it now: taken at once while the
+    /// note is read, or kept until the editor lets go of the keyboard, then taken if nothing
+    /// was typed meanwhile (what was typed is committed over it: last writer wins).
+    pub fn offer_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if text == self.synced {
+            self.offered = None;
+            return;
+        }
+        if self.editing(window, cx) {
+            self.offered = Some(text.to_owned());
+            return;
+        }
+        self.set_text(text, window, cx);
+    }
+
+    /// The editor let go of the keyboard: what was typed goes to the document, or, with
+    /// nothing typed, the text another client wrote meanwhile comes in.
+    fn blurred(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.live_text(cx) != self.synced;
+        self.commit(cx);
+        if let Some(text) = self.offered.take()
+            && !typed
+        {
+            self.set_text(&text, window, cx);
+        }
         cx.notify();
     }
 
@@ -210,6 +247,8 @@ impl NoteView {
             return;
         }
         self.synced.clone_from(&value);
+        // What was typed is written over whatever another client wrote meanwhile.
+        self.offered = None;
         cx.emit(NoteViewEvent::Commit(value));
     }
 }

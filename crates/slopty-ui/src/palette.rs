@@ -9,7 +9,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Action, App, AppContext as _, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_core::SessionId;
@@ -705,6 +706,10 @@ pub struct CommandPalette {
     input: Entity<InputState>,
     /// Which match ↑/↓ have selected.
     selected: usize,
+    /// The list's scroll, so the selected row can be brought into view.
+    scroll: ScrollHandle,
+    /// The selection moved (a step, a new query): the next frame scrolls to it.
+    reveal: bool,
     /// A find in every card: the field's text is a needle, never a path.
     finding: bool,
     /// Whether key chords are worth printing: not on a touch device with no keyboard, where
@@ -769,6 +774,7 @@ impl CommandPalette {
         let events = cx.subscribe(&input, |this, _input, event, cx| match event {
             InputEvent::Change => {
                 this.selected = 0;
+                this.reveal = true;
                 let text = this.input.read(cx).value().to_string();
                 this.path_items = if this.finding { Vec::new() } else { path_items(&text) };
                 this.found.clear();
@@ -784,6 +790,8 @@ impl CommandPalette {
             found: Vec::new(),
             input,
             selected: 0,
+            scroll: ScrollHandle::new(),
+            reveal: false,
             finding,
             chords: true,
             theme,
@@ -862,6 +870,7 @@ impl CommandPalette {
         }
         let at = i64::try_from(self.selected(usize::try_from(count).unwrap_or(0))).unwrap_or(0);
         self.selected = usize::try_from(at.saturating_add(delta).rem_euclid(count)).unwrap_or(0);
+        self.reveal = true;
         cx.notify();
     }
 
@@ -952,6 +961,10 @@ impl Render for CommandPalette {
                 .debug_selector(move || name);
                 rows.push(heading.into_any_element());
             }
+            if ix == chosen && std::mem::take(&mut self.reveal) {
+                // Its place among the list's children, headings counted.
+                self.scroll.scroll_to_item(rows.len());
+            }
             rows.push(self.row(ix, item, ix == chosen, cx).into_any_element());
         }
         let empty = rows.is_empty();
@@ -993,6 +1006,8 @@ impl Render for CommandPalette {
                     .child(
                         div()
                             .id("palette-list")
+                            .debug_selector(|| "palette-list".to_owned())
+                            .track_scroll(&self.scroll)
                             .role(gpui::accesskit::Role::ListBox)
                             .aria_label("Commands")
                             .flex_1()

@@ -12,7 +12,7 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     px,
 };
-use slopty_client::layout::WorkerKey;
+use slopty_client::layout::{Strip, WorkerKey};
 use slopty_theme::alpha;
 
 use super::actions::{
@@ -117,7 +117,12 @@ impl WorkspaceView {
     }
 
     /// The bar. `safe_top` is the notch's inset on a phone, zero on a Mac.
-    pub(super) fn render_titlebar(&self, window: &Window, cx: &Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_titlebar(
+        &self,
+        strip: &Strip,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
@@ -219,8 +224,8 @@ impl WorkspaceView {
 
         // Right: the inbox, "+" and "…". Who needs you is counted on the bell and named in the
         // status bar, which also goes to them.
-        let total = self.needs_you_count();
-        let unread = self.inbox_count();
+        let total = self.drawn_waiting.len();
+        let unread = total.saturating_add(self.finished.len());
         let bell = has_workers.then(|| {
             let tone = if total > 0 { s.warn } else { s.accent };
             let badge = (unread > 0).then(|| {
@@ -271,7 +276,7 @@ impl WorkspaceView {
         // the toggle, the name and the buttons rather than cover them.
         let (leading, trailing) =
             (LEADING_INSET + f32::from(safe.left), spacing.md + f32::from(safe.right));
-        let indicator = self.render_indicator(cx).and_then(|(marks, dots)| {
+        let indicator = self.render_indicator(strip, cx).and_then(|(marks, dots)| {
             let text = |text: &str, size: f32, weight: gpui::FontWeight| {
                 text_width(window, &theme.typography.ui_family, text, size, weight)
             };
@@ -356,10 +361,13 @@ impl WorkspaceView {
     ///
     /// Dots, not a scaled map of the strip: a track with the view bracketed and the active
     /// column filled read as a progress bar, the loudest thing in the bar saying the least.
-    fn render_indicator(&self, cx: &Context<Self>) -> Option<(gpui::AnyElement, f32)> {
+    fn render_indicator(
+        &self,
+        strip: &Strip,
+        cx: &Context<Self>,
+    ) -> Option<(gpui::AnyElement, f32)> {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let strip = self.layout.frame().strip;
         let count = strip.columns.len();
         if count < 2 {
             return None;
@@ -393,7 +401,7 @@ impl WorkspaceView {
                     .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
                         this.tick();
-                        this.layout.strip_jump(i);
+                        this.layout.focus_column(i);
                         this.after_focus_moved(cx);
                         this.layout_touched(cx);
                         cx.notify();

@@ -1015,6 +1015,47 @@ fn a_new_note_opens_beside_the_focus_on_its_worker(cx: &mut TestAppContext) {
     assert_eq!(column_of(&view, cx, tile), column_of(&view, cx, shell).saturating_add(1));
 }
 
+/// Another client's text for a note is taken on the frame after it arrives while the note is
+/// read, and kept back while it is being edited, then taken once the editor lets go with
+/// nothing typed: the notes are matched to the registry when it changes, not every frame.
+#[gpui::test]
+fn a_note_written_elsewhere_lands_now_or_when_the_editing_stops(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    // Focus and blur are only reported in an active window.
+    cx.update(|window, _| window.activate_window());
+    let mut fake = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    let note = fake
+        .drain()
+        .iter()
+        .find_map(|m| match m {
+            ClientMsg::Items(ItemOp::Upsert(i)) if matches!(i.kind, ItemKind::Note { .. }) => {
+                Some(i.clone())
+            }
+            _ => None,
+        })
+        .expect("the note went to the worker");
+    let shown = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, cx| v.notes.get(&note.id).map(|n| n.read(cx).live_text(cx)))
+    };
+    let (key, other) = (fake.key, ClientId::new());
+    let written = |text: &str, version: u64| {
+        let item = Item { kind: ItemKind::Note { text: text.to_owned() }, ..note.clone() };
+        ItemSync::Delta { version, by: other, op: ItemOp::Upsert(item) }
+    };
+    view.update_in(cx, |v, _w, cx| v.apply_sync(key, written("from the phone", 3), cx));
+    cx.run_until_parked();
+    assert_eq!(shown(&view, cx).as_deref(), Some(""), "kept back while it is edited");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
+    cx.run_until_parked();
+    assert_eq!(shown(&view, cx).as_deref(), Some("from the phone"), "taken when editing stops");
+    view.update_in(cx, |v, _w, cx| v.apply_sync(key, written("and again", 4), cx));
+    cx.run_until_parked();
+    assert_eq!(shown(&view, cx).as_deref(), Some("and again"), "taken at once while read");
+}
+
 // ----- agents ------------------------------------------------------------------------------
 
 /// An agent waiting on the human rings the tile in the warn tone, counts in the titlebar and
@@ -1247,7 +1288,9 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+mod away;
 mod frame;
+mod measure;
 mod palette;
 mod remote;
 mod strip_marks;

@@ -149,7 +149,7 @@ pub type Run = Rc<dyn Fn(String, &mut App)>;
 
 /// A fenced block as its own element, with buttons.
 ///
-/// Its language, a "copy" button and — with `run` — a "run" button, over the code in the
+/// Its language, a "Copy" button and — with `run` — a "Run" button, over the code in the
 /// mono face on the raised surface. `ids` are the copy and run buttons' element ids and
 /// debug selectors; `scale` as for [`style`].
 #[must_use]
@@ -181,13 +181,13 @@ pub fn code_block(
     };
     let (copy_id, run_id) = ids;
     let text = body.to_owned();
-    let copy = button(copy_id, "Copy code", "copy").on_click(move |_ev, _window, cx| {
+    let copy = button(copy_id, "Copy code", "Copy").on_click(move |_ev, _window, cx| {
         cx.stop_propagation();
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
     });
     let run = run.map(|run| {
         let code = body.to_owned();
-        button(run_id, "Run in shell", "run").on_click(move |_ev, _window, cx| {
+        button(run_id, "Run in shell", "Run").on_click(move |_ev, _window, cx| {
             cx.stop_propagation();
             run(code.clone(), cx);
         })

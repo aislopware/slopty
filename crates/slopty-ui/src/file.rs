@@ -53,6 +53,8 @@ pub(crate) const CHANGED_ON_DISK: &str = "Changed on disk";
 pub(crate) const RELOAD: &str = "Reload";
 /// The bar's way out that keeps the edit.
 pub(crate) const OVERWRITE: &str = "Overwrite";
+/// Why a save has no answer, after "Not saved: ".
+pub(crate) const LINK_LOST: &str = "the link dropped before the worker answered";
 
 /// What a file tile tells the workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,7 +457,20 @@ impl FileView {
         self.dirty = false;
         self.discard = false;
         self.trouble = None;
+        // A save still out was of the text just dropped: its answer, if one comes, is about
+        // nothing this tile holds, and must not keep ⌘S, "Overwrite" and "Reload" waiting.
+        self.saving = None;
         cx.notify();
+    }
+
+    /// The link a save went out on dropped before the worker answered: the tile stops waiting
+    /// and says the edit may not be on disk, so ⌘S can send it again once the worker is back.
+    pub fn link_lost(&mut self, cx: &mut Context<Self>) {
+        if self.saving.take().is_some() {
+            tracing::info!(path = %self.path, "save unanswered: link lost");
+            self.trouble = Some(Trouble::Failed(LINK_LOST.to_owned()));
+            cx.notify();
+        }
     }
 
     /// ⌘S: send the edit, based on the version it started from. Nothing when there is
@@ -745,7 +760,7 @@ impl FileView {
     #[must_use]
     pub fn summary(&self, cx: &gpui::App) -> String {
         match &self.read {
-            None => "reading…".to_owned(),
+            None => "Reading…".to_owned(),
             Some(FileRead::Text { .. }) => {
                 let n = self.line_count(cx);
                 let mut parts =
@@ -1022,7 +1037,7 @@ impl Render for FileView {
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let text_size = self.text_size * self.zoom;
         let body = match &self.read {
-            None => self.notice("reading…".to_owned()),
+            None => self.notice("Reading…".to_owned()),
             Some(FileRead::Binary { .. } | FileRead::Missing { .. }) if self.base.is_none() => {
                 self.notice(self.summary(cx))
             }
