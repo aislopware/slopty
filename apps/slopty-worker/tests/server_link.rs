@@ -13,7 +13,6 @@ mod tests {
     use slopty_net::admission::Admission;
     use slopty_net::framed::{FramedRecv, FramedSend};
     use slopty_net::server::{AcceptedLink, ServerListener};
-    use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::orchestration::{
         ErrorCode, Input, Outcome, Size, TermRef, Verb, WaitUntil, Waited,
     };
@@ -107,7 +106,7 @@ mod tests {
         async fn welcome(link: AcceptedLink) -> (Self, Registration) {
             let Role::Worker(registration) = link.role else { panic!("{:?}", link.role) };
             let mut tx = link.tx;
-            let welcome = FromServer::Welcome { protocol: PROTOCOL_VERSION, name: "fake".into() };
+            let welcome = FromServer::Welcome { name: "fake".into() };
             tx.send(&welcome).await.unwrap();
             (Self { conn: link.conn, tx, rx: link.rx, heard: Vec::new(), next: 1 }, registration)
         }

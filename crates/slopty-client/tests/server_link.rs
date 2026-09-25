@@ -11,7 +11,6 @@ mod tests {
     use slopty_net::HostAddr;
     use slopty_net::admission::Admission;
     use slopty_net::server::{AcceptedLink, ServerListener};
-    use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::ClientKind;
     use slopty_proto::server::{FromServer, Liveness, Os, Role, WorkerCaps, WorkerInfo};
     use tokio::sync::mpsc;
@@ -53,10 +52,7 @@ mod tests {
     async fn welcome(listener: &ServerListener, directory: Vec<WorkerInfo>) -> AcceptedLink {
         let mut link = tokio::time::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
         assert!(matches!(link.role, Role::Client { .. }), "{:?}", link.role);
-        link.tx
-            .send(&FromServer::Welcome { protocol: PROTOCOL_VERSION, name: "hub".to_owned() })
-            .await
-            .unwrap();
+        link.tx.send(&FromServer::Welcome { name: "hub".to_owned() }).await.unwrap();
         link.tx.send(&FromServer::Directory(directory)).await.unwrap();
         link
     }

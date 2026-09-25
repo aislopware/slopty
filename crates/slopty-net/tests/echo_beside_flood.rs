@@ -40,7 +40,6 @@ mod tests {
     use slopty_net::streams::{self, Uni};
     use slopty_net::worker::WorkerListener;
     use slopty_net::{ClientMsg, Connection, WorkerMsg, congestion};
-    use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck};
     use slopty_proto::terminal::{TermEvent, TermRequest};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -291,7 +290,6 @@ mod tests {
         let mut client = listener.accept().await.unwrap();
         let _unwatched = accepted.send(client.conn.clone());
         let ack = HelloAck {
-            protocol: PROTOCOL_VERSION,
             worker: WorkerId::new(),
             name: "worker".to_owned(),
             app_version: "0".to_owned(),
@@ -534,7 +532,6 @@ mod tests {
         };
         let endpoint = bind_client().unwrap();
         let hello = Hello {
-            protocol: PROTOCOL_VERSION,
             client: ClientId::new(),
             kind: ClientKind::Tool,
             name: "echo".to_owned(),

@@ -1111,7 +1111,7 @@ as a dialog over the workspace with a Cancel. The phone adds "Paste", since it h
 | Crate | Role | Platform |
 |---|---|---|
 | `slopty-core` | ids, clocks, errors, small shared types | all |
-| `slopty-proto` | wire messages, versioning, codec (postcard) | all |
+| `slopty-proto` | wire messages, codec (postcard), byte goldens | all |
 | `slopty-grid` | terminal frame model, row diff, line cache | all |
 | `slopty-engine` | libghostty-vt engine: frames, scrollback, input encoders | worker |
 | `slopty-pty` | openpty/spawn/resize, ptyd protocol | worker |

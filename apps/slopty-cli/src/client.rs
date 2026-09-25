@@ -8,7 +8,6 @@ use slopty_core::ClientId;
 use slopty_net::client::{WorkerConn, bind_client, connect};
 use slopty_net::known::{KnownWorker, KnownWorkers};
 use slopty_net::{Endpoint, HostAddr};
-use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::handshake::{Caps, ClientKind, Hello};
 
 /// How long a closing endpoint may take to tell its peers.
@@ -25,7 +24,6 @@ fn known(data_dir: &Path) -> Result<KnownWorkers> {
 
 fn hello(client: ClientId) -> Hello {
     Hello {
-        protocol: PROTOCOL_VERSION,
         client,
         kind: ClientKind::Tool,
         name: format!("slopty cli @ {}", host_name()),

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use noq::{Connection, Endpoint};
-use slopty_proto::handshake::{Hello, Rejection};
-use slopty_proto::{ClientMsg, PROTOCOL_VERSION, WorkerMsg};
+use slopty_proto::handshake::Hello;
+use slopty_proto::{ClientMsg, WorkerMsg};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::NetError;
@@ -15,8 +15,6 @@ use crate::framed::{FramedRecv, FramedSend};
 
 /// How long a client has to send `Hello` after connecting.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long we let a rejected client read its `Rejected` before closing under it.
-const REJECT_LINGER: Duration = Duration::from_secs(2);
 
 /// QUIC close codes.
 pub mod close_code {
@@ -34,7 +32,7 @@ pub struct WorkerListener {
     greeted: Arc<Mutex<mpsc::Receiver<AcceptedClient>>>,
 }
 
-/// A client that said `Hello` with our protocol version. The caller answers with a `HelloAck`.
+/// A client that said `Hello`. The caller answers with a `HelloAck`.
 #[derive(Debug)]
 pub struct AcceptedClient {
     /// The QUIC connection (for session streams and datagrams).
@@ -122,19 +120,5 @@ async fn greet(incoming: noq::Incoming) -> Result<AcceptedClient, NetError> {
         conn.close(close_code::PROTOCOL.into(), b"hello first");
         return Err(NetError::Protocol("first message must be Hello"));
     };
-    if hello.protocol != PROTOCOL_VERSION {
-        let why = Rejection::ProtocolVersion { worker: PROTOCOL_VERSION };
-        reject(&conn, tx, why, close_code::PROTOCOL).await;
-        return Err(NetError::Protocol("protocol version"));
-    }
     Ok(AcceptedClient { conn, remote, hello, tx, rx })
-}
-
-/// Send `Rejected`, give the client a moment to read it (a close would discard unread data), then
-/// close.
-async fn reject(conn: &Connection, mut tx: FramedSend<WorkerMsg>, why: Rejection, code: u32) {
-    let _sent = tx.send(&WorkerMsg::Rejected(why)).await;
-    let _finished = tx.finish();
-    let _closed_by_peer = tokio::time::timeout(REJECT_LINGER, conn.closed()).await;
-    conn.close(code.into(), b"rejected");
 }

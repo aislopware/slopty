@@ -1211,3 +1211,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   direction sometimes misses the 5 s handshake timeout (4 of 24 with roles reversed). BBR3's
   low pacing rate on an app-limited lossy connection is the deeper cause the pacer patch works
   around. *Upstream:* propose patch 4 to noq with its test.
+
+- ✅ **No protocol version while in development** (2026-09-25). The user wants speed over
+  negotiation: when the wire changes, every binary is rebuilt from the same tree, and a
+  mismatched build is rebuilt rather than refused politely. Removed: `PROTOCOL_VERSION`, the
+  `protocol` field of `Hello`, `HelloAck`, `ToServer::Hello` and `FromServer::Welcome`,
+  `Rejection::ProtocolVersion` and `Refusal::ProtocolVersion`, the worker's and server's checks,
+  and the CLI's "update the older one" message. A changed golden is now just a wire change and
+  is accepted with the change. A stale peer now fails to decode or sends a wrong first message,
+  and the link drops with a codec or protocol error. Older entries that give a version number
+  are history. Tests: the `client_hello` and `server_worker_hello` goldens re-accepted, each one
+  byte shorter. The ptyd socket follows the same rule: `PTYD_PROTOCOL` and
+  `PtyError::ProtocolMismatch` are gone, and `Hello` carries nothing.

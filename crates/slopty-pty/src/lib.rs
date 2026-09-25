@@ -34,14 +34,6 @@ pub enum PtyError {
         #[source]
         source: std::io::Error,
     },
-    /// ptyd spoke a different protocol version.
-    #[error("ptyd protocol mismatch: ours {ours}, theirs {theirs}")]
-    ProtocolMismatch {
-        /// Our version.
-        ours: u16,
-        /// Theirs.
-        theirs: u16,
-    },
     /// The daemon answered with an error.
     #[error("ptyd: {0}")]
     Daemon(String),

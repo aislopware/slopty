@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use slopty_core::SessionId;
 use slopty_proto::codec;
 use slopty_pty::fdpass;
-use slopty_pty::protocol::{PTYD_PROTOCOL, PtydEvent, PtydRequest};
+use slopty_pty::protocol::{PtydEvent, PtydRequest};
 use slopty_pty::shell_integration::ShellIntegration;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
@@ -201,27 +201,15 @@ impl Connection {
     async fn handle(&mut self, req: PtydRequest) -> Result<()> {
         if !self.greeted {
             return match req {
-                PtydRequest::Hello { protocol } if protocol == PTYD_PROTOCOL => {
+                PtydRequest::Hello => {
                     self.greeted = true;
-                    self.reply(
-                        &PtydEvent::Hello { protocol: PTYD_PROTOCOL, pid: std::process::id() },
-                        None,
-                    )
-                    .await
-                }
-                PtydRequest::Hello { protocol } => {
-                    self.reply(
-                        &PtydEvent::Hello { protocol: PTYD_PROTOCOL, pid: std::process::id() },
-                        None,
-                    )
-                    .await?;
-                    anyhow::bail!("protocol mismatch: client {protocol}, ours {PTYD_PROTOCOL}")
+                    self.reply(&PtydEvent::Hello { pid: std::process::id() }, None).await
                 }
                 _ => anyhow::bail!("first message must be Hello"),
             };
         }
         match req {
-            PtydRequest::Hello { .. } => self.error(None, "already greeted").await,
+            PtydRequest::Hello => self.error(None, "already greeted").await,
             PtydRequest::Spawn { id, spec } => {
                 if self.session(id).is_some() {
                     return self.error(Some(id), "session id already exists").await;

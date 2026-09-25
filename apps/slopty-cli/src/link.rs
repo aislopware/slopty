@@ -14,7 +14,7 @@ use slopty_net::server::{DialError, ServerLink, connect};
 use slopty_net::{Endpoint, HostAddr, NetError};
 use slopty_proto::codec::CodecError;
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
-use slopty_proto::server::{FromServer, Refusal, RequestId, Role, ToServer};
+use slopty_proto::server::{FromServer, RequestId, Role, ToServer};
 use slopty_tools::Dispatch;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -174,11 +174,6 @@ impl Dispatch for Link {
 
 async fn dial(endpoint: &Endpoint, server: &HostAddr, role: Role) -> Result<ServerLink> {
     connect(endpoint, server, role).await.map_err(|e| match e {
-        DialError::Refused(Refusal::ProtocolVersion { server: theirs }) => anyhow!(
-            "the server at {server} speaks protocol {theirs} and this slopty {}; update the \
-             older one",
-            slopty_proto::PROTOCOL_VERSION
-        ),
         DialError::Refused(why) => anyhow!("the server at {server} refused: {why:?}"),
         DialError::Net(e) => anyhow!("cannot reach the server at {server}: {e}"),
     })

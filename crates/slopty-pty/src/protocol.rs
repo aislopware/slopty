@@ -11,9 +11,6 @@ use slopty_proto::terminal::TermSize;
 use crate::PtyError;
 use crate::pty::SpawnSpec;
 
-/// Bumped on incompatible change. Both sides must match exactly.
-pub const PTYD_PROTOCOL: u16 = 3;
-
 /// Bytes ptyd retains per session: output read while detached, or tapped by the worker since
 /// its last checkpoint.
 pub const DEFAULT_BACKLOG_BYTES: usize = 4 << 20;
@@ -28,11 +25,9 @@ pub fn socket_path() -> PathBuf {
 /// The worker → ptyd.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum PtydRequest {
-    /// First message.
-    Hello {
-        /// Must equal [`PTYD_PROTOCOL`].
-        protocol: u16,
-    },
+    /// First message. Nothing is versioned: ptyd and the worker are built and installed
+    /// together.
+    Hello,
     /// Create a PTY and spawn on it. Answer: `Spawned` or `Error`.
     Spawn {
         /// Chosen by the worker.
@@ -87,8 +82,6 @@ pub enum PtydRequest {
 pub enum PtydEvent {
     /// Reply to `Hello`.
     Hello {
-        /// Daemon's protocol.
-        protocol: u16,
         /// Daemon pid.
         pid: u32,
     },

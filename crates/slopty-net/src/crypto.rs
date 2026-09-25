@@ -38,8 +38,8 @@ use noq_proto::{ConnectError, ConnectionId, PathId, Side, TransportError, Transp
 /// `0x?a?a?a?a` greasing form.
 pub const QUIC_VERSION: u32 = u32::from_be_bytes(*b"SLP1");
 
-/// First bytes of a `HELLO`. The trailing number tracks nothing: protocol compatibility is
-/// [`slopty_proto::PROTOCOL_VERSION`] in `Hello`, answered by a readable rejection.
+/// First bytes of a `HELLO`. The trailing number tracks nothing: the wire is not versioned, and
+/// every binary is built from the same tree.
 pub const MAGIC: &[u8; 8] = b"slopty\0\x01";
 
 /// The one byte of a `FINISHED`.

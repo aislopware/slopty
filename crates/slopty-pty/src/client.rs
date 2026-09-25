@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::protocol::{PTYD_PROTOCOL, PtydEvent, PtydRequest, SessionInfo};
+use crate::protocol::{PtydEvent, PtydRequest, SessionInfo};
 use crate::pty::SpawnSpec;
 use crate::{PtyError, fdpass};
 
@@ -68,13 +68,8 @@ impl PtydClient {
         let (replies, replies_rx) = mpsc::unbounded_channel();
         let reader = tokio::spawn(read_loop(Arc::clone(&stream), replies_rx, exits));
         let mut client = Self { stream, replies, reader };
-        match client.call(&PtydRequest::Hello { protocol: PTYD_PROTOCOL }).await?.0 {
-            PtydEvent::Hello { protocol, .. } if protocol == PTYD_PROTOCOL => {
-                Ok((client, exits_rx))
-            }
-            PtydEvent::Hello { protocol, .. } => {
-                Err(PtyError::ProtocolMismatch { ours: PTYD_PROTOCOL, theirs: protocol })
-            }
+        match client.call(&PtydRequest::Hello).await?.0 {
+            PtydEvent::Hello { .. } => Ok((client, exits_rx)),
             _ => Err(PtyError::UnexpectedReply),
         }
     }

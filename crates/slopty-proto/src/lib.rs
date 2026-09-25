@@ -17,8 +17,8 @@
 //!   as a datagram each ([`datagram`]), taken only in order, so a lost packet costs a datagram's
 //!   trip rather than QUIC's probe timeout.
 //!
-//! Compatibility: [`PROTOCOL_VERSION`] is negotiated in `Hello`. Encoded bytes of representative
-//! messages are pinned under `src/snapshots`; a changed snapshot is a protocol change.
+//! Encoded bytes of representative messages are pinned as insta goldens under `tests/snapshots`;
+//! a changed golden is a wire change.
 
 #![forbid(unsafe_code)]
 
@@ -38,9 +38,6 @@ pub mod transfer;
 
 use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
-
-/// Bumped on any incompatible change. Workers serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 58;
 
 /// Everything a client sends on the control stream.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

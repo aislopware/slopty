@@ -14,7 +14,6 @@ use std::sync::Arc;
 use slopty_core::{ClientId, SessionId, StreamId, XferId};
 use slopty_net::worker::AcceptedClient;
 use slopty_net::{ClientMsg, Connection, NetError, WorkerMsg};
-use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::handshake::{Caps, HelloAck};
 use slopty_proto::input::{KeyAction, KeyCode, Mods};
@@ -204,7 +203,6 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     // heard, not lost; `Heard` drops the ones the greeting already told.
     let events = daemon.events.subscribe();
     let ack = HelloAck {
-        protocol: PROTOCOL_VERSION,
         worker: daemon.id,
         name: daemon.name.clone(),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),

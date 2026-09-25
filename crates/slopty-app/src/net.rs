@@ -53,7 +53,6 @@ fn hello(client: ClientId) -> Hello {
     #[cfg(not(target_os = "ios"))]
     let (kind, name) = (ClientKind::Mac, "Slopty for Mac");
     Hello {
-        protocol: slopty_proto::PROTOCOL_VERSION,
         client,
         kind,
         name: name.to_owned(),
@@ -95,8 +94,7 @@ pub struct Added {
 ///
 /// # Errors
 ///
-/// When the address does not parse, nothing answers there, or it answers with another
-/// protocol version.
+/// When the address does not parse, nothing answers there, or the worker turns it away.
 pub async fn add_worker(address: &str) -> Result<Added> {
     let address: HostAddr = address.trim().parse()?;
     let mut me = known()?;

@@ -141,9 +141,6 @@ async fn session(
     let link = match slopty_net::server::connect(endpoint, addr, Role::Worker(registration)).await {
         Ok(link) => link,
         Err(DialError::Refused(Refusal::DuplicateWorker)) => return Err(Ended::Duplicate),
-        Err(DialError::Refused(why)) => {
-            return Err(Ended::Failed(anyhow::anyhow!("refused: {why:?}")));
-        }
         Err(DialError::Net(e)) => return Err(e.into()),
     };
     let ServerLink { conn, remote, name, tx, mut rx } = link;

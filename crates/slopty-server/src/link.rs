@@ -13,7 +13,6 @@ use slopty_core::{SessionId, WorkerId};
 use slopty_net::NetError;
 use slopty_net::framed::{FramedRecv, FramedSend};
 use slopty_net::server::{AcceptedLink, ServerListener};
-use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus};
 use slopty_proto::codec::CodecError;
 use slopty_proto::orchestration::{ErrorCode, Outcome};
@@ -41,7 +40,7 @@ pub async fn serve(listener: ServerListener, hub: Hub) {
 
 async fn worker(hub: Hub, link: AcceptedLink, registration: slopty_proto::server::Registration) {
     let (out, queue) = mpsc::channel(LINK_QUEUE);
-    let welcome = FromServer::Welcome { protocol: PROTOCOL_VERSION, name: hub.name().to_owned() };
+    let welcome = FromServer::Welcome { name: hub.name().to_owned() };
     // First in the queue before the worker is reachable, so no request can overtake it.
     if out.try_send(welcome).is_err() {
         return;
@@ -132,7 +131,7 @@ async fn client(hub: Hub, link: AcceptedLink, name: String) {
     // Subscribed before the state is read, so no change falls between the two.
     let mut changes = hub.subscribe();
     let mut told = Told::default();
-    let welcome = FromServer::Welcome { protocol: PROTOCOL_VERSION, name: hub.name().to_owned() };
+    let welcome = FromServer::Welcome { name: hub.name().to_owned() };
     if tx.send(&welcome).await.is_err() {
         return;
     }

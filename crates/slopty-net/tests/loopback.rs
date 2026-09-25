@@ -11,14 +11,12 @@ mod tests {
     use slopty_net::streams::{self, Uni};
     use slopty_net::worker::WorkerListener;
     use slopty_net::{HostAddr, NetError, WorkerMsg};
-    use slopty_proto::PROTOCOL_VERSION;
-    use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck, Rejection};
+    use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck};
     use slopty_proto::terminal::TermEvent;
     use slopty_proto::transfer::{BulkHeader, Purpose};
 
     fn hello() -> Hello {
         Hello {
-            protocol: PROTOCOL_VERSION,
             client: ClientId::new(),
             kind: ClientKind::Tool,
             name: "test".to_owned(),
@@ -29,7 +27,6 @@ mod tests {
 
     fn ack(worker: WorkerId) -> HelloAck {
         HelloAck {
-            protocol: PROTOCOL_VERSION,
             worker,
             name: "worker".to_owned(),
             app_version: "0".to_owned(),
@@ -235,26 +232,6 @@ mod tests {
             assert_eq!(conn.ack.worker, id, "{addr}");
             conn.close();
         }
-    }
-
-    #[tokio::test]
-    async fn another_protocol_version_is_rejected_readably() {
-        let (listener, port, _id) = worker(Admission::default());
-        let drained = {
-            let listener = listener.clone();
-            tokio::spawn(async move { listener.accept().await.is_none() })
-        };
-        let endpoint = bind_client().unwrap();
-        let old = Hello { protocol: PROTOCOL_VERSION.wrapping_sub(1), ..hello() };
-        let err = connect_addr(&endpoint, SocketAddr::from(([127, 0, 0, 1], port)), old)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, HandshakeError::Rejected(Rejection::ProtocolVersion { worker }) if worker == PROTOCOL_VERSION),
-            "{err:?}"
-        );
-        assert!(!drained.is_finished(), "a rejected client never reaches the caller");
-        drained.abort();
     }
 
     /// A peer outside the admitted ranges is refused at its first packet: the client hears so

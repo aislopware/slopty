@@ -15,7 +15,6 @@ mod tests {
     use slopty_net::streams::{self, RawRecv, Uni};
     use slopty_net::worker::{AcceptedClient, WorkerListener};
     use slopty_net::{ClientMsg, HostAddr, WorkerMsg};
-    use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck};
     use slopty_proto::orchestration::Port;
     use slopty_proto::transfer::{
@@ -28,7 +27,6 @@ mod tests {
 
     fn hello() -> Hello {
         Hello {
-            protocol: PROTOCOL_VERSION,
             client: ClientId::new(),
             kind: ClientKind::Tool,
             name: "test".to_owned(),
@@ -46,7 +44,6 @@ mod tests {
         let accepted = tokio::spawn(async move {
             let mut client = listener.accept().await.unwrap();
             let ack = HelloAck {
-                protocol: PROTOCOL_VERSION,
                 worker,
                 name: "worker".to_owned(),
                 app_version: "0".to_owned(),

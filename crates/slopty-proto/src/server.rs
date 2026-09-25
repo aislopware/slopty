@@ -151,10 +151,8 @@ pub type RequestId = u64;
 /// Dialer → server.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ToServer {
-    /// First message: protocol and role.
+    /// First message: who is dialing.
     Hello {
-        /// Must equal [`crate::PROTOCOL_VERSION`].
-        protocol: u16,
         /// Who.
         role: Role,
     },
@@ -192,8 +190,6 @@ pub enum ToServer {
 pub enum FromServer {
     /// The hello was accepted.
     Welcome {
-        /// Server protocol version.
-        protocol: u16,
         /// The server's name.
         name: String,
     },
@@ -224,11 +220,6 @@ pub enum FromServer {
 /// Why the server refused a hello.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Refusal {
-    /// Protocol mismatch.
-    ProtocolVersion {
-        /// What the server speaks.
-        server: u16,
-    },
     /// A worker with this id is already connected from elsewhere.
     DuplicateWorker,
 }

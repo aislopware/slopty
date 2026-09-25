@@ -2,8 +2,8 @@
 //! agent makes (`slopty_proto::server`, `docs/decisions/topology.md`).
 //!
 //! Every link is one bidirectional stream opened by the dialer, whose first message is
-//! [`ToServer::Hello`]. The listener checks the protocol version itself; the role's answer
-//! ([`FromServer::Welcome`], or a refusal such as a duplicate worker) is the caller's.
+//! [`ToServer::Hello`]. The answer ([`FromServer::Welcome`], or a refusal such as a duplicate
+//! worker) is the caller's.
 //! Server links run on [`crate::endpoint::lease_transport_config`]: a link that goes quiet for
 //! [`crate::endpoint::LEASE_IDLE_TIMEOUT`] is dead, which for a worker ends its lease.
 
@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use noq::{Connection, Endpoint};
-use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::server::{FromServer, Refusal, Role, ToServer};
 use tokio::sync::{Mutex, mpsc};
 
@@ -37,7 +36,7 @@ pub struct ServerListener {
     greeted: Arc<Mutex<mpsc::Receiver<AcceptedLink>>>,
 }
 
-/// A dialer that said `Hello` with this protocol version. The caller answers it:
+/// A dialer that said `Hello`. The caller answers it:
 /// [`FromServer::Welcome`] on [`Self::tx`], or [`Self::refuse`].
 #[derive(Debug)]
 pub struct AcceptedLink {
@@ -109,19 +108,17 @@ async fn admit(endpoint: Endpoint, admission: Admission, greeted: mpsc::Sender<A
         let greeted = greeted.clone();
         tokio::spawn(async move {
             match greet(incoming).await {
-                Ok(Some(link)) => {
+                Ok(link) => {
                     let _sent = greeted.send(link).await;
                 }
-                Ok(None) => tracing::info!(%peer, "refused: protocol version"),
                 Err(e) => tracing::info!(%peer, error = %e, "dialer dropped"),
             }
         });
     }
 }
 
-/// Finish the handshake and read the `Hello`; `None` when it named another protocol version
-/// (answered here, since no role can accept it).
-async fn greet(incoming: noq::Incoming) -> Result<Option<AcceptedLink>, NetError> {
+/// Finish the handshake and read the `Hello`.
+async fn greet(incoming: noq::Incoming) -> Result<AcceptedLink, NetError> {
     let remote = crate::endpoint::canonical(incoming.remote_address());
     let conn = incoming.await.map_err(|e| NetError::Connect(e.to_string()))?;
     let (send, recv) = tokio::time::timeout(HELLO_TIMEOUT, conn.accept_bi())
@@ -133,16 +130,11 @@ async fn greet(incoming: noq::Incoming) -> Result<Option<AcceptedLink>, NetError
     let first = tokio::time::timeout(HELLO_TIMEOUT, rx.recv())
         .await
         .map_err(|_elapsed| NetError::Protocol("hello timeout"))??;
-    let ToServer::Hello { protocol, role } = first else {
+    let ToServer::Hello { role } = first else {
         conn.close(close_code::PROTOCOL.into(), b"hello first");
         return Err(NetError::Protocol("first message must be Hello"));
     };
-    let link = AcceptedLink { conn, remote, role, tx, rx };
-    if protocol != PROTOCOL_VERSION {
-        link.refuse(Refusal::ProtocolVersion { server: PROTOCOL_VERSION }).await;
-        return Ok(None);
-    }
-    Ok(Some(link))
+    Ok(AcceptedLink { conn, remote, role, tx, rx })
 }
 
 /// Why a dial to the server failed.
@@ -212,12 +204,12 @@ async fn hello(conn: Connection, remote: SocketAddr, role: Role) -> Result<Serve
     let (send, recv) = conn.open_bi().await.map_err(|e| NetError::stream(&e))?;
     let mut tx = FramedSend::<ToServer>::new(send);
     let mut rx = FramedRecv::<FromServer>::new(recv);
-    tx.send(&ToServer::Hello { protocol: PROTOCOL_VERSION, role }).await?;
+    tx.send(&ToServer::Hello { role }).await?;
     let reply = tokio::time::timeout(WELCOME_TIMEOUT, rx.recv())
         .await
         .map_err(|_elapsed| NetError::Protocol("welcome timeout"))??;
     match reply {
-        FromServer::Welcome { name, .. } => Ok(ServerLink { conn, remote, name, tx, rx }),
+        FromServer::Welcome { name } => Ok(ServerLink { conn, remote, name, tx, rx }),
         FromServer::Refused(why) => {
             conn.close(close_code::NORMAL.into(), b"refused");
             Err(DialError::Refused(why))

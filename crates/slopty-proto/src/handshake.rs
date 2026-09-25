@@ -42,8 +42,6 @@ bitflags! {
 /// First message from a client.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Hello {
-    /// Must equal [`crate::PROTOCOL_VERSION`].
-    pub protocol: u16,
     /// Stable identity of this client installation.
     pub client: ClientId,
     /// Kind.
@@ -59,8 +57,6 @@ pub struct Hello {
 /// Worker's acceptance.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct HelloAck {
-    /// Worker protocol version (equals the client's, or `Rejected` was sent instead).
-    pub protocol: u16,
     /// Worker identity: a UUID the worker keeps in its data directory, so a client keys
     /// everything by it and not by the address it happened to dial.
     pub worker: WorkerId,
@@ -77,11 +73,6 @@ pub struct HelloAck {
 /// Why a `Hello` was refused.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Rejection {
-    /// Protocol mismatch.
-    ProtocolVersion {
-        /// What the worker speaks.
-        worker: u16,
-    },
     /// Too many clients.
     Busy,
 }

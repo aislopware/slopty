@@ -26,8 +26,8 @@ in it until checked here.
   edited by hand.
 - Every `unsafe` block states the framework or ABI rule it relies on. Apple constants come from
   the objc2 statics. A `CFSTR` macro constant is spelled once, next to its use, naming its header.
-- Wire types live in `slopty-proto` with insta goldens. A changed golden is a protocol change and
-  bumps `PROTOCOL_VERSION`.
+- Wire types live in `slopty-proto` with insta goldens. A changed golden is a wire change. Nothing
+  is versioned: every binary is rebuilt together (pre-release).
 - Libraries hold no `std::sync::Mutex`, no `thread::sleep`, no `unwrap`/`expect`.
 - Every behaviour has a test at the lowest layer that can see it (`docs/TESTING.md`). A decision
   worth a paragraph gets its entry under `docs/decisions/` in the same change. Docs paraphrase

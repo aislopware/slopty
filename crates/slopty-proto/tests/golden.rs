@@ -1,5 +1,5 @@
-//! Golden byte snapshots of representative messages. A changed snapshot is a protocol change:
-//! bump [`slopty_proto::PROTOCOL_VERSION`] and accept it deliberately (`cargo insta review`).
+//! Golden byte snapshots of representative messages. A changed snapshot is a wire change: accept
+//! it deliberately (`cargo insta review`).
 
 #[cfg(test)]
 mod golden {
@@ -19,7 +19,7 @@ mod golden {
     use slopty_proto::transfer::{
         BulkHeader, ClipItem, ClipMsg, Dest, Offer, Peer, Purpose, TunnelOpen, UniHead, XferMsg,
     };
-    use slopty_proto::{ClientMsg, PROTOCOL_VERSION, WorkerMsg, codec};
+    use slopty_proto::{ClientMsg, WorkerMsg, codec};
     use uuid::Uuid;
 
     fn session() -> SessionId {
@@ -45,7 +45,6 @@ mod golden {
         snap(
             "client_hello",
             &ClientMsg::Hello(Hello {
-                protocol: PROTOCOL_VERSION,
                 client: ClientId::from_uuid(Uuid::from_u128(0x42)),
                 kind: ClientKind::IPad,
                 name: "iPad".to_owned(),
@@ -720,7 +719,6 @@ mod golden {
         snap(
             "server_worker_hello",
             &ToServer::Hello {
-                protocol: PROTOCOL_VERSION,
                 role: Role::Worker(Registration {
                     worker,
                     name: "mac-studio".to_owned(),

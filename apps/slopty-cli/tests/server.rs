@@ -127,10 +127,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(mut link) = listener.accept().await {
                     role_tx.send(link.role.clone()).unwrap();
-                    let welcome = FromServer::Welcome {
-                        protocol: slopty_proto::PROTOCOL_VERSION,
-                        name: "fake".to_owned(),
-                    };
+                    let welcome = FromServer::Welcome { name: "fake".to_owned() };
                     link.tx.send(&welcome).await.unwrap();
                     link.tx.send(&FromServer::Directory(directory())).await.unwrap();
                     let verb_tx = verb_tx.clone();

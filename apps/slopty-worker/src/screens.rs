@@ -393,7 +393,6 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let endpoint = slopty_net::client::bind_client().unwrap();
         let hello = Hello {
-            protocol: slopty_proto::PROTOCOL_VERSION,
             client: slopty_core::ClientId::new(),
             kind: ClientKind::Tool,
             name: "bench".to_owned(),
@@ -407,7 +406,6 @@ mod tests {
             );
         let mut accepted = listener.accept().await.unwrap();
         let ack = slopty_proto::handshake::HelloAck {
-            protocol: slopty_proto::PROTOCOL_VERSION,
             worker: slopty_core::WorkerId::new(),
             name: "bench".to_owned(),
             app_version: "0".to_owned(),

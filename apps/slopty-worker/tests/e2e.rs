@@ -13,7 +13,6 @@ mod tests {
     use slopty_net::framed::FramedRecv;
     use slopty_net::streams::{self, Uni};
     use slopty_net::{ClientMsg, WorkerMsg};
-    use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest, SourceState};
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
@@ -176,7 +175,6 @@ mod tests {
     async fn dial(addr: SocketAddr) -> (slopty_net::Endpoint, WorkerConn) {
         let endpoint = bind_client().unwrap();
         let hello = Hello {
-            protocol: PROTOCOL_VERSION,
             client: ClientId::new(),
             kind: ClientKind::Tool,
             name: "e2e".to_owned(),
@@ -240,7 +238,6 @@ mod tests {
     async fn shell_round_trip_over_quic() {
         let dir = tempfile::tempdir().unwrap();
         let (_guard, mut worker) = connect(dir.path()).await;
-        assert_eq!(worker.ack.protocol, PROTOCOL_VERSION);
         assert!(worker.ack.sessions.is_empty());
 
         let size = TermSize { cols: 40, rows: 6, ..TermSize::default() };
@@ -623,7 +620,6 @@ mod tests {
         config.transport_config(std::sync::Arc::new(transport));
         endpoint.set_default_client_config(config);
         let hello = Hello {
-            protocol: PROTOCOL_VERSION,
             client: ClientId::new(),
             kind: ClientKind::Tool,
             name: "e2e".to_owned(),
