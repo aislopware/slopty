@@ -55,7 +55,9 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>) -> Result<()> {
         WorkerCmd::Doctor => CtlRequest::Doctor,
         WorkerCmd::Screens => CtlRequest::Screens,
         WorkerCmd::Install(opts) => return service::install(&opts, server).await,
-        WorkerCmd::Uninstall { data_dir } => return service::uninstall(data_dir.as_deref()),
+        WorkerCmd::Uninstall { data_dir } => {
+            return service::uninstall(data_dir.as_deref()).await;
+        }
         WorkerCmd::Service { data_dir } => {
             service::status(data_dir.as_deref());
             return Ok(());

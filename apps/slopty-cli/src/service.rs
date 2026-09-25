@@ -223,7 +223,7 @@ pub async fn install(opts: &InstallOpts, server: Option<&str>) -> Result<()> {
     // Stop first: the copy must not land on a running binary, and a stale socket file makes
     // the daemon's bind fail (launchd would then loop on it).
     for label in [WORKER_LABEL, PTYD_LABEL] {
-        bootout(uid, label);
+        bootout(uid, label).await;
     }
     if bin_dir != source {
         for bin in BINARIES {
@@ -270,12 +270,12 @@ pub async fn install(opts: &InstallOpts, server: Option<&str>) -> Result<()> {
 }
 
 /// Stop both agents and remove their plists. Sessions die with `slopty-ptyd`.
-pub fn uninstall(data_dir: Option<&Path>) -> Result<()> {
+pub async fn uninstall(data_dir: Option<&Path>) -> Result<()> {
     let data_dir = data_dir.map_or_else(crate::client::data_dir, Path::to_path_buf);
     let layout = Layout::new(&data_dir);
     let uid = rustix::process::getuid().as_raw();
     for label in [WORKER_LABEL, PTYD_LABEL] {
-        bootout(uid, label);
+        bootout(uid, label).await;
         let path = layout.plist(label);
         match std::fs::remove_file(&path) {
             Ok(()) => println!("removed {label}"),
@@ -313,10 +313,23 @@ fn launchd_pid(out: &str) -> Option<u32> {
     })
 }
 
-/// Unload an agent if it is loaded; not being loaded is not an error.
-fn bootout(uid: u32, label: &str) {
-    if let Err(e) = launchctl(&["bootout", &format!("gui/{uid}/{label}")]) {
+/// How long [`bootout`] waits for launchd to let go of an agent.
+const BOOTOUT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Unload an agent if it is loaded, and return once launchd no longer knows it; not being
+/// loaded is not an error.
+///
+/// `launchctl bootout` returns while the job is still being torn down, and a `bootstrap` of the
+/// same label in that window fails with "5: Input/output error": `slopty server install` failed
+/// that way on every reinstall.
+async fn bootout(uid: u32, label: &str) {
+    let target = format!("gui/{uid}/{label}");
+    if let Err(e) = launchctl(&["bootout", &target]) {
         tracing::debug!(label, error = %e, "bootout");
+    }
+    let started = Instant::now();
+    while launchctl(&["print", &target]).is_ok() && started.elapsed() < BOOTOUT_TIMEOUT {
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -412,7 +425,7 @@ async fn probe(port: u16) -> Result<String> {
 pub async fn server(cmd: ServerCmd, data_dir: &Path) -> Result<()> {
     match cmd {
         ServerCmd::Install(opts) => install_server(&opts, data_dir).await,
-        ServerCmd::Uninstall => uninstall_server(data_dir),
+        ServerCmd::Uninstall => uninstall_server(data_dir).await,
         ServerCmd::Status => {
             server_status(data_dir).await;
             Ok(())
@@ -436,7 +449,7 @@ async fn install_server(opts: &ServerInstallOpts, data_dir: &Path) -> Result<()>
         std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
     }
     let uid = rustix::process::getuid().as_raw();
-    bootout(uid, SERVER_LABEL);
+    bootout(uid, SERVER_LABEL).await;
     if bin_dir != source {
         let to = bin_dir.join("slopty-server");
         std::fs::copy(&from, &to)
@@ -470,9 +483,9 @@ async fn install_server(opts: &ServerInstallOpts, data_dir: &Path) -> Result<()>
 }
 
 /// Stop the server's agent and remove its plist.
-fn uninstall_server(data_dir: &Path) -> Result<()> {
+async fn uninstall_server(data_dir: &Path) -> Result<()> {
     let path = Layout::new(data_dir).plist(SERVER_LABEL);
-    bootout(rustix::process::getuid().as_raw(), SERVER_LABEL);
+    bootout(rustix::process::getuid().as_raw(), SERVER_LABEL).await;
     match std::fs::remove_file(&path) {
         Ok(()) => println!("removed {SERVER_LABEL}"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
