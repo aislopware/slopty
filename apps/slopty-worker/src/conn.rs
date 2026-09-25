@@ -1,10 +1,12 @@
 //! One client connection.
 //!
-//! The loop here only routes. A terminal's keys, a window's input and the client's loss feedback
-//! are handled where they arrive; everything that waits on something slow (a window stream, the
-//! disk, ptyd, the pasteboard) runs on a task of its own and reports back through [`Done`]. What
-//! one request costs therefore never lands on another terminal's echo (MEASUREMENTS.md, "echo
-//! behind slow requests").
+//! The loop here only routes, and never awaits. A terminal's keys, a window's input and the
+//! client's loss feedback are handled where they arrive; everything that waits on something
+//! slow runs on a task of its own and reports back through [`Done`]: a window stream, the disk,
+//! ptyd, the pasteboard, a session stream waiting for the client to allow it, the encoder's
+//! rate changes, and the worker's events going to a client that reads slowly. What one request
+//! costs therefore never lands on another terminal's echo (MEASUREMENTS.md, "echo behind slow
+//! requests" and "nothing on the connection waits behind anything slow").
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -16,14 +18,14 @@ use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::handshake::{Caps, HelloAck};
 use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::items::ItemSync;
-use slopty_proto::screen::{Feedback, ScreenInput, ScreenRequest};
+use slopty_proto::screen::{Feedback, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest};
 use slopty_proto::terminal::{CloseReason, TermEvent, TermRequest, TermSize};
 use slopty_proto::transfer::{ClipMsg, Dest, XferMsg};
 use slopty_worker::WorkerError;
 use slopty_worker::clip::Paste;
 use slopty_worker::screen::{StreamControl, listing};
-use slopty_worker::session::Outbound;
-use tokio::sync::{mpsc, watch};
+use slopty_worker::session::{ClientSink, Outbound, SessionHandle};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::Daemon;
@@ -32,7 +34,8 @@ use crate::screens::{Command, Told};
 /// The weak end of a session's sink, as the connection keeps it.
 type WeakClientSink = mpsc::WeakSender<Outbound>;
 
-/// Events buffered per attached session before the client is considered stuck.
+/// Events buffered per attached session. At most two of them are frames (`session::Outbound`'s
+/// credit); an event that does not fit waits in the session actor.
 const SINK_DEPTH: usize = 256;
 /// Outbound control messages buffered before the writer applies backpressure.
 const CONTROL_DEPTH: usize = 1024;
@@ -40,6 +43,12 @@ const CONTROL_DEPTH: usize = 1024;
 const FEEDBACK_DEPTH: usize = 256;
 /// Clipboard representations the client sent up as streams, queued for the peer loop.
 const CLIP_DEPTH: usize = 8;
+/// Receiver reports waiting for the task that applies them. Reports come a few times a second
+/// per stream and each one stands alone, so one that finds the queue full is dropped.
+const REPORT_DEPTH: usize = 64;
+/// How long an upload into a terminal's directory waits to learn the directory before it
+/// lands in the drop directory instead.
+const CWD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long a paste chord waits for the client's clipboard to arrive before it goes to the
 /// window anyway (and pastes what the worker had).
 const PASTE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -112,6 +121,46 @@ enum Done {
     PastePlan(Option<Paste>),
     /// The client's clipboard is on the pasteboard.
     PasteWritten,
+    /// A session ended. Its pump is let go of rather than aborted: it sends what the actor left
+    /// in the sink, then finishes its stream.
+    SessionClosed(SessionId),
+    /// The worker's events stopped reaching the client, and why: the connection is done.
+    Ended(&'static str),
+}
+
+/// A receiver report for the task that applies it.
+struct Asked {
+    stream: StreamId,
+    control: StreamControl,
+    report: ReceiverReport,
+}
+
+/// What the client has been told of the sessions and the item registry, so an event it already
+/// has (in the `HelloAck`, the first snapshot or a resync) is not sent to it twice.
+#[derive(Debug, Default)]
+struct Heard {
+    sessions: HashSet<SessionId>,
+    /// The item registry version of the last snapshot sent: deltas up to it are in it.
+    items_floor: u64,
+}
+
+impl Heard {
+    /// Whether `msg` still tells the client something; what it tells is noted either way.
+    fn admit(&mut self, msg: &WorkerMsg) -> bool {
+        match msg {
+            WorkerMsg::SessionOpened(summary) => self.sessions.insert(summary.id),
+            WorkerMsg::SessionClosed { session, .. } => {
+                self.sessions.remove(session);
+                true
+            }
+            WorkerMsg::Items(ItemSync::Delta { version, .. }) => *version > self.items_floor,
+            WorkerMsg::Items(ItemSync::Snapshot { version, .. }) => {
+                self.items_floor = self.items_floor.max(*version);
+                true
+            }
+            _ => true,
+        }
+    }
 }
 
 /// One screen stream as the loop sees it: where its commands go, and once it is open, where
@@ -143,6 +192,9 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         Ok(())
     });
 
+    // Subscribed before anything the greeting carries is read, so an event in between is
+    // heard, not lost; `Heard` drops the ones the greeting already told.
+    let events = daemon.events.subscribe();
     let ack = HelloAck {
         protocol: PROTOCOL_VERSION,
         worker: daemon.id,
@@ -151,17 +203,25 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         caps: Caps::empty(),
         sessions: daemon.worker.summaries().await,
     };
-    let sessions: HashSet<SessionId> = ack.sessions.iter().map(|s| s.id).collect();
-    out.send(WorkerMsg::HelloAck(ack)).await.map_err(|_gone| NetError::Closed)?;
-    out.send(WorkerMsg::Items(daemon.items.snapshot())).await.map_err(|_gone| NetError::Closed)?;
-    // Collected first: the lock must not be held across the sends.
+    let mut heard =
+        Heard { sessions: ack.sessions.iter().map(|s| s.id).collect(), ..Heard::default() };
+    let mut greeting = vec![WorkerMsg::HelloAck(ack), WorkerMsg::Items(daemon.items.snapshot())];
+    // Collected first: the locks must not be held across the sends.
     let agents = daemon.agents.lock().snapshot();
-    for event in agents {
-        out.send(WorkerMsg::Agent(event)).await.map_err(|_gone| NetError::Closed)?;
+    greeting.extend(agents.into_iter().map(WorkerMsg::Agent));
+    let known = daemon.ports.lock().known();
+    greeting.extend(known.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
+    for msg in greeting {
+        heard.admit(&msg);
+        out.send(msg).await.map_err(|_gone| NetError::Closed)?;
     }
 
-    let mut events = daemon.events.subscribe();
+    let (done, mut done_rx) = mpsc::unbounded_channel();
+    let link = conn.stable_id();
     let mut tasks = JoinSet::new();
+    tasks.spawn(relay_events(daemon.clone(), link, heard, events, out.clone(), done.clone()));
+    let (reports, asked) = mpsc::channel(REPORT_DEPTH);
+    tasks.spawn(answer_reports(conn.clone(), out.clone(), asked));
     tasks.spawn(slopty_net::endpoint::trace_path_health(conn.clone(), "worker"));
     let (feedback_tx, mut feedback_rx) = mpsc::channel::<Feedback>(FEEDBACK_DEPTH);
     tasks.spawn(read_feedback(conn.clone(), feedback_tx));
@@ -176,21 +236,14 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     tasks.spawn(crate::tunnel::accept(conn.clone(), hello.client));
     let (watch_files, watched) = watch::channel(Vec::new());
     tasks.spawn(crate::files::watch(hello.client, out.clone(), watched));
-    let known = daemon.ports.lock().known();
-    for (session, ports) in known {
-        out.send(WorkerMsg::Ports { session, ports }).await.map_err(|_gone| NetError::Closed)?;
-    }
-    let (done, mut done_rx) = mpsc::unbounded_channel();
     let (told, mut told_rx) = mpsc::unbounded_channel();
-    let link = conn.stable_id();
     let mut peer = Peer {
         daemon,
         conn,
         client: hello.client,
         name: hello.name,
         out,
-        sessions,
-        items_floor: 0,
+        reports,
         attached: HashMap::new(),
         screens: HashMap::new(),
         streams: JoinSet::new(),
@@ -213,11 +266,15 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
                     Err(NetError::Closed) => break Ok("control stream closed"),
                     Err(e) => break Err(e),
                 };
-                peer.handle(msg).await;
+                peer.handle(msg);
             }
             Some(feedback) = feedback_rx.recv() => peer.feedback(feedback),
             Some(clip) = clips_rx.recv() => peer.clip_data(clip.generation, &clip.uti, clip.bytes),
-            Some(done) = done_rx.recv() => peer.done(done).await,
+            Some(done) = done_rx.recv() => {
+                if let Some(why) = peer.done(done) {
+                    break Ok(why);
+                }
+            }
             Some(told) = told_rx.recv() => peer.told(told),
             () = fetching_until(peer.held.as_ref()) => {
                 tracing::debug!(client = %peer.client, "paste went on without the clipboard");
@@ -225,31 +282,6 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
             }
             Some(_finished) = peer.tasks.join_next(), if !peer.tasks.is_empty() => {}
             Some(_finished) = peer.streams.join_next(), if !peer.streams.is_empty() => {}
-            ev = events.recv() => {
-                match ev {
-                    // The worker's clipboard goes only to the clients that want it now.
-                    Ok(WorkerMsg::Clip(ClipMsg::Offer(_))) if !daemon.clip.is_watching(peer.link) => {}
-                    // Already in the snapshot a resync sent.
-                    Ok(WorkerMsg::Items(ItemSync::Delta { version, .. })) if version <= peer.items_floor => {}
-                    Ok(msg) => {
-                        peer.heard(&msg);
-                        if peer.out.send(msg).await.is_err() {
-                            break Ok("writer gone");
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(client = %peer.client, lagged = n, "missed worker events; sending the state again");
-                        // What is queued is older than the state about to be read; skip it.
-                        events = events.resubscribe();
-                        if peer.resync().await.is_err() {
-                            break Ok("writer gone");
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        break Ok("daemon shutting down");
-                    }
-                }
-            }
             reason = peer.conn.closed() => {
                 tracing::info!(client = %peer.client, %reason, "connection closed");
                 break Ok("connection closed");
@@ -328,16 +360,190 @@ async fn read_feedback(conn: Connection, out: mpsc::Sender<Feedback>) {
     }
 }
 
-/// Tell the client a request about `session` failed.
+/// Tell the client a request about `session` failed, from a task that may wait for room.
 async fn report(
     out: &mpsc::Sender<WorkerMsg>,
     client: ClientId,
     session: SessionId,
-    e: &WorkerError,
+    e: &(dyn std::fmt::Display + Sync),
 ) {
     tracing::warn!(%client, %session, error = %e, "request failed");
     let event = TermEvent::Error(e.to_string());
     let _sent = out.send(WorkerMsg::Term { session, event }).await;
+}
+
+/// Queue `msg` for the client without waiting. A client whose control queue is full has not
+/// read a thousand messages; what the loop answers it (a pong, an error, a clipboard fetch) is
+/// dropped rather than let it hold every other terminal on the connection.
+fn post(out: &mpsc::Sender<WorkerMsg>, client: ClientId, msg: WorkerMsg) {
+    match out.try_send(msg) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(msg)) => {
+            tracing::warn!(%client, ?msg, "control queue full; answer dropped");
+        }
+    }
+}
+
+/// Send the worker's events to one client until the connection ends, waiting on the client as
+/// long as it takes: a slow reader holds only this task, and once it lags the broadcast it is
+/// sent the state again. Tells the loop of each closed session, and why it stopped.
+async fn relay_events(
+    daemon: Daemon,
+    link: slopty_worker::clip::Link,
+    mut heard: Heard,
+    mut events: broadcast::Receiver<WorkerMsg>,
+    out: mpsc::Sender<WorkerMsg>,
+    done: mpsc::UnboundedSender<Done>,
+) {
+    let why = loop {
+        match events.recv().await {
+            // The worker's clipboard goes only to the clients that want it now.
+            Ok(WorkerMsg::Clip(ClipMsg::Offer(_))) if !daemon.clip.is_watching(link) => {}
+            Ok(msg) => {
+                if let WorkerMsg::SessionClosed { session, .. } = &msg {
+                    let _sent = done.send(Done::SessionClosed(*session));
+                }
+                if heard.admit(&msg) && out.send(msg).await.is_err() {
+                    break "writer gone";
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(lagged = n, "missed worker events; sending the state again");
+                // What is queued is older than the state about to be read; skip it.
+                events = events.resubscribe();
+                if resync(&daemon, &mut heard, &out, &done).await.is_err() {
+                    break "writer gone";
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break "daemon shutting down",
+        }
+    };
+    let _sent = done.send(Done::Ended(why));
+}
+
+/// Send the client the state the broadcast carries, for events it missed: the sessions opened
+/// and closed since, the item registry, the agents and the ports. Clipboard offers are not
+/// repeated; the next copy offers again. `Err` when the writer is gone.
+async fn resync(
+    daemon: &Daemon,
+    heard: &mut Heard,
+    out: &mpsc::Sender<WorkerMsg>,
+    done: &mpsc::UnboundedSender<Done>,
+) -> Result<(), ()> {
+    let summaries = daemon.worker.summaries().await;
+    let now: HashSet<SessionId> = summaries.iter().map(|s| s.id).collect();
+    let mut msgs: Vec<WorkerMsg> = heard
+        .sessions
+        .difference(&now)
+        // Why each ended was among what was missed.
+        .map(|&session| WorkerMsg::SessionClosed { session, reason: CloseReason::Exited })
+        .collect();
+    for msg in &msgs {
+        if let WorkerMsg::SessionClosed { session, .. } = msg {
+            let _sent = done.send(Done::SessionClosed(*session));
+        }
+    }
+    msgs.extend(summaries.into_iter().map(WorkerMsg::SessionOpened));
+    msgs.push(WorkerMsg::Items(daemon.items.snapshot()));
+    // Collected first: the locks must not be held across the sends.
+    let agents = daemon.agents.lock().snapshot();
+    msgs.extend(agents.into_iter().map(WorkerMsg::Agent));
+    let ports = daemon.ports.lock().known();
+    msgs.extend(ports.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
+    for msg in msgs {
+        if heard.admit(&msg) {
+            out.send(msg).await.map_err(|_gone| ())?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply receiver reports in the order they came, off the loop: a report can change the
+/// encoder's bitrate and cadence, which are VideoToolbox property calls and wait on the
+/// encoder's lock while the stream rebuilds it. A changed rate is told to the client.
+async fn answer_reports(
+    conn: Connection,
+    out: mpsc::Sender<WorkerMsg>,
+    mut asked: mpsc::Receiver<Asked>,
+) {
+    while let Some(Asked { stream, control, report }) = asked.recv().await {
+        let path = slopty_net::endpoint::path_rtt_cwnd(&conn).map(|(rtt, cwnd)| {
+            slopty_worker::screen::PathSample {
+                rtt: slopty_core::Duration::from_micros(
+                    u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX),
+                ),
+                cwnd,
+            }
+        });
+        let decided = tokio::task::spawn_blocking(move || control.report(&report, path)).await;
+        let Ok(Some(decision)) = decided else { continue };
+        let event = ScreenEvent::Rate {
+            stream,
+            target_bps: decision.target_bps,
+            verdict: decision.verdict,
+            capped: decision.capped,
+        };
+        if out.send(WorkerMsg::Screen(event)).await.is_err() {
+            break;
+        }
+    }
+}
+
+/// Where `session`'s shell is: its OSC 7 directory, else its foreground process's.
+async fn session_cwd(daemon: &Daemon, session: SessionId) -> Option<String> {
+    let handle = daemon.worker.get(session).ok()?;
+    if let Some(cwd) = handle.snapshot().await.ok()?.cwd {
+        return Some(cwd);
+    }
+    let cwd = handle.probe().await.ok()?.foreground?.cwd?;
+    Some(cwd.to_string_lossy().into_owned())
+}
+
+/// What a session's pump needs of its connection.
+struct Pipe {
+    conn: Connection,
+    out: mpsc::Sender<WorkerMsg>,
+    client: ClientId,
+}
+
+/// Open `session`'s stream to the client and pump the actor's events into it. The actor already
+/// has the sink, so events wait in it while the stream opens. A stream the client does not
+/// allow within [`slopty_net::streams::SESSION_STREAM_WAIT`] detaches the sink and tells the
+/// client the attach failed.
+async fn pump(
+    pipe: Pipe,
+    handle: SessionHandle,
+    sink: ClientSink,
+    mut events: mpsc::Receiver<Outbound>,
+) {
+    let Pipe { conn, out, client } = pipe;
+    let session = handle.id();
+    let wait = slopty_net::streams::SESSION_STREAM_WAIT;
+    let mut stream = match slopty_net::streams::open_session(&conn, session, wait).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            let _ignored = handle.detach_sink(client, &sink);
+            return report(&out, client, session, &e).await;
+        }
+    };
+    // Only the actor holds the sink from here, so the pump ends when it lets go.
+    drop(sink);
+    while let Some(event) = events.recv().await {
+        let send_from = std::time::Instant::now();
+        if let Err(e) = stream.send_raw(event.wire()).await {
+            tracing::debug!(%client, %session, error = %e, "session stream ended");
+            break;
+        }
+        if event.is_frame() {
+            tracing::trace!(
+                %client,
+                %session,
+                send_us = send_from.elapsed().as_micros(),
+                "frame sent"
+            );
+        }
+    }
+    let _finished = stream.finish();
 }
 
 /// One client's view of the daemon: its connection, outbound control queue, and attachments.
@@ -348,11 +554,8 @@ struct Peer<'d> {
     /// Its name from `Hello`, for the pointings it relays.
     name: String,
     out: mpsc::Sender<WorkerMsg>,
-    /// The sessions this client was told exist, for a resync to tell it which ones it missed
-    /// opening or closing.
-    sessions: HashSet<SessionId>,
-    /// The item registry version of the last resync's snapshot: deltas up to it are in it.
-    items_floor: u64,
+    /// Receiver reports, for the task that applies them.
+    reports: mpsc::Sender<Asked>,
     /// Per attached session: the stream pump and the sink the actor writes into. The sink is
     /// weak, so the pump ends once the session's actor lets go of its end, whoever closed it.
     attached: HashMap<SessionId, (JoinHandle<()>, WeakClientSink)>,
@@ -395,65 +598,23 @@ impl Drop for Peer<'_> {
 }
 
 impl Peer<'_> {
-    /// Keep track of what a broadcast event told the client. A closed session's pump is let go
-    /// of rather than aborted: it sends what the actor left in the sink, then finishes its
-    /// stream.
-    fn heard(&mut self, msg: &WorkerMsg) {
-        match msg {
-            WorkerMsg::SessionOpened(summary) => {
-                self.sessions.insert(summary.id);
-            }
-            WorkerMsg::SessionClosed { session, .. } => {
-                self.sessions.remove(session);
-                drop(self.attached.remove(session));
-            }
-            _ => {}
-        }
+    /// Queue `msg` for the client without waiting ([`post`]).
+    fn post(&self, msg: WorkerMsg) {
+        post(&self.out, self.client, msg);
     }
 
-    /// Send the client the state the broadcast carries, for events it missed: the sessions
-    /// opened and closed since, the item registry, the agents and the ports. Clipboard offers
-    /// are not repeated; the next copy offers again. `Err` when the writer is gone.
-    async fn resync(&mut self) -> Result<(), ()> {
-        let summaries = self.daemon.worker.summaries().await;
-        let now: HashSet<SessionId> = summaries.iter().map(|s| s.id).collect();
-        let mut msgs: Vec<WorkerMsg> = self
-            .sessions
-            .difference(&now)
-            // Why each ended was among what was missed.
-            .map(|&session| WorkerMsg::SessionClosed { session, reason: CloseReason::Exited })
-            .collect();
-        msgs.extend(
-            summaries
-                .into_iter()
-                .filter(|s| !self.sessions.contains(&s.id))
-                .map(WorkerMsg::SessionOpened),
-        );
-        let items = self.daemon.items.snapshot();
-        if let ItemSync::Snapshot { version, .. } = &items {
-            self.items_floor = *version;
-        }
-        msgs.push(WorkerMsg::Items(items));
-        // Collected first: the lock must not be held across the sends.
-        let agents = self.daemon.agents.lock().snapshot();
-        msgs.extend(agents.into_iter().map(WorkerMsg::Agent));
-        let ports = self.daemon.ports.lock().known();
-        msgs.extend(ports.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
-        for msg in msgs {
-            self.heard(&msg);
-            self.out.send(msg).await.map_err(|_gone| ())?;
-        }
-        Ok(())
+    /// Tell the client a request about `session` failed, without waiting.
+    fn fail(&self, session: SessionId, e: &WorkerError) {
+        tracing::warn!(client = %self.client, %session, error = %e, "request failed");
+        self.post(WorkerMsg::Term { session, event: TermEvent::Error(e.to_string()) });
     }
 
-    async fn handle(&mut self, msg: ClientMsg) {
+    fn handle(&mut self, msg: ClientMsg) {
         match msg {
             ClientMsg::Hello(_) => {
                 tracing::warn!(client = %self.client, "duplicate Hello ignored");
             }
-            ClientMsg::Ping { sent_at } => {
-                let _sent = self.out.send(WorkerMsg::Pong { sent_at }).await;
-            }
+            ClientMsg::Ping { sent_at } => self.post(WorkerMsg::Pong { sent_at }),
             ClientMsg::OpenSession(req) => {
                 let (daemon, client) = (self.daemon.clone(), self.client);
                 let (out, done) = (self.out.clone(), self.done.clone());
@@ -481,7 +642,7 @@ impl Peer<'_> {
                 if matches!(req, TermRequest::Raw(_) | TermRequest::Key(_)) {
                     tracing::trace!(client = %self.client, %session, "term input received");
                 }
-                self.term(session, req).await;
+                self.term(session, req);
             }
             ClientMsg::Point { item } => {
                 // Ephemeral: relayed as is, never in the registry. An item the worker no longer
@@ -494,9 +655,9 @@ impl Peer<'_> {
                 Ok(delta) => {
                     let _sent = self.daemon.events.send(WorkerMsg::Items(delta));
                 }
-                Err(e) => report(&self.out, self.client, SessionId::nil(), &e).await,
+                Err(e) => self.fail(SessionId::nil(), &e),
             },
-            ClientMsg::Screen(req) => self.screen(req).await,
+            ClientMsg::Screen(req) => self.screen(req),
             ClientMsg::FindFiles { root, query } => {
                 self.tasks.spawn(crate::files::find(self.out.clone(), root, query));
             }
@@ -516,8 +677,8 @@ impl Peer<'_> {
                     crate::files::write(client, &out, path, text, base_modified_ms).await;
                 });
             }
-            ClientMsg::Clip(msg) => self.clip(msg).await,
-            ClientMsg::Xfer(msg) => self.xfer(msg).await,
+            ClientMsg::Clip(msg) => self.clip(msg),
+            ClientMsg::Xfer(msg) => self.xfer(msg),
             ClientMsg::InstallHooks => {
                 let (client, out) = (self.client, self.out.clone());
                 self.tasks.spawn(async move {
@@ -529,15 +690,14 @@ impl Peer<'_> {
         }
     }
 
-    /// A task the loop started finished its part.
-    async fn done(&mut self, done: Done) {
+    /// A task the loop started finished its part; `Some` with why when the connection is done.
+    fn done(&mut self, done: Done) -> Option<&'static str> {
         match done {
-            Done::Attach { session, size } => self.attach(session, size).await,
+            Done::Attach { session, size } => self.attach(session, size),
             Done::PastePlan(Some(Paste::Fetch { generation, utis })) => {
                 tracing::debug!(client = %self.client, generation, ?utis, "paste waits for the clipboard");
                 for uti in utis {
-                    let fetch = ClipMsg::Fetch { generation, uti };
-                    let _sent = self.out.send(WorkerMsg::Clip(fetch)).await;
+                    self.post(WorkerMsg::Clip(ClipMsg::Fetch { generation, uti }));
                 }
                 let until = tokio::time::Instant::now()
                     .checked_add(PASTE_WAIT)
@@ -551,7 +711,10 @@ impl Peer<'_> {
                 tracing::debug!(client = %self.client, "pasteboard set for a paste");
                 self.release_held();
             }
+            Done::SessionClosed(session) => drop(self.attached.remove(&session)),
+            Done::Ended(why) => return Some(why),
         }
+        None
     }
 
     /// A screen stream's task says where it is.
@@ -568,7 +731,7 @@ impl Peer<'_> {
         }
     }
 
-    async fn clip(&mut self, msg: ClipMsg) {
+    fn clip(&mut self, msg: ClipMsg) {
         match msg {
             ClipMsg::Watch(on) => {
                 tracing::debug!(client = %self.client, on, "clipboard watch");
@@ -579,7 +742,11 @@ impl Peer<'_> {
                 self.daemon.clip.offered(self.link, offer);
             }
             ClipMsg::Fetch { generation, uti } => {
-                crate::xfer::send_clip(self.daemon, &self.conn, &self.out, generation, uti).await;
+                let (daemon, conn, out) =
+                    (self.daemon.clone(), self.conn.clone(), self.out.clone());
+                self.tasks.spawn(async move {
+                    crate::xfer::send_clip(&daemon, &conn, &out, generation, uti).await;
+                });
             }
             ClipMsg::Data { generation, uti, bytes } => self.clip_data(generation, &uti, bytes),
             ClipMsg::Unavailable { generation } => {
@@ -643,15 +810,31 @@ impl Peer<'_> {
         }
     }
 
-    async fn xfer(&mut self, msg: XferMsg) {
+    fn xfer(&mut self, msg: XferMsg) {
         match msg {
             XferMsg::Begin { xfer, dest: Some(dest), files, bytes } => {
-                let cwd = match &dest {
-                    Dest::SessionCwd(session) => self.session_cwd(*session).await,
+                let in_session = match &dest {
+                    Dest::SessionCwd(session) => Some(*session),
                     Dest::Staging | Dest::Path(_) => None,
                 };
-                tracing::info!(client = %self.client, %xfer, ?dest, ?cwd, files, bytes, "upload begins");
-                self.daemon.transfers.begin(xfer, &dest, cwd.as_deref(), files);
+                let (daemon, client) = (self.daemon.clone(), self.client);
+                let begin = move |cwd: Option<String>| {
+                    tracing::info!(%client, %xfer, ?dest, ?cwd, files, bytes, "upload begins");
+                    daemon.transfers.begin(xfer, &dest, cwd.as_deref(), files);
+                };
+                // The directory is a question for the session's actor and then ptyd; the
+                // upload's files wait for the `Begin` (`xfer::BEGIN_WAIT`), nothing else does.
+                match in_session {
+                    Some(session) => {
+                        let daemon = self.daemon.clone();
+                        self.tasks.spawn(async move {
+                            let asked =
+                                tokio::time::timeout(CWD_WAIT, session_cwd(&daemon, session));
+                            begin(asked.await.ok().flatten());
+                        });
+                    }
+                    None => begin(None),
+                }
             }
             XferMsg::Resume { xfer, name } => {
                 let transfers = Arc::clone(&self.daemon.transfers);
@@ -697,17 +880,7 @@ impl Peer<'_> {
         }
     }
 
-    /// Where `session`'s shell is: its OSC 7 directory, else its foreground process's.
-    async fn session_cwd(&self, session: SessionId) -> Option<String> {
-        let handle = self.daemon.worker.get(session).ok()?;
-        if let Some(cwd) = handle.snapshot().await.ok()?.cwd {
-            return Some(cwd);
-        }
-        let cwd = handle.probe().await.ok()?.foreground?.cwd?;
-        Some(cwd.to_string_lossy().into_owned())
-    }
-
-    async fn screen(&mut self, req: ScreenRequest) {
+    fn screen(&mut self, req: ScreenRequest) {
         match req {
             ScreenRequest::List => {
                 let out = self.out.clone();
@@ -744,24 +917,10 @@ impl Peer<'_> {
                 self.command(stream, Command::SetQuality(quality));
             }
             ScreenRequest::Report { stream, report } => {
-                if let Some(control) = self.screens.get(&stream).and_then(|s| s.control.as_ref()) {
-                    let path =
-                        slopty_net::endpoint::path_rtt_cwnd(&self.conn).map(|(rtt, cwnd)| {
-                            slopty_worker::screen::PathSample {
-                                rtt: slopty_core::Duration::from_micros(
-                                    u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX),
-                                ),
-                                cwnd,
-                            }
-                        });
-                    if let Some(decision) = control.report(&report, path) {
-                        let event = slopty_proto::screen::ScreenEvent::Rate {
-                            stream,
-                            target_bps: decision.target_bps,
-                            verdict: decision.verdict,
-                            capped: decision.capped,
-                        };
-                        let _sent = self.out.send(WorkerMsg::Screen(event)).await;
+                if let Some(control) = self.screens.get(&stream).and_then(|s| s.control.clone()) {
+                    let asked = Asked { stream, control, report };
+                    if self.reports.try_send(asked).is_err() {
+                        tracing::debug!(client = %self.client, %stream, "reports backed up; one dropped");
                     }
                 }
             }
@@ -805,9 +964,9 @@ impl Peer<'_> {
         while self.streams.join_next().await.is_some() {}
     }
 
-    async fn term(&mut self, session: SessionId, req: TermRequest) {
+    fn term(&mut self, session: SessionId, req: TermRequest) {
         match req {
-            TermRequest::Attach { size } => self.attach(session, size).await,
+            TermRequest::Attach { size } => self.attach(session, size),
             TermRequest::Detach => {
                 self.forget(session);
                 if let Ok(h) = self.daemon.worker.get(session) {
@@ -831,7 +990,7 @@ impl Peer<'_> {
                 let outcome =
                     self.daemon.worker.get(session).and_then(|h| h.request(self.client, other));
                 if let Err(e) = outcome {
-                    report(&self.out, self.client, session, &e).await;
+                    self.fail(session, &e);
                 }
             }
         }
@@ -843,58 +1002,80 @@ impl Peer<'_> {
         }
     }
 
-    /// Attach to `session`: open a uni stream and pump the actor's events into it.
-    async fn attach(&mut self, session: SessionId, size: TermSize) {
+    /// Attach to `session`: hand its actor a sink now, and open the stream the sink is pumped
+    /// into on a task, since the client may make the stream wait.
+    fn attach(&mut self, session: SessionId, size: TermSize) {
         let handle = match self.daemon.worker.get(session) {
             Ok(h) => h,
-            Err(e) => return report(&self.out, self.client, session, &e).await,
+            Err(e) => return self.fail(session, &e),
         };
         self.forget(session);
-        let stream = match slopty_net::streams::open_session(&self.conn, session).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(client = %self.client, %session, error = %e, "open session stream");
-                return;
-            }
-        };
-        let (sink, mut events) = mpsc::channel::<Outbound>(SINK_DEPTH);
+        let (sink, events) = mpsc::channel::<Outbound>(SINK_DEPTH);
         let weak = sink.downgrade();
-        if let Err(e) = handle.attach(self.client, size, sink) {
-            return report(&self.out, self.client, session, &e).await;
+        if let Err(e) = handle.attach(self.client, size, sink.clone()) {
+            return self.fail(session, &e);
         }
-        let client = self.client;
-        let task = tokio::spawn(async move {
-            let mut stream = stream;
-            while let Some(out) = events.recv().await {
-                let send_from = std::time::Instant::now();
-                if let Err(e) = stream.send_raw(out.wire()).await {
-                    tracing::debug!(%client, %session, error = %e, "session stream ended");
-                    break;
-                }
-                if out.is_frame() {
-                    tracing::trace!(
-                        %client,
-                        %session,
-                        send_us = send_from.elapsed().as_micros(),
-                        "frame sent"
-                    );
-                }
-            }
-            let _finished = stream.finish();
-        });
+        let pipe = Pipe { conn: self.conn.clone(), out: self.out.clone(), client: self.client };
+        let task = tokio::spawn(pump(pipe, handle, sink, events));
         self.attached.insert(session, (task, weak));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::input::{KeyAction, KeyCode, Mods};
-    use slopty_proto::screen::ScreenInput;
+    use std::collections::HashSet;
 
-    use super::{Route, StreamId, route};
+    use slopty_core::{ClientId, ItemId, SessionId};
+    use slopty_net::WorkerMsg;
+    use slopty_proto::input::{KeyAction, KeyCode, Mods};
+    use slopty_proto::items::{ItemOp, ItemSync};
+    use slopty_proto::screen::ScreenInput;
+    use slopty_proto::terminal::{CloseReason, SessionState, SessionSummary};
+
+    use super::{Heard, Route, StreamId, route};
 
     fn key(code: KeyCode, mods: Mods) -> ScreenInput {
         ScreenInput::Key { code, action: KeyAction::Press, mods, text: None }
+    }
+
+    fn opened(id: SessionId) -> WorkerMsg {
+        WorkerMsg::SessionOpened(SessionSummary {
+            id,
+            title: String::new(),
+            cwd: None,
+            repo: None,
+            cols: 80,
+            rows: 24,
+            state: SessionState::Running,
+            viewers: 0,
+            command: Vec::new(),
+            agent: None,
+        })
+    }
+
+    fn delta(version: u64) -> WorkerMsg {
+        let op = ItemOp::Remove(ItemId::new());
+        WorkerMsg::Items(ItemSync::Delta { version, by: ClientId::new(), op })
+    }
+
+    /// The events are subscribed to before the greeting is read, so one that happened in
+    /// between arrives after it: what the greeting (or a resync) already told is not told
+    /// again, and what it did not is.
+    #[test]
+    fn an_event_the_greeting_carried_is_not_told_again() {
+        let (told, new) = (SessionId::new(), SessionId::new());
+        let mut heard = Heard { sessions: HashSet::from([told]), ..Heard::default() };
+        let snapshot = WorkerMsg::Items(ItemSync::Snapshot { version: 5, items: Vec::new() });
+        assert!(heard.admit(&snapshot));
+
+        assert!(!heard.admit(&opened(told)), "in the HelloAck");
+        assert!(!heard.admit(&delta(5)), "in the snapshot");
+        assert!(heard.admit(&delta(6)));
+        assert!(heard.admit(&opened(new)));
+        assert!(!heard.admit(&opened(new)), "told once");
+        let closed = WorkerMsg::SessionClosed { session: told, reason: CloseReason::Exited };
+        assert!(heard.admit(&closed));
+        assert_eq!(heard.sessions, HashSet::from([new]));
     }
 
     /// A paste holds only the window it went to, in order; another window's input goes on, and a

@@ -3954,3 +3954,64 @@ the path this changes, so they check that nothing regressed. p50 (p95) in ms:
 The spread between runs of the same binary is larger than any difference between the arms.
 The two wide p95s (after pair 1's `never`, before pair 2's (h) and `never`) are key → arrived
 p95 of 17–68 ms, when the load peaked mid-run.
+
+## 2026-09-25 — nothing on the connection waits behind anything slow
+
+**The connection's loop.** Two e2e tests make the worker wait on the client, the way a stuck
+or slow client does, and type into a `/bin/cat` session on the same connection meanwhile. In
+the first the client allows one worker-opened stream at a time and attaches a second terminal
+while the first holds it. In the second the client stops reading its control stream while
+another client sends 300 000 pointings. Each key goes out after the last one's echo, and the
+echo counts only when the frame shows that key at the end of the line. Debug build,
+mac-studio, other sessions running (load average 4 to 18). "Before" is `conn.rs` as of
+`4f48f26` with a 24 h wait given to `open_session`, which had none then.
+
+```
+cargo nextest run -p slopty-workerd --test e2e -E 'test(/a_terminal_waiting|stops_reading/)' --no-capture
+```
+
+| 30 keys | before | after |
+| --- | --- | --- |
+| an attach waiting for a stream | no echo within the test's 20 s step | p50 0.26 / p99 0.95 ms |
+| the control stream unread | no echo within the test's 20 s step | p50 0.20 / p99 1.67 ms |
+
+Before, the loop awaited the stream open and the event send inline, so the first key never
+reached its session. Not measured here: a receiver report's encoder calls, which now run on
+the blocking pool from a task of their own. That needs a live stream and Screen Recording.
+
+**Datagrams ahead of an echo.** noq writes queued datagrams into each packet before any stream
+data. `echo_beside_a_video_flood` runs `/bin/cat` behind a real connection's control and
+session streams through `slopty-shape` at 20 Mbit/s, 2 ms each way. The worker side floods
+datagrams at 60 fps: 25 kB frames cut to the path's datagram size, and a 130 kB keyframe every
+second. Four arms on fresh connections: no video, video in one burst per frame, video through
+the audio lane's rule (QUIC holds at most 5 ms of the link) while someone typed in the last
+second, and that lane also metered to 2 MB/s, 80% of the link. The echo event is 240 B, about a
+one-row frame. 200 keys an arm, release, three runs:
+
+```
+cargo nextest run -p slopty-net --release --test echo_beside_flood --run-ignored only --no-capture
+```
+
+| echo p50 / p99 ms | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| no video | 8.6 / 33.9 | 8.1 / 8.4 | 7.9 / 8.3 |
+| bursts | 9.4 / 38.6 | 8.8 / 35.8 | 8.5 / 24.8 |
+| lane, 5 ms slice | 8.8 / 48.6 | 8.5 / 31.4 | 8.9 / 39.3 |
+| lane, metered | 8.5 / 34.2 | 8.6 / 14.6 | 9.0 / 19.3 |
+
+| datagrams QUIC held when the echo was written, p99 (max) kB | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| bursts | 78.4 (112.0) | 98.8 (110.8) | 96.4 (118.0) |
+| lane, 5 ms slice | 12.0 (12.4) | 12.0 (12.4) | 12.0 (12.4) |
+| lane, metered | 12.0 (52.0) | 3.6 (3.6) | 2.4 (10.8) |
+
+The clear link with no video answers in 0.45 to 0.76 ms at p50. The shaper's own timers put
+the shaped baseline near 8 ms, twice its round trip, and run 1 was noisy from the start.
+
+The slice does what it says. What QUIC holds in front of an echo drops from most of a keyframe
+to 12 kB. The echo gets no faster, though. BBR3's window on this path read 0.9 to 7.4 MB at the
+median against a bandwidth-delay product near 20 kB, so QUIC never holds a frame for the window.
+The pacer lets it into the bottleneck queue, and the echo waits there instead. Only the metered
+lane, which keeps video below the link rate, pulls the echo's p99 down (14.6 and 19.3 ms against
+35.8 and 24.8 on the two quiet runs). The max stays near 52 ms in every arm with video, one
+keyframe at this rate: a keyframe already on the wire when the key arrives still has to drain.

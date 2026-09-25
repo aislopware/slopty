@@ -959,3 +959,39 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   open. Measured (MEASUREMENTS.md, "echo behind slow requests"): echo p99 33.3 → 4.8–5.3 ms under
   that load, p50 28.7 → 2.8 ms. `slopty_worker::file::read` also refuses what is not a regular file
   before opening it: a named pipe would wait for a writer on a blocking thread for good.
+
+- ✅ **The connection's loop never awaits; slow work and slow clients get tasks of their own**
+  (2026-09-25). After the earlier split the loop still awaited five things inline: the uni
+  stream an attach opens, which waits for as long as the client withholds stream credit; every
+  send into the control queue (pongs, errors, rates, clipboard fetches, and each broadcast
+  event), which waits on a client that reads slowly; a receiver report's rate change, which
+  calls VideoToolbox and can wait on the encoder's lock during a rebuild; an upload's session
+  directory, an actor snapshot and then a ptyd probe; and the clipboard fetch. A key for any
+  terminal on the connection waited behind each. Now the loop only routes. The actor gets the
+  attach's sink at once, and a pump task opens the stream within
+  `slopty_net::streams::SESSION_STREAM_WAIT` (10 s, `NetError::TimedOut` past it) and then
+  detaches the sink and tells the client. The worker's events go to the client from a relay
+  task. It waits on the client alone and resyncs when it lags. Reports go through a bounded
+  queue (64; a full one drops the report, and each report stands alone) to a task that applies
+  them on the blocking pool. The upload's directory is asked on a task with a 2 s limit, since
+  the files already wait for `Begin`. What the loop itself answers goes in with `try_send`,
+  and a client that has left a thousand messages unread loses that answer, not the other
+  terminals. The connection also subscribes to the events before it reads the greeting, so an
+  event between the two is no longer lost, and drops what the greeting already told (a
+  `SessionOpened` it listed, an item delta its snapshot holds). Tests:
+  `a_terminal_waiting_for_its_stream_holds_no_other_terminal` and
+  `a_client_that_stops_reading_its_control_stream_still_types` (`slopty-workerd` e2e; both hang
+  on the old loop), `a_session_stream_the_client_never_allows_times_out` (`slopty-net`),
+  `an_event_the_greeting_carried_is_not_told_again`. Measured (MEASUREMENTS.md, "nothing on the
+  connection waits behind anything slow"): echo p99 under 1.7 ms in both, where the old loop
+  gave no echo in 20 s.
+
+  🔬 Not taken: widening the audio lane to "while someone types". noq fills packets with
+  datagrams before stream data, so an echo waits behind whatever datagrams QUIC holds. Over a
+  20 Mbit/s shaper the lane's 5 ms slice cuts that from 78 to 99 kB at p99 to 12 kB, and the
+  echo is no faster. BBR3's window there ran into megabytes, so the burst moved into the
+  bottleneck queue and the echo waited in that queue instead. Metering the lane below the link
+  rate while someone types did cut the echo's p99 (15 to 19 ms against 25 to 36 on quiet runs).
+  That costs a keyframe its delivery time, so it needs the rate controller's number and a
+  shaped-ladder run on hardware before it lands. BBR3's window on the shaper is part of the
+  BBR3 against Cubic comparison still owed above.

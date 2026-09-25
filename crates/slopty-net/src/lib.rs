@@ -61,6 +61,9 @@ pub enum NetError {
     /// The peer closed the stream or connection.
     #[error("closed")]
     Closed,
+    /// Something waited on the peer longer than it may.
+    #[error("{0} timed out")]
+    TimedOut(&'static str),
     /// The peer sent something we did not expect at this point.
     #[error("protocol violation: {0}")]
     Protocol(&'static str),

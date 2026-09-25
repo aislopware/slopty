@@ -5,6 +5,8 @@
 //! stream carries raw bytes, read through [`RawRecv`] so bytes the header's read buffered are
 //! not lost.
 
+use std::time::Duration;
+
 use bytes::{Bytes, BytesMut};
 use noq::{Connection, RecvStream, SendStream};
 use slopty_core::SessionId;
@@ -65,15 +67,27 @@ impl RawRecv {
     }
 }
 
-/// Open a session stream to a client and write its header.
+/// How long a session stream may wait to open: for the peer to allow another stream, and for
+/// room to write its header. Past it the attach fails rather than waiting for good.
+pub const SESSION_STREAM_WAIT: Duration = Duration::from_secs(10);
+
+/// Open a session stream to a client and write its header, giving up after `wait`
+/// ([`NetError::TimedOut`]): a peer that never lets a stream close holds a new one back for
+/// as long as it likes.
 pub async fn open_session(
     conn: &Connection,
     session: SessionId,
+    wait: Duration,
 ) -> Result<FramedSend<TermEvent>, NetError> {
-    let send = conn.open_uni().await.map_err(|e| NetError::stream(&e))?;
-    let mut head = FramedSend::<UniHead>::new(send);
-    head.send(&UniHead::Session { session }).await?;
-    Ok(head.retype())
+    let open = async {
+        let send = conn.open_uni().await.map_err(|e| NetError::stream(&e))?;
+        let mut head = FramedSend::<UniHead>::new(send);
+        head.send(&UniHead::Session { session }).await?;
+        Ok(head.retype())
+    };
+    tokio::time::timeout(wait, open)
+        .await
+        .map_err(|_elapsed| NetError::TimedOut("opening a session stream"))?
 }
 
 /// Open a bulk stream, at [`BULK_PRIORITY`], and write its header; the raw bytes follow on the

@@ -525,6 +525,183 @@ mod tests {
         took
     }
 
+    /// Like [`echoes`], but each round trip ends at the frame that shows the key just typed at
+    /// the end of its line, not at the next frame of any kind: a frame the last key left
+    /// behind would otherwise count as this key's echo.
+    async fn exact_echoes(
+        send: &tokio::sync::mpsc::Sender<ClientMsg>,
+        frames: &mut FramedRecv<TermEvent>,
+        session: SessionId,
+        count: usize,
+    ) -> Vec<f64> {
+        let mut took = Vec::with_capacity(count);
+        let mut line = String::new();
+        for i in 0..count {
+            let key = char::from(b'a'.saturating_add(u8::try_from(i % 26).unwrap()));
+            line.push(key);
+            let sent = std::time::Instant::now();
+            let req = TermRequest::Raw(vec![u8::try_from(key).unwrap()]);
+            send.send(ClientMsg::Term { session, req }).await.unwrap();
+            loop {
+                let ev = tokio::time::timeout(STEP, frames.recv()).await.unwrap().unwrap();
+                if let TermEvent::Frame(f) = ev
+                    && f.updates.iter().any(|u| u.line.text().trim_end() == line)
+                {
+                    break;
+                }
+            }
+            took.push(sent.elapsed().as_secs_f64() * 1e3);
+            if i % 64 == 63 {
+                line.clear();
+                send.send(ClientMsg::Term { session, req: TermRequest::Raw(b"\x15".to_vec()) })
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                while tokio::time::timeout(Duration::from_millis(30), frames.recv()).await.is_ok() {
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        took
+    }
+
+    /// Open `/bin/cat`, attached or not; its session, and its events when attached.
+    async fn open_cat(
+        worker: &mut WorkerConn,
+        attach: bool,
+    ) -> (SessionId, Option<FramedRecv<TermEvent>>) {
+        let open = OpenSession {
+            size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
+            cwd: None,
+            command: vec!["/bin/cat".to_owned()],
+            env: Vec::new(),
+            title: None,
+            attach,
+        };
+        worker.tx.send(&ClientMsg::OpenSession(open)).await.unwrap();
+        let session = next_msg(worker, |m| match m {
+            WorkerMsg::SessionOpened(summary) => Some(summary.id),
+            _ => None,
+        })
+        .await;
+        if !attach {
+            return (session, None);
+        }
+        let (streamed, events) = session_stream(worker).await;
+        assert_eq!(streamed, session);
+        (session, Some(events))
+    }
+
+    /// The control stream's two halves as tasks: what goes in the returned sender is sent, and
+    /// whatever the worker says is read and let go.
+    fn split(
+        worker: WorkerConn,
+    ) -> (tokio::sync::mpsc::Sender<ClientMsg>, [tokio::task::JoinHandle<()>; 2]) {
+        let WorkerConn { mut tx, mut rx, .. } = worker;
+        let (send, mut outbox) = tokio::sync::mpsc::channel::<ClientMsg>(64);
+        let writer = tokio::spawn(async move {
+            while let Some(msg) = outbox.recv().await {
+                tx.send(&msg).await.unwrap();
+            }
+        });
+        let reader = tokio::spawn(async move { while rx.recv().await.is_ok() {} });
+        (send, [writer, reader])
+    }
+
+    /// A client that lets the worker open one stream at a time attaches a second terminal
+    /// while the first holds that stream. The second waits for its stream on a task of its own:
+    /// the first terminal's keys echo meanwhile (they waited behind that stream for good), and
+    /// the second's stream comes once the first lets go of its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_terminal_waiting_for_its_stream_holds_no_other_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, addr) = daemons(dir.path()).await;
+        let endpoint = bind_client().unwrap();
+        let mut transport = slopty_net::endpoint::transport_config();
+        transport.max_concurrent_uni_streams(1_u32.into());
+        let mut config = slopty_net::crypto::client_config();
+        config.transport_config(std::sync::Arc::new(transport));
+        endpoint.set_default_client_config(config);
+        let hello = Hello {
+            protocol: PROTOCOL_VERSION,
+            client: ClientId::new(),
+            kind: ClientKind::Tool,
+            name: "e2e".to_owned(),
+            app_version: "0".to_owned(),
+            caps: Caps::empty(),
+        };
+        let mut worker = tokio::time::timeout(STEP, connect_addr(&endpoint, addr, hello))
+            .await
+            .unwrap()
+            .unwrap();
+        guard.1 = Some(endpoint);
+        let (typed, events) = open_cat(&mut worker, true).await;
+        let mut events = events.unwrap();
+        let (waiting, _none) = open_cat(&mut worker, false).await;
+        let conn = worker.conn.clone();
+        let (send, tasks) = split(worker);
+
+        let size = TermSize { cols: 80, rows: 24, ..TermSize::default() };
+        send.send(ClientMsg::Term { session: waiting, req: TermRequest::Attach { size } })
+            .await
+            .unwrap();
+        let took = exact_echoes(&send, &mut events, typed, 30).await;
+        let (p50, p99, max) = p50_p99_max(&took);
+        eprintln!(
+            "echo while an attach waits for a stream: p50 {p50:.2} / p99 {p99:.2} / max {max:.2} ms"
+        );
+
+        send.send(ClientMsg::Term { session: typed, req: TermRequest::Detach }).await.unwrap();
+        drop(events);
+        let uni = tokio::time::timeout(STEP, streams::accept_uni(&conn)).await.unwrap().unwrap();
+        let Uni::Session { session: streamed, .. } = uni else { panic!("a session stream") };
+        assert_eq!(streamed, waiting, "the waiting terminal's stream, once there is room");
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    /// A client that stops reading its control stream while another floods the worker with
+    /// pointings: the worker's events for it back up until they fill everything between the
+    /// two, and its terminal still echoes. The events used to be sent from the connection's
+    /// loop, which then waited on the client with every key behind it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_that_stops_reading_its_control_stream_still_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, addr) = daemons(dir.path()).await;
+        let (endpoint_a, mut a) = dial(addr).await;
+        guard.1 = Some(endpoint_a);
+        let (session, events) = open_cat(&mut a, true).await;
+        let mut events = events.unwrap();
+        let WorkerConn { tx: a_tx, rx: _unread, .. } = a;
+        let (send, mut outbox) = tokio::sync::mpsc::channel::<ClientMsg>(64);
+        let writer = tokio::spawn(async move {
+            let mut tx = a_tx;
+            while let Some(msg) = outbox.recv().await {
+                tx.send(&msg).await.unwrap();
+            }
+        });
+
+        let (_endpoint_b, b) = dial(addr).await;
+        let (b_send, b_tasks) = split(b);
+        // As in `a_client_that_falls_behind_gets_the_items_again`: several times what the
+        // client's stream window, the worker's queue and its broadcast hold together.
+        let item = slopty_core::ItemId::new();
+        for _ in 0..300_000 {
+            b_send.send(ClientMsg::Point { item }).await.unwrap();
+        }
+
+        let took = exact_echoes(&send, &mut events, session, 30).await;
+        let (p50, p99, max) = p50_p99_max(&took);
+        eprintln!(
+            "echo with the control stream unread: p50 {p50:.2} / p99 {p99:.2} / max {max:.2} ms"
+        );
+        writer.abort();
+        for task in b_tasks {
+            task.abort();
+        }
+    }
+
     /// Open a shell, have it print `marker`, and wait for the marker on the screen.
     async fn open_shell_and_see(
         worker: &mut WorkerConn,

@@ -68,7 +68,10 @@ mod tests {
                 assert_eq!(client.hello.name, "test");
                 assert_eq!(client.remote.ip(), std::net::Ipv4Addr::LOCALHOST, "canonical IPv4");
                 client.tx.send(&WorkerMsg::HelloAck(ack(id))).await.unwrap();
-                let mut stream = streams::open_session(&client.conn, session).await.unwrap();
+                let mut stream =
+                    streams::open_session(&client.conn, session, streams::SESSION_STREAM_WAIT)
+                        .await
+                        .unwrap();
                 stream.send(&TermEvent::Bell).await.unwrap();
                 // A pre-encoded frame (the fan-out path), then a graceful end.
                 let raw = slopty_proto::codec::encode(&TermEvent::Bell).unwrap();
@@ -107,6 +110,35 @@ mod tests {
         assert!(max >= 1150, "no AEAD tag eats into a datagram: {max}");
         conn.close();
         tokio::time::timeout(Duration::from_secs(10), worker_task).await.unwrap().unwrap();
+    }
+
+    /// A client that lets the worker open no stream at all: the session stream gives up after
+    /// its wait with a timeout, where it used to wait for as long as the client liked.
+    #[tokio::test]
+    async fn a_session_stream_the_client_never_allows_times_out() {
+        let (listener, port, id) = worker(Admission::default());
+        let wait = Duration::from_millis(300);
+        let worker_task = tokio::spawn(async move {
+            let mut client = listener.accept().await.unwrap();
+            client.tx.send(&WorkerMsg::HelloAck(ack(id))).await.unwrap();
+            let started = Instant::now();
+            let opened = streams::open_session(&client.conn, SessionId::new(), wait).await;
+            (opened.map(drop), started.elapsed(), client)
+        });
+        let endpoint = bind_client().unwrap();
+        let mut transport = slopty_net::endpoint::transport_config();
+        transport.max_concurrent_uni_streams(0_u32.into());
+        let mut config = slopty_net::crypto::client_config();
+        config.transport_config(std::sync::Arc::new(transport));
+        endpoint.set_default_client_config(config);
+        let at = SocketAddr::from(([127, 0, 0, 1], port));
+        let conn = connect_addr(&endpoint, at, hello()).await.unwrap();
+
+        let (opened, took, _client) =
+            tokio::time::timeout(Duration::from_secs(5), worker_task).await.unwrap().unwrap();
+        assert!(matches!(opened, Err(NetError::TimedOut(_))), "{opened:?}");
+        assert!(took >= wait && took < wait.saturating_mul(3), "gave up after {took:?}");
+        conn.close();
     }
 
     fn header(size: u64, purpose: Purpose) -> BulkHeader {
