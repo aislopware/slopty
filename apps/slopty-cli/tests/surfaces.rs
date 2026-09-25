@@ -14,7 +14,7 @@ mod tests {
     use slopty_net::admission::Admission;
     use slopty_net::client::bind_client;
     use slopty_net::server::{ServerLink, connect};
-    use slopty_proto::agent::{AgentKind, AgentStatus, BlockReason};
+    use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
     use slopty_proto::orchestration::{ErrorCode, Line, Outcome, Screen, Verb, Waited};
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer, WorkerCaps};
     use slopty_proto::terminal::{SessionState, SessionSummary};
@@ -58,20 +58,22 @@ mod tests {
                 state: SessionState::Running,
                 viewers: 0,
                 command: Vec::new(),
-                agent: Some((
-                    AgentKind::ClaudeCode,
-                    AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
-                )),
+                agent: Some(blocked()),
             }],
+        }
+    }
+
+    fn blocked() -> SessionAgent {
+        SessionAgent {
+            kind: AgentKind::ClaudeCode,
+            status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
+            source: AgentSource::Hook,
         }
     }
 
     fn answer(verb: &Verb) -> Outcome {
         match verb {
-            Verb::AgentStatus { .. } => Outcome::Agent(Some((
-                AgentKind::ClaudeCode,
-                AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
-            ))),
+            Verb::AgentStatus { .. } => Outcome::Agent(Some(blocked())),
             Verb::ReadScreen { .. } => Outcome::Screen(Screen {
                 lines: vec![Line { index: 40, text: "$ ready".to_owned() }],
                 cursor: (0, 7),

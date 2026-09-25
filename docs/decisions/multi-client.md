@@ -48,7 +48,10 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   connection finally idles out at the host (`IDLE_TIMEOUT`, 45 s), `slopty-worker`'s `Peer::drop`
   calls `SessionHandle::detach_sink(client, &sink)`, which removes a viewer only if
   `Sender::same_channel` matches — so the relaunched A's live viewer survives its dead connection's
-  cleanup, and the host still reports both clients connected.
+  cleanup, and the host still reports both clients connected. Since 2026-09-25 a closed sink
+  removes its viewer but keeps the driver's seat for that client (`Actor::orphan`): a re-attach
+  by the same client keeps it, and only a detach through that exact sink passes it on
+  (`docs/decisions/terminal.md`).
 
 - ✅ **A display streams to two clients; the host encodes once per viewer, not once per stream**
   (2026-09-06). `slopty-worker`'s `Peer` opens a `ScreenStream` per connection

@@ -642,8 +642,6 @@ pub struct StreamPrefs {
     pub fps: u16,
     /// The bitrate ceiling, bits per second.
     pub max_bitrate_bps: u32,
-    /// 10-bit HEVC.
-    pub hdr: bool,
     /// A stream opens with its audio silenced on this client (the title-bar pill still
     /// toggles it).
     pub muted: bool,
@@ -651,7 +649,7 @@ pub struct StreamPrefs {
 
 impl Default for StreamPrefs {
     fn default() -> Self {
-        Self { fps: 60, max_bitrate_bps: 30_000_000, hdr: false, muted: false }
+        Self { fps: 60, max_bitrate_bps: 30_000_000, muted: false }
     }
 }
 

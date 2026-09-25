@@ -10,8 +10,9 @@
 //! Clients cache scrollback by absolute [`LineIndex`](slopty_grid::LineIndex). The
 //! engine keeps a tracked anchor on the newest active row and re-derives the index of screen row 0
 //! after every write, so eviction of old scrollback never shifts indices. When numbering cannot be
-//! preserved — reflow on resize, reset, alternate-screen switches, a write that scrolls more than
-//! the whole scrollback — the frame's `epoch` is bumped and clients drop their cache.
+//! preserved — reflow on resize, reset, a write that scrolls more than the whole scrollback — the
+//! frame carries a new `epoch` and clients drop their cache. The alternate screen numbers its
+//! own rows under an epoch of its own, and leaving it gives the primary its epoch back.
 
 #![forbid(unsafe_code)]
 

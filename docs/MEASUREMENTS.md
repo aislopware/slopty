@@ -4015,3 +4015,54 @@ The pacer lets it into the bottleneck queue, and the echo waits there instead. O
 lane, which keeps video below the link rate, pulls the echo's p99 down (14.6 and 19.3 ms against
 35.8 and 24.8 on the two quiet runs). The max stays near 52 ms in every arm with video, one
 keyframe at this rate: a keyframe already on the wire when the key arrives still has to drain.
+
+## 2026-09-25 — a scroll ships the rows it moved
+
+Bytes a viewer that follows the diffs is sent: the encoded `TermEvent::Frame`, length prefix
+included. The engine's screen is full of `ls -l`-like output with a zsh-style marked prompt on
+the bottom row. "Echo" is the frame after the shell echoes one typed key. "Enter" is the frame
+after `ls` ran: three lines of output and the next prompt, so the screen scrolled by four lines.
+The one-line scroll is 500 lines written one at a time at 200 × 60, each frame built and encoded
+(release). "Trimmed only" is the old engine with the new `Line` encoding: the engine file
+checked out from `HEAD` for the run, then put back.
+
+```
+cargo nextest run -p slopty-engine --test wire_bytes --no-capture            # bytes
+cargo nextest run --release -p slopty-engine --test wire_bytes --no-capture  # the scroll's time
+```
+
+| | 80 × 24 echo | 80 × 24 Enter | 200 × 60 echo | 200 × 60 Enter | 200 × 60 one-line scroll |
+| --- | --- | --- | --- | --- | --- |
+| before | 619 B | 15 008 B (24 rows) | 1 461 B | 88 333 B (60 rows) | 87 951 B, 486–519 µs |
+| trimmed only | 228 B | 9 873 B | 230 B | 27 178 B | 27 883 B, 393 µs |
+| rows compared by hash (rejected) | 228 B | 653 B | 230 B | 658 B | 505 B, 885 µs |
+| after | 228 B | 653 B (4 rows) | 230 B | 658 B (4 rows) | 505 B, 343–369 µs |
+
+A 200-column echo fits one 1252-byte packet again. The scroll still reads every row from
+libghostty, and that read is most of the time. Hashing every cell with `DefaultHasher` cost
+more than it saved. Comparing each row with the line kept costs less than encoding it did.
+Keeping the lines costs the size of one screen per session, about 0.6 MB at 200 × 60.
+
+Staleness on a throttled link, debug build, mac-studio at load 4–9. The flood is the one in
+"echo pacing and frames in flight": 120 bursts of 15 lines into 80 × 24, the viewer's link
+250 kB/s. The stream-window test models noq's send buffer: a write returns as soon as the
+1.25 MB window has room, and the frame's credit goes back then, as `send_raw` does. The link
+delivers each event when its bytes have crossed. The client applies it to a `TermState` and
+sends back the requests that come out of it. The older test holds each event until its bytes
+have crossed, a link with no buffer at all.
+
+```
+cargo nextest run -p slopty-worker --test session_actor --no-capture \
+  -E 'test(/throttled|echo_beside/)'
+```
+
+| | behind the stream window: flood's end shown after | most in the stream buffer | no-buffer link: shown after | a frame |
+| --- | --- | --- | --- | --- |
+| before | 5 096 ms | 1 241 050 B | 137 ms | 14 530 B |
+| after, run 1 | 222 ms | 64 282 B | 91 ms | 9 417 B |
+| after, run 2 | 225 ms | 64 732 B | 95 ms | 9 328 B |
+| after, run 3 | 258 ms | 63 422 B | 86 ms | 9 787 B |
+
+The buffer now holds what the markers allow, 64 KiB and the frame in hand. At 250 kB/s that
+is a quarter of a second. The echo beside a flood did not move: key to acking frame p50
+0.06–0.10 ms, p90 0.10–0.14 ms, 39–43 flood frames in 400 ms.

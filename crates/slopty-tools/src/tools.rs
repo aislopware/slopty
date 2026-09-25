@@ -342,7 +342,8 @@ pub fn list() -> Vec<Tool> {
             "list_terminals",
             "Terminals on one worker or on all: `term` (the handle every terminal tool takes, \
              copy it verbatim), title, working directory, repository, size, whether the program \
-             still runs, and its command line.",
+             still runs, its command line, and the coding agent in it if one runs (as \
+             `agent_status` gives it).",
             Kind::Read,
         ),
         tool::<OpenTerminalArgs>(
@@ -422,7 +423,8 @@ pub fn list() -> Vec<Tool> {
             "agent_status",
             "The coding agent in a terminal, if one runs, and its status: idle, working, tool \
              (running `tool`), blocked (needs a human, with `reason` and for a permission the \
-             `tool`), or done.",
+             `tool`), or done. `source` says what the status was read from: `hook`, or \
+             `transcript`, `title` or `process` when the agent's hooks are not installed.",
             Kind::Read,
         ),
         tool::<ResizeArgs>(

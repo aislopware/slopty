@@ -164,7 +164,8 @@ mod golden {
             Feedback::Nack { stream: StreamId(7), frame: 0x0102_0304, fragments: vec![2, 5] };
         let bytes = codec::encode_body(&nack).expect("encodes");
         insta::assert_snapshot!("client_nack", hex(&bytes));
-        let refresh = Feedback::Refresh { stream: StreamId(7), last_good_frame: 300 };
+        let refresh =
+            Feedback::Refresh { stream: StreamId(7), last_good_frame: 300, keyframe: true };
         let bytes = codec::encode_body(&refresh).expect("encodes");
         insta::assert_snapshot!("client_refresh", hex(&bytes));
     }
@@ -224,10 +225,11 @@ mod golden {
                 state: SessionState::Running,
                 viewers: 1,
                 command: vec!["/bin/zsh".to_owned(), "-l".to_owned()],
-                agent: Some((
-                    slopty_proto::agent::AgentKind::ClaudeCode,
-                    slopty_proto::agent::AgentStatus::Working,
-                )),
+                agent: Some(slopty_proto::agent::SessionAgent {
+                    kind: slopty_proto::agent::AgentKind::ClaudeCode,
+                    status: slopty_proto::agent::AgentStatus::Working,
+                    source: slopty_proto::agent::AgentSource::Hook,
+                }),
             }),
         );
         snap(
@@ -622,6 +624,15 @@ mod golden {
                     z: -1,
                 }],
             }),
+        );
+    }
+
+    #[test]
+    fn markers() {
+        snap("worker_term_marker", &TermEvent::Marker { id: 41 });
+        snap(
+            "client_term_reached",
+            &ClientMsg::Term { session: session(), req: TermRequest::Reached { marker: 41 } },
         );
     }
 

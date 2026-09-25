@@ -4,10 +4,11 @@
 mod actor {
     use std::time::Duration;
 
+    use slopty_client::term::{Effect, TermState};
     use slopty_core::{ClientId, SessionId};
     use slopty_grid::LineIndex;
     use slopty_proto::input::{CellMetrics, KeyAction, KeyCode, KeyEvent, Mods};
-    use slopty_proto::terminal::{Frame, TermColors, TermEvent, TermRequest, TermSize};
+    use slopty_proto::terminal::{TermColors, TermEvent, TermRequest, TermSize};
     use slopty_pty::{Pty, SpawnSpec};
     use slopty_worker::session::{self, Outbound, SessionStart, Tap};
     use tokio::sync::mpsc;
@@ -56,40 +57,43 @@ mod actor {
         slopty_proto::codec::try_decode(&mut buf).unwrap().expect("one whole event")
     }
 
-    /// Apply frames onto a local screen model and return its text once `pred` holds.
+    /// A client's view of a session: its sink, and the state its events build, as the app
+    /// applies them.
+    struct Viewer {
+        rx: mpsc::Receiver<Outbound>,
+        state: TermState,
+    }
+
+    /// A sink `depth` events deep and the viewer reading it.
+    fn viewer(depth: usize) -> (mpsc::Sender<Outbound>, Viewer) {
+        let (tx, rx) = mpsc::channel(depth);
+        (tx, Viewer { rx, state: TermState::new(size(40, 6)) })
+    }
+
+    /// Apply events to the viewer's state until `pred` holds of them and its screen.
     async fn wait_for(
-        rx: &mut mpsc::Receiver<Outbound>,
+        viewer: &mut Viewer,
         mut pred: impl FnMut(&[TermEvent], &slopty_grid::Screen) -> bool,
     ) -> (Vec<TermEvent>, slopty_grid::Screen) {
         let mut seen = Vec::new();
-        let mut screen = slopty_grid::Screen::new(40, 6);
         let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
         loop {
-            let ev = tokio::time::timeout_at(deadline, rx.recv())
+            let ev = tokio::time::timeout_at(deadline, viewer.rx.recv())
                 .await
                 .unwrap_or_else(|_| {
-                    panic!("timeout waiting for events; {seen:?}\nscreen:\n{}", text(&screen))
+                    panic!(
+                        "timeout waiting for events; {seen:?}\nscreen:\n{}",
+                        text(viewer.state.screen())
+                    )
                 })
                 .expect("sink closed");
             let ev = event(&ev);
-            if let TermEvent::Frame(f) = &ev {
-                apply(&mut screen, f);
-            }
+            let _effects = viewer.state.apply(ev.clone());
             seen.push(ev);
-            if pred(&seen, &screen) {
-                return (seen, screen);
+            if pred(&seen, viewer.state.screen()) {
+                return (seen, viewer.state.screen().clone());
             }
         }
-    }
-
-    fn apply(screen: &mut slopty_grid::Screen, f: &Frame) {
-        if (screen.cols(), screen.rows()) != (f.cols, f.rows) {
-            screen.resize(f.cols, f.rows);
-        }
-        for u in &f.updates {
-            screen.apply(u.clone()).unwrap();
-        }
-        *screen.cursor_mut() = f.cursor;
     }
 
     fn text(screen: &slopty_grid::Screen) -> String {
@@ -114,7 +118,7 @@ mod actor {
     async fn attach_type_and_see_echo_with_input_ack() {
         let (session, mut child) = start(&["/bin/sh", "-c", "cat"]);
         let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (tx, mut rx) = viewer(64);
         session.attach(me, size(40, 6), tx).unwrap();
         let (events, _) = wait_for(&mut rx, |ev, _| {
             ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full))
@@ -157,7 +161,7 @@ mod actor {
         assert_eq!((snap.size.cols, snap.size.rows), (100, 30), "nobody watches: applied");
 
         let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (tx, mut rx) = viewer(64);
         session.attach(me, size(40, 6), tx).unwrap();
         wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full)))
             .await;
@@ -173,7 +177,7 @@ mod actor {
     async fn output_is_tapped_and_a_quiet_session_checkpoints() {
         let (session, mut child, mut taps) = start_tapped(&["/bin/sh", "-c", "cat"], Vec::new());
         let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (tx, mut rx) = viewer(64);
         session.attach(me, size(40, 6), tx).unwrap();
         session.request(me, TermRequest::Raw(b"tapped-line\r".to_vec())).unwrap();
         let _seen = wait_for(&mut rx, |_, s| text(s).contains("tapped-line\ntapped-line")).await;
@@ -195,7 +199,7 @@ mod actor {
         assert!(text_out.contains("tapped-line\r\ntapped-line"), "tapped: {text_out:?}");
 
         let (next, mut cat2, mut taps2) = start_tapped(&["/bin/sh", "-c", "cat"], checkpoint);
-        let (tx2, mut rx2) = mpsc::channel(64);
+        let (tx2, mut rx2) = viewer(64);
         next.attach(ClientId::new(), size(40, 6), tx2).unwrap();
         let (_, screen) = wait_for(&mut rx2, |ev, _| {
             ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full))
@@ -233,8 +237,8 @@ mod actor {
         ]);
         let a = ClientId::new();
         let b = ClientId::new();
-        let (tx_a, mut rx_a) = mpsc::channel(64);
-        let (tx_b, mut rx_b) = mpsc::channel(64);
+        let (tx_a, mut rx_a) = viewer(64);
+        let (tx_b, mut rx_b) = viewer(64);
         session.attach(a, size(40, 6), tx_a).unwrap();
         let (events, _) = wait_for(&mut rx_a, |_, s| text(s).contains("line19")).await;
 
@@ -299,8 +303,8 @@ mod actor {
             start(&["/bin/sh", "-c", "printf 'alpha\\nbeta\\ngamma\\n'; read x; exit 0"]);
         let a = ClientId::new();
         let b = ClientId::new();
-        let (tx_a, mut rx_a) = mpsc::channel(64);
-        let (tx_b, mut rx_b) = mpsc::channel(64);
+        let (tx_a, mut rx_a) = viewer(64);
+        let (tx_b, mut rx_b) = viewer(64);
         session.attach(a, size(40, 6), tx_a).unwrap();
         wait_for(&mut rx_a, |_, s| text(s).contains("gamma")).await;
         session.attach(b, size(60, 10), tx_b).unwrap();
@@ -388,8 +392,8 @@ mod actor {
         ]);
         let a = ClientId::new();
         let b = ClientId::new();
-        let (tx_a, mut rx_a) = mpsc::channel(64);
-        let (tx_b, mut rx_b) = mpsc::channel(64);
+        let (tx_a, mut rx_a) = viewer(64);
+        let (tx_b, mut rx_b) = viewer(64);
         session.attach(a, size(60, 6), tx_a).unwrap();
         wait_for(&mut rx_a, |ev, _| {
             ev.iter().any(|e| matches!(e, TermEvent::Driver { you: true }))
@@ -426,8 +430,8 @@ mod actor {
         ]);
         let a = ClientId::new();
         let b = ClientId::new();
-        let (tx_a, mut rx_a) = mpsc::channel(64);
-        let (tx_b, mut rx_b) = mpsc::channel(64);
+        let (tx_a, mut rx_a) = viewer(64);
+        let (tx_b, mut rx_b) = viewer(64);
         session.attach(a, size(60, 6), tx_a).unwrap();
         let bg = Some([0x28, 0x2c, 0x34]);
         let (events, _) = wait_for(&mut rx_a, |ev, _| {
@@ -470,7 +474,7 @@ mod actor {
         let (session, mut child, _tap) =
             start_tapped(&["/bin/sh", "-c", "read x; exit 0"], checkpoint);
         let a = ClientId::new();
-        let (tx_a, mut rx_a) = mpsc::channel(64);
+        let (tx_a, mut rx_a) = viewer(64);
         session.attach(a, size(40, 6), tx_a).unwrap();
         let (events, screen) = wait_for(&mut rx_a, |ev, _| {
             ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full))
@@ -498,8 +502,8 @@ mod actor {
         let opener = ClientId::new();
         let other = ClientId::new();
         session.reserve_driver(opener).unwrap();
-        let (tx_other, mut rx_other) = mpsc::channel(64);
-        let (tx_opener, mut rx_opener) = mpsc::channel(64);
+        let (tx_other, mut rx_other) = viewer(64);
+        let (tx_opener, mut rx_opener) = viewer(64);
         session.attach(other, size(60, 10), tx_other).unwrap();
         let (events, _) =
             wait_for(&mut rx_other, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_))))
@@ -540,8 +544,8 @@ mod actor {
     async fn stale_connection_detach_keeps_the_reconnected_viewer() {
         let (session, mut child) = start(&["/bin/sh", "-c", "read x; exit 0"]);
         let a = ClientId::new();
-        let (old_tx, mut old_rx) = mpsc::channel(64);
-        let (new_tx, mut new_rx) = mpsc::channel(64);
+        let (old_tx, mut old_rx) = viewer(64);
+        let (new_tx, mut new_rx) = viewer(64);
         session.attach(a, size(40, 6), old_tx.clone()).unwrap();
         wait_for(&mut old_rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
 
@@ -558,7 +562,7 @@ mod actor {
         assert_eq!(session.snapshot().await.unwrap().viewers, 1);
         // A live connection's own sink does detach its client.
         let b = ClientId::new();
-        let (b_tx, mut b_rx) = mpsc::channel(64);
+        let (b_tx, mut b_rx) = viewer(64);
         session.attach(b, size(40, 6), b_tx.clone()).unwrap();
         wait_for(&mut b_rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
         assert_eq!(session.snapshot().await.unwrap().viewers, 2);
@@ -581,7 +585,7 @@ mod actor {
     async fn closing_the_session_hangs_up_the_child() {
         let (session, mut child) = start(&["/bin/sh", "-c", "cat"]);
         let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (tx, mut rx) = viewer(64);
         session.attach(me, size(40, 6), tx).unwrap();
         wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
         session.close();
@@ -601,7 +605,7 @@ mod actor {
             &["/bin/sh", "-c", "printf '\\033]0;half'; sleep 2; printf 'done\\033\\\\'; sleep 30"],
             Vec::new(),
         );
-        let (tx, _rx) = mpsc::channel(64);
+        let (tx, _rx) = viewer(64);
         session.attach(ClientId::new(), size(40, 6), tx).unwrap();
         let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
         let mut output = Vec::new();
@@ -670,32 +674,23 @@ done
     /// block tracking sees the cursor below the command while it runs.
     #[tokio::test]
     async fn a_silent_command_after_a_clear_is_seen_running_at_once() {
-        fn pump(
-            events: &[TermEvent],
-            state: &mut slopty_client::term::TermState,
-            effects: &mut Vec<slopty_client::term::Effect>,
-        ) {
+        fn pump(events: &[TermEvent], state: &mut TermState, effects: &mut Vec<Effect>) {
             for ev in events {
                 effects.extend(state.apply(ev.clone()));
             }
         }
         let (session, mut child) = start(&["/bin/sh", "-c", MARKED_SHELL]);
         let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (tx, mut rx) = viewer(64);
         session.attach(me, size(40, 6), tx).unwrap();
-        let mut state = slopty_client::term::TermState::new(size(40, 6));
+        let mut state = TermState::new(size(40, 6));
         let mut effects = Vec::new();
         let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("> ")).await;
         pump(&events, &mut state, &mut effects);
         session.request(me, TermRequest::Raw(b"echo hi\r".to_vec())).unwrap();
         let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("out\n\n~\n> ")).await;
         pump(&events, &mut state, &mut effects);
-        assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, slopty_client::term::Effect::CommandFinished { .. })),
-            "{effects:?}"
-        );
+        assert!(effects.iter().any(|e| matches!(e, Effect::CommandFinished { .. })), "{effects:?}");
         effects.clear();
         session.request(me, TermRequest::Clear).unwrap();
         let (events, screen) =
@@ -707,16 +702,14 @@ done
         let typed = tokio::time::Instant::now();
         let deadline = typed.checked_add(Duration::from_secs(1)).unwrap();
         while !state.command_running() {
-            let ev = tokio::time::timeout_at(deadline, rx.recv())
+            let ev = tokio::time::timeout_at(deadline, rx.rx.recv())
                 .await
                 .unwrap_or_else(|_| panic!("not seen running within a second; {effects:?}"))
                 .expect("sink closed");
             pump(&[event(&ev)], &mut state, &mut effects);
         }
         assert!(
-            effects.iter().any(
-                |e| matches!(e, slopty_client::term::Effect::CommandStarted(c) if c == "sleep 2")
-            ),
+            effects.iter().any(|e| matches!(e, Effect::CommandStarted(c) if c == "sleep 2")),
             "{effects:?}"
         );
         assert_eq!(state.cursor().row, 3, "the cursor sits below the command while it runs");
@@ -741,7 +734,7 @@ done
             clip(cap + 1)
         );
         let (session, mut child) = start(&["/bin/sh", "-c", &script]);
-        let (tx, mut rx) = mpsc::channel(64);
+        let (tx, mut rx) = viewer(64);
         session.attach(ClientId::new(), size(40, 6), tx).unwrap();
         let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("MARK")).await;
         let cwd: Vec<&str> = events
@@ -798,7 +791,7 @@ done
     /// What a viewer is sent until its screen shows `DONE`, read as a connection that keeps
     /// up reads it.
     fn until_done(
-        mut rx: mpsc::Receiver<Outbound>,
+        mut rx: Viewer,
         after: Duration,
     ) -> tokio::task::JoinHandle<(Vec<TermEvent>, slopty_grid::Screen)> {
         tokio::spawn(async move {
@@ -814,14 +807,14 @@ done
     async fn viewers_joining_a_busy_session_never_make_the_others_resync() {
         let (session, mut child) = start(&["/bin/sh", "-c", &flood(150, "0.01")]);
         let a = ClientId::new();
-        let (tx_a, rx_a) = mpsc::channel(4096);
+        let (tx_a, rx_a) = viewer(4096);
         session.attach(a, size(40, 6), tx_a).unwrap();
         let first = until_done(rx_a, Duration::ZERO);
         session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
         let mut joiners = Vec::new();
         for _ in 0..6 {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            let (tx, rx) = mpsc::channel(4096);
+            let (tx, rx) = viewer(4096);
             session.attach(ClientId::new(), size(40, 6), tx).unwrap();
             joiners.push(until_done(rx, Duration::ZERO));
         }
@@ -846,11 +839,11 @@ done
     async fn a_slow_viewer_is_skipped_then_caught_up_never_dropped() {
         let (session, mut child) = start(&["/bin/sh", "-c", &flood(150, "0.01")]);
         let fast = ClientId::new();
-        let (tx_fast, rx_fast) = mpsc::channel(4096);
+        let (tx_fast, rx_fast) = viewer(4096);
         session.attach(fast, size(40, 6), tx_fast).unwrap();
         let fast_seen = until_done(rx_fast, Duration::ZERO);
         let slow = ClientId::new();
-        let (tx_slow, rx_slow) = mpsc::channel(8);
+        let (tx_slow, rx_slow) = viewer(8);
         session.attach(slow, size(40, 6), tx_slow).unwrap();
         // Long enough for some fifty frames.
         let slow_seen = until_done(rx_slow, Duration::from_millis(500));
@@ -878,7 +871,7 @@ done
         // `tr` echoes each line back in capitals, after the tty's own echo of it.
         let (session, mut child) = start(&["/usr/bin/tr", "a-z", "A-Z"]);
         let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel(4096);
+        let (tx, mut rx) = viewer(4096);
         session.attach(me, size(40, 6), tx).unwrap();
         let mut paste = format!("{}\n", "x".repeat(99)).repeat(2_600);
         paste.push_str("end\n");
@@ -896,7 +889,7 @@ done
     async fn the_viewers_are_told_the_real_exit_status_of_the_child() {
         let (session, mut child) = start(&["/bin/sh", "-c", "read x; exit 3"]);
         let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (tx, mut rx) = viewer(64);
         session.attach(me, size(40, 6), tx).unwrap();
         session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
         let status = child.wait().await.unwrap().code().unwrap();
@@ -924,7 +917,7 @@ done
         let (session, mut child) =
             start(&["/bin/sh", "-c", "read x; printf '\\033[?2026hheld'; sleep 30"]);
         let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (tx, mut rx) = viewer(64);
         session.attach(me, size(40, 6), tx).unwrap();
         let _first =
             wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
@@ -948,7 +941,7 @@ done
         let (session, mut child, mut taps) =
             start_tapped(&["/bin/sh", "-c", "read x; exit 0"], Vec::new());
         let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (tx, mut rx) = viewer(64);
         session.attach(me, size(40, 6), tx).unwrap();
         let _first =
             wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
@@ -1067,7 +1060,7 @@ done
         let probe = tx.clone();
         session.attach(me, size(80, 24), tx).unwrap();
         let link = tokio::spawn(async move {
-            let mut screen = slopty_grid::Screen::new(80, 24);
+            let mut state = TermState::new(size(80, 24));
             let started = tokio::time::Instant::now();
             let (mut carried, mut queued, mut frames) = (0_usize, 0_usize, 0_usize);
             loop {
@@ -1080,10 +1073,11 @@ done
                 let on_link = u64::try_from(carried).unwrap().saturating_mul(1_000_000) / RATE;
                 tokio::time::sleep_until(started + Duration::from_micros(on_link)).await;
                 drop(out);
-                if let TermEvent::Frame(f) = &ev {
+                let frame = matches!(ev, TermEvent::Frame(_));
+                let _effects = state.apply(ev);
+                if frame {
                     frames += 1;
-                    apply(&mut screen, f);
-                    if text(&screen).contains("DONE") {
+                    if text(state.screen()).contains("DONE") {
                         return (tokio::time::Instant::now(), queued, carried / frames);
                     }
                 }
@@ -1106,8 +1100,161 @@ done
             "MEASURE throttled viewer at {RATE} B/s: shown {:.0} ms after the program ended; at most {queued} events queued; {frame_bytes} B a frame",
             stale.as_secs_f64() * 1e3
         );
-        assert!(queued <= 2, "a frame or two waits for the link, not a queue: {queued}");
+        assert!(
+            queued <= 3,
+            "a frame or two (and a marker) wait for the link, not a queue: {queued}"
+        );
         assert!(stale < Duration::from_millis(600), "the end shows promptly: {stale:?}");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// The same flood behind a QUIC stream: the connection's write returns once the frame is
+    /// in noq's send buffer, which takes up to the stream window before the link has carried
+    /// any of it. The client applies each event as the link delivers it and sends back what
+    /// its state asks the worker for, as the app does.
+    #[tokio::test]
+    async fn a_throttled_viewer_behind_the_stream_window_is_under_a_second_behind() {
+        /// The link, in bytes a second.
+        const RATE: u64 = 250_000;
+        /// noq's default stream receive window: what a stream may hold unread by the peer.
+        const WINDOW: usize = 1_250_000;
+        let script = "read x; i=0; while [ $i -lt 120 ]; do j=0; while [ $j -lt 15 ]; do \
+                      echo \"line $i.$j the quick brown fox jumps over the lazy dog again\"; \
+                      j=$((j+1)); done; sleep 0.01; i=$((i+1)); done; echo DONE; sleep 30";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel::<Outbound>(256);
+        session.attach(me, size(80, 24), tx).unwrap();
+        let (wire_tx, mut wire_rx) = mpsc::unbounded_channel::<(tokio::time::Instant, TermEvent)>();
+        // The connection: a write waits only for room in the stream window, and the frame's
+        // credit goes back as soon as it is written.
+        let writer = tokio::spawn(async move {
+            let mut buffered: std::collections::VecDeque<(tokio::time::Instant, usize)> =
+                std::collections::VecDeque::new();
+            let mut last = tokio::time::Instant::now();
+            let mut most = 0_usize;
+            while let Some(out) = rx.recv().await {
+                let len = out.wire().len();
+                loop {
+                    let now = tokio::time::Instant::now();
+                    while buffered.front().is_some_and(|&(at, _)| at <= now) {
+                        buffered.pop_front();
+                    }
+                    let held: usize = buffered.iter().map(|&(_, n)| n).sum();
+                    most = most.max(held);
+                    if held + len <= WINDOW || buffered.is_empty() {
+                        break;
+                    }
+                    let (at, _) = buffered.front().copied().unwrap();
+                    tokio::time::sleep_until(at).await;
+                }
+                let now = tokio::time::Instant::now();
+                let on_link = Duration::from_micros(
+                    u64::try_from(len).unwrap().saturating_mul(1_000_000) / RATE,
+                );
+                last = last.max(now) + on_link;
+                buffered.push_back((last, len));
+                let ev = event(&out);
+                drop(out);
+                if wire_tx.send((last, ev)).is_err() {
+                    break;
+                }
+            }
+            most
+        });
+        let client = {
+            let session = session.clone();
+            tokio::spawn(async move {
+                let mut state = TermState::new(size(80, 24));
+                while let Some((at, ev)) = wire_rx.recv().await {
+                    tokio::time::sleep_until(at).await;
+                    for effect in state.apply(ev) {
+                        if let Effect::Request(req) = effect {
+                            let _sent = session.request(me, req);
+                        }
+                    }
+                    if state.screen().lines().iter().any(|l| l.text().contains("DONE")) {
+                        return tokio::time::Instant::now();
+                    }
+                }
+                panic!("the stream ended before DONE");
+            })
+        };
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        let ended = loop {
+            if let session::Text::Screen { screen, .. } =
+                session.read(session::Read::Screen).await.unwrap()
+                && screen.rows.iter().any(|r| r.contains("DONE"))
+            {
+                break tokio::time::Instant::now();
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        };
+        let shown = tokio::time::timeout(Duration::from_secs(60), client).await.unwrap().unwrap();
+        let stale = shown.duration_since(ended);
+        session.close();
+        let most = writer.await.unwrap();
+        eprintln!(
+            "MEASURE viewer behind a {WINDOW} B stream window at {RATE} B/s: shown {:.0} ms after the program ended; at most {most} B in the stream buffer",
+            stale.as_secs_f64() * 1e3
+        );
+        let bound = slopty_proto::terminal::FRAMES_UNREACHED_BYTES;
+        assert!(most < bound + bound / 2, "the confirmed frames bound the buffer: {most} B");
+        assert!(stale < Duration::from_secs(1), "the end shows promptly: {stale:?}");
+        let _killed = child.kill().await;
+    }
+
+    /// A sink that closes does not say whether its client left or is attaching again (the
+    /// connection lets go of the old sink before the new attach arrives), so the driver's
+    /// seat waits: another viewer is not handed the size until the connection detaches that
+    /// sink, and the driver attaching again keeps it.
+    #[tokio::test]
+    async fn a_closed_sink_keeps_the_drivers_seat_until_its_connection_detaches_it() {
+        let (session, mut child) = start(&["/bin/sh", "-c", "cat"]);
+        let (a, b) = (ClientId::new(), ClientId::new());
+        let (old_tx, mut old_a) = viewer(64);
+        let (tx_b, mut rx_b) = viewer(64);
+        session.attach(a, size(40, 6), old_tx.clone()).unwrap();
+        wait_for(&mut old_a, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Driver { you: true }))
+        })
+        .await;
+        session.attach(b, size(60, 10), tx_b).unwrap();
+        wait_for(&mut rx_b, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full)))
+            .await;
+        let driven_by_b = |events: &[TermEvent]| {
+            events.iter().any(|e| {
+                matches!(e, TermEvent::Driver { you: true } | TermEvent::Resized { cols: 60, .. })
+            })
+        };
+        // A's connection lets go of its sink, as a re-attach does before the attach lands.
+        drop(old_a);
+        session.request(b, TermRequest::Raw(b"x".to_vec())).unwrap();
+        let (events, _) = wait_for(&mut rx_b, |_, s| text(s).contains('x')).await;
+        assert!(!driven_by_b(&events), "{events:?}");
+        let snap = session.snapshot().await.unwrap();
+        assert_eq!((snap.viewers, snap.size.cols), (1, 40), "a's viewer went, its size stays");
+        // The attach lands: a still drives.
+        let (new_tx, mut new_a) = viewer(64);
+        session.attach(a, size(40, 6), new_tx.clone()).unwrap();
+        wait_for(&mut new_a, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Driver { you: true }))
+        })
+        .await;
+        // The old connection's detach names the old sink: nothing moves.
+        session.detach_sink(a, &old_tx).unwrap();
+        session.request(b, TermRequest::Raw(b"y".to_vec())).unwrap();
+        let (events, _) = wait_for(&mut rx_b, |_, s| text(s).contains('y')).await;
+        assert!(!driven_by_b(&events), "{events:?}");
+        // A's connection goes for good: its sink closes, then its detach passes the seat on.
+        drop(new_a);
+        session.request(b, TermRequest::Raw(b"z".to_vec())).unwrap();
+        let (events, _) = wait_for(&mut rx_b, |_, s| text(s).contains('z')).await;
+        assert!(!driven_by_b(&events), "{events:?}");
+        session.detach_sink(a, &new_tx).unwrap();
+        let (events, _) = wait_for(&mut rx_b, |ev, _| driven_by_b(ev)).await;
+        assert!(events.iter().any(|e| matches!(e, TermEvent::Driver { you: true })));
         session.close();
         let _killed = child.kill().await;
     }
@@ -1118,7 +1265,7 @@ done
     async fn a_reply_reaches_a_viewer_that_fell_behind_the_frames() {
         let (session, mut child) = start(&["/bin/sh", "-c", &flood(150, "0.01")]);
         let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel(8);
+        let (tx, mut rx) = viewer(8);
         session.attach(me, size(40, 6), tx).unwrap();
         session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
         // Long enough for some twenty frames, more than the sink holds.

@@ -110,3 +110,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **`[terminal] natural_editing`** (2026-09-13): ghostty's macOS "natural text editing"
   keybinds (⌘← ⌘→ ⌘⌫ ⌥← ⌥→, plus ⌥⌫) as one switch, default on, on `Theme::behaviour`;
   ruled in decisions/terminal.md ("The line is edited with the Mac's keys").
+
+- ✅ **`[remote] hdr` is gone** (2026-09-25): it stopped reaching a stream when the stream
+  became 8-bit only, and it went with the wire fields that echoed it; ruled in
+  decisions/video.md ("HDR is not carried"). A file that still names it gets the unknown-key
+  warning.

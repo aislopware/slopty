@@ -2,7 +2,7 @@
 //! CLI and both MCP surfaces call these, so a verb means the same on every one of them.
 
 use slopty_core::WorkerId;
-use slopty_proto::agent::{AgentKind, AgentStatus};
+use slopty_proto::agent::{AgentKind, SessionAgent};
 use slopty_proto::orchestration::{
     Command, DirEntry, EventFilter, FileStat, HubEvent, Input, Line, Outcome, Port, Screen, Size,
     TermRef, Verb, WaitUntil, Waited,
@@ -199,7 +199,7 @@ pub async fn wait<D: Dispatch>(
 pub async fn agent_status<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     term: &str,
-) -> Result<Option<(AgentKind, AgentStatus)>, ToolError> {
+) -> Result<Option<SessionAgent>, ToolError> {
     let term = res.term(term).await?;
     match res.dispatch().call(Verb::AgentStatus { term }).await {
         Outcome::Agent(agent) => Ok(agent),

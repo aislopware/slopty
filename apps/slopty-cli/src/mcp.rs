@@ -23,7 +23,7 @@ use rmcp::{ErrorData, Peer, RoleServer, ServerHandler, ServiceExt as _};
 use serde_json::{Value, json};
 use slopty_core::WorkerId;
 use slopty_net::client::bind_client;
-use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
+use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::server::{Event, FromServer, Role};
 use slopty_tools::{tools, view};
@@ -200,9 +200,10 @@ fn needs_human(
             Level::Warning
         }
     };
-    let agent = view::agent(Some(&(event.kind, event.status.clone())));
+    let reported = SessionAgent::from(event);
+    let agent = view::agent(Some(&reported));
     let where_ = worker_name.map_or_else(|| term.worker.to_string(), str::to_owned);
-    let what = view::agent_text(Some(&(event.kind, event.status.clone())));
+    let what = view::agent_text(Some(&reported));
     let message = event.detail.as_ref().map_or_else(
         || format!("{what} (on {where_})"),
         |detail| format!("{what} (on {where_}): {detail}"),

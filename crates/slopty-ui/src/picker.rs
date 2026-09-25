@@ -480,8 +480,7 @@ mod tests {
             window(21, "Safari", "", true),
             window(40, "Music", "Music", false),
         ];
-        let displays =
-            vec![DisplayInfo { id: 2, w: 1728.0, h: 1117.0, scale: 2.0, hz: 120.0, hdr: true }];
+        let displays = vec![DisplayInfo { id: 2, w: 1728.0, h: 1117.0, scale: 2.0, hz: 120.0 }];
         let picker =
             cx.new(|cx| WindowPicker::new(sessions, windows, displays, Theme::default(), cx));
         let picked: Rc<RefCell<Vec<PickerEvent>>> = Rc::default();

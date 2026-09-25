@@ -948,9 +948,9 @@ impl Peer<'_> {
                     control.nack(frame, &fragments);
                 }
             }
-            Feedback::Refresh { stream, last_good_frame } => {
+            Feedback::Refresh { stream, last_good_frame, keyframe } => {
                 if let Some(control) = control(stream) {
-                    control.request_refresh(last_good_frame);
+                    control.request_refresh(last_good_frame, keyframe);
                 }
             }
         }

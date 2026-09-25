@@ -822,9 +822,9 @@ impl Worker {
                     self.counters.nacks = self.counters.nacks.saturating_add(1);
                     Feedback::Nack { stream, frame, fragments }
                 }
-                Action::RequestRefresh { last_good_frame } => {
+                Action::RequestRefresh { last_good_frame, keyframe } => {
                     self.counters.refreshes = self.counters.refreshes.saturating_add(1);
-                    Feedback::Refresh { stream, last_good_frame }
+                    Feedback::Refresh { stream, last_good_frame, keyframe }
                 }
             };
             if !(self.feedback)(encode_feedback(feedback)) {

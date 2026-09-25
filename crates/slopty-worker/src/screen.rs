@@ -368,6 +368,14 @@ impl LtrBook {
         self.usable = None;
     }
 
+    /// The client's decoder lost every reference it held: nothing acknowledged so far can be
+    /// predicted from, nor anything acknowledged late for this epoch, until a keyframe starts the
+    /// next one.
+    const fn client_lost(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.usable = None;
+    }
+
     /// How long ago the usable reference was encoded, microseconds; `None` when there is none.
     fn usable_age(&self, now: u64) -> Option<u64> {
         self.usable.map(|(_token, at)| now.saturating_sub(at))
@@ -1093,8 +1101,8 @@ impl<P: Platform> StreamControl<P> {
     }
 
     /// See [`ScreenStream::request_refresh`].
-    pub fn request_refresh(&self, last_good_frame: u32) {
-        self.0.request_refresh(last_good_frame);
+    pub fn request_refresh(&self, last_good_frame: u32, keyframe: bool) {
+        self.0.request_refresh(last_good_frame, keyframe);
     }
 
     /// See [`ScreenStream::nack`].
@@ -1861,10 +1869,20 @@ impl<P: Platform> Shared<P> {
 
     /// The client lost a frame it cannot recover: make the next frame stand on its own. On a
     /// still screen there is no next frame, so the held capture answers ([`repair_loop`]).
-    fn request_refresh(&self, last_good_frame: u32) {
-        tracing::debug!(stream = %self.id, last_good_frame, "refresh requested");
+    ///
+    /// `keyframe` says the client's decoder holds no reference any more (a new decoder session),
+    /// so an LTR refresh would be predicted from a picture it does not have and fail to decode
+    /// (-17694). Its acknowledged references are dropped and a keyframe is asked for, which then
+    /// has no reference left to be deferred for ([`Self::keyframe_admitted`]).
+    fn request_refresh(&self, last_good_frame: u32, keyframe: bool) {
+        tracing::debug!(stream = %self.id, last_good_frame, keyframe, "refresh requested");
         self.counters.refreshes.fetch_add(1, Ordering::Relaxed);
-        self.pending.lock().refresh = true;
+        if keyframe {
+            self.ltr.lock().client_lost();
+            self.pending.lock().keyframe = true;
+        } else {
+            self.pending.lock().refresh = true;
+        }
         self.repair.notify_one();
     }
 
@@ -2410,7 +2428,6 @@ impl<P: Platform> Pipeline<P> {
             width: capture_config.width,
             height: capture_config.height,
             scale,
-            hdr: false,
         };
         let stream = Self {
             id,
@@ -2811,9 +2828,10 @@ impl<P: Platform> Pipeline<P> {
         self.shared.rate.lock().target_bps()
     }
 
-    /// The client lost a frame it cannot recover: make the next frame stand on its own.
-    pub fn request_refresh(&self, last_good_frame: u32) {
-        self.shared.request_refresh(last_good_frame);
+    /// The client lost a frame it cannot recover: make the next frame stand on its own, and a
+    /// keyframe when `keyframe` says the client holds no reference to predict from.
+    pub fn request_refresh(&self, last_good_frame: u32, keyframe: bool) {
+        self.shared.request_refresh(last_good_frame, keyframe);
     }
 
     /// Retransmit fragments of a recent frame, unless QUIC is already holding more than the
@@ -3766,7 +3784,7 @@ mod tests {
         for token in [5, 6] {
             shared.ltr.lock().on_packet(false, Some(token), 0);
         }
-        shared.request_refresh(41);
+        shared.request_refresh(41, false);
         assert!(shared.pending.lock().refresh);
         assert_eq!(shared.stats().refreshes, 1);
         let mut acked_ltr = [0; 4];
@@ -3919,6 +3937,38 @@ mod tests {
         assert!(shared.keyframe_admitted(2_000_000), "the valve opens rather than hold forever");
     }
 
+    /// A client whose decoder lost its session holds none of the references it acknowledged, so
+    /// the refresh it asks for as a keyframe is an IDR: not an LTR delta off the reference, and
+    /// not deferred for one however badly it fits the link.
+    #[test]
+    fn a_keyframe_refresh_is_an_idr_even_with_a_usable_reference() {
+        let (shared, _wire) = shared_for_frames();
+        shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
+        shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
+        shared.on_packet(&packet(900, false, Some(7), false));
+        shared.report(&acking(&[7]), None);
+        shared.request_refresh(41, false);
+        let (keyframe, refresh) = {
+            let pending = shared.pending.lock();
+            (pending.keyframe, pending.refresh)
+        };
+        assert!(refresh && !keyframe && shared.ltr_usable(), "a plain refresh: a delta off 7");
+        shared.pending.lock().refresh = false;
+
+        shared.request_refresh(41, true);
+        let (keyframe, refresh) = {
+            let pending = shared.pending.lock();
+            (pending.keyframe, pending.refresh)
+        };
+        assert!(keyframe && !refresh, "the encoder is asked for a keyframe");
+        assert!(!shared.ltr_usable(), "reference 7 went with the client's session");
+        assert!(shared.keyframe_admitted(1_000_000), "so nothing is left to defer it for");
+        assert_eq!(shared.stats().keyframes_deferred, 0);
+        shared.report(&acking(&[7]), None);
+        assert!(!shared.ltr_usable(), "a late ack from the lost session names nothing");
+        assert_eq!(shared.stats().refreshes, 2);
+    }
+
     /// The rule the keyframe path could not reach: `pending.keyframe` is set at stream open and
     /// on a quality change and almost nowhere else, so `keyframes_deferred` read 0 on every rung
     /// of the shaped ladder. The *drop* path runs on every dropped frame, which on a collapsed
@@ -4045,7 +4095,7 @@ mod tests {
         assert_eq!(shared.repair_at(), None, "sent once");
 
         // A refresh on the still picture: answered from the held capture a period on.
-        shared.request_refresh(3);
+        shared.request_refresh(3, false);
         let refresh_at = shared.repair_at().expect("a refresh is owed");
         assert_eq!(refresh_at, at + 33_333 - 4_166);
         assert_eq!(shared.repair_now(refresh_at), Attempt::Sent);
@@ -4053,7 +4103,7 @@ mod tests {
         assert_eq!(shared.stats().repaired, 2);
 
         // A still target that is hidden is not repaired: the held capture is dropped.
-        shared.request_refresh(4);
+        shared.request_refresh(4, false);
         shared.target_hidden.store(true, Ordering::Relaxed);
         assert_eq!(shared.repair_now(refresh_at + 100_000), Attempt::Nothing);
         assert_eq!(shared.repair_at(), None, "nothing held any more");

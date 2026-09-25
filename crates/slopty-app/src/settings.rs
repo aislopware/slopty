@@ -138,7 +138,6 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
         } else {
             defaults.max_bitrate_bps
         },
-        hdr: remote.hdr,
         muted: remote.muted,
     };
     theme
@@ -361,12 +360,11 @@ mod tests {
     fn remote_settings_ride_on_the_theme() {
         let mut s = Settings::default();
         let stream = theme_for(&s, true).behaviour.stream;
-        assert_eq!((stream.fps, stream.max_bitrate_bps, stream.hdr), (60, 30_000_000, false));
+        assert_eq!((stream.fps, stream.max_bitrate_bps), (60, 30_000_000));
         s.remote.fps = 30;
         s.remote.max_bitrate_mbps = 8;
-        s.remote.hdr = true;
         let stream = theme_for(&s, true).behaviour.stream;
-        assert_eq!((stream.fps, stream.max_bitrate_bps, stream.hdr), (30, 8_000_000, true));
+        assert_eq!((stream.fps, stream.max_bitrate_bps), (30, 8_000_000));
         s.remote.fps = 0;
         s.remote.max_bitrate_mbps = 500;
         let stream = theme_for(&s, true).behaviour.stream;

@@ -22,7 +22,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use slopty_core::{ClientId, SessionId, WorkerId};
 use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
-use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason};
+use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::orchestration::{
     Command, DirEntry, ErrorCode, FileKind, FileStat, Input, Line, Outcome, Screen, Size, TermRef,
     Verb, WaitUntil,
@@ -78,7 +78,7 @@ const ORCHESTRATED_SIZE: TermSize = TermSize {
 /// Coding-agent status as the daemon tracks it (`slopty_agent::AgentTable` behind a lock).
 pub trait Agents: Send + Sync {
     /// The agent in `session` now, if one runs.
-    fn status(&self, session: SessionId) -> Option<(AgentKind, AgentStatus)>;
+    fn status(&self, session: SessionId) -> Option<SessionAgent>;
     /// `session` is gone; drop what was known about it.
     fn forget(&self, session: SessionId);
 }
@@ -195,7 +195,7 @@ impl Orchestrator {
                 let handle = self.session(term)?;
                 let feed = matches!(until, WaitUntil::AgentNeedsInput).then(|| AgentFeed {
                     events: inner.events.subscribe(),
-                    now: inner.worker.agents().status(term.session).map(|(_kind, status)| status),
+                    now: inner.worker.agents().status(term.session).map(|a| a.status),
                 });
                 let timeout = Duration::from_millis(u64::from(timeout_ms));
                 Ok(Outcome::Waited(wait_for(&handle, &until, timeout, feed).await?))
@@ -315,7 +315,7 @@ impl Orchestrator {
         let handle = self.open(&req, ORCHESTRATOR).await?;
         let session = handle.id();
         if let Some(prompt) = prompt {
-            let now = self.inner.worker.agents().status(session).map(|(_kind, status)| status);
+            let now = self.inner.worker.agents().status(session).map(|a| a.status);
             tokio::spawn(type_when_ready(handle, prompt, AgentFeed { events, now }));
         }
         Ok(Outcome::Opened(TermRef { worker: self.inner.id, session }))

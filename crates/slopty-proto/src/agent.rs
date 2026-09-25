@@ -68,6 +68,18 @@ pub enum AgentSource {
     Hook,
 }
 
+/// The agent a session runs, as a listing or a status query reports it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SessionAgent {
+    /// Which agent.
+    pub kind: AgentKind,
+    /// What it is doing.
+    pub status: AgentStatus,
+    /// Where the status came from; anything short of [`AgentSource::Hook`] means the hooks are
+    /// not installed (or have not spoken yet).
+    pub source: AgentSource,
+}
+
 /// Worker → client.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
@@ -85,4 +97,10 @@ pub struct AgentEvent {
     pub attention: bool,
     /// Where the status came from.
     pub source: AgentSource,
+}
+
+impl From<&AgentEvent> for SessionAgent {
+    fn from(event: &AgentEvent) -> Self {
+        Self { kind: event.kind, status: event.status.clone(), source: event.source }
+    }
 }

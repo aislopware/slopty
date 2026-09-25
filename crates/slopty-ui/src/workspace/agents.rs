@@ -9,7 +9,7 @@ use gpui::{
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::SessionId;
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentEvent, AgentSource, AgentStatus, BlockReason};
+use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::SessionSummary;
 use slopty_theme::alpha;
@@ -108,8 +108,9 @@ impl WorkspaceView {
     }
 
     /// What the worker's summaries say runs in each session, taken before any `Agent` event
-    /// arrives, so a tile shows its agent's badge from the first frame after a connect. A
-    /// session that already has a live event keeps it: the event is newer than any summary.
+    /// arrives, so a tile shows its agent's badge, and offers the hooks only when they are not
+    /// what the worker reads it from, from the first frame after a connect. A session that
+    /// already has a live event keeps it: the event is newer than any summary.
     pub(super) fn seed_agents<'a>(
         &mut self,
         sessions: impl IntoIterator<Item = &'a SessionSummary>,
@@ -117,7 +118,9 @@ impl WorkspaceView {
     ) {
         let mut seeded = false;
         for summary in sessions {
-            let Some((kind, status)) = summary.agent.clone() else { continue };
+            let Some(SessionAgent { kind, status, source }) = summary.agent.clone() else {
+                continue;
+            };
             if status == AgentStatus::None || self.agents.contains_key(&summary.id) {
                 continue;
             }
@@ -134,7 +137,7 @@ impl WorkspaceView {
                     agent_session: None,
                     detail: None,
                     attention: false,
-                    source: AgentSource::Process,
+                    source,
                 },
             );
             seeded = true;

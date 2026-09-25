@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use slopty_core::{SessionId, WorkerId};
-use slopty_proto::agent::AgentStatus;
+use slopty_proto::agent::{AgentStatus, SessionAgent};
 use slopty_proto::orchestration::{
     ErrorCode, EventFilter, Happening, HubEvent, Outcome, TermRef, Verb,
 };
@@ -568,13 +568,13 @@ impl Lease {
             }
             ToServer::Agent(event) => {
                 let listed = entry.sessions.iter_mut().find(|s| s.id == event.session);
-                let before = listed.as_ref().map(|s| s.agent.as_ref().map(|(_kind, st)| st));
+                let before = listed.as_ref().map(|s| s.agent.as_ref().map(|a| &a.status));
                 // A report of the status already known (the same tool again) is no change.
                 let same = before
                     .is_some_and(|before| before.unwrap_or(&AgentStatus::None) == &event.status);
                 if let Some(summary) = listed {
-                    summary.agent = (event.status != AgentStatus::None)
-                        .then(|| (event.kind, event.status.clone()));
+                    summary.agent =
+                        (event.status != AgentStatus::None).then(|| SessionAgent::from(&event));
                 }
                 if !same {
                     hub.happen(Happening::Agent {
@@ -895,8 +895,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// `ListTerminals` answers with each agent as the worker last reported it, and an agent
-    /// that left leaves its terminal without one.
+    /// `ListTerminals` answers with each agent as the worker last reported it, with the signal
+    /// it was read from, and an agent that left leaves its terminal without one.
     #[tokio::test]
     async fn listed_terminals_carry_the_agent_as_last_reported() {
         let hub = Hub::new("server".to_owned(), Vec::new());
@@ -904,7 +904,7 @@ pub(crate) mod tests {
         let session = SessionId::new();
         let (tx, _rx) = mpsc::channel(8);
         let lease = hub.register(registration(worker, vec![summary(session)]), ip(), tx).unwrap();
-        let report = |session: SessionId, status: AgentStatus| {
+        let report = |session: SessionId, status: AgentStatus, source: AgentSource| {
             ToServer::Agent(AgentEvent {
                 session,
                 kind: AgentKind::ClaudeCode,
@@ -912,9 +912,11 @@ pub(crate) mod tests {
                 agent_session: None,
                 detail: None,
                 attention: false,
-                source: AgentSource::Hook,
+                source,
             })
         };
+        let agent =
+            |status, source| Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source });
         let listed = async || {
             let Outcome::Terminals(list) = hub.dispatch(Verb::ListTerminals { worker: None }).await
             else {
@@ -923,14 +925,14 @@ pub(crate) mod tests {
             list.into_iter().map(|(_worker, s)| s.agent).collect::<Vec<_>>()
         };
         assert_eq!(listed().await, [None], "no agent yet");
-        lease.handle(report(session, AgentStatus::Working));
-        assert_eq!(listed().await, [Some((AgentKind::ClaudeCode, AgentStatus::Working))]);
+        lease.handle(report(session, AgentStatus::Working, AgentSource::Title));
+        assert_eq!(listed().await, [agent(AgentStatus::Working, AgentSource::Title)]);
         let blocked = AgentStatus::Blocked(BlockReason::Question);
-        lease.handle(report(session, blocked.clone()));
-        assert_eq!(listed().await, [Some((AgentKind::ClaudeCode, blocked))], "kept current");
-        lease.handle(report(session, AgentStatus::None));
+        lease.handle(report(session, blocked.clone(), AgentSource::Hook));
+        assert_eq!(listed().await, [agent(blocked, AgentSource::Hook)], "kept current");
+        lease.handle(report(session, AgentStatus::None, AgentSource::Hook));
         assert_eq!(listed().await, [None], "the agent left");
-        lease.handle(report(SessionId::new(), AgentStatus::Idle));
+        lease.handle(report(SessionId::new(), AgentStatus::Idle, AgentSource::Hook));
         assert_eq!(listed().await, [None], "a report for a session not listed changes nothing");
     }
 

@@ -129,7 +129,6 @@ fn display_info(d: &SCDisplay) -> DisplayInfo {
         h: to_f32(frame.size.height),
         scale,
         hz: to_f32(if hz > 0.0 { hz } else { 60.0 }),
-        hdr: false,
     }
 }
 

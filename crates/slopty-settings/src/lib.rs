@@ -262,16 +262,13 @@ pub struct RemoteSettings {
     /// The most the worker may send per stream, in megabits per second (1–200): the ceiling
     /// its bitrate controller grows towards, never the rate it starts at.
     pub max_bitrate_mbps: u16,
-    /// Encode 10-bit HEVC (Main 10) so an HDR source keeps its range; off, everything is
-    /// 8-bit.
-    pub hdr: bool,
     /// A stream opens silenced on this client; the title-bar pill still toggles it.
     pub muted: bool,
 }
 
 impl Default for RemoteSettings {
     fn default() -> Self {
-        Self { fps: 60, max_bitrate_mbps: 30, hdr: false, muted: false }
+        Self { fps: 60, max_bitrate_mbps: 30, muted: false }
     }
 }
 
@@ -481,8 +478,6 @@ fps = {fps}
 # Ceiling for one stream in megabits per second (1 to 200); the worker grows
 # towards it as the link allows.
 max_bitrate_mbps = {max_bitrate_mbps}
-# 10-bit HEVC, for an HDR source.
-hdr = {hdr}
 # Open a stream with its audio silenced here; the title-bar pill still toggles it.
 muted = {muted}
 
@@ -540,7 +535,6 @@ server = \"\"
             natural_editing = d.terminal.natural_editing,
             fps = d.remote.fps,
             max_bitrate_mbps = d.remote.max_bitrate_mbps,
-            hdr = d.remote.hdr,
             muted = d.remote.muted,
         )
     }
@@ -745,17 +739,16 @@ mod tests {
         assert!(d.terminal.hide_pointer_while_typing, "as Terminal.app");
         assert_eq!(d.terminal.scroll_multiplier, 1.0, "one for one");
         assert!(d.font.ligatures, "the font's own");
-        assert_eq!((d.remote.fps, d.remote.max_bitrate_mbps, d.remote.hdr), (60, 30, false));
+        assert_eq!((d.remote.fps, d.remote.max_bitrate_mbps), (60, 30));
     }
 
     #[test]
     fn remote_keys() {
-        let loaded =
-            Settings::parse("[remote]\nfps = 30\nmax_bitrate_mbps = 8\nhdr = true\nmuted = true\n");
+        let loaded = Settings::parse("[remote]\nfps = 30\nmax_bitrate_mbps = 8\nmuted = true\n");
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
         assert_eq!(
             loaded.settings.remote,
-            RemoteSettings { fps: 30, max_bitrate_mbps: 8, hdr: true, muted: true }
+            RemoteSettings { fps: 30, max_bitrate_mbps: 8, muted: true }
         );
         assert!(!Settings::default().remote.muted, "sound on, as the worker plays it");
     }

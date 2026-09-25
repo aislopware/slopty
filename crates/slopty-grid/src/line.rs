@@ -107,7 +107,11 @@ impl Hyperlink {
 }
 
 /// One row of the grid. Always exactly `cols` cells long once placed in a [`crate::Screen`].
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+///
+/// On the wire a line is its width and its cells up to the last one that is not blank; the
+/// rest are blank again on decode. A blank cell cost seven bytes, so a 200-column echo row
+/// took two packets (MEASUREMENTS 2026-09-25, "a scroll ships the rows it moved").
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Line {
     /// The cells, left to right.
     pub cells: Vec<Cell>,
@@ -117,6 +121,52 @@ pub struct Line {
     pub mark: SemanticMark,
     /// OSC 8 links on this line, left to right, non-overlapping.
     pub links: Vec<Hyperlink>,
+}
+
+/// [`Line`] as it is encoded, borrowed.
+#[derive(Serialize)]
+struct WireRef<'a> {
+    cols: u16,
+    cells: &'a [Cell],
+    flags: LineFlags,
+    mark: SemanticMark,
+    links: &'a [Hyperlink],
+}
+
+/// [`Line`] as it is decoded, before the blank cells are put back.
+#[derive(Deserialize)]
+struct Wire {
+    cols: u16,
+    cells: Vec<Cell>,
+    flags: LineFlags,
+    mark: SemanticMark,
+    links: Vec<Hyperlink>,
+}
+
+impl Serialize for Line {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let content = self.last_content_col().map_or(0, |c| usize::from(c).saturating_add(1));
+        WireRef {
+            cols: self.cols(),
+            cells: self.cells.get(..content).unwrap_or_default(),
+            flags: self.flags,
+            mark: self.mark,
+            links: &self.links,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Line {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let Wire { cols, mut cells, flags, mark, links } = Wire::deserialize(deserializer)?;
+        let cols = usize::from(cols);
+        if cells.len() > cols {
+            return Err(serde::de::Error::invalid_length(cells.len(), &"at most `cols` cells"));
+        }
+        cells.resize(cols, Cell::BLANK);
+        Ok(Self { cells, flags, mark, links })
+    }
 }
 
 impl Line {
@@ -298,6 +348,32 @@ mod tests {
         let mut line = Line::blank(3);
         line.cells[2] = Cell::spacer_tail(Style::DEFAULT);
         assert!(!line.is_blank(), "a spacer is content");
+    }
+
+    /// Trailing blank cells are left off the wire and come back on decode; interior blanks,
+    /// styled blanks and spacers are content and travel.
+    #[test]
+    fn a_line_travels_up_to_its_last_content_and_comes_back_whole() {
+        let mut line = Line::from_text("a b", 200, Style::DEFAULT);
+        line.mark = SemanticMark::Prompt { exit: Some(1), input: Some(2) };
+        let json = serde_json::to_value(&line).unwrap();
+        assert_eq!(json["cols"], 200);
+        assert_eq!(json["cells"].as_array().map(Vec::len), Some(3));
+        assert_eq!(serde_json::from_value::<Line>(json).unwrap(), line);
+        assert_eq!(
+            serde_json::from_value::<Line>(serde_json::to_value(Line::blank(80)).unwrap()).unwrap(),
+            Line::blank(80)
+        );
+        let mut styled = Line::blank(10);
+        styled.cells[7].style.bg = crate::Color::Palette(4);
+        let json = serde_json::to_value(&styled).unwrap();
+        assert_eq!(json["cells"].as_array().map(Vec::len), Some(8), "a coloured blank is content");
+        let bad = serde_json::json!({
+            "cols": 1, "cells": [json["cells"][0], json["cells"][0]],
+            "flags": "", "mark": "Unknown", "links": [],
+        });
+        let err = serde_json::from_value::<Line>(bad).unwrap_err().to_string();
+        assert!(err.contains("at most `cols` cells"), "{err}");
     }
 
     #[test]

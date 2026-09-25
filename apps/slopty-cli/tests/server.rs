@@ -11,7 +11,9 @@ mod tests {
     use slopty_core::{SessionId, WorkerId};
     use slopty_net::admission::Admission;
     use slopty_net::server::ServerListener;
-    use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
+    use slopty_proto::agent::{
+        AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent,
+    };
     use slopty_proto::orchestration::{ErrorCode, Input, Outcome, TermRef, Verb};
     use slopty_proto::server::{
         Event, FromServer, Liveness, Os, Role, ToServer, WorkerCaps, WorkerInfo,
@@ -74,8 +76,13 @@ mod tests {
         }
     }
 
-    fn blocked() -> AgentStatus {
-        AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() })
+    /// A Claude Code waiting on a permission, as its hook said.
+    fn blocked() -> SessionAgent {
+        SessionAgent {
+            kind: AgentKind::ClaudeCode,
+            status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
+            source: AgentSource::Hook,
+        }
     }
 
     /// What the fake answers: one online worker with a shell and a Claude Code waiting on a
@@ -85,16 +92,10 @@ mod tests {
             Verb::ListWorkers => Outcome::Workers(directory()),
             Verb::ListTerminals { .. } => Outcome::Terminals(vec![
                 (studio(), summary(shell(), "zsh")),
-                (
-                    studio(),
-                    SessionSummary {
-                        agent: Some((AgentKind::ClaudeCode, blocked())),
-                        ..summary(agent(), "claude")
-                    },
-                ),
+                (studio(), SessionSummary { agent: Some(blocked()), ..summary(agent(), "claude") }),
             ]),
             Verb::AgentStatus { term } if term.session == agent() => {
-                Outcome::Agent(Some((AgentKind::ClaudeCode, blocked())))
+                Outcome::Agent(Some(blocked()))
             }
             Verb::AgentStatus { .. } => Outcome::Agent(None),
             Verb::Close { term } if term.session != shell() => Outcome::Error {
@@ -273,6 +274,7 @@ mod tests {
         assert!(ran.ok, "{}", ran.stderr);
         assert!(ran.stdout.starts_with("TERM "), "{}", ran.stdout);
         assert!(ran.stdout.contains("mac-studio/0199a1b2  running"), "{}", ran.stdout);
+        assert!(ran.stdout.contains("waiting: permission for Bash (hooks)"), "{}", ran.stdout);
     }
 
     #[tokio::test]
@@ -416,5 +418,7 @@ mod tests {
         let terminals = tool_json(&mcp.reply(4).await);
         assert_eq!(terminals[1]["term"], format!("{}/{}", studio(), agent()));
         assert_eq!(terminals[1]["worker_name"], "mac-studio");
+        assert_eq!(terminals[1]["agent"]["source"], "hook", "{terminals}");
+        assert!(terminals[0].get("agent").is_none(), "a shell has no agent: {terminals}");
     }
 }

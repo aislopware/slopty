@@ -264,18 +264,20 @@ pub struct HudInput<'a> {
     pub ui: Option<&'a crate::frames::FrameStats>,
 }
 
-/// The four lines of the stats overlay: what is on screen, how it got there, when, and how
-/// the UI itself keeps up.
+/// The five lines of the stats overlay: what is on screen, how it got there, what the sound
+/// did, when the picture was shown, and how the UI itself keeps up.
 ///
 /// Line one is the picture: size, rate, throughput, round trip and the age of the frame being
 /// shown. Line two is the path: jitter (RFC 3550 interarrival), how long frames waited for
 /// their last fragment (p50 / p95 of the last report), the in-order queue, recovery counts,
-/// stalls, the worker's bitrate verdict and audio. Line three is the presentation: how long a
+/// stalls and the worker's bitrate verdict. Line three is the audio: packets played, lost and
+/// concealed, the times playback ran dry, how much the jitter buffer trimmed and stretched to
+/// hold its depth, and the depth it aims for. Line four is the presentation: how long a
 /// frame takes from the arrival of the datagram that completed it to the paint that shows it
 /// (p50 / p95 / worst of the last `slopty_client::pacing::RING` frames, with the decoder's share
 /// of it), the spacing of those paints and its jitter, and the two cadence faults —
 /// `skip` (a frame the display never saw) and `repeat` (a paint that showed the picture again).
-/// Line four is the UI: draw time of the whole window (p50 / p95 / p99 / max over the last
+/// Line five is the UI: draw time of the whole window (p50 / p95 / p99 / max over the last
 /// [`crate::frames::RING`] frames), the spacing of frames, and how many went over the display
 /// period or were dropped ([`crate::frames::hud_line`]). Pure so it can be checked without a
 /// window.
@@ -302,7 +304,8 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
     let ui = crate::frames::hud_line(input.ui);
     format!(
         "{}×{} @{:.2}  ·  {:.0} fps  ·  {:.2} Mb/s  ·  {rtt}  ·  {age}\n\
-         jitter {:.1} ms  ·  hold {:.1} / {:.1} ms  ·  queue {}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}  ·  audio {} lost {} concealed {}\n\
+         jitter {:.1} ms  ·  hold {:.1} / {:.1} ms  ·  queue {}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}\n\
+         audio {} lost {} concealed {}  ·  dry {}  ·  trimmed {:.0} ms stretched {:.0} ms  ·  target {:.0} ms\n\
          present {:.1} / {:.1} / {:.1} ms (decode {:.1})  ·  every {:.1} ms ±{:.1}  ·  shown {} skip {} repeat {} late {}\n\
          {ui}",
         input.size.0,
@@ -323,6 +326,10 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
         stats.audio_packets,
         stats.audio_lost,
         stats.audio_concealed,
+        stats.audio_underruns,
+        ms(stats.audio_trimmed),
+        ms(stats.audio_stretched),
+        ms(stats.audio_target),
         ms(pacing.latency_p50),
         ms(pacing.latency_p95),
         ms(pacing.latency_max),
@@ -1566,7 +1573,7 @@ mod tests {
 
     /// The overlay names every number a human needs to judge a stream: age of the picture,
     /// jitter, how long frames wait for their tail, the queue, recovery, stalls, the verdict,
-    /// and what the presentation path did with it all.
+    /// what the audio jitter buffer did, and what the presentation path did with it all.
     #[test]
     fn hud_shows_age_jitter_hold_present_cadence_and_the_verdict() {
         let stats = ScreenStats {
@@ -1584,6 +1591,10 @@ mod tests {
             audio_packets: 50,
             audio_lost: 0,
             audio_concealed: 0,
+            audio_underruns: 2,
+            audio_trimmed: Duration::from_millis(40),
+            audio_stretched: Duration::from_millis(20),
+            audio_target: Duration::from_millis(60),
             ..ScreenStats::default()
         };
         let pacing = PacingStats {
@@ -1616,7 +1627,8 @@ mod tests {
             lines,
             vec![
                 "1920×1080 @1.00  ·  60 fps  ·  18.25 Mb/s  ·  rtt 9.4 ms  ·  age 12 ms",
-                "jitter 1.2 ms  ·  hold 2.0 / 9.0 ms  ·  queue 1  ·  fec 3 lost 1 nack 4 refresh 1  ·  stalls 2 (140 ms) flowing  ·  target 19.2 Mb/s hold (stall) (cwnd)  ·  audio 50 lost 0 concealed 0",
+                "jitter 1.2 ms  ·  hold 2.0 / 9.0 ms  ·  queue 1  ·  fec 3 lost 1 nack 4 refresh 1  ·  stalls 2 (140 ms) flowing  ·  target 19.2 Mb/s hold (stall) (cwnd)",
+                "audio 50 lost 0 concealed 0  ·  dry 2  ·  trimmed 40 ms stretched 20 ms  ·  target 60 ms",
                 "present 5.4 / 11.9 / 28.0 ms (decode 2.1)  ·  every 16.7 ms ±1.4  ·  shown 1204 skip 2 repeat 7 late 0",
                 "ui –",
             ]

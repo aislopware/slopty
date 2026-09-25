@@ -86,7 +86,17 @@ pub struct GhosttyEngine {
     light: Rc<std::cell::Cell<bool>>,
     size: TermSize,
     seq: u64,
+    /// The numbering in force.
     epoch: u32,
+    /// The last numbering handed out: numberings are never reused, so a client can tell the
+    /// primary's coming back from a new one.
+    epochs: u32,
+    /// The primary screen's numbering and marks while the alternate screen is up, as
+    /// `primary_anchor`.
+    primary_marks: Option<PrimaryMarks>,
+    /// What the viewers following the diffs hold, so a scroll ships only the rows whose
+    /// content changed.
+    shown: Shown,
     /// Absolute index of screen row 0 of the active screen.
     base: u64,
     on_alt: bool,
@@ -136,6 +146,63 @@ pub struct GhosttyEngine {
     graphics_gen: u64,
     /// The program's colour changes as last reported.
     overrides: ColorOverrides,
+}
+
+/// The primary screen's numbering, parked while a program has the alternate screen.
+#[derive(Debug)]
+struct PrimaryMarks {
+    epoch: u32,
+    exit_marks: BTreeMap<u64, Option<u8>>,
+    prompt_starts: BTreeSet<u64>,
+}
+
+/// The rows the viewers that follow the diffs hold, as the last diff (or resize) left them:
+/// the absolute line of the top row and each row's line, `None` where not known.
+///
+/// libghostty rebuilds every row when the viewport moves, and the viewport follows the
+/// output, so every line scrolled in made a full frame: an Enter at a bottom prompt sent the
+/// whole screen (88 kB at 200 × 60). With this a scroll ships only the rows whose line is
+/// not already held at its absolute index; the client moves the rest up itself. The lines
+/// themselves are kept, not a hash of them: comparing costs less than hashing every cell
+/// did (MEASUREMENTS 2026-09-25, "a scroll ships the rows it moved"), and it is exact.
+#[derive(Debug, Default)]
+struct Shown {
+    epoch: u32,
+    cols: u16,
+    first: u64,
+    rows: Vec<Option<Line>>,
+}
+
+impl Shown {
+    /// Whether it describes a screen of this numbering and size.
+    fn holds(&self, epoch: u32, cols: u16, rows: u16) -> bool {
+        !self.rows.is_empty()
+            && self.epoch == epoch
+            && self.cols == cols
+            && self.rows.len() == usize::from(rows)
+    }
+
+    fn slot(&mut self, line: u64) -> Option<&mut Option<Line>> {
+        let i = usize::try_from(line.checked_sub(self.first)?).ok()?;
+        self.rows.get_mut(i)
+    }
+
+    /// The line held at absolute `line`.
+    fn at(&self, line: u64) -> Option<&Line> {
+        let i = usize::try_from(line.checked_sub(self.first)?).ok()?;
+        self.rows.get(i)?.as_ref()
+    }
+
+    /// The line held at absolute `line`, moved out for the next frame's record.
+    fn take(&mut self, line: u64) -> Option<Line> {
+        self.slot(line)?.take()
+    }
+
+    fn forget(&mut self, line: u64) {
+        if let Some(slot) = self.slot(line) {
+            *slot = None;
+        }
+    }
 }
 
 /// A tracked row plus its absolute index.
@@ -203,6 +270,9 @@ impl GhosttyEngine {
             size: config.size,
             seq: 0,
             epoch: 0,
+            epochs: 0,
+            primary_marks: None,
+            shown: Shown::default(),
             base: 0,
             on_alt: false,
             primary_snapshot: None,
@@ -375,7 +445,8 @@ impl GhosttyEngine {
     }
 
     fn bump_epoch(&mut self) {
-        self.epoch = self.epoch.wrapping_add(1);
+        self.epochs = self.epochs.wrapping_add(1);
+        self.epoch = self.epochs;
         self.base = 0;
         self.exit_marks.clear();
         self.prompt_starts.clear();
@@ -467,17 +538,33 @@ impl GhosttyEngine {
         if on_alt != self.on_alt {
             self.on_alt = on_alt;
             if on_alt {
-                // Park the primary anchor; alt screen has no history and starts at 0.
+                // Park the primary's numbering with its marks; the alternate screen has no
+                // history and a numbering of its own.
                 self.primary_anchor = self.anchor.take();
                 self.primary_commands = std::mem::take(&mut self.commands);
+                self.primary_marks = Some(PrimaryMarks {
+                    epoch: self.epoch,
+                    exit_marks: std::mem::take(&mut self.exit_marks),
+                    prompt_starts: std::mem::take(&mut self.prompt_starts),
+                });
                 self.bump_epoch();
                 self.reanchor()?;
                 return Ok(());
             }
-            // Back on primary: restore numbering from the parked anchor if it survived.
+            // Back on the primary: its numbering, marks and blocks come back with the parked
+            // anchor, so the clients take back the lines they held; a new numbering if the
+            // anchor did not survive (checked below).
             self.anchor = self.primary_anchor.take();
             self.commands = std::mem::take(&mut self.primary_commands);
-            self.epoch = self.epoch.wrapping_add(1);
+            self.forced_rows.clear();
+            match self.primary_marks.take() {
+                Some(parked) if self.anchor.is_some() => {
+                    self.epoch = parked.epoch;
+                    self.exit_marks = parked.exit_marks;
+                    self.prompt_starts = parked.prompt_starts;
+                }
+                _ => self.bump_epoch(),
+            }
         }
 
         let followed = match &self.anchor {
@@ -556,12 +643,17 @@ impl GhosttyEngine {
         let snapshot =
             if hold.is_some() { render.snapshot() } else { render.update(&self.term)? };
         let dirty = snapshot.dirty()?;
-        let full = take != Take::Diff || dirty == Dirty::Full;
+        let cols = snapshot.cols()?;
+        let rows = snapshot.rows()?;
+        // Every row is read again; for the viewers that follow the diffs only those whose line
+        // they do not hold at its index are sent, unless the numbering or the size changed.
+        let rebuild = take != Take::Diff || dirty == Dirty::Full;
+        let full = rebuild && !(take == Take::Diff && self.shown.holds(self.epoch, cols, rows));
         // A placement added or deleted moves no cell, but the frame must say so. Rows forced
         // by a prompt mark are read from the live grid, so they wait for the hold to end.
         let graphics_gen = self.term.kitty_graphics()?.generation()?;
         let forcing = hold.is_none() && !self.forced_rows.is_empty();
-        if !full
+        if !rebuild
             && dirty == Dirty::Clean
             && (graphics_gen == self.graphics_gen || hold.is_some())
             && !forcing
@@ -572,14 +664,16 @@ impl GhosttyEngine {
             self.graphics_gen = graphics_gen;
         }
 
-        let cols = snapshot.cols()?;
-        let rows = snapshot.rows()?;
         let cursor = Self::cursor(&snapshot)?;
         let scrollback = match hold {
             Some(h) => h.scrollback,
             None => self.term.scrollback_rows()? as u64,
         };
+        let first = self.base.saturating_add(scrollback);
         let mut updates = Vec::with_capacity(if full { usize::from(rows) } else { 8 });
+        // What the viewers following the diffs hold once this frame is applied.
+        let mut shown = Vec::with_capacity(usize::from(rows));
+        let known = self.shown.holds(self.epoch, cols, rows);
 
         let mut row_iter = self.rows_iter.update(&snapshot)?;
         let mut y: u16 = 0;
@@ -590,14 +684,18 @@ impl GhosttyEngine {
             let raw = row.raw_row()?;
             // The row flag may be a false positive, but a row without it has no placeholders.
             let placeholders = raw.has_kitty_virtual_placeholder()?;
-            let abs = self.base.saturating_add(scrollback).saturating_add(u64::from(y));
+            let abs = first.saturating_add(u64::from(y));
             let forced = forcing
                 && if take == Take::Joiner {
                     self.forced_rows.contains(&abs)
                 } else {
                     self.forced_rows.remove(&abs)
                 };
-            if full || row.dirty()? || forced {
+            let build = rebuild || row.dirty()? || forced;
+            if !build && take != Take::Joiner {
+                shown.push(if known { self.shown.take(abs) } else { None });
+            }
+            if build {
                 let mut line = Line::blank(cols);
                 let mut first_semantic = None;
                 let mut first_input = None;
@@ -683,7 +781,20 @@ impl GhosttyEngine {
                         first_input,
                     )
                 });
-                updates.push(RowUpdate { row: y, line });
+                let held = if known { self.shown.at(abs) } else { None };
+                let same = held.is_some_and(|l| *l == line);
+                if take == Take::Joiner {
+                    // The joiner holds this line as it is now, the others as they were sent
+                    // it: a line changed and changed back since then is theirs to be sent.
+                    if held.is_some() && !same {
+                        self.shown.forget(abs);
+                    }
+                } else {
+                    shown.push(if same { self.shown.take(abs) } else { Some(line.clone()) });
+                }
+                if full || forced || !same {
+                    updates.push(RowUpdate { row: y, line });
+                }
                 if take != Take::Joiner {
                     row.set_dirty(false)?;
                 }
@@ -719,6 +830,7 @@ impl GhosttyEngine {
                 self.placed_if(graphics_gen, runs)?
             }
             Take::Everyone | Take::Diff => {
+                self.shown = Shown { epoch: self.epoch, cols, first, rows: shown };
                 if forcing {
                     // A forced row that is no longer on the screen has nothing left to say.
                     self.forced_rows.clear();
@@ -741,7 +853,7 @@ impl GhosttyEngine {
             cursor,
             modes: self.modes()?,
             oldest_line: LineIndex(self.base),
-            first_visible_line: LineIndex(self.base.saturating_add(scrollback)),
+            first_visible_line: LineIndex(first),
             total_lines: self.base.saturating_add(total),
             input_ack,
             updates,
@@ -1401,6 +1513,7 @@ impl GhosttyEngine {
         if reflow {
             self.primary_anchor = None;
             self.primary_commands.clear();
+            self.primary_marks = None;
             self.bump_epoch();
             self.reanchor()?;
         }
@@ -1810,6 +1923,40 @@ mod tests {
         assert!(!back.modes.contains(TermModes::ALT_SCREEN));
         assert_eq!(back.total_lines, before.total_lines);
         assert_eq!(back.oldest_line, before.oldest_line);
+    }
+
+    /// The alternate screen has a numbering of its own. Leaving it gives the primary its
+    /// numbering back with the prompt marks and statuses on its rows, so a client takes back
+    /// the lines it held; a second trip, or one the primary was reflowed during, gets a
+    /// numbering never used before.
+    #[test]
+    fn the_alternate_screen_gives_the_primary_its_numbering_and_marks_back() {
+        let mut e = engine(20, 4);
+        e.write(b"\x1b]133;A\x07$ \x1b]133;B\x07false\r\n\x1b]133;C\x07\x1b]133;D;1\x07");
+        e.write(b"\x1b]133;A\x07$ \x1b]133;B\x07vim\r\n\x1b]133;C\x07");
+        let before = e.full_frame(0).unwrap();
+        let marks = |f: &Frame| f.updates.iter().map(|u| u.line.mark).collect::<Vec<_>>();
+        assert_eq!(
+            marks(&before)[1],
+            SemanticMark::Prompt { exit: Some(1), input: Some(2) },
+            "{before:?}"
+        );
+        e.write(b"\x1b[?1049h\x1b[Hvim");
+        let alt = e.take_frame(0).unwrap().expect("the alternate screen");
+        assert!(alt.full && alt.epoch != before.epoch);
+        e.write(b"\x1b[?1049l");
+        let back = e.take_frame(0).unwrap().expect("the primary");
+        assert!(back.full, "a numbering other than the last frame's");
+        assert_eq!(back.epoch, before.epoch);
+        assert_eq!(back.first_visible_line, before.first_visible_line);
+        assert_eq!(marks(&back), marks(&before), "the marks came back");
+        e.write(b"\x1b[?1049h");
+        let again = e.take_frame(0).unwrap().expect("the alternate screen again");
+        assert!(![before.epoch, alt.epoch].contains(&again.epoch), "{}", again.epoch);
+        e.resize(TermSize { cols: 30, ..e.size() }).unwrap();
+        e.write(b"\x1b[?1049l");
+        let reflowed = e.full_frame(0).unwrap();
+        assert!(![before.epoch, alt.epoch, again.epoch].contains(&reflowed.epoch));
     }
 
     #[test]
@@ -2472,9 +2619,10 @@ mod tests {
         e.write(b"\x1b[?2004l\r\r\n");
         let f = e.take_frame(0).unwrap().expect("the cursor moved");
         assert_eq!(f.cursor.row, 1);
-        assert_eq!(f.updates.len(), 2, "the row left and the row reached");
+        let rows: Vec<u16> = f.updates.iter().map(|u| u.row).collect();
+        assert_eq!(rows, [1], "the row reached; the row left is as it was sent");
         assert_eq!(
-            f.updates[1].line.mark,
+            f.updates[0].line.mark,
             SemanticMark::PromptContinuation { input: None },
             "libghostty guesses a continuation until told otherwise"
         );

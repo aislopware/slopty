@@ -56,7 +56,10 @@ The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**
   their keys in arrival order (nothing lost or reordered); one client is the size **driver** (§2,
   the "take" pill) while the rest are viewers; an agent's attention badges every client; a client
   that dies leaves the others streaming and reattaches on relaunch (its dead connection's cleanup
-  detaches only its own sinks, `Sender::same_channel`). See DECISIONS "Multi-client" for the
+  detaches only its own sinks, `Sender::same_channel`). A sink that closes keeps the driver's
+  seat until its connection detaches that sink, so a re-attach never hands the size to another
+  viewer, and a frame from a replaced stream that arrives after the new stream's is dropped by
+  its sequence number (`TermState::superseded`). See DECISIONS "Multi-client" for the
   state-ownership and input-contention rulings.
 - A slow link never falls behind a fast program: each viewer has at most two frames in flight
   (a credit on `session::Outbound` that returns when the connection has written the frame), the
@@ -64,7 +67,18 @@ The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**
   viewer that missed a diff is sent every row at the others' sequence number. Other events
   (lines, matches, title, bell) are never skipped. A joining viewer's frame is built the same
   way, so nobody else is made to resync. Input buys up to two frames outside the 8 ms pace for
-  50 ms, so an echo beside a flood is not held to it.
+  50 ms, so an echo beside a flood is not held to it. A written frame can still wait in QUIC's
+  stream buffer, so the worker follows every 16 KiB of frames with a `TermEvent::Marker` that the
+  client answers with `TermRequest::Reached` once it has applied everything before it; a viewer
+  that answers has at most `FRAMES_UNREACHED_BYTES` (64 KiB) of frames unconfirmed, a quarter of
+  a second at 250 kB/s where the 1.25 MB stream window was five. A tool that reads the stream
+  raw and never answers is sent frames as before.
+- A scrolling screen is not sent again. libghostty rebuilds every row when output moves the
+  viewport, and the engine compares each with the line the viewers already hold at that
+  absolute index (`ghostty::Shown`), so a frame carries the rows that changed and the lines that
+  came in; the client moves the rest up from its line cache (`TermState::readopt`). A row goes
+  on the wire up to its last non-blank cell. An Enter at a bottom prompt at 200 × 60 is 0.7 kB,
+  not 88.
 - The client needs no VT engine at all. iOS never builds Zig.
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
   ranges are fetched, prefetched around the viewport; the cache indexes its prompt rows, so a
@@ -99,10 +113,12 @@ making the path absolute against the shell's directory, `WorkspaceView::absolute
 **Absolute line numbering.** Clients cache scrollback by `LineIndex` (absolute, monotonic). The
 engine keeps a libghostty *tracked grid ref* pinned to the newest active row and re-derives the
 index of screen row 0 after every write, so worker-side eviction never shifts indices. When
-numbering cannot survive — reflow on resize, RIS, alternate-screen switch, a single write that
-scrolls past the whole scrollback — the frame's `epoch` bumps and clients drop their cache.
-Returning from the alternate screen restores the parked primary anchor, so the cache survives
-`vim`/`less` round trips.
+numbering cannot survive — reflow on resize, RIS, a single write that scrolls past the whole
+scrollback — the frame carries a new `epoch` and clients drop their cache. The alternate screen
+has an epoch of its own: the engine parks the primary's anchor with its epoch, prompt marks and
+exit statuses, and the client puts its cache aside. Returning restores the primary's epoch, and
+the client takes its cache back, so the history, the prompt marks and the command blocks survive
+`vim`/`less` round trips. An epoch is never handed out twice.
 
 **Search** is a worker request (`TermRequest::Search` → `TermEvent::Matches`): the engine renders
 the retained rows as plain text with libghostty's formatter and maps hits back to cells, so the
@@ -259,7 +275,8 @@ requirement the identifier rather than the hash and one approval enough for good
 `[worker] server`), the worker registers with it (`apps/slopty-worker/src/server.rs`). It sends
 its capabilities (`slopty-worker::caps`) and its sessions, forwards session and agent events,
 and redials with capped backoff when the link drops. Every `SessionSummary` carries the agent
-running in the session and its status, read from the daemon's agent table (`Worker::summaries`),
+running in the session, its status and the signal that status came from (`SessionAgent`), read
+from the daemon's agent table (`Worker::summaries`),
 and the server's hub keeps each listed terminal's agent current from the `Agent` events, so
 `ListTerminals` (and `slopty workers`, which counts the agents waiting on a human from it)
 answers without asking each worker. `slopty-worker::orchestrate::Orchestrator`
@@ -419,7 +436,7 @@ which is the wrong trade for a screen. When the decoder runs ahead of the displa
 runs behind, the paint shows the same picture again (`repeats`); a frame not newer than what is
 up is dropped (`late`). The pacer is also the instrument: a ring of the last 240 presented
 frames gives arrival → present p50/p95/max, the decoder's share of it, the spacing of the paints
-and that spacing's jitter — read by the ⌘⇧I overlay's third line (`hud_lines`) and by the app
+and that spacing's jitter — read by the ⌘⇧I overlay's fourth line (`hud_lines`) and by the app
 self-test's `dump` (`ScreenInfo`). The policy is pure and clock-injected
 (`slopty_client::pacing`), so it is unit-tested without a window; the element only feeds it a
 frame on one side and a paint on the other.
@@ -598,7 +615,8 @@ end of the workspace that last held that worker's tiles. A worker that drops kee
 ("reconnecting"); its next snapshot removes only what it no longer has. Each terminal's agent
 badge starts from its `SessionSummary.agent` when the worker connects or the session opens
 (`WorkspaceView::seed_agents`), so a client that joins late names the running agents and
-their status before any event arrives; an event always wins over the seed. The view draws only
+their status before any event arrives, and offers the hooks only where the seed's source is not
+a hook; an event always wins over the seed. The view draws only
 tiles near the view (a far terminal prepares no rows), sizes a terminal's grid from the
 tile's resting rect so a spring never resizes a PTY, lets a remote tile's stream go after 5 s
 off screen, and asks for frames only while something moves. Two-finger swipes drag the strip
@@ -1032,7 +1050,7 @@ confirm_close | natural_editing` (the ratio and bold-is-bright ride on `Terminal
 copy-on-select, the blink override, paste protection, the pointer hide, the multiplier,
 option-as-alt, the close confirmation and the natural editing keys on `Theme::behaviour`,
 the last travelling on every `KeyEvent` to the worker's encoder, the bell flag is
-read by the app's bell handler, see decisions/terminal.md), `[remote] fps | max_bitrate_mbps | hdr | muted` (`Theme::behaviour.stream`;
+read by the app's bell handler, see decisions/terminal.md), `[remote] fps | max_bitrate_mbps | muted` (`Theme::behaviour.stream`;
 a live stream re-asks its quality on change and takes a changed `muted`, see
 decisions/video.md and decisions/settings.md), `[colors] foreground |
 background | cursor | cursor_text | selection | ansi` (`"#rrggbb"` strings laid over

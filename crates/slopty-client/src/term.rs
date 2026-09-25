@@ -113,6 +113,21 @@ pub struct TermState {
     placements: Vec<Placement>,
     /// The program's colour changes over the theme.
     colors: ColorOverrides,
+    /// The primary screen's lines while the alternate screen is up, to take back if the
+    /// worker returns to the same numbering.
+    parked: Option<Parked>,
+    /// Frames dropped as older than the last one applied: the tail of a stream a re-attach
+    /// replaced.
+    superseded: u64,
+}
+
+/// What the client held of the primary screen's numbering when a program took the alternate
+/// screen.
+#[derive(Clone, Debug)]
+struct Parked {
+    epoch: u32,
+    scrollback: Scrollback,
+    latest_prompt: Option<LineIndex>,
 }
 
 /// The pixels of one image the worker sent (kitty graphics).
@@ -187,6 +202,8 @@ impl TermState {
             image_bytes: 0,
             placements: Vec::new(),
             colors: ColorOverrides::default(),
+            parked: None,
+            superseded: 0,
         }
     }
 
@@ -315,6 +332,12 @@ impl TermState {
         self.frames
     }
 
+    /// Frames dropped because they were older than one already applied.
+    #[must_use]
+    pub const fn superseded(&self) -> u64 {
+        self.superseded
+    }
+
     /// Lines scrolled up from the bottom (0 = following).
     #[must_use]
     pub const fn view_offset(&self) -> u64 {
@@ -385,18 +408,24 @@ impl TermState {
             TermEvent::SearchInvalid { needle, message } => {
                 vec![Effect::SearchInvalid { needle, message }]
             }
+            TermEvent::Marker { id } => {
+                vec![Effect::Request(TermRequest::Reached { marker: id })]
+            }
         }
     }
 
     fn apply_frame(&mut self, frame: Frame) -> Vec<Effect> {
         let mut effects = Vec::new();
+        if self.last_seq.is_some_and(|last| frame.seq < last || (frame.seq == last && !frame.full))
+        {
+            // The rest of a stream an attach replaced, arriving after the new one's frames:
+            // what it carries is older than what is shown.
+            self.superseded = self.superseded.saturating_add(1);
+            return effects;
+        }
         self.frames = self.frames.saturating_add(1);
         if self.epoch != Some(frame.epoch) {
-            // Numbering changed (reflow, reset, alt screen): the cache is meaningless now.
-            self.scrollback = Scrollback::new(CACHE_LINES);
-            self.epoch = Some(frame.epoch);
-            self.view_offset = 0;
-            self.latest_prompt = None;
+            self.change_numbering(&frame);
         }
         let gap = match self.last_seq {
             Some(prev) => frame.seq != prev.wrapping_add(1),
@@ -415,8 +444,12 @@ impl TermState {
             self.size.rows = frame.rows;
             self.screen.resize(frame.cols, frame.rows);
         }
+        let moved = self.first_visible != frame.first_visible_line;
         self.first_visible = frame.first_visible_line;
         self.scrollback.set_extent(frame.oldest_line, frame.total_lines);
+        if moved && !frame.full {
+            self.readopt();
+        }
         for update in frame.updates {
             let index = self.first_visible.offset(u64::from(update.row));
             // One allocation held twice: the screen row and its scrollback entry are the same
@@ -441,6 +474,42 @@ impl TermState {
         // nothing to do); clamp if history shrank.
         self.view_offset = self.view_offset.min(self.history_len());
         effects
+    }
+
+    /// A frame in another numbering: the lines held are put aside, kept for the primary
+    /// screen while the alternate one is up, and taken back when the worker returns to the
+    /// numbering they were held under.
+    fn change_numbering(&mut self, frame: &Frame) {
+        let held = std::mem::replace(&mut self.scrollback, Scrollback::new(CACHE_LINES));
+        let parked = self.parked.take();
+        let to_alt = frame.modes.contains(TermModes::ALT_SCREEN)
+            && !self.screen.modes().contains(TermModes::ALT_SCREEN);
+        let latest_prompt = self.latest_prompt.take();
+        if to_alt {
+            self.parked = self.epoch.map(|epoch| Parked { epoch, scrollback: held, latest_prompt });
+        } else if let Some(back) = parked.filter(|p| p.epoch == frame.epoch) {
+            self.scrollback = back.scrollback;
+            self.latest_prompt = back.latest_prompt;
+        }
+        self.epoch = Some(frame.epoch);
+        self.view_offset = 0;
+    }
+
+    /// The screen moved down the numbering without being sent again (output scrolled it):
+    /// every row shows the line held at its index, and the frame then replaces what changed.
+    fn readopt(&mut self) {
+        let cols = self.screen.cols();
+        for row in 0..self.screen.rows() {
+            let index = self.first_visible.offset(u64::from(row));
+            let line = self
+                .scrollback
+                .shared(index)
+                .filter(|l| l.cols() == cols)
+                .unwrap_or_else(|| Arc::new(Line::blank(cols)));
+            if let Err(e) = self.screen.apply_shared(row, line) {
+                tracing::debug!(error = %e, "row not re-adopted");
+            }
+        }
     }
 
     /// Follow the shell's command blocks from the marks: a command is running once the cursor
@@ -1412,6 +1481,75 @@ mod tests {
         assert_eq!(s.view_offset(), 0);
         let fetch = s.scroll(2);
         assert_eq!(fetch.len(), 1, "old cache gone: {fetch:?}");
+    }
+
+    /// Output scrolled and the frame carries only the line that came in: the rows the
+    /// client holds move up, taken from the lines kept by index.
+    #[test]
+    fn a_scroll_moves_the_held_rows_up_and_takes_only_the_new_one() {
+        let mut s = TermState::new(size());
+        s.apply(TermEvent::Frame(frame(1, true, 0, 0, 3, &[(0, "a"), (1, "b"), (2, "c")])));
+        assert!(s.apply(TermEvent::Frame(frame(2, false, 0, 1, 4, &[(2, "d")]))).is_empty());
+        assert_eq!(texts(&s), vec![Some("b".into()), Some("c".into()), Some("d".into())]);
+        let shown: Vec<String> = s.screen().lines().iter().map(|l| l.text()).collect();
+        assert_eq!(shown, ["b", "c", "d"]);
+        // A line the client never held comes up blank rather than as another row's.
+        s.apply(TermEvent::Lines { start: LineIndex(9), lines: Vec::new() });
+        s.apply(TermEvent::Frame(frame(3, false, 0, 3, 6, &[(2, "f")])));
+        let shown: Vec<String> = s.screen().lines().iter().map(|l| l.text()).collect();
+        assert_eq!(shown, ["d", "", "f"]);
+    }
+
+    /// Frames from a stream a re-attach replaced can arrive after the new stream's: one older
+    /// than the last applied is dropped, and so is a diff at its number; a joiner's full
+    /// frame at the others' number is taken.
+    #[test]
+    fn a_frame_older_than_the_last_applied_is_dropped() {
+        let mut s = TermState::new(size());
+        s.apply(TermEvent::Frame(frame(4, false, 0, 0, 3, &[(0, "old")])));
+        assert!(s.apply(TermEvent::Frame(frame(5, true, 0, 0, 3, &[(0, "new")]))).is_empty());
+        for stale in [frame(5, false, 0, 0, 3, &[(0, "late")]), frame(3, true, 0, 0, 3, &[])] {
+            assert!(s.apply(TermEvent::Frame(stale)).is_empty(), "no resync asked");
+        }
+        assert_eq!(s.superseded(), 2);
+        assert_eq!(s.screen().line(0).map(Line::text).as_deref(), Some("new"));
+        s.apply(TermEvent::Frame(frame(5, true, 0, 0, 3, &[(0, "joined")])));
+        assert_eq!(s.screen().line(0).map(Line::text).as_deref(), Some("joined"));
+        assert!(s.apply(TermEvent::Frame(frame(6, false, 0, 0, 3, &[(1, "x")]))).is_empty());
+        assert_eq!((s.frames(), s.superseded()), (4, 2));
+    }
+
+    /// A program on the alternate screen and back: the primary's lines are put aside and
+    /// taken back when the worker returns to their numbering, so scrolling up after `vim`
+    /// asks for nothing; a numbering the worker did not return to drops them.
+    #[test]
+    fn the_primary_lines_come_back_after_the_alternate_screen() {
+        let alt = |f: Frame| Frame { modes: TermModes::ALT_SCREEN, ..f };
+        let mut s = TermState::new(size());
+        s.apply(TermEvent::Frame(frame(1, true, 4, 0, 3, &[(0, "a"), (1, "b"), (2, "c")])));
+        s.apply(TermEvent::Frame(frame(2, false, 4, 2, 5, &[(1, "d"), (2, "$ vim")])));
+        s.apply(TermEvent::Frame(alt(frame(3, true, 5, 0, 3, &[(0, "~"), (1, "~"), (2, "")]))));
+        assert_eq!(
+            s.scrollback().get(LineIndex(0)).map(Line::text).as_deref(),
+            Some("~"),
+            "the alternate screen's own lines"
+        );
+        s.apply(TermEvent::Frame(frame(4, true, 4, 2, 5, &[(0, "c"), (1, "d"), (2, "$ vim")])));
+        assert!(s.scroll(2).is_empty(), "the history is held again");
+        assert_eq!(texts(&s), vec![Some("a".into()), Some("b".into()), Some("c".into())]);
+        s.apply(TermEvent::Frame(alt(frame(5, true, 6, 0, 3, &[(0, "~")]))));
+        s.apply(TermEvent::Frame(frame(6, true, 7, 2, 5, &[(0, "C"), (1, "D"), (2, "$ ")])));
+        assert_eq!(s.scroll(2).len(), 1, "a new numbering: nothing taken back");
+    }
+
+    /// The worker asks, after enough frames, whether they arrived; the answer names the marker.
+    #[test]
+    fn a_marker_is_answered_once_the_events_before_it_are_applied() {
+        let mut s = TermState::new(size());
+        assert_eq!(
+            s.apply(TermEvent::Marker { id: 41 }),
+            vec![Effect::Request(TermRequest::Reached { marker: 41 })]
+        );
     }
 
     #[test]

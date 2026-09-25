@@ -943,3 +943,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `an_agent_started_without_hooks_is_attributed_from_what_the_worker_can_see` (shell-script fake
   `claude`), the title-bar a11y order (`Heading < Status < Button "go" < Terminal`) and the
   find-everywhere and palette-directory tests without their agent lines.
+
+- ✅ **A listed agent says which signal it was read from** (2026-09-25, protocol 57).
+  `SessionSummary.agent` and `Outcome::Agent` carry a `SessionAgent { kind, status, source }`
+  in place of the `(AgentKind, AgentStatus)` pair. `AgentEvent` already had the source, but a
+  client that joins late seeds its badges from the summaries, and the seed claimed
+  `AgentSource::Process`: every seeded agent offered "Install hooks" until its first event,
+  including agents the hooks already report. Now the worker's agent table, the hub (which keeps
+  each listed terminal's agent current from the events) and the listing agree on the source.
+  The UI seeds it, so the offer shows only where no hook speaks. `slopty terminals` has an
+  AGENT column ("working (hooks)", "idle (title)"), and `list_terminals` / `agent_status` give
+  `source` as `hook | transcript | title | process`. Hub events keep no source: they record
+  what changed, not how it was read. Tests: `the_summaries_seed_the_agents_before_any_event`
+  (UI), `listed_terminals_carry_the_agent_as_last_reported` (hub),
+  `a_summary_carries_the_agent_a_hook_reported` (worker e2e),
+  `an_agent_reads_the_same_in_json_and_text` and the `terminals_as_*` snapshots (tools), the
+  CLI's `terminals` and MCP `list_terminals` checks, the `worker_session_opened` golden.

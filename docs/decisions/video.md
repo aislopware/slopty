@@ -790,8 +790,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   at the scale it holds — a bitrate change is applied in place on the host, a rate or
   depth change rebuilds its encoder, as `set_quality` already ruled. `hdr` selects HEVC
   Main 10 (P010 capture); it is the client's choice, since the host cannot know what the
-  client's display shows. (`hdr` superseded 2026-09-24: removed from the wire, see "420f and
-  BT.709 end to end".) Out-of-range values (fps outside 15–120, a ceiling outside 1–200
+  client's display shows. (`hdr` superseded 2026-09-24 and removed from the settings
+  2026-09-25, see "420f and BT.709 end to end" and "HDR is not carried".) Out-of-range values (fps outside 15–120, a ceiling outside 1–200
   Mbit/s) read as the defaults, as the font sizes do. Tests: `remote_keys`,
   `remote_settings_ride_on_the_theme`, `new_stream_settings_are_asked_of_a_live_stream`.
 
@@ -855,9 +855,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   with them. Tests: `the_stream_is_full_range_bt709_end_to_end` (the keyframe's parameter sets
   say full range and BT.709, and the decoded buffer is `420f` tagged BT.709),
   `the_capture_is_full_range_bt709`, `configs_clamp_the_quality_and_keep_even_sides`.
-  Still owed: `ScreenEvent::Opened.hdr` and `DisplayInfo.hdr` are always false on the wire, and
-  the `[remote] hdr` setting in `slopty-settings`/`slopty-theme`/`slopty-app` no longer reaches
-  the stream.
+  (What this left behind, the always-false wire fields and the unread setting, went
+  2026-09-25: "HDR is not carried".)
 
 - ✅ **The LTR-refresh flag rides with its own frame, in `sourceFrameRefcon`** (2026-09-24). The
   encoder kept one `pending_refresh` atomic, set before `VTCompressionSessionEncodeFrame` and
@@ -1008,6 +1007,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   keyframe rebuilds even with identical sets. A token is acknowledged when its picture comes
   back, never on submit, and each report repeats the newest acknowledged token while frames
   flow, so a lost report heals; a report refused by a full channel is handed back into the next.
-  Owed, and a protocol change: after a lost session only an IDR helps, but the worker answers
-  `Refresh` with a long-term-reference refresh once any token was acknowledged, which a fresh
-  session cannot decode (-17694). The fix is a keyframe flag on `Feedback::Refresh`.
+  After a lost session only an IDR helps, but the worker answered `Refresh` with a
+  long-term-reference refresh once any token was acknowledged, which a fresh session cannot
+  decode (-17694). Fixed by "A refresh says when only a keyframe will do".
+- ✅ **A refresh says when only a keyframe will do** (2026-09-25, protocol 57).
+  `Feedback::Refresh` carries `keyframe`, set while the reassembler waits in `Need::Keyframe`:
+  before the stream's first picture, and after `force_refresh(_, true)` (a lost decoder
+  session). A reassembler already waiting on an LTR refresh when the session goes asks again at
+  once, since the refresh it asked for is no longer decodable, and its repeats keep the flag.
+  The worker answers a keyframe refresh by retiring its usable reference (`LtrBook::client_lost`:
+  a new epoch, so a late acknowledgement from the lost session names nothing) and setting
+  `pending.keyframe`. The IDR then goes through the usual keyframe gates: the cadence rung
+  never holds a keyframe back, the congestion guard still does, and with no usable reference
+  `keyframe_admitted` has nothing to defer it for. A new flag, not a second variant, because
+  both ask for the same thing (a picture that stands on its own) and differ only in what the
+  client can still predict from. Tests: `a_keyframe_refresh_is_an_idr_even_with_a_usable_reference`
+  (worker), `a_lost_session_while_waiting_on_a_refresh_asks_for_a_keyframe` and
+  `a_decoder_failure_forces_a_refresh_and_a_lost_session_a_keyframe` (reassembler), the
+  `client_refresh` golden.
+- ✅ **HDR is not carried** (2026-09-25, protocol 57). `ScreenEvent::Opened.hdr` and
+  `DisplayInfo.hdr` were always false after the 2026-09-24 ruling, and the `[remote] hdr`
+  setting (`RemoteSettings`, `StreamPrefs`) no longer reached a stream. All three are gone,
+  with no compatibility: a settings file that still names `hdr` gets the usual unknown-key
+  warning. Every stream is 8-bit HEVC Main, 420f, BT.709. HDR comes back only with a pipeline that
+  shows it (a 10-bit capture, an EDR layer on the client, tagged primaries and transfer), and
+  that change adds its own fields.

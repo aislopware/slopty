@@ -16,7 +16,7 @@ use slopty_net::framed::FramedSend;
 use slopty_net::server::{DialError, ServerLink};
 use slopty_net::{HostAddr, NetError};
 use slopty_proto::WorkerMsg;
-use slopty_proto::agent::{AgentKind, AgentStatus};
+use slopty_proto::agent::SessionAgent;
 use slopty_proto::codec::CodecError;
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
 use slopty_proto::server::{FromServer, Refusal, Registration, Role, ToServer, WorkerCaps};
@@ -59,9 +59,9 @@ pub fn configured(
 pub struct DaemonAgents(pub Arc<parking_lot::Mutex<slopty_agent::AgentTable>>);
 
 impl Agents for DaemonAgents {
-    fn status(&self, session: SessionId) -> Option<(AgentKind, AgentStatus)> {
+    fn status(&self, session: SessionId) -> Option<SessionAgent> {
         let event = self.0.lock().snapshot().into_iter().find(|e| e.session == session)?;
-        Some((event.kind, event.status))
+        Some(SessionAgent::from(&event))
     }
 
     fn forget(&self, session: SessionId) {

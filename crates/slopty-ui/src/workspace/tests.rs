@@ -13,7 +13,9 @@ use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, SemanticMark, Style, TermModes};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
+use slopty_proto::agent::{
+    AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent,
+};
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::screen::{CaptureTarget, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{
@@ -775,7 +777,6 @@ fn an_offscreen_window_lets_its_stream_go_after_the_grace(cx: &mut TestAppContex
                 width: 1280,
                 height: 800,
                 scale: 2.0,
-                hdr: false,
             },
             cx,
         );
@@ -1054,21 +1055,23 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
     assert!(terminal_focused(&view, cx, session));
 }
 
-/// A worker's summaries name the agent in each session: a connect shows its badge and counts
-/// it before any agent event arrives, and a live event is not overwritten by a later summary.
+/// A worker's summaries name the agent in each session and where its status came from: a
+/// connect shows its badge, counts it and knows whether the hooks are worth offering before any
+/// agent event arrives, and a live event is not overwritten by a later summary.
 #[gpui::test]
 fn the_summaries_seed_the_agents_before_any_event(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let (tx, _rx) = mpsc::channel(256);
     let key = WorkerKey::new(7);
     let (waiting, working) = (SessionId::new(), SessionId::new());
-    let with = |session, status| SessionSummary {
-        agent: Some((AgentKind::ClaudeCode, status)),
+    let with = |session, status, source| SessionSummary {
+        agent: Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source }),
         ..summary(session, None)
     };
+    let permission = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() });
     let sessions = vec![
-        with(waiting, AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() })),
-        with(working, AgentStatus::Working),
+        with(waiting, permission, AgentSource::Hook),
+        with(working, AgentStatus::Working, AgentSource::Title),
         summary(SessionId::new(), None),
     ];
     let factory: ScreenFactory =
@@ -1091,13 +1094,16 @@ fn the_summaries_seed_the_agents_before_any_event(cx: &mut TestAppContext) {
         assert_eq!(v.needs_you_count(), 1, "the blocked agent counts at once");
         let status = |s| v.agent_state(s).map(|a| a.status.clone());
         assert_eq!(status(working), Some(AgentStatus::Working));
+        let source = |s| v.agent_state(s).map(|a| a.source);
+        assert_eq!(source(waiting), Some(AgentSource::Hook), "no hooks to offer there");
+        assert_eq!(source(working), Some(AgentSource::Title), "the hooks would add to this");
         assert_eq!(v.agents.len(), 2, "the plain shell has no agent");
     });
     // The worker's first event says the agent moved on; a summary after it (the session
     // reopened in the list) does not take that back.
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(waiting) }, cx);
-        v.session_opened(key, with(waiting, AgentStatus::Working), cx);
+        v.session_opened(key, with(waiting, AgentStatus::Working, AgentSource::Hook), cx);
     });
     cx.run_until_parked();
     view.read_with(cx, |v, _| {

@@ -3743,10 +3743,11 @@ mod tests {
         serde_json::from_str(reply.trim()).unwrap()
     }
 
-    /// A session's summary carries the agent a hook reported in it, for every later listing.
+    /// A session's summary carries the agent a hook reported in it, and that a hook said so,
+    /// for every later listing.
     #[tokio::test]
     async fn a_summary_carries_the_agent_a_hook_reported() {
-        use slopty_proto::agent::{AgentKind, AgentStatus};
+        use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, SessionAgent};
         use slopty_worker::ctl::{CtlReply, CtlRequest};
 
         let dir = tempfile::tempdir().unwrap();
@@ -3765,7 +3766,11 @@ mod tests {
         assert!(matches!(ctl(&sock, &hook).await, CtlReply::Ok { .. }));
         assert_eq!(
             agent_of(&sock).await,
-            Some(Some((AgentKind::ClaudeCode, AgentStatus::Working)))
+            Some(Some(SessionAgent {
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Working,
+                source: AgentSource::Hook,
+            }))
         );
         let close = ClientMsg::Term { session, req: TermRequest::Close };
         worker.tx.send(&close).await.unwrap();

@@ -89,7 +89,7 @@ pub struct SessionSummary {
     /// Command line the session was started with.
     pub command: Vec<String>,
     /// The coding agent running in it and what it is doing, when one is.
-    pub agent: Option<(crate::agent::AgentKind, crate::agent::AgentStatus)>,
+    pub agent: Option<crate::agent::SessionAgent>,
 }
 
 /// Why a session closed.
@@ -161,7 +161,20 @@ pub enum TermRequest {
     /// defaults, so a program asking OSC 10/11/12 `?` or OSC 4 hears the colours it is
     /// actually shown in. Sent after `Attach` and whenever the theme changes.
     Colors(TermColors),
+    /// Everything the session stream carried up to `TermEvent::Marker { id }` has been
+    /// applied. A frame the connection has written may still wait in the transport, and this
+    /// is how the worker learns it arrived: it holds back frames once [`FRAMES_UNREACHED_BYTES`]
+    /// of them are unconfirmed, so a slow link shows a screen a fraction of a second old
+    /// rather than the tail of a queue.
+    Reached {
+        /// The marker's id.
+        marker: u64,
+    },
 }
+
+/// Bytes of frames a viewer that answers markers may have on their way unconfirmed. At
+/// 250 kB/s a quarter of a second; the transport's own stream window (1.25 MB) was five.
+pub const FRAMES_UNREACHED_BYTES: usize = 64 * 1024;
 
 /// A terminal palette on the wire: what a client paints default text, the background, the
 /// cursor and ANSI 0–15 with, as `[r, g, b]`.
@@ -206,14 +219,21 @@ pub struct SearchMatch {
 }
 
 /// One frame: the changed rows since the previous frame (or every row when `full`).
+///
+/// A frame that is not full may move `first_visible_line`, when output scrolled the screen:
+/// a row it does not carry shows the line the client already holds at that absolute index,
+/// so a line scrolling up is never sent again.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Frame {
-    /// Monotonic per session stream. A gap means the client must request a resync.
+    /// Monotonic per session. A gap means the client must request a resync. A frame that is
+    /// not after the last one applied came on a stream a re-attach replaced, and is dropped,
+    /// unless it is full at the same number: a joiner's frame carries the others' number.
     pub seq: u64,
-    /// True when `updates` holds every row (attach, resize, resync).
+    /// True when `updates` holds every row (attach, resize, resync, a new numbering).
     pub full: bool,
-    /// Bumped whenever absolute line numbering was invalidated (reflow on resize, RIS, alternate
-    /// screen switch). The client drops its line cache when this changes.
+    /// Names a numbering of the absolute lines. A new one comes with a reflow on resize, a
+    /// reset, or the alternate screen, and the client puts its line cache aside. Returning
+    /// from the alternate screen brings the primary's back, and with it the cache.
     pub epoch: u32,
     /// Columns.
     pub cols: u16,
@@ -383,4 +403,10 @@ pub enum TermEvent {
     },
     /// The program changed (or reset) the terminal's colours; the whole current set.
     Colors(ColorOverrides),
+    /// Answer with `TermRequest::Reached { marker: id }` once every event before this one is
+    /// applied. Sent after every quarter of [`FRAMES_UNREACHED_BYTES`] of frames.
+    Marker {
+        /// Unique within the session.
+        id: u64,
+    },
 }

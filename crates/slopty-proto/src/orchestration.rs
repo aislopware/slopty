@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WorkerId};
 
-use crate::agent::{AgentKind, AgentStatus};
+use crate::agent::{AgentKind, AgentStatus, SessionAgent};
 use crate::server::{Liveness, WorkerInfo};
 use crate::terminal::SessionSummary;
 
@@ -457,8 +457,8 @@ pub enum Outcome {
     Commands(Vec<Command>),
     /// For [`Verb::WaitFor`].
     Waited(Waited),
-    /// For [`Verb::AgentStatus`]: the agent, if one runs, and its status.
-    Agent(Option<(AgentKind, AgentStatus)>),
+    /// For [`Verb::AgentStatus`]: the agent, if one runs, its status and where that came from.
+    Agent(Option<SessionAgent>),
     /// For [`Verb::ReadFile`]: the bytes from `offset` on, and the file's whole size.
     File {
         /// What was read.

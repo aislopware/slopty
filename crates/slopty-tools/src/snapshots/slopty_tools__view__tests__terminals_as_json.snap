@@ -18,7 +18,15 @@ expression: "terminals_json(&o.workers, &o.terminals)"
     "viewers": 1,
     "command": [
       "zsh"
-    ]
+    ],
+    "agent": {
+      "agent": "claude_code",
+      "status": "working",
+      "tool": null,
+      "reason": null,
+      "needs_human": false,
+      "source": "title"
+    }
   },
   {
     "term": "0199a000-0000-7000-8000-000000000001/0199a1b2-c3d4-7000-8000-00000000abcd",
@@ -35,7 +43,15 @@ expression: "terminals_json(&o.workers, &o.terminals)"
     "viewers": 1,
     "command": [
       "zsh"
-    ]
+    ],
+    "agent": {
+      "agent": "claude_code",
+      "status": "blocked",
+      "tool": "Bash",
+      "reason": "permission",
+      "needs_human": true,
+      "source": "hook"
+    }
   },
   {
     "term": "0199a000-0000-7000-8000-000000000002/0199a1b3-c3d4-7000-8000-00000000abcd",
@@ -52,6 +68,14 @@ expression: "terminals_json(&o.workers, &o.terminals)"
     "viewers": 1,
     "command": [
       "zsh"
-    ]
+    ],
+    "agent": {
+      "agent": "claude_code",
+      "status": "blocked",
+      "tool": null,
+      "reason": "question",
+      "needs_human": true,
+      "source": "hook"
+    }
   }
 ]

@@ -14,7 +14,8 @@ use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, Text
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
 use slopty_proto::codec;
 use slopty_proto::terminal::{
-    ColorOverrides, Frame, MAX_OSC52_BYTES, TermColors, TermEvent, TermRequest, TermSize,
+    ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_OSC52_BYTES, TermColors, TermEvent,
+    TermRequest, TermSize,
 };
 use slopty_pty::PtyMaster;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
@@ -45,6 +46,12 @@ const ECHO_WINDOW: Duration = Duration::from_millis(50);
 /// program is sent the newest screen rather than a queue of old ones; the engine keeps what
 /// changed meanwhile and the next diff carries all of it.
 const FRAMES_IN_FLIGHT: usize = 2;
+/// A viewer is sent a `TermEvent::Marker` after this many bytes of frames, so its answers
+/// confirm the frames it has while more are on their way.
+const MARKER_EVERY_BYTES: usize = FRAMES_UNREACHED_BYTES / 4;
+/// Unanswered markers remembered per viewer. One that answers has about five out at a time;
+/// one that never answers would otherwise collect them for as long as it watches.
+const MARKERS_KEPT: usize = 16;
 /// Events a viewer's sink had no room for wait in order, up to this many bytes. Past it they
 /// are dropped and the viewer is told everything again once its sink drains, as a joiner is.
 const QUEUED_MAX_BYTES: usize = 16 << 20;
@@ -501,6 +508,55 @@ struct Viewer {
     /// Its queue passed [`QUEUED_MAX_BYTES`] and was dropped: it is sent nothing until its
     /// sink has room, then told everything again.
     lost: bool,
+    /// Where its frames stand against the markers it answers ([`Reach`]).
+    reach: Reach,
+}
+
+/// How far a viewer's frames have got, by the markers it answers: a written frame may still
+/// wait in the transport's stream buffer (up to its 1.25 MB window, five seconds at 250 kB/s),
+/// and only the client can say it arrived. A viewer that answers is held to
+/// [`FRAMES_UNREACHED_BYTES`] of frames it has not confirmed; one that never answers (a tool
+/// reading the stream raw) is sent frames as its connection writes them.
+#[derive(Debug, Default)]
+struct Reach {
+    /// Bytes of frames sent to it.
+    sent: usize,
+    /// `sent` when it was last sent a marker.
+    marked: usize,
+    /// Markers not answered yet, with `sent` at each.
+    markers: VecDeque<(u64, usize)>,
+    /// `sent` at the newest marker it answered, once it has answered one.
+    reached: Option<usize>,
+}
+
+impl Reach {
+    /// It may be sent another frame.
+    fn open(&self) -> bool {
+        self.reached.is_none_or(|at| self.sent.saturating_sub(at) < FRAMES_UNREACHED_BYTES)
+    }
+
+    /// A frame of `bytes` went to it; `true` when a marker should follow it.
+    const fn frame(&mut self, bytes: usize) -> bool {
+        self.sent = self.sent.saturating_add(bytes);
+        self.sent.saturating_sub(self.marked) >= MARKER_EVERY_BYTES
+    }
+
+    fn marker(&mut self, id: u64) {
+        self.marked = self.sent;
+        if self.markers.len() == MARKERS_KEPT {
+            self.markers.pop_front();
+        }
+        self.markers.push_back((id, self.sent));
+    }
+
+    /// It answered marker `id`; an id it was never sent (a late answer from the stream a
+    /// re-attach replaced) changes nothing.
+    fn answered(&mut self, id: u64) {
+        let Some(n) = self.markers.iter().position(|&(m, _)| m == id) else { return };
+        if let Some((_, at)) = self.markers.drain(..=n).next_back() {
+            self.reached = Some(at);
+        }
+    }
 }
 
 impl Viewer {
@@ -516,12 +572,14 @@ impl Viewer {
             queued_bytes: 0,
             waiting: false,
             lost: false,
+            reach: Reach::default(),
         }
     }
 
-    /// It has room for another frame.
+    /// It has room for another frame: fewer than [`FRAMES_IN_FLIGHT`] with its connection, and
+    /// the ones it confirmed not too far behind.
     fn takes_frame(&self) -> bool {
-        !self.lost && self.in_flight.load(Ordering::Acquire) < FRAMES_IN_FLIGHT
+        !self.lost && self.in_flight.load(Ordering::Acquire) < FRAMES_IN_FLIGHT && self.reach.open()
     }
 }
 
@@ -597,6 +655,14 @@ struct Actor {
     burst: EchoBurst,
     viewers: Vec<Viewer>,
     driver: Option<ClientId>,
+    /// The driver's sink closed and no detach has said why yet: the seat is kept for it, with
+    /// the sink, until its connection detaches that sink (then it passes on) or the client
+    /// attaches again (then it keeps it). A closed sink alone is also what a re-attach looks
+    /// like while the new attach is still on its way, and handing the size to another viewer
+    /// then took it from a client that never left.
+    orphan: Option<(ClientId, ClientSink)>,
+    /// The next `TermEvent::Marker` id.
+    next_marker: u64,
     title: Option<String>,
     cwd: Option<String>,
     /// The program's colour changes (OSC 4/10/11/12): broadcast, and sent to a late attach.
@@ -712,6 +778,8 @@ impl Actor {
             input: Input::default(),
             viewers: Vec::new(),
             driver: None,
+            orphan: None,
+            next_marker: 0,
             title,
             cwd,
             program_colors,
@@ -1124,14 +1192,34 @@ impl Actor {
                 v.stale = true;
                 continue;
             }
-            let claimed = frame.claimed(v, &self.room);
             let open = images.iter().all(|image| self.deliver(i, image.clone()))
-                && self.deliver(i, claimed);
+                && self.deliver_frame(i, &frame);
             if !open {
                 gone.push(i);
             }
         }
         self.remove(gone);
+    }
+
+    /// Hand viewer `i` a frame, holding a place among its frames in flight, and a marker after
+    /// it when the frames since the last one call for it. `false` when the viewer is gone.
+    fn deliver_frame(&mut self, i: usize, frame: &Outbound) -> bool {
+        let Some(v) = self.viewers.get_mut(i) else { return true };
+        let claimed = frame.claimed(v, &self.room);
+        let marker_due = v.reach.frame(frame.wire.len());
+        if !self.deliver(i, claimed) {
+            return false;
+        }
+        if !marker_due {
+            return true;
+        }
+        let id = self.next_marker;
+        self.next_marker = self.next_marker.wrapping_add(1);
+        let Some(marker) = self.encode(&TermEvent::Marker { id }) else { return true };
+        if let Some(v) = self.viewers.get_mut(i) {
+            v.reach.marker(id);
+        }
+        self.deliver(i, marker)
     }
 
     /// Every viewer that missed a diff and has room is sent every row, at the others'
@@ -1162,19 +1250,22 @@ impl Actor {
         let Some(frame) = self.encode(&TermEvent::Frame(frame)) else { return true };
         let Some(v) = self.viewers.get_mut(i) else { return true };
         v.stale = false;
-        let claimed = frame.claimed(v, &self.room);
         images
             .into_iter()
             .all(|u| self.encode(&image_event(u)).is_none_or(|image| self.deliver(i, image)))
-            && self.deliver(i, claimed)
+            && self.deliver_frame(i, &frame)
     }
 
-    /// Drop the viewers at `gone` (ascending indices).
+    /// Drop the viewers at `gone` (ascending indices), whose sinks closed. A closed sink does
+    /// not say whether its client left or is attaching again, so the driver's seat is kept
+    /// for it until a detach or an attach does ([`Actor::orphan`]).
     fn remove(&mut self, gone: Vec<usize>) {
         for i in gone.into_iter().rev() {
             if i < self.viewers.len() {
                 let v = self.viewers.swap_remove(i);
-                self.on_viewer_gone(v.client);
+                if self.driver == Some(v.client) {
+                    self.orphan = Some((v.client, v.sink));
+                }
             }
         }
     }
@@ -1317,8 +1408,11 @@ impl Actor {
         }
     }
 
+    /// `client` detached: the size passes to another viewer if it drove and has no other
+    /// view of the session.
     fn on_viewer_gone(&mut self, client: ClientId) {
-        if self.driver == Some(client) {
+        if self.driver == Some(client) && !self.viewers.iter().any(|v| v.client == client) {
+            self.orphan = None;
             self.driver = None;
             // Hand the size to the first remaining viewer, so a phone that joined after the
             // laptop left still gets a fitting terminal.
@@ -1378,6 +1472,9 @@ impl Actor {
                 let colors =
                     self.viewers.iter().find(|v| v.client == client).and_then(|v| v.colors);
                 self.viewers.retain(|v| v.client != client);
+                if self.orphan.as_ref().is_some_and(|(c, _)| *c == client) {
+                    self.orphan = None;
+                }
                 self.viewers.push(Viewer::new(client, sink, size, colors));
                 if self.driver.is_none() {
                     self.driver = Some(client);
@@ -1393,15 +1490,19 @@ impl Actor {
                 self.introduce(client);
             }
             Cmd::Detach { client, sink } => {
+                // Scoped to a sink, only that sink's viewer goes: the same client may be
+                // attached again through another one, and that one stays.
+                let through = |s: &ClientSink| sink.as_ref().is_none_or(|t| t.same_channel(s));
                 let before = self.viewers.len();
-                self.viewers.retain(|v| {
-                    v.client != client || sink.as_ref().is_some_and(|s| !s.same_channel(&v.sink))
-                });
-                if self.viewers.len() != before {
+                self.viewers.retain(|v| v.client != client || !through(&v.sink));
+                let orphaned =
+                    self.orphan.as_ref().is_some_and(|(c, s)| *c == client && through(s));
+                if self.viewers.len() != before || orphaned {
                     self.on_viewer_gone(client);
                 }
             }
             Cmd::Reserve { client } => {
+                self.orphan = None;
                 if let Some(old) = self.driver.replace(client)
                     && old != client
                 {
@@ -1483,6 +1584,13 @@ impl Actor {
                 }
                 Ok(())
             }
+            TermRequest::Reached { marker } => {
+                if let Some(v) = self.viewers.iter_mut().find(|v| v.client == client) {
+                    v.reach.answered(marker);
+                }
+                self.frame_room();
+                Ok(())
+            }
             TermRequest::Colors(colors) => {
                 if let Some(v) = self.viewers.iter_mut().find(|v| v.client == client) {
                     v.colors = Some(colors);
@@ -1494,6 +1602,7 @@ impl Actor {
             }
             TermRequest::Drive { drive } => {
                 if drive {
+                    self.orphan = None;
                     if let Some(old) = self.driver.replace(client)
                         && old != client
                     {
@@ -1612,6 +1721,38 @@ mod tests {
             !burst.spend(now + ECHO_WINDOW + Duration::from_millis(1)),
             "too late to be the echo"
         );
+    }
+
+    /// A viewer that never answers a marker is sent frames as its connection writes them and
+    /// keeps a bounded list of markers; one that answers is held to the unconfirmed budget,
+    /// opened again by its answers, and a late answer from a replaced stream changes nothing.
+    #[test]
+    fn a_viewer_is_held_to_the_frames_it_confirmed_once_it_answers() {
+        let mut reach = Reach::default();
+        let mut next = 0_u64;
+        let mut send = |reach: &mut Reach, bytes: usize| {
+            if reach.frame(bytes) {
+                reach.marker(next);
+                next += 1;
+            }
+        };
+        for _ in 0..200 {
+            send(&mut reach, 8_000);
+        }
+        assert!(reach.open(), "never answered: never held");
+        assert_eq!(reach.markers.len(), MARKERS_KEPT);
+        let newest = reach.markers.back().map(|&(id, _)| id).unwrap();
+        reach.answered(newest);
+        assert!(reach.markers.is_empty() && reach.open());
+        while reach.open() {
+            send(&mut reach, 8_000);
+        }
+        assert!(reach.sent - reach.reached.unwrap() >= FRAMES_UNREACHED_BYTES);
+        reach.answered(newest);
+        assert!(!reach.open(), "an answer it was already given opens nothing");
+        let oldest = reach.markers.front().map(|&(id, _)| id).unwrap();
+        reach.answered(oldest);
+        assert!(reach.open(), "the first marker after the answer opens it");
     }
 
     #[test]

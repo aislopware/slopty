@@ -43,8 +43,6 @@ pub struct DisplayInfo {
     pub scale: f32,
     /// Refresh rate.
     pub hz: f32,
-    /// Supports HDR.
-    pub hdr: bool,
 }
 
 /// What to stream.
@@ -246,6 +244,9 @@ pub enum Feedback {
         stream: StreamId,
         /// Highest frame fully decoded.
         last_good_frame: u32,
+        /// The client holds no reference to predict from (its decoder session was lost, or the
+        /// stream has not started): only an IDR can be decoded, whatever it acknowledged before.
+        keyframe: bool,
     },
 }
 
@@ -353,8 +354,6 @@ pub enum ScreenEvent {
         height: u32,
         /// Points-to-pixels scale.
         scale: f32,
-        /// HDR stream (PQ, BT.2020).
-        hdr: bool,
     },
     /// Stream ended.
     Closed {

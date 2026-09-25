@@ -260,7 +260,7 @@ mod tests {
         assert!(h.tick().is_empty(), "two tries only");
         h.advance(cfg().grace);
         let actions = h.tick();
-        assert_eq!(actions, vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert_eq!(actions, vec![Action::RequestRefresh { last_good_frame: 0, keyframe: false }]);
         assert!(h.rx.awaiting_refresh());
         assert!(h.drain().is_empty(), "frames 2 to 4 are dropped: they depended on frame 1");
         // The worker answers with an LTR refresh; everything after it flows again.
@@ -719,7 +719,7 @@ mod tests {
         h.advance(nack_delay());
         assert_eq!(h.tick().len(), 1);
         h.advance(cfg().max_hold);
-        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: false }]);
         assert!(h.rx.awaiting_refresh());
     }
 
@@ -729,13 +729,13 @@ mod tests {
         // Nothing has arrived; the reassembler nudges the worker for an IDR periodically.
         assert!(h.tick().is_empty(), "the constructor counts as the first request");
         h.advance(cfg().refresh_repeat + RTT * 2);
-        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
         assert!(h.tick().is_empty());
         // Each unanswered repeat doubles the wait: the second one is not due one period later.
         h.advance(cfg().refresh_repeat + RTT * 2);
         assert!(h.tick().is_empty(), "backoff");
         h.advance(cfg().refresh_repeat);
-        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
         // Over ten seconds a silent target sees a handful of requests, not eighty.
         let mut sent = 0;
         for _ in 0..1000 {
@@ -759,7 +759,7 @@ mod tests {
         let mut h = Harness::new();
         assert!(h.tick().is_empty(), "the constructor counts as the first request");
         h.advance(cfg().refresh_repeat + RTT * 2);
-        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
 
         h.rx.set_source_live(false);
         assert!(!h.rx.source_live());
@@ -772,7 +772,7 @@ mod tests {
         // the first frame is now worth waiting for.
         h.rx.set_source_live(true);
         h.advance(cfg().refresh_repeat + RTT * 2);
-        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
     }
 
     /// What clears what: a heartbeat proves the worker is alive, so the retry cap starts over, but
@@ -823,7 +823,7 @@ mod tests {
         assert!(h.rx.source_live());
         h.advance(cfg().max_hold);
         assert!(
-            h.tick().contains(&Action::RequestRefresh { last_good_frame: 0 }),
+            h.tick().contains(&Action::RequestRefresh { last_good_frame: 0, keyframe: true }),
             "asking resumes once the worker says the source draws again"
         );
     }
@@ -838,7 +838,7 @@ mod tests {
         h.deliver(&s0.datagrams[..1]);
         assert!(h.rx.source_live());
         h.advance(cfg().max_hold);
-        assert!(h.tick().contains(&Action::RequestRefresh { last_good_frame: 0 }));
+        assert!(h.tick().contains(&Action::RequestRefresh { last_good_frame: 0, keyframe: true }));
     }
 
     /// Fallback for a worker that never sends the hint: the repeats stop on their own. With the
@@ -864,7 +864,7 @@ mod tests {
         let actions = h.tick();
         assert_eq!(
             actions.last(),
-            Some(&Action::RequestRefresh { last_good_frame: 0 }),
+            Some(&Action::RequestRefresh { last_good_frame: 0, keyframe: false }),
             "{actions:?}"
         );
     }
@@ -969,7 +969,7 @@ mod tests {
         h.deliver(&s4.datagrams);
         assert!(h.tick().is_empty(), "two tries only");
         h.advance(cfg().grace);
-        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: false }]);
         assert_eq!((h.rx.stats().frames_lost, h.rx.stats().nacks), (1, 2));
     }
 
@@ -1226,7 +1226,7 @@ mod tests {
         let s2 = h.send(&frame_bytes(3, 2_000), false, false);
         h.deliver(&s2.datagrams);
         h.advance(cfg().max_hold);
-        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: false }]);
         assert!(h.rx.awaiting_refresh());
         let plain = h.send(&frame_bytes(4, 2_000), false, false);
         h.deliver_except(&plain, &[0, 1]);
@@ -1272,7 +1272,7 @@ mod tests {
         assert_eq!(h.drain().len(), 2);
 
         h.rx.force_refresh(h.now, false);
-        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 1 }]);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 1, keyframe: false }]);
         h.rx.force_refresh(h.now, false);
         assert!(h.tick().is_empty(), "already waiting: no second request");
         let s2 = h.send(&frame_bytes(3, 2_000), false, false);
@@ -1286,7 +1286,7 @@ mod tests {
 
         h.rx.ack_ltr(9);
         h.rx.force_refresh(h.now, true);
-        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 3 }]);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 3, keyframe: true }]);
         assert_eq!(h.rx.take_report(h.now, 0).acked_ltr_len, 0, "the old session's references");
         let refresh = h.send(&frame_bytes(5, 2_000), false, true);
         h.deliver(&refresh.datagrams);
@@ -1300,6 +1300,25 @@ mod tests {
             vec![(5, true)]
         );
         assert_eq!(h.rx.stats().frames_lost, 0, "the decoder's failure is not the link's loss");
+    }
+
+    /// A refresh asked for as an LTR delta is no use once the decoder's session goes: the
+    /// worker is asked again at once, for a keyframe, and the repeats keep asking for one.
+    #[test]
+    fn a_lost_session_while_waiting_on_a_refresh_asks_for_a_keyframe() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        assert_eq!(h.drain().len(), 1);
+
+        h.rx.force_refresh(h.now, false);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: false }]);
+        h.rx.force_refresh(h.now, true);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
+        h.rx.force_refresh(h.now, true);
+        assert!(h.tick().is_empty(), "already waiting on a keyframe: no second request");
+        h.advance(cfg().refresh_repeat + RTT * 2);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
     }
 
     /// The newest acknowledged token rides every report that delivered a frame, so one report

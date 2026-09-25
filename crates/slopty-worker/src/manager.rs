@@ -192,8 +192,7 @@ impl Worker {
                 Some(status) => SessionState::Exited { status },
                 None => SessionState::Running,
             };
-            let agent =
-                self.inner.agents.status(id).filter(|(_kind, status)| *status != AgentStatus::None);
+            let agent = self.inner.agents.status(id).filter(|a| a.status != AgentStatus::None);
             out.push(SessionSummary {
                 id,
                 title: snap.title.clone().unwrap_or_else(|| {

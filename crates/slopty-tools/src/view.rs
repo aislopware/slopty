@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WorkerId};
-use slopty_proto::agent::{AgentKind, AgentStatus, BlockReason};
+use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::orchestration::{
     Command, DirEntry, FileKind, FileStat, Happening, HubEvent, Line, Port, Screen, TermRef, Waited,
 };
@@ -85,6 +85,8 @@ pub struct TerminalView {
     exit_status: Option<i32>,
     viewers: u16,
     command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<AgentView>,
 }
 
 /// An agent's status, for JSON.
@@ -95,6 +97,11 @@ pub struct AgentView {
     tool: Option<String>,
     reason: Option<&'static str>,
     needs_human: bool,
+    /// The signal the worker read it from; `hook` is the only one that says what an agent is
+    /// blocked on, so anything else means the hooks are not installed. Absent where the report
+    /// does not say (an event).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'static str>,
 }
 
 /// A line, for JSON.
@@ -303,6 +310,24 @@ const fn agent_name(kind: AgentKind) -> &'static str {
     }
 }
 
+const fn source_key(source: AgentSource) -> &'static str {
+    match source {
+        AgentSource::Process => "process",
+        AgentSource::Title => "title",
+        AgentSource::Transcript => "transcript",
+        AgentSource::Hook => "hook",
+    }
+}
+
+const fn source_name(source: AgentSource) -> &'static str {
+    match source {
+        AgentSource::Process => "process",
+        AgentSource::Title => "title",
+        AgentSource::Transcript => "transcript",
+        AgentSource::Hook => "hooks",
+    }
+}
+
 const fn reason_key(reason: &BlockReason) -> &'static str {
     match reason {
         BlockReason::Permission { .. } => "permission",
@@ -321,16 +346,22 @@ pub const fn blocked(status: &AgentStatus) -> Option<&BlockReason> {
 }
 
 /// An agent's status, for JSON.
-pub fn agent(agent: Option<&(AgentKind, AgentStatus)>) -> AgentView {
-    let Some((kind, status)) = agent else {
+pub fn agent(agent: Option<&SessionAgent>) -> AgentView {
+    let Some(a) = agent else {
         return AgentView {
             agent: None,
             status: "none",
             tool: None,
             reason: None,
             needs_human: false,
+            source: None,
         };
     };
+    reported(a.kind, &a.status, Some(a.source))
+}
+
+/// An agent's status as a report gave it, for JSON; `source` where the report names one.
+fn reported(kind: AgentKind, status: &AgentStatus, source: Option<AgentSource>) -> AgentView {
     let (status_key, tool, reason) = match status {
         AgentStatus::None => ("none", None, None),
         AgentStatus::Idle => ("idle", None, None),
@@ -346,17 +377,23 @@ pub fn agent(agent: Option<&(AgentKind, AgentStatus)>) -> AgentView {
         AgentStatus::Done => ("done", None, None),
     };
     AgentView {
-        agent: Some(agent_key(*kind)),
+        agent: Some(agent_key(kind)),
         status: status_key,
         tool,
         reason,
         needs_human: blocked(status).is_some(),
+        source: source.map(source_key),
     }
 }
 
-/// An agent's status, for a person.
-pub fn agent_text(agent: Option<&(AgentKind, AgentStatus)>) -> String {
-    let Some((kind, status)) = agent else { return "no agent".to_owned() };
+/// An agent's status, for a person: "Claude Code  working (hooks)".
+pub fn agent_text(agent: Option<&SessionAgent>) -> String {
+    let Some(a) = agent else { return "no agent".to_owned() };
+    format!("{}  {}", agent_name(a.kind), status_text(&a.status, Some(a.source)))
+}
+
+/// What an agent is doing, for a person, and the signal that said so when it is known.
+fn status_text(status: &AgentStatus, source: Option<AgentSource>) -> String {
     let what = match status {
         AgentStatus::None => "not detected".to_owned(),
         AgentStatus::Idle => "idle".to_owned(),
@@ -365,7 +402,10 @@ pub fn agent_text(agent: Option<&(AgentKind, AgentStatus)>) -> String {
         AgentStatus::Blocked(reason) => format!("waiting: {}", reason_text(reason)),
         AgentStatus::Done => "done".to_owned(),
     };
-    format!("{}  {what}", agent_name(*kind))
+    match source {
+        Some(source) => format!("{what} ({})", source_name(source)),
+        None => what,
+    }
 }
 
 fn reason_text(reason: &BlockReason) -> String {
@@ -392,8 +432,8 @@ impl Overview {
             .filter(|(w, _)| *w == worker)
             .filter_map(|(w, s)| {
                 let term = TermRef { worker: *w, session: s.id };
-                let (kind, status) = s.agent.as_ref()?;
-                blocked(status).map(|reason| (term, *kind, reason))
+                let a = s.agent.as_ref()?;
+                blocked(&a.status).map(|reason| (term, a.kind, reason))
             })
             .collect();
         waiting.sort_by_key(|(term, ..)| term.session);
@@ -513,6 +553,7 @@ pub fn terminals_json(
                 exit_status,
                 viewers: s.viewers,
                 command: s.command.clone(),
+                agent: s.agent.as_ref().map(|a| agent(Some(a))),
             }
         })
         .collect()
@@ -538,10 +579,13 @@ pub fn terminals_text(workers: &[WorkerInfo], terminals: &[(WorkerId, SessionSum
                 s.viewers.to_string(),
                 s.title.clone(),
                 s.cwd.clone().unwrap_or_default(),
+                s.agent
+                    .as_ref()
+                    .map_or_else(|| "-".to_owned(), |a| status_text(&a.status, Some(a.source))),
             ]
         })
         .collect();
-    table(&["TERM", "STATE", "SIZE", "VIEWERS", "TITLE", "CWD"], rows)
+    table(&["TERM", "STATE", "SIZE", "VIEWERS", "TITLE", "CWD", "AGENT"], rows)
 }
 
 /// Lines, for JSON.
@@ -788,7 +832,7 @@ pub fn event(e: &HubEvent) -> EventView<'_> {
             view.kind = "agent";
             view.worker = term.worker;
             view.term = Some(term_string(*term));
-            view.agent = Some(agent(Some(&(*kind, status.clone()))));
+            view.agent = Some(reported(*kind, status, None));
             view.detail = detail.as_deref();
         }
     }
@@ -811,7 +855,7 @@ pub fn event_text<S: std::hash::BuildHasher>(
         }
         Happening::SessionClosed { term: t } => format!("closed  {}", term(t)),
         Happening::Agent { term: t, kind, status, detail } => {
-            let said = agent_text(Some(&(*kind, status.clone())));
+            let said = format!("{}  {}", agent_name(*kind), status_text(status, None));
             match detail {
                 Some(detail) => format!("agent   {}  {said}: {detail}", term(t)),
                 None => format!("agent   {}  {said}", term(t)),
@@ -951,7 +995,9 @@ mod tests {
             },
         ];
         let with_agent = |mut summary: SessionSummary, status: AgentStatus| {
-            summary.agent = Some((AgentKind::ClaudeCode, status));
+            let source =
+                if blocked(&status).is_some() { AgentSource::Hook } else { AgentSource::Title };
+            summary.agent = Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source });
             summary
         };
         let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
@@ -1034,18 +1080,28 @@ mod tests {
         assert_eq!(short.get(t), "mac-studio/0199a1b2-c3d5");
     }
 
+    /// Each agent says the signal it was read from, so a reader can tell a hooked agent from
+    /// one the hooks would tell more about.
     #[test]
     fn an_agent_reads_the_same_in_json_and_text() {
-        let blocked = (AgentKind::ClaudeCode, AgentStatus::Blocked(BlockReason::Question));
+        let blocked = SessionAgent {
+            kind: AgentKind::ClaudeCode,
+            status: AgentStatus::Blocked(BlockReason::Question),
+            source: AgentSource::Hook,
+        };
         let json = serde_json::to_value(agent(Some(&blocked))).unwrap();
         assert_eq!(
             json,
             serde_json::json!({
                 "agent": "claude_code", "status": "blocked", "tool": null,
-                "reason": "question", "needs_human": true
+                "reason": "question", "needs_human": true, "source": "hook"
             })
         );
-        assert_eq!(agent_text(Some(&blocked)), "Claude Code  waiting: a question");
+        assert_eq!(agent_text(Some(&blocked)), "Claude Code  waiting: a question (hooks)");
+        let titled =
+            SessionAgent { status: AgentStatus::Working, source: AgentSource::Title, ..blocked };
+        assert_eq!(serde_json::to_value(agent(Some(&titled))).unwrap()["source"], "title");
+        assert_eq!(agent_text(Some(&titled)), "Claude Code  working (title)");
         let none = serde_json::to_value(agent(None)).unwrap();
         assert_eq!(none["status"], "none");
         assert_eq!(none["needs_human"], false);

@@ -1303,3 +1303,90 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_slow_viewer_is_skipped_then_caught_up_never_dropped`; session
   `input_buys_a_few_unpaced_frames_and_only_soon_after`; predict
   `background_output_does_not_mute_prediction`.
+
+- ✅ **A scroll ships the rows that changed, and a row ends at its last cell** (2026-09-25).
+  libghostty rebuilds every row when the viewport pin moves (`render.zig`, `beginUpdate`), and
+  the worker's viewport follows the output, so every line scrolled in was a full frame. An
+  Enter at a bottom prompt sent the whole screen again: 15.0 kB at 80 × 24 and 88.3 kB at
+  200 × 60, for the four rows that changed. The engine now keeps the lines the viewers that
+  follow the diffs hold (`ghostty::Shown`: the screen's first absolute line, the numbering,
+  the width and each row's line). After a scroll it compares every rebuilt row with the line
+  held at the same absolute index and sends only those that differ, in a frame that is not
+  `full`. A client that sees `first_visible_line` move on a frame that is not full fills each
+  row from its line cache at the new index (`TermState::readopt`) and then applies the rows the
+  frame carries. The frame stays full when the numbering or the width changed, and for a
+  joiner, a resize and a resync. A joiner holds the screen as it is when it joins, which can
+  differ from what the others were sent, so a line that changed and then changed back is
+  dropped from the record and sent again. Lines are compared, not hashed. `DefaultHasher` over
+  every cell doubled the build (885 µs a scroll at 200 × 60 in release), and a comparison is
+  exact. On the wire a `Line` is now its width and its cells up to the last one that is not
+  blank; the rest come back blank on decode. A blank cell was 7 bytes, so a 200-column echo row
+  (1.46 kB) took two packets at the 1252-byte MTU. Numbers: echo 1461 → 230 B at 200 columns,
+  Enter 88.3 kB → 0.66 kB at 200 × 60, a one-line scroll 486–519 → 347–369 µs to build and encode
+  (MEASUREMENTS 2026-09-25, "a scroll ships the rows it moved"). Protocol 57. Tests: engine
+  `every_diff_applied_by_index_shows_the_terminal` (twelve seeded runs of 600 writes: scrolls,
+  scroll regions, erases, wide characters, the alternate screen and joiners, each frame checked
+  against a second engine fed the same bytes), `a_scroll_sends_the_lines_that_came_in`,
+  `a_joiner_is_sent_a_line_that_changed_back_since_the_others_had_it`,
+  `an_echo_and_an_enter_cost_what_changed`; grid
+  `a_line_round_trips_without_its_trailing_blanks` (property),
+  `a_line_travels_up_to_its_last_content_and_comes_back_whole`; client
+  `a_scroll_moves_the_held_rows_up_and_takes_only_the_new_one`.
+
+- ✅ **The alternate screen keeps the primary's numbering for its return** (2026-09-25). Entering
+  it bumped the epoch, which also cleared the prompt starts and exit statuses the engine keeps
+  per absolute line. Leaving it restored the anchor and the command blocks, then bumped the
+  epoch again, and the client dropped its cache on either change. After `vim`, `less`, `man` or
+  `htop` the history had to be fetched again, and the prompts above lost their marks, so a
+  block's prompt and status were gone. ARCHITECTURE claimed the cache survived; it did not. Now
+  the engine parks the primary's epoch, prompt starts and exit statuses with its anchor, and
+  gives the alternate screen an epoch never used before (a counter, so an epoch is never handed
+  out twice). Returning restores all of them. A reflow on the alternate screen, or an anchor
+  that did not survive, gives the primary a new epoch instead. The client puts its line cache
+  aside when a frame brings the alternate screen in a new epoch, and takes it back when the
+  worker returns to that epoch; any other epoch drops it. Tests: engine
+  `the_alternate_screen_gives_the_primary_its_numbering_and_marks_back`; client
+  `the_primary_lines_come_back_after_the_alternate_screen`.
+
+- ✅ **A closed sink keeps the driver's seat, and a replaced stream's late frames are dropped**
+  (2026-09-25). A re-attach on the same connection aborts the old stream's pump before the new
+  attach reaches the actor. If the actor wrote to the closed sink in between, it removed the
+  viewer and handed the size to another viewer, so the client that re-attached had lost the
+  driver. The actor now removes a viewer whose sink closed without handing anything on, and
+  keeps the driver's seat for it along with that sink (`Actor::orphan`). An attach by the same
+  client keeps the seat. A detach through that sink passes it on. That detach comes from the
+  connection's teardown (`detach_sink`) or from the client's `Detach`. A detach through a sink
+  that was replaced changes nothing. On the client, the old stream's buffered frames can arrive
+  after the new stream's, which showed old rows until they changed. Frame numbers only grow
+  within a session's actor, and a client's `TermState` lives for one connection, since the app
+  rebuilds its views on a new one. So a frame numbered below the last one applied, or a diff at
+  the same number, is dropped (`TermState::superseded`). A full frame at the same number is
+  still taken, because a joiner's frame carries the others' number. Rejected: an attach
+  generation in `UniHead::Session`. The frame number already carries the order. A generation
+  would add a field that the connection, the stream framing and the client link all have to
+  carry, and the actor still could not tell a closing sink from a leaving client without the
+  seat rule above. Tests: actor
+  `a_closed_sink_keeps_the_drivers_seat_until_its_connection_detaches_it`; client
+  `a_frame_older_than_the_last_applied_is_dropped`.
+
+- ✅ **What waits in the transport is bounded by markers the client answers** (2026-09-25). The
+  frame credit counts a frame done once the connection has written it, but a write returns
+  once the frame is in noq's stream buffer. That buffer holds up to the 1.25 MB stream window,
+  five seconds at 250 kB/s. The worker now sends a `TermEvent::Marker { id }` after every
+  16 KiB of frames to a viewer. The client answers `TermRequest::Reached { marker }` when it
+  applies the marker, and every event before it has been applied by then. A viewer that has
+  answered at least once is sent no further frame while more than `FRAMES_UNREACHED_BYTES`
+  (64 KiB) of its frames are unconfirmed. It misses the diffs meanwhile and gets every row once
+  an answer opens it again, as with the credit. A tool that reads the stream raw and never
+  answers is not held back, and at most 16 markers are kept for it. Measured with a model of
+  the stream buffer (writes return while the window has room, the link drains at 250 kB/s):
+  the viewer showed a flood's end 5096 ms after the program printed it, with 1.24 MB waiting.
+  Now it shows it after 265 ms, with at most 64 kB waiting (MEASUREMENTS 2026-09-25, "a scroll
+  ships the rows it moved"). This closes the item the entry on echo pacing left open. Rejected: a
+  smaller stream receive window set by the client. noq has no per-stream window, only
+  `TransportConfig::stream_receive_window` for every stream of a connection, so downloads and
+  tunnels would be capped at the window per round trip. Also rejected: acknowledging every
+  frame, which would send a message upstream per frame. Tests: actor
+  `a_throttled_viewer_behind_the_stream_window_is_under_a_second_behind`, session
+  `a_viewer_is_held_to_the_frames_it_confirmed_once_it_answers`; client
+  `a_marker_is_answered_once_the_events_before_it_are_applied`.

@@ -242,6 +242,9 @@ pub enum Action {
     RequestRefresh {
         /// Highest frame delivered.
         last_good_frame: u32,
+        /// Only a keyframe will do: the stream has not started, or the decoder lost its session
+        /// and with it every reference an LTR refresh would be predicted from.
+        keyframe: bool,
     },
 }
 
@@ -607,10 +610,13 @@ impl Reassembler {
     /// every frame until one comes. `keyframe` says the decoder lost its session, so a refresh
     /// predicted from a long-term reference cannot help and only an IDR restarts it.
     ///
-    /// A receiver already waiting for a refresh asks nothing more here; its repeats run on the
-    /// usual backoff, so a decoder failing on every frame cannot turn into a request per frame.
+    /// A receiver already waiting for what this asks for asks nothing more here; its repeats run
+    /// on the usual backoff, so a decoder failing on every frame cannot turn into a request per
+    /// frame. One waiting for a refresh when the session goes asks for a keyframe at once.
     pub fn force_refresh(&mut self, now: Instant, keyframe: bool) {
-        let waiting = self.awaiting_refresh();
+        // A wait for a refresh that becomes a wait for a keyframe asks again at once: what was
+        // asked for is no longer something the decoder can use.
+        let waiting = self.awaiting_refresh() && (!keyframe || self.need == Need::Keyframe);
         self.need =
             if keyframe || self.need == Need::Keyframe { Need::Keyframe } else { Need::Refresh };
         self.ready.clear();
@@ -856,7 +862,10 @@ impl Reassembler {
     fn request_refresh(&mut self, now: Instant) {
         self.refresh_requested_at = Some(now);
         self.stats.refreshes = self.stats.refreshes.saturating_add(1);
-        self.actions.push(Action::RequestRefresh { last_good_frame: self.last_good.unwrap_or(0) });
+        self.actions.push(Action::RequestRefresh {
+            last_good_frame: self.last_good.unwrap_or(0),
+            keyframe: self.need == Need::Keyframe,
+        });
     }
 
     /// Deliver everything that is in order (or restarts the stream).
