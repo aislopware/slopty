@@ -5,8 +5,9 @@ The repository, the commands and the loop. Rules of the game are in `CLAUDE.md`;
 
 ## Layout
 `crates/*` libraries, `apps/*` binaries, `xtask/` automation, `vendor/ghostty` pinned submodule
-(libghostty-vt source), `docs/` design + decisions. GPUI comes from `aislopware/zed` (branch
-`slopty`) and gpui-kit from `aislopware/gpui-kit` (branch `slopty`) as rev-pinned git dependencies.
+(libghostty-vt source), `docs/` design + decisions. GPUI comes from `aislopware/zed`, gpui-kit
+from `aislopware/gpui-kit` and libghostty-vt from `aislopware/libghostty-rs`, as rev-pinned git
+dependencies. Each fork carries our commits on its default branch, rebased onto upstream.
 
 ## Dev loop
 - Before coding, bring the ground up to date: `cargo xtask upstream check` and `sync` whatever

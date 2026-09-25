@@ -59,13 +59,11 @@ struct Fork {
     /// Our fork.
     #[serde(rename = "fork")]
     url: String,
-    /// The fork branch the workspace pins (`Cargo.toml` `branch = …`).
-    #[serde(rename = "fork_branch")]
+    /// The branch carrying our commits, in the fork and in the checkout alike: the fork's default
+    /// branch, which `Cargo.toml` pins by leaving `branch` out.
     branch: String,
     /// Checkout directory, relative to the main checkout of this repository.
     checkout: Utf8PathBuf,
-    /// The branch in that checkout carrying our commits.
-    local_branch: String,
     /// The upstream commit the fork branch was last rebased onto.
     base: String,
     /// Its commit date (`YYYY-MM-DD`).
@@ -214,13 +212,13 @@ fn check(sh: &Shell, root: &Utf8Path, main: &Utf8Path, name: &str, fork: &Fork) 
         short(&fork_head.sha),
         fork_head.date
     );
-    let branch = &fork.local_branch;
+    let branch = &fork.branch;
     let local = cmd!(sh, "git rev-parse --verify --quiet {branch}")
         .ignore_stderr()
         .read()
         .unwrap_or_default();
     if local != fork_head.sha {
-        println!("  note: local branch {} is at {}", fork.local_branch, short(&local));
+        println!("  note: local branch {branch} is at {}", short(&local));
     }
     if name == "libghostty-rs" {
         ghostty_pin_report(sh, root, &fork_head.sha)?;
@@ -275,7 +273,7 @@ fn sync(sh: &Shell, main: &Utf8Path, name: &str, fork: &Fork, no_push: bool) -> 
 
     let upstream = fetch(sh, &fork.upstream, &fork.upstream_branch)?;
     let fork_head = fetch(sh, &fork.url, &fork.branch)?;
-    let branch = &fork.local_branch;
+    let branch = &fork.branch;
     let fork_sha = &fork_head.sha;
     let local = cmd!(sh, "git rev-parse --verify --quiet {branch}").ignore_stderr().read().ok();
     match local {
@@ -330,12 +328,12 @@ fn sync(sh: &Shell, main: &Utf8Path, name: &str, fork: &Fork, no_push: bool) -> 
                 fork_is_ancestor || carries_every_patch() || replays_every_patch(),
                 "{}'s {} ({}) has diverged from {} ({}); reset it or push it first",
                 dir,
-                fork.local_branch,
+                fork.branch,
                 short(&local),
                 fork.url,
                 short(&fork_head.sha)
             );
-            println!("  note: {} is ahead of the fork; rebasing it too", fork.local_branch);
+            println!("  note: {branch} is ahead of the fork; rebasing it too");
         }
     }
 
@@ -354,7 +352,7 @@ fn sync(sh: &Shell, main: &Utf8Path, name: &str, fork: &Fork, no_push: bool) -> 
 
     if !no_push {
         let url = &fork.url;
-        let refspec = format!("{}:{}", fork.local_branch, fork.branch);
+        let refspec = format!("{branch}:{branch}");
         let lease = format!("--force-with-lease={}:{}", fork.branch, fork_head.sha);
         step("push", &cmd!(sh, "git push {url} {refspec} {lease}"))?;
     }
@@ -416,14 +414,11 @@ fn ensure_checkout(sh: &Shell, main: &Utf8Path, fork: &Fork) -> Result<Utf8PathB
         if let Some(parent) = dir.parent() {
             std::fs::create_dir_all(parent).with_context(|| format!("creating {parent}"))?;
         }
-        let (url, remote_branch, branch) = (&fork.url, &fork.branch, &fork.local_branch);
+        let (url, branch) = (&fork.url, &fork.branch);
         step(
             &format!("clone {url}"),
-            &cmd!(sh, "git clone --filter=blob:none --branch {remote_branch} {url} {dir}"),
+            &cmd!(sh, "git clone --filter=blob:none --branch {branch} {url} {dir}"),
         )?;
-        let _dir = sh.push_dir(&dir);
-        cmd!(sh, "git branch --no-track {branch} {remote_branch}").run()?;
-        cmd!(sh, "git switch --quiet {branch}").run()?;
     }
     Ok(dir)
 }
@@ -507,11 +502,11 @@ fn tags_since(sh: &Shell, base: &str, head: &str) -> Result<Vec<String>> {
 /// The commit this workspace's `Cargo.lock` pins for the fork's git source.
 fn lock_pin(root: &Utf8Path, fork: &Fork) -> Result<String> {
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).context("reading Cargo.lock")?;
-    let needle = format!("source = \"git+{}?branch={}#", fork.url, fork.branch);
+    let needle = format!("source = \"git+{}#", fork.url);
     lock.lines()
         .find_map(|line| line.strip_prefix(&needle))
         .map(|rest| rest.trim_end_matches('"').to_owned())
-        .with_context(|| format!("Cargo.lock has no entry for {} branch {}", fork.url, fork.branch))
+        .with_context(|| format!("Cargo.lock has no entry for {}", fork.url))
 }
 
 /// Rewrite the `base`, `base_date` and `checked` lines of one `[section]` in place, keeping
@@ -673,7 +668,6 @@ mod tests {
             url: String::new(),
             branch: String::new(),
             checkout: Utf8PathBuf::new(),
-            local_branch: String::new(),
             base: String::new(),
             base_date: "2026-09-01".to_owned(),
             checked: String::new(),
@@ -693,16 +687,15 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(dir.clone()).expect("utf8 tmp dir");
         std::fs::write(
             root.join("Cargo.lock"),
-            "[[package]]\nname = \"gpui\"\nsource = \"git+https://x/zed.git?branch=slopty#abc\"\n",
+            "[[package]]\nname = \"gpui\"\nsource = \"git+https://x/zed.git#abc\"\n",
         )
         .expect("write");
         let fork = Fork {
             upstream: String::new(),
             upstream_branch: String::new(),
             url: "https://x/zed.git".to_owned(),
-            branch: "slopty".to_owned(),
+            branch: "main".to_owned(),
             checkout: Utf8PathBuf::new(),
-            local_branch: String::new(),
             base: String::new(),
             base_date: String::new(),
             checked: String::new(),

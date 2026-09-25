@@ -99,6 +99,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_matrices_map_codes_to_the_right_colours`, and
   `a_tagged_surface_renders_its_colour_and_a_foreign_one_is_skipped`, which renders BT.709 red
   headless three frames running and checks the pixel values.
+  2026-09-25: rebased onto zed main `7fdb97cad5` (5 commits, fork head `c8f8aa66bf`) and gpui-kit
+  main `62966c99` (fork head on top of it, 2 commits); libghostty-rs was at upstream head. The
+  forks moved to their default branches the same day (the entry below).
 
 - ✅ **Upstream sync is `cargo xtask upstream check|sync`, run at least weekly** (user standing
   order 2026-09-05: gpui and gpui-kit move fast, keep pulling). `xtask/upstream.toml` records,
@@ -118,6 +121,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   rewrite the base lines. What it does not do: the gate, the e2e runs and the DECISIONS entry —
   those stay with whoever ran it. Commits in the checkouts are signed like ours, so
   `SSH_AUTH_SOCK` must point at the signing agent before `sync`.
+
+- ✅ **Each fork carries our commits on its default branch** (2026-09-25). zed and gpui-kit on
+  `main`, libghostty-rs on `master`: upstream plus our commits rebased on top, one branch per fork
+  and nothing else on it. They used to live on a `slopty` branch beside a `main` that nobody
+  synced, so GitHub's front page showed a mirror hundreds of commits behind while the branch we
+  build was current; the user found the second branch confusing and the numbers misleading.
+  `Cargo.toml` names no `branch`, so Cargo follows the default branch and `Cargo.lock` pins the
+  commit. gpui-kit's own manifest must spell the zed source the same way (no `branch` either),
+  or Cargo sees two sources and builds gpui twice. libghostty-rs was a plain repository pushed
+  as a mirror, so GitHub showed no ahead/behind and offered no upstream pull request; it was
+  recreated as a real fork of `Uzaaft/libghostty-rs`. `xtask/upstream.toml` has one `branch`
+  per fork, the same name in the fork and in the checkout.
 
 - ✅ **Forks are git dependencies, not submodules.** `gpui = { git = "…/aislopware/zed", rev = … }`
   pinned by rev; cargo caches the fetch. A zed submodule would put a multi-GB checkout in every
