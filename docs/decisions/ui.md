@@ -1234,3 +1234,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     setting for it. Folding would widen the gutter by the fold icons' 18 pt, but that adds
     folding, which the file tile turns off. The fix is a gutter-padding option in the fork.
   Goldens rerendered: `overview`, `transfers`.
+
+- ✅ **The overlay scrollbar goes when the pointer leaves without a move** (2026-09-25). The
+  bar stayed up when the pointer left the grid's right edge without a move over the window: out
+  of the window, to another app with ⌘-tab, or by the tile moving under a still pointer. The
+  element now lets it go on the window's mouse exit, when the window goes inactive (an edge,
+  kept in element state, so hovering an inactive window still shows it), and whenever prepaint
+  finds the last pointer position is no longer near the edge as laid out now. Only a real move
+  brings it up. Test: `the_scrollbar_lets_go_when_the_pointer_leaves_without_a_move`. The test
+  platform reports the pointer at the origin after activation changes, so the inactive case
+  passes there without the edge; that clause is checked by reading. The opacity still asks
+  AppKit for Reduce Motion on every prepaint of a terminal with history. Caching it belongs in
+  `TerminalView::scrollbar_opacity` and is left for whoever owns `terminal/view.rs`.
+
+- ✅ **The overview's gap always holds the workspace's name** (2026-09-25). The name above a
+  workspace is `spacing.xl` (24 pt) tall, but the gap was 10 % of the height at the overview's
+  zoom: 17 pt for three workspaces in an 800 pt window, less on a phone on its side, so names
+  overlapped the workspace above. `LayoutConfig::overview_label` is the band a gap must hold,
+  set by the strip from the same token the label is drawn with. In the overview a gap is the
+  larger of the share and the band (scaled in with the overview's progress, so the zoom
+  animation stays continuous), and `overview_fit` takes the smaller zoom of the two that fill
+  the height, so a stack that fits still shows whole. With room to spare nothing changes. Test:
+  `the_overview_gap_always_fits_the_workspace_name`.
+
+- ✅ **The column dots keep clear of the name and centre on the safe area** (2026-09-25). The
+  dots were an overlay centred on the window, so on a narrow window they covered the workspace
+  name, and on a phone on its side they ignored the notch. `dots_at` now places them on the
+  middle of the safe area. It measures the name, the status texts and the right side (round
+  trip, who needs you, "+" and "…") with the text system and moves the dots aside as far as it
+  takes to clear both. With no room between the two the dots are not drawn. Tests:
+  `the_dots_centre_on_the_safe_area`, `the_dots_give_way_to_the_name_and_the_buttons`.

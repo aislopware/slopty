@@ -60,7 +60,13 @@ const INITIAL_RTT: Duration = Duration::from_millis(5);
 const MTU_UPPER_BOUND: u16 = 1252;
 
 /// Environment override for the congestion controller: `cubic`, `bbr3` or `newreno`.
+///
+/// Each is held to [`crate::congestion::CEILING_BDPS`] of the measured path unless
+/// [`UNBOUNDED_SUFFIX`] follows it (diagnostics: `SLOPTY_CC=bbr3-unbounded` is noq's BBR3 as it
+/// ships).
 pub const CC_ENV: &str = "SLOPTY_CC";
+/// Appended to a [`CC_ENV`] choice, leaves noq's window alone.
+pub const UNBOUNDED_SUFFIX: &str = "-unbounded";
 /// Environment override for the initial congestion window, in packets (diagnostics).
 pub const INITIAL_WINDOW_ENV: &str = "SLOPTY_QUIC_IW";
 /// Initial congestion window, in packets of the initial 1200-byte datagram size.
@@ -84,7 +90,10 @@ pub const MAX_STREAMS: u32 = 1024;
 /// Congestion control is BBR3 (model-based: pacing at the measured bottleneck rate) rather
 /// than the Cubic default: on the Wi-Fi/mesh path Cubic cut the window to 13–20 KB after a
 /// handful of real losses per 15 s, which at a 10 ms round trip caps a media stream near
-/// 10 Mbit/s — a third of the 30 Mbit/s target (MEASUREMENTS.md, 2026-09-05).
+/// 10 Mbit/s — a third of the 30 Mbit/s target (MEASUREMENTS.md, 2026-09-05). Its window is
+/// held to twice the measured bandwidth-delay product ([`crate::congestion`]), since noq's grows
+/// without bound under bursty video and moves every burst into the bottleneck's queue
+/// (MEASUREMENTS.md, "BBR3's window under bursty video").
 #[must_use]
 pub fn transport_config() -> TransportConfig {
     let mut acks = AckFrequencyConfig::default();
@@ -143,17 +152,27 @@ fn initial_window_of(packets: Option<&str>) -> u64 {
     packets.saturating_mul(1200)
 }
 
-/// The congestion controller factory: [`CC_ENV`] if set and known, else BBR3.
+/// The congestion controller factory: [`CC_ENV`] if set and known, else BBR3, bounded by
+/// [`crate::congestion::Bounded`] unless the choice says otherwise.
 fn congestion_controller() -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync + 'static> {
-    use noq::congestion::{Bbr3Config, CubicConfig, NewRenoConfig};
     let choice = std::env::var(CC_ENV).unwrap_or_default();
+    let (inner, ceiling) = match choice.strip_suffix(UNBOUNDED_SUFFIX) {
+        Some(inner) => (inner, None),
+        None => (choice.as_str(), Some(crate::congestion::CEILING_BDPS)),
+    };
+    Arc::new(crate::congestion::BoundedFactory::new(noq_controller(inner), ceiling))
+}
+
+/// noq's controller factory `choice` names, BBR3 for anything else.
+fn noq_controller(choice: &str) -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync> {
+    use noq::congestion::{Bbr3Config, CubicConfig, NewRenoConfig};
     let window = initial_window();
     let bbr3 = || {
         let mut config = Bbr3Config::default();
         config.initial_window(window);
         Arc::new(config)
     };
-    match choice.as_str() {
+    match choice {
         "cubic" => {
             let mut config = CubicConfig::default();
             config.initial_window(window);

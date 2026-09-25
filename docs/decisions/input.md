@@ -300,3 +300,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   scale. A still pointer stays put, and only a pointer that moved in the round trip before the
   ask is drawn wrong until the worker's next sample. Test:
   `the_workers_pointer_is_drawn_at_the_scale_asked_for`.
+
+- ✅ **A button pressed on the picture is always let go on the worker** (2026-09-25). gpui
+  reports a mouse-up only over the element that saw the press, so a drag let go off the
+  picture never sent its release. The worker then kept the button down and turned every later
+  hover into a drag on the real desktop. `ScreenView` now keeps the buttons whose press went to
+  the worker, as it keeps keys. A release off the picture comes in through `on_mouse_up_out`
+  and goes at the picture's nearest edge, where the worker's pointer stopped. Focus leaving the
+  view or the window going inactive releases held buttons along with keys and modifiers, at the
+  last position sent. A release with no press behind it sends nothing. A stream that closes is
+  let go by the worker (`release_input` before the close). Test:
+  `a_held_button_is_released_off_the_picture_and_on_focus_loss`.
+
+- ✅ **The worker lets go of every held key and button before it exits** (2026-09-25). Only
+  SIGINT was handled. launchd stops a job with SIGTERM (`launchctl kickstart -k`, `bootout`), and
+  that killed the daemon with whatever clients held still down on the desktop. Even on SIGINT,
+  the streams' tasks were dropped with the runtime rather than awaited, so an input thread still
+  posting when the process ended posted nothing. SIGTERM now shuts down the way SIGINT does. After
+  the endpoint closes and drains, `slopty_input::let_go_everywhere` asks every input thread in the
+  process to release what it holds and waits up to 500 ms for the posts. A thread whose handle is
+  already gone lets go on its way out, and the wait covers it too. The threads are counted as
+  they start, in a process-wide census of weak handles, since the streams own their sinks and
+  nothing else can reach them. Tests: `the_census_lets_go_of_every_stream_before_the_process_ends`
+  and `the_census_wait_is_bounded`. The signal wiring in `apps/slopty-worker/src/main.rs` has
+  no test; it is checked by reading.

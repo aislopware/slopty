@@ -64,14 +64,24 @@ fn view_spring() -> SpringParams {
     SpringParams::new(1.0, 800.0, 0.0001)
 }
 
-/// The overview's zoom for `n` workspaces: [`OVERVIEW_ZOOM`], or less when the stack would
-/// not fit the window's height at it, down to [`OVERVIEW_MIN_ZOOM`]. The stack is each
-/// workspace with the gap above it (where its name goes) and a gap of margin at either end.
-/// The gap is a share of the height, so the width plays no part.
-fn overview_fit(n: usize) -> f32 {
+/// The overview's zoom for `n` workspaces in a window `view_h` high: [`OVERVIEW_ZOOM`], or
+/// less when the stack would not fit the height at it, down to [`OVERVIEW_MIN_ZOOM`]. The
+/// stack is each workspace with the gap above it (where its name goes) and a gap of margin at
+/// either end. A gap is a share of the height, or the `label` height when that is more
+/// ([`overview_gap`]); the width plays no part.
+fn overview_fit(n: usize, view_h: f32, label: f32) -> f32 {
     let n = count(n.max(1));
-    let height = n.mul_add(1.0 + WORKSPACE_GAP, 2.0 * WORKSPACE_GAP);
-    (1.0 / height).clamp(OVERVIEW_MIN_ZOOM, OVERVIEW_ZOOM)
+    // The stack is `n × h × z + (n + 2) × gap`, with the gap the larger of the share and the
+    // label, so the zoom is the smaller of the two that fill the height exactly.
+    let share = 1.0 / n.mul_add(1.0 + WORKSPACE_GAP, 2.0 * WORKSPACE_GAP);
+    let labelled = (n + 2.0).mul_add(-label, view_h) / (n * view_h.max(1.0));
+    share.min(labelled).clamp(OVERVIEW_MIN_ZOOM, OVERVIEW_ZOOM)
+}
+
+/// The gap above each workspace, on screen, at `zoom` with the overview `progress` of the way
+/// open: a share of the height, and in the overview never less than its names' `label`.
+fn overview_gap(view_h: f32, zoom: f32, label: f32, progress: f32) -> f32 {
+    (view_h * WORKSPACE_GAP * zoom).max(label * progress)
 }
 
 /// The workspace switch: 1.0 / 1000 / 0.0001.
@@ -245,6 +255,9 @@ pub struct LayoutConfig {
     pub phone_peek: f32,
     /// Whether changes animate (off: Reduce Motion, the self-test).
     pub animate: bool,
+    /// The height of the name drawn above each workspace in the overview, in points on screen:
+    /// the gap above a workspace there is never less. The UI sets it from its theme.
+    pub overview_label: f32,
 }
 
 impl Default for LayoutConfig {
@@ -256,6 +269,7 @@ impl Default for LayoutConfig {
             phone_below: 700.0,
             phone_peek: 12.0,
             animate: true,
+            overview_label: 0.0,
         }
     }
 }
@@ -1899,6 +1913,11 @@ impl Layout {
         }
     }
 
+    /// The height of the overview's workspace names, in points on screen.
+    pub const fn set_overview_label(&mut self, height: f32) {
+        self.config.overview_label = height;
+    }
+
     /// The workspace area.
     #[must_use]
     pub const fn viewport(&self) -> (f32, f32) {
@@ -2539,7 +2558,10 @@ impl Layout {
     /// The zoom the overview lands on: fitted to the workspaces, springing to the new fit
     /// when their count changed while it showed.
     fn overview_zoom(&self) -> f32 {
-        self.refit.map_or_else(|| overview_fit(self.fitted), |a| narrow(a.value_at(self.now)))
+        self.refit.map_or_else(
+            || overview_fit(self.fitted, self.view_h, self.config.overview_label),
+            |a| narrow(a.value_at(self.now)),
+        )
     }
 
     /// Fit the overview's zoom to the workspace count, if it changed.
@@ -2552,7 +2574,8 @@ impl Layout {
         let velocity = self.refit.map_or(0.0, |a| a.velocity_at(self.now));
         self.fitted = n;
         self.refit = if self.overview_progress() > 0.0 {
-            self.ctx().spring(from, overview_fit(n), velocity, view_spring())
+            let to = overview_fit(n, self.view_h, self.config.overview_label);
+            self.ctx().spring(from, to, velocity, view_spring())
         } else {
             None
         };
@@ -2941,7 +2964,8 @@ impl Layout {
     /// the window and the switch's rubber band stays inside a gap.
     fn ws_rects(&self, zoom: f32) -> Vec<Rect> {
         let (w, h) = (self.view_w * zoom, self.view_h * zoom);
-        let gap = self.view_h * WORKSPACE_GAP * zoom;
+        let gap =
+            overview_gap(self.view_h, zoom, self.config.overview_label, self.overview_progress());
         let step = h + gap;
         let sx = (self.view_w - w) / 2.0;
         let stack = count(self.workspaces.len()) * step;

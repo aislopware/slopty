@@ -48,7 +48,7 @@ pub use pointer::{Pointer, PointerWatch};
 use slopty_capture::Rect;
 use slopty_proto::screen::{CaptureTarget, ScreenInput};
 #[cfg(target_os = "macos")]
-pub use thread::{CgEvents, InputThread};
+pub use thread::{CgEvents, InputThread, let_go_everywhere};
 
 /// What went wrong posting an event.
 #[derive(Clone, Copy, thiserror::Error, Debug)]

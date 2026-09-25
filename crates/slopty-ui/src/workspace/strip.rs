@@ -457,6 +457,8 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         self.tick();
+        // The overview's gaps hold the names drawn in them.
+        self.layout.set_overview_label(self.theme.spacing.xl);
         if let Some(Drag::Move { moving: true, .. }) = self.drag {
             // The pointer resting in an edge band keeps the strip scrolling.
             let (x, _) = self.local(window.mouse_position());

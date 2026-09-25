@@ -767,6 +767,44 @@ fn the_overview_fits_every_workspace_with_a_gap_around_each() {
     near(f.workspaces[1].1.bottom(), 800.0 - gap);
 }
 
+/// The gap above a workspace in the overview always holds its name: however many workspaces
+/// and however short the window (a phone on its side), the label band fits between a workspace
+/// and the one above, and above the first. The zoom shrinks to keep the stack whole, and past
+/// the least zoom the stack scrolls with the band kept.
+#[test]
+fn the_overview_gap_always_fits_the_workspace_name() {
+    const LABEL: f32 = 24.0;
+    for (w, h, workspaces) in
+        [(1280.0, 800.0, 3), (1280.0, 800.0, 6), (844.0, 390.0, 2), (390.0, 844.0, 4)]
+    {
+        let mut l = still();
+        l.set_overview_label(LABEL);
+        l.set_viewport(w, h);
+        for i in 1..workspaces {
+            l.open(tile(i, 1), Placement::Remote);
+        }
+        l.set_overview(true);
+        let f = l.frame();
+        let rows: Vec<Rect> = f.workspaces.iter().map(|(_, r)| *r).collect();
+        let at = format!("{w}×{h}, {} workspaces, zoom {}", rows.len(), f.zoom);
+        let first = rows[0];
+        assert!(first.y - LABEL >= -0.01, "the first name is in the window: {at}");
+        for pair in rows.windows(2) {
+            let gap = pair[1].y - pair[0].bottom();
+            assert!(gap >= LABEL - 0.01, "a gap of {gap} under a {LABEL} name: {at}");
+        }
+        if f.zoom > OVERVIEW_MIN_ZOOM + 0.001 {
+            let last = rows[rows.len() - 1];
+            assert!(last.bottom() <= h + 0.01, "a stack that fits shows whole: {at}");
+        }
+    }
+    // With room to spare the gap is the usual share of the height; the band changes nothing.
+    let mut l = columns(1);
+    l.set_overview_label(LABEL);
+    l.set_overview(true);
+    near(l.frame().zoom, OVERVIEW_TWO);
+}
+
 /// Past the least zoom the stack scrolls with the workspace on show, centred as niri has it,
 /// but held a gap from the window's edge at either end; a workspace added while the overview
 /// shows springs the zoom to the new fit rather than jumping.

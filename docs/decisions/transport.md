@@ -1010,3 +1010,61 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   dropped, as hyper and axum do. Tests: `a_stream_the_worker_resets_resets_the_browser`,
   `a_browser_that_resets_resets_the_stream`, `a_failed_accept_keeps_the_port_served` (each
   failed on the old code) and `clean_ends_half_close_each_way` (`slopty-client`).
+
+- ✅ **BBR3 stays the default, with its window held to twice the measured bandwidth-delay
+  product** (2026-09-25, MEASUREMENTS.md "BBR3's window under bursty video"). This settles the
+  shaper half of the 🔬 BBR3-against-Cubic item above and the window question in the "loop never
+  awaits" entry. The mesh half, and the ladder on hardware, are still owed.
+
+  *Why the window ran to megabytes.* noq-proto 1.3.0's BBR3 counts every delivered byte as ACK
+  aggregation once a flow restarts from idle each frame: `handle_restart_from_idle` moves the
+  aggregation interval to now without clearing the bytes counted in it, and the window
+  (`2 × max_bw × min_rtt + extra_acked`) grows by the video's own rate. Video that never fills
+  the link also stays in `ProbeBW_UP` at pacing gain 1.25 (the exit waits for `full_bw_now`,
+  which app-limited samples never set), and it can stay in `Startup`, pacing at 106 MB/s. With
+  a window nothing binds, the pacer alone sends each burst, and above the link rate it lands in
+  the bottleneck's queue.
+
+  *The bound* (`slopty_net::congestion::Bounded`, wrapping whatever `SLOPTY_CC` picks). The
+  window is `min(noq's, 2 × delivery rate × min RTT)`, never below 16 packets. Both inputs are
+  measured in the wrapper, since BBR3's model is private and is what went wrong: the fastest the
+  peer acknowledged data over at least one round trip, and the smallest per-packet round trip,
+  each the best of the last five to ten seconds. On the 20 Mbit/s shaper it cut the bottleneck
+  queue's p99 from 16.7 to 10.9 ms (maximum 26.5 to 12.1) with bursts and from 17.8 to 11.9 ms
+  with the lane, at the same 12.5 Mbit/s and the same frames delivered whole. When the link
+  halves under the sender, noq's BBR3 filled the 100 ms buffer in two of four runs and echo p99
+  reached 94 to 155 ms; bounded, the queue stayed under 22 ms with nothing dropped and echo p99
+  was 32 to 43 ms. On a 20 ms buffer the bound took BBR3's overflow losses from 75 to 0.
+  `SLOPTY_CC=bbr3-unbounded` (any choice with `-unbounded`) is noq's controller as it ships, for
+  measuring against. The window also feeds the media rate controller's cap (`0.9 × cwnd / srtt`),
+  which now reads about 1.8 × the measured delivery rate instead of nothing.
+
+  ❌ *Cubic, bounded or not.* Unbounded Cubic reports no pacing rate, so a burst leaves at once:
+  on the 20 ms buffer 950 packets overflowed a run and no keyframe arrived whole. Bounded, it
+  filled the buffer when the link halved (199 ms, 312 dropped), because Cubic never drains a
+  queue, the minimum round trip ages into the queued one, and the bound rises with it. Its keyframe
+  p99 is better (56 to 78 ms against BBR3's 130 to 200, which is `ProbeRTT`), and that is the
+  one thing it wins.
+
+  🔬 *What no controller can do here.* A keyframe is 52 ms of a 20 Mbit/s link, and an echo
+  written behind it waits for it: at the bottleneck if it was paced above the link rate, in QUIC
+  if below, since noq writes datagrams before stream data (`connection/mod.rs:6504` before
+  `:6562`). The bound removes the controller's own queue, not that one. The rest of the fix
+  sits in noq, which Slopty does not fork for this:
+  1. Write stream frames before datagrams, or give datagrams a priority below a stream's
+     (`populate_packet`, the `DATAGRAM` block ahead of `STREAM`). Then the capture guard's held
+     frame waits in QUIC behind the echo, and the bound keeps the bottleneck short, which is the
+     half that needed this change.
+  2. In `handle_restart_from_idle` (`bbr3/mod.rs:1266`) also zero `extra_acked_delivered`, as
+     Linux does on `CA_EVENT_TX_START`, and cap `extra_acked` at some milliseconds of `max_bw`
+     in `update_max_inflight` (line 1350; Linux uses 100 ms).
+  3. Let an app-limited flow leave `ProbeBW_UP` after a round trip at `inflight ≤ 1.25 × BDP`
+     (Linux BBRv3's probe-up exit), and skip `ProbeRTT` for a flow that was app-limited through
+     the interval, whose round trips are unqueued already. That takes BBR3's keyframe p99 back
+     toward Cubic's.
+  With 2 and 3 upstream the bound should stop binding, and it can go.
+
+  Owed on real links: the shaped ladder on hardware and a mesh session with this default, bound
+  against `bbr3-unbounded`, watching the rate controller's cap and keyframe delivery. The shaper
+  has no AQM and releases packets on 1 ms ticks, so a Wi-Fi link's aggregation or an fq_codel
+  router may move the numbers.

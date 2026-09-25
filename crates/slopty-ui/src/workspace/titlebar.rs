@@ -53,6 +53,38 @@ pub(super) enum MenuKind {
     More,
 }
 
+/// The widths across the bar that decide where the column dots go, in points.
+#[derive(Clone, Copy, Debug)]
+struct BarRow {
+    /// The whole bar.
+    width: f32,
+    /// The safe area's insets, left and right.
+    safe: (f32, f32),
+    /// The bar's padding on the left (the traffic lights and the inset) and on the right.
+    leading: f32,
+    trailing: f32,
+    /// Between the bar's parts.
+    gap: f32,
+    /// What the left part holds at its natural width: the name, the server's and the workers'
+    /// status.
+    left: f32,
+    /// What the right part holds: the round trip, who needs you, "+" and "…".
+    right: f32,
+    /// The dots themselves.
+    dots: f32,
+}
+
+/// Where the column dots' left edge goes: centred on the safe area, moved aside as far as it
+/// takes to keep clear of the left and right parts, and `None` when there is no room between
+/// them at all.
+fn dots_at(row: BarRow) -> Option<f32> {
+    let (safe_left, safe_right) = row.safe;
+    let centred = (row.width - safe_left - safe_right - row.dots).mul_add(0.5, safe_left);
+    let lowest = row.leading + row.left + row.gap;
+    let highest = row.width - row.trailing - row.right - row.gap - row.dots;
+    (lowest <= highest).then(|| centred.clamp(lowest, highest))
+}
+
 impl WorkspaceView {
     /// Whether the bar shows `key`'s round trip: the worker of the focused tile does.
     pub(super) fn rtt_shown(&self, key: WorkerKey) -> bool {
@@ -219,11 +251,13 @@ impl WorkspaceView {
             .context_worker()
             .and_then(|key| self.workers.get(&key)?.rtt)
             .map(|d| format!("{:.1} ms", d.as_secs_f64() * 1e3));
+        let rtt_text = rtt.clone();
         let total = self.needs_you_count();
-        let needs_you = (total > 0).then(|| {
+        let needs_you_text = (total > 0).then(|| {
+            if total == 1 { "1 needs you".to_owned() } else { format!("{total} need you") }
+        });
+        let needs_you = needs_you_text.clone().map(|text| {
             let warm = s.warn;
-            let text =
-                if total == 1 { "1 needs you".to_owned() } else { format!("{total} need you") };
             let pill = div()
                 .id("needs-you")
                 .debug_selector(|| "needs-you".to_owned())
@@ -277,20 +311,60 @@ impl WorkspaceView {
             .gap(px(spacing.xxs))
             .when_some(add, gpui::ParentElement::child)
             .child(more);
-        // The column dots sit on the window's centre, not on the centre of what the traffic
-        // lights leave: the bar's leading inset is 78 pt and its trailing one 12, so a dot row
-        // between two equal flexible sides stood 33 pt right of the middle.
-        let indicator = self.render_indicator(cx).map(|marks| {
-            div()
-                .absolute()
-                .top(safe.top)
-                .bottom_0()
-                .left_0()
-                .right_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(marks)
+        // The column dots sit on the middle of the safe area, not on the middle of what the
+        // traffic lights leave (the bar's leading inset is 78 pt and its trailing one 12, so a
+        // dot row between two equal flexible sides stood 33 pt right of it), and give way to
+        // the name and the buttons rather than cover them.
+        let (leading, trailing) =
+            (LEADING_INSET + f32::from(safe.left), spacing.md + f32::from(safe.right));
+        let indicator = self.render_indicator(cx).and_then(|(marks, dots)| {
+            let text = |text: &str, size: f32, weight: gpui::FontWeight| {
+                text_width(window, &theme.typography.ui_family, text, size, weight)
+            };
+            let status = |status: &str| {
+                spacing.xs.mul_add(2.0, text(status, small, gpui::FontWeight::NORMAL))
+            };
+            let mut left: Vec<f32> = Vec::new();
+            if has_workers {
+                let strong = gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT);
+                left.push(text(&self.workspace_name(), theme.typography.ui_size, strong));
+            }
+            left.extend(self.server_status.as_deref().map(status));
+            left.extend(
+                self.workers
+                    .values()
+                    .filter(|w| !w.status.is_up())
+                    .map(|w| status(&format!("{} {}", w.name, w.status.text()))),
+            );
+            let mut readouts: Vec<f32> = Vec::new();
+            readouts.extend(rtt_text.as_deref().map(|t| text(t, small, gpui::FontWeight::NORMAL)));
+            readouts.extend(
+                needs_you_text
+                    .as_deref()
+                    .map(|t| spacing.sm.mul_add(2.0, text(t, small, gpui::FontWeight::NORMAL))),
+            );
+            let buttons_w =
+                if has_workers { ICON_BUTTON.mul_add(2.0, spacing.xxs) } else { ICON_BUTTON };
+            let x = dots_at(BarRow {
+                width: f32::from(window.viewport_size().width),
+                safe: (f32::from(safe.left), f32::from(safe.right)),
+                leading,
+                trailing,
+                gap: spacing.md,
+                left: spaced(&left, spacing.md),
+                right: spaced(&readouts, spacing.sm) + spacing.md + buttons_w,
+                dots,
+            })?;
+            Some(
+                div()
+                    .absolute()
+                    .top(safe.top)
+                    .bottom_0()
+                    .left(px(x))
+                    .flex()
+                    .items_center()
+                    .child(marks),
+            )
         });
         div()
             .id("titlebar")
@@ -303,8 +377,8 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(spacing.md))
-            .pl(px(LEADING_INSET) + safe.left)
-            .pr(px(spacing.md) + safe.right)
+            .pl(px(leading))
+            .pr(px(trailing))
             .bg(hsla(s.canvas))
             .border_b_1()
             .border_color(hsla(s.border))
@@ -340,7 +414,7 @@ impl WorkspaceView {
     ///
     /// Dots, not a scaled map of the strip: a track with the view bracketed and the active
     /// column filled read as a progress bar, the loudest thing in the bar saying the least.
-    fn render_indicator(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_indicator(&self, cx: &Context<Self>) -> Option<(gpui::AnyElement, f32)> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let strip = self.layout.frame().strip;
@@ -385,18 +459,19 @@ impl WorkspaceView {
                     .into_any_element()
             })
             .collect();
-        Some(
-            div()
-                .id("indicator")
-                .debug_selector(|| "indicator".to_owned())
-                .role(Role::Group)
-                .aria_label("Columns")
-                .flex_none()
-                .flex()
-                .items_center()
-                .children(marks)
-                .into_any_element(),
-        )
+        #[expect(clippy::cast_precision_loss, reason = "a count of columns is small")]
+        let width = count as f32 * theme.spacing.xxs.mul_add(2.0, size);
+        let row = div()
+            .id("indicator")
+            .debug_selector(|| "indicator".to_owned())
+            .role(Role::Group)
+            .aria_label("Columns")
+            .flex_none()
+            .flex()
+            .items_center()
+            .children(marks)
+            .into_any_element();
+        Some((row, width))
     }
 
     /// The open menu, anchored under its button at the right of the bar.
@@ -545,5 +620,92 @@ impl WorkspaceView {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+/// `parts` laid side by side with `gap` between them.
+fn spaced(parts: &[f32], gap: f32) -> f32 {
+    #[expect(clippy::cast_precision_loss, reason = "a handful of parts")]
+    let gaps = parts.len().saturating_sub(1) as f32;
+    gaps.mul_add(gap, parts.iter().sum())
+}
+
+/// How wide `text` is set in `family` at `size` and `weight`.
+fn text_width(
+    window: &Window,
+    family: &str,
+    text: &str,
+    size: f32,
+    weight: gpui::FontWeight,
+) -> f32 {
+    let font = gpui::Font { weight, ..gpui::font(SharedString::from(family.to_owned())) };
+    let run = gpui::TextRun {
+        len: text.len(),
+        font,
+        color: gpui::Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window.text_system().shape_line(
+        SharedString::from(text.to_owned()),
+        px(size),
+        &[run],
+        None,
+    );
+    f32::from(line.width)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Mac bar 1200 wide: the traffic lights' 78 on the left, 12 on the right, a short name
+    /// and "+" and "…".
+    const MAC: BarRow = BarRow {
+        width: 1200.0,
+        safe: (0.0, 0.0),
+        leading: 78.0,
+        trailing: 12.0,
+        gap: 12.0,
+        left: 90.0,
+        right: 60.0,
+        dots: 50.0,
+    };
+
+    fn near(a: Option<f32>, b: f32) {
+        assert!(a.is_some_and(|a| (a - b).abs() < 0.01), "{a:?} vs {b}");
+    }
+
+    /// The dots sit on the middle of the safe area, not of the window and not of what the bar's
+    /// paddings leave: a phone on its side with the notch on the left centres them right of the
+    /// window's middle.
+    #[test]
+    fn the_dots_centre_on_the_safe_area() {
+        near(dots_at(MAC), 600.0 - 25.0);
+        let phone = BarRow {
+            width: 844.0,
+            safe: (59.0, 0.0),
+            leading: 12.0 + 59.0,
+            trailing: 12.0,
+            left: 80.0,
+            ..MAC
+        };
+        near(dots_at(phone), 59.0 + (844.0 - 59.0) / 2.0 - 25.0);
+        let both = BarRow { safe: (59.0, 59.0), trailing: 12.0 + 59.0, ..phone };
+        near(dots_at(both), 422.0 - 25.0);
+    }
+
+    /// The dots never cover the name nor the right side: a name reaching past where they would
+    /// sit moves them right, a wide right side moves them left, and with no room between the
+    /// two they are not drawn.
+    #[test]
+    fn the_dots_give_way_to_the_name_and_the_buttons() {
+        let long = BarRow { width: 700.0, left: 260.0, ..MAC };
+        near(dots_at(long), 78.0 + 260.0 + 12.0);
+        let busy = BarRow { width: 700.0, right: 330.0, ..MAC };
+        near(dots_at(busy), 700.0 - 12.0 - 330.0 - 12.0 - 50.0);
+        assert_eq!(dots_at(BarRow { width: 450.0, left: 260.0, ..MAC }), None);
+        assert_eq!(dots_at(BarRow { width: 390.0, leading: 12.0, left: 240.0, ..MAC }), None);
     }
 }

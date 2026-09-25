@@ -97,6 +97,20 @@ impl Shaper {
         self.tally
     }
 
+    /// Carry `rate` bytes per second from now on, the way a Wi-Fi or LTE link changes its rate
+    /// under a sender. What is already queued keeps the times it was given; the queue's limit
+    /// stays in bytes, so it holds longer at a lower rate, as a router's buffer does.
+    pub const fn set_rate(&mut self, rate: u64) {
+        self.link.rate = rate;
+    }
+
+    /// How long a packet arriving `now` would wait in the queue before its own transmission:
+    /// the bottleneck's standing queue, in time.
+    #[must_use]
+    pub const fn queue_delay(&self, now: Duration) -> Duration {
+        self.drains_at.saturating_sub(now)
+    }
+
     /// Decide a packet of `len` bytes arriving `now` into the run.
     pub fn admit(&mut self, len: u64, now: Duration) -> Fate {
         if self.link.loss > 0.0 && self.rng.unit() < self.link.loss {
@@ -209,6 +223,9 @@ mod tests {
         let sent = fates.iter().filter(|f| matches!(**f, Fate::At(_))).count();
         assert_eq!(sent, 11, "the one in transmission plus a full queue behind it");
         assert_eq!(shaper.tally().overflowed, 9);
+        assert_eq!(shaper.queue_delay(Duration::ZERO), ms(110), "eleven packets to carry");
+        assert_eq!(shaper.queue_delay(ms(60)), ms(50), "and it drains at the rate");
+        assert_eq!(shaper.queue_delay(ms(500)), Duration::ZERO, "an empty queue waits for nothing");
         // And they leave one transmission apart, in the order they arrived.
         assert_eq!(fates.first(), Some(&Fate::At(Duration::ZERO)));
         assert_eq!(fates.get(10), Some(&Fate::At(ms(100))));
@@ -223,6 +240,16 @@ mod tests {
         assert_eq!(shaper.admit(1_000, Duration::ZERO), Fate::Drop);
         // A second later the queue is long empty, and the next packet leaves at once.
         assert_eq!(shaper.admit(1_000, ms(1_000)), Fate::At(ms(1_000)));
+    }
+
+    #[test]
+    fn a_rate_change_applies_to_the_next_packet() {
+        let mut shaper = Shaper::new(rate_only(100_000, 100_000), 1);
+        assert_eq!(shaper.admit(1_000, Duration::ZERO), Fate::At(Duration::ZERO));
+        shaper.set_rate(50_000);
+        // The first packet still leaves in 10 ms; the next takes 20 ms behind it.
+        assert_eq!(shaper.admit(1_000, Duration::ZERO), Fate::At(ms(10)));
+        assert_eq!(shaper.queue_delay(Duration::ZERO), ms(30));
     }
 
     #[test]

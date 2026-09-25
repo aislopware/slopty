@@ -4066,3 +4066,149 @@ cargo nextest run -p slopty-worker --test session_actor --no-capture \
 The buffer now holds what the markers allow, 64 KiB and the frame in hand. At 250 kB/s that
 is a quarter of a second. The echo beside a flood did not move: key to acking frame p50
 0.06–0.10 ms, p90 0.10–0.14 ms, 39–43 flood frames in 400 ms.
+
+## 2026-09-25 — BBR3's window under bursty video
+
+The question from "nothing on the connection waits behind anything slow": why noq's BBR3 held
+a 0.9 to 7.4 MB window on a path whose bandwidth-delay product is about 20 kB, and which
+controller keeps a keystroke's echo quickest beside video.
+
+`echo_beside_a_video_flood` gained what it needed to answer that. A sampler reads the worker's
+path every 10 ms: the window in force and noq's own, bytes in flight (the new
+`slopty_net::congestion` wrapper keeps noq's count), BBR3's pacing rate, the wrapper's delivery
+rate and round-trip minimum, loss, and the shaper's standing queue (`Relay::queue_delay_down`).
+With `SLOPTY_ECHO_TRACE` it also writes BBR3's model out of its `Debug` print. Each datagram now
+carries its frame number and send time, so the client times whole frames. A fifth arm halves the
+link's rate as the typing starts (`Relay::set_rate`), the way Wi-Fi or LTE drops under a sender.
+`SLOPTY_ECHO_QUEUE_MS` sizes the queue and `SLOPTY_ECHO_LOSS` adds random loss. 320 keys an arm,
+release, mac-studio with other sessions building (load average 2 to 21 across the runs).
+
+```
+SLOPTY_CC=<bbr3|bbr3-unbounded|cubic|cubic-unbounded> SLOPTY_ECHO_QUEUE_MS=<100|20> \
+  SLOPTY_ECHO_LOSS=<0|0.002> SLOPTY_ECHO_TRACE=$PWD/target/cc-trace \
+  cargo nextest run -p slopty-net --release --test echo_beside_flood --run-ignored only --no-capture
+```
+
+### Why the window grows (noq-proto 1.3.0, `src/congestion/bbr3/mod.rs`)
+
+The window is `2 × max_bw × min_rtt + extra_acked` (`update_max_inflight`, line 1350). In the
+trace `extra_acked` is the whole window less a kilobyte, and it climbs by about 380 kB every
+250 ms, which is the video's own 1.5 MB/s. Every frame leaves the connection idle, and each
+restart from idle moves `extra_acked_interval_start` to now (`handle_restart_from_idle`, line
+1266) without clearing `extra_acked_delivered`. `update_ack_aggregation` (line 819) clears that
+count only once it falls under `bw × interval`, which a fresh interval never allows, so every
+byte delivered counts as aggregation. `min(extra, cwnd)` (line 839) and `cwnd + newly_acked` in
+`set_cwnd` (line 1331) let each feed the other. Linux clears the count on the same event
+(`tcp_bbr.c`, `CA_EVENT_TX_START` resets `ack_epoch_acked`) and caps the allowance at 100 ms of
+bandwidth. noq does neither.
+
+Two more things keep the pacing rate above the link. `check_full_bw_reached` (line 849) skips
+app-limited samples, and `maybe_go_down` (line 1089) leaves `ProbeBW_UP` only on
+`full_bw_now` or loss, so video that never fills the link sits in `UP` at gain 1.25: 61 to 79 %
+of samples in the four traces. `max_bw` read 2.55 to 3.14 MB/s against the shaper's 2.5, since
+the relay releases packets on 1 ms timer ticks and the ACKs come back in clumps. The same guard
+can hold a flow in `Startup` for good (noq has a test for it, `startup_never_exits_when_app_limited_without_loss`,
+line 3085), and `Startup` paces at `2.77 × initial_cwnd / 1 ms` (line 611), 106 MB/s with our
+38 400 B initial window. In one traced run a quarter of the samples were still in `Startup`.
+
+Datagrams count as bytes in flight like anything else: a DATAGRAM frame is ack-eliciting
+(`frame.rs:246`), and `packet_builder.rs:284-318` charges the packet to the controller and the
+pacer. What the window never did was bind. Bytes in flight peaked at 131 kB, one keyframe, so
+the pacer alone decided when a burst left, and at 1.25 × an overestimate a keyframe reaches the
+bottleneck faster than it drains.
+
+`app_limited` is set when a `poll_transmit` finds nothing to send and nothing blocked it
+(`connection/mod.rs:1424`). For one burst per frame that is right. The trouble is what BBR3 does
+with a flow that is app-limited most of the time, above.
+
+The shaper behaves as a drop-tail router does. Each direction is one FIFO bounded in bytes
+(`slopty-shape/src/lib.rs:125` drops an arrival that would wait longer than the queue's size at
+the link's rate). Delay applies after serialisation, and nothing reorders. It has no AQM, where
+many current home routers run fq_codel, and it releases packets on tokio's 1 ms timer
+(`relay.rs:163`), which reads to BBR as ACK aggregation, much as Wi-Fi's frame aggregation does.
+The runs use 100 ms of buffer (250 kB), a home router's size, and 20 ms (50 kB) for a shallow one.
+
+### The comparison
+
+`bbr3` and `cubic` are held by the new bound (twice the measured bandwidth-delay product, below);
+`-unbounded` is noq's controller as it ships. Medians over 2 to 5 runs per cell, interleaved.
+"queue" is the shaper's standing queue in front of the worker's packets, sampled while the keys
+went; nothing on either host can reorder what waits there. Echo p99 takes the median of the runs'
+p99s, and the range across runs follows in brackets. The shaped link with no video already
+spread p99 over 9 to 38 ms under this load, so echo differences under about 10 ms are noise, and
+the queue columns are the load-independent reading.
+
+100 ms queue, no loss:
+
+| arm | controller | echo p50 / p95 / p99 [runs] ms | queue p99 / max ms | cwnd p50 | lost | keyframe p50 / p99 ms | Mbit/s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| bursts | bbr3-unbounded | 10.2 / 22.0 / 30.1 [26.4–55.7] | 16.7 / 26.5 | 3.7 MB | 0 | 56 / 170 | 12.5 |
+| bursts | **bbr3** | 9.4 / 19.4 / 23.2 [18.5–30.8] | **10.9 / 12.1** | 42 kB | 0 | 56 / 169 | 12.5 |
+| bursts | cubic-unbounded | 9.4 / 31.4 / 52.0 [51.3–52.8] | 42.5 / 51.7 | 1.1 MB | 0 | 56 / 62 | 12.9 |
+| bursts | cubic | 9.8 / 23.1 / 27.8 [18.4–70.0] | 15.2 / 16.2 | 48 kB | 0 | 56 / 60 | 12.7 |
+| laned | bbr3-unbounded | 9.7 / 22.5 / 28.5 [27.2–56.3] | 17.8 / 39.3 | 4.8 MB | 0 | 56 / 152 | 12.6 |
+| laned | **bbr3** | 9.8 / 19.5 / 23.7 [19.9–26.4] | **11.9 / 13.6** | 40 kB | 0 | 56 / 133 | 12.5 |
+| laned | cubic-unbounded | 9.6 / 30.5 / 46.6 [45.4–47.9] | 40.5 / 42.7 | 200 kB | 0 | 56 / 59 | 12.9 |
+| laned | cubic | 10.0 / 26.1 / 45.3 [28.4–61.9] | 15.4 / 18.2 | 45 kB | 0 | 56 / 68 | 12.6 |
+| metered | bbr3-unbounded | 9.5 / 16.1 / 28.1 [22.6–60.0] | 5.8 / 10.4 | 2.0 MB | 0 | 63 / 164 | 12.4 |
+| metered | **bbr3** | 9.3 / 14.7 / 23.6 [20.5–30.5] | 5.5 / 8.2 | 37 kB | 0 | 63 / 165 | 12.4 |
+| metered | cubic | 9.7 / 16.3 / 28.9 [19.2–77.6] | 7.2 / 9.9 | 50 kB | 0 | 64 / 78 | 12.5 |
+| halved | bbr3-unbounded | 26.7 / 40.9 / 112 [68.5–155] | 118 / 128 | 26 kB | 114 | 158 / 296 | 9.6 |
+| halved | **bbr3** | 24.1 / 29.6 / **37.4** [32.2–42.5] | **17.4 / 19.8** | 20 kB | **0** | 151 / 275 | 9.6 |
+| halved | cubic | 66.7 / 209 / 315 [215–415] | 199 / 200 | 138 kB | 312 | 240 / 345 | 9.9 |
+
+The same with 0.2 % random loss each way (two runs each; `cubic-unbounded` not run):
+
+| arm | controller | echo p50 / p95 / p99 [runs] ms | queue p99 / max ms | lost | keyframe p50 / p99 ms | Mbit/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| bursts | bbr3-unbounded | 9.1 / 19.4 / 27.1 [24.4–29.8] | 15.7 / 38.1 | 55 | 56 / 164 | 12.4 |
+| bursts | bbr3 | 8.7 / 19.1 / 28.5 [23.6–33.4] | 8.2 / 9.7 | 54 | 59 / 201 | 12.4 |
+| bursts | cubic | 9.2 / 20.3 / 46.7 [26.5–66.9] | 9.3 / 10.3 | 58 | 56 / 61 | 12.4 |
+| halved | bbr3-unbounded | 24.9 / 35.7 / 94.1 [53.2–135] | 127 / 132 | 114 | 159 / 288 | 9.6 |
+| halved | bbr3 | 23.7 / 31.0 / 38.6 [38.2–39.1] | 18.8 / 21.2 | 54 | 151 / 268 | 9.6 |
+| halved | cubic | 28.1 / 35.9 / 54.7 [50.1–59.2] | 20.7 / 21.6 | 64 | 156 / 168 | 9.8 |
+
+20 ms queue, no loss (two runs each):
+
+| arm | controller | echo p99 [runs] ms | queue p99 / max ms | lost | keyframe p50 / p99 ms | frames whole |
+| --- | --- | --- | --- | --- | --- | --- |
+| bursts | bbr3-unbounded | 42.0 [33.8–50.3] | 15.4 / 20.1 | 75 | 56 / 176 | 2031 / 2042 |
+| bursts | bbr3 | 30.1 [29.7–30.5] | 10.8 / 13.7 | 0 | 56 / 164 | 2042 / 2047 |
+| bursts | cubic-unbounded | 39.0 [38.7–39.4] | 16.4 / 20.4 | 952 | **none whole** | 1994 / 2063 |
+| bursts | cubic | 25.2 [20.8–29.6] | 10.8 / 12.6 | 0 | 56 / 69 | 2033 / 2038 |
+| laned | bbr3-unbounded | 37.0 [25.4–48.6] | 16.6 / 19.5 | 90 | 56 / 184 | 2023 / 2040 |
+| laned | bbr3 | 31.8 [25.8–37.8] | 12.2 / 14.9 | 0 | 56 / 193 | 2050 / 2054 |
+
+A sweep of the bound's size on the 100 ms queue (single runs, an earlier version that sized it
+from BBR3's pacing rate) found one round trip too tight: the laned echo's p50 rose to 16 ms on
+the shallow queue and the idle connection's smoothed round trip to 24 ms. Two matches BBR's own
+`cwnd_gain` and is what shipped.
+
+What the numbers say:
+
+* **The bound is the fix for the queue, and it costs no video.** On a steady link it cuts the
+  bottleneck queue's p99 by a third and its maximum by half or more in the bursts and laned
+  arms, with the same 12.5 Mbit/s and the same frames delivered whole. Metered video already
+  stays under the link rate and barely changes. When the link halves, noq's BBR3 kept pacing at
+  the old rate with a window nothing bound, and in two of four runs it filled the whole buffer
+  (195 ms, up to 228 packets dropped at the queue). Bounded, the queue stayed under 22 ms in all
+  four with no overflow, and echo p99 was 32 to 43 ms against 53 to 155. On the shallow queue the
+  bound took BBR3's overflow losses from 75 to 0.
+* **No controller makes the bursts arm's echo fast.** A keyframe is 52 ms of this link. Paced
+  at or below the link rate it waits in QUIC, where noq writes datagrams before stream data
+  (`connection/mod.rs:6504` before `:6562`); paced above, it waits in the bottleneck. Either way
+  an echo written behind it waits for it. The bound only stops the controller adding queue of
+  its own on top. The halved arm shows the sender's half: with the queue held at the bottleneck,
+  the capture guard's 50 kB held in QUIC put the echo's p50 at 24 ms.
+* **Cubic is not the answer, bounded or not.** Unbounded, it has no rate to pace by, so a burst
+  leaves at once: on the shallow queue 950 packets overflowed and not one keyframe arrived
+  whole. Bounded, it fills the buffer when the link halves (199 ms, 312 dropped), because
+  nothing in Cubic drains a queue, the round-trip minimum ages into the queued round trip after
+  ten seconds, and the bound follows it up. Its one win is keyframe p99, next.
+* **BBR3's keyframe p99 of 130 to 200 ms is `ProbeRTT`, bound or not.** Every 5 s (line 82)
+  BBR3 drops to `max(0.5 × BDP, 4 packets)` for 200 ms, and a keyframe that lands then drains
+  through 7.5 kB a round trip. Cubic's keyframe p99 is 56 to 78 ms. The bound does not touch it.
+
+The final run with nothing set, load 10 to 21 (`target/cc-logs/final.log`): bursts echo p50 9.3
+/ p99 24.3 ms, queue p99 7.8 ms, cwnd 36 kB, 787 of 789 frames whole at 12.4 Mbit/s; halved
+echo p99 39.4 ms, queue p99 22.8 ms, no overflow, 9.6 Mbit/s.

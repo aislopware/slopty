@@ -38,6 +38,10 @@ use tokio::sync::broadcast;
 /// again; both cost more than the few hundred kilobytes a deeper queue does.
 const EVENT_BUFFER: usize = 1024;
 
+/// How long a daemon going down waits for its streams' input threads to let go of what their
+/// clients hold down on this desktop.
+const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Command line.
 #[derive(Parser, Debug)]
 #[command(name = "slopty-worker", version, about)]
@@ -376,6 +380,10 @@ async fn main() -> Result<()> {
         }
     }
 
+    // launchd stops a job with SIGTERM (`launchctl kickstart -k`, `bootout`, logout); a
+    // terminal with SIGINT. Both go down the same way.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("listen for SIGTERM")?;
     loop {
         tokio::select! {
             client = daemon.listener.accept() => {
@@ -383,7 +391,11 @@ async fn main() -> Result<()> {
                 tokio::spawn(conn::serve(daemon.clone(), client));
             }
             _signal = tokio::signal::ctrl_c() => {
-                tracing::info!("shutting down");
+                tracing::info!("SIGINT: shutting down");
+                break;
+            }
+            _signal = terminate.recv() => {
+                tracing::info!("SIGTERM: shutting down");
                 break;
             }
         }
@@ -397,6 +409,12 @@ async fn main() -> Result<()> {
         daemon.listener.endpoint().wait_idle(),
     )
     .await;
+    // Last, so nothing a client sent before the close is posted after it.
+    let released =
+        tokio::task::spawn_blocking(|| slopty_input::let_go_everywhere(RELEASE_WAIT)).await;
+    if !matches!(released, Ok(true)) {
+        tracing::warn!("an input thread did not let go in time; a key or button may stay down");
+    }
     Ok(())
 }
 

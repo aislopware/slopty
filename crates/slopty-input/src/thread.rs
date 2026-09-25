@@ -8,8 +8,9 @@
 //! with bounds already read and waits on nothing (MEASUREMENTS.md, "input injection off the
 //! runtime").
 
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Instant;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use slopty_capture::Rect;
 use slopty_proto::screen::{CaptureTarget, ScreenInput};
@@ -26,7 +27,7 @@ pub type CgEvents = InputThread;
 /// Dropping it lets go of everything held down on the worker and ends the thread.
 #[derive(Debug)]
 pub struct InputThread {
-    jobs: Sender<Job>,
+    jobs: Arc<Sender<Job>>,
     pointer: PointerWatch,
 }
 
@@ -36,7 +37,71 @@ enum Job {
     Focus,
     Scale(f64),
     Bounds(Option<Rect>, Instant),
-    Release,
+    /// Let go of everything held, then answer on the sender, if there is one.
+    Release(Option<Sender<()>>),
+}
+
+/// The process's input threads, for [`let_go_everywhere`].
+static CENSUS: Census = Census { live: parking_lot::const_mutex(Vec::new()) };
+
+/// Let go of every key and button held down through any stream's input in this process, and
+/// wait up to `within` for the releases to be posted. `false` when a thread did not answer in
+/// time.
+///
+/// For a daemon about to exit. Its streams' tasks are dropped with the runtime rather than
+/// awaited, so each input thread would let go only as its handle drops, and a thread still
+/// posting when the process ends posts nothing: the worker's desktop would be left with a key
+/// or button down. Blocks; call it off the async runtime.
+pub fn let_go_everywhere(within: Duration) -> bool {
+    CENSUS.let_go(within)
+}
+
+/// Input threads, counted as they start.
+#[derive(Debug, Default)]
+struct Census {
+    live: parking_lot::Mutex<Vec<Counted>>,
+}
+
+/// One thread in the census: its queue while a handle holds it, and the thread's end.
+#[derive(Debug)]
+struct Counted {
+    jobs: Weak<Sender<Job>>,
+    /// Never sent on: it disconnects once the thread has let go and ended.
+    ended: Receiver<()>,
+}
+
+impl Census {
+    fn count(&self, counted: Counted) {
+        let mut live = self.live.lock();
+        live.retain(|c| !matches!(c.ended.try_recv(), Err(TryRecvError::Disconnected)));
+        live.push(counted);
+    }
+
+    /// See [`let_go_everywhere`]. A thread whose handle is still held is asked to let go and
+    /// answer; one whose handle is gone lets go on its way out, and its end is waited for.
+    fn let_go(&self, within: Duration) -> bool {
+        let deadline = Instant::now().checked_add(within);
+        let counted = std::mem::take(&mut *self.live.lock());
+        let waits: Vec<Receiver<()>> = counted
+            .into_iter()
+            .map(|c| {
+                let Some(jobs) = c.jobs.upgrade() else { return c.ended };
+                let (answer, answered) = mpsc::channel();
+                // A thread that is already gone drops the answer, which reads as done: it let
+                // go as it ended.
+                let _gone = jobs.send(Job::Release(Some(answer)));
+                answered
+            })
+            .collect();
+        let mut all = true;
+        for wait in waits {
+            let left = deadline.map_or(within, |d| d.saturating_duration_since(Instant::now()));
+            if matches!(wait.recv_timeout(left), Err(RecvTimeoutError::Timeout)) {
+                all = false;
+            }
+        }
+        all
+    }
 }
 
 impl InputThread {
@@ -47,15 +112,27 @@ impl InputThread {
     where
         B: Backend + Send + 'static,
     {
+        Self::spawn_in(&CENSUS, target, scale, backend)
+    }
+
+    fn spawn_in<B>(census: &Census, target: CaptureTarget, scale: f64, backend: B) -> Self
+    where
+        B: Backend + Send + 'static,
+    {
         let (jobs, queue) = mpsc::channel();
+        let (end, ended) = mpsc::channel();
         let pointer = PointerWatch::default();
         let watch = pointer.clone();
-        let started = std::thread::Builder::new()
-            .name("slopty-input".to_owned())
-            .spawn(move || serve(target, scale, backend, watch, &queue));
+        let started =
+            std::thread::Builder::new().name("slopty-input".to_owned()).spawn(move || {
+                let _end = end;
+                serve(target, scale, backend, watch, &queue);
+            });
         if let Err(e) = started {
             tracing::warn!(?target, error = %e, "input thread");
         }
+        let jobs = Arc::new(jobs);
+        census.count(Counted { jobs: Arc::downgrade(&jobs), ended });
         Self { jobs, pointer }
     }
 
@@ -86,7 +163,7 @@ impl InputSink for InputThread {
     }
 
     fn release_all(&mut self) {
-        let _stopped = self.send(Job::Release);
+        let _stopped = self.send(Job::Release(None));
     }
 
     fn pointer(&self) -> PointerWatch {
@@ -117,8 +194,11 @@ fn serve<B: Backend>(
                 injector.set_bounds(bounds, at);
                 Ok(())
             }
-            Job::Release => {
+            Job::Release(answer) => {
                 injector.release_all();
+                if let Some(answer) = answer {
+                    let _gone = answer.send(());
+                }
                 Ok(())
             }
         };
@@ -272,6 +352,74 @@ mod tests {
         assert_eq!(downs, [true, true, false, false], "{got:?}");
         drop(sink);
         assert_eq!(drain(&posts), [], "nothing held is left for the drop");
+    }
+
+    /// A daemon going down lets go of what every stream holds before it exits: a stream still
+    /// open has its releases posted, one whose handle is already dropped is waited for while
+    /// its thread lets go on the way out, and the wait returns only once both have posted.
+    #[test]
+    fn the_census_lets_go_of_every_stream_before_the_process_ends() {
+        let census = Census::default();
+        let bounds = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
+        let (tap, open_posts) = Tap::new(Recorder::window(7, bounds));
+        let mut open = InputThread::spawn_in(&census, CaptureTarget::Window(WindowId(3)), 1.0, tap);
+        open.inject(&key(KeyCode::MetaLeft, KeyAction::Press)).unwrap();
+        let (tap, gone_posts) = Tap::new(Recorder::window(8, bounds));
+        let mut gone = InputThread::spawn_in(&census, CaptureTarget::Window(WindowId(4)), 1.0, tap);
+        gone.inject(&key(KeyCode::C, KeyAction::Press)).unwrap();
+        drop(gone);
+
+        assert!(census.let_go(Duration::from_secs(5)), "every thread answered in time");
+        let downs = |posts: &Receiver<Post>| -> Vec<bool> {
+            posts.try_iter().map(|p| matches!(p.event, Event::Key { down, .. } if down)).collect()
+        };
+        assert_eq!(downs(&open_posts), [true, false], "posted before let_go returned");
+        assert_eq!(downs(&gone_posts), [true, false], "posted before let_go returned");
+        drop(open);
+        assert_eq!(drain(&open_posts), [], "nothing held is left for the drop");
+    }
+
+    /// A thread stuck in the window server does not hold the daemon's exit: the wait gives up
+    /// at its bound and says so.
+    #[test]
+    fn the_census_wait_is_bounded() {
+        /// Posts only once the gate is dropped.
+        #[derive(Debug)]
+        struct Stuck(Recorder, Receiver<()>);
+        impl Backend for Stuck {
+            fn owner_pid(&self, target: CaptureTarget) -> Option<i32> {
+                self.0.owner_pid(target)
+            }
+
+            fn bounds(&mut self, target: CaptureTarget) -> Option<Rect> {
+                self.0.bounds(target)
+            }
+
+            fn is_active(&mut self, pid: i32) -> bool {
+                self.0.is_active(pid)
+            }
+
+            fn activate(&mut self, pid: i32) -> Result<(), InputError> {
+                self.0.activate(pid)
+            }
+
+            fn post(&mut self, _post: Post) -> Result<(), InputError> {
+                let _opened = self.1.recv();
+                Ok(())
+            }
+        }
+        let census = Census::default();
+        let (gate, stuck) = mpsc::channel();
+        let bounds = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
+        let backend = Stuck(Recorder::window(7, bounds), stuck);
+        let mut sink =
+            InputThread::spawn_in(&census, CaptureTarget::Window(WindowId(3)), 1.0, backend);
+        sink.inject(&key(KeyCode::C, KeyAction::Press)).unwrap();
+        let started = Instant::now();
+        assert!(!census.let_go(Duration::from_millis(50)), "the stuck thread did not answer");
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(50) && took < Duration::from_secs(2), "{took:?}");
+        drop(gate);
     }
 
     /// The bounds the stream's probe hands over are the only ones used: moves at 200 Hz for

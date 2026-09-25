@@ -103,6 +103,18 @@ impl Relay {
         Carried { up: self.up.lock().await.tally(), down: self.down.lock().await.tally() }
     }
 
+    /// Carry `rate` bytes per second both ways from now on.
+    pub async fn set_rate(&self, rate: u64) {
+        self.up.lock().await.set_rate(rate);
+        self.down.lock().await.set_rate(rate);
+    }
+
+    /// How long a packet the worker sends now waits for the bottleneck before its own
+    /// transmission.
+    pub async fn queue_delay_down(&self) -> Duration {
+        self.down.lock().await.queue_delay(self.started.elapsed())
+    }
+
     /// Carry packets until the socket fails. Never returns otherwise.
     ///
     /// # Errors

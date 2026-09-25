@@ -18,9 +18,10 @@ use std::sync::Arc;
 use gpui::{
     App, BorderStyle, BorrowAppContext as _, Bounds, Corners, DispatchPhase, Edges, Element,
     ElementId, ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, GlyphId,
-    Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseMoveEvent, PathBuilder,
-    Pixels, Point, RenderImage, ShapedLine, SharedString, Size, Style, TextAlign, TextRun,
-    TransformationMatrix, UnderlineStyle, Window, fill, point, px, quad, relative, size,
+    Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseExitEvent,
+    MouseMoveEvent, PathBuilder, Pixels, Point, RenderImage, ShapedLine, SharedString, Size, Style,
+    TextAlign, TextRun, TransformationMatrix, UnderlineStyle, Window, fill, point, px, quad,
+    relative, size,
 };
 use rustc_hash::{FxHashMap, FxHasher};
 use slopty_grid::{Cell, CellWidth, CursorShape, Style as CellStyle, StyleFlags, Underline};
@@ -1038,7 +1039,7 @@ impl Element for TerminalElement {
 
     fn prepaint(
         &mut self,
-        _global_id: Option<&GlobalElementId>,
+        id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _request: &mut (),
@@ -1122,6 +1123,19 @@ impl Element for TerminalElement {
             },
         };
         self.view.update(cx, |view, cx| view.fitted(fitted, metrics, cx));
+        // The pointer can leave the right edge without a move this element hears: to another
+        // app (the window going inactive), or by the tile moving under a still pointer. Here the
+        // bar is only ever let go; a real move is what brings it up.
+        let active = window.is_window_active();
+        let deactivated = id.is_some_and(|id| {
+            window.with_element_state(id, |was: Option<bool>, _| {
+                (was.unwrap_or(active) && !active, active)
+            })
+        });
+        let pointer = window.mouse_position();
+        if deactivated || !(bounds.contains(&pointer) && near_scrollbar(&metrics, pointer)) {
+            self.view.update(cx, |view, cx| view.pointer_near_scrollbar(false, cx));
+        }
 
         // Shaping reads the view's rows in place (no copy of the grid per frame) while the
         // cache is out of the app: put it back before anything else touches `cx`.
@@ -1533,6 +1547,13 @@ impl Element for TerminalElement {
             }
             let near = bounds.contains(&event.position) && near_scrollbar(&m, event.position);
             view.update(cx, |view, cx| view.pointer_near_scrollbar(near, cx));
+        });
+        // Out of the window the pointer is not near anything, and no move says so.
+        let view = self.view.clone();
+        window.on_mouse_event(move |_: &MouseExitEvent, phase, _window, cx| {
+            if phase == DispatchPhase::Bubble {
+                view.update(cx, |view, cx| view.pointer_near_scrollbar(false, cx));
+            }
         });
         window.paint_quad(fill(bounds, prepared.background));
         for row in &prepared.rows {
@@ -2522,5 +2543,87 @@ mod tests {
         assert_eq!(CursorText::over(None, 2, 4, red), red, "no block cursor");
         let hidden = Hsla { a: 0.0, ..red };
         assert_eq!(CursorText::over(under, 2, 4, hidden), hidden, "invisible text stays so");
+    }
+
+    /// The pointer can leave the grid's right edge without a move over the grid: out of the
+    /// window, to another app (⌘-tab), or by the tile moving away under a still pointer. Each
+    /// lets the scrollbar go (it lingers and fades as after any leave) instead of holding it up.
+    #[gpui::test]
+    fn the_scrollbar_lets_go_when_the_pointer_leaves_without_a_move(cx: &mut gpui::TestAppContext) {
+        use slopty_grid::{LineIndex, RowUpdate, Style, TermModes};
+        use slopty_proto::terminal::{Frame, TermEvent};
+
+        use crate::terminal::scrollbar::{FADE, LINGER};
+
+        cx.update(gpui_kit::init);
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let grid = TermSize { cols: 10, rows: 3, ..TermSize::default() };
+            let view =
+                TerminalView::new(slopty_core::SessionId::new(), grid, tx, Theme::default(), cx);
+            window.focus(&view.focus_handle(cx), cx);
+            view
+        });
+        cx.simulate_resize(size(px(400.0), px(300.0)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let history = TermEvent::Frame(Frame {
+            seq: 1,
+            full: true,
+            epoch: 0,
+            cols: 10,
+            rows: 3,
+            cursor: slopty_grid::Cursor::default(),
+            modes: TermModes::empty(),
+            oldest_line: LineIndex(0),
+            first_visible_line: LineIndex(30),
+            total_lines: 33,
+            input_ack: 0,
+            images: Vec::new(),
+            updates: ["one", "two", "three"]
+                .iter()
+                .zip(0_u16..)
+                .map(|(text, row)| RowUpdate {
+                    row,
+                    line: Line::from_text(text, 10, Style::DEFAULT),
+                })
+                .collect(),
+        });
+        view.update(cx, |view, cx| view.apply(history, cx));
+        cx.run_until_parked();
+        let shown = |cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |v, cx| v.scrollbar_opacity(cx.background_executor().now()))
+        };
+        let gone = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(LINGER.saturating_add(FADE));
+            cx.run_until_parked();
+            shown(cx) <= 0.0
+        };
+        let m = view.read_with(cx, |v, _| v.metrics().expect("laid out"));
+        let edge = point(
+            m.origin.x + m.cell_width * (f32::from(m.cols) - 0.5),
+            m.origin.y + m.line_height * 1.5,
+        );
+        let mods = gpui::Modifiers::default();
+        let to_edge = |cx: &mut gpui::VisualTestContext| {
+            cx.simulate_mouse_move(edge, None, mods);
+            cx.run_until_parked();
+            assert!(shown(cx) >= 1.0, "the pointer at the right edge brings it up");
+        };
+
+        to_edge(cx);
+        cx.simulate_event(MouseExitEvent { position: edge, pressed_button: None, modifiers: mods });
+        assert!(gone(cx), "out of the window");
+
+        to_edge(cx);
+        cx.deactivate_window();
+        assert!(gone(cx), "another app came to the front");
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        to_edge(cx);
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        cx.run_until_parked();
+        assert!(gone(cx), "the edge moved away from a still pointer");
     }
 }

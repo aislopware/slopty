@@ -190,6 +190,13 @@ pub struct ScreenView {
     /// Keys whose press went to the worker, so a release for a locally-handled chord (its press
     /// was eaten by a canvas binding) is not forwarded as a stray key-up.
     held: Vec<KeyCode>,
+    /// Buttons whose press went to the worker. gpui reports a release only over the element that
+    /// saw the press, so one let go elsewhere, or never seen at all (focus gone mid-drag), is
+    /// released from here: a button left down turns every later hover into a drag.
+    buttons: Vec<ProtoButton>,
+    /// Where the pointer was last sent, in stream pixels: where a button is let go when the
+    /// real release has no position on the picture.
+    pointer_at: (f32, f32),
     /// Asked before a paste chord goes, so the worker pastes what this client copied.
     paste_hook: Option<PasteHook>,
     /// Pastes of files still on their way to the worker, and the input held behind them.
@@ -498,6 +505,8 @@ impl ScreenView {
             bounds: Bounds::default(),
             frames: 0,
             held: Vec::new(),
+            buttons: Vec::new(),
+            pointer_at: (0.0, 0.0),
             modifiers: Modifiers::default(),
             let_go: None,
             paste_hook: None,
@@ -783,8 +792,7 @@ impl ScreenView {
     fn to_stream(&self, position: Point<Pixels>) -> (f32, f32) {
         let width = f32::from(self.bounds.size.width).max(1.0);
         let height = f32::from(self.bounds.size.height).max(1.0);
-        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
-        let (stream_w, stream_h) = (self.mapped.0 as f32, self.mapped.1 as f32);
+        let (stream_w, stream_h) = self.mapped_f32();
         let x = (f32::from(position.x) - f32::from(self.bounds.origin.x)) / width * stream_w;
         let y = (f32::from(position.y) - f32::from(self.bounds.origin.y)) / height * stream_h;
         tracing::trace!(?position, bounds = ?self.bounds, mapped = ?self.mapped, x, y, "to_stream");
@@ -813,6 +821,7 @@ impl ScreenView {
             return;
         }
         let (x, y) = self.to_stream(ev.position);
+        self.pointer_at = (x, y);
         self.input(ScreenInput::Move { x, y });
     }
 
@@ -824,6 +833,10 @@ impl ScreenView {
         cx.emit(ScreenViewEvent::Pressed);
         let button = proto_button(ev.button);
         let (x, y) = self.to_stream(ev.position);
+        self.pointer_at = (x, y);
+        if !self.buttons.contains(&button) {
+            self.buttons.push(button);
+        }
         self.input(ScreenInput::Button {
             button,
             down: true,
@@ -835,9 +848,16 @@ impl ScreenView {
         cx.stop_propagation();
     }
 
+    /// A button came up, over the picture or anywhere else in the window: released on the
+    /// worker if its press went there, at the nearest point of the picture.
     fn mouse_up(&mut self, ev: &MouseUpEvent, _w: &mut Window, _cx: &mut Context<Self>) {
         let button = proto_button(ev.button);
+        let Some(at) = self.buttons.iter().position(|&b| b == button) else { return };
+        self.buttons.swap_remove(at);
         let (x, y) = self.to_stream(ev.position);
+        let (w, h) = self.mapped_f32();
+        let (x, y) = (x.clamp(0.0, w), y.clamp(0.0, h));
+        self.pointer_at = (x, y);
         self.input(ScreenInput::Button {
             button,
             down: false,
@@ -846,6 +866,13 @@ impl ScreenView {
             clicks: u8::try_from(ev.click_count).unwrap_or(u8::MAX),
             mods: keys::mods(ev.modifiers),
         });
+    }
+
+    /// The size the worker maps input with, as floats.
+    const fn mapped_f32(&self) -> (f32, f32) {
+        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
+        let mapped = (self.mapped.0 as f32, self.mapped.1 as f32);
+        mapped
     }
 
     fn scroll_wheel(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
@@ -982,11 +1009,22 @@ impl ScreenView {
         });
     }
 
-    /// Focus left the view or the window went inactive: release on the worker every key and
-    /// modifier whose press went there, since the release never will (⌘-tab away with ⌘
-    /// held, a click on another card while a key is down) — a key stuck down on the worker is
-    /// the one thing a remote desktop must never leave behind.
+    /// Focus left the view or the window went inactive: release on the worker every button,
+    /// key and modifier whose press went there, since the release never will (⌘-tab away with
+    /// ⌘ held, a click on another card while a key is down) — input stuck down on the worker
+    /// is the one thing a remote desktop must never leave behind.
     fn let_go(&mut self, cx: &mut Context<Self>) {
+        let (x, y) = self.pointer_at;
+        for button in std::mem::take(&mut self.buttons) {
+            self.input(ScreenInput::Button {
+                button,
+                down: false,
+                x,
+                y,
+                clicks: 1,
+                mods: Mods::empty(),
+            });
+        }
         for code in std::mem::take(&mut self.held) {
             self.input(ScreenInput::Key {
                 code,
@@ -1402,6 +1440,9 @@ impl Render for ScreenView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .child(picture)
             .child(record_bounds)
@@ -2260,6 +2301,54 @@ mod tests {
         );
         cx.run_until_parked();
         assert!(inputs(&mut rx).is_empty());
+    }
+
+    /// A button pressed on the picture is let go on the worker however the press ends: released
+    /// off the picture (at the picture's edge, where the worker's pointer stopped), or held
+    /// while focus leaves. A release with no press behind it sends nothing.
+    #[gpui::test]
+    fn a_held_button_is_released_off_the_picture_and_on_focus_loss(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        drop(sent(&mut rx));
+        let bounds = view.read_with(cx, |v, _| v.bounds);
+        let middle = bounds.center();
+        let released = |got: &[ScreenInput]| -> Vec<(ProtoButton, f32, f32)> {
+            got.iter()
+                .filter_map(|input| match input {
+                    ScreenInput::Button { button, down: false, x, y, .. } => {
+                        Some((*button, *x, *y))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        cx.simulate_mouse_down(middle, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(
+            point(bounds.right() + px(40.0), bounds.bottom() + px(40.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let got = inputs(&mut rx);
+        assert_eq!(
+            released(&got),
+            [(ProtoButton::Left, 800.0, 600.0)],
+            "released past the corner: at the corner, {got:?}"
+        );
+
+        cx.simulate_mouse_up(middle, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(inputs(&mut rx).is_empty(), "nothing held: nothing to release");
+
+        cx.simulate_mouse_down(middle, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        drop(inputs(&mut rx));
+        view.update(cx, ScreenView::let_go);
+        let got = inputs(&mut rx);
+        assert_eq!(released(&got), [(ProtoButton::Right, 400.0, 300.0)], "{got:?}");
+        view.update(cx, ScreenView::let_go);
+        assert!(inputs(&mut rx).is_empty(), "let go once");
     }
 
     /// Everything the view sends, in order, letting its outbox refill the queue after each

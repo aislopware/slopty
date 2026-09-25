@@ -25,6 +25,7 @@
 pub mod addr;
 pub mod admission;
 pub mod client;
+pub mod congestion;
 pub mod crypto;
 pub mod endpoint;
 pub mod framed;
