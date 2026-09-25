@@ -1204,8 +1204,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the shaped loopback (8 ms round trip, 13 % loss each way) and from 13.5 to 0.5 % idle and
   11.8 to 0.7 % loaded on the mesh. Clean loopback is unchanged: p50 0.90 ms before, 0.80 after.
 
-  *Open.* The mesh after-run stopped at four of six rounds when the MacBook left the network;
-  its rerun command is in MEASUREMENTS.md. With the pacer patch the bulk pull beside the echo
+  *Open.* The mesh after-run stopped at four of six rounds when the MacBook left the network.
+  It is not rerun: measurements run on this Mac alone, and the shaped loopback, which models
+  the tailnet path measured here, is the number of record. With the pacer patch the bulk pull beside the echo
   ran at 180 instead of 80 Mbit/s, which is not explained yet; the patch changes nothing above
   about 250 kB/s, so the bulk connection must spend time below that. A connect over the lossy
   direction sometimes misses the 5 s handshake timeout (4 of 24 with roles reversed). BBR3's

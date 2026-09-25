@@ -13,7 +13,14 @@ workspace = true
 [features]
 default = [ "harness" ]
 # The driver, the harness and the snapshot comparison (everything but the protocol types).
-harness = [ "dep:tokio", "dep:image", "dep:anyhow", "dep:tempfile", "dep:slopty-pty" ]
+harness = [
+    "dep:tokio",
+    "dep:image",
+    "dep:anyhow",
+    "dep:tempfile",
+    "dep:slopty-pty",
+    "dep:slopty-shape",
+]
 
 [dependencies]
 data-encoding.workspace = true
@@ -22,6 +29,8 @@ serde_json.workspace = true
 anyhow = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
 slopty-pty = { workspace = true, optional = true }
+# The link the second worker is reached over (`harness::SecondWorker`).
+slopty-shape = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = [ "process" ] }
 
@@ -36,7 +45,6 @@ slopty-platform.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
-regex.workspace = true
 slopty-agent.workspace = true
 slopty-media.workspace = true
 slopty-pty.workspace = true

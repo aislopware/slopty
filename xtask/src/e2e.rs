@@ -47,21 +47,20 @@ pub enum Case {
     /// The same with the second client in the simulator (`--sim iphone|ipad`): the Mac and
     /// the phone on one worker.
     PairIos,
-    /// One client, two workers on two machines: ptyd + worker + the app here, ptyd + worker on a
-    /// second machine over ssh (`SLOPTY_WORKER2=<ssh name>`, `SLOPTY_WORKER2_ADDR` when the app
-    /// must add it by another address), under a temp root there with a private HOME. Proves
-    /// cross-worker attention against a real remote daemon: the app adds two workers,
-    /// a shell on the second round-trips over the mesh, a permission hook played to it through
-    /// `slopty hook` badges the cross-worker pill and routes a banner back to it, and killing it
-    /// mid-stream turns its row amber then green on restart. No permissions needed.
+    /// One client, two workers: ptyd + worker + the app, and a second ptyd + worker under a root
+    /// of its own with a private HOME, reached through a relay shaped like the tailnet path to
+    /// another Mac. Proves cross-worker attention against a real second daemon: the app adds two
+    /// workers, a shell on the second round-trips over the shaped link, a permission hook played
+    /// to it through `slopty hook` badges the cross-worker pill and routes a banner back to it, and
+    /// killing it mid-stream shows it down while the first keeps streaming, then connected again
+    /// on restart. No permissions needed.
     Workers,
     /// The server with a real worker: `slopty-server` and ptyd + worker registered with it, on
     /// ports of their own, driven through the `slopty` CLI with `--json` and MCP over HTTP:
     /// the directory, a shell typed to and read, files both ways, ports, close and exit, the
     /// lease lost on a killed worker and taken back. No permissions needed.
     Server,
-    /// All of the above (not `ios`, which needs a simulator, nor `workers`, which needs a second
-    /// machine).
+    /// All of the above but the simulator cases (`smooth-ios`, `pair-ios`).
     All,
     /// ptyd + worker on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
     /// through its test socket: add the worker, open a shell, type, read the rows back, render
@@ -204,7 +203,7 @@ const PAIR_IOS: &[Suite] = &[Suite {
 }];
 
 const WORKERS: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_WORKER2_E2E"),
+    gate: Some("SLOPTY_WORKERS_E2E"),
     package: "slopty-e2e",
     test: "workers",
     filter: "",
@@ -247,6 +246,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             .chain(INPUT)
             .chain(SMOOTH)
             .chain(PAIR)
+            .chain(WORKERS)
             .collect(),
         Case::Ios => IOS.iter().collect(),
     };

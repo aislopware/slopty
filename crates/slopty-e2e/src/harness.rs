@@ -267,7 +267,7 @@ async fn daemons(
     env: &[(&str, &str)],
 ) -> Result<(Vec<Child>, String)> {
     let ptyd = spawn_ptyd(root, log, env).await?;
-    let (worker, address) = spawn_worker(root, worker_name, log, env, None).await?;
+    let (worker, address) = spawn_worker(root, worker_name, log, env, None, 0).await?;
     Ok((vec![ptyd, worker], address))
 }
 
@@ -329,14 +329,15 @@ async fn spawn_ptyd(root: &Path, log: &str, env: &[(&str, &str)]) -> Result<Chil
 }
 
 /// The worker named `worker_name` on the ptyd of [`spawn_ptyd`], with its data in `root/worker`, on
-/// a port of its choosing, registered with `server` when one is given; and the loopback address
-/// clients reach it on.
+/// `port` (0: one of its choosing), registered with `server` when one is given; and the loopback
+/// address clients reach it on.
 async fn spawn_worker(
     root: &Path,
     worker_name: &str,
     log: &str,
     env: &[(&str, &str)],
     server: Option<&str>,
+    port: u16,
 ) -> Result<(Child, String)> {
     let mut command = Command::new(bin("slopty-worker")?);
     command
@@ -348,7 +349,7 @@ async fn spawn_worker(
         .arg(root.join("worker"))
         .arg("--print-addr")
         .arg("--port")
-        .arg("0");
+        .arg(port.to_string());
     if let Some(server) = server {
         command.arg("--server").arg(server);
     }
@@ -978,452 +979,6 @@ impl Drop for Stack {
     }
 }
 
-/// A second worker on another machine, reached over ssh.
-///
-/// `slopty-ptyd` and `slopty-worker` run under one temporary root there, so the app can add
-/// two workers at once and the cross-worker attention path can be driven against a real remote
-/// daemon.
-///
-/// Everything it creates on the remote lives under `Self::root` and is torn down on
-/// [`Self::shutdown`] (and best-effort on drop). The remote's own `~/.claude` is never touched:
-/// the daemons and the hook relay run with a private `HOME` under the root, and
-/// `slopty hook install` is never run — so no user settings file is written.
-#[derive(Debug)]
-pub struct RemoteWorker {
-    /// ssh destination (`$SLOPTY_WORKER2`).
-    ssh: String,
-    /// The remote temp root; everything the worker creates lives under it.
-    root: String,
-    /// The remote binary directory (`root/bin`).
-    bin: String,
-    /// The remote worker control socket.
-    ctl_sock: String,
-    /// The remote private `HOME` (under [`Self::root`]).
-    home: String,
-    /// The remote transcript path, rewritten before each played hook.
-    transcript: String,
-    /// The fixed UDP port the worker binds, so a restart is reachable at the same address.
-    port: u16,
-    /// ptyd's and the worker's pids on the remote, killed on teardown; the worker's is replaced by
-    /// [`Self::restart_worker`].
-    ptyd_pid: u32,
-    worker_pid: u32,
-    /// The display name the worker was given (what the app's switcher shows for this worker).
-    name: String,
-}
-
-/// Run `script` on `ssh` (through the login shell) and return its trimmed stdout.
-async fn ssh_out(ssh: &str, script: &str) -> Result<String> {
-    // `kill_on_drop`: when the timeout wins, the child inside the dropped `output()` future is
-    // killed rather than left running under nobody.
-    let output = tokio::time::timeout(
-        STARTUP,
-        Command::new("ssh")
-            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
-            .arg(ssh)
-            .arg(script)
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .with_context(|| format!("ssh {ssh} timed out running: {script}"))?
-    .with_context(|| format!("spawn ssh {ssh}"))?;
-    ensure!(
-        output.status.success(),
-        "ssh {ssh} failed ({}): {script}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-/// Feed `input` to `script`'s stdin on `ssh`; return once it exits.
-async fn ssh_pipe(ssh: &str, script: &str, input: &[u8]) -> Result<()> {
-    let mut child = Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
-        .arg(ssh)
-        .arg(script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("spawn ssh {ssh}"))?;
-    let mut stdin = child.stdin.take().context("ssh stdin")?;
-    stdin.write_all(input).await?;
-    stdin.shutdown().await?;
-    drop(stdin);
-    let output = tokio::time::timeout(STARTUP, child.wait_with_output())
-        .await
-        .with_context(|| format!("ssh {ssh} timed out: {script}"))??;
-    ensure!(
-        output.status.success(),
-        "ssh {ssh} failed ({}): {script}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(())
-}
-
-/// gzip a local binary and gunzip it into place on the remote, `chmod +x`.
-async fn copy_bin(ssh: &str, local: &Path, remote: &str) -> Result<()> {
-    let mut gz = Command::new("gzip")
-        .arg("-1")
-        .arg("-c")
-        .arg(local)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true)
-        .spawn()
-        .context("spawn gzip")?;
-    let mut gz_out = gz.stdout.take().context("gzip stdout")?;
-    let script =
-        format!("gunzip -c > {remote}.tmp && mv {remote}.tmp {remote} && chmod +x {remote}");
-    let mut ssh = Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
-        .arg(ssh)
-        .arg(&script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("spawn ssh (copy)")?;
-    let mut ssh_in = ssh.stdin.take().context("ssh stdin")?;
-    tokio::io::copy(&mut gz_out, &mut ssh_in).await.context("stream binary over ssh")?;
-    ssh_in.shutdown().await?;
-    drop(ssh_in);
-    let gz_status = gz.wait().await?;
-    ensure!(gz_status.success(), "gzip {}", local.display());
-    let output = ssh.wait_with_output().await?;
-    ensure!(
-        output.status.success(),
-        "copy {} to {remote} ({}): {}",
-        local.display(),
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(())
-}
-
-/// The remote teardown: kill the daemons we started, then anything else under `root`, then the
-/// root itself. `gentle` sends TERM first and gives the daemons 300 ms before KILL.
-///
-/// A pid of 0 is "never started" (the launch failed before that daemon came up) and is left out:
-/// `kill -9 0` would signal the cleanup shell's own process group and end the script before the
-/// `pkill`/`rm -rf` that follow.
-fn teardown_script(pids: &[u32], root: &str, gentle: bool) -> String {
-    let pids: Vec<String> = pids.iter().filter(|&&p| p != 0).map(u32::to_string).collect();
-    let kill = if pids.is_empty() {
-        String::new()
-    } else {
-        let pids = pids.join(" ");
-        let term =
-            if gentle { format!("kill {pids} 2>/dev/null; sleep 0.3; ") } else { String::new() };
-        format!("{term}kill -9 {pids} 2>/dev/null; ")
-    };
-    let pattern = self_excluding(root);
-    format!("{kill}pkill -9 -f {pattern} 2>/dev/null; rm -rf {root}; true")
-}
-
-/// A `pgrep -f`/`pkill -f` pattern for everything started from `root`'s `bin/` that does not
-/// match the shell running the script itself: the remote runs `zsh -c "<script>"`, whose
-/// command line holds every literal in the script, so a plain `pkill -f /tmp/…` killed that
-/// shell first and ssh came back with SIGKILL. `/[b]in/` matches the daemons' paths
-/// (`…/bin/slopty-worker`) while the script's own text, which spells it with the brackets and
-/// names the root bare only in `rm -rf`, no longer does.
-fn self_excluding(root: &str) -> String {
-    format!("{root}/[b]in/")
-}
-
-/// The two-worker suite's gate, from the two environment variables.
-///
-/// `Ok(None)` when `SLOPTY_WORKER2_E2E` is unset (the suite skips), `Ok(Some(ssh))` when it is set
-/// and `SLOPTY_WORKER2` names the second machine, and an error when the gate is on but the machine
-/// is missing, so an enabled suite can never pass by doing nothing.
-///
-/// # Errors
-///
-/// When `gate` is set and `worker2` is unset or empty.
-pub fn worker2_gate(gate: Option<&str>, worker2: Option<&str>) -> Result<Option<String>> {
-    if gate.is_none() {
-        return Ok(None);
-    }
-    match worker2 {
-        Some(name) if !name.trim().is_empty() => Ok(Some(name.trim().to_owned())),
-        _ => bail!(
-            "SLOPTY_WORKER2_E2E is set but SLOPTY_WORKER2 is empty: name the second machine \
-             (its ssh destination) or unset SLOPTY_WORKER2_E2E"
-        ),
-    }
-}
-
-/// The address the app adds the second worker by: `explicit` (`SLOPTY_WORKER2_ADDR`) when set,
-/// else the host part of the ssh destination `ssh` (`user@host` or `host`), with `port` unless
-/// the address names its own.
-fn remote_address(explicit: Option<&str>, ssh: &str, port: u16) -> String {
-    let host = explicit
-        .map(str::trim)
-        .filter(|a| !a.is_empty())
-        .unwrap_or_else(|| ssh.rsplit_once('@').map_or(ssh, |(_user, host)| host));
-    if host.parse::<std::net::SocketAddr>().is_ok()
-        || host.rsplit_once(':').is_some_and(|(h, p)| !h.contains(':') && p.parse::<u16>().is_ok())
-    {
-        host.to_owned()
-    } else if host.contains(':') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
-}
-
-impl RemoteWorker {
-    /// Copy the daemons and the `slopty` CLI to `ssh`, start ptyd and the worker there under a
-    /// fresh temp root with a private `HOME`, and return the worker with the address the app
-    /// adds it by: `SLOPTY_WORKER2_ADDR` when set (a tailnet or LAN IP, when the ssh
-    /// destination is an alias no resolver knows), else the worker part of the ssh destination,
-    /// on the fixed port.
-    ///
-    /// # Errors
-    ///
-    /// When ssh is unreachable, a binary is missing, or a daemon does not come up.
-    pub async fn launch(ssh: &str) -> Result<(Self, String)> {
-        let root = format!("/tmp/slopty-e2e/worker2-{}", std::process::id());
-        let bin = format!("{root}/bin");
-        let home = format!("{root}/home");
-        let ctl_sock = format!("{root}/worker.sock");
-        let transcript = format!("{root}/agent.jsonl");
-        // The daemons must never read the remote user's real HOME; assert the private one is
-        // under our own temp root before anything runs there.
-        ensure!(home.starts_with(&root), "private HOME {home} is not under the temp root {root}");
-        // A fixed port so a restart (the mid-stream-kill scenario) is reachable at the same
-        // address the app stored when it added the worker.
-        let port = 45_560;
-        let name = "macbook".to_owned();
-
-        // The guard exists before the first byte lands on the remote: a missing binary or a
-        // failed copy below drops it, and `Drop` removes whatever was already created there.
-        let mut worker = Self {
-            ssh: ssh.to_owned(),
-            root,
-            bin,
-            ctl_sock,
-            home,
-            transcript,
-            port,
-            ptyd_pid: 0,
-            worker_pid: 0,
-            name,
-        };
-        let (root, bin) = (worker.root.clone(), worker.bin.clone());
-        let home = worker.home.clone();
-        ssh_out(
-            ssh,
-            &format!("rm -rf {root} && mkdir -p {bin} {home} {root}/data {root}/terminfo"),
-        )
-        .await
-        .context("prepare the remote temp root")?;
-
-        let dir = bin_dir()?;
-        for name in ["slopty-ptyd", "slopty-worker", "slopty"] {
-            let local = dir.join(name);
-            ensure!(local.exists(), "{} is not built (add `-p slopty-cli`?)", local.display());
-            copy_bin(ssh, &local, &format!("{bin}/{name}")).await?;
-        }
-
-        worker.ptyd_pid = worker.start_ptyd().await?;
-        worker.worker_pid = worker.start_worker().await?;
-        worker.wait_answering().await?;
-        let address =
-            remote_address(std::env::var("SLOPTY_WORKER2_ADDR").ok().as_deref(), ssh, worker.port);
-        Ok((worker, address))
-    }
-
-    /// The common environment for a remote daemon: a private HOME, a terminfo dir and a
-    /// pasteboard of its own, so the run never reads that Mac's clipboard.
-    fn daemon_env(&self) -> String {
-        let terminfo = format!("{}/terminfo", self.root);
-        let board = pasteboard_name(Path::new(&self.root), "worker2");
-        format!(
-            "HOME={} {}={terminfo} TERMINFO_DIRS={terminfo}: RUST_LOG=info \
-             {PASTEBOARD_ENV}={board} SLOPTY_DROP_DIR={}/drops",
-            self.home,
-            slopty_pty::terminfo::DIR_ENV,
-            self.root,
-        )
-    }
-
-    /// Start ptyd on the remote (backgrounded), returning its pid.
-    async fn start_ptyd(&self) -> Result<u32> {
-        let env = self.daemon_env();
-        let (root, bin) = (&self.root, &self.bin);
-        let pid = ssh_out(
-            &self.ssh,
-            &format!(
-                "{env} nohup {bin}/slopty-ptyd --socket {root}/ptyd.sock \
-                 >{root}/ptyd.log 2>&1 & echo $!"
-            ),
-        )
-        .await?;
-        self.wait_remote_socket(&format!("{root}/ptyd.sock"), "remote ptyd").await?;
-        pid.trim().parse().with_context(|| format!("ptyd pid: {pid:?}"))
-    }
-
-    /// Start the worker on the remote (backgrounded, on a fixed port so a restart keeps the same
-    /// address), returning its pid. It listens on every interface, so the app reaches it over
-    /// the mesh or the LAN, whichever the address names.
-    async fn start_worker(&self) -> Result<u32> {
-        let env = self.daemon_env();
-        let (root, bin, port, name) = (&self.root, &self.bin, self.port, &self.name);
-        let pid = ssh_out(
-            &self.ssh,
-            &format!(
-                "{env} SLOPTY_WORKER_NAME={name} \
-                 nohup {bin}/slopty-worker --ptyd-socket {root}/ptyd.sock \
-                 --ctl-socket {root}/worker.sock --data-dir {root}/data --port {port} \
-                 >{root}/worker.log 2>&1 & echo $!"
-            ),
-        )
-        .await?;
-        self.wait_remote_socket(&self.ctl_sock, "remote worker").await?;
-        pid.trim().parse().with_context(|| format!("worker pid: {pid:?}"))
-    }
-
-    /// Kill the remote worker (ptyd and the sessions stay), as a worker crash would.
-    ///
-    /// # Errors
-    ///
-    /// When the kill cannot be sent.
-    pub async fn kill_worker(&self) -> Result<()> {
-        ssh_out(&self.ssh, &format!("kill {} 2>/dev/null; true", self.worker_pid)).await?;
-        Ok(())
-    }
-
-    /// Start the worker again on the same data dir and port (same identity, reachable at the same
-    /// address): the app reconnects on its own.
-    ///
-    /// # Errors
-    ///
-    /// When the worker does not come back up.
-    pub async fn restart_worker(&mut self) -> Result<()> {
-        // The dead daemon left its control socket on disk; drop it so the readiness poll waits
-        // for the new process to bind rather than seeing the stale file.
-        ssh_out(&self.ssh, &format!("rm -f {}", self.ctl_sock)).await?;
-        self.worker_pid = self.start_worker().await?;
-        Ok(())
-    }
-
-    /// Poll for a socket file on the remote.
-    async fn wait_remote_socket(&self, path: &str, what: &str) -> Result<()> {
-        let deadline = tokio::time::Instant::now().checked_add(STARTUP);
-        loop {
-            if ssh_out(&self.ssh, &format!("test -S {path} && echo ok || true")).await? == "ok" {
-                return Ok(());
-            }
-            if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
-                bail!("{what} did not bind {path} within {STARTUP:?}");
-            }
-            tokio::time::sleep(POLL).await;
-        }
-    }
-
-    /// Wait until the remote worker answers on its control socket. The socket file appears
-    /// before the daemon answers on it (over a fast link the first call can land in that gap),
-    /// so a refused call is retried within [`STARTUP`]; the last error carries the remote
-    /// The worker's log tail, which the guard's teardown would otherwise take with it.
-    async fn wait_answering(&self) -> Result<()> {
-        let script =
-            format!("SLOPTY_WORKER_SOCKET={} {}/slopty worker status", self.ctl_sock, self.bin);
-        let deadline = tokio::time::Instant::now().checked_add(STARTUP);
-        loop {
-            match ssh_out(&self.ssh, &script).await {
-                Ok(status) => {
-                    ensure!(
-                        status.contains(&self.name),
-                        "remote worker answered as someone else: {status:?}"
-                    );
-                    return Ok(());
-                }
-                Err(e) if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) => {
-                    let log =
-                        ssh_out(&self.ssh, &format!("tail -n 20 {}/worker.log || true", self.root))
-                            .await
-                            .unwrap_or_default();
-                    return Err(e.context(format!("remote worker log:\n{log}")));
-                }
-                Err(_) => tokio::time::sleep(POLL).await,
-            }
-        }
-    }
-
-    /// Play a Claude Code hook for `session` (the id from the dump) against the remote worker,
-    /// through the real `slopty hook` relay over ssh: write [`TRANSCRIPT`] on the remote, then
-    /// run the relay with `SLOPTY_SESSION` set and the payload on its stdin, exactly what Claude
-    /// Code does. Nothing is typed into a shell and no real agent is started.
-    ///
-    /// # Errors
-    ///
-    /// When the transcript cannot be written or the relay cannot be run.
-    pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
-        ssh_pipe(&self.ssh, &format!("cat > {}", self.transcript), TRANSCRIPT.as_bytes()).await?;
-        let payload = format!(
-            r#"{{"hook_event_name":"{event}","session_id":"e2e","transcript_path":"{}"{fields}}}"#,
-            self.transcript
-        );
-        // The relay always exits 0 (it must never block the agent); the effect is asserted
-        // through the app's dump, not this call's status.
-        ssh_pipe(
-            &self.ssh,
-            &format!(
-                "SLOPTY_SESSION={session} SLOPTY_WORKER_SOCKET={} {}/slopty hook",
-                self.ctl_sock, self.bin
-            ),
-            payload.as_bytes(),
-        )
-        .await
-    }
-
-    /// The remote's `slopty` processes still running under our root (should be empty after
-    /// [`Self::shutdown`]); the `pgrep -lf` lines, for the report.
-    ///
-    /// # Errors
-    ///
-    /// When ssh cannot be reached.
-    pub async fn stray_processes(&self) -> Result<String> {
-        ssh_out(&self.ssh, &format!("pgrep -lf {} || true", self_excluding(&self.root))).await
-    }
-
-    /// Kill the remote daemons, remove the temp root, and confirm nothing of ours is left.
-    ///
-    /// # Errors
-    ///
-    /// When ssh cannot be reached or a process survives.
-    pub async fn shutdown(self) -> Result<()> {
-        let script = teardown_script(&[self.ptyd_pid, self.worker_pid], &self.root, true);
-        ssh_out(&self.ssh, &script).await?;
-        let stray =
-            ssh_out(&self.ssh, &format!("pgrep -f {} | wc -l", self_excluding(&self.root))).await?;
-        ensure!(stray.trim() == "0", "remote processes survived teardown: {stray}");
-        Ok(())
-    }
-}
-
-impl Drop for RemoteWorker {
-    fn drop(&mut self) {
-        // Best-effort synchronous cleanup if `shutdown` was not called (a panicking test).
-        let script = teardown_script(&[self.ptyd_pid, self.worker_pid], &self.root, false);
-        let _best_effort = std::process::Command::new("ssh")
-            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
-            .arg(&self.ssh)
-            .arg(&script)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-}
-
 /// Check that the terminal face is the bundled `JetBrains Mono` as its tables say.
 ///
 /// Measured through the platform text system: no line gap, the underline 0.155 em below the
@@ -1452,67 +1007,13 @@ pub fn check_jetbrains_mono_face(face: Option<&crate::FaceInfo>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{loopback_address, remote_address, self_excluding, teardown_script, worker2_gate};
-
-    /// The kill pattern must match the daemons under the root but not the script that holds
-    /// the pattern (the remote shell's own command line).
-    #[test]
-    fn the_kill_pattern_spares_the_shell_that_runs_it() {
-        let pattern = self_excluding("/tmp/slopty-e2e/worker2-1");
-        assert_eq!(pattern, "/tmp/slopty-e2e/worker2-1/[b]in/");
-        let re = regex::Regex::new(&pattern).unwrap();
-        assert!(re.is_match("/tmp/slopty-e2e/worker2-1/bin/slopty-worker --port 45560"));
-        assert!(re.is_match("/tmp/slopty-e2e/worker2-1/bin/slopty hook"));
-        assert!(!re.is_match(&teardown_script(&[7], "/tmp/slopty-e2e/worker2-1", true)));
-        assert!(!re.is_match(&format!("pgrep -lf {pattern} || true")));
-    }
+    use super::loopback_address;
 
     #[test]
     fn the_app_dials_loopback_on_the_port_the_worker_printed() {
         assert_eq!(loopback_address("[::]:53211\n").unwrap(), "127.0.0.1:53211");
         assert_eq!(loopback_address("0.0.0.0:7").unwrap(), "127.0.0.1:7");
         loopback_address("not an address").unwrap_err();
-    }
-
-    #[test]
-    fn the_second_worker_is_added_by_its_ssh_host_unless_an_address_is_given() {
-        assert_eq!(remote_address(None, "macbook-pro", 45_560), "macbook-pro:45560");
-        assert_eq!(remote_address(None, "me@100.64.0.5", 45_560), "100.64.0.5:45560");
-        assert_eq!(remote_address(Some("192.168.1.7"), "macbook-pro", 45_560), "192.168.1.7:45560");
-        assert_eq!(remote_address(Some("10.0.0.2:9"), "x", 45_560), "10.0.0.2:9");
-        assert_eq!(remote_address(Some("fd7a:115c:a1e0::5"), "x", 1), "[fd7a:115c:a1e0::5]:1");
-        assert_eq!(remote_address(Some(" "), "host", 1), "host:1", "blank is unset");
-    }
-
-    #[test]
-    fn an_unstarted_daemon_is_not_in_the_kill_list() {
-        let s = teardown_script(&[0, 4242], "/tmp/slopty-e2e/worker2-1", false);
-        assert_eq!(
-            s,
-            "kill -9 4242 2>/dev/null; pkill -9 -f /tmp/slopty-e2e/worker2-1/[b]in/ 2>/dev/null; rm -rf /tmp/slopty-e2e/worker2-1; true"
-        );
-        let s = teardown_script(&[0, 0], "/tmp/r", true);
-        assert!(s.starts_with("pkill "), "no kill of pids when nothing started: {s}");
-        assert!(!s.contains(" 0 "), "pid 0 must never be signalled: {s}");
-        assert!(s.ends_with("rm -rf /tmp/r; true"));
-    }
-
-    #[test]
-    fn a_gentle_teardown_terms_before_it_kills() {
-        let s = teardown_script(&[7, 8], "/tmp/r", true);
-        assert!(s.starts_with("kill 7 8 2>/dev/null; sleep 0.3; kill -9 7 8 2>/dev/null; "));
-    }
-
-    #[test]
-    fn the_gate_refuses_to_run_without_a_second_machine() {
-        assert!(worker2_gate(None, None).unwrap().is_none());
-        assert!(worker2_gate(None, Some("mac")).unwrap().is_none());
-        assert_eq!(
-            worker2_gate(Some("1"), Some(" macbook-pro ")).unwrap().as_deref(),
-            Some("macbook-pro")
-        );
-        worker2_gate(Some("1"), None).unwrap_err();
-        worker2_gate(Some("1"), Some("")).unwrap_err();
     }
 }
 
@@ -1594,25 +1095,27 @@ impl ServerDaemon {
     }
 }
 
-/// ptyd + worker from this build, registered with a server as one worker. Killed on drop.
+/// ptyd + worker from this build, registered with a server as one worker when one is named.
+/// Killed on drop.
 ///
-/// Its sockets and data live under the root it was started in, so a restarted worker keeps its
-/// worker id and finds the same ptyd.
+/// Its sockets and data live under the root it was started in, and a restart binds the port the
+/// first start was given, so a restarted worker keeps its worker id, finds the same ptyd and is
+/// reached at the same address.
 #[derive(Debug)]
 pub struct Worker {
     ptyd: Child,
     daemon: Option<Child>,
     root: PathBuf,
     name: String,
-    server: String,
+    server: Option<String>,
     log: String,
     env: Vec<(String, String)>,
     address: String,
 }
 
 impl Worker {
-    /// Start ptyd and the worker named `name` in `root`, registering with the server at `server`;
-    /// `env` goes to both daemons, and so to the shells.
+    /// Start ptyd and the worker named `name` in `root` on a free port, registering with the
+    /// server at `server` when one is given; `env` goes to both daemons, and so to the shells.
     ///
     /// # Errors
     ///
@@ -1620,19 +1123,19 @@ impl Worker {
     pub async fn start(
         root: &Path,
         name: &str,
-        server: &str,
+        server: Option<&str>,
         log: &str,
         env: &[(&str, &str)],
     ) -> Result<Self> {
         std::fs::create_dir_all(root)?;
         let ptyd = spawn_ptyd(root, log, env).await?;
-        let (worker, address) = spawn_worker(root, name, log, env, Some(server)).await?;
+        let (worker, address) = spawn_worker(root, name, log, env, server, 0).await?;
         Ok(Self {
             ptyd,
             daemon: Some(worker),
             root: root.to_path_buf(),
             name: name.to_owned(),
-            server: server.to_owned(),
+            server: server.map(str::to_owned),
             log: log.to_owned(),
             env: env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
             address,
@@ -1645,14 +1148,20 @@ impl Worker {
         &self.name
     }
 
-    /// Where clients reach the worker directly, `127.0.0.1:<port>`; a restart picks a new port.
+    /// Where clients reach the worker directly, `127.0.0.1:<port>`; a restart keeps it.
     #[must_use]
     pub fn address(&self) -> &str {
         &self.address
     }
 
-    /// Kill the worker (SIGKILL: no goodbye to the server, as a crash or a pulled cable would leave
-    /// it) and reap it. ptyd and its shells live on.
+    /// The worker's control socket: what `slopty` and the hook relay talk to.
+    #[must_use]
+    pub fn ctl_socket(&self) -> PathBuf {
+        self.root.join("worker.sock")
+    }
+
+    /// Kill the worker (SIGKILL: no goodbye to the server or the clients, as a crash or a pulled
+    /// cable would leave them) and reap it. ptyd and its shells live on.
     pub async fn kill_worker(&mut self) {
         if let Some(mut worker) = self.daemon.take() {
             let _killed = worker.start_kill();
@@ -1660,26 +1169,184 @@ impl Worker {
         }
     }
 
-    /// Start the worker again on the same ptyd and data directory (so the same worker id).
+    /// Start the worker again on the same ptyd, data directory and port (so the same worker id,
+    /// at the same address).
     ///
     /// # Errors
     ///
-    /// When the worker does not come up.
+    /// When the worker does not come up, or its port was taken while it was down.
     pub async fn restart_worker(&mut self) -> Result<()> {
         self.kill_worker().await;
         let env: Vec<(&str, &str)> = self.env.iter().map(|(k, v)| (&**k, &**v)).collect();
+        let port = self.address.parse::<std::net::SocketAddr>()?.port();
+        let server = self.server.as_deref();
         let (worker, address) =
-            spawn_worker(&self.root, &self.name, &self.log, &env, Some(&self.server)).await?;
+            spawn_worker(&self.root, &self.name, &self.log, &env, server, port).await?;
         self.daemon = Some(worker);
         self.address = address;
         Ok(())
     }
 
-    /// Kill both daemons and reap them.
+    /// Kill both daemons, reap them and give the worker's pasteboard back.
     pub async fn shutdown(mut self) {
         self.kill_worker().await;
         let _killed = self.ptyd.start_kill();
         let _reaped = self.ptyd.wait().await;
+        #[cfg(target_os = "macos")]
+        slopty_platform::pasteboard::MacPasteboard::named(&pasteboard_name(&self.root, "worker"))
+            .release();
+    }
+}
+
+/// The tailnet path to another Mac, as the 2026-09-25 mesh run measured it (MEASUREMENTS, "BBR3's
+/// bound on the Tailscale mesh"): a 10 ms echo median over an ICMP round trip of 7 to 16 ms.
+///
+/// 4 ms each way plus up to 2 ms of jitter is a round trip of 8 to 12 ms. That run's ICMP pings
+/// lost 13 to 21 % each way, but the worker's QUIC counted no loss in 15 of its 16 runs, so the
+/// ICMP figure is about how ICMP is treated, not what the UDP path drops. 3 % independent loss
+/// still puts a retransmission (and the keystroke's datagram copy) into every step of a test
+/// that sends a few hundred packets, while a lost handshake or close costs a step one timeout,
+/// not the run. A link that loses a fifth of its packets is the worker e2e's own test
+/// (`typing_through_a_lossy_link_lands_once_in_order`).
+pub const TAILNET: slopty_shape::Link = slopty_shape::Link {
+    delay: Duration::from_millis(4),
+    jitter: Duration::from_millis(2),
+    loss: 0.03,
+    ..slopty_shape::Link::CLEAR
+};
+
+/// The relay's loop, stopped when the handle is dropped: [`slopty_shape::relay::Relay::run`]
+/// never returns on its own.
+#[derive(Debug)]
+struct RelayTask(tokio::task::JoinHandle<std::io::Result<()>>);
+
+impl Drop for RelayTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A second worker on this Mac, reached the way a worker on another Mac would be.
+///
+/// ptyd and the worker run from this build under a [`StackDir`] of their own, beside a
+/// [`Stack`]'s, with a private `HOME` there, so they never read the real `~/.claude` and
+/// `slopty hook install` is never run. The app does not dial the worker: it dials a
+/// [`slopty_shape::relay::Relay`] in this process that carries every packet over a shaped link
+/// ([`TAILNET`]), so the connection sees a mesh's round trip, jitter and loss. The worker keeps
+/// its port across [`Self::restart_worker`] and the relay outlives it, so the app redials the
+/// address it added.
+#[derive(Debug)]
+pub struct SecondWorker {
+    worker: Worker,
+    relay: std::sync::Arc<slopty_shape::relay::Relay>,
+    _relay_task: RelayTask,
+    address: String,
+    home: PathBuf,
+    // Last, so the root goes after the daemons in it are killed.
+    dir: StackDir,
+}
+
+impl SecondWorker {
+    /// Start ptyd and the worker named `name` under a root of their own, and a relay in front
+    /// of the worker shaped as `link`.
+    ///
+    /// # Errors
+    ///
+    /// When a binary is missing, a daemon does not come up or the relay cannot bind.
+    pub async fn launch(name: &str, link: slopty_shape::Link) -> Result<Self> {
+        let dir = StackDir::new("slopty-e2e-second-")?;
+        let root = dir.path();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home)?;
+        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let home_env = home.to_string_lossy();
+        let worker = Worker::start(root, name, None, &log, &[("HOME", &*home_env)]).await?;
+        let direct = worker.address().parse().context("the worker's address")?;
+        // The wildcard, not loopback: the relay's socket then sends to the worker's port and
+        // answers the app from the same port, whichever address each end used.
+        let any = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
+        // A fixed seed, so a run's losses fall where the last run's did.
+        let relay = slopty_shape::relay::Relay::bind(any, direct, link, 0x5107_7e2e)
+            .await
+            .context("bind the relay")?;
+        let address = relay.addr()?.to_string();
+        let relay = std::sync::Arc::new(relay);
+        let task = tokio::spawn({
+            let relay = std::sync::Arc::clone(&relay);
+            async move { relay.run().await }
+        });
+        Ok(Self { worker, relay, _relay_task: RelayTask(task), address, home, dir })
+    }
+
+    /// Where the app adds it: the relay, `127.0.0.1:<port>`.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// What the relay has carried and dropped each way so far.
+    pub async fn carried(&self) -> slopty_shape::relay::Carried {
+        self.relay.carried().await
+    }
+
+    /// Kill the worker (SIGKILL, as a crash would); ptyd and the sessions stay.
+    pub async fn kill_worker(&mut self) {
+        self.worker.kill_worker().await;
+    }
+
+    /// Start the worker again on the same data directory and port (same identity, reachable
+    /// through the same relay): the app reconnects on its own.
+    ///
+    /// # Errors
+    ///
+    /// When the worker does not come back up.
+    pub async fn restart_worker(&mut self) -> Result<()> {
+        self.worker.restart_worker().await
+    }
+
+    /// Play a Claude Code hook in `session` (the id from the dump) through the real relay:
+    /// write [`TRANSCRIPT`] under the root, then run `slopty hook` with the session and the
+    /// worker's control socket in its environment and the payload for `event` (plus `fields`,
+    /// more JSON members) on its stdin, exactly what Claude Code does. Nothing is typed into a
+    /// shell and no agent is started.
+    ///
+    /// # Errors
+    ///
+    /// When the transcript cannot be written or the relay does not run to the end. The relay
+    /// exits 0 even when the worker refuses (it must never block an agent), so the effect is
+    /// the app's to show.
+    pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
+        let transcript = self.dir.path().join("agent.jsonl");
+        std::fs::write(&transcript, TRANSCRIPT)?;
+        let payload = format!(
+            r#"{{"hook_event_name":"{event}","session_id":"e2e","transcript_path":"{}"{fields}}}"#,
+            transcript.display()
+        );
+        let mut hook = Command::new(bin("slopty")?)
+            .arg("hook")
+            .env("SLOPTY_SESSION", session)
+            .env("SLOPTY_WORKER_SOCKET", self.worker.ctl_socket())
+            .env("HOME", &self.home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawn slopty hook")?;
+        let mut stdin = hook.stdin.take().context("the hook's stdin")?;
+        stdin.write_all(payload.as_bytes()).await?;
+        stdin.shutdown().await?;
+        drop(stdin);
+        let status = tokio::time::timeout(STARTUP, hook.wait())
+            .await
+            .context("slopty hook did not finish")??;
+        ensure!(status.success(), "slopty hook failed: {status}");
+        Ok(())
+    }
+
+    /// Kill both daemons; the relay stops and the root goes as the rest drops, after them.
+    pub async fn shutdown(self) {
+        self.worker.shutdown().await;
     }
 }
 
@@ -1806,7 +1473,8 @@ impl ServerStack {
         let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
         let env = [("BASH_SILENCE_DEPRECATION_WARNING", "1")];
         let worker =
-            Worker::start(&root.join("worker"), worker_name, server.address(), &log, &env).await?;
+            Worker::start(&root.join("worker"), worker_name, Some(server.address()), &log, &env)
+                .await?;
         let stack = Self { dir, server, worker };
         stack.worker_online(STARTUP).await?;
         Ok(stack)

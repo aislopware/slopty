@@ -17,7 +17,9 @@ dependencies. Each fork carries our commits on its default branch, rebased onto 
 - `bacon` for the watch loop; `cargo nextest run -p <crate>` for one crate.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
 - `cargo xtask e2e <case>` runs the live tests (`docs/TESTING.md`); `cargo xtask e2e server`
-  is the one for the server, its worker link, the CLI and MCP, and takes seconds.
+  is the one for the server, its worker link, the CLI and MCP, and takes seconds. Every case
+  runs on this Mac alone: `workers` starts its second worker here, behind a relay shaped like
+  the tailnet, so nothing waits on another machine.
 - `cargo xtask run worker|app` to launch; `cargo xtask ios sim [--sim ipad]|device` for the phone/tablet;
   `cargo xtask bundle` builds a signed `Slopty.app` (app + daemons + CLI) under `target/bundle`
   with the icon rendered from `assets/icon.svg` (`cargo xtask icon` previews it);

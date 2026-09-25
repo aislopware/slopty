@@ -4739,14 +4739,8 @@ shows each key once and in order, no frame asks for a resync, and both ends take
 worker took 14 and 48 key copies in two runs, the client showed 8 echoes from theirs in the
 first).
 
-**Owed.** Run 5 stopped after four rounds, and the MacBook was unreachable when this was written,
-so the mesh has no full after-run yet. Six rounds of its four arms, set up as above:
-
-```sh
-rm -rf /tmp/echocopy/mesh
-/tmp/echocopy/all8.sh > /tmp/echocopy/all8.log 2>&1   # round.sh "off|2" … "a|p", 6 rotations
-python3 /tmp/echocopy/summ.py /tmp/echocopy/mesh
-ssh macbook-pro '/tmp/slopty-echocopy/remote-down.sh all; pgrep -fl slopty-echocopy'
-```
+**Of record.** Run 5 stopped after four rounds when the MacBook left the network. It is not
+rerun: measurements run on this Mac alone (2026-09-25 ruling), so the shaped loopback above is
+the number of record, and its lossy link models the tailnet path these runs measured.
 
 The bulk connection's pacing is worth tracing beside it, to explain its goodput.

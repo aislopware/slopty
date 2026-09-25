@@ -31,11 +31,14 @@
    leaves the other streaming and reattaches on relaunch, closing and notes propagate. The
    display scenario also needs `SLOPTY_SCREEN_E2E`. `cargo xtask e2e pair-ios [--sim iphone|ipad]`
    (gate `SLOPTY_PAIR_IOS_E2E`) puts the second client in the simulator: the Mac and the phone
-   on one worker. `cargo xtask e2e workers` (gate `SLOPTY_WORKER2_E2E`,
-   `SLOPTY_WORKER2=<ssh name>`, serial) is one client and two workers on two machines: ptyd +
-   `slopty-worker` on a second Mac over ssh (temp root, private HOME, torn down after), to prove
-   cross-worker attention — the pill sums both workers, a banner routes to the worker holding
-   its session, and a hook is played only through `slopty hook` over ssh, never a real agent.
+   on one worker. `cargo xtask e2e workers` (gate `SLOPTY_WORKERS_E2E`, serial)
+   is one client and two workers on this Mac: a second ptyd + `slopty-worker` under a root of
+   its own with a private HOME (`harness::SecondWorker`), which the app reaches only through a
+   `slopty-shape` relay shaped like the tailnet path to another Mac (`harness::TAILNET`: 8 to
+   12 ms round trip, 3 % loss). It proves cross-worker attention: the pill sums both workers, a
+   banner routes to the worker holding its session, a hook is played only by spawning
+   `slopty hook` with the payload on its stdin, never a real agent, and a killed worker shows
+   down and reattaches on restart while the other keeps streaming.
    `cargo xtask e2e server` (gate `SLOPTY_SERVER_E2E`, about 7 s) is the server with a real
    worker: `slopty-server`, then ptyd + `slopty-worker` registered with it through `--server`,
    on ports of their own under a temp root (`harness::ServerStack`). It drives them only

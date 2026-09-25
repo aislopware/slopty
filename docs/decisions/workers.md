@@ -62,7 +62,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   does not outlive a hostd restart, so reattach is confirmed by live I/O, not grid replay).
 
 - ✅ **Two-host harness hardening** (2026-09-06, from the Codex review of `claude/twohosts`,
-  fixed after landing). Four holes in `crates/slopty-e2e/src/harness.rs` and `tests/workers.rs`,
+  fixed after landing; superseded 2026-09-26 by **The two-worker e2e runs on one Mac**).
+  Four holes in `crates/slopty-e2e/src/harness.rs` and `tests/workers.rs`,
   none in product code: the `Drop` guard passed unset daemon PIDs (0) to `kill -9`, which signals
   the cleanup shell's own process group and ends the script before the `pkill`/`rm -rf` that
   follow — `teardown_script` now leaves unstarted daemons out (unit-tested); the remote root was
@@ -73,7 +74,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   silently when `SLOPTY_WORKER2_E2E` was set but `SLOPTY_WORKER2` empty — `worker2_gate` errors,
   naming both variables, and the test panics on it (unit-tested).
 
-- ✅ **Two-host harness, second hardening** (2026-09-12, from re-running the suite on main).
+- ✅ **Two-host harness, second hardening** (2026-09-12, from re-running the suite on main;
+  superseded 2026-09-26 by **The two-worker e2e runs on one Mac**).
   Three findings, none in product code. (1) The `pkill -9 -f <root>` in `teardown_script`
   matched the remote `zsh -c "<script>"` running it — every literal in the script is in that
   shell's command line — so the shell died first and ssh reported SIGKILL, failing a run whose
@@ -245,3 +247,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   start. Directories an unfinished drop made in place stay. Resuming a transfer across a
   client reconnect is still the client's to do. Tests: `two_drops_of_one_name_never_share_a_partial`
   and `a_sweep_removes_the_stale_partials_of_unfinished_transfers` (`slopty_worker::xfer`).
+
+- ✅ **The two-worker e2e runs on one Mac, behind a shaped link** (2026-09-26). The suite
+  needed a second Mac over ssh: it copied the binaries there, ran the daemons under a temp root
+  and played the hook over ssh, so it passed or failed on that machine being awake and on how
+  fast the overlay moved 60 MB. The user ruled that nothing may depend on the second machine.
+  Worker B is now a second ptyd + worker on this Mac (`harness::SecondWorker`), under a
+  `StackDir` of its own with a private `HOME`, the fixed-prompt zsh and a pasteboard of its own.
+  The app never dials it directly. It dials a `slopty-shape` relay in the test process, and
+  that relay carries the link the 2026-09-25 mesh run measured (`harness::TAILNET`): 4 ms each
+  way, up to 2 ms of jitter and 3 % independent loss. The ICMP loss of 13 to 21 % on that path
+  is not a UDP figure, since the worker's QUIC counted no loss in 15 of 16 runs. 3 % still puts
+  retransmissions into every step, where 13 % would make a lost handshake or close decide the
+  run. The 20 % case is the worker e2e's lossy typing test. The worker takes a free port on its
+  first start and binds it again on restart, and the relay outlives it, so the kill-mid-stream
+  scenario redials the address the app added. The kill is a SIGKILL, a crash with no goodbye.
+  The app shows the worker silent within its 8 s bound and redials after its 15 s drop bound.
+  The hook goes through the real `slopty hook`, spawned by the test with the session, the
+  worker's control socket and the payload on stdin. `cargo xtask e2e all` now includes it. Two
+  runs in a row: RTT to B 14.8 / 14.6 ms through the shaper, against 0.7 ms to A on loopback;
+  the pill badged 110 / 117 ms after the hook; B shown down 8.5 / 8.7 s after the kill and
+  connected 8.2 / 8.3 s after the restart; the whole run took 21.6 / 20.7 s. The relay lost
+  7 of about 150 packets up and 2 of 88 down, and the test fails if either direction loses
+  nothing, which would mean the traffic did not go through the shaper. Supersedes the two
+  "Two-host harness" hardening entries above, whose ssh teardown, gate and address helpers are
+  gone.
