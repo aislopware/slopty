@@ -203,7 +203,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_path_dragged_out_of_a_shell_is_kept_by_a_download`.
 
 - ✅ **Playback is a jitter buffer that aims for the lateness it measures** (2026-09-25, no
-  protocol change; `slopty_codec::audio::Playout`).
+  protocol change; `slopty_codec::audio::{Jitter, Ring}`).
   - A packet's delay is its arrival, as the connection's reader stamped it, minus its sequence
     times 20 ms. Its lateness is that delay minus the least one of the last 5 s. The ring aims
     to hold, when a packet arrives on time, the 95th percentile of lateness plus one 10 ms
@@ -261,3 +261,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     under a development-signed build.
   - Open: whether a hidden domain can be switched on at all, and whether other apps raise a
     privacy prompt when they read a placeholder. Both are one manual check.
+
+- ✅ **The jitter estimate runs outside the playback lock, and a mute starts a fresh one**
+  (2026-09-25, no protocol change).
+  - `Playout` is now two parts. `Jitter` holds the window, the percentile and the target, and
+    only the thread that decodes packets takes it. `Ring` holds the samples and the depth
+    steering, and the AudioQueue callback shares it. A packet locks the ring to read what it
+    saw since the last packet (`Since`), times itself against the window with the ring
+    unlocked, then locks the ring again to queue. The callback never waits on the window's
+    sort. A stretch now works in place instead of through a temporary vector, so nothing under
+    the ring's lock allocates beyond the ring's own growth. If the ring runs dry between the two
+    locks, the next packet carries the mark instead of this one. The synthetic-trace numbers
+    (stall, keyframe bursts, ±100 ppm drift) are unchanged.
+  - Muting emptied the ring without flagging the gate. When the host's gate closed for 110 ms
+    to 1 s during a mute, every packet after the unmute read that much late against the minimum
+    from before the gap. Past the 110 ms a depth can cover, each one counted as a stall, and the
+    ring was cut to its floor on every packet for up to the 5 s window. A mute now marks the
+    next packet as gated, as running dry after silence does. A packet more than 20 ms late after
+    a quiet one also starts a fresh estimate, which covers a gate shorter than the ring's depth.
+    A mute also ramps down from the last sample played instead of stepping to zero.
+  - On a synthetic trace (muted from 2 to 3 s, a 400 ms gate inside the mute, 1 ms scatter),
+    the old code had 85 underruns and cut 652 ms. Now there are 0 underruns, 30 ms of drift
+    slices, and 60 ms mean heard delay from 4 s on. Tests:
+    `a_gate_while_muted_leaves_no_lasting_cuts`,
+    `a_late_packet_after_silence_starts_a_new_estimate`.

@@ -478,7 +478,8 @@ impl Lane {
     }
 
     /// Take the datagrams that fit under `budget` with `held` already in QUIC. One always goes
-    /// when QUIC is empty, whatever the budget, so the lane cannot stall.
+    /// when QUIC is empty, whatever the budget, so the lane cannot stall. What QUIC then takes
+    /// of them is added to `expected` by the caller: a refused datagram never drains.
     fn take(&mut self, held: usize, budget: usize) -> Vec<Bytes> {
         let mut room = budget.saturating_sub(held);
         let mut out = Vec::new();
@@ -489,10 +490,25 @@ impl Lane {
             }
             room = room.saturating_sub(front.len());
             self.bytes = self.bytes.saturating_sub(front.len());
-            self.expected = self.expected.saturating_add(front.len());
             out.extend(self.queue.pop_front());
         }
         out
+    }
+}
+
+/// What the transport took of a batch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct Taken {
+    datagrams: u64,
+    bytes: usize,
+}
+
+impl Taken {
+    fn of(datagrams: &[Bytes]) -> Self {
+        Self {
+            datagrams: u64::try_from(datagrams.len()).unwrap_or(u64::MAX),
+            bytes: datagrams.iter().map(Bytes::len).sum(),
+        }
     }
 }
 
@@ -1297,19 +1313,37 @@ impl<P: Platform> Shared<P> {
         }
     }
 
+    /// Put a new encoder session in, in place of the old one, and reset what described the old
+    /// one ([`Self::rebuilt`]) before the encoder's write lock goes. An encode holds the read
+    /// lock from taking its requests to submitting the frame, so no frame reaches the new
+    /// session with the old one's requests, and none of the new session's packets can be filed
+    /// in the old book. The old session is invalidated in the swap, which ends its callbacks,
+    /// so none of its packets lands after the reset either. The held capture is the old size.
+    fn install(&self, encoder: P::Video) {
+        let mut slot = self.encoder.write();
+        *slot = Some(encoder);
+        self.rebuilt();
+        drop(slot);
+        // Outside the write lock: an encode takes the held capture's lock before the encoder's.
+        self.forget_held();
+    }
+
     /// A new encoder session replaced the old one: its references, the acknowledgements still
     /// queued for them, the keyframe estimate and the valve's clock all described the old
-    /// session, and the held capture is the old size. The new session starts on a keyframe.
+    /// session. The new session starts on a keyframe. The book stays locked while the queued
+    /// acknowledgements go, as [`Self::report`] holds it while queueing them, so a report is
+    /// wholly before the reset or wholly after it.
     fn rebuilt(&self) {
-        self.ltr.lock().reset();
+        let mut ltr = self.ltr.lock();
+        ltr.reset();
         {
             let mut pending = self.pending.lock();
             pending.acked.clear();
             pending.keyframe = true;
         }
+        drop(ltr);
         self.keyframe_bytes.store(0, Ordering::Relaxed);
         self.keyframe_deferred_us.store(0, Ordering::Relaxed);
-        self.forget_held();
     }
 
     /// Drop the held capture: it is not a picture of the target any more (hidden, suspected, or
@@ -1341,27 +1375,20 @@ impl<P: Platform> Shared<P> {
         tracing::debug!(stream = %self.id, fps, bps, "cadence");
     }
 
-    /// Hand `datagrams` to the transport now, in one call; how many it took.
+    /// Hand `datagrams` to the transport now, in one call; what it took.
     ///
     /// A datagram too large for the path is a sizing bug, not the end of the stream: the
     /// packetizer cut the frame for a size the path had when it started and has no longer. The
     /// ones that still fit go, the rest are counted as refused, and it is logged once.
-    fn send(&self, datagrams: &[Bytes]) -> u64 {
+    fn send(&self, datagrams: &[Bytes]) -> Taken {
         if datagrams.is_empty() {
-            return 0;
+            return Taken::default();
         }
         let now = now::<P>();
         let n = u64::try_from(datagrams.len()).unwrap_or(u64::MAX);
         let taken = match self.sink.send(datagrams) {
-            Ok(()) => {
-                self.counters.datagrams.fetch_add(n, Ordering::Relaxed);
-                self.last_push_us.store(now, Ordering::Relaxed);
-                return n;
-            }
-            Err(Refused::Closed) => {
-                self.counters.queue_full.fetch_add(n, Ordering::Relaxed);
-                return 0;
-            }
+            Ok(()) => Taken::of(datagrams),
+            Err(Refused::Closed) => Taken::default(),
             Err(Refused::TooLarge) => {
                 let max = self.sink.max_size().unwrap_or(0);
                 if !self.too_large_logged.swap(true, Ordering::Relaxed) {
@@ -1371,17 +1398,14 @@ impl<P: Platform> Shared<P> {
                 let fitting: Vec<Bytes> =
                     datagrams.iter().filter(|d| d.len() <= max).cloned().collect();
                 let sent = !fitting.is_empty() && self.sink.send(&fitting).is_ok();
-                if sent {
-                    let m = u64::try_from(fitting.len()).unwrap_or(u64::MAX);
-                    self.counters.datagrams.fetch_add(m, Ordering::Relaxed);
-                    self.last_push_us.store(now, Ordering::Relaxed);
-                    m
-                } else {
-                    0
-                }
+                if sent { Taken::of(&fitting) } else { Taken::default() }
             }
         };
-        self.counters.queue_full.fetch_add(n.saturating_sub(taken), Ordering::Relaxed);
+        if taken.datagrams > 0 {
+            self.counters.datagrams.fetch_add(taken.datagrams, Ordering::Relaxed);
+            self.last_push_us.store(now, Ordering::Relaxed);
+        }
+        self.counters.queue_full.fetch_add(n.saturating_sub(taken.datagrams), Ordering::Relaxed);
         taken
     }
 
@@ -1473,6 +1497,9 @@ impl<P: Platform> Shared<P> {
     /// arrived; otherwise it is [`repair_loop`] sending the held one again at `now`.
     fn try_encode(&self, held: Option<&Frame<P>>, fresh: bool, now: u64) -> Attempt {
         let Some(frame) = held else { return Attempt::Nothing };
+        // Held from reading the requests to submitting the frame, so a rebuild is wholly before
+        // or wholly after them ([`Self::install`]).
+        let encoder = self.encoder.read();
         let owed = self.owed.load(Ordering::Relaxed);
         let (want_keyframe, want_refresh) = {
             let pending = self.pending.lock();
@@ -1530,8 +1557,7 @@ impl<P: Platform> Shared<P> {
             self.counters.repaired.fetch_add(1, Ordering::Relaxed);
         }
         self.counters.submitted(pts, now);
-        let outcome =
-            self.encoder.read().as_ref().map(|encoder| encoder.encode(&frame.image, pts, &options));
+        let outcome = encoder.as_ref().map(|encoder| encoder.encode(&frame.image, pts, &options));
         if let Some(Err(e)) = outcome {
             self.counters.returned(pts, Source::<P>::now_us());
             tracing::warn!(stream = %self.id, error = %e, "encode failed");
@@ -1541,8 +1567,10 @@ impl<P: Platform> Shared<P> {
             pending.refresh |= options.force_ltr_refresh;
             pending.acked.extend(options.acked_ltr);
             drop(pending);
+            drop(encoder);
             return Attempt::Failed;
         }
+        drop(encoder);
         Attempt::Sent
     }
 
@@ -1585,7 +1613,7 @@ impl<P: Platform> Shared<P> {
             .collect();
         self.last_audio_us.store(now, Ordering::Relaxed);
         let taken = self.send(&datagrams);
-        self.counters.audio_packets.fetch_add(taken, Ordering::Relaxed);
+        self.counters.audio_packets.fetch_add(taken.datagrams, Ordering::Relaxed);
     }
 
     /// Hand a frame's video datagrams on: straight to QUIC while no audio flows, through the
@@ -1600,8 +1628,7 @@ impl<P: Platform> Shared<P> {
             // current for when audio starts.
             let held = self.sink.held();
             lane.observe(held, now);
-            lane.expected = held.saturating_add(datagrams.iter().map(Bytes::len).sum::<usize>());
-            self.send(datagrams);
+            lane.expected = held.saturating_add(self.send(datagrams).bytes);
             return;
         }
         lane.push(datagrams);
@@ -1624,7 +1651,7 @@ impl<P: Platform> Shared<P> {
         lane.observe(held, now);
         let floor = self.counters.bitrate_bps.load(Ordering::Relaxed) / 8;
         let batch = lane.take(held, lane.budget(floor));
-        self.send(&batch);
+        lane.expected = lane.expected.saturating_add(self.send(&batch).bytes);
     }
 
     /// Run the silence gate and the encoder under the audio lock; `None` when nothing goes out.
@@ -1739,7 +1766,7 @@ impl<P: Platform> Shared<P> {
     /// A receiver report: acknowledged LTR tokens go to the encoder, the loss to the parity
     /// and rate controllers; a changed target is applied to the encoder.
     fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
-        let acked: Vec<u64> = {
+        let acked = {
             let mut ltr = self.ltr.lock();
             let was_usable = ltr.usable.is_some();
             // Only this session's tokens reach the encoder: one acknowledged for the session a
@@ -1756,12 +1783,14 @@ impl<P: Platform> Shared<P> {
                 // keyframe can be deferred for one (`keyframe_admitted`).
                 tracing::debug!(stream = %self.id, token = ?ltr.usable.map(|(t, _at)| t), "LTR reference usable");
             }
-            acked
+            let count = u64::try_from(acked.len()).unwrap_or(u64::MAX);
+            // Queued under the book that vouched for them: a rebuild between the two would
+            // hand the new session the old one's tokens ([`Self::rebuilt`]).
+            self.pending.lock().acked.extend(acked);
+            drop(ltr);
+            count
         };
-        self.counters
-            .ltr_acked
-            .fetch_add(u64::try_from(acked.len()).unwrap_or(u64::MAX), Ordering::Relaxed);
-        self.pending.lock().acked.extend(acked);
+        self.counters.ltr_acked.fetch_add(acked, Ordering::Relaxed);
         let sent_total = self.packetizer.lock().datagrams_sent();
         let previous = self.sent_at_report.swap(sent_total, Ordering::Relaxed);
         let sent = u32::try_from(sent_total.saturating_sub(previous)).unwrap_or(u32::MAX);
@@ -2372,7 +2401,7 @@ impl<P: Platform> Pipeline<P> {
         let t_encoder = Instant::now();
         let encoder = build_encoder(&Arc::downgrade(&shared), encoder_config)?;
         let encoder_built = t_encoder.elapsed();
-        *shared.encoder.write() = Some(encoder);
+        shared.install(encoder);
         let start = shared.rate.lock().target_bps();
         shared.apply_bitrate(start);
         shared.apply_cadence(start);
@@ -2752,8 +2781,7 @@ impl<P: Platform> Pipeline<P> {
     ) -> Result<(), ScreenError> {
         let weak = Arc::downgrade(&self.shared);
         let encoder = build_encoder(&weak, encoder_config)?;
-        *self.shared.encoder.write() = Some(encoder);
-        self.shared.rebuilt();
+        self.shared.install(encoder);
         let target = {
             let mut rate = self.shared.rate.lock();
             rate.set_max(encoder_config.bitrate_bps);
@@ -3729,17 +3757,17 @@ mod tests {
     fn a_too_large_datagram_costs_itself_and_a_closed_link_takes_nothing() {
         let (shared, wire) = shared_for_frames();
         let batch = [Bytes::from_static(b"a"), Bytes::from_static(b"bb"), Bytes::from_static(b"c")];
-        assert_eq!(shared.send(&batch), 3);
+        assert_eq!(shared.send(&batch), Taken { datagrams: 3, bytes: 4 });
         assert_eq!(wire.calls.load(Ordering::Relaxed), 1, "one call for the whole batch");
         assert_eq!(wire.drain(), batch);
 
         wire.max.store(1, Ordering::Relaxed);
-        assert_eq!(shared.send(&batch), 2, "the two that fit");
+        assert_eq!(shared.send(&batch), Taken { datagrams: 2, bytes: 2 }, "the two that fit");
         assert_eq!(wire.drain(), [Bytes::from_static(b"a"), Bytes::from_static(b"c")]);
         assert!(!shared.sink.is_closed(), "the stream goes on");
 
         wire.closed.store(true, Ordering::Relaxed);
-        assert_eq!(shared.send(&batch), 0);
+        assert_eq!(shared.send(&batch), Taken::default());
         assert!(wire.drain().is_empty());
         let stats = shared.stats();
         assert_eq!((stats.datagrams, stats.queue_full), (5, 4));
@@ -4219,6 +4247,134 @@ mod tests {
             }
         }
         (audio_wait, last_video)
+    }
+
+    /// A platform whose video encoder records what each of its sessions was handed.
+    enum Recording {}
+
+    impl Platform for Recording {
+        type Audio = slopty_codec::Opus;
+        type Capture = slopty_capture::ScreenCaptureKit;
+        type Input = slopty_input::CgEvents;
+        type Video = Recorder;
+    }
+
+    /// Frames handed to an encoder: the session, and whether a keyframe was forced.
+    type Log = Arc<Mutex<Vec<(u64, bool)>>>;
+
+    struct Recorder {
+        session: u64,
+        log: Log,
+    }
+
+    impl slopty_codec::VideoEncoder for Recorder {
+        type Image = slopty_codec::PixelBuffer;
+
+        fn new(
+            _config: EncoderConfig,
+            _sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, CodecError> {
+            Ok(Self { session: 0, log: Log::default() })
+        }
+
+        fn encode(
+            &self,
+            _image: &Self::Image,
+            _pts_us: u64,
+            options: &FrameOptions,
+        ) -> Result<(), CodecError> {
+            self.log.lock().push((self.session, options.force_keyframe));
+            Ok(())
+        }
+
+        fn set_bitrate(&self, _bps: u32) -> Result<(), CodecError> {
+            Ok(())
+        }
+
+        fn set_frame_rate(&self, _fps: u16) -> Result<(), CodecError> {
+            Ok(())
+        }
+    }
+
+    /// A rebuild swaps the encoder and resets what described the old session in one step. An
+    /// encode caught between the two reached the new session with the old one's requests (no
+    /// keyframe), and the rebuild's keyframe then went out as a second IDR. Here the rebuild is
+    /// held where it resets the book, and an encode is tried beside it.
+    #[test]
+    fn a_rebuild_is_one_step_for_an_encode_beside_it() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let log = Log::default();
+        shared.install(Recorder { session: 1, log: Arc::clone(&log) });
+        shared.pending.lock().keyframe = false;
+        *shared.held.lock() = Some(a_frame());
+        shared.owed.store(true, Ordering::Relaxed);
+
+        let book = shared.ltr.lock();
+        let rebuild = std::thread::spawn({
+            let shared = Arc::clone(&shared);
+            let log = Arc::clone(&log);
+            move || shared.install(Recorder { session: 2, log })
+        });
+        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+        let swapping = || {
+            shared.encoder.is_locked_exclusive()
+                || shared
+                    .encoder
+                    .try_read()
+                    .is_some_and(|e| e.as_ref().is_some_and(|e| e.session == 2))
+        };
+        while !swapping() {
+            assert!(Instant::now() < deadline, "the rebuild never started");
+            std::thread::yield_now();
+        }
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let encode = std::thread::spawn({
+            let shared = Arc::clone(&shared);
+            move || {
+                let held = shared.held.lock();
+                let attempt = shared.try_encode(held.as_ref(), false, 1_000_000);
+                drop(held);
+                let _sent = done_tx.send(attempt);
+            }
+        });
+        // Finished while the rebuild is held: it ran between the swap and the reset.
+        let between = done.recv_timeout(Duration::from_millis(200)).is_ok();
+        drop(book);
+        rebuild.join().unwrap();
+        encode.join().unwrap();
+        assert!(!between, "an encode ran between the swap and the reset: {:?}", log.lock());
+        assert_eq!(
+            *log.lock(),
+            vec![(2, true)],
+            "the new session starts on the rebuild's keyframe"
+        );
+        assert!(!shared.pending.lock().keyframe, "and no second one is pending");
+    }
+
+    /// A datagram the transport refused never left, so it says nothing of how fast the link
+    /// drains: the lane expects QUIC to hold only what it took. Counting the refused ones read
+    /// as bytes drained at the next look and widened the slice.
+    #[test]
+    fn a_refused_datagram_is_not_counted_as_sent() {
+        let (shared, wire) = shared_for_frames();
+        wire.max.store(500, Ordering::Relaxed);
+        let small = Bytes::from(vec![1_u8; 400]);
+        let large = Bytes::from(vec![2_u8; 1_000]);
+        // Straight to QUIC, no audio flowing.
+        shared.send_video(&[small.clone(), large.clone()], 1_000);
+        assert_eq!(shared.lane.lock().expected, 400, "the one that fit");
+        // Through the lane.
+        let mut lane = shared.lane.lock();
+        lane.expected = 0;
+        lane.rate = 100_000_000;
+        lane.push(&[small.clone(), large, small]);
+        shared.pump(&mut lane, 1_000);
+        assert!(lane.queue.is_empty(), "the refused one is not retried");
+        assert_eq!(lane.expected, 800, "the two that fit");
+        drop(lane);
+        assert_eq!(wire.drain().len(), 3);
     }
 
     /// The number behind the lane. On a 20 Mbit/s link (2.5 kB a millisecond) a 130 kB keyframe

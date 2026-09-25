@@ -1032,3 +1032,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   warning. Every stream is 8-bit HEVC Main, 420f, BT.709. HDR comes back only with a pipeline that
   shows it (a 10-bit capture, an EDR layer on the client, tagged primaries and transfer), and
   that change adds its own fields.
+- ✅ **A refresh that fails to decode is answered with a keyframe** (2026-09-25, no protocol
+  change). The client answered a decode failure at or after the last restart with an LTR
+  refresh unless the session was gone. When the failed frame was that refresh, the next one
+  predicts from the same references and can fail the same way, so the stream could ask
+  forever. Each parked frame now records whether it restarts decoding (a keyframe or an LTR
+  refresh), and the folded failure keeps that. `refresh_for` asks for a keyframe when a
+  restart frame was among the failures, and a synchronous `decode` error on a restart frame
+  does the same. Test: `a_failed_refresh_asks_for_a_keyframe`.
+- ✅ **A rebuild swaps the encoder and resets its session state in one step** (2026-09-25).
+  `reconfigure` installed the new encoder and only then reset the LTR book and the pending
+  requests. A frame encoded in between reached the new session without the rebuild's keyframe,
+  so that keyframe went out later as a second IDR. The new session's tokens also landed in the
+  old book, the reset wiped them, and the worker rejected the client's first acknowledgements.
+  `Shared::install` now swaps and calls `rebuilt` under the encoder's write lock, and
+  `try_encode` holds the read lock from reading the requests to submitting the frame. The swap
+  drops the old session, and its invalidation ends its callbacks before the reset. A report
+  queues acknowledged tokens while it still holds the book that vouched for them, and
+  `rebuilt` clears the queue under the same lock, so a report lands wholly before or after a
+  rebuild. The held capture goes after the write lock is released, because an encode takes
+  that lock before the encoder's. Test: `a_rebuild_is_one_step_for_an_encode_beside_it`, which
+  uses a recording encoder on a test platform, holds the rebuild at the book and tries an
+  encode beside it. The report ordering holds by construction; no test can force that
+  interleaving.
+- ✅ **The audio lane counts only what QUIC took** (2026-09-25). `Lane::take` added every
+  datagram it handed out to the bytes QUIC should hold, before `send`. A datagram the transport
+  refused (too large for the path, or a closed connection) then read as drained at the next look
+  and raised the rate the slice is sized from. `Shared::send` now returns what the transport
+  took (`Taken`), and both the lane and the straight path add only those bytes. Test:
+  `a_refused_datagram_is_not_counted_as_sent`.

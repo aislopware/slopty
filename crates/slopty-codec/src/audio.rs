@@ -443,45 +443,80 @@ struct Timed {
     stall: bool,
 }
 
-/// Samples waiting to be played, and the jitter buffer policy that decides how many.
+/// The jitter buffer policy: how deep the ring should be, from how late packets run.
 ///
 /// Each packet's delay is its arrival minus its place on the worker's 20 ms clock; how late it
 /// ran is that delay minus the smallest one over the last [`JITTER_WINDOW_US`]. The depth an
 /// on-time packet should find is the 95th percentile of that lateness plus one device buffer,
-/// held between [`TARGET_MIN_US`] and [`TARGET_MAX_US`]. The ring starts, and restarts after
-/// running dry, only once it holds that much.
+/// held between [`TARGET_MIN_US`] and [`TARGET_MAX_US`].
 ///
-/// The depth an arrival reveals is the ring's level before the packet goes in plus how late
-/// the packet ran: a late packet finds the ring lower by exactly its lateness, so a clump of
-/// late packets reads the same depth as an on-time stream and costs nothing. A depth that
-/// stays off the target is corrected one [`SLICE_FRAMES`] slice per packet, dropped or played
-/// twice with a [`FADE_FRAMES`] crossfade, which is how a worker clock running ±100 ppm off
-/// the device's is absorbed. A depth past the target by more than [`BURST_US`] is the backlog
-/// a stall releases, and goes at once, crossfaded, rather than as lasting delay.
+/// Only the thread that decodes packets takes it, never the device's callback, so the sort
+/// behind the percentile never holds up a buffer (see [`Ring`]).
 #[derive(Debug)]
-struct Playout {
-    samples: VecDeque<f32>,
-    /// Playing from the ring, as against filling it up to the target.
-    playing: bool,
-    /// Cutting a stall's backlog (see [`Playout::converge`]).
-    cutting: bool,
+struct Jitter {
     /// The first arrival, which the delays are measured from.
     epoch: Option<Instant>,
     /// Timing of the packets in the window, oldest first.
     window: VecDeque<Timed>,
+    /// When the last packet later than any depth could cover arrived, microseconds.
+    released_at: Option<i64>,
+    target_us: i64,
+    lateness_us: i64,
+    /// The window's lateness, sorted for the percentile; kept to be refilled for each packet.
+    late: Vec<i64>,
+}
+
+/// What the ring saw since the last packet, which the next packet's timing reads.
+#[derive(Clone, Copy, Debug, Default)]
+struct Since {
+    /// The ring ran dry under sound: this packet is the late one.
+    starved: bool,
+    /// The ring ran dry after silence, or the stream was muted: the host's gate may have
+    /// closed meanwhile, and its sequence clock stood still, so this packet starts a new
+    /// estimate.
+    gated: bool,
+    /// The last packet had nothing above the host's silence floor.
+    quiet: bool,
+}
+
+/// How a packet ran, for the ring to steer by.
+#[derive(Clone, Copy, Debug)]
+struct Timing {
+    /// How late it ran against the window's earliest.
+    lateness: i64,
+    /// The depth an on-time packet should find.
+    target_us: i64,
+    /// The estimate started over with this packet.
+    rebased: bool,
+}
+
+/// Samples waiting to be played, shared with the device's callback.
+///
+/// The ring starts, and restarts after running dry, only once it holds the target. The depth
+/// an arrival reveals is the ring's level before the packet goes in plus how late the packet
+/// ran: a late packet finds the ring lower by exactly its lateness, so a clump of late packets
+/// reads the same depth as an on-time stream and costs nothing. A depth that stays off the
+/// target is corrected one [`SLICE_FRAMES`] slice per packet, dropped or played twice with a
+/// [`FADE_FRAMES`] crossfade, which is how a worker clock running ±100 ppm off the device's is
+/// absorbed. A depth past the target by more than [`BURST_US`] is the backlog a stall
+/// releases, and goes at once, crossfaded, rather than as lasting delay.
+///
+/// Nothing done under its lock allocates beyond the ring's own growth, or sorts.
+#[derive(Debug, Default)]
+struct Ring {
+    samples: VecDeque<f32>,
+    /// Playing from the ring, as against filling it up to the target.
+    playing: bool,
+    /// Cutting a stall's backlog (see [`Ring::converge`]).
+    cutting: bool,
     /// Depths the recent arrivals read, microseconds, newest last.
     recent: VecDeque<i64>,
     /// The last packet pushed had a sample above the host's silence floor.
     last_loud: bool,
     /// The ring ran dry under sound: the next packet is the late one.
     starved: bool,
-    /// The ring ran dry after silence: the host's gate closed, and its sequence clock stood
-    /// still meanwhile, so the next packet starts a new estimate.
+    /// The ring ran dry after silence, or the stream was muted (see [`Since::gated`]).
     gated: bool,
-    /// When the last packet later than any depth could cover arrived, microseconds.
-    released_at: Option<i64>,
-    target_us: i64,
-    jitter_us: i64,
     /// The last frame the device was given, and how many frames of the ramp from it down to
     /// silence are still to play: a ring that runs dry at a buffer's edge has nothing left to
     /// fade, so the fade continues from what was last heard.
@@ -556,50 +591,39 @@ fn fade_in_weight(k: usize) -> f32 {
     (k as f32 + 1.0) / (FADE_FRAMES as f32 + 1.0)
 }
 
-impl Default for Playout {
+impl Default for Jitter {
     fn default() -> Self {
         Self {
-            samples: VecDeque::new(),
-            playing: false,
-            cutting: false,
             epoch: None,
             window: VecDeque::new(),
-            recent: VecDeque::new(),
-            last_loud: false,
-            starved: false,
-            gated: false,
             released_at: None,
             target_us: TARGET_DEFAULT_US,
-            jitter_us: 0,
-            tail: [0.0; 2],
-            ramp: 0,
-            underruns: 0,
-            trimmed_frames: 0,
-            stretched_frames: 0,
+            lateness_us: 0,
+            late: Vec::new(),
         }
     }
 }
 
-impl Playout {
-    /// Microseconds of audio in the ring.
-    fn level_us(&self) -> i64 {
-        frames_us(self.samples.len().checked_div(CHANNELS as usize).unwrap_or(0))
-    }
-
+impl Jitter {
     fn min_delay(&self) -> Option<i64> {
         self.window.iter().map(|t| t.delay_us).min()
     }
 
-    /// Put an arrival into the estimate; how late it ran.
-    fn time(&mut self, arrival: Arrival) -> i64 {
+    /// Put an arrival into the estimate.
+    fn time(&mut self, arrival: Arrival, since: Since) -> Timing {
         let epoch = *self.epoch.get_or_insert(arrival.at);
         let at_us = i64::try_from(arrival.at.saturating_duration_since(epoch).as_micros())
             .unwrap_or(i64::MAX);
         let delay_us = at_us.saturating_sub(i64::from(arrival.seq).saturating_mul(PACKET_US));
-        let jumped = self.min_delay().is_some_and(|min| delay_us.saturating_sub(min) > REBASE_US);
-        if std::mem::take(&mut self.gated) || jumped {
+        // Later than a packet after a quiet one is the gate reopening even when the ring did not
+        // run dry to say so: it held more than the gap, or the stream was muted.
+        let jumped = self.min_delay().is_some_and(|min| {
+            let late = delay_us.saturating_sub(min);
+            late > REBASE_US || (since.quiet && late > PACKET_US)
+        });
+        let rebased = since.gated || jumped;
+        if rebased {
             self.window.clear();
-            self.recent.clear();
         }
         let horizon = at_us.saturating_sub(JITTER_WINDOW_US);
         while self.window.front().is_some_and(|t| t.at_us < horizon) {
@@ -611,22 +635,20 @@ impl Playout {
             self.released_at = Some(at_us);
         }
         let stall = self.released_at.is_some_and(|t| at_us.saturating_sub(t) <= DEVICE_US);
-        let starved = std::mem::take(&mut self.starved);
-        self.window.push_back(Timed { at_us, delay_us, starved, stall });
+        self.window.push_back(Timed { at_us, delay_us, starved: since.starved, stall });
         self.retarget(at_us, min);
-        lateness
+        Timing { lateness, target_us: self.target_us, rebased }
     }
 
     /// The target from the window: the 95th percentile of lateness, and never less than a
     /// lateness that starved the ring in it, since that one is known not to be noise.
     fn retarget(&mut self, now_us: i64, min: i64) {
-        let mut late: Vec<i64> = self
-            .window
-            .iter()
-            .filter(|t| !t.stall)
-            .map(|t| t.delay_us.saturating_sub(min))
-            .collect();
-        late.sort_unstable();
+        self.late.clear();
+        self.late.extend(
+            self.window.iter().filter(|t| !t.stall).map(|t| t.delay_us.saturating_sub(min)),
+        );
+        self.late.sort_unstable();
+        let late = &self.late;
         let p95 = late.get(late.len().saturating_mul(95) / 100).or_else(|| late.last()).copied();
         let held = self
             .window
@@ -634,23 +656,55 @@ impl Playout {
             .filter(|t| t.starved && !t.stall)
             .map(|t| t.delay_us.saturating_sub(min))
             .max();
-        self.jitter_us = p95.unwrap_or(0).max(held.unwrap_or(0));
-        let target = self.jitter_us.saturating_add(DEVICE_US).clamp(TARGET_MIN_US, TARGET_MAX_US);
+        self.lateness_us = p95.unwrap_or(0).max(held.unwrap_or(0));
+        let target = self.lateness_us.saturating_add(DEVICE_US).clamp(TARGET_MIN_US, TARGET_MAX_US);
         let span = self.window.front().map_or(0, |t| now_us.saturating_sub(t.at_us));
         self.target_us =
             if span < ESTIMATE_AFTER_US { target.max(TARGET_DEFAULT_US) } else { target };
     }
 
+    /// Time one decoded packet, then queue it. The ring is locked to read what it saw and again
+    /// to queue: the estimate runs between, outside the lock the device's callback takes.
+    fn push(&mut self, ring: &Mutex<Ring>, pcm: &[f32], arrival: Arrival) {
+        let since = ring.lock().since();
+        let timing = self.time(arrival, since);
+        ring.lock().push(pcm, timing);
+    }
+
+    /// A packet that is timed but not played (the stream is muted).
+    fn hold(&mut self, ring: &Mutex<Ring>, arrival: Arrival) {
+        let since = ring.lock().since();
+        let _timing = self.time(arrival, since);
+        ring.lock().hold();
+    }
+}
+
+impl Ring {
+    /// Microseconds of audio in the ring.
+    fn level_us(&self) -> i64 {
+        frames_us(self.samples.len().checked_div(CHANNELS as usize).unwrap_or(0))
+    }
+
+    /// Hand what the ring saw since the last packet to the next one's timing.
+    const fn since(&mut self) -> Since {
+        let since = Since { starved: self.starved, gated: self.gated, quiet: !self.last_loud };
+        self.starved = false;
+        self.gated = false;
+        since
+    }
+
     /// Queue one decoded packet and steer the depth.
-    fn push(&mut self, pcm: &[f32], arrival: Arrival) {
-        let lateness = self.time(arrival);
+    fn push(&mut self, pcm: &[f32], timing: Timing) {
+        if timing.rebased {
+            self.recent.clear();
+        }
         let before = self.level_us();
         self.samples.extend(pcm);
         self.last_loud = pcm.iter().any(|s| s.abs() > LOUD);
         if self.playing {
-            self.converge(before.saturating_add(lateness));
-        } else if self.level_us().saturating_add(lateness).saturating_sub(PACKET_US)
-            >= self.target_us
+            self.converge(before.saturating_add(timing.lateness), timing.target_us);
+        } else if self.level_us().saturating_add(timing.lateness).saturating_sub(PACKET_US)
+            >= timing.target_us
         {
             // Full enough that the next packet, on time, finds the target.
             self.playing = true;
@@ -664,18 +718,22 @@ impl Playout {
         self.samples.extend(pcm);
     }
 
-    /// A packet that is timed but not played (the stream is muted): the ring empties, and
-    /// fills again to the target when sound is wanted.
-    fn hold(&mut self, arrival: Arrival) {
-        let _lateness = self.time(arrival);
+    /// The stream is muted: the ring empties, ramping down from what was last heard, and fills
+    /// again to the target when sound is wanted. The host's gate may close meanwhile with
+    /// nothing running dry to show it, so the next packet starts a new estimate.
+    fn hold(&mut self) {
+        if self.playing {
+            self.ramp = FADE_FRAMES;
+        }
         self.samples.clear();
         self.playing = false;
         self.last_loud = false;
+        self.gated = true;
     }
 
     /// Move the depth towards the target: a stall's backlog at once, a drift one slice at a time.
-    fn converge(&mut self, depth: i64) {
-        let excess = depth.saturating_sub(self.target_us);
+    fn converge(&mut self, depth: i64, target_us: i64) {
+        let excess = depth.saturating_sub(target_us);
         // A backlog arrives packet by packet and the ring holds only so much of it at a time, so
         // the cut goes on with each packet until the depth is back at the target.
         self.cutting = excess > BURST_US || (self.cutting && excess > DEADBAND_US);
@@ -701,13 +759,12 @@ impl Playout {
         let slice = frames_us(SLICE_FRAMES);
         let spare =
             self.level_us().saturating_sub(KEEP_US) >= slice.saturating_add(frames_us(FADE_FRAMES));
-        let shift = if mean.saturating_sub(self.target_us) > DEADBAND_US
+        let shift = if mean.saturating_sub(target_us) > DEADBAND_US
             && spare
             && self.drop_frames(SLICE_FRAMES)
         {
             slice.saturating_neg()
-        } else if self.target_us.saturating_sub(mean) > DEADBAND_US
-            && self.stretch_frames(SLICE_FRAMES)
+        } else if target_us.saturating_sub(mean) > DEADBAND_US && self.stretch_frames(SLICE_FRAMES)
         {
             slice
         } else {
@@ -739,25 +796,27 @@ impl Playout {
     }
 
     /// Play `n` frames at the front twice: after them, crossfade back to the start of the ring.
+    /// Done in place, in room opened at the front; `n` is at least a fade long.
     fn stretch_frames(&mut self, n: usize) -> bool {
         let channels = CHANNELS as usize;
         let (span, fade) = (n.saturating_mul(channels), FADE_FRAMES.saturating_mul(channels));
-        if self.samples.len() < span.saturating_add(fade) {
+        if self.samples.len() < span.saturating_add(fade) || span < fade {
             return false;
         }
+        self.samples.resize(self.samples.len().saturating_add(span), 0.0);
+        self.samples.rotate_right(span);
+        // The old ring now starts at `span`: its first `span` samples are copied into the room,
+        // then its first `fade` are crossfaded, in place, into the ones a span later. What
+        // follows the crossfade is the old ring from the end of the fade, already in place.
         let buf = self.samples.make_contiguous();
-        let mut front: Vec<f32> = Vec::with_capacity(span.saturating_add(fade));
-        front.extend(buf.iter().take(span));
+        buf.copy_within(span..span.saturating_mul(2), 0);
         for k in 0..fade {
             let w = fade_in_weight(k.checked_div(channels).unwrap_or(0));
-            let outgoing = buf.get(span.saturating_add(k)).copied().unwrap_or(0.0);
-            let incoming = buf.get(k).copied().unwrap_or(0.0);
-            front.push(incoming.mul_add(w, outgoing * (1.0 - w)));
-        }
-        // What follows the crossfade is the ring from the end of the fade's incoming side.
-        self.samples.drain(..fade);
-        for &sample in front.iter().rev() {
-            self.samples.push_front(sample);
+            let outgoing =
+                buf.get(span.saturating_mul(2).saturating_add(k)).copied().unwrap_or(0.0);
+            if let Some(incoming) = buf.get_mut(span.saturating_add(k)) {
+                *incoming = incoming.mul_add(w, outgoing * (1.0 - w));
+            }
         }
         self.stretched_frames = self.stretched_frames.saturating_add(n as u64);
         true
@@ -808,19 +867,20 @@ impl Playout {
             }
         }
     }
+}
 
-    fn stats(&self) -> PlayoutStats {
-        let frames = |n: u64| {
-            let us = n.saturating_mul(1_000_000).checked_div(u64::from(SAMPLE_RATE));
-            Duration::from_micros(us.unwrap_or(0))
-        };
-        PlayoutStats {
-            underruns: self.underruns,
-            trimmed: frames(self.trimmed_frames),
-            stretched: frames(self.stretched_frames),
-            target: duration_us(self.target_us),
-            jitter: duration_us(self.jitter_us),
-        }
+/// What playback has done, from the ring's counts and the estimate's depth.
+fn playout_stats(ring: &Ring, jitter: &Jitter) -> PlayoutStats {
+    let frames = |n: u64| {
+        let us = n.saturating_mul(1_000_000).checked_div(u64::from(SAMPLE_RATE));
+        Duration::from_micros(us.unwrap_or(0))
+    };
+    PlayoutStats {
+        underruns: ring.underruns,
+        trimmed: frames(ring.trimmed_frames),
+        stretched: frames(ring.stretched_frames),
+        target: duration_us(jitter.target_us),
+        jitter: duration_us(jitter.lateness_us),
     }
 }
 
@@ -840,7 +900,10 @@ const QUEUE_BUFFERS: usize = 3;
 /// An `AudioQueue` playing interleaved stereo float at 48 kHz from a ring the decoder fills.
 pub struct Player {
     queue: AudioQueueRef,
-    ring: Arc<Mutex<Playout>>,
+    ring: Arc<Mutex<Ring>>,
+    /// Taken by whoever pushes packets, never by the callback. Boxed so a player stays small
+    /// beside the other states of a stream's audio.
+    jitter: Box<Mutex<Jitter>>,
 }
 
 impl std::fmt::Debug for Player {
@@ -852,15 +915,15 @@ impl std::fmt::Debug for Player {
 // SAFETY: AudioQueue calls are thread-safe; the ring is behind a mutex.
 unsafe impl Send for Player {}
 
-/// `AudioQueueOutputCallback`: refill a buffer from the ring (see [`Playout::pull`]).
+/// `AudioQueueOutputCallback`: refill a buffer from the ring (see [`Ring::pull`]).
 unsafe extern "C-unwind" fn refill(
     user: *mut c_void,
     queue: AudioQueueRef,
     buffer: AudioQueueBufferRef,
 ) {
-    // SAFETY: `user` is the `Arc<Mutex<Playout>>` leaked into the queue at creation and reclaimed
+    // SAFETY: `user` is the `Arc<Mutex<Ring>>` leaked into the queue at creation and reclaimed
     // in `Drop` only after `AudioQueueDispose` returned, which ends all callbacks.
-    let ring = unsafe { &*user.cast::<Mutex<Playout>>() };
+    let ring = unsafe { &*user.cast::<Mutex<Ring>>() };
     // SAFETY: the queue hands a buffer it allocated; the struct is valid until we re-enqueue it.
     let Some(buf) = (unsafe { buffer.as_mut() }) else { return };
     let capacity = usize::try_from(buf.mAudioDataBytesCapacity).unwrap_or(0) / SAMPLE_BYTES;
@@ -877,7 +940,7 @@ unsafe extern "C-unwind" fn refill(
 impl Player {
     /// Create and start the queue (it plays silence until samples arrive).
     pub fn new() -> Result<Self, CodecError> {
-        let ring: Arc<Mutex<Playout>> = Arc::default();
+        let ring: Arc<Mutex<Ring>> = Arc::default();
         let user = Arc::into_raw(Arc::clone(&ring)).cast_mut().cast::<c_void>();
         let mut format = pcm_format();
         let mut queue: AudioQueueRef = ptr::null_mut();
@@ -896,10 +959,10 @@ impl Player {
         };
         if let Err(e) = check("AudioQueueNewOutput", status) {
             // SAFETY: the queue never took the pointer; reclaim the clone we leaked for it.
-            drop(unsafe { Arc::from_raw(user.cast_const().cast::<Mutex<Playout>>()) });
+            drop(unsafe { Arc::from_raw(user.cast_const().cast::<Mutex<Ring>>()) });
             return Err(e);
         }
-        let player = Self { queue, ring };
+        let player = Self { queue, ring, jitter: Box::default() };
         let bytes = u32_of(BUFFER_BYTES);
         for _ in 0..QUEUE_BUFFERS {
             let mut buffer: AudioQueueBufferRef = ptr::null_mut();
@@ -920,7 +983,7 @@ impl Player {
 
     /// Queue one decoded packet, timed by its arrival (see [`Arrival`]).
     pub fn push(&self, samples: &[f32], arrival: Arrival) {
-        self.ring.lock().push(samples, arrival);
+        self.jitter.lock().push(&self.ring, samples, arrival);
     }
 
     /// Queue stand-ins for lost packets (see [`Conceal`]); they take the gap's time.
@@ -931,13 +994,14 @@ impl Player {
     /// A packet that arrived but is not to be heard (the stream is muted): its timing still
     /// counts, and what is queued goes.
     pub fn hold(&self, arrival: Arrival) {
-        self.ring.lock().hold(arrival);
+        self.jitter.lock().hold(&self.ring, arrival);
     }
 
     /// What playback has done so far.
     #[must_use]
     pub fn stats(&self) -> PlayoutStats {
-        self.ring.lock().stats()
+        let jitter = self.jitter.lock();
+        playout_stats(&self.ring.lock(), &jitter)
     }
 
     /// Samples waiting to be played, both channels.
@@ -1050,6 +1114,31 @@ mod conceal_tests {
 mod latency_tests {
     use super::*;
 
+    /// The player's two halves, driven the way [`Player`] drives them.
+    #[derive(Default)]
+    struct Playout {
+        jitter: Jitter,
+        ring: Mutex<Ring>,
+    }
+
+    impl Playout {
+        fn push(&mut self, pcm: &[f32], arrival: Arrival) {
+            self.jitter.push(&self.ring, pcm, arrival);
+        }
+
+        fn hold(&mut self, arrival: Arrival) {
+            self.jitter.hold(&self.ring, arrival);
+        }
+
+        fn pull(&self, out: &mut [f32]) {
+            self.ring.lock().pull(out);
+        }
+
+        fn stats(&self) -> PlayoutStats {
+            playout_stats(&self.ring.lock(), &self.jitter)
+        }
+    }
+
     /// A 440 Hz tone at half scale, continuous across packets, so any step in the output larger
     /// than the tone's own is a join the playout made.
     fn tone(seq: u32) -> Vec<f32> {
@@ -1113,6 +1202,11 @@ mod latency_tests {
     /// 10 ms buffer every 10 ms of its own clock, until `end_us`. Driven through the same
     /// `push` and `pull` the player runs; the clocks are the trace's, so nothing sleeps.
     fn play(arrivals: &[(i64, u32)], end_us: i64) -> Run {
+        play_muted(arrivals, end_us, (0, 0))
+    }
+
+    /// [`play`], with the packets arriving in `muted` (from, to) held rather than played.
+    fn play_muted(arrivals: &[(i64, u32)], end_us: i64, muted: (i64, i64)) -> Run {
         let epoch = Instant::now();
         let mut playout = Playout::default();
         let mut run = Run::default();
@@ -1123,7 +1217,11 @@ mod latency_tests {
         while pull_at < end_us {
             while let Some(&&(at_us, seq)) = next.peek().filter(|&&&(at, _)| at <= pull_at) {
                 let at = epoch + Duration::from_micros(u64::try_from(at_us).unwrap());
-                playout.push(&tone(seq), Arrival { seq, at });
+                if (muted.0..muted.1).contains(&at_us) {
+                    playout.hold(Arrival { seq, at });
+                } else {
+                    playout.push(&tone(seq), Arrival { seq, at });
+                }
                 next.next();
             }
             playout.pull(&mut out);
@@ -1131,7 +1229,7 @@ mod latency_tests {
                 run.max_step = run.max_step.max((frame[0] - last).abs());
                 last = frame[0];
             }
-            let queued = playout.samples.len() + QUEUE_BUFFERS * BUFFER_SAMPLES;
+            let queued = playout.ring.lock().samples.len() + QUEUE_BUFFERS * BUFFER_SAMPLES;
             let ms = i64::try_from(queued * 1000 / samples_in_ms(1000)).unwrap();
             run.heard.push((pull_at, ms));
             pull_at += DEVICE_US;
@@ -1242,6 +1340,48 @@ mod latency_tests {
         }
     }
 
+    /// Muted, the host's gate closes for 400 ms and its sequence clock stands still; sound comes
+    /// back after the unmute. Nothing ran dry to flag the gate, so without a fresh estimate
+    /// every packet after it reads 400 ms late and the ring is cut to its floor on each one.
+    #[test]
+    fn a_gate_while_muted_leaves_no_lasting_cuts() {
+        let gap_us = 400_000;
+        let arrivals: Vec<(i64, u32)> = trace(6, 0, 1_000, &[])
+            .into_iter()
+            .map(|(at, seq)| if seq > 125 { (at + gap_us, seq) } else { (at, seq) })
+            .collect();
+        let end_us = 6_000_000 + gap_us;
+        let run = play_muted(&arrivals, end_us, (2_000_000, 3_000_000));
+        let settled = run.mean_heard(4_000_000, end_us);
+        eprintln!(
+            "gate while muted: {settled} ms mean from 4 s; {:?}, max step {:.4}",
+            run.stats, run.max_step
+        );
+        assert_eq!(run.stats.underruns, 0, "{:?}", run.stats);
+        assert!(run.stats.trimmed <= Duration::from_millis(50), "no lasting cuts: {:?}", run.stats);
+        assert!(settled <= 70, "{settled} ms");
+        assert!(run.max_step < 2.0 * tone_step(), "no click at the mute: {}", run.max_step);
+    }
+
+    /// A packet late by more than a packet after a quiet one is the host's gate reopening,
+    /// even when the ring never ran dry to say so: the estimate starts over.
+    #[test]
+    fn a_late_packet_after_silence_starts_a_new_estimate() {
+        let epoch = Instant::now();
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        let mut playout = Playout::default();
+        let silent = vec![0.0_f32; PACKET_SAMPLES];
+        for seq in 1..=20_u32 {
+            playout.push(&silent, Arrival { seq, at: at(u64::from(seq) * 20) });
+        }
+        playout.push(&tone(21), Arrival { seq: 21, at: at(21 * 20 + 60) });
+        assert_eq!(playout.jitter.window.len(), 1, "a fresh estimate");
+        // After sound the same lateness is lateness.
+        playout.push(&tone(22), Arrival { seq: 22, at: at(22 * 20 + 60) });
+        playout.push(&tone(23), Arrival { seq: 23, at: at(23 * 20 + 120) });
+        assert_eq!(playout.jitter.window.len(), 3, "kept");
+    }
+
     /// The ring runs dry after silence: that is the host's gate closing, not an underrun, and
     /// the next sound, whose sequence clock stood still meanwhile, starts a fresh estimate.
     #[test]
@@ -1262,7 +1402,7 @@ mod latency_tests {
         assert_eq!(playout.stats().underruns, 0, "{:?}", playout.stats());
         // Sound again 5 s later on the next sequence number: no 5 s of lateness in the estimate.
         playout.push(&tone(21), Arrival { seq: 21, at: at(5_420) });
-        assert_eq!(playout.window.len(), 1, "a fresh estimate");
+        assert_eq!(playout.jitter.window.len(), 1, "a fresh estimate");
         assert_eq!(playout.stats().jitter, Duration::ZERO);
     }
 }
