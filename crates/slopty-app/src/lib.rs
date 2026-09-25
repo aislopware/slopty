@@ -709,7 +709,7 @@ impl Workspace {
     /// it as loaded so the watcher sees nothing new.
     fn save_server(&mut self, server: Option<&slopty_net::HostAddr>) -> Result<(), String> {
         let text = settings::editable_text(&self.settings_path);
-        let text = slopty_settings::with_client_server(&text, server)?;
+        let text = slopty_settings::with_server(&text, slopty_settings::ServerOf::Client, server)?;
         let loaded = settings::save(&self.settings_path, &text)?;
         self.settings = loaded.settings;
         Ok(())

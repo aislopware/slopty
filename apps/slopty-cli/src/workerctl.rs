@@ -49,12 +49,12 @@ fn socket() -> PathBuf {
     std::env::temp_dir().join("slopty").join("worker.sock")
 }
 
-pub async fn run(cmd: WorkerCmd) -> Result<()> {
+pub async fn run(cmd: WorkerCmd, server: Option<&str>) -> Result<()> {
     let req = match cmd {
         WorkerCmd::Status => CtlRequest::Status,
         WorkerCmd::Doctor => CtlRequest::Doctor,
         WorkerCmd::Screens => CtlRequest::Screens,
-        WorkerCmd::Install(opts) => return service::install(&opts).await,
+        WorkerCmd::Install(opts) => return service::install(&opts, server).await,
         WorkerCmd::Uninstall { data_dir } => return service::uninstall(data_dir.as_deref()),
         WorkerCmd::Service { data_dir } => {
             service::status(data_dir.as_deref());

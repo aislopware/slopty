@@ -37,7 +37,7 @@ struct Cli {
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     /// The server, `host[:port]` (default: `$SLOPTY_SERVER`, else `server` under `[client]` in
-    /// settings.toml).
+    /// settings.toml). `worker install` saves it as the server this Mac registers with.
     #[arg(long, global = true)]
     server: Option<String>,
     /// Print the answer as JSON.
@@ -189,7 +189,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let data_dir = cli.data_dir.unwrap_or_else(client::data_dir);
     match cli.cmd {
-        Cmd::Worker { cmd } => workerctl::run(cmd).await,
+        Cmd::Worker { cmd } => workerctl::run(cmd, cli.server.as_deref()).await,
         Cmd::Hook { cmd: None } => {
             hook::relay().await;
             Ok(())

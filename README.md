@@ -36,11 +36,11 @@ Slopty.app/Contents/MacOS/slopty server install
 On every Mac that should be reachable (the server can be one of them):
 
 ```sh
-slopty=Slopty.app/Contents/MacOS/slopty
-$slopty settings init      # writes settings.toml; `settings path` prints where
-# set `server = "<server-host>"` under [worker] in that file, then:
-$slopty worker install
+Slopty.app/Contents/MacOS/slopty worker install --server <server-host>
 ```
+
+The address is saved as `server` under `[worker]` in `settings.toml`, which the worker reads
+each time it starts.
 
 The first window or desktop you stream asks for Screen Recording, and the first input you send
 asks for Accessibility, on that worker.

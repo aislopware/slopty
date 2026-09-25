@@ -174,9 +174,31 @@ fn launch_agent(
 /// The binaries an installation carries.
 const BINARIES: [&str; 3] = ["slopty-ptyd", "slopty-worker", "slopty"];
 
-/// Copy the binaries, write the plists, (re)bootstrap both agents, wait for the daemon and
-/// print a ticket.
-pub async fn install(opts: &InstallOpts) -> Result<()> {
+/// Save `server` as `[worker] server` in the settings file under `data_dir`, keeping the rest of
+/// the file. The daemon reads it when it starts, so this runs before the bootstrap.
+fn save_worker_server(data_dir: &Path, server: &str) -> Result<HostAddr> {
+    let addr = HostAddr::parse_with_port(server, SERVER_PORT)
+        .with_context(|| format!("server address {server:?}"))?;
+    let path = slopty_settings::path_in(data_dir);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            slopty_settings::Settings::default_file()
+        }
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    let text = slopty_settings::with_server(&text, slopty_settings::ServerOf::Worker, Some(&addr))
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
+    }
+    std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
+    Ok(addr)
+}
+
+/// Copy the binaries, write the plists, (re)bootstrap both agents and wait for the daemon.
+/// `server` (the global `--server`) is saved as the server the worker registers with.
+pub async fn install(opts: &InstallOpts, server: Option<&str>) -> Result<()> {
     let source = binaries_source(opts.bin_dir.as_deref())?;
     for bin in BINARIES {
         let p = source.join(bin);
@@ -185,6 +207,13 @@ pub async fn install(opts: &InstallOpts) -> Result<()> {
         }
     }
     let data_dir = opts.data_dir.clone().unwrap_or_else(crate::client::data_dir);
+    if let Some(server) = server {
+        save_worker_server(&data_dir, server)?;
+    }
+    let registers_with = slopty_settings::Settings::load(&slopty_settings::path_in(&data_dir))
+        .settings
+        .worker
+        .server;
     let layout = Layout::new(&data_dir);
     let bin_dir = layout.bin();
     for dir in [&layout.run, &layout.logs, &layout.agents, &bin_dir] {
@@ -215,10 +244,17 @@ pub async fn install(opts: &InstallOpts) -> Result<()> {
     loop {
         match workerctl::call_at(&socket, CtlRequest::Status).await {
             Ok(CtlReply::Status { name, .. }) => {
-                println!(
-                    "\n{name} is up; add it from a client with `slopty add <this Mac's tailnet \
-                     name or IP>` or the app's \"Add worker…\""
-                );
+                match &registers_with {
+                    Some(server) => println!(
+                        "\n{name} is up and registers with {server}; every client of that server \
+                         lists it"
+                    ),
+                    None => println!(
+                        "\n{name} is up on its own (pass --server to register it); add it from a \
+                         client with `slopty add <this Mac's tailnet name or IP>` or the app's \
+                         \"Add a worker\""
+                    ),
+                }
                 return Ok(());
             }
             Ok(other) => bail!("unexpected reply {other:?}"),
@@ -483,6 +519,26 @@ fn binaries_source(bin_dir: Option<&Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_saves_the_workers_server_and_keeps_the_rest_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = save_worker_server(dir.path(), "studio").unwrap();
+        assert_eq!((fresh.host(), fresh.port()), ("studio", SERVER_PORT));
+        let path = slopty_settings::path_in(dir.path());
+        let loaded = slopty_settings::Settings::load(&path).settings;
+        assert_eq!(loaded.worker.server, Some(fresh), "a missing file starts from the defaults");
+        assert_eq!(loaded.client.server, None, "the client's server is not the worker's");
+
+        std::fs::write(&path, "[font]\nmono_size = 15.0 # mine\n").unwrap();
+        save_worker_server(dir.path(), "100.64.0.9:7000").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("[font]\nmono_size = 15.0 # mine\n"), "{text}");
+        assert!(text.contains("[worker]\nserver = \"100.64.0.9:7000\""), "{text}");
+
+        save_worker_server(dir.path(), "a b").unwrap_err();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "a bad address writes nothing");
+    }
 
     #[test]
     fn plists_carry_the_paths_and_flags() {

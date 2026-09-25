@@ -42,8 +42,10 @@ pub fn configured(
     flag: Option<&str>,
     settings: &slopty_settings::Settings,
 ) -> Result<Option<HostAddr>> {
-    let text = flag.map_or(settings.worker.server.as_str(), str::trim);
-    if text.trim().is_empty() {
+    let Some(text) = flag.map(str::trim) else {
+        return Ok(settings.worker.server.clone());
+    };
+    if text.is_empty() {
         return Ok(None);
     }
     let addr = HostAddr::parse_with_port(text, slopty_net::endpoint::SERVER_PORT)
@@ -214,13 +216,15 @@ async fn write(mut tx: FramedSend<ToServer>, mut rx: mpsc::Receiver<ToServer>) {
 
 #[cfg(test)]
 mod tests {
+    use slopty_net::HostAddr;
+
     use super::configured;
 
     #[test]
     fn the_flag_wins_over_the_settings_and_the_port_defaults_to_the_servers() {
         let mut settings = slopty_settings::Settings::default();
         assert_eq!(configured(None, &settings).unwrap(), None, "on its own");
-        settings.worker.server = "studio".to_owned();
+        settings.worker.server = Some(HostAddr::parse_with_port("studio", 45560).unwrap());
         let from_file = configured(None, &settings).unwrap().unwrap();
         assert_eq!((from_file.host(), from_file.port()), ("studio", 45560));
         let flag = configured(Some("100.64.0.9:7000"), &settings).unwrap().unwrap();

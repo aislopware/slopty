@@ -282,9 +282,12 @@ pub struct WorkerSettings {
     /// Address ranges (`100.64.0.0/10`, `fd00::/8`, a bare address) whose peers may connect,
     /// replacing the default of the tailnet and private LANs. Loopback is always admitted.
     pub allow: Vec<String>,
-    /// The server to register with, `host[:port]` (port 45560 when absent); empty runs the
-    /// worker on its own. `--server` and `SLOPTY_SERVER` take precedence.
-    pub server: String,
+    /// The server to register with, `host[:port]` with
+    /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
+    /// empty string in the file) runs the worker on its own. `--server` and `SLOPTY_SERVER`
+    /// take precedence.
+    #[serde(with = "server_address")]
+    pub server: Option<HostAddr>,
 }
 
 /// `[client]`: how the app and the `slopty` CLI find the workers.
@@ -556,20 +559,46 @@ server = \"\"
     }
 }
 
-/// `text` (a `settings.toml`, the commented defaults when there is none) with
-/// `[client] server` set to `server`, every other line kept as it was, comments included.
+/// Which table's `server` key an edit sets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ServerOf {
+    /// `[client] server`: the directory the app and the CLI read.
+    Client,
+    /// `[worker] server`: the server this Mac registers with as a worker.
+    Worker,
+}
+
+impl ServerOf {
+    const fn table(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Worker => "worker",
+        }
+    }
+
+    const fn of(self, settings: &Settings) -> Option<&HostAddr> {
+        match self {
+            Self::Client => settings.client.server.as_ref(),
+            Self::Worker => settings.worker.server.as_ref(),
+        }
+    }
+}
+
+/// `text` (a `settings.toml`, the commented defaults when there is none) with `of`'s `server`
+/// set to `server`, every other line kept as it was, comments included.
 ///
 /// # Errors
 ///
 /// When `text` does not parse, since editing a broken file would bury the mistake.
-pub fn with_client_server(text: &str, server: Option<&HostAddr>) -> Result<String, String> {
+pub fn with_server(text: &str, of: ServerOf, server: Option<&HostAddr>) -> Result<String, String> {
     if let Some(error) = Settings::parse(text).error {
         return Err(error.to_string());
     }
+    let table = of.table();
     let value = toml_string(&server.map(ToString::to_string).unwrap_or_default());
     let line = format!("server = {value}");
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-    let header = lines.iter().position(|l| table_header(l) == Some("client"));
+    let header = lines.iter().position(|l| table_header(l) == Some(table));
     if let Some(at) = header {
         let end = lines
             .iter()
@@ -590,16 +619,14 @@ pub fn with_client_server(text: &str, server: Option<&HostAddr>) -> Result<Strin
         if lines.last().is_some_and(|l| !l.trim().is_empty()) {
             lines.push(String::new());
         }
-        lines.push("[client]".to_owned());
+        lines.push(format!("[{table}]"));
         lines.push(line);
     }
     let mut out = lines.join("\n");
     out.push('\n');
     match Settings::parse(&out) {
-        Loaded { error: None, settings, .. } if settings.client.server.as_ref() == server => {
-            Ok(out)
-        }
-        _ => Err("could not set [client] server in settings.toml".to_owned()),
+        Loaded { error: None, settings, .. } if of.of(&settings) == server => Ok(out),
+        _ => Err(format!("could not set [{table}] server in settings.toml")),
     }
 }
 
@@ -918,24 +945,30 @@ mod tests {
     #[test]
     fn setting_the_server_keeps_the_rest_of_the_file() {
         let studio = HostAddr::parse_with_port("studio", 45560).unwrap();
-        let text = with_client_server(&Settings::default_file(), Some(&studio)).unwrap();
+        let text = with_server(&Settings::default_file(), ServerOf::Client, Some(&studio)).unwrap();
         assert!(text.contains("server = \"studio:45560\""), "{text}");
         assert!(text.contains("# The server whose directory"), "comments stay");
         let loaded = Settings::parse(&text);
         assert_eq!(loaded.settings.client.server.as_ref(), Some(&studio));
-        assert_eq!(loaded.settings.worker.server, "", "the worker's key is another table's");
+        assert_eq!(loaded.settings.worker.server, None, "the worker's key is another table's");
 
         let custom = "[font]\nmono_size = 15.0 # mine\n";
-        let set = with_client_server(custom, Some(&studio)).unwrap();
+        let set = with_server(custom, ServerOf::Client, Some(&studio)).unwrap();
         assert_eq!(set, "[font]\nmono_size = 15.0 # mine\n\n[client]\nserver = \"studio:45560\"\n");
-        let cleared = with_client_server(&set, None).unwrap();
+        let cleared = with_server(&set, ServerOf::Client, None).unwrap();
         assert!(cleared.ends_with("[client]\nserver = \"\"\n"), "{cleared}");
 
         let keyless = "[client]\n[font]\nmono_size = 15.0\n";
-        let set = with_client_server(keyless, Some(&studio)).unwrap();
+        let set = with_server(keyless, ServerOf::Client, Some(&studio)).unwrap();
         assert!(set.starts_with("[client]\nserver = \"studio:45560\"\n[font]"), "{set}");
 
-        with_client_server("[font\n", Some(&studio)).unwrap_err();
+        with_server("[font\n", ServerOf::Client, Some(&studio)).unwrap_err();
+
+        let worker =
+            with_server(&Settings::default_file(), ServerOf::Worker, Some(&studio)).unwrap();
+        let loaded = Settings::parse(&worker);
+        assert_eq!(loaded.settings.worker.server.as_ref(), Some(&studio));
+        assert_eq!(loaded.settings.client.server, None, "the client's key is another table's");
     }
 
     #[test]
@@ -945,9 +978,10 @@ mod tests {
         );
         assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
         assert_eq!(loaded.settings.worker.allow, ["100.64.0.3", "fd00::/8"]);
-        assert_eq!(loaded.settings.worker.server, "studio.tail1234.ts.net");
+        let server = loaded.settings.worker.server.unwrap();
+        assert_eq!((server.host(), server.port()), ("studio.tail1234.ts.net", 45560));
         assert!(Settings::default().worker.allow.is_empty(), "the private ranges by default");
-        assert!(Settings::default().worker.server.is_empty(), "on its own by default");
+        assert_eq!(Settings::default().worker.server, None, "on its own by default");
     }
 
     #[test]
