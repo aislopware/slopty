@@ -5209,6 +5209,15 @@ not to restart; a worker started from a shell here has no Screen Recording (`slo
 doctor`: ✘). Expected: display at the default ceiling 60 fps encoded (from 33–35), arrival gap
 p50 13.3 ms.
 
+2026-09-26, the worker reinstalled from `503ac1b` (doctor: both ticks). The display bench at the
+default ceiling read 318 captured in 10 s, 0 dropped, 31.7 fps decoded, capture→decoded p50 5.0 /
+p90 7.2 ms. That is not the "after" row: the display was mostly still, and ScreenCaptureKit only
+delivers a frame when something on it changes, so 32 captures a second is the content's rate,
+not the pace's. The moving source did not come up (a Ghostty `-e yes` window launched from the
+shell was listed but never delivered a frame), and the other windows on screen belong to the
+user, so none was used. The row stays owed: it needs a window this session starts that keeps
+drawing at the panel's rate.
+
 ### Capture to the glass: not reachable yet
 
 Capture → decoded on loopback is the bench's column above: p50 5.2–9.9 ms. Nothing can yet time
