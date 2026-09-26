@@ -590,11 +590,14 @@ impl Workspace {
                 });
                 let outcome = ready_rx.await;
                 let Ok(Ok(connected)) = outcome else {
-                    let why = match outcome {
-                        Ok(Err(why)) => why,
-                        Ok(Ok(_)) | Err(_) => "connection task died".to_owned(),
+                    let failed = match outcome {
+                        Ok(Err(failed)) => failed,
+                        Ok(Ok(_)) | Err(_) => {
+                            net::DialFailed::Other("connection task died".to_owned())
+                        }
                     };
-                    let Ok(status) = this.update(cx, |ws, _cx| ws.failure_status(id, why)) else {
+                    let Ok(status) = this.update(cx, |ws, _cx| ws.failure_status(id, failed))
+                    else {
                         break;
                     };
                     let delay = redial.next(std::time::Instant::now());
@@ -1425,6 +1428,9 @@ fn apply_link_event(
         }
         LinkEvent::Control(WorkerMsg::Xfer(msg)) => {
             view.update(cx, |v, cx| v.xfer_message(msg, cx));
+        }
+        LinkEvent::Control(WorkerMsg::Path(path)) => {
+            view.update(cx, |v, cx| v.set_link_path(key, path, cx));
         }
         LinkEvent::Ports { session, forwards } => {
             view.update(cx, |v, cx| v.ports_changed(session, forwards, cx));

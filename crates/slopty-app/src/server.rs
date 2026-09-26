@@ -15,14 +15,18 @@ use slopty_client::server::{ServerEvent, ServerTask};
 use slopty_core::WorkerId;
 use slopty_net::HostAddr;
 use slopty_net::server::ServerLink;
-use slopty_proto::server::{Event, FromServer, Liveness};
+use slopty_proto::server::{Event, FromServer, Liveness, Refusal};
 use slopty_ui::workspace::WorkerStatus;
 
+use crate::net::DialFailed;
 use crate::workers::{WorkerSlot, worker_key};
 use crate::{Workspace, net};
 
 /// The status bar's word while the server does not answer.
 pub const UNREACHABLE: &str = "Server unreachable";
+/// The titlebar's line while the server turns this app away: the tailnet policy grants this
+/// device no client role there.
+pub const NOT_GRANTED: &str = "Server access not granted by the tailnet policy";
 
 /// A worker the server says is away is still dialled this often: the server's view of it can
 /// be wrong (its path to the worker broken while this client's works).
@@ -56,6 +60,28 @@ const fn away(liveness: Liveness) -> Option<WorkerStatus> {
         Liveness::Online => None,
         Liveness::Unreachable => Some(WorkerStatus::Unreachable),
         Liveness::Gone => Some(WorkerStatus::Gone),
+    }
+}
+
+/// How a failed dial shows. A worker that answered to turn this device away is reachable, so
+/// that is said whatever the server thinks of it; otherwise the server's word when it has one,
+/// else the reason.
+fn failure_status(dial: &Dial, failed: DialFailed) -> WorkerStatus {
+    let why = match failed {
+        DialFailed::NotGranted => return WorkerStatus::NotGranted,
+        DialFailed::Other(why) => why,
+    };
+    match dial {
+        Dial::Hold(liveness) => away(*liveness).unwrap_or(WorkerStatus::Reconnecting(why)),
+        Dial::At(_) | Dial::Unlisted => WorkerStatus::Reconnecting(why),
+    }
+}
+
+/// The titlebar's line while the server turns this app away.
+const fn refused_status(why: Refusal) -> &'static str {
+    match why {
+        Refusal::NotGranted => NOT_GRANTED,
+        Refusal::DuplicateWorker => why.text(),
     }
 }
 
@@ -196,18 +222,9 @@ impl Workspace {
                 self.directory.set_server(ServerState::Linked { name });
                 self.view.update(cx, |v, cx| v.set_server_status(None, cx));
             }
-            ServerEvent::Unlinked { why } => {
-                let was_linked = self.directory.linked();
-                self.directory.set_server(ServerState::Unreachable { why });
-                self.view.update(cx, |v, cx| v.set_server_status(Some(UNREACHABLE.to_owned()), cx));
-                if was_linked {
-                    // Degraded: the cached addresses are all there is now, so try each at once.
-                    for slot in &self.workers {
-                        if !slot.linked() {
-                            slot.wake();
-                        }
-                    }
-                }
+            ServerEvent::Unlinked { why } => self.server_down(why, UNREACHABLE, cx),
+            ServerEvent::Refused(why) => {
+                self.server_down(why.text().to_owned(), refused_status(why), cx);
             }
             ServerEvent::Message(msg) => {
                 let listing = matches!(*msg, FromServer::Directory(_) | FromServer::Worker(_));
@@ -222,6 +239,21 @@ impl Workspace {
         }
         self.refresh_menu(cx);
         cx.notify();
+    }
+
+    /// The server link is down, for `why`; the titlebar says `status` until it is back.
+    fn server_down(&mut self, why: String, status: &str, cx: &mut Context<Self>) {
+        let was_linked = self.directory.linked();
+        self.directory.set_server(ServerState::Unreachable { why });
+        self.view.update(cx, |v, cx| v.set_server_status(Some(status.to_owned()), cx));
+        if was_linked {
+            // Degraded: the cached addresses are all there is now, so try each at once.
+            for slot in &self.workers {
+                if !slot.linked() {
+                    slot.wake();
+                }
+            }
+        }
     }
 
     fn directory_change(&mut self, change: Change, cx: &mut Context<Self>) {
@@ -292,12 +324,9 @@ impl Workspace {
         HostAddr::parse_with_port(&info.address, slopty_net::endpoint::WORKER_PORT).ok()
     }
 
-    /// How a failed dial shows: the server's word when it has one, else the reason.
-    pub(crate) fn failure_status(&self, id: WorkerId, why: String) -> WorkerStatus {
-        match self.directory.dial(id) {
-            Dial::Hold(liveness) => away(liveness).unwrap_or(WorkerStatus::Reconnecting(why)),
-            Dial::At(_) | Dial::Unlisted => WorkerStatus::Reconnecting(why),
-        }
+    /// How a failed dial to `id` shows ([`failure_status`]).
+    pub(crate) fn failure_status(&self, id: WorkerId, failed: DialFailed) -> WorkerStatus {
+        failure_status(&self.directory.dial(id), failed)
     }
 
     /// The server's address as shown.
@@ -346,5 +375,24 @@ mod tests {
         assert_eq!(cached_server(&path, None).await, None);
         drop(tx);
         writer.await.unwrap();
+    }
+
+    /// A worker that turned this device away answered, so that is what shows, even where the
+    /// server calls it away; any other failure shows the server's word, else its reason. A
+    /// server that refuses the app says why in the titlebar.
+    #[test]
+    fn a_refusal_by_the_tailnet_policy_is_named_over_other_words() {
+        let other = || DialFailed::Other("no answer".to_owned());
+        let at = Dial::At(HostAddr::new("studio", 45_550));
+        for dial in [at.clone(), Dial::Hold(Liveness::Unreachable), Dial::Unlisted] {
+            assert_eq!(failure_status(&dial, DialFailed::NotGranted), WorkerStatus::NotGranted);
+        }
+        assert_eq!(
+            failure_status(&Dial::Hold(Liveness::Gone), other()),
+            WorkerStatus::Gone,
+            "the server's word"
+        );
+        assert_eq!(failure_status(&at, other()), WorkerStatus::Reconnecting("no answer".into()));
+        assert_eq!(refused_status(Refusal::NotGranted), NOT_GRANTED);
     }
 }

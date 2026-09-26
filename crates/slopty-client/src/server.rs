@@ -7,7 +7,7 @@
 
 use slopty_net::HostAddr;
 use slopty_net::server::{DialError, ServerLink, connect};
-use slopty_proto::server::{FromServer, Role};
+use slopty_proto::server::{FromServer, Refusal, Role};
 use tokio::sync::mpsc;
 
 /// Server messages queued for the UI at most.
@@ -28,6 +28,9 @@ pub enum ServerEvent {
         /// Why.
         why: String,
     },
+    /// The server answered and turned this dialer away. The next attempt is on its way all the
+    /// same: a change to the tailnet policy can let it in.
+    Refused(Refusal),
 }
 
 /// The running link; dropping it closes the link and ends the redials.
@@ -71,17 +74,17 @@ async fn run(
             Some(link) => Ok(link),
             None => connect(&endpoint, &addr, role.clone()).await,
         };
-        let why = match dialled {
+        let event = match dialled {
             Ok(link) => {
                 redial.linked(std::time::Instant::now());
                 let Some(why) = pump(link, &tx).await else { return };
-                why
+                ServerEvent::Unlinked { why }
             }
-            Err(DialError::Refused(why)) => format!("refused: {why:?}"),
-            Err(DialError::Net(e)) => e.to_string(),
+            Err(DialError::Refused(why)) => ServerEvent::Refused(why),
+            Err(DialError::Net(e)) => ServerEvent::Unlinked { why: e.to_string() },
         };
-        tracing::debug!(server = %addr, %why, "server link down");
-        if tx.send(ServerEvent::Unlinked { why }).await.is_err() {
+        tracing::debug!(server = %addr, ?event, "server link down");
+        if tx.send(event).await.is_err() {
             return;
         }
         tokio::time::sleep(redial.next(std::time::Instant::now())).await;

@@ -9,6 +9,7 @@ use slopty_proto::ClientMsg;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::items::{ItemKind, ItemSync};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
+use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermEvent, TermRequest, TermSize};
 
 use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView};
@@ -49,6 +50,7 @@ impl WorkspaceView {
         w.name = name;
         w.status = WorkerStatus::Connected;
         w.link = Some(link);
+        w.path = None;
         w.awaiting_snapshot = true;
         w.titles_requested = false;
         w.watched.clear();
@@ -90,6 +92,7 @@ impl WorkspaceView {
         w.status = status;
         w.link = None;
         w.rtt = None;
+        w.path = None;
         w.pending_opens.clear();
         w.picker_wanted = false;
         w.display_wanted = false;
@@ -215,6 +218,22 @@ impl WorkspaceView {
         if changed && self.rtt_shown(key, was, rtt) {
             cx.notify();
         }
+    }
+
+    /// How the tailnet carries the link to `key`, as its worker last said; the link that
+    /// brings it is the one it describes, so it goes with the link.
+    pub fn set_link_path(&mut self, key: WorkerKey, path: LinkPath, cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get_mut(&key).filter(|w| w.link.is_some()) else { return };
+        if w.path.as_ref() != Some(&path) {
+            w.path = Some(path);
+            cx.notify();
+        }
+    }
+
+    /// How the tailnet carries the link to `key`, when its worker has said.
+    #[must_use]
+    pub fn link_path(&self, key: WorkerKey) -> Option<&LinkPath> {
+        self.workers.get(&key)?.path.as_ref()
     }
 
     /// A registry snapshot, delta or pointing from `key`.

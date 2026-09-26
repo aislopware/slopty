@@ -58,6 +58,7 @@ use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentEvent;
 use slopty_proto::items::{Item, ItemOp};
 use slopty_proto::screen::CaptureTarget;
+use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::SessionSummary;
 use slopty_theme::Theme;
 pub use statusbar::HostActions;
@@ -206,6 +207,9 @@ pub enum WorkerStatus {
     Unreachable,
     /// The server has not heard from the worker for long enough to presume it gone.
     Gone,
+    /// The worker, or the server listing it, turned this device away: the tailnet policy grants
+    /// it no role there. Still retried, as a policy change can grant it.
+    NotGranted,
 }
 
 impl WorkerStatus {
@@ -219,6 +223,7 @@ impl WorkerStatus {
             Self::Reconnecting(why) => format!("{why}; reconnecting…"),
             Self::Unreachable => "unreachable".to_owned(),
             Self::Gone => "gone".to_owned(),
+            Self::NotGranted => "closed to this device by the tailnet policy".to_owned(),
         }
     }
 
@@ -257,6 +262,9 @@ struct Worker {
     doc: ItemDoc,
     sessions: HashMap<SessionId, SessionSummary>,
     rtt: Option<Duration>,
+    /// How the tailnet carries the link, once the worker has said; never on a loopback or LAN
+    /// link.
+    path: Option<LinkPath>,
     /// `slopty hook install` has been offered on this worker once.
     hooks_offered: bool,
     /// The paths the worker was last asked to watch for its file cards, sorted.
@@ -290,6 +298,7 @@ impl Worker {
             doc: ItemDoc::default(),
             sessions: HashMap::new(),
             rtt: None,
+            path: None,
             hooks_offered: false,
             watched: Vec::new(),
             titles_requested: false,

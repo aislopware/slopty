@@ -2196,3 +2196,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   under its worker was washed in the warn fill too, beside its warn-toned "Needs you" word.
   The wash is gone; the section leads and the word stays (golden
   `agent-needs-you-navigator`). Test: `a_tile_row_reads_its_age_or_its_state_then_its_place`.
+
+- ✅ **A link's tailnet path shows beside its round trip, and a refusal by the policy is
+  named** (2026-09-27, with **Tailscale is the network, and its LocalAPI says who is calling**
+  in `topology.md`). A worker reached over the tailnet says how Tailscale carries the link
+  (`WorkerMsg::Path`). The workspace keeps the latest per worker and drops it with the link,
+  so a relink shows nothing until the worker says again. A loopback or LAN link never has one
+  and shows nothing extra. The words are "Direct", "Peer relay" and "DERP · fra":
+  - the status bar puts the focused worker's path before "RTT 4.2 ms";
+  - the hosts popover puts each worker's path before its round trip;
+  - the navigator names only a DERP relay, like the round trip, which it names only when it is
+    slow. A list of healthy workers stays a list of names;
+  - DERP is TCP through a relay server and often a detour, so it takes the `warn` text tone
+    everywhere. The other paths take the readout's own colour.
+
+  A refusal by the tailnet policy is its own state, not a generic disconnect, and the redial
+  goes on because a policy change can grant it. A worker that closes the dial with
+  `NOT_GRANTED` shows `WorkerStatus::NotGranted`: "Not granted" where the link's health
+  shows, and "closed to this device by the tailnet policy" when it is gone to. That word wins
+  over the server's "unreachable", because the worker answered. A server's
+  `Refusal::NotGranted` shows "Server access not granted by the tailnet policy" in the status
+  bar's server slot. Both add panels say "Not granted by the tailnet policy", the words of
+  `Refusal::text`, which the CLI prints too. `NetError::stream` walks noq's error chain for an
+  application close with `NOT_GRANTED` and yields `NetError::NotGranted`, so no caller reads
+  error text.
+
+  Tests: workspace `the_link_path_shows_beside_the_round_trip_and_goes_with_the_link`,
+  `a_worker_the_tailnet_policy_closes_says_not_granted`; app
+  `a_refusal_by_the_tailnet_policy_is_named_over_other_words`; client
+  `a_worker_closing_with_not_granted_is_told_from_other_closes`,
+  `a_refusal_is_reported_by_name_and_the_link_keeps_dialling`; net
+  `a_not_granted_close_is_its_own_error`.

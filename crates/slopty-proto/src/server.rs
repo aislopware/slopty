@@ -222,6 +222,17 @@ pub enum Refusal {
     NotGranted,
 }
 
+impl Refusal {
+    /// The refusal as a person reads it, in a sentence of its own.
+    #[must_use]
+    pub const fn text(self) -> &'static str {
+        match self {
+            Self::NotGranted => "Not granted by the tailnet policy",
+            Self::DuplicateWorker => "A worker with this id is already connected",
+        }
+    }
+}
+
 /// Something that happened on a worker, fanned out to clients and agents.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Event {

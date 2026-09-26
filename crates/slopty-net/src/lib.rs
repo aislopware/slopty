@@ -77,13 +77,22 @@ pub enum NetError {
     /// Known-workers store I/O.
     #[error("store: {0}")]
     Store(String),
+    /// The worker closed the connection because the tailnet grants this device no role there
+    /// ([`worker::close_code::NOT_GRANTED`]).
+    #[error("not granted by the tailnet policy")]
+    NotGranted,
 }
 
 impl NetError {
     /// A stream error with its source chain: noq's `ReadError::ConnectionLost` displays as
     /// just "connection lost", and the reason (timed out, reset, closed by peer) is the part
     /// worth logging.
+    /// A close by the peer with [`worker::close_code::NOT_GRANTED`] anywhere in the chain is
+    /// [`NetError::NotGranted`].
     pub(crate) fn stream(e: &(dyn std::error::Error + 'static)) -> Self {
+        if closed_with(e) == Some(u64::from(worker::close_code::NOT_GRANTED)) {
+            return Self::NotGranted;
+        }
         let mut text = e.to_string();
         let mut source = e.source();
         while let Some(s) = source {
@@ -98,6 +107,19 @@ impl NetError {
     }
 }
 
+/// The application close code the peer closed the connection with, found anywhere in `e`'s
+/// source chain.
+fn closed_with(e: &(dyn std::error::Error + 'static)) -> Option<u64> {
+    let mut at = Some(e);
+    while let Some(err) = at {
+        if let Some(noq::ConnectionError::ApplicationClosed(close)) = err.downcast_ref() {
+            return Some(close.error_code.into_inner());
+        }
+        at = err.source();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::NetError;
@@ -109,6 +131,31 @@ mod tests {
     #[derive(Debug, thiserror::Error)]
     #[error("timed out")]
     struct TimedOut;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("connection lost")]
+    struct LostTo(#[source] noq::ConnectionError);
+
+    fn closed(code: u32) -> LostTo {
+        let close = noq::ApplicationClose {
+            error_code: noq::VarInt::from_u32(code),
+            reason: bytes::Bytes::from_static(b"no role"),
+        };
+        LostTo(noq::ConnectionError::ApplicationClosed(close))
+    }
+
+    /// A worker's `NOT_GRANTED` close reads as its own error wherever it sits in the chain;
+    /// any other close is a stream error with its text.
+    #[test]
+    fn a_not_granted_close_is_its_own_error() {
+        assert!(matches!(NetError::stream(&closed(3)), NetError::NotGranted));
+        assert!(matches!(NetError::stream(&closed(3).0), NetError::NotGranted));
+        let normal = NetError::stream(&closed(0));
+        assert!(
+            matches!(&normal, NetError::Stream(text) if text.contains("closed by peer")),
+            "{normal}"
+        );
+    }
 
     #[test]
     fn stream_error_carries_its_source_chain() {

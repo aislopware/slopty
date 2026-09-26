@@ -192,7 +192,7 @@ impl Dispatch for Link {
 
 async fn dial(endpoint: &Endpoint, server: &HostAddr, role: Role) -> Result<ServerLink> {
     connect(endpoint, server, role).await.map_err(|e| match e {
-        DialError::Refused(why) => anyhow!("the server at {server} refused: {why:?}"),
+        DialError::Refused(why) => anyhow!("the server at {server} refused: {}", why.text()),
         DialError::Net(e) => anyhow!("cannot reach the server at {server}: {e}"),
     })
 }

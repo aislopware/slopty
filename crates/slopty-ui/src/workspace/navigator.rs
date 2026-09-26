@@ -50,6 +50,7 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::items::{Item, ItemKind};
+use slopty_proto::tailnet::LinkPath;
 use slopty_theme::{Theme, Typography};
 
 use super::actions::ToggleNavigator;
@@ -250,6 +251,18 @@ pub(super) const fn worker_health(status: &WorkerStatus) -> Option<(Status, &'st
         WorkerStatus::Reconnecting(_) => Some((Status::Away, "reconnecting")),
         WorkerStatus::Unreachable => Some((Status::Away, "unreachable")),
         WorkerStatus::Gone => Some((Status::Away, "gone")),
+        WorkerStatus::NotGranted => Some((Status::Away, "not granted")),
+    }
+}
+
+/// How a link's packets travel, as the chrome names it, and whether that is the slow path: a
+/// DERP relay is TCP and often a detour, so it wears the warning tone.
+pub(super) fn path_label(path: &LinkPath) -> (String, bool) {
+    match path {
+        LinkPath::Direct => ("Direct".to_owned(), false),
+        LinkPath::PeerRelay => ("Peer relay".to_owned(), false),
+        LinkPath::Derp { region } if region.is_empty() => ("DERP".to_owned(), true),
+        LinkPath::Derp { region } => (format!("DERP · {region}"), true),
     }
 }
 
@@ -441,6 +454,9 @@ struct NavHeader {
     key: WorkerKey,
     name: String,
     health: Option<(Status, &'static str)>,
+    /// The DERP relay its link goes through, the slow path; a direct or peer-relayed link
+    /// names nothing here.
+    relay: Option<String>,
     /// Its round trip, when it is slow enough to name.
     rtt: Option<String>,
     linked: bool,
@@ -744,11 +760,19 @@ impl WorkspaceView {
             let tiles = tiles.into_iter().map(|(_, t)| t).collect();
             let health = worker_health(&w.status);
             let rtt = w.rtt.filter(|rtt| health.is_none() && *rtt >= RTT_SHOWN_FROM).map(rtt_label);
+            // Like the round trip, the path is named here only when it is worth a look.
+            let relay = w
+                .path
+                .as_ref()
+                .filter(|_| health.is_none())
+                .map(path_label)
+                .and_then(|(text, slow)| slow.then_some(text));
             let folded = query.is_empty() && self.nav.folded.contains(&key);
             let header = NavHeader {
                 key,
                 name: w.name.clone(),
                 health,
+                relay,
                 rtt,
                 linked: w.link.is_some(),
                 rollup,
@@ -1281,9 +1305,10 @@ impl WorkspaceView {
         let key = worker.key;
         let folded = worker.folded;
         let label = SharedString::from(format!(
-            "{}{}{}",
+            "{}{}{}{}",
             worker.name,
             worker.health.map(|(_, word)| format!(", {word}")).unwrap_or_default(),
+            worker.relay.as_ref().map(|relay| format!(", {relay}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
         let lead =
@@ -1322,6 +1347,11 @@ impl WorkspaceView {
             .group_hover(group.clone(), gpui::Styled::invisible)
             .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r, false)))
             .children(worker.health.map(|(_, word)| readout(theme, word)))
+            .children(worker.relay.clone().map(|relay| {
+                readout(theme, relay)
+                    .debug_selector(move || format!("nav-path-{key}"))
+                    .text_color(hsla(s.warn))
+            }))
             .children(worker.rtt.clone().map(|rtt| {
                 tabular(div())
                     .debug_selector(move || format!("nav-rtt-{key}"))

@@ -1,5 +1,6 @@
 //! The client's server link against a real server listener in-process, over UDP on loopback:
-//! the directory arrives, a drop is reported, and the link comes back by itself.
+//! the directory arrives, a drop is reported, and the link comes back by itself; a refusal is
+//! reported by name and the link keeps dialling.
 
 #[cfg(test)]
 mod tests {
@@ -11,7 +12,7 @@ mod tests {
     use slopty_net::HostAddr;
     use slopty_net::admission::Admission;
     use slopty_net::server::{AcceptedLink, ServerListener};
-    use slopty_proto::server::{FromServer, Liveness, Os, Role, WorkerCaps, WorkerInfo};
+    use slopty_proto::server::{FromServer, Liveness, Os, Refusal, Role, WorkerCaps, WorkerInfo};
     use tokio::sync::mpsc;
 
     const WAIT: Duration = Duration::from_secs(20);
@@ -119,5 +120,30 @@ mod tests {
         );
         let ServerEvent::Unlinked { why } = next(&mut events).await else { panic!("linked?") };
         assert!(!why.is_empty());
+    }
+
+    /// A server that turns the client away (the tailnet policy grants it no client role) is
+    /// reported as that refusal, not as unreachable, and dialled again: a policy change can let
+    /// it in.
+    #[tokio::test]
+    async fn a_refusal_is_reported_by_name_and_the_link_keeps_dialling() {
+        let listener =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::default()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let endpoint = slopty_net::client::bind_client().unwrap();
+        let addr = HostAddr::new("127.0.0.1", port);
+        let (_task, mut events) =
+            spawn(&tokio::runtime::Handle::current(), endpoint, addr, role(), None);
+
+        for _ in 0..2 {
+            let link = tokio::time::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+            tokio::spawn(link.refuse(Refusal::NotGranted));
+            let event = next(&mut events).await;
+            assert!(matches!(event, ServerEvent::Refused(Refusal::NotGranted)), "{event:?}");
+        }
+        assert_eq!(Refusal::NotGranted.text(), "Not granted by the tailnet policy");
+
+        let _granted = welcome(&listener, Vec::new()).await;
+        let ServerEvent::Linked { .. } = next(&mut events).await else { panic!("not let in") };
     }
 }

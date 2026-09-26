@@ -1,7 +1,8 @@
 //! The client's link against a scripted worker in-process, over UDP on loopback: an upload
 //! resumed after the worker cut its stream, a download and one resumed after a cut, a clipboard
 //! representation fetched on paste, a port forwarded to a real local connection, and one port of
-//! the worker served by two clients on this machine at two local ports.
+//! the worker served by two clients on this machine at two local ports, and a dial the worker
+//! closes because the tailnet grants this device no client role.
 
 #[cfg(test)]
 mod tests {
@@ -13,6 +14,7 @@ mod tests {
     use slopty_net::admission::Admission;
     use slopty_net::client::{bind_client, connect};
     use slopty_net::streams::{self, RawRecv, Uni};
+    use slopty_net::worker::close_code::NOT_GRANTED;
     use slopty_net::worker::{AcceptedClient, WorkerListener};
     use slopty_net::{ClientMsg, HostAddr, WorkerMsg};
     use slopty_proto::handshake::{Hello, HelloAck};
@@ -449,5 +451,28 @@ mod tests {
         first.tx.send(&WorkerMsg::Ports { session, ports: Vec::new() }).await.unwrap();
         assert!(forwarded(&mut first_events).await.is_empty());
         assert!(std::net::TcpListener::bind(("127.0.0.1", wanted)).is_err(), "still served");
+    }
+
+    /// A worker that closes a greeting with `NOT_GRANTED`, as it does for a node the tailnet
+    /// grants no client role, fails the dial as that; any other close is something else.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_worker_closing_with_not_granted_is_told_from_other_closes() {
+        let listener =
+            WorkerListener::bind(slopty_net::endpoint::any(0), Admission::default()).unwrap();
+        let addr: HostAddr =
+            format!("127.0.0.1:{}", listener.local_addr().unwrap().port()).parse().unwrap();
+        let endpoint = bind_client().unwrap();
+        let mut closes = Vec::new();
+        for (code, reason) in [(NOT_GRANTED, &b"not granted"[..]), (NOT_GRANTED, b""), (0, b"bye")]
+        {
+            let worker = async {
+                let client = tokio::time::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+                client.conn.close(code.into(), reason);
+                client
+            };
+            let (dialled, _client) = tokio::join!(connect(&endpoint, &addr, hello()), worker);
+            closes.push(matches!(dialled.unwrap_err(), slopty_net::NetError::NotGranted));
+        }
+        assert_eq!(closes, [true, true, false]);
     }
 }

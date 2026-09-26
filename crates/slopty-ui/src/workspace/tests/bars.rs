@@ -7,6 +7,7 @@ use std::rc::Rc;
 use gpui::{Modifiers, MouseButton};
 use slopty_client::tunnel::Forward;
 use slopty_proto::orchestration::Port;
+use slopty_proto::tailnet::LinkPath;
 
 use super::*;
 
@@ -164,6 +165,76 @@ fn the_workers_count_opens_the_hosts_and_their_actions(cx: &mut TestAppContext) 
     click(cx, "status-workers");
     click(cx, leak(format!("hosts-row-{studio_key}")));
     assert!(!view.read_with(cx, |v, _| v.hosts_open()), "a row goes to its worker");
+}
+
+/// How the tailnet carries a link shows beside its round trip: in the status bar for the
+/// focused worker, in the hosts popover for each, and in the navigator only for a DERP relay,
+/// the slow path. It goes with the link, and a link the worker has said nothing of shows none.
+#[gpui::test]
+fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let lan = connect(&view, cx, 3, "lan");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let (studio_key, laptop_key, lan_key) = (studio.key, laptop.key, lan.key);
+    view.update_in(cx, |v, _w, cx| {
+        v.set_rtt(studio_key, Some(Duration::from_micros(4_240)), cx);
+        v.set_link_path(studio_key, LinkPath::Direct, cx);
+        v.set_link_path(laptop_key, LinkPath::Derp { region: "fra".to_owned() }, cx);
+    });
+    cx.run_until_parked();
+    let names = labels(&view, cx);
+    assert!(names.iter().any(|l| l == "Direct"), "the focused worker's path: {names:#?}");
+    assert!(names.iter().any(|l| l == "laptop, DERP · fra"), "a relay is named: {names:#?}");
+    assert!(cx.debug_bounds(leak(format!("nav-path-{studio_key}"))).is_none(), "direct is quiet");
+    assert!(cx.debug_bounds(leak(format!("nav-path-{laptop_key}"))).is_some());
+
+    click(cx, "status-workers");
+    let names = labels(&view, cx);
+    for row in ["studio, Direct, 4.2 ms", "laptop, DERP · fra", "lan"] {
+        assert!(names.iter().any(|l| l == row), "{row}: {names:#?}");
+    }
+    assert!(cx.debug_bounds(leak(format!("hosts-path-{lan_key}"))).is_none(), "nothing said");
+    click(cx, "status-workers");
+
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(laptop_key, WorkerStatus::Reconnecting("lost".into()), cx);
+        v.set_link_path(laptop_key, LinkPath::PeerRelay, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.link_path(laptop_key).cloned()), None, "went with it");
+    assert!(cx.debug_bounds(leak(format!("nav-path-{laptop_key}"))).is_none());
+    let _again = connect(&view, cx, 2, "laptop");
+    assert_eq!(view.read_with(cx, |v, _| v.link_path(laptop_key).cloned()), None, "not yet said");
+    view.update_in(cx, |v, _w, cx| v.set_link_path(laptop_key, LinkPath::PeerRelay, cx));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.link_path(laptop_key).cloned()),
+        Some(LinkPath::PeerRelay)
+    );
+
+    let label = |path| navigator::path_label(&path);
+    assert_eq!(label(LinkPath::Direct), ("Direct".to_owned(), false));
+    assert_eq!(label(LinkPath::PeerRelay), ("Peer relay".to_owned(), false));
+    let derp = |region: &str| LinkPath::Derp { region: region.to_owned() };
+    assert_eq!(label(derp("fra")), ("DERP · fra".to_owned(), true), "the slow path");
+    assert_eq!(label(derp("")), ("DERP".to_owned(), true), "no region to name");
+}
+
+/// A worker that turns this device away says so in a word wherever its link's health shows,
+/// and in full when it is gone to.
+#[gpui::test]
+fn a_worker_the_tailnet_policy_closes_says_not_granted(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, WorkerStatus::NotGranted, cx));
+    cx.run_until_parked();
+    let names = labels(&view, cx);
+    assert!(names.iter().any(|l| l == "Not granted"), "the status bar: {names:#?}");
+    assert!(names.iter().any(|l| l == "studio, not granted"), "the navigator: {names:#?}");
+    assert_eq!(WorkerStatus::NotGranted.text(), "closed to this device by the tailnet policy");
 }
 
 /// The inbox keeps what it was told: *Unread* lists what is still badged, *All* the history,

@@ -28,7 +28,7 @@ use slopty_client::layout::WorkerKey;
 use slopty_proto::items::ItemKind;
 use slopty_theme::Theme;
 
-use super::navigator::{Mode, rtt_label, worker_health};
+use super::navigator::{Mode, path_label, rtt_label, worker_health};
 use super::{MenuRun, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
@@ -329,6 +329,15 @@ impl WorkspaceView {
                 .child(icon(theme, IconName::Upload, IconSize::Inline, muted))
                 .child(tabular(div()).child(text))
         });
+        // How the tailnet carries the link, beside its round trip; a DERP relay in the warning
+        // tone, being the slow path.
+        let path = link.filter(|w| w.status.is_up()).and_then(|w| w.path.as_ref()).map(|path| {
+            let (text, slow) = path_label(path);
+            let text = SharedString::from(text);
+            readout("status-path", text.clone())
+                .when(slow, |el| el.text_color(hsla(s.warn)))
+                .child(text)
+        });
         let rtt = link.and_then(|w| w.rtt.filter(|_| w.status.is_up())).map(|rtt| {
             let text = SharedString::from(format!("RTT {}", rtt_label(rtt)));
             tabular(readout("status-rtt", text.clone())).child(text)
@@ -360,6 +369,7 @@ impl WorkspaceView {
             .children(ports)
             .children(transfers)
             .children(health)
+            .children(path)
             .children(rtt)
             .children(frame)
             .children(workers)
@@ -517,10 +527,23 @@ impl WorkspaceView {
             None => icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted))
                 .into_any_element(),
         };
+        let path = w.path.as_ref().filter(|_| health.is_none()).map(path_label);
         let detail = match health {
             Some((mark, word)) => div().text_color(hsla(mark.tone(theme))).child(word),
-            None => tabular(div().text_color(hsla(s.text_muted)))
-                .children(w.rtt.map(|rtt| SharedString::from(rtt_label(rtt)))),
+            None => div()
+                .flex()
+                .items_center()
+                .gap(px(spacing.sm))
+                .children(path.clone().map(|(text, slow)| {
+                    div()
+                        .debug_selector(move || format!("hosts-path-{key}"))
+                        .text_color(hsla(if slow { s.warn } else { s.text_muted }))
+                        .child(SharedString::from(text))
+                }))
+                .child(
+                    tabular(div().text_color(hsla(s.text_muted)))
+                        .children(w.rtt.map(|rtt| SharedString::from(rtt_label(rtt)))),
+                ),
         };
         let actions = self.bar.hosts.get(&key).cloned().unwrap_or_default();
         let action = |id: String, label: &'static str, run: MenuRun| {
@@ -560,10 +583,13 @@ impl WorkspaceView {
             .group_hover(group.clone(), gpui::Styled::visible)
             .children(connect)
             .children(forget);
-        let label = SharedString::from(match (health, w.rtt) {
-            (Some((_, word)), _) => format!("{}, {word}", w.name),
-            (None, Some(rtt)) => format!("{}, {}", w.name, rtt_label(rtt)),
-            (None, None) => w.name.clone(),
+        let label = SharedString::from(match health {
+            Some((_, word)) => format!("{}, {word}", w.name),
+            None => [Some(w.name.clone()), path.map(|(text, _)| text), w.rtt.map(rtt_label)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", "),
         });
         let el = div()
             .id(ElementId::Name(format!("hosts-row-{key}").into()))
