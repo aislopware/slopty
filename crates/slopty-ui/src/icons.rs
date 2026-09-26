@@ -82,6 +82,7 @@ gpui_kit::assets::icon_assets!(
         Save,
         Search,
         Server,
+        ServerOff,
         Settings,
         SquareTerminal,
         StickyNote,

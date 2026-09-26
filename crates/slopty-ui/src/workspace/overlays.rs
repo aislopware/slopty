@@ -37,8 +37,8 @@ impl WorkspaceView {
             .flatten()
     }
 
-    /// A line per worker: `Go to <name>`, with its round trip on the right while its link is
-    /// up, else a mark and a word for what is wrong.
+    /// A line per worker: its name, with its round trip on the right while its link is up,
+    /// else a mark and a word for what is wrong.
     pub(super) fn worker_lines(&self) -> impl Iterator<Item = PaletteItem> + '_ {
         self.workers.iter().map(|(key, w)| {
             let health = super::navigator::worker_health(&w.status);
@@ -69,6 +69,8 @@ impl WorkspaceView {
                     .with_icon(icon)
                     .with_status(row.mark)
                     .on_worker(row.worker)
+                    .in_dir(row.cwd)
+                    .aged(row.age)
             })
             .collect();
         // Every file card, and every other tile the human named: a name is a wish to find it
@@ -476,6 +478,14 @@ impl WorkspaceView {
     /// The terminal sessions for the picker and the palette: agents waiting on the human
     /// first, then other agents, then plain shells; ties in reading order.
     pub(super) fn session_rows(&self, cx: &Context<Self>) -> Vec<SessionRow> {
+        // Wall clock, as the worker stamped the start: the summary may be relayed long after.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let session_age = |started_ms: u64| {
+            (started_ms > 0)
+                .then(|| std::time::Duration::from_millis(now_ms.saturating_sub(started_ms)))
+        };
         let order = self.reading_order();
         let mut rows: Vec<(u8, usize, SessionRow)> = order
             .iter()
@@ -490,6 +500,7 @@ impl WorkspaceView {
                     Some(_) => 1,
                     None => 2,
                 };
+                let summary = self.summary(session);
                 let row = SessionRow {
                     session,
                     title: self.card_title(*tile, item, cx),
@@ -497,6 +508,8 @@ impl WorkspaceView {
                     needs_you,
                     mark: agent.and_then(Status::of_agent),
                     worker: self.worker_label(tile.worker),
+                    cwd: summary.and_then(|s| s.cwd.as_deref()).map(super::tile::cwd_tail),
+                    age: summary.and_then(|s| session_age(s.started_ms)),
                 };
                 Some((rank, at, row))
             })

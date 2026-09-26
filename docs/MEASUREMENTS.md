@@ -4993,3 +4993,61 @@ so every prompt's frame waited about 21 µs for it. The actor now only notes tha
 due and resolves it after the read's frame has gone out. The prompt's frame waits for none of
 the 40 µs, and the viewers hear a `Cwd` event only when the directory, the repository or the
 branch has changed, where before they heard one at every prompt.
+
+## 2026-09-26 — failed blocks in the paint
+
+A frame of the terminal view with command blocks on screen: `terminal::view::tests::failed_blocks_cost`
+(headless GPUI, release, mac-studio) draws a 100 × 40 screen of ten four-row blocks, every
+other one failed, and times a notify and the draw it brings, 2 000 frames with the pointer off
+the window and 2 000 with it over a failed block's output, in alternating blocks of 200 after a
+warm-up round. "Before" is the index as it stood (the red separator, no hover); "after" adds the
+error bar and wash on the failed blocks' rows and the hovered block's facts. Both binaries were
+built from one scratch export, with only this change's files differing, and run four times
+each, alternating, while other sessions built on the machine. Headless GPUI shapes with a no-op
+text system, so the numbers are the element's and the layout's own work, not CoreText's.
+
+| build | pointer away, p50 | pointer over a failed block, p50 |
+| --- | --- | --- |
+| before (four runs) | 135.7–136.3 µs | 135.8–136.5 µs |
+| after (four runs) | 136.2–137.3 µs | 151.1–152.1 µs |
+
+The bars and washes cost about 1 µs a frame: `TermState::failed_runs` reads the marks of the
+rows once, with two indexed prompt lookups, and each failed block adds two quads. The facts a
+hovered block shows cost about 15 µs a frame, and only while the pointer rests on a block: the
+status, the duration and the "…" button are GPUI elements laid out over the grid. The p95 and
+p99 moved with the load on the machine, not with the build (before: 142–509 µs p95; after:
+144–521 µs).
+
+```sh
+# the measurement test; prints one MEASURE line
+cargo test -p slopty-ui --release --lib failed_blocks_cost -- --ignored --nocapture
+```
+
+Logs: `target/logs/terminal-agent-measure-interleaved.log`.
+
+## 2026-09-26 — what the navigator adds to a frame
+
+The navigator's rows became two lines with a leading slot, a second line and an age, its
+worker headers gained a count and a fixed trailing slot, and it now draws every frame the
+workspace does (`docs/decisions/ui.md`, "The navigator runs the window's height, and the
+workspaces are tabs"). The same workspace (one worker, 60 shells with a directory, a branch and
+a start, and 60 notes) drawn 400 times after 20 of warm-up, first with the navigator docked
+and then hidden by ⌘B, in one debug test build. The difference is the navigator: its listing
+(status, title, second line and age of every tile) and its rows' elements. Mac Studio, other
+sessions' builds and an e2e run on the machine throughout (load average about 20).
+
+| run | docked p50 | docked p95 | hidden p50 | hidden p95 |
+| --- | --- | --- | --- | --- |
+| 1 | 7.70 ms | 30.05 ms | 1.24 ms | 1.48 ms |
+| 2 | 7.58 ms | 12.52 ms | 1.28 ms | 1.51 ms |
+| 3 | 9.50 ms | 10.45 ms | 1.69 ms | 1.87 ms |
+
+About 6.5 ms of a debug frame at p50 for 120 tiles, all of them laid out whether or not the
+list shows them. The next step, not taken here, is a virtualised list that lays out only the
+rows in view; this number is the baseline it has to beat.
+
+```sh
+cargo test -p slopty-ui --lib measure_the_navigator -- --ignored --nocapture
+```
+
+Log: `target/logs/navigator-measure.log`.

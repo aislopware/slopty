@@ -2563,7 +2563,7 @@ mod tests {
             })
             .collect();
         let joined = answers.concat();
-        assert!(joined.contains("\x1b]11;rgb:0e0e/0f0f/1212"), "{answers:?}");
+        assert!(joined.contains("\x1b]11;rgb:1616/1818/1d1d"), "{answers:?}");
         assert!(joined.contains("\x1b]10;rgb:e6e6/e6e6/e6e6"), "{answers:?}");
         assert!(joined.contains("\x1b]12;rgb:8a8a/b4b4/f8f8"), "{answers:?}");
         let red = slopty_theme::TerminalPalette::DARK.ansi.get(1).copied().expect("red");

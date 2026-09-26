@@ -24,12 +24,14 @@ pub enum Effect {
     Bell,
     /// The title changed.
     Title(String),
-    /// The cwd changed, with the repository the worker resolved it to.
+    /// The cwd changed, with the repository the worker resolved it to and its branch.
     Cwd {
         /// The new directory.
         path: String,
         /// Its repository root, if it is in one.
         repo: Option<String>,
+        /// The branch checked out in that repository, if it is on one.
+        branch: Option<String>,
     },
     /// The program wrote to the clipboard.
     ClipboardWrite(String),
@@ -98,6 +100,7 @@ pub struct TermState {
     title: Option<String>,
     cwd: Option<String>,
     repo: Option<String>,
+    branch: Option<String>,
     exited: Option<i32>,
     driving: bool,
     resync_pending: bool,
@@ -166,7 +169,7 @@ pub struct TermImage {
 pub struct BlockHead {
     /// The row the prompt starts on.
     pub prompt: LineIndex,
-    /// The status of the command that ran before this prompt, when the shell said.
+    /// The status of the command typed at this prompt, once the next prompt reported it.
     pub exit: Option<u8>,
     /// What was typed at the prompt, rows joined with newlines; `None` when nothing was.
     pub command: Option<String>,
@@ -181,7 +184,7 @@ pub struct CommandBlock {
     pub prompt: LineIndex,
     /// The first row after the block (the next prompt's start, or one past the newest line).
     pub end: LineIndex,
-    /// The status of the command that ran before this prompt, when the shell said.
+    /// The status of the command typed at this prompt, once the next prompt reported it.
     pub exit: Option<u8>,
     /// What was typed at the prompt, rows joined with newlines; `None` when nothing was.
     pub command: Option<String>,
@@ -205,6 +208,7 @@ impl TermState {
             title: None,
             cwd: None,
             repo: None,
+            branch: None,
             exited: None,
             driving: false,
             resync_pending: false,
@@ -316,6 +320,12 @@ impl TermState {
         self.repo.as_deref()
     }
 
+    /// The branch checked out in [`Self::repo`], as the worker resolved it.
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
     /// Exit status once the child is gone.
     #[must_use]
     pub const fn exited(&self) -> Option<i32> {
@@ -384,10 +394,11 @@ impl TermState {
                 self.title = Some(t.clone());
                 vec![Effect::Title(t)]
             }
-            TermEvent::Cwd { path, repo, .. } => {
+            TermEvent::Cwd { path, repo, branch } => {
                 self.cwd = Some(path.clone());
                 self.repo.clone_from(&repo);
-                vec![Effect::Cwd { path, repo }]
+                self.branch.clone_from(&branch);
+                vec![Effect::Cwd { path, repo, branch }]
             }
             TermEvent::Bell => vec![Effect::Bell],
             TermEvent::Notification { title, body } => vec![Effect::Notification { title, body }],
@@ -562,7 +573,7 @@ impl TermState {
                         let typed_at = self.prompt_before(prompt).filter(|&p| {
                             self.block_head(p).and_then(|h| h.command) == Some(command.clone())
                         });
-                        let exit = head.and_then(|h| h.exit);
+                        let exit = self.line(prompt).and_then(|l| l.mark.exit());
                         effects.push(Effect::CommandFinished { prompt: typed_at, command, exit });
                     }
                 }
@@ -770,7 +781,8 @@ impl TermState {
         } else {
             self.prompt_before(index)?
         };
-        let exit = self.line(prompt)?.mark.exit();
+        self.line(prompt)?;
+        let exit = self.block_exit(prompt);
         let body = self.block_body(prompt);
         // From each prompt row its input column on; an `Input` row whole.
         let command: Vec<String> = (prompt.0..body.0)
@@ -791,6 +803,15 @@ impl TermState {
             command: (!command.trim().is_empty()).then_some(command),
             body,
         })
+    }
+
+    /// The status of the command typed at `prompt`: the shell reports it (`OSC 133;D`) on the
+    /// row the next prompt starts on, so a block still running, or the last one held here,
+    /// has none. Indexed, so a per-frame reader can ask.
+    #[must_use]
+    pub fn block_exit(&self, prompt: LineIndex) -> Option<u8> {
+        let next = self.prompt_after(prompt)?;
+        self.line(next)?.mark.exit()
     }
 
     /// The first line after the rows a command was typed on: the prompt's rows (a start, then
@@ -997,6 +1018,50 @@ impl TermState {
             .collect()
     }
 
+    /// The runs of `rows` (as [`Self::view`] gives them, 0 = the top) that belong to a block
+    /// whose command failed, top to bottom: what the grid marks with its error bar and wash.
+    ///
+    /// A block's status is on the row the next prompt starts on, so the walk goes up from the
+    /// bottom carrying it; below the rows it comes from the first prompt under them. Rows
+    /// above the first prompt in `rows` are in a block only when a prompt starts above them.
+    /// Two indexed lookups and one pass over the marks, so it runs on every frame. Nothing
+    /// on the alternate screen, which has no blocks.
+    #[must_use]
+    pub fn failed_runs(&self, rows: &[ViewRow<'_>]) -> Vec<std::ops::Range<u16>> {
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else { return Vec::new() };
+        if self.modes().contains(TermModes::ALT_SCREEN) {
+            return Vec::new();
+        }
+        let mut status =
+            self.prompt_after(last.index).and_then(|next| self.line(next)?.mark.exit());
+        let starts = |row: &ViewRow<'_>| row.line.map(|l| l.mark).filter(|m| m.starts_prompt());
+        let mut failed: Vec<bool> = rows
+            .iter()
+            .rev()
+            .map(|row| {
+                let failed = status.is_some_and(|code| code != 0);
+                if let Some(mark) = starts(row) {
+                    status = mark.exit();
+                }
+                failed
+            })
+            .collect();
+        failed.reverse();
+        if self.prompt_before(first.index).is_none() {
+            let unowned = rows.iter().position(|row| starts(row).is_some()).unwrap_or(rows.len());
+            failed.iter_mut().take(unowned).for_each(|f| *f = false);
+        }
+        let mut runs: Vec<std::ops::Range<u16>> = Vec::new();
+        for (i, _) in failed.iter().enumerate().filter(|(_, f)| **f) {
+            let row = u16::try_from(i).unwrap_or(u16::MAX);
+            match runs.last_mut() {
+                Some(run) if run.end == row => run.end = row.saturating_add(1),
+                _ => runs.push(row..row.saturating_add(1)),
+            }
+        }
+        runs
+    }
+
     /// The client's size changed: resize locally for immediate feedback and ask the worker.
     pub fn resize(&mut self, size: TermSize) -> Vec<Effect> {
         self.size = size;
@@ -1081,20 +1146,37 @@ mod tests {
     }
 
     /// Every event that is not a frame is kept where the view reads it and re-emitted as its
-    /// effect: title, cwd with its repository, the bell, a clipboard write, the exit (which
-    /// also ends a running command), an error, matches and a refused pattern; a resize and
-    /// the driver flag change the state and emit nothing.
+    /// effect: title, cwd with its repository and branch, the bell, a clipboard write, the exit
+    /// (which also ends a running command), an error, matches and a refused pattern; a resize
+    /// and the driver flag change the state and emit nothing.
     #[test]
     fn events_are_kept_and_re_emitted_as_effects() {
         let mut state = TermState::new(size());
         assert_eq!(state.apply(TermEvent::Title("vim".into())), vec![Effect::Title("vim".into())]);
         assert_eq!(state.title(), Some("vim"));
-        let cwd = TermEvent::Cwd { path: "/w/app".into(), repo: Some("/w".into()), branch: None };
+        let cwd = TermEvent::Cwd {
+            path: "/w/app".into(),
+            repo: Some("/w".into()),
+            branch: Some("main".into()),
+        };
         assert_eq!(
             state.apply(cwd),
-            vec![Effect::Cwd { path: "/w/app".into(), repo: Some("/w".into()) }]
+            vec![Effect::Cwd {
+                path: "/w/app".into(),
+                repo: Some("/w".into()),
+                branch: Some("main".into())
+            }]
         );
-        assert_eq!((state.cwd(), state.repo()), (Some("/w/app"), Some("/w")));
+        assert_eq!(
+            (state.cwd(), state.repo(), state.branch()),
+            (Some("/w/app"), Some("/w"), Some("main"))
+        );
+        let out = TermEvent::Cwd { path: "/tmp".into(), repo: None, branch: None };
+        assert_eq!(
+            state.apply(out),
+            vec![Effect::Cwd { path: "/tmp".into(), repo: None, branch: None }]
+        );
+        assert_eq!((state.repo(), state.branch()), (None, None), "leaving the repo drops both");
         assert_eq!(state.apply(TermEvent::Bell), vec![Effect::Bell]);
         assert_eq!(
             state.apply(TermEvent::Notification { title: "T".to_owned(), body: "b".to_owned() }),
@@ -1325,16 +1407,17 @@ mod tests {
         assert!(state.recent_commands(0).is_empty());
         // A block from any of its rows: the prompt, the typed command, the trimmed output.
         let block = state.command_block(LineIndex(6)).expect("the seq block");
-        assert_eq!((block.prompt, block.end, block.exit), (LineIndex(4), LineIndex(8), Some(1)));
+        assert_eq!((block.prompt, block.end, block.exit), (LineIndex(4), LineIndex(8), Some(0)));
         assert_eq!(block.command.as_deref(), Some("seq 2"));
         assert_eq!(block.output, "1\n2");
         let block = state.command_block(LineIndex(3)).expect("the false block");
-        assert_eq!((block.prompt, block.end), (LineIndex(3), LineIndex(4)));
+        assert_eq!((block.prompt, block.end, block.exit), (LineIndex(3), LineIndex(4), Some(1)));
         assert_eq!((block.command.as_deref(), block.output.as_str()), (Some("false"), ""));
         assert_eq!(state.command_block(LineIndex(0)).map(|b| b.output), Some("a\nb".to_owned()));
         let newest = state.command_block(LineIndex(8)).expect("the open prompt");
         assert_eq!((newest.prompt, newest.end), (LineIndex(8), LineIndex(9)));
         assert_eq!(newest.command, None, "nothing typed after the prompt");
+        assert_eq!(newest.exit, None, "no prompt after it has reported a status");
         // A command typed twice is listed once, at its newest place.
         state.apply(TermEvent::Lines {
             start: LineIndex(3),
@@ -1343,12 +1426,71 @@ mod tests {
         assert_eq!(state.recent_commands(8), ["seq 2", "ls"], "the repeat keeps its newest place");
         // The head alone, read every frame by the sticky header: no output is gathered.
         let head = state.block_head(LineIndex(6)).expect("the seq head");
-        assert_eq!((head.prompt, head.body, head.exit), (LineIndex(4), LineIndex(5), Some(1)));
+        assert_eq!((head.prompt, head.body, head.exit), (LineIndex(4), LineIndex(5), Some(0)));
+        assert_eq!(state.block_exit(LineIndex(3)), Some(1), "`false` failed, said by `seq`'s row");
         assert_eq!(head.command.as_deref(), Some("seq 2"));
         assert_eq!(state.block_head(LineIndex(8)).map(|h| h.body), Some(LineIndex(9)));
         let _fetches: Vec<Effect> = state.scroll_to_line(LineIndex(3));
         assert_eq!(state.index_at_row(0), LineIndex(3));
         assert_eq!(state.view_offset(), 3);
+    }
+
+    /// The rows of a failed block run from its prompt to the next prompt, which carries the
+    /// status; a block cut off by the view's bottom takes it from the prompt below; rows over
+    /// the first prompt are nobody's block; the open prompt and the alternate screen have none.
+    #[test]
+    fn failed_runs_cover_the_blocks_whose_command_failed() {
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let mut state = TermState::new(size());
+        let screen = |state: &mut TermState, newest: Option<u8>, modes: TermModes| {
+            let mut f = frame(2, true, 0, 6, 9, &[(0, "2"), (1, ""), (2, "$ ")]);
+            f.modes = modes;
+            f.updates[0].line.mark = SemanticMark::Output;
+            f.updates[1].line.mark = SemanticMark::Output;
+            f.updates[2].line.mark = prompt(newest);
+            state.apply(TermEvent::Frame(f));
+        };
+        screen(&mut state, Some(0), TermModes::empty());
+        state.apply(TermEvent::Lines {
+            start: LineIndex(0),
+            lines: vec![
+                marked("$ ls", prompt(None)),
+                marked("a", SemanticMark::Output),
+                marked("b", SemanticMark::Output),
+                marked("$ false", prompt(Some(0))),
+                marked("$ seq 2", prompt(Some(1))),
+                marked("1", SemanticMark::Output),
+            ],
+        });
+        let runs = |state: &TermState| {
+            let runs = state.failed_runs(&state.view());
+            runs.into_iter().map(|run| (run.start, run.end)).collect::<Vec<_>>()
+        };
+        assert_eq!(runs(&state), [], "`seq 2` succeeded; the open prompt has no status");
+        let _fetches = state.scroll_to_line(LineIndex(3));
+        assert_eq!(runs(&state), [(0, 1)], "`false` failed, `seq 2` below it did not");
+        let _fetches = state.scroll_to_line(LineIndex(0));
+        assert_eq!(runs(&state), [], "`ls` succeeded, `false` starts below the view");
+        let _fetches = state.scroll_to_line(LineIndex(1));
+        assert_eq!(runs(&state), [(2, 3)], "the `false` row, under `ls`'s cut-off output");
+
+        let _fetches = state.scroll_to(0);
+        screen(&mut state, Some(2), TermModes::empty());
+        assert_eq!(runs(&state), [(0, 2)], "`seq 2` failed: its output, cut off at the top");
+        let _fetches = state.scroll_to_line(LineIndex(4));
+        assert_eq!(runs(&state), [(0, 3)], "the whole `seq 2` block, the status from below");
+        let _fetches = state.scroll_to(0);
+        screen(&mut state, Some(2), TermModes::ALT_SCREEN);
+        assert_eq!(runs(&state), [], "the alternate screen has no blocks");
+
+        // A status on the first prompt says a command failed before any block was drawn.
+        let mut state = TermState::new(size());
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "junk"), (1, "$ x"), (2, "y")]);
+        f.updates[0].line.mark = SemanticMark::Output;
+        f.updates[1].line.mark = prompt(Some(1));
+        f.updates[2].line.mark = SemanticMark::Output;
+        state.apply(TermEvent::Frame(f));
+        assert_eq!(runs(&state), [], "the junk over the first prompt is no block's");
     }
 
     /// A command continued on the next row (a `for` loop typed over two lines) is marked as

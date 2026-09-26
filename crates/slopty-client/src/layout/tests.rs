@@ -88,6 +88,18 @@ fn width_of(l: &Layout, tile: TileRef) -> f32 {
     rect(l, tile).w
 }
 
+/// The width `tile`'s column keeps for when it has a neighbour: a lone column shows full width
+/// whatever its own.
+fn stored_width_of(l: &Layout, tile: TileRef) -> f32 {
+    let column = l
+        .workspaces()
+        .iter()
+        .flat_map(Workspace::columns)
+        .find(|c| c.tiles().iter().any(|t| t.tile() == tile))
+        .unwrap();
+    column.stored_width(&l.geom())
+}
+
 // ----- the pieces ---------------------------------------------------------------------------
 
 #[test]
@@ -149,14 +161,14 @@ fn local_tiles_open_right_of_the_focus_and_the_view_moves_the_least() {
     let mut l = still();
     l.open(t(1), Placement::Local);
     let a = rect(&l, t(1));
-    near(a.x, (1280.0 - HALF) / 2.0);
-    near(a.w, HALF);
+    near(a.x, 0.0);
+    near(a.w, 1280.0);
     near(a.y, 0.0);
     near(a.h, 800.0);
     assert_eq!(l.focused(), Some(t(1)));
 
-    // The second: the view leaves the lone column's centre only as far as showing both needs,
-    // and the pair fills the window edge to edge.
+    // The second: the lone column gives back the width it filled, and the pair fills the
+    // window edge to edge.
     l.open(t(2), Placement::Local);
     near(view_pos(&l), 0.0);
     near(rect(&l, t(1)).x, 0.0);
@@ -266,7 +278,9 @@ fn closing_after_the_focus_moved_takes_the_next_column_in_place() {
     l.focus_column_first();
     l.remove(t(1));
     assert_eq!(l.focused(), Some(t(2)), "the column that slid into its place");
-    near(rect(&l, t(2)).x, (1280.0 - HALF) / 2.0);
+    let alone = rect(&l, t(2));
+    near(alone.x, 0.0);
+    near(alone.w, 1280.0);
     l.remove(t(2));
     assert_eq!(l.focused(), None);
     l.remove(t(2));
@@ -426,7 +440,7 @@ fn moving_a_column_to_another_workspace_keeps_its_width_and_tiles() {
     // Workspace 0 emptied and was dropped once left.
     assert_eq!(shape(&l), vec![vec![vec![t(1), t(2)]], vec![]]);
     assert_eq!(l.focused(), Some(t(2)));
-    near(width_of(&l, t(1)), THIRD);
+    near(stored_width_of(&l, t(1)), THIRD);
     l.move_column_to_workspace_up();
     assert_eq!(shape(&l), vec![vec![vec![t(1), t(2)]], vec![]], "nothing above");
 }
@@ -509,29 +523,29 @@ fn presets_cycle_both_ways_from_a_preset_and_from_any_width() {
     let mut l = columns(1);
     // 640 is not marked as a preset: forward goes to the first one wider.
     l.switch_preset_width(true);
-    near(width_of(&l, t(1)), TWO_THIRDS);
+    near(stored_width_of(&l, t(1)), TWO_THIRDS);
     l.switch_preset_width(true);
-    near(width_of(&l, t(1)), THIRD);
+    near(stored_width_of(&l, t(1)), THIRD);
     l.switch_preset_width(true);
-    near(width_of(&l, t(1)), HALF);
+    near(stored_width_of(&l, t(1)), HALF);
     l.switch_preset_width(false);
-    near(width_of(&l, t(1)), THIRD);
+    near(stored_width_of(&l, t(1)), THIRD);
     l.switch_preset_width(false);
-    near(width_of(&l, t(1)), TWO_THIRDS);
+    near(stored_width_of(&l, t(1)), TWO_THIRDS);
     // From a width between presets.
     l.set_width_delta(-10.0);
-    let w = width_of(&l, t(1));
+    let w = stored_width_of(&l, t(1));
     assert!(w > HALF && w < TWO_THIRDS, "{w}");
     l.switch_preset_width(false);
-    near(width_of(&l, t(1)), HALF);
+    near(stored_width_of(&l, t(1)), HALF);
     l.set_width_delta(10.0);
     l.switch_preset_width(true);
-    near(width_of(&l, t(1)), TWO_THIRDS);
+    near(stored_width_of(&l, t(1)), TWO_THIRDS);
     // Backward from narrower than every preset: round to the widest.
     let mut l = columns(1);
     l.set_width_delta(-100.0);
     l.switch_preset_width(false);
-    near(width_of(&l, t(1)), TWO_THIRDS);
+    near(stored_width_of(&l, t(1)), TWO_THIRDS);
     assert_eq!(l.workspaces()[0].columns()[0].preset(), Some(2));
 }
 
@@ -539,22 +553,22 @@ fn presets_cycle_both_ways_from_a_preset_and_from_any_width() {
 fn width_steps_clamp_and_turn_a_fixed_width_proportional() {
     let mut l = columns(1);
     l.set_width_delta(10.0);
-    near(width_of(&l, t(1)), 1280.0 * 0.6);
+    near(stored_width_of(&l, t(1)), 1280.0 * 0.6);
     l.set_width_delta(100.0);
-    near(width_of(&l, t(1)), 1280.0);
+    near(stored_width_of(&l, t(1)), 1280.0);
     l.set_width_delta(-200.0);
-    near(width_of(&l, t(1)), 128.0);
+    near(stored_width_of(&l, t(1)), 128.0);
     assert_eq!(l.workspaces()[0].columns()[0].preset(), None);
     // A fixed width (an interactive resize) steps from its proportion.
     l.resize_begin(0);
     l.resize_update(372.0);
     l.resize_end();
-    near(width_of(&l, t(1)), 500.0);
+    near(stored_width_of(&l, t(1)), 500.0);
     assert_eq!(l.workspaces()[0].columns()[0].width(), ColumnWidth::Fixed(500.0));
     l.set_width_delta(10.0);
     let ColumnWidth::Proportion(p) = l.workspaces()[0].columns()[0].width() else { panic!() };
     near(p, 500.0 / 1280.0 + 0.1);
-    near(width_of(&l, t(1)), 500.0 + 128.0);
+    near(stored_width_of(&l, t(1)), 500.0 + 128.0);
 }
 
 #[test]
@@ -651,7 +665,7 @@ fn tile_heights_split_by_weight_after_fixed_ones() {
     let mut col = Column::new(Tile::new(t(1)), ColumnWidth::Proportion(0.5), false);
     col.tiles.push(Tile { height: TileHeight::Fixed(200.0), ..Tile::new(t(2)) });
     col.tiles.push(Tile { height: TileHeight::Auto { weight: 2.0 }, ..Tile::new(t(3)) });
-    let g = Geom { view_w: 1280.0, view_h: 800.0, strut: 0.0, compact: false };
+    let g = Geom { view_w: 1280.0, view_h: 800.0, strut: 0.0, compact: false, lone: false };
     let r = col.tile_rects(&g);
     let left = 800.0 - 200.0;
     near(r[0].y, 0.0);
@@ -698,7 +712,7 @@ fn a_tabbed_column_shows_one_tile_at_full_height() {
     }
     l.focus_window_down();
     assert!(!placed(&l, t(2)).hidden && placed(&l, t(1)).hidden);
-    // Dropping onto a tabbed column (alone, so centred) appends.
+    // Dropping onto a tabbed column (alone, so full width) appends.
     let target = l.drop_target(640.0, 100.0);
     assert_eq!(target, Some(DropTarget::IntoColumn { workspace: 0, column: 0, index: 3 }));
     l.toggle_tabbed();
@@ -777,8 +791,8 @@ fn the_overview_fits_every_workspace_with_a_gap_around_each() {
     }
     near(f.workspaces[2].1.bottom(), 800.0 - gap);
     let first = rect(&l, t(1));
-    near(first.x, (1280.0 - HALF).mul_add(zoom / 2.0, left));
-    near(first.w, HALF * zoom);
+    near(first.x, left);
+    near(first.w, 1280.0 * zoom);
     l.toggle_overview();
     near(l.frame().zoom, 1.0);
     // One workspace and the empty one: niri's half would cut the empty one off at the
@@ -869,27 +883,35 @@ fn a_tall_overview_scrolls_with_the_active_workspace_and_refits_smoothly() {
     near(l.frame().zoom, OVERVIEW_THREE);
 }
 
-/// niri's `always-center-single-column`: a lone column sits in the middle of the window, and
-/// stays there when the window or the column changes width; a second column brings back the
-/// usual fit.
+/// A lone column fills the window edge to edge, whatever its own width, which it keeps: a
+/// width step or a preset while it is alone is stored and shows when a neighbour arrives, and
+/// losing the neighbour fills the window again. A pane never floats on the canvas.
 #[test]
-fn a_lone_column_is_centred_and_stays_centred() {
+fn a_lone_column_fills_the_width_and_keeps_its_own_for_a_neighbour() {
     let mut l = columns(1);
-    let centred = |l: &Layout| {
+    let fills = |l: &Layout| {
         let r = rect(l, t(1));
-        near(r.x, (l.viewport().0 - r.w) / 2.0);
+        near(r.x, 0.0);
+        near(r.w, l.viewport().0);
     };
-    centred(&l);
+    fills(&l);
+    near(stored_width_of(&l, t(1)), HALF);
     l.set_viewport(1600.0, 900.0);
-    centred(&l);
-    l.switch_preset_width(true);
-    centred(&l);
+    fills(&l);
     l.set_viewport(1280.0, 800.0);
-    centred(&l);
+    l.switch_preset_width(true);
+    fills(&l);
+    near(stored_width_of(&l, t(1)), TWO_THIRDS);
     l.open(t(2), Placement::Local);
+    near(width_of(&l, t(1)), TWO_THIRDS);
+    near(rect(&l, t(2)).right(), 1280.0);
     l.focus_column_first();
     l.remove(t(2));
-    centred(&l);
+    fills(&l);
+    // A second workspace's lone column fills its own strip.
+    l.open(tile(2, 1), Placement::Remote);
+    l.focus_workspace_down();
+    near(rect(&l, tile(2, 1)).w, 1280.0);
 }
 
 /// Below `phone_below` (an iPad in Split View) every column shows at full width and the strip
@@ -1372,7 +1394,9 @@ fn without_animation_everything_lands_at_once() {
 fn the_target_rect_is_where_a_springing_tile_comes_to_rest() {
     let mut l = moving();
     l.open(t(1), Placement::Local);
+    l.open(t(2), Placement::Local);
     l.set_clock(MS(1000));
+    l.focus_column_first();
     l.switch_preset_width(true);
     l.set_clock(MS(1050));
     let p = placed(&l, t(1));

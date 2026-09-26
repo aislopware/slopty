@@ -505,6 +505,9 @@ struct Geom {
     strut: f32,
     /// Narrower than `phone_below`: every column shows at full width (see `normal_width`).
     compact: bool,
+    /// The workspace has one column, which shows at full width (see `normal_width`). Set by
+    /// `Workspace::geom`; false wherever no workspace is in hand.
+    lone: bool,
 }
 
 impl Geom {
@@ -708,10 +711,12 @@ impl Column {
     }
 
     /// The width outside fullscreen: the stored one, or the full width while the viewport is
-    /// compact. A deviation from niri, which keeps proportions at any size: in Split View a
-    /// half column is 231 pt, a terminal of about 25 columns nobody can use.
+    /// compact or the column is its workspace's only one. Deviations from niri, which keeps
+    /// proportions at any size: in Split View a half column is 231 pt, a terminal of about 25
+    /// columns nobody can use; and a lone half column on a wide window leaves half the strip
+    /// bare, a pane floating on the canvas where the panes are meant to meet every edge.
     fn normal_width(&self, g: &Geom) -> f32 {
-        if g.compact { g.max_width() } else { self.stored_width(g) }
+        if g.compact || g.lone { g.max_width() } else { self.stored_width(g) }
     }
 
     /// The width the column keeps for a viewport that is not compact: what presets, ±10 %
@@ -998,7 +1003,13 @@ impl Workspace {
     }
 
     fn column_x(&self, idx: usize, g: &Geom) -> f32 {
+        let g = &self.geom(g);
         self.columns.iter().take(idx).map(|c| c.resolved_width(g)).sum()
+    }
+
+    /// `g` for this workspace: a lone column shows at full width.
+    const fn geom(&self, g: &Geom) -> Geom {
+        Geom { lone: self.columns.len() == 1, ..*g }
     }
 
     fn view_pos(&self, ctx: &Ctx) -> f32 {
@@ -1006,20 +1017,14 @@ impl Workspace {
     }
 
     fn target_view_pos(&self, g: &Geom) -> f32 {
+        let g = &self.geom(g);
         self.column_x(self.active, g) + self.view.target()
     }
 
-    /// The offset that shows column `idx`: niri's fit, except that a lone column is centred
-    /// (niri's `always-center-single-column`). Left-aligned, one column on a wide window
-    /// leaves half of it empty on one side, which reads as something missing.
+    /// The offset that shows column `idx`: niri's fit. A lone column fills the working width,
+    /// so it rests flush with both edges.
     fn fit_offset(&self, g: &Geom, target_x: Option<f32>, idx: usize) -> f32 {
-        if self.columns.len() == 1 {
-            return self.centred_offset(g, idx);
-        }
-        self.fit_offset_niri(g, target_x, idx)
-    }
-
-    fn fit_offset_niri(&self, g: &Geom, target_x: Option<f32>, idx: usize) -> f32 {
+        let g = &self.geom(g);
         let Some(col) = self.columns.get(idx) else { return 0.0 };
         if col.fullscreen {
             return 0.0;
@@ -1034,10 +1039,11 @@ impl Workspace {
     }
 
     fn centred_offset(&self, g: &Geom, idx: usize) -> f32 {
+        let g = &self.geom(g);
         let Some(col) = self.columns.get(idx) else { return 0.0 };
         let w = col.resolved_width(g);
         if col.fullscreen || g.working_w() <= w {
-            return self.fit_offset_niri(g, None, idx);
+            return self.fit_offset(g, None, idx);
         }
         -(g.working_w() - w) / 2.0 - g.working_x()
     }
@@ -1188,7 +1194,7 @@ impl Workspace {
             self.activate_column(ctx, self.active.min(last));
         }
         if last == 0 {
-            // Alone now: to the centre, wherever the view was.
+            // Alone now, it fills the width: the view comes to rest on it wherever it was.
             self.animate_view_to_column(ctx, None, 0);
         }
         Some(column)
@@ -1300,7 +1306,7 @@ impl Workspace {
     }
 
     fn toggle_width(&mut self, ctx: &Ctx, forward: bool) {
-        let g = ctx.g;
+        let g = self.geom(&ctx.g);
         let len = ctx.presets.len();
         let Some(col) = self.columns.get_mut(self.active) else { return };
         if len == 0 {
@@ -1332,7 +1338,7 @@ impl Workspace {
     }
 
     fn set_width_delta(&mut self, ctx: &Ctx, percent: f32) {
-        let g = ctx.g;
+        let g = self.geom(&ctx.g);
         let Some(col) = self.columns.get_mut(self.active) else { return };
         let current = if col.full_width { ColumnWidth::Proportion(1.0) } else { col.width };
         let proportion = match current {
@@ -1409,6 +1415,7 @@ impl Workspace {
     /// The columns fully inside the working area as the view will be: `(width taken, leftmost
     /// x, the active column's x, whether another column counted)`.
     fn fully_visible(&self, g: &Geom) -> (f32, Option<f32>, Option<f32>, bool) {
+        let g = &self.geom(g);
         let view_x = self.target_view_pos(g);
         let (wx, ww) = (g.working_x(), g.working_w());
         let mut taken = 0.0;
@@ -1438,7 +1445,7 @@ impl Workspace {
     }
 
     fn center_visible_columns(&mut self, ctx: &Ctx) {
-        let g = ctx.g;
+        let g = self.geom(&ctx.g);
         let (taken, leftmost, active_x, _) = self.fully_visible(&g);
         let (Some(leftmost), Some(active_x)) = (leftmost, active_x) else { return };
         let free = g.working_w() - taken;
@@ -1449,7 +1456,7 @@ impl Workspace {
     }
 
     fn expand_to_available_width(&mut self, ctx: &Ctx) {
-        let g = ctx.g;
+        let g = self.geom(&ctx.g);
         let Some(col) = self.columns.get(self.active) else { return };
         if col.fullscreen || col.full_width {
             return;
@@ -1518,7 +1525,7 @@ impl Workspace {
             self.animate_view_to_column(ctx, None, self.active);
             return true;
         }
-        let g = ctx.g;
+        let g = self.geom(&ctx.g);
         let (left_strut, right_strut) = (g.working_x(), g.view_w - g.working_w() - g.working_x());
         let snaps_of = |col_x: f32, col: &Column| {
             let w = col.resolved_width(&g);
@@ -1609,7 +1616,7 @@ impl Workspace {
     /// niri's `dnd_scroll_gesture_{begin,scroll}`: the pointer's depth into the band at either
     /// edge sets the speed; the time since the last call sets the distance.
     fn dnd_scroll(&mut self, ctx: &Ctx, pointer_x: f32) -> bool {
-        let g = ctx.g;
+        let g = self.geom(&ctx.g);
         let is_dnd = matches!(&self.view, ViewOffset::Gesture(ViewGesture { dnd: Some(_), .. }));
         if !is_dnd {
             self.resize = None;
@@ -1694,7 +1701,7 @@ impl Workspace {
 
     fn resize_update(&mut self, ctx: &Ctx, dx: f32) -> bool {
         let Some(resize) = self.resize else { return false };
-        let g = ctx.g;
+        let g = self.geom(&ctx.g);
         let Some(col) = self.columns.get_mut(resize.column) else { return false };
         let old = col.resolved_width(&g);
         let stored = (resize.original + dx).clamp(g.min_width(), g.max_width().max(g.min_width()));
@@ -1728,10 +1735,12 @@ impl Workspace {
 
     /// Every tile's rectangle in view coordinates once the view has landed, no animation.
     fn rest_rects(&self, g: &Geom) -> Vec<(TileRef, Rect)> {
+        let g = &self.geom(g);
         self.rects_at(g, self.target_view_pos(g))
     }
 
     fn rects_at(&self, g: &Geom, view_pos: f32) -> Vec<(TileRef, Rect)> {
+        let g = &self.geom(g);
         let mut out = Vec::new();
         let mut x = 0.0;
         for col in &self.columns {
@@ -2029,7 +2038,13 @@ impl Layout {
 
     fn geom(&self) -> Geom {
         let strut = if self.is_phone() { self.config.phone_peek.max(0.0) } else { 0.0 };
-        Geom { view_w: self.view_w, view_h: self.view_h, strut, compact: self.is_phone() }
+        Geom {
+            view_w: self.view_w,
+            view_h: self.view_h,
+            strut,
+            compact: self.is_phone(),
+            lone: false,
+        }
     }
 
     fn ctx(&self) -> Ctx {
@@ -2816,6 +2831,7 @@ impl Layout {
         strip_x: f32,
         strip_y: f32,
     ) -> DropTarget {
+        let g = &ws.geom(g);
         let mut col_x = 0.0;
         for (idx, col) in ws.columns.iter().enumerate() {
             let width = col.resolved_width(g);
@@ -3061,7 +3077,7 @@ impl Layout {
             let mut visible: Option<(usize, usize)> = None;
             let mut x = 0.0;
             for (ci, col) in ws.columns.iter().enumerate() {
-                let width = col.resolved_width(&g);
+                let width = col.resolved_width(&ws.geom(&g));
                 let left = (x - view_pos).mul_add(zoom, panel.x);
                 let right = width.mul_add(zoom, left);
                 if shown && right > 0.0 && left < g.view_w {
@@ -3125,7 +3141,7 @@ impl Layout {
                 .columns
                 .iter()
                 .map(|c| {
-                    let w = c.resolved_width(&g);
+                    let w = c.resolved_width(&ws.geom(&g));
                     let at = x;
                     x += w;
                     (at, w)

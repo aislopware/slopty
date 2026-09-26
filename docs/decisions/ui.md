@@ -1685,3 +1685,189 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (U+3000) read as text, so a double-click on it took the word beside it, while the left
     half took only the space.
   - Test: view `either_half_of_a_wide_character_is_the_character`.
+
+- ✅ **The status bar states facts, the inbox is a mailbox, and palette rows say where**
+  (2026-09-26). The reference study found the status bar showing a debug readout and the inbox
+  and palette rows with too little to tell one from another. This ruling amends the status
+  bar and inbox of "The chrome gets a frame" (2026-09-25).
+  - **Status bar** (`statusbar.rs`). It sits on the canvas step, like the title bar. The left
+    side holds the focused tile's worker behind a server mark (`ServerOff` when its link is
+    down). Next comes its directory in mono. Inside a repository that is the repository's
+    name and the path within it (`slopty/crates/ui`), since the tail alone loses the name
+    once the shell goes deeper. Then the branch behind a branch mark. The right side holds
+    the ports forwarded here (`2 ports`, which opens the port list) and the uploads. It says
+    what is wrong with the focused worker's link only when something is, and gives the round
+    trip. `N workers` carries a dot in the worst link's tone only while a worker is not up,
+    and opens the hosts popover. Last comes the agent summary. The frame time is a
+    measurement, not a fact about the work, so it shows only with the stream stats (⌘⇧I).
+    Every count, age, port and round trip is set in tabular figures (`kit::tabular`).
+  - **Hosts popover.** It lists each worker in a 28 pt row: the server mark or the status
+    mark, the name, and the round trip or the word for what is wrong. Under the pointer the
+    row shows *Connect* (only while the link is down) and *Forget* (only for a worker added
+    by address). *Add a worker* sits at the foot. Connecting and forgetting are the app's, so
+    the app hands the workspace those actions (`set_host_actions`). *Connect* wakes the
+    worker's redial out of its backoff; *Forget* is the "…" menu's forget. A row goes to the
+    worker's tiles, and a click anywhere else closes the popover.
+  - **Inbox** (`inbox.rs`). The inbox keeps a history of the last 200 commands that finished
+    unwatched, which gives it the *All* view the 2026-09-25 entry lacked. *Unread* is what is
+    still badged on a header: read state is the badge, so reading a row, looking at its tile
+    and clearing its badge are one act. A later command in the same session replaces the
+    earlier one's badge, so the earlier row counts as read. Each row has two lines: the
+    command (or the agent's words), then the outcome, worker and directory in mono. The age
+    on the right swaps for a mark-read button under the pointer. *Mark all read* clears every
+    badge. An agent waiting is not marked read: answering it is what reads it. Newest first.
+    With nothing unread the inbox says "You're all caught up" under an inbox mark.
+  - **Palette rows.** Tiles and workers are listed by name alone. "Go to" repeated what the
+    section heading already says, and it pushed the name right. The row leads with one fixed
+    slot, `palette::status_slot`, which holds the kind icon at rest and the status mark once
+    there is a state; the picker, the navigator and the tile headers share it. A muted second
+    column gives the worker (once there are two) and the directory in mono. The session's age
+    (from the worker's `started_ms`) sits right-aligned. The filter matches that column too,
+    so a worker's or a directory's name finds its tiles. Section headings are `small()` in the
+    strong weight, as the plan's type discipline keeps `caption()` for badges.
+  - Tests (`workspace/tests/bars.rs`):
+    `the_status_bar_says_where_the_shell_is_and_counts_what_is_shared`,
+    `the_workers_count_opens_the_hosts_and_their_actions`, `the_inbox_reads_like_a_mailbox`,
+    `a_palette_row_says_where_the_tile_is`; `statusbar` `a_place_in_a_repository_is_named_by_it`;
+    `palette` `an_age_says_the_one_unit_that_matters`. Golden: `inbox`
+    (`the_inbox_lists_what_waits_and_what_finished`).
+
+- ✅ **Three surfaces in order, focus told by the header, tabs drawn as tabs** (2026-09-26).
+  The reference study found no order to the surfaces. In the light theme the navigator, the
+  status bar, every header and every body were the same white. In the dark theme a body sat
+  between the bars and the navigator, one shade from each. It also found focus invisible. The
+  veil over an unfocused body was the canvas at `alpha::FAINT`, and measured as a WCAG contrast
+  against the bare body it came to 1.000 in the dark theme (`0E0F12` under 12 % of `0A0B0E`
+  rounds to itself) and 1.009 in the light one. This entry reverses the flush-panes ruling's
+  "Focus comes from the veil" and "every header is on the body's surface" (2026-09-25).
+  - **Surface order.** The window has three steps, and they rise in both variants: the title
+    bar and the status bar on `canvas`, the navigator on `panel`, tile headers and bodies on
+    the content step. Zed's One themes order theirs by distance from the editor. In the dark
+    one the bars are the lightest, which would put Slopty's scrim, its picture wells and its
+    hover steps (`raised`, `overlay`) on the wrong side of the bars. So Slopty orders by
+    elevation, as VS Code's modern themes do. The content step is `Theme::content()`, the
+    terminal's background, so a grid, its body and its focused header are one surface
+    whatever the settings make it.
+  - **Values.** Adjacent steps are at least 1.05 apart (VS Code's dark modern is 1.05 a step,
+    Zed's One 1.08 to 1.22). Test: `the_surfaces_climb_in_three_steps_bars_navigator_content`.
+
+    | Token | Dark | Light |
+    |---|---|---|
+    | `canvas` | `08090B` | `EBEDF0` |
+    | `panel` | `0F1115` | `F6F7F9` |
+    | content (`terminal.bg`) | `16181D` | `FFFFFF` |
+    | `raised` / `overlay` | `1E2127` / `272A31` | `E8EAEE` / `E2E5EA` |
+    | `border` | `2A2D34` | `CFD3D9` |
+    | `border_subtle` (new) | `1F2127` | `E4E6EA` |
+
+    The dark terminal's ANSI 8 goes from `747D8D` to `7A8393` to stay above 4.5:1 on the
+    lifted background. Every chrome ink still clears WCAG AA on all five surfaces; the tightest
+    pairs are 4.52 in light and 4.53 in dark, both on `overlay`.
+  - **Two hairlines.** `border` stays for what divides regions: between panes, under a bar,
+    round a popover. `border_subtle` is the quieter line inside one region: under an
+    unfocused header, under a tab row, between a list's rows and a panel's sections.
+  - **Focus.** The focused tile's header is its body's surface in primary text with nothing
+    under it, so the tile reads as one piece. An unfocused header steps down to `panel`, its
+    title muted, with the subtle hairline over its body (Zed's tab: `tab.rs`). The veil is
+    gone. To be seen it would have to reach `alpha::PRESSED`, 1.056 in dark and 1.063 in
+    light, which is a 40 % dim of every other pane's text and picture. Dimming inactive panes
+    was ruled out with the flush panes. Dropping it also takes one quad per unfocused tile out
+    of every frame.
+  - **Leading slot.** A header leads with `palette::status_slot`, the one fixed square the
+    navigator, the palette and the inbox share. It shows the kind icon at rest, and the status
+    mark (working, waiting, failed, done, away) once there is one. The mark no longer also
+    sits on the right. On a Mac a file's slot is its drag-out proxy.
+  - **Density.** The worker chip becomes muted `small()` text after a server glyph: a fact,
+    not a control. The place (a shell's directory, a page's address) and the ports are set in
+    the mono face at `small()`. The header's right end is one strip, at least two icon buttons
+    wide (`kit::icon_button_side`). It holds the readouts at rest (the agent's pill, a
+    finished command's, the unseen dot) and swaps them for fullscreen and close while the
+    pointer is on the header, so nothing beside it moves. The focused tile with nothing to say
+    shows its buttons at rest, for touch.
+  - **Tabs.** A tabbed column's header was the shown tile's with `1/3` after its title. It is
+    a tab row now, a tab per tile, at most 200 pt each. A tab holds its slot, its title and a
+    close button shown on the tab's hover (always on the shown tab). The shown tab is the
+    content surface with no edge under it; the rest sit on `panel` over the bar's subtle
+    hairline. A press on a tab shows and focuses it and starts a move; a double-click names
+    it.
+  - **Figures.** `kit::tabular(el)` sets OpenType `tnum` on an element's text style, and its
+    children inherit it. `kit::tabular_figures()` gives the features for a shaped run. The
+    system font's figures are proportional, so a changing count, age or round trip shifted
+    what followed it. The header's strip, ports and upload wear it.
+  - **Motion.** `kit::fade_in(el, id, cx)` fades chrome in over `kit::FADE` (120 ms, eased
+    out) the first time it is drawn, and lands at once under Reduce Motion. `kit::motion(cx)`
+    reads the system setting as well as GPUI's flag, since the app never sets the latter. Only
+    opacity moves, so an overlay takes the pointer and the keys from its first frame. The
+    hover hint wears it; the palette, menus and inbox belong to their own files.
+  - `kit::sync` gives gpui-kit's bars `canvas`, its sidebar `panel`, its active tab the
+    content step, and its table rows `border_subtle`.
+
+  Tests: theme `the_surfaces_climb_in_three_steps_bars_navigator_content`,
+  `chrome_text_clears_wcag_aa` (content added); kit
+  `tabular_figures_set_tnum_on_the_text_style`, `chrome_holds_still_under_reduce_motion`,
+  `the_kit_theme_follows_the_tokens`; tiles
+  `tiles_have_no_frame_and_focus_is_told_by_the_header`, `no_body_is_veiled`,
+  `the_header_leads_with_one_slot_for_the_kind_or_the_status`,
+  `the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves`,
+  `a_tabbed_column_draws_a_tab_per_tile`. Golden: `tabbed-column`
+  (`a_tabbed_column_draws_its_tab_row`).
+
+- ✅ **The navigator runs the window's height, and the workspaces are tabs** (2026-09-26). The
+  reference study (diri, Orca, Zed's sidebar) found the navigator reading as a list of names:
+  one-line rows with nothing about where a shell is or what it did, headings that looked like
+  rows, and the workspaces listed twice, in a section of their own and as the title bar's
+  name. This amends the frame entry of 2026-09-25 and reverses "The column dots keep clear of
+  the name and centre on the safe area".
+  - **Height.** The navigator runs from the window's top to its bottom, and the title bar, the
+    strip and the status bar stack to its right. Its top row is the title bar's height: on a
+    Mac it leaves 78 pt for the traffic lights, then holds a filter field behind a search
+    icon. The title bar starts at the navigator's right edge; only with the navigator hidden
+    does it keep the traffic lights' inset. On an iPad or a phone the panel lays over the whole
+    frame, title bar included, and has no traffic lights to make room for.
+  - **Filter.** The field keeps the tiles whose title or second line holds what was typed, in
+    any case, and every tile of a worker whose name holds it. A fold hides nothing while it
+    filters. With nothing left the list says `Nothing matches`; ↩ goes to the first tile
+    listed, and Esc empties the field and gives the keyboard back.
+  - **Tile rows.** Two lines, 40 pt. A fixed leading slot shows the kind at rest (idle
+    included) and the status mark otherwise, through the shared `palette::status_slot`. The
+    first line is the title, with the unseen dot's fixed slot at its end. The second, muted,
+    joins the directory's tail, what the agent says (else the command running or the last one)
+    and the branch with a bullet, and ends with the age from the session's start
+    (`SessionSummary.started_ms`) in tabular figures, so truncation drops the branch first and
+    never the age.
+  - **Worker headers.** A server icon (`ServerOff` in warn while the worker is away, the
+    working mark while it connects), the name in the strong weight, the count of its tiles and
+    its round trip in tabular caption type on the row's right edge, where the tiles' ages end,
+    or the word for what is wrong. A folded worker's rollup comes before them. Under the pointer
+    the chevron and "+" (a new shell on that worker) take the readouts' place, as the tile
+    headers' actions do. The readouts grow leftwards, so neither the pointer nor a fold moves
+    the count or the round trip. A first build kept a fixed empty slot after the round trip
+    for the actions, and the golden showed the readouts floating 34 pt short of every other
+    right edge in the list. Section headings are the shared `section_heading`, on the rows'
+    leading edge.
+  - **Rollup** (`workspace/rollup.rs`). A group's slot shows one thing, the most urgent: the
+    warn mark with a count past one while tiles wait on the human, else the working mark, else
+    the unseen dot, else nothing. A tile counts once, as what it is doing.
+  - **Tabs.** The navigator's *Workspaces* section is gone. The title bar holds a tab per
+    workspace with something in it or a name, and the active one even when empty. A tab is
+    148 pt, giving way evenly (to 64) only when the bar runs out of room, so a long name, a
+    switch or a mark moves nothing. The active tab sits on `overlay` in the strong weight. Each
+    ends in the rollup's slot. "+" after the tabs (`New workspace`) goes to the empty workspace
+    the layout keeps last. Tabs carry no chord. The overview is still in "…" and on its key;
+    clicking the name no longer opens it.
+  - **Dots.** The column dots follow "+" in the bar's flow. They are beside the active tab
+    while there is one workspace, and in the same place whichever tab is active, since a slot
+    that followed the active tab would move the tabs after it on every switch. The measured
+    centring (`dots_at`) is deleted.
+
+  The branch comes from the summary the session opened with; following a `cd` or a checkout
+  needs the terminal view's `Cwd` event to carry it, which it does not yet. Tests
+  (`workspace/tests/nav_rows.rs`, `tab_strip.rs`, `frame.rs`): `the_filter_keeps_the_rows_that_match`,
+  `a_tile_row_reads_its_place_its_words_its_branch_and_its_age`,
+  `a_folded_worker_rolls_up_what_its_tiles_want`, `the_plus_on_a_worker_opens_a_shell_there`,
+  `the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge`,
+  `the_workspaces_are_tabs_in_the_title_bar`, `the_navigator_lists_what_needs_you_then_the_workers`,
+  `the_column_dots_keep_clear_of_the_toggle_and_the_tabs`,
+  `the_round_trips_share_the_right_edge_and_hold_still`; rollup
+  `a_rollup_shows_what_waits_then_what_works_then_what_is_unseen`, `a_tile_counts_once`,
+  `an_age_runs_from_the_start`, `the_second_line_skips_what_says_nothing`.

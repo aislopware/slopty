@@ -129,12 +129,11 @@ fn dragging_the_handle_resizes_the_navigator_within_its_clamps(cx: &mut TestAppC
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// *Needs you* shows only while an agent waits, above *Workers* and *Workspaces*; each
-/// worker lists its tiles beneath it, with an accessible name, until its row folds them.
+/// *Needs you* shows only while an agent waits, above *Workers*; each worker lists its tiles
+/// beneath it, with an accessible name, until its row folds them. The workspaces are no
+/// section of the navigator any more: they are the title bar's tabs, named with their count.
 #[gpui::test]
-fn the_navigator_lists_what_needs_you_then_the_workers_then_the_workspaces(
-    cx: &mut TestAppContext,
-) {
+fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
@@ -145,7 +144,8 @@ fn the_navigator_lists_what_needs_you_then_the_workers_then_the_workspaces(
     let top = |cx: &mut VisualTestContext, selector: &'static str| {
         f32::from(cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}")).origin.y)
     };
-    assert!(top(cx, "nav-workers") < top(cx, "nav-workspaces"));
+    assert!(cx.debug_bounds("nav-workers").is_some());
+    assert!(cx.debug_bounds("nav-workspaces").is_none(), "the tabs list the workspaces");
     assert!(cx.debug_bounds(selector("nav-tile", mine.item)).is_some(), "a tile under its worker");
 
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
@@ -156,7 +156,7 @@ fn the_navigator_lists_what_needs_you_then_the_workers_then_the_workspaces(
     let names = labels(&view, cx);
     assert!(names.iter().any(|l| l == "studio"), "a worker that is fine is its name: {names:#?}");
     assert!(names.iter().any(|l| l == "shell, Needs you"), "the waiting tile's row: {names:#?}");
-    assert!(names.iter().any(|l| l == "Workspace 1, 2 tiles"), "{names:#?}");
+    assert!(names.iter().any(|l| l == "Workspace 1, 2 tiles, 1 needs you"), "{names:#?}");
 
     click(cx, "nav-worker-00000000000000000000000000000001");
     assert!(cx.debug_bounds(selector("nav-tile", mine.item)).is_none(), "folded away");
@@ -182,7 +182,7 @@ fn on_a_phone_the_navigator_is_a_drawer_that_closes_on_a_choice(cx: &mut TestApp
     assert!(view.read_with(cx, |v, _| v.layout().navigator().shown), "the desktop's setting");
 }
 
-/// A tile's row focuses its tile and hands it the keyboard; a workspace's row goes there.
+/// A tile's row focuses its tile and hands it the keyboard; a workspace's tab goes there.
 #[gpui::test]
 fn a_tile_row_focuses_its_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -200,7 +200,7 @@ fn a_tile_row_focuses_its_tile(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.layout().active_workspace()), 1);
-    click(cx, "nav-workspace-0");
+    click(cx, "ws-tab-0");
     assert_eq!(view.read_with(cx, |v, _| v.layout().active_workspace()), 0);
     assert_eq!(focused(&view, cx), Some(first));
 }
@@ -270,33 +270,39 @@ fn the_bell_counts_the_inbox_and_its_rows_go_there(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.inbox_count()), 1, "looked at, it is cleared");
 }
 
-/// With the toggle and a long name on the left, the column dots move right of them rather
-/// than cover them, and never onto the buttons.
+/// The bar runs from the docked navigator's right edge: the toggle, the workspace's tab, "+",
+/// then the column dots, each clear of the next and of the bell. A long name is cut inside
+/// its tab, which keeps its width, so the dots do not move for it.
 #[gpui::test]
-fn the_column_dots_keep_clear_of_the_toggle_and_the_name(cx: &mut TestAppContext) {
+fn the_column_dots_keep_clear_of_the_toggle_and_the_tabs(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let _shells = three_shells(&view, cx, &fake);
+    let bounds = |cx: &mut VisualTestContext, selector: &'static str| {
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
+    };
+    let (tab_before, dots_before) = (bounds(cx, "ws-tab-0"), bounds(cx, "indicator"));
     view.update_in(cx, |v, _w, cx| {
         let name = "The workspace with the longest name anybody ever gave one of them, and more";
         v.layout.set_workspace_name(0, Some(name.to_owned()));
         cx.notify();
     });
     cx.run_until_parked();
-    let bounds = |cx: &mut VisualTestContext, selector: &'static str| {
-        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
-    };
-    let (toggle, name, dots, bell) = (
+    let (navigator, toggle, tab, new, dots, bell) = (
+        bounds(cx, "navigator"),
         bounds(cx, "navigator-toggle"),
-        bounds(cx, "workspace-name"),
+        bounds(cx, "ws-tab-0"),
+        bounds(cx, "new-workspace"),
         bounds(cx, "indicator"),
         bounds(cx, "bell"),
     );
-    assert!(toggle.right() <= name.left(), "{toggle:?} {name:?}");
-    assert!(name.right() <= dots.left(), "the dots cover the name: {name:?} {dots:?}");
+    assert!(navigator.right() <= toggle.left(), "the bar starts at the navigator's edge");
+    assert!(toggle.right() <= tab.left(), "{toggle:?} {tab:?}");
+    assert!(tab.right() <= new.left(), "{tab:?} {new:?}");
+    assert!(new.right() <= dots.left(), "the dots cover +: {new:?} {dots:?}");
     assert!(dots.right() <= bell.left(), "the dots cover the bell: {dots:?} {bell:?}");
-    let centred = (VIEWPORT.0 - f32::from(dots.size.width)) / 2.0;
-    assert!(f32::from(dots.left()) > centred, "pushed right of the middle by the name");
+    assert_eq!(tab.size, tab_before.size, "the tab keeps its width for a long name");
+    assert_eq!(dots.origin, dots_before.origin, "and the dots stay where they were");
 }
 
 /// A worker whose link is up says nothing about it: no word and no mark in the navigator, the
@@ -325,8 +331,8 @@ fn a_healthy_worker_says_nothing_and_a_lost_one_says_what_is_wrong(cx: &mut Test
     assert_eq!(
         workers,
         [
-            ("Go to studio".to_owned(), "4.2 ms".to_owned(), None),
-            ("Go to laptop".to_owned(), String::new(), None),
+            ("studio".to_owned(), "4.2 ms".to_owned(), None),
+            ("laptop".to_owned(), String::new(), None),
         ]
     );
 
@@ -339,7 +345,7 @@ fn a_healthy_worker_says_nothing_and_a_lost_one_says_what_is_wrong(cx: &mut Test
     assert!(names.iter().any(|l| l == "reconnecting"), "the status bar says so: {names:#?}");
     assert!(marks(cx).iter().any(|m| m == "Away"), "{:?}", marks(cx));
     let studio_line = view.read_with(cx, |v, _| {
-        v.worker_lines().find(|l| l.label == "Go to studio").map(|l| (l.keys, l.status))
+        v.worker_lines().find(|l| l.label == "studio").map(|l| (l.keys, l.status))
     });
     assert_eq!(studio_line, Some(("reconnecting".to_owned(), Some(crate::icons::Status::Away))));
 }
@@ -516,19 +522,46 @@ fn the_frame_fits_the_workspace_not_the_window(cx: &mut TestAppContext) {
     assert!(f32::from(drawer.right()) < NARROW, "the drawer fits: {drawer:?}");
 }
 
-/// The navigator's captions end on one edge: a healthy worker's round trip keeps no empty
-/// status lane after it, so it lines up with the workspaces' counts under it.
+/// The workers' round trips end on one edge, the row's. Under the pointer the chevron and "+"
+/// take the readouts' place; folded, the rollup comes before them. Neither moves a count or a
+/// round trip.
 #[gpui::test]
-fn the_round_trip_and_the_counts_share_the_right_edge(cx: &mut TestAppContext) {
+fn the_round_trips_share_the_right_edge_and_hold_still(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let key = studio.key;
-    view.update_in(cx, |v, _w, cx| v.set_rtt(key, Some(Duration::from_micros(4_240)), cx));
+    let laptop = connect(&view, cx, 2, "laptop");
+    let busy = SessionId::new();
+    let _busy = opens(&view, cx, &studio, busy, studio.me, 1);
+    let _other = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
+    let (a, b) = (studio.key, laptop.key);
+    view.update_in(cx, |v, _w, cx| {
+        v.set_rtt(a, Some(Duration::from_micros(4_240)), cx);
+        v.set_rtt(b, Some(Duration::from_millis(31)), cx);
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(busy) }, cx);
+    });
+    let far = point(px(VIEWPORT.0 - 10.0), px(VIEWPORT.1 / 2.0));
+    cx.simulate_mouse_move(far, None, Modifiers::default());
     cx.run_until_parked();
-    let rtt = cx.debug_bounds(leak(format!("nav-rtt-{key}"))).expect("the round trip is drawn");
-    let count = cx.debug_bounds("nav-count-0").expect("the count is drawn");
-    near(f32::from(rtt.right()), f32::from(count.right()));
+    let at = |cx: &mut VisualTestContext, what: &str, key: WorkerKey| {
+        let selector = leak(format!("{what}-{key}"));
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
+    };
+    let (rtt_a, rtt_b) = (at(cx, "nav-rtt", a), at(cx, "nav-rtt", b));
+    near(f32::from(rtt_a.right()), f32::from(rtt_b.right()));
+    let count = at(cx, "nav-count", a);
+
+    let header = at(cx, "nav-worker", a);
+    cx.simulate_mouse_move(header.center(), None, Modifiers::default());
+    cx.run_until_parked();
+    let actions = at(cx, "nav-new-shell", a);
+    assert!(cx.debug_bounds(leak(format!("nav-rtt-{a}"))).is_none(), "the actions take its place");
+    assert!(actions.right() <= rtt_a.right() + px(0.5), "within the readouts' edge");
+    click(cx, leak(format!("nav-worker-{a}")));
+    cx.simulate_mouse_move(far, None, Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(leak(format!("nav-rollup-{a}"))).is_some(), "folded, the rollup");
+    assert_eq!(at(cx, "nav-rtt", a), rtt_a, "back where it was, the rollup before it");
+    assert_eq!(at(cx, "nav-count", a), count);
 }
 
 /// A window narrowed past where the navigator docks is laid out for its new width at once.

@@ -57,7 +57,8 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   spring keeps its velocity; a cancelled strip gesture settles where it is and brings the focus
   back into view; one workspace of gesture travel is 1.1 viewport heights; fullscreen is not
   saved. Added 2026-09-25: a lone column is centred (niri's `always-center-single-column`, off
-  by default there), including when a removal leaves one, and the overview centres a strip
+  by default there), including when a removal leaves one; amended 2026-09-26: it fills the
+  width instead (below), and the overview centres a strip
   that fits the zoomed-out window without moving the view (`shown_view_pos`). The layout's
   unit tests pin the maths.
   Deviation added 2026-09-25, compact width: below 700 pt (a phone, an iPad in Split View) no
@@ -305,3 +306,21 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   only as needed; closing a just-opened column returns to the one left of it at its exact
   offset; moving or resizing keeps the camera still while neighbours spring by the delta; a
   retarget starts from the running animation's target.
+
+- ✅ **A lone column fills the width** (2026-09-26). This amends the 2026-09-25 deviation that
+  centred a lone column. A column alone in its workspace kept its proportion, half the window
+  by default. It then stood in the middle of the canvas with bare canvas on both sides, a pane
+  floating where the panes are meant to meet every edge. It now shows at the full working
+  width, as a compact window's columns do. Its own width is kept for when a neighbour arrives.
+  A preset or a ±10 % step made while it is alone changes that stored width and shows once
+  there are two. The second column springs it back to its width. Losing the neighbour fills
+  the window again, and the view comes to rest on it.
+  - **In the model.** `Geom::lone`, set by `Workspace::geom` from the column count, joins
+    `compact` in `normal_width`. Every workspace-level measurement goes through
+    `Workspace::geom`, so the frame, the snaps, the drop targets and the overview agree. The
+    lone-column branch of `fit_offset` is gone: a column as wide as the view already rests
+    flush. `center_column` still centres a column narrower than the view.
+  - **Cost.** Opening a second column now resizes the first one's PTY, where a centred half
+    column kept its size. That is a resize per first split, not per frame.
+  - Tests: client `a_lone_column_fills_the_width_and_keeps_its_own_for_a_neighbour`, and the
+    width tests read the stored width (`stored_width_of`) where their column is alone.

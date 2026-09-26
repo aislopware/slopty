@@ -130,11 +130,9 @@ mod tests {
             x >= 0.0 && y >= 0.0 && x + w <= vw + 1.0 && y + h <= vh + 1.0,
             "{term:?} in {vw}x{vh}"
         );
-        if vw < PHONE_BELOW {
-            assert!(w > vw * 0.85, "a phone column fills the screen: {term:?} in {vw}");
-        } else {
-            assert!(w > vw * 0.4 && w < vw * 0.6, "a tablet column is half the screen: {term:?}");
-        }
+        // A lone column fills the width on a phone and a tablet alike
+        // (docs/decisions/workspace.md).
+        assert!(w > vw * 0.85, "a lone column fills the screen: {term:?} in {vw}");
 
         drv.type_text("echo ios-$((6*7))").await.unwrap();
         drv.keys("enter").await.unwrap();

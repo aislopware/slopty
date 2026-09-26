@@ -7,11 +7,13 @@
 //! or a link looks like the chrome around it in both variants.
 
 use std::rc::Rc;
+use std::sync::{Arc, LazyLock};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    Animation, AnimationExt as _, App, Context, Div, FontFeatures, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Window, div, ease_out_quint, px,
 };
 use gpui_kit::base::text::TextViewDefaults;
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
@@ -22,6 +24,56 @@ use crate::colors::{hsla, hsla_alpha};
 /// What a find bar says before anything is typed. The terminal and the file card share it: the
 /// same bar, the same word.
 pub const FIND_PLACEHOLDER: &str = "Find";
+
+/// Figures of one width: OpenType `tnum`, which the system UI font and the terminal face both
+/// carry. Built once; each use clones an `Arc`.
+static TABULAR: LazyLock<FontFeatures> =
+    LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".to_owned(), 1)])));
+
+/// The font features that set a number's figures to one width, for text that is not a
+/// [`Styled`] element (a shaped run, a `TextStyle`).
+#[must_use]
+pub fn tabular_figures() -> FontFeatures {
+    TABULAR.clone()
+}
+
+/// `el` with tabular figures: every digit one width.
+///
+/// A count, a round trip, an age or a progress readout that changes then does not shift what
+/// follows it, and a column of them lines up. The system font's figures are proportional by
+/// default, where a `1` is narrower than an `8`. The children inherit it, `ChromeText`
+/// included.
+#[must_use]
+pub fn tabular<E: Styled>(el: E) -> E {
+    el.font_features(tabular_figures())
+}
+
+/// How long chrome takes to appear: an overlay, a menu, the palette, a hint. Short enough
+/// that a key typed at once still lands in what opened (focus does not wait for it).
+pub const FADE: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// Whether chrome may move: not while the system asks for reduced motion (or a test asks
+/// through [`App::set_reduce_motion`]). GPUI's own flag is not set from the system, so both
+/// are read.
+#[must_use]
+pub fn motion(cx: &App) -> bool {
+    !(cx.reduce_motion() || (!cfg!(test) && slopty_platform::reduce_motion()))
+}
+
+/// `el` fading in over [`FADE`] the first time it is drawn under `id`, eased out.
+///
+/// Under Reduce Motion it lands at once. Wrap the root of an overlay, a menu or a popover in
+/// it. Only opacity moves, so the element takes the pointer and the keys from its first frame.
+pub fn fade_in<E>(el: E, id: impl Into<gpui::ElementId>, cx: &App) -> gpui::AnyElement
+where
+    E: IntoElement + Styled + 'static,
+{
+    if !motion(cx) {
+        return el.into_any_element();
+    }
+    el.with_animation(id, Animation::new(FADE).with_easing(ease_out_quint()), Styled::opacity)
+        .into_any_element()
+}
 
 /// How large an overlay grows on a desktop.
 ///
@@ -164,9 +216,16 @@ pub fn button(
         ButtonKind::Link => el
             .border_color(gpui::transparent_black())
             .text_color(hsla(s.accent))
-            .hover(gpui::Styled::underline),
+            .hover(Styled::underline),
     };
     crate::a11y::tab_stop(el, s.accent)
+}
+
+/// The side of an [`icon_button`] at zoom 1: the large icon size and a small pad round it.
+/// A strip that holds icon buttons in turn with something else sizes itself from it.
+#[must_use]
+pub fn icon_button_side(theme: &Theme) -> f32 {
+    2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large())
 }
 
 /// A square button around one icon: a bar's actions, a tile's close and split.
@@ -196,7 +255,7 @@ pub fn icon_button_at(
     let s = theme.surfaces;
     let id: SharedString = id.into();
     let selector = id.to_string();
-    let side = 2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large()) * k;
+    let side = icon_button_side(theme) * k;
     let el = div()
         .id(gpui::ElementId::Name(id))
         .debug_selector(move || selector)
@@ -262,10 +321,10 @@ impl Hint {
 }
 
 impl Render for Hint {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        div()
+        let hint = div()
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
@@ -279,7 +338,8 @@ impl Render for Hint {
             .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
             .child(div().text_color(hsla(s.text)).child(self.what.clone()))
-            .child(div().text_color(hsla(s.text_muted)).child(self.key.clone()))
+            .child(div().text_color(hsla(s.text_muted)).child(self.key.clone()));
+        fade_in(hint, "hint", cx)
     }
 }
 
@@ -315,6 +375,20 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.link_active = hsla(s.accent);
     c.popover = hsla(s.panel);
     c.popover_foreground = hsla(s.text);
+    // The surface order: bars on the canvas, side panels on the panel, content above both.
+    c.title_bar = hsla(s.canvas);
+    c.title_bar_border = hsla(s.border);
+    c.status_bar = hsla(s.canvas);
+    c.status_bar_border = hsla(s.border);
+    c.sidebar = hsla(s.panel);
+    c.sidebar_foreground = hsla(s.text);
+    c.sidebar_border = hsla(s.border);
+    c.tab_bar = hsla(s.panel);
+    c.tab = hsla(s.panel);
+    c.tab_foreground = hsla(s.text_muted);
+    c.tab_active = hsla(theme.content());
+    c.tab_active_foreground = hsla(s.text);
+    c.table_row_border = hsla(s.border_subtle);
     c.list = hsla(s.panel);
     c.list_hover = hsla(s.raised);
     c.list_active = hsla(s.overlay);
@@ -403,6 +477,10 @@ mod tests {
                 assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.accent_fg));
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
                 assert_eq!(kit.colors.ring, hsla(theme.surfaces.accent));
+                assert_eq!(kit.colors.title_bar, hsla(theme.surfaces.canvas));
+                assert_eq!(kit.colors.sidebar, hsla(theme.surfaces.panel));
+                assert_eq!(kit.colors.tab_active, hsla(theme.content()));
+                assert_eq!(kit.colors.table_row_border, hsla(theme.surfaces.border_subtle));
                 assert!(!kit.focus_ring, "a focused field is one hairline, not a halo");
                 assert!(
                     TextViewDefaults::global(cx).has_code_block_highlighter(),
@@ -655,6 +733,24 @@ mod tests {
         assert!(literal_spacing(".size(px(16.0))").is_none());
         // `.pr(` must not be found inside `.appear(` or any other word ending in those letters.
         assert!(literal_spacing("something.expr(px(4.0))").is_none());
+    }
+
+    /// A tabular element carries `tnum` in the text style its children inherit, and nothing
+    /// else: no other feature of the UI font is switched on or off with it.
+    #[test]
+    fn tabular_figures_set_tnum_on_the_text_style() {
+        let mut el = tabular(div());
+        let features = el.text_style().font_features.clone();
+        assert_eq!(features.map(|f| f.0.as_ref().clone()), Some(vec![("tnum".to_owned(), 1)]));
+        assert_eq!(tabular_figures(), tabular_figures(), "one value, cloned");
+    }
+
+    /// Chrome moves unless Reduce Motion is asked for, and then it lands at once.
+    #[gpui::test]
+    fn chrome_holds_still_under_reduce_motion(cx: &TestAppContext) {
+        assert!(cx.update(|cx| motion(cx)), "motion by default");
+        cx.update(|cx| cx.set_reduce_motion(true));
+        assert!(!cx.update(|cx| motion(cx)), "still under Reduce Motion");
     }
 
     /// The two overlay sizes differ in both directions, and a list is the smaller of them: a

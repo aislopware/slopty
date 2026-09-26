@@ -3,6 +3,7 @@
 //! show what it should, and the notices in the strip's corner.
 
 use slopty_grid::SemanticMark;
+use slopty_theme::alpha;
 
 use super::*;
 use crate::workspace::tile::{CLOSE_TILE, RECONNECTING, cwd_tail};
@@ -118,17 +119,20 @@ fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Qua
         .collect()
 }
 
-/// Panes sit flush: no tile is rounded or framed, the focused one included, and every header
-/// lies on its body's surface with one hairline under it.
+/// Panes sit flush: no tile is rounded or framed, the focused one included. Focus is told by
+/// the header: the focused one is its body's surface with nothing under it, the other is the
+/// panel with a subtle hairline over its body.
 #[gpui::test]
-fn tiles_have_no_frame_or_corner_and_headers_sit_on_their_bodies(cx: &mut TestAppContext) {
+fn tiles_have_no_frame_and_focus_is_told_by_the_header(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
     assert_eq!(focused(&view, cx), Some(second));
     cx.run_until_parked();
-    let panel = gpui::Background::from(crate::colors::hsla(Theme::default().surfaces.panel));
+    let theme = Theme::default();
+    let fill = |c| gpui::Background::from(crate::colors::hsla(c));
+    let (panel, content) = (fill(theme.surfaces.panel), fill(theme.content()));
     for tile in [first, second] {
         let bounds = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
         let quads = quads_at(cx, bounds);
@@ -145,11 +149,26 @@ fn tiles_have_no_frame_or_corner_and_headers_sit_on_their_bodies(cx: &mut TestAp
                 "no frame: {q:?}"
             );
         }
-        let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
-        let quads = quads_at(cx, header);
-        assert!(quads.iter().all(|q| q.background != panel), "on the body's surface");
-        assert!(quads.iter().any(|q| q.border_widths.bottom.0 > 0.0), "a hairline under it");
     }
+    let header = |cx: &mut VisualTestContext, tile: TileRef| {
+        let bounds = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
+        quads_at(cx, bounds)
+    };
+    let on = header(cx, second);
+    assert!(on.iter().any(|q| q.background == content), "focused: the body's surface");
+    assert!(on.iter().all(|q| q.border_widths.bottom.0 == 0.0), "and nothing under it");
+    let off = header(cx, first);
+    assert!(off.iter().any(|q| q.background == panel), "unfocused: the panel");
+    let subtle = crate::colors::hsla(theme.surfaces.border_subtle);
+    assert!(
+        off.iter().any(|q| q.border_widths.bottom.0 > 0.0 && q.border_color == subtle),
+        "with the quiet hairline over its body"
+    );
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    cx.run_until_parked();
+    assert!(header(cx, first).iter().any(|q| q.background == content), "it follows the focus");
+    assert!(header(cx, second).iter().any(|q| q.background == panel));
 }
 
 /// One divider between each pair of neighbours: a tile draws it on its right edge where a
@@ -177,32 +196,57 @@ fn a_divider_runs_only_between_neighbours(cx: &mut TestAppContext) {
     assert!(quads_at(cx, line).iter().any(|q| q.background == border), "in the border colour");
 }
 
-/// The focused tile is left alone and the others lie under the canvas colour, a quad over
-/// the body and not an opacity; a tile alone in view is never veiled.
+/// No body is veiled, focused or not: the header carries the focus, and a quad over every
+/// unfocused body would be one more to paint for a wash nobody could see.
 #[gpui::test]
-fn unfocused_bodies_are_veiled_and_a_lone_tile_is_not(cx: &mut TestAppContext) {
+fn no_body_is_veiled(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
-    let lone = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
-    assert!(cx.debug_bounds(selector("veil", lone.item)).is_none(), "alone: no veil");
+    let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
-    view.update_in(cx, |v, _w, cx| v.focus_tile(lone, cx));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
     cx.run_until_parked();
-    let veil = cx.debug_bounds(selector("veil", second.item)).expect("the other tile is veiled");
-    let body = cx.debug_bounds(selector("title", second.item)).expect("drawn");
-    assert!(veil.top() >= body.bottom(), "over the body, not the header");
-    let theme = Theme::default();
-    let wash = gpui::Background::from(crate::colors::hsla_alpha(
-        theme.surfaces.canvas,
-        slopty_theme::alpha::FAINT,
-    ));
-    assert!(quads_at(cx, veil).iter().any(|q| q.background == wash), "canvas at FAINT");
-    assert!(cx.debug_bounds(selector("veil", lone.item)).is_none(), "the focused one is not");
+    let canvas = Theme::default().surfaces.canvas;
+    let washes: Vec<gpui::Background> = [alpha::FAINT, alpha::TINT, alpha::PRESSED]
+        .into_iter()
+        .map(|a| crate::colors::hsla_alpha(canvas, a).into())
+        .collect();
+    for tile in [first, second] {
+        let body = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
+        let quads = cx.update(|w, _| w.painted_quads());
+        let scale = cx.update(|w, _| w.scale_factor());
+        let over = quads.iter().filter(|q| {
+            let at = point(px(q.bounds.origin.x.0 / scale), px(q.bounds.origin.y.0 / scale));
+            body.contains(&at)
+        });
+        assert!(over.clone().count() > 0, "the body paints");
+        assert!(over.clone().all(|q| !washes.contains(&q.background)), "no wash over a body");
+    }
+}
 
-    view.update_in(cx, |v, _w, cx| v.focus_tile(second, cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("veil", lone.item)).is_some(), "the veil follows the focus");
-    assert!(cx.debug_bounds(selector("veil", second.item)).is_none());
+/// The header leads with one fixed slot, where the tile's kind sits at rest and its status
+/// mark once there is one, on the header's inset.
+#[gpui::test]
+fn the_header_leads_with_one_slot_for_the_kind_or_the_status(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let shell = SessionId::new();
+    let tile = opens(&view, cx, &fake, shell, fake.me, 1);
+    let slot_at = |cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector("status", tile.item)).expect("the slot is always drawn")
+    };
+    let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
+    let rest = slot_at(cx);
+    let inset = Theme::default().spacing.inset();
+    assert!((f32::from(rest.left() - header.left()) - inset).abs() < 0.5, "on the inset");
+    assert!(marks(cx).iter().all(|m| m != "Failed"), "at rest: the kind");
+    view.update_in(cx, |v, _w, cx| {
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let rows = [("$ false", prompt(None)), ("$ ", prompt(Some(1)))];
+        v.term_event(shell, marked_frame(1, &rows, 1), cx);
+    });
+    assert!(marks(cx).iter().any(|m| m == "Failed"), "the mark takes the slot");
+    assert_eq!(slot_at(cx), rest, "in the same square");
 }
 
 /// A tile whose agent waits on the human carries a warn bar along the top of its header, and
@@ -498,4 +542,85 @@ fn the_closed_notice_takes_the_tile_back(cx: &mut TestAppContext) {
     );
     assert!(view.read_with(cx, |v, _| v.layout().contains(third)), "back");
     assert!(cx.debug_bounds("closed").is_none(), "the offer is taken");
+}
+
+/// The header's right end is one strip: the agent's pill at rest, fullscreen and close while
+/// the pointer is on the header, and the swap moves nothing (the strip, the title).
+#[gpui::test]
+fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let agent = SessionId::new();
+    let waiting = opens(&view, cx, &fake, agent, fake.me, 1);
+    let _other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(
+            AgentEvent {
+                session: agent,
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
+                agent_session: None,
+                detail: None,
+                attention: false,
+                source: AgentSource::Hook,
+            },
+            cx,
+        );
+    });
+    cx.simulate_mouse_move(point(px(1.0), px(799.0)), None, Modifiers::none());
+    cx.run_until_parked();
+    let bounds = |cx: &mut VisualTestContext, part: &str| {
+        cx.debug_bounds(selector(part, waiting.item)).unwrap_or_else(|| panic!("{part} drawn"))
+    };
+    let (strip, name, pill) = (bounds(cx, "strip"), bounds(cx, "name"), bounds(cx, "agent"));
+    assert!(strip.contains(&pill.center()), "the pill is in the strip");
+    let side = crate::kit::icon_button_side(&Theme::default());
+    assert!(f32::from(strip.size.width) >= 2.0_f32.mul_add(side, -0.5), "room for both buttons");
+    assert!(!quads_at(cx, pill).is_empty(), "the pill shows at rest");
+
+    let header = bounds(cx, "title").center();
+    cx.simulate_mouse_move(header, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(quads_at(cx, pill).is_empty(), "hovered: the pill gives way");
+    assert_eq!(bounds(cx, "strip"), strip, "the strip holds its place");
+    assert_eq!(bounds(cx, "name"), name, "and so does the title");
+    let close = cx.debug_bounds(selector("close", waiting.item)).expect("close drawn");
+    assert!(strip.contains(&close.center()), "close sits in the same strip");
+}
+
+/// A tabbed column's header is a tab row: a tab per tile with its title, the shown one
+/// selected; a click on a tab shows and focuses it, and a tab's close closes its tile.
+#[gpui::test]
+fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    cx.simulate_keystrokes("cmd-[");
+    cx.simulate_keystrokes("cmd-alt-t");
+    cx.run_until_parked();
+    assert_eq!(column_of(&view, cx, first), column_of(&view, cx, second), "one column");
+    assert_eq!(focused(&view, cx), Some(second));
+    let tab = |cx: &mut VisualTestContext, tile: TileRef| {
+        cx.debug_bounds(selector("tab", tile.item)).expect("a tab per tile")
+    };
+    let (a, b) = (tab(cx, first), tab(cx, second));
+    assert_eq!(a.top(), b.top(), "side by side in one row");
+    assert!(a.right() <= b.left(), "in the column's order");
+    let tabs: Vec<_> = tree(cx).into_iter().filter(|n| n.role == "Tab").collect();
+    assert_eq!(tabs.len(), 2, "{tabs:#?}");
+    assert!(
+        tree(cx).iter().all(|n| n.label.as_deref() != Some("2/2")),
+        "no count stands in for the tabs"
+    );
+
+    cx.simulate_click(a.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), Some(first), "the clicked tab is shown and focused");
+    let close = cx.debug_bounds(selector("tab-close", second.item)).expect("drawn");
+    cx.simulate_mouse_move(close.center(), None, Modifiers::none());
+    cx.simulate_click(close.center(), Modifiers::none());
+    cx.run_until_parked();
+    let left: Vec<TileRef> = view.read_with(cx, |v, _| v.layout().tiles().collect());
+    assert_eq!(left, vec![first], "its close closed that tab's tile");
 }

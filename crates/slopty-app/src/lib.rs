@@ -40,7 +40,8 @@ use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
 use slopty_ui::terminal::TerminalView;
 use slopty_ui::workspace::{
-    KeyTarget, MenuEntry, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView,
+    HostActions, KeyTarget, MenuEntry, MenuRun, WorkerLink, WorkerStatus, WorkspaceEvent,
+    WorkspaceView,
 };
 pub use workers::actions::{AddWorker, ConnectServer, DisconnectServer};
 use workers::{Hearing, Tick, WorkerSlot};
@@ -440,6 +441,45 @@ impl Workspace {
             });
         }
         self.view.update(cx, |v, cx| v.set_more_menu(entries, cx));
+        self.refresh_hosts(cx);
+    }
+
+    /// What the status bar's hosts popover can do to each worker: dial it now, and forget
+    /// one added by address; and its way to add a worker.
+    fn refresh_hosts(&self, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let hosts = self
+            .workers
+            .iter()
+            .map(|slot| {
+                let id = slot.id;
+                let connect: MenuRun = {
+                    let this = this.clone();
+                    Rc::new(move |_window, cx| {
+                        let _gone = this.update(cx, |ws, _cx| ws.connect_now(id));
+                    })
+                };
+                let forget = slot.added.then(|| {
+                    let this = this.clone();
+                    let run: MenuRun = Rc::new(move |window, cx| {
+                        let _gone = this.update(cx, |ws, cx| ws.forget_worker(id, window, cx));
+                    });
+                    run
+                });
+                (slot.key, HostActions { connect: Some(connect), forget })
+            })
+            .collect();
+        let add: MenuRun = Rc::new(move |window, cx| {
+            let _gone = this.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
+        });
+        self.view.update(cx, |v, cx| v.set_host_actions(hosts, Some(add), cx));
+    }
+
+    /// Dial `id` now rather than at the end of its backoff.
+    fn connect_now(&self, id: WorkerId) {
+        if let Some(slot) = self.slot(id) {
+            slot.wake();
+        }
     }
 
     /// Connect to `id` and keep it connected: each drop (worker restart, network change,
@@ -1046,7 +1086,7 @@ impl Workspace {
             .overflow_x_scroll()
             .px(px(self.theme.spacing.xs))
             .gap(px(self.theme.spacing.xs))
-            .bg(hsla(s.panel))
+            .bg(hsla(s.canvas))
             .border_t_1()
             .border_color(hsla(s.border))
             .font_family(self.theme.typography.ui_family.clone());
@@ -1197,9 +1237,9 @@ impl Render for Workspace {
                     .when_some(key_bar, |el, bar| {
                         el.child(div().w_full().px(insets.left).child(bar))
                     })
-                    // The home indicator's band continues whatever sits above it (the key bar
-                    // or the status bar, both on `panel`), not the canvas behind them.
-                    .child(div().w_full().h(insets.bottom).bg(hsla(surfaces.panel)))
+                    // The home indicator's band continues the bar above it: the key bar and the
+                    // status bar are both chrome on `canvas`.
+                    .child(div().w_full().h(insets.bottom).bg(hsla(surfaces.canvas)))
             })
             .when_some(adding, gpui::ParentElement::child)
             .when_some(settings_editor, gpui::ParentElement::child)

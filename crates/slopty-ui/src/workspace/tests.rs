@@ -550,8 +550,9 @@ fn the_layout_keys_move_the_focus_and_the_columns(cx: &mut TestAppContext) {
     assert_ne!(focused(&view, cx), Some(first), "⌘⌥↑ walks the column");
 }
 
-/// ⌘R cycles the column through the preset widths; the terminal's grid follows the width it
-/// comes to rest at. ⌘⇧↩ fills the view, and again restores.
+/// A lone column fills the strip. Beside another, ⌘R cycles it through the preset widths;
+/// the terminal's grid follows the width it comes to rest at. ⌘⇧↩ fills the view, and again
+/// restores.
 #[gpui::test]
 fn the_width_keys_resize_the_column_and_its_grid(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -565,6 +566,10 @@ fn the_width_keys_resize_the_column_and_its_grid(cx: &mut TestAppContext) {
         view.read_with(cx, |v, cx| v.terminal(session).unwrap().read(cx).size().cols)
     };
     let strip = f32::from(cx.debug_bounds("strip").unwrap().size.width);
+    assert!((width(cx) - strip).abs() < 2.0, "alone, edge to edge: {}", width(cx));
+    let _beside = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
     let half = width(cx);
     assert!((half - strip / 2.0).abs() < 2.0, "half the strip, edge to edge: {half}");
     let half_cols = cols(cx);
@@ -962,7 +967,7 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     assert_ne!(focused(&view, cx), Some(tile));
     cx.simulate_keystrokes("cmd-shift-p");
     cx.run_until_parked();
-    cx.simulate_keystrokes("g o space t o space s h e l l enter");
+    cx.simulate_keystrokes("s h e l l enter");
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(tile), "gone to");
     assert!(terminal_focused(&view, cx, session));
@@ -1258,7 +1263,7 @@ fn the_worker_list_goes_to_a_worker(cx: &mut TestAppContext) {
                 .collect::<Vec<_>>()
         })
     });
-    assert_eq!(lines, Some(vec![("Go to studio".to_owned(), String::new())]), "up: no word");
+    assert_eq!(lines, Some(vec![("studio".to_owned(), String::new())]), "up: no word");
     studio.drain();
     view.update_in(cx, |v, _w, cx| v.go_to_worker(studio.key, cx));
     cx.run_until_parked();
@@ -1291,11 +1296,15 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
 }
 
 mod away;
+mod bars;
+mod cwd;
 mod frame;
 mod measure;
+mod nav_rows;
 mod palette;
 mod remote;
 mod strip_marks;
+mod tab_strip;
 mod tiles;
 
 /// A worker that comes up with nothing on it is given a shell beside the rest, and the focus

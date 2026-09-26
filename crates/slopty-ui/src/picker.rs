@@ -21,7 +21,7 @@ use slopty_theme::Theme;
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::icons::{self, IconName, IconSize, Status};
-use crate::palette::{icon_slot, section_heading};
+use crate::palette::{icon_slot, section_heading, status_slot};
 
 /// What the field says before anything is typed.
 pub(crate) const FILTER_PLACEHOLDER: &str = "Type to filter";
@@ -66,6 +66,10 @@ pub struct SessionRow {
     pub mark: Option<Status>,
     /// The worker it runs on, named only when more than one is known.
     pub worker: Option<String>,
+    /// Its directory, as the headers print it.
+    pub cwd: Option<String>,
+    /// How long it has run.
+    pub age: Option<std::time::Duration>,
 }
 
 /// The text of one picker row; `hot` paints the secondary text warm (an agent waiting on the
@@ -246,7 +250,11 @@ impl WindowPicker {
                     secondary: status,
                     hot: s.needs_you,
                     mark: s.mark,
-                    worker: s.worker.clone(),
+                    worker: [s.worker.as_deref(), s.cwd.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .map(str::to_owned)
+                        .reduce(|a, b| format!("{a} · {b}")),
                 },
                 on_pick: PickerEvent::Jump(s.session),
             });
@@ -391,7 +399,7 @@ impl WindowPicker {
             .when(chosen, |el| el.bg(hsla(overlay)))
             .when(!chosen, |el| el.hover(move |st| st.bg(hsla(raised))))
             .active(move |st| st.bg(hsla(overlay)))
-            .child(icon_slot(theme, icon, hsla(icon_ink)))
+            .child(status_slot(theme, icon, mark, hsla(icon_ink), 1.0))
             .child(
                 div()
                     .flex_none()
@@ -414,8 +422,7 @@ impl WindowPicker {
             )
             .children(worker.map(|worker| {
                 div().flex_none().text_color(hsla(s.text_muted)).child(SharedString::from(worker))
-            }))
-            .children(mark.map(|mark| icons::status_mark(theme, Some(mark), 1.0)));
+            }));
         tab_stop(row, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
             cx.emit(on_pick.clone());
         }))
@@ -516,7 +523,7 @@ impl Render for WindowPicker {
         let empty = rows.is_empty();
         let title = "Jump to a session, or add a window from the worker";
 
-        crate::kit::backdrop(&theme, window)
+        let root = crate::kit::backdrop(&theme, window)
             .id("picker-backdrop")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
@@ -569,7 +576,8 @@ impl Render for WindowPicker {
                             .children(rows)
                             .when(empty, |el| el.child(self.empty_state())),
                     ),
-            )
+            );
+        crate::kit::fade_in(root, "picker-fade", cx)
     }
 }
 
@@ -621,6 +629,8 @@ mod tests {
                 needs_you: true,
                 mark: Some(Status::NeedsYou),
                 worker: None,
+                cwd: None,
+                age: None,
             },
             SessionRow {
                 session: s2,
@@ -629,6 +639,8 @@ mod tests {
                 needs_you: false,
                 mark: None,
                 worker: None,
+                cwd: None,
+                age: None,
             },
         ];
         let windows = vec![
@@ -739,6 +751,8 @@ mod tests {
             needs_you: false,
             mark: None,
             worker: None,
+            cwd: None,
+            age: None,
         }
     }
 

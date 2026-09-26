@@ -462,7 +462,7 @@ mod actor {
         session.request(b, TermRequest::Colors(white)).unwrap();
         // b only views: the answer is still the default dark background.
         session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
-        wait_for(&mut rx_a, |_, s| text(s).contains("rgb:0e0e/0f0f/1212")).await;
+        wait_for(&mut rx_a, |_, s| text(s).contains("rgb:1616/1818/1d1d")).await;
         // b drives: its white answers.
         session.request(b, TermRequest::Drive { drive: true }).unwrap();
         wait_for(&mut rx_b, |ev, _| {

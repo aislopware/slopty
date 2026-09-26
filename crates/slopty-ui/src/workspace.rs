@@ -15,8 +15,9 @@
 //! * [`remote`] — the clipboard shared with the workers, files dropped on tiles, forwarded ports.
 //! * `strip` — the tiles laid out from the layout's frame, and the pointer and gestures.
 //! * `tile` — one tile's chrome and body.
-//! * `titlebar` — the bar across the top.
-//! * `navigator` — the workers, their tiles and the workspaces, down the left.
+//! * `titlebar` — the bar across the top, with the workspaces as tabs.
+//! * `navigator` — the workers and their tiles, down the left, and the filter over them.
+//! * `rollup` — what a folded worker or a workspace tab adds up to; the navigator's second line.
 //! * `statusbar` — the bar along the bottom: where the focused tile runs, the link, the agents.
 //! * `inbox` — the bell's list of what needs the human and what finished.
 
@@ -28,6 +29,7 @@ mod inbox;
 mod navigator;
 mod overlays;
 pub mod remote;
+mod rollup;
 mod statusbar;
 mod strip;
 mod tile;
@@ -54,6 +56,7 @@ use slopty_proto::items::{Item, ItemOp};
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::terminal::SessionSummary;
 use slopty_theme::Theme;
+pub use statusbar::HostActions;
 #[cfg(test)]
 pub(crate) use strip::{EMPTY_WORKSPACE, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
 #[cfg(test)]
@@ -403,8 +406,10 @@ pub struct WorkspaceView {
     menu: Option<titlebar::MenuKind>,
     /// The navigator's state for this run (its width and whether it docks are the layout's).
     nav: navigator::NavState,
-    /// The status bar's frame time, and when it was worked out.
-    frame_text: Option<(Instant, Option<SharedString>)>,
+    /// The status bar's own state: its readouts and the hosts popover.
+    bar: statusbar::Bar,
+    /// The inbox's history and which of its views is up.
+    inbox: inbox::Inbox,
     /// The app's rows in the "…" menu.
     more_entries: Vec<MenuEntry>,
     show_stats: bool,
@@ -545,7 +550,8 @@ impl WorkspaceView {
             pending_focus_palette: false,
             menu: None,
             nav: navigator::NavState::default(),
-            frame_text: None,
+            bar: statusbar::Bar::default(),
+            inbox: inbox::Inbox::default(),
             more_entries: Vec::new(),
             show_stats: false,
             toast: None,
@@ -1013,9 +1019,12 @@ impl gpui::Render for WorkspaceView {
         // frame draws: the bar's column dots and the strip agree, and none is worked out twice.
         let frame = self.frame_at_clock(window);
         self.drawn_waiting = self.needs_you();
-        let titlebar = self.render_titlebar(&frame.strip, window, cx);
-        // Before the strip: a docked navigator narrows it.
+        // First: a docked navigator narrows the title bar and the strip.
+        if self.navigator_visible(self.navigator_mode(window)) {
+            self.ensure_navigator_filter(window, cx);
+        }
         let navigator = self.render_navigator(window, cx);
+        let titlebar = self.render_titlebar(&frame.strip, window, cx);
         let statusbar = self.render_statusbar(window, cx);
         let strip = self.render_strip(&frame, window, cx);
         let toast = self.render_toast(cx);
@@ -1077,9 +1086,7 @@ impl gpui::Render for WorkspaceView {
             }))
             .on_action(cx.listener(Self::toggle_navigator))
             .child(Self::measure_width(cx))
-            .child(titlebar)
-            .child(Self::render_middle(navigator, strip, toast))
-            .children(statusbar)
+            .child(Self::render_frame(navigator, titlebar, strip, toast, statusbar))
             .children(menu)
             .when_some(picker, gpui::ParentElement::child)
             .when_some(palette, gpui::ParentElement::child)
@@ -1122,11 +1129,14 @@ impl WorkspaceView {
         .into_any_element()
     }
 
-    /// Between the bars: the navigator docked beside the strip, or laid over it.
-    fn render_middle(
+    /// The frame: the navigator the window's full height on the left, docked beside the rest
+    /// or laid over it, and the title bar, the strip and the status bar stacked to its right.
+    fn render_frame(
         navigator: Option<(navigator::Mode, gpui::AnyElement)>,
+        titlebar: gpui::AnyElement,
         strip: gpui::AnyElement,
         toast: Option<gpui::AnyElement>,
+        statusbar: Option<gpui::AnyElement>,
     ) -> gpui::AnyElement {
         use gpui::{IntoElement as _, ParentElement as _, Styled as _};
         let (docked, over) = match navigator {
@@ -1134,6 +1144,15 @@ impl WorkspaceView {
             Some((_, el)) => (None, Some(el)),
             None => (None, None),
         };
+        let middle = gpui::div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(strip)
+            .children(toast);
         gpui::div()
             .relative()
             .flex_1()
@@ -1149,8 +1168,9 @@ impl WorkspaceView {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(strip)
-                    .children(toast),
+                    .child(titlebar)
+                    .child(middle)
+                    .children(statusbar),
             )
             .children(over)
             .into_any_element()

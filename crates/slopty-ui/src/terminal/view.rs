@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
 use crate::kit::FIND_PLACEHOLDER;
-use crate::terminal::element::{CellMetrics, TerminalElement, separator_color};
+use crate::terminal::element::{CellMetrics, FailedLook, TerminalElement, separator_color};
 use crate::terminal::scrollbar::Visibility;
 use crate::terminal::{latency, url};
 
@@ -225,14 +225,17 @@ pub enum TerminalViewEvent {
         /// Its body.
         body: String,
     },
-    /// The working directory changed (OSC 7), with the repository the worker resolved it to.
-    /// What arrange-by-repo groups on, so it has to follow a `cd` and not stay at whatever the
-    /// session opened in.
+    /// The working directory changed (OSC 7), or the branch checked out there did, with the
+    /// repository the worker resolved it to. What arrange-by-repo groups on and the navigator
+    /// and status bar print, so it has to follow a `cd` or a checkout and not stay at whatever
+    /// the session opened in.
     Cwd {
         /// The new directory.
         path: String,
         /// Its repository root, if it is in one.
         repo: Option<String>,
+        /// The branch checked out in that repository, if it is on one.
+        branch: Option<String>,
     },
     /// Bell.
     Bell,
@@ -400,13 +403,17 @@ pub struct TerminalView {
     block_menu: Option<BlockMenu>,
     /// When the running shell command left its prompt.
     command_started: Option<Instant>,
-    /// How long each finished command took, by the row it was typed at, for the caption at
-    /// the right end of that row; only those at or over [`TOOK_MIN`]. Rows are numbered per
-    /// epoch, so a new epoch empties it (`took_epoch` remembers which one filled it).
+    /// How long each finished command took, by the row it was typed at: for the caption at
+    /// the right end of that row (only from [`TOOK_MIN`]) and the facts a hovered block shows.
+    /// Rows are numbered per epoch, so a new epoch empties it (`took_epoch` remembers which
+    /// one filled it).
     took: HashMap<LineIndex, Duration>,
     took_epoch: Option<u32>,
     /// The cell under the pointer, for the ⌘-hover link underline.
     hover: Option<(u16, u16)>,
+    /// Where the pointer is over the grid's element, wherever it is covered (the block facts,
+    /// the sticky header): which block is hovered, followed through a scroll.
+    pointer_at: Option<gpui::Point<Pixels>>,
     /// ⌘ is down: links under the pointer show as links.
     cmd_held: bool,
     /// ⇧ is held: the pointer is the human's even while a program reports the mouse.
@@ -509,6 +516,7 @@ impl TerminalView {
             program_buttons: 0,
             reported_cell: None,
             hover: None,
+            pointer_at: None,
             cmd_held: false,
             shift_held: false,
             touch_selecting: false,
@@ -1360,8 +1368,9 @@ impl TerminalView {
     }
 
     /// One row over the grid's top naming the command whose output the viewport is inside,
-    /// so a long output is never anonymous; a click scrolls its prompt back to the top. The
-    /// hairline under it is the block's separator colour, red after a failure.
+    /// so a long output is never anonymous; a click scrolls its prompt back to the top. Its
+    /// text starts at the grid's first column, and a failed block carries its bar and wash on
+    /// up into it. Under the pointer it shows the block's facts in place of the duration.
     fn render_block_header(
         &self,
         block: &BlockHead,
@@ -1376,13 +1385,26 @@ impl TerminalView {
         let family = self.font_family.clone().unwrap_or_else(|| {
             theme.typography.mono_families.first().cloned().unwrap_or_default().into()
         });
+        let inset = px(theme.spacing.inset() * self.zoom);
         // The block's duration at the right end, as its prompt row would show it.
-        let took = self.took(prompt).map(|elapsed| {
-            div()
-                .debug_selector(|| "block-header-took".to_owned())
-                .flex_none()
-                .pl(px(theme.spacing.sm))
-                .child(SharedString::from(took_label(elapsed)))
+        let right = if self.hovered_block() == Some(prompt) {
+            Some(self.render_block_facts(prompt, cx).into_any_element())
+        } else {
+            self.took(prompt).map(|elapsed| {
+                crate::kit::tabular(div())
+                    .debug_selector(|| "block-header-took".to_owned())
+                    .flex_none()
+                    .pl(px(theme.spacing.sm))
+                    .child(SharedString::from(took_label(elapsed)))
+                    .into_any_element()
+            })
+        };
+        let failed = block.exit.is_some_and(|code| code != 0).then(|| {
+            let look = FailedLook::new(theme, self.zoom);
+            [
+                div().absolute().inset_0().bg(look.wash),
+                div().absolute().top_0().bottom_0().left_0().w(look.bar_width).bg(look.bar),
+            ]
         });
         Some(
             div()
@@ -1399,10 +1421,10 @@ impl TerminalView {
                 .flex()
                 .items_center()
                 .justify_between()
-                .px(px(theme.spacing.sm))
-                .bg(hsla(s.panel))
+                .px(inset)
+                .bg(hsla(theme.content()))
                 .border_b_1()
-                .border_color(separator_color(theme, block.exit))
+                .border_color(separator_color(theme))
                 .font_family(family)
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
@@ -1416,8 +1438,112 @@ impl TerminalView {
                         this.jump_to(prompt, cx);
                     }),
                 )
+                .children(failed.into_iter().flatten())
                 .child(div().overflow_hidden().child(command))
-                .children(took)
+                .children(right)
+                .into_any_element(),
+        )
+    }
+
+    /// What the block typed at `prompt` says about itself, in order, each in its tone: its
+    /// status once the next prompt reported it ("Exit 1" in the error tone after a failure,
+    /// "Running" before), then how long it ran when that is known.
+    #[must_use]
+    pub fn block_facts(&self, prompt: LineIndex) -> Vec<(SharedString, slopty_theme::Rgb)> {
+        let s = &self.theme.surfaces;
+        let status = match self.state.block_exit(prompt) {
+            Some(0) => Some((SharedString::from("Exit 0"), s.text_muted)),
+            Some(code) => Some((SharedString::from(format!("Exit {code}")), s.error)),
+            None if self.state.prompt_after(prompt).is_none() => {
+                Some((SharedString::from("Running"), s.text_muted))
+            }
+            None => None,
+        };
+        let took = self.duration(prompt).map(|d| (SharedString::from(took_label(d)), s.text_muted));
+        status.into_iter().chain(took).collect()
+    }
+
+    /// A hovered block's facts ([`Self::block_facts`]) joined by "·", and "…" for the block
+    /// menu.
+    fn render_block_facts(
+        &self,
+        prompt: LineIndex,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let facts = self.block_facts(prompt);
+        let line = self
+            .metrics
+            .map_or_else(|| theme.typography.icon_large(), |m| f32::from(m.line_height));
+        let button = 2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large());
+        let more = crate::kit::icon_button_at(
+            theme,
+            "block-more",
+            crate::icons::IconName::Ellipsis,
+            "Block actions",
+            (line / button).min(1.0),
+        )
+        .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            let block = this.state.command_block(prompt);
+            this.block_menu = Some(BlockMenu { block, at: ev.position() });
+            cx.notify();
+        }));
+        let mut row = crate::kit::tabular(div())
+            .id("block-facts")
+            .debug_selector(|| "block-facts".to_owned())
+            .flex_none()
+            .h(px(line))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .pl(px(theme.spacing.sm))
+            .font_family(theme.typography.ui_family.clone())
+            .text_size(px(theme.typography.small()))
+            .line_height(px(line));
+        for (i, (text, tone)) in facts.into_iter().enumerate() {
+            if i > 0 {
+                row = row.child(div().text_color(hsla(s.text_muted)).child("·"));
+            }
+            row = row.child(div().text_color(hsla(tone)).child(text));
+        }
+        row.child(more)
+    }
+
+    /// The hovered block's facts at the right end of its prompt row, when that row is on
+    /// screen (above it, the sticky header carries them).
+    fn render_hovered_block(
+        &self,
+        header: Option<&BlockHead>,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let prompt = self.hovered_block()?;
+        if header.is_some_and(|h| h.prompt == prompt) {
+            return None;
+        }
+        let m = self.metrics?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let rows = prompt.0.saturating_sub(self.state.index_at_row(0).0);
+        let row = u16::try_from(rows).unwrap_or(u16::MAX).min(m.rows.saturating_sub(1));
+        let inset = px(theme.spacing.inset() * self.zoom);
+        Some(
+            div()
+                .absolute()
+                .top(inset + m.line_height * f32::from(row))
+                .right(inset)
+                .h(m.line_height)
+                .flex()
+                .items_center()
+                .occlude()
+                .pr(px(theme.spacing.xxs))
+                .rounded(px(theme.radii.xs))
+                .border_1()
+                .border_color(hsla(s.border_subtle))
+                .bg(hsla(s.raised))
+                .child(self.render_block_facts(prompt, cx))
                 .into_any_element(),
         )
     }
@@ -1908,6 +2034,13 @@ impl TerminalView {
         self.state.title()
     }
 
+    /// The branch checked out where the shell stands, as the worker resolved it: what the
+    /// navigator and the status bar print beside the repository.
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        self.state.branch()
+    }
+
     /// The cursor row's text, trailing spaces trimmed: what a screen reader reads as the
     /// grid's value (the whole grid would be noise).
     #[must_use]
@@ -2017,7 +2150,9 @@ impl TerminalView {
                 Effect::ClipboardWrite(text) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
-                Effect::Cwd { path, repo } => cx.emit(TerminalViewEvent::Cwd { path, repo }),
+                Effect::Cwd { path, repo, branch } => {
+                    cx.emit(TerminalViewEvent::Cwd { path, repo, branch });
+                }
                 Effect::Error(e) => tracing::warn!(session = %self.session, error = %e, "worker"),
                 Effect::Matches { needle, total, matches } => {
                     self.matches_arrived(&needle, total, matches, cx);
@@ -2128,18 +2263,52 @@ impl TerminalView {
         )
     }
 
-    /// A command typed at `prompt` took `elapsed`: kept for the row's caption when it is at
-    /// or over `TOOK_MIN` (a quick command says nothing worth a caption).
+    /// A command typed at `prompt` took `elapsed`.
     pub fn set_took(&mut self, prompt: LineIndex, elapsed: Duration) {
-        if elapsed >= TOOK_MIN {
-            self.took.insert(prompt, elapsed);
-        }
+        self.took.insert(prompt, elapsed);
     }
 
-    /// How long the command typed at `prompt` took, when it was long enough to say.
+    /// How long the command typed at `prompt` took, when it was long enough for its row's
+    /// caption (from `TOOK_MIN`: a quick command says nothing worth a caption).
     #[must_use]
     pub fn took(&self, prompt: LineIndex) -> Option<Duration> {
+        self.duration(prompt).filter(|&elapsed| elapsed >= TOOK_MIN)
+    }
+
+    /// How long the command typed at `prompt` took, however short: what its block's facts say
+    /// under the pointer.
+    #[must_use]
+    pub fn duration(&self, prompt: LineIndex) -> Option<Duration> {
         self.took.get(&prompt).copied()
+    }
+
+    /// The prompt row of the command block under the pointer: one with a typed command that
+    /// has finished or is running (the line being typed at is not a block yet). Nothing on
+    /// the alternate screen.
+    #[must_use]
+    pub fn hovered_block(&self) -> Option<LineIndex> {
+        let at = self.pointer_at?;
+        let m = self.metrics?;
+        if self.state.modes().contains(TermModes::ALT_SCREEN) {
+            return None;
+        }
+        let rows = ((at.y - m.origin.y) / m.line_height).floor();
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
+        let row = rows.clamp(0.0, f32::from(m.rows.saturating_sub(1))) as u16;
+        let head = self.state.block_head(self.state.index_at_row(row))?;
+        let done = self.state.prompt_after(head.prompt).is_some();
+        let running = self.state.command_running() && !done;
+        head.command.is_some().then_some(head.prompt).filter(|_| done || running)
+    }
+
+    /// The pointer moved over the grid's element (`Some`, wherever it is covered) or left it:
+    /// a frame follows when that changes which block is hovered.
+    pub(super) fn pointer_over(&mut self, at: Option<gpui::Point<Pixels>>, cx: &mut Context<Self>) {
+        let before = self.hovered_block();
+        self.pointer_at = at;
+        if self.hovered_block() != before {
+            cx.notify();
+        }
     }
 
     /// The images the latest frame places, each with its texture.
@@ -3158,7 +3327,9 @@ impl Render for TerminalView {
             .as_ref()
             .is_some_and(|s| s.input.read(cx).focus_handle(cx).is_focused(window));
         let search = self.search.as_ref().map(|s| self.render_search(s, search_focused, cx));
-        let header = self.block_header().and_then(|block| self.render_block_header(&block, cx));
+        let block = self.block_header();
+        let hovered = self.render_hovered_block(block.as_ref(), cx);
+        let header = block.and_then(|block| self.render_block_header(&block, cx));
         div()
             .id("terminal")
             .debug_selector(|| "terminal".to_owned())
@@ -3206,6 +3377,7 @@ impl Render for TerminalView {
                 }
                 el.child(grid)
             })
+            .children(hovered)
             .children(header)
             .children(search)
             .children(self.render_link_preview())
@@ -3351,12 +3523,14 @@ enum BlockMenuItem {
 /// The shortest command whose row gets a "took" caption.
 pub const TOOK_MIN: Duration = Duration::from_secs(1);
 
-/// A command's duration for its row's caption: `1.4 s` under a minute, `2 m 03 s` under an
-/// hour, `1 h 02 m` from there.
+/// A command's duration for its row's caption: `40 ms` under a second (what a hovered quick
+/// block says), `1.4 s` under a minute, `2 m 03 s` under an hour, `1 h 02 m` from there.
 #[must_use]
 pub fn took_label(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
-    if secs < 60 {
+    if secs == 0 {
+        format!("{} ms", elapsed.as_millis())
+    } else if secs < 60 {
         format!("{:.1} s", elapsed.as_secs_f64())
     } else if secs < 3600 {
         format!("{} m {:02} s", secs / 60, secs % 60)
@@ -3557,39 +3731,78 @@ mod tests {
         out
     }
 
-    /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport; the block separator
-    /// is drawn on every prompt-start row but the first line, red after a failed command, and
-    /// on the viewport's top row only when red.
+    /// The view rows a failed block covers, as `(first row, rows)`: the error bar down the
+    /// element's left edge and the wash across its width, read from the scene. Each bar must
+    /// have its wash.
+    fn failed_bands(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> Vec<(u16, u16)> {
+        let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
+        let (metrics, zoom) =
+            view.read_with(cx, |view, _| (view.metrics.expect("laid out"), view.zoom));
+        let look = FailedLook::new(&Theme::default(), zoom);
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
+            f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
+        };
+        let row_at = |y: gpui::ScaledPixels| {
+            (0..=metrics.rows)
+                .find(|&row| near(y, metrics.origin.y + metrics.line_height * f32::from(row)))
+                .expect("a band sits on row edges")
+        };
+        let (mut bars, mut washes) = (Vec::new(), Vec::new());
+        for q in &quads {
+            if !near(q.bounds.origin.x, bounds.origin.x) {
+                continue;
+            }
+            let color = q.background.as_solid();
+            let bar = near(q.bounds.size.width, look.bar_width) && color == Some(look.bar);
+            let wash = near(q.bounds.size.width, bounds.size.width) && color == Some(look.wash);
+            if !(bar || wash) {
+                continue;
+            }
+            let first = row_at(q.bounds.origin.y);
+            let bottom = gpui::ScaledPixels(q.bounds.origin.y.0 + q.bounds.size.height.0);
+            let rows = row_at(bottom).saturating_sub(first);
+            let band = (first, rows);
+            if bar { bars.push(band) } else { washes.push(band) }
+        }
+        assert_eq!(bars, washes, "every bar has its wash");
+        bars
+    }
+
+    /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport. A neutral rule is
+    /// drawn on every prompt-start row but the first line and the viewport's top row; a block
+    /// whose command failed wears the error bar and wash over its rows, with the status from
+    /// the prompt below it even when that prompt is out of view.
     #[gpui::test]
     fn cmd_up_and_down_walk_the_prompts_and_separators_follow(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         with_command_blocks(&view, cx);
         let theme = Theme::default();
-        let ok = separator_color(&theme, Some(0));
-        let failed = separator_color(&theme, Some(1));
-        let none = separator_color(&theme, None);
-        assert_ne!(ok, failed);
-        assert_eq!(failed, hsla_alpha(theme.surfaces.error, alpha::STRONG));
-        assert_eq!(ok, none, "no status and a zero status rule the same faint line");
+        let rule = separator_color(&theme);
+        assert_eq!(rule, hsla_alpha(theme.terminal.fg, alpha::FAINT));
+        let look = FailedLook::new(&theme, 1.0);
+        assert_eq!(look.bar, hsla(theme.surfaces.error));
+        assert_eq!(look.wash, hsla_alpha(theme.surfaces.error, alpha::FAINT));
+        assert_eq!(look.bar_width, px(theme.spacing.xxs), "a 2 pt bar");
 
         assert_eq!(top_line(&view, cx), LineIndex(6), "following output");
-        assert_eq!(separators(&view, cx), vec![(2, ok)], "the newest prompt, after `seq 2`");
+        assert_eq!(separators(&view, cx), vec![(2, rule)], "the newest prompt, after `seq 2`");
+        assert_eq!(failed_bands(&view, cx), vec![], "`seq 2` succeeded");
 
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(4), "`$ seq 2` at the top");
-        assert_eq!(separators(&view, cx), vec![(0, failed)], "`false` failed");
+        assert_eq!(separators(&view, cx), vec![], "none on the top edge");
+        assert_eq!(failed_bands(&view, cx), vec![], "`false` is above the view");
 
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(3));
-        assert_eq!(
-            separators(&view, cx),
-            vec![(1, failed)],
-            "a neutral rule on the top edge would double the tile header's hairline"
-        );
+        assert_eq!(separators(&view, cx), vec![(1, rule)], "neutral, not doubling the header");
+        assert_eq!(failed_bands(&view, cx), vec![(0, 1)], "`false` failed: its one row");
 
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(0));
         assert_eq!(separators(&view, cx), vec![], "never on the very first line");
+        assert_eq!(failed_bands(&view, cx), vec![], "`ls` succeeded; `false` is below the view");
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(0), "nothing above: stays");
 
@@ -3643,8 +3856,8 @@ mod tests {
             );
         });
         cx.run_until_parked();
-        let ok = separator_color(&Theme::default(), Some(0));
-        assert_eq!(separators(&view, cx), vec![(3, ok)], "only the prompt after `echo hi`");
+        let rule = separator_color(&Theme::default());
+        assert_eq!(separators(&view, cx), vec![(3, rule)], "only the prompt after `echo hi`");
     }
 
     /// A block whose prompt rows have scrolled above the viewport keeps its command in a
@@ -4214,6 +4427,93 @@ mod tests {
         assert_eq!(drain_words(&mut rx), ["clear"]);
     }
 
+    /// Under the pointer a finished block says how it ended and how long it ran at the right
+    /// end of its prompt row ("Exit 1" in the error tone), with "…" for the block menu; with
+    /// its prompt scrolled above, the sticky header says it. The pointer leaving takes it away,
+    /// and the line being typed at shows nothing.
+    #[gpui::test]
+    fn a_hovered_block_shows_its_status_duration_and_menu(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        let s = Theme::default().surfaces;
+        let facts = |cx: &mut VisualTestContext, prompt: u64| {
+            view.read_with(cx, |v, _| {
+                v.block_facts(LineIndex(prompt))
+                    .into_iter()
+                    .map(|(text, tone)| (text.to_string(), tone))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let (m, terminal) = (
+            view.read_with(cx, |v, _| v.metrics.expect("laid out")),
+            cx.debug_bounds("terminal").expect("the terminal is drawn"),
+        );
+        let over_row = |cx: &mut VisualTestContext, row: f32| {
+            let at = m.origin + point(m.cell_width * 1.5, m.line_height * (row + 0.5));
+            cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        let hovered = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.hovered_block());
+        view.update(cx, |v, _| v.set_took(LineIndex(3), Duration::from_millis(40)));
+
+        cx.simulate_keystrokes("cmd-up cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(3), "`$ false`, `$ seq 2`, `1`");
+        assert!(cx.debug_bounds("block-facts").is_none(), "nothing before the pointer comes");
+        over_row(cx, 0.0);
+        assert_eq!(hovered(cx), Some(LineIndex(3)));
+        assert_eq!(
+            facts(cx, 3),
+            [("Exit 1".to_owned(), s.error), ("40 ms".to_owned(), s.text_muted)],
+            "`false` failed, and how long it ran however short"
+        );
+        let shown = cx.debug_bounds("block-facts").expect("the facts are drawn");
+        assert!(
+            shown.top() >= m.origin.y && shown.bottom() <= m.origin.y + m.line_height,
+            "on the prompt row: {shown:?}, {m:?}"
+        );
+        assert!(shown.left() > terminal.center().x, "at the prompt row's right end: {shown:?}");
+
+        over_row(cx, 2.0);
+        assert_eq!(hovered(cx), Some(LineIndex(4)), "`seq 2`'s output is its block");
+        assert_eq!(facts(cx, 4), [("Exit 0".to_owned(), s.text_muted)], "no duration known");
+        let shown = cx.debug_bounds("block-facts").expect("the facts follow the pointer");
+        let row1 = m.origin.y + m.line_height;
+        assert!(shown.top() >= row1 && shown.bottom() <= row1 + m.line_height, "{shown:?}");
+
+        // "…" opens the block's menu, as a right click on it would.
+        let more = cx.debug_bounds("block-more").expect("the menu affordance");
+        cx.simulate_click(more.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("block-menu-rerun").is_some(), "the block's own items");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        cx.simulate_mouse_move(
+            terminal.bottom_right() + point(px(8.0), px(8.0)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert_eq!(hovered(cx), None, "the pointer left");
+        assert!(cx.debug_bounds("block-facts").is_none());
+
+        // With the prompt scrolled above, the sticky header carries the facts, not the caption.
+        view.update(cx, |v, _| v.set_took(LineIndex(4), Duration::from_secs(2)));
+        cx.simulate_keystrokes("cmd-down cmd-down");
+        assert_eq!(top_line(&view, cx), LineIndex(6));
+        assert!(cx.debug_bounds("block-header-took").is_some(), "the caption, unhovered");
+        over_row(cx, 1.0);
+        assert_eq!(hovered(cx), Some(LineIndex(4)));
+        let header = cx.debug_bounds("block-header").expect("the sticky header");
+        let shown = cx.debug_bounds("block-facts").expect("in the header");
+        assert!(header.contains(&shown.center()), "{shown:?} in {header:?}");
+        assert!(cx.debug_bounds("block-header-took").is_none(), "the facts say it instead");
+
+        // The line being typed at is no block yet.
+        over_row(cx, 2.0);
+        assert_eq!(hovered(cx), None, "the open prompt");
+    }
+
     /// A right click on a block's row opens its menu: the typed command and the output to
     /// the clipboard, the command run again (a paste, then ↩), the block selected; Esc and
     /// any click close it; the terminal's own items come after the block's.
@@ -4458,6 +4758,7 @@ mod tests {
 
     #[test]
     fn a_took_label_reads_as_a_clock_would() {
+        assert_eq!(took_label(Duration::from_millis(40)), "40 ms", "a quick one, when hovered");
         assert_eq!(took_label(Duration::from_millis(1_040)), "1.0 s");
         assert_eq!(took_label(Duration::from_millis(3_260)), "3.3 s", "a tenth, rounded");
         assert_eq!(took_label(Duration::from_secs(59)), "59.0 s");
@@ -6471,6 +6772,108 @@ mod tests {
             row(&mut following),
             row(&mut hidden),
             row(&mut shown),
+        );
+    }
+
+    /// What command blocks cost a frame: a 100 × 40 screen of ten four-row blocks, every other
+    /// one failed, redrawn with nothing changed, in alternating blocks with the pointer away and
+    /// over a failed block (the first round warms up). Each sample is one notify and the draw
+    /// it brings. Prints the numbers MEASUREMENTS records; run by
+    /// hand, in release:
+    /// `cargo test -p slopty-ui --release --lib failed_blocks_cost -- --ignored --nocapture`.
+    #[gpui::test]
+    #[ignore = "measurement, run by hand"]
+    fn failed_blocks_cost(cx: &mut TestAppContext) {
+        const BLOCKS: u16 = 10;
+        const ROUNDS: usize = 11;
+        const BLOCK: usize = 200;
+        const WARM: usize = 20;
+        let (tx, _rx) = mpsc::channel(1 << 10);
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let size = TermSize { cols: 100, rows: 40, ..TermSize::default() };
+            let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(1000.0), px(900.0)));
+        cx.run_until_parked();
+        let text = prose(0x2545_f491, 40, 90);
+        let updates = (0..BLOCKS * 4)
+            .map(|row| {
+                let (block, at) = (row / 4, row % 4);
+                let mark = if at == 0 {
+                    // The status of the block above: every odd block failed.
+                    let exit = (block > 0).then_some(u8::from(block % 2 == 0));
+                    SemanticMark::Prompt { exit, input: Some(2) }
+                } else {
+                    SemanticMark::Output
+                };
+                let text =
+                    if at == 0 { format!("$ run {block}") } else { text[usize::from(row)].clone() };
+                let mut line = Line::from_text(&text, 100, Style::DEFAULT);
+                line.mark = mark;
+                RowUpdate { row, line }
+            })
+            .collect();
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 100,
+                    rows: 40,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 40,
+                    input_ack: 0,
+                    images: Vec::new(),
+                    updates,
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
+        let over = point(
+            metrics.origin.x + metrics.cell_width * 20.0,
+            metrics.origin.y + metrics.line_height * 5.5,
+        );
+        // Off the window: over the grid's padding it would still hover the top block.
+        let away = point(px(4000.0), px(4000.0));
+        let (mut rest, mut hovered) = (Vec::new(), Vec::new());
+        let renders = view.read_with(cx, |v, _| v.renders());
+        for round in 0..ROUNDS {
+            for (at, samples) in [(away, &mut rest), (over, &mut hovered)] {
+                cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+                cx.run_until_parked();
+                for n in 0..WARM + BLOCK {
+                    let started = Instant::now();
+                    view.update(cx, |_, cx| cx.notify());
+                    cx.run_until_parked();
+                    if round > 0 && n >= WARM {
+                        samples.push(started.elapsed());
+                    }
+                }
+            }
+        }
+        let drawn = view.read_with(cx, |v, _| v.renders()).saturating_sub(renders);
+        let frames = 2 * ROUNDS * (WARM + BLOCK);
+        assert!(usize::try_from(drawn).is_ok_and(|d| d >= frames), "every frame drew");
+        let row = |samples: &mut Vec<Duration>| {
+            samples.sort_unstable();
+            let at = |q: usize| samples[(samples.len().saturating_sub(1)).saturating_mul(q) / 100];
+            format!("{:?} / {:?} / {:?} / {:?}", at(50), at(95), at(99), at(100))
+        };
+        println!(
+            "MEASURE command blocks, 100 × 40, {BLOCKS} blocks, a notify and its draw \
+             (p50 / p95 / p99 / max, {} frames each): pointer away {} · over a failed block {}",
+            rest.len(),
+            row(&mut rest),
+            row(&mut hovered),
         );
     }
 

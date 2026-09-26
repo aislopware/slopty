@@ -108,7 +108,7 @@ mod tests {
         let grid = dump.a11y_node("Terminal", None).unwrap_or_else(|| panic!("{:#?}", dump.a11y));
         assert!(grid.value.as_deref().is_some_and(|v| !v.is_empty()), "cursor row: {grid:?}");
         assert!(grid.bounds[2] > 100.0 && grid.bounds[3] > 100.0, "{grid:?}");
-        for label in ["Open", "More", "Workspace 1, show every workspace"] {
+        for label in ["Open", "More", "Workspace 1, 1 tile", "New workspace"] {
             assert!(dump.a11y_node("Button", Some(label)).is_some(), "{label}: {:#?}", dump.a11y);
         }
 

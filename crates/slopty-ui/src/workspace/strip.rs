@@ -822,9 +822,12 @@ impl WorkspaceView {
                         .children(workers),
                 )
         };
+        // The strip is the content step with or without a tile on it: the empty workspace is
+        // the page a tile would be, not a hole down to the bars' canvas.
         div()
             .absolute()
             .inset_0()
+            .bg(hsla(theme.content()))
             .flex()
             .items_center()
             .justify_center()

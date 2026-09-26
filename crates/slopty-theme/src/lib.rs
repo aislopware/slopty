@@ -109,7 +109,8 @@ impl TerminalPalette {
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const DARK: Self = Self {
         fg: Rgb::hex(0xe6e6e6),
-        bg: Rgb::hex(0x0e0f12),
+        // The content step of the chrome's surface order: tile headers and bodies share it.
+        bg: Rgb::hex(0x16181d),
         cursor: Rgb::hex(0x8ab4f8),
         cursor_text: Rgb::hex(0x0e0f12),
         selection: Rgb::hex(0x2b3a55),
@@ -124,7 +125,7 @@ impl TerminalPalette {
             Rgb::hex(0xc678dd),
             Rgb::hex(0x56b6c2),
             Rgb::hex(0xc8ccd4),
-            Rgb::hex(0x747d8d),
+            Rgb::hex(0x7a8393),
             Rgb::hex(0xff7b86),
             Rgb::hex(0xa6d68a),
             Rgb::hex(0xf0cc8c),
@@ -455,26 +456,34 @@ pub mod alpha {
     pub const PRESSED: f32 = 0.4;
     /// A modal backdrop.
     pub const SCRIM: f32 = 0.6;
-    /// A mark that must read over whatever it covers: the separator after a failed command.
+    /// Present but set back: a read row in the inbox.
     pub const STRONG: f32 = 0.7;
     /// A panel laid over content and read through only barely: the stream HUD.
     pub const VEIL: f32 = 0.9;
 }
 
-/// Surface colours for chrome (not the terminal grid): a four-step ladder, three text
-/// levels, the accent and what sits on it, and three status tones.
+/// Surface colours for chrome (not the terminal grid): a four-step ladder, two hairlines,
+/// three text levels, the accent and what sits on it, and three status tones.
+///
+/// The window reads in three steps of elevation, lighter as they rise in both variants: the
+/// bars on `canvas`, the navigator on `panel`, and tile headers and bodies on the content
+/// step, [`Theme::content`], the terminal's own background. `raised` and `overlay` are the
+/// hover and pressed states above whichever of them they sit on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Surfaces {
-    /// Step 0: window, canvas, bars.
+    /// Step 0: the window, the title bar and the status bar.
     pub canvas: Rgb,
-    /// Step 1: title bars, panels, popovers, the composer.
+    /// Step 1: the navigator, unfocused tile headers, popovers, the composer.
     pub panel: Rgb,
     /// Step 2: key caps, inputs, hovered rows.
     pub raised: Rgb,
     /// Step 3: pressed rows, pill fills, the HUD.
     pub overlay: Rgb,
-    /// Every hairline.
+    /// The hairlines that divide regions: between panes, under a bar, round a popover.
     pub border: Rgb,
+    /// The quieter hairline inside one region: between rows or groups of a list, under a
+    /// tab row, between a panel's sections.
+    pub border_subtle: Rgb,
     /// Primary text.
     pub text: Rgb,
     /// Labels, tool summaries, counts.
@@ -497,11 +506,12 @@ impl Surfaces {
     /// Dark.
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const DARK: Self = Self {
-        canvas: Rgb::hex(0x0a0b0e),
-        panel: Rgb::hex(0x14161b),
-        raised: Rgb::hex(0x1b1e25),
-        overlay: Rgb::hex(0x23272f),
-        border: Rgb::hex(0x24272e),
+        canvas: Rgb::hex(0x08090b),
+        panel: Rgb::hex(0x0f1115),
+        raised: Rgb::hex(0x1e2127),
+        overlay: Rgb::hex(0x272a31),
+        border: Rgb::hex(0x2a2d34),
+        border_subtle: Rgb::hex(0x1f2127),
         text: Rgb::hex(0xe6e6e6),
         text_secondary: Rgb::hex(0xb4b9c3),
         text_muted: Rgb::hex(0x8b919c),
@@ -514,11 +524,12 @@ impl Surfaces {
     /// Light.
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const LIGHT: Self = Self {
-        canvas: Rgb::hex(0xf4f5f7),
-        panel: Rgb::hex(0xffffff),
-        raised: Rgb::hex(0xeef0f3),
-        overlay: Rgb::hex(0xe4e7ec),
-        border: Rgb::hex(0xd8dbe1),
+        canvas: Rgb::hex(0xebedf0),
+        panel: Rgb::hex(0xf6f7f9),
+        raised: Rgb::hex(0xe8eaee),
+        overlay: Rgb::hex(0xe2e5ea),
+        border: Rgb::hex(0xcfd3d9),
+        border_subtle: Rgb::hex(0xe4e6ea),
         text: Rgb::hex(0x1d1d1f),
         text_secondary: Rgb::hex(0x4b4f58),
         // Darkened 2026-09-15 so every one of these clears WCAG AA on the darkest chrome
@@ -713,6 +724,14 @@ impl Theme {
         }
     }
 
+    /// The content step of the surface order: what tile headers and bodies sit on. It is the
+    /// terminal's background, whatever the settings made it, so a shell's grid, the body
+    /// round it and its focused header are one surface.
+    #[must_use]
+    pub const fn content(&self) -> Rgb {
+        self.terminal.bg
+    }
+
     /// Which variant the colours are (by the terminal background).
     #[must_use]
     pub fn variant(&self) -> Variant {
@@ -768,14 +787,47 @@ mod tests {
         );
         assert_ne!(dark.accent_fg, light.accent_fg, "text on the accent flips with the variant");
 
+        let r = Radii::default();
+        assert!(r.xs < r.sm && r.sm < r.md);
+
         let mut t = Typography::default();
         assert_eq!((t.caption(), t.small(), t.title(), t.display()), (10.0, 12.0, 15.0, 20.0));
         t.ui_size = 8.0;
         assert_eq!((t.caption(), t.small(), t.title()), (6.0, 7.0, 10.0), "clamped at the floor");
         let s = Spacing::default();
         assert!(s.xxs < s.xs && s.xs < s.sm && s.sm < s.md && s.md < s.lg && s.lg < s.xl);
-        let r = Radii::default();
-        assert!(r.xs < r.sm && r.sm < r.md);
+    }
+
+    /// The window reads in three steps that climb in both variants (bars, navigator, content),
+    /// each far enough from the next to be seen, and the in-panel hairline is quieter than the
+    /// one between panes on every step while still showing on the content.
+    ///
+    /// Before this, the light variant's navigator, status bar, headers and bodies were all
+    /// white, and the dark one's content sat between its bars and its navigator.
+    #[test]
+    fn the_surfaces_climb_in_three_steps_bars_navigator_content() {
+        // Adjacent steps a little over 5 % apart read as two surfaces; the pair a step apart
+        // twice that (VS Code's dark modern is 1.05 a step, Zed's One 1.08 to 1.22).
+        const STEP: f32 = 1.05;
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let content = theme.content();
+            assert_eq!(content, theme.terminal.bg, "{variant:?}: the content is the grid's");
+            let (bars, navigator) = (s.canvas.luminance(), s.panel.luminance());
+            assert!(bars < navigator && navigator < content.luminance(), "{variant:?} climbs");
+            for (low, high) in [(s.canvas, s.panel), (s.panel, content)] {
+                let step = low.contrast(high);
+                assert!(step >= STEP, "{variant:?}: {low:?} to {high:?} is {step:.3}");
+            }
+            for (name, surface) in [("canvas", s.canvas), ("panel", s.panel), ("content", content)]
+            {
+                let (loud, quiet) = (s.border.contrast(surface), s.border_subtle.contrast(surface));
+                assert!(quiet < loud, "{variant:?}: the subtle hairline is quieter on {name}");
+            }
+            let subtle = s.border_subtle.contrast(content);
+            assert!(subtle >= STEP, "{variant:?}: the subtle hairline shows on content");
+        }
     }
 
     /// Each byte of a `0xRRGGBB` literal lands in its own channel, and the cube's first
@@ -875,9 +927,12 @@ mod tests {
     fn chrome_text_clears_wcag_aa() {
         const AA: f32 = 4.5;
         for (name, s) in [("dark", Surfaces::DARK), ("light", Surfaces::LIGHT)] {
+            let content =
+                if name == "dark" { TerminalPalette::DARK } else { TerminalPalette::LIGHT };
             let surfaces = [
                 ("canvas", s.canvas),
                 ("panel", s.panel),
+                ("content", content.bg),
                 ("raised", s.raised),
                 ("overlay", s.overlay),
             ];

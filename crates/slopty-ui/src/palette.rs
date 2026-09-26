@@ -200,10 +200,14 @@ impl Section {
     }
 }
 
-/// One line of the palette: a name, what the right side says (the keys that do the same, or
-/// a session's status), and what ↩ does, with the kind icon and the section it is listed under.
+/// One line of the palette: a name, and what ↩ does.
+///
+/// Around them: where it is (its worker and directory), what the right side says (the keys
+/// that do the same, or a session's status), how old it is, the kind icon and the section it
+/// is listed under.
 pub struct PaletteItem {
-    /// What the line says (`New note`, `Go to shell`).
+    /// What the line says (`New note`, `shell`): a tile or a worker by its name alone, since
+    /// the section it sits in already says that choosing it goes there.
     pub label: String,
     /// The right side, muted: the shortcut (`⌘⇧N`) or a session's status; empty for none.
     pub keys: String,
@@ -211,10 +215,15 @@ pub struct PaletteItem {
     pub run: PaletteRun,
     /// The kind icon in the line's leading slot.
     pub icon: IconName,
-    /// How the tile or worker is doing, marked beside the right side; `None` marks nothing.
+    /// How the tile or worker is doing: its mark takes the leading slot from the kind icon;
+    /// `None` leaves the kind icon there.
     pub status: Option<Status>,
     /// The worker the tile is on, named only when more than one is known.
     pub worker: Option<String>,
+    /// Where the tile is: its directory, as the headers print it.
+    pub cwd: Option<String>,
+    /// How long the tile's session has run.
+    pub age: Option<std::time::Duration>,
     /// The group it is listed under.
     pub section: Section,
 }
@@ -227,7 +236,7 @@ impl PaletteItem {
         icon: IconName,
         section: Section,
     ) -> Self {
-        Self { label, keys, run, icon, status: None, worker: None, section }
+        Self { label, keys, run, icon, status: None, worker: None, cwd: None, age: None, section }
     }
 
     /// Whether its right-hand text is a key chord (an action's binding), not a readout.
@@ -245,11 +254,11 @@ impl PaletteItem {
         Self::line(label.to_owned(), keys, PaletteRun::Action(action), icon, Section::Commands)
     }
 
-    /// A line that goes to a session in the workspace: `Go to <title>`, its status on the right.
+    /// A line that goes to a session in the workspace: its title, its status on the right.
     #[must_use]
     pub fn session(title: &str, status: &str, session: SessionId) -> Self {
         Self::line(
-            format!("Go to {title}"),
+            title.to_owned(),
             status.to_owned(),
             PaletteRun::Session(session),
             IconName::SquareTerminal,
@@ -257,11 +266,11 @@ impl PaletteItem {
         )
     }
 
-    /// `Go to <name>` for a worker, whether it is reachable on the right.
+    /// A worker by its name, whether it is reachable on the right.
     #[must_use]
     pub fn worker(name: &str, status: &str, worker: slopty_client::layout::WorkerKey) -> Self {
         Self::line(
-            format!("Go to {name}"),
+            name.to_owned(),
             status.to_owned(),
             PaletteRun::Worker(worker),
             IconName::Server,
@@ -269,11 +278,11 @@ impl PaletteItem {
         )
     }
 
-    /// `Go to <title>` for an item in the workspace, `what` ("file") on the right.
+    /// An item in the workspace by its title, `what` ("file") on the right.
     #[must_use]
     pub fn item(title: &str, what: &str, icon: IconName, item: slopty_core::ItemId) -> Self {
         let run = PaletteRun::Item(item);
-        Self::line(format!("Go to {title}"), what.to_owned(), run, icon, Section::Tiles)
+        Self::line(title.to_owned(), what.to_owned(), run, icon, Section::Tiles)
     }
 
     /// A line that opens `url` in the browser, `detail` on the right.
@@ -401,6 +410,31 @@ impl PaletteItem {
         self
     }
 
+    /// The same line, in `cwd` (the directory as the headers print it).
+    #[must_use]
+    pub fn in_dir(mut self, cwd: Option<String>) -> Self {
+        self.cwd = cwd;
+        self
+    }
+
+    /// The same line, `age` old.
+    #[must_use]
+    pub const fn aged(mut self, age: Option<std::time::Duration>) -> Self {
+        self.age = age;
+        self
+    }
+
+    /// Where the line is, as its muted second column says it: the worker, then the directory.
+    #[must_use]
+    pub fn context(&self) -> String {
+        [self.worker.as_deref(), self.cwd.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
     /// The same line, listed under `section`.
     #[must_use]
     pub const fn in_section(mut self, section: Section) -> Self {
@@ -408,12 +442,13 @@ impl PaletteItem {
         self
     }
 
-    /// The line as a screen reader reads it: the label, the worker, then the keys.
+    /// The line as a screen reader reads it: the label, the worker and directory, then the
+    /// keys.
     #[must_use]
     pub fn a11y_label(&self) -> String {
-        [Some(self.label.as_str()), self.worker.as_deref(), Some(self.keys.as_str())]
+        let context = self.context();
+        [self.label.as_str(), context.as_str(), self.keys.as_str()]
             .into_iter()
-            .flatten()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(" ")
@@ -429,6 +464,8 @@ impl Clone for PaletteItem {
             icon: self.icon,
             status: self.status,
             worker: self.worker.clone(),
+            cwd: self.cwd.clone(),
+            age: self.age,
             section: self.section,
         }
     }
@@ -443,6 +480,8 @@ impl std::fmt::Debug for PaletteItem {
             .field("icon", &self.icon)
             .field("status", &self.status)
             .field("worker", &self.worker)
+            .field("cwd", &self.cwd)
+            .field("age", &self.age)
             .field("section", &self.section)
             .finish()
     }
@@ -515,8 +554,8 @@ pub fn in_sections(items: Vec<&PaletteItem>, path_first: bool) -> Vec<&PaletteIt
     items
 }
 
-/// A small muted heading over a group of rows: the palette's sections, the pickers', the
-/// empty workspace's workers. A heading, not a row, to a screen reader.
+/// A small, strong, muted heading over a group of rows: the palette's sections, the pickers',
+/// the empty workspace's workers. A heading, not a row, to a screen reader.
 pub(crate) fn section_heading(
     theme: &Theme,
     id: ElementId,
@@ -529,7 +568,8 @@ pub(crate) fn section_heading(
         .px(px(theme.spacing.md))
         .pt(px(theme.spacing.sm))
         .pb(px(theme.spacing.xxs))
-        .text_size(px(theme.typography.caption()))
+        .text_size(px(theme.typography.small()))
+        .font_weight(gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT))
         .text_color(hsla(theme.surfaces.text_muted))
         .child(text)
 }
@@ -543,6 +583,55 @@ pub(crate) fn icon_slot(theme: &Theme, name: IconName, color: gpui::Hsla) -> gpu
         .items_center()
         .justify_center()
         .child(icons::icon(theme, name, IconSize::Inline, color))
+}
+
+/// A row's leading slot, one fixed square for every list (the palette, the pickers, the
+/// inbox, the tile headers): the kind icon while there is nothing to say, the status mark once
+/// there is, so every title starts on one edge and a state reads in the same place on every
+/// row. `k` is the chrome's zoom (a tile header's in the overview); a list passes 1.
+pub(crate) fn status_slot(
+    theme: &Theme,
+    kind: IconName,
+    status: Option<Status>,
+    ink: gpui::Hsla,
+    k: f32,
+) -> gpui::Stateful<gpui::Div> {
+    let side = px(theme.typography.icon() * k);
+    let mark = match status {
+        Some(status) => {
+            icons::status_icon(theme, status, side, hsla(status.tone(theme))).into_any_element()
+        }
+        None => icons::icon(theme, kind, IconSize::Inline, ink).size(side).into_any_element(),
+    };
+    div()
+        .id("status")
+        .flex_none()
+        .size(px(theme.typography.icon_large() * k))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when_some(status, |el, status| {
+            el.role(gpui::accesskit::Role::Image).aria_label(status.label())
+        })
+        .child(mark)
+}
+
+/// An age as the inbox, the palette and the navigator print it: `now` under a minute, then
+/// whole minutes, hours and days, the one unit that matters.
+#[must_use]
+pub fn age_label(age: std::time::Duration) -> String {
+    let secs = age.as_secs();
+    match secs {
+        0..60 => "now".to_owned(),
+        60..3_600 => format!("{}m", secs / 60),
+        3_600..86_400 => format!("{}h", secs / 3_600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+/// The UI's monospace family: paths in chrome are set in it.
+pub(crate) fn mono_family(theme: &Theme) -> SharedString {
+    theme.typography.mono_families.first().cloned().unwrap_or_default().into()
 }
 
 /// The keys that run `action` in `bindings`, spelled as [`keys_label`] spells them.
@@ -671,16 +760,19 @@ pub fn files_query(query: &str) -> Option<&str> {
     (word.chars().count() >= 2 && !word.contains(char::is_whitespace) && !rooted).then_some(word)
 }
 
-/// The items `query` keeps, in their order: every word of the query is found in the label,
-/// case-insensitive; an empty query keeps all.
+/// The items `query` keeps, in their order.
+///
+/// Every word of the query is found in the label or in where the line is (its worker and
+/// directory), case-insensitive; an empty query keeps all. So a worker's name finds its tiles,
+/// and a directory the shells in it.
 #[must_use]
 pub fn filter<'a>(query: &str, items: &'a [PaletteItem]) -> Vec<&'a PaletteItem> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     items
         .iter()
         .filter(|item| {
-            let label = item.label.to_lowercase();
-            words.iter().all(|w| label.contains(w.as_str()))
+            let text = format!("{} {}", item.label, item.context()).to_lowercase();
+            words.iter().all(|w| text.contains(w.as_str()))
         })
         .collect()
 }
@@ -906,11 +998,11 @@ impl CommandPalette {
             .on_click(cx.listener(move |_this, _ev, _window, cx| {
                 cx.emit(PaletteEvent::Run(run.clone()));
             }))
-            .child(icon_slot(theme, item.icon, hsla(icon_ink)))
+            .child(status_slot(theme, item.icon, item.status, hsla(icon_ink), 1.0))
             .child(
                 div()
                     .debug_selector(move || format!("palette-title-{ix}"))
-                    .flex_1()
+                    .flex_initial()
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
@@ -918,13 +1010,33 @@ impl CommandPalette {
                     .text_color(hsla(s.text))
                     .child(SharedString::from(item.label.clone())),
             )
-            .children(item.worker.as_ref().map(|worker| {
+            .child(
                 div()
-                    .flex_none()
+                    .debug_selector(move || format!("palette-context-{ix}"))
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(theme.spacing.xs))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(worker.clone()))
-            }))
-            .children(item.status.map(|status| icons::status_mark(theme, Some(status), 1.0)))
+                    .children(
+                        item.worker
+                            .clone()
+                            .map(|worker| div().flex_none().child(SharedString::from(worker))),
+                    )
+                    .when(item.worker.is_some() && item.cwd.is_some(), |el| el.child("·"))
+                    .children(item.cwd.clone().map(|cwd| {
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .font_family(mono_family(theme))
+                            .child(SharedString::from(cwd))
+                    })),
+            )
             .when(!item.keys.is_empty() && (self.chords || !item.is_chord()), |el| {
                 el.child(
                     div()
@@ -934,6 +1046,17 @@ impl CommandPalette {
                         .child(SharedString::from(drawn_keys(&item.keys))),
                 )
             })
+            .children(item.age.map(|age| {
+                crate::kit::tabular(div())
+                    .debug_selector(move || format!("palette-age-{ix}"))
+                    .flex_none()
+                    .min_w(px(theme.spacing.xl))
+                    .flex()
+                    .justify_end()
+                    .text_size(px(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(age_label(age)))
+            }))
     }
 }
 
@@ -968,7 +1091,7 @@ impl Render for CommandPalette {
             rows.push(self.row(ix, item, ix == chosen, cx).into_any_element());
         }
         let empty = rows.is_empty();
-        crate::kit::backdrop(&theme, window)
+        let root = crate::kit::backdrop(&theme, window)
             .id("palette-backdrop")
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
             .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))
@@ -1024,7 +1147,8 @@ impl Render for CommandPalette {
                             }),
                     )
                     .when(self.chords, |el| el.child(legend(&theme))),
-            )
+            );
+        crate::kit::fade_in(root, "palette-fade", cx)
     }
 }
 
@@ -1033,6 +1157,18 @@ mod tests {
     use gpui::Keystroke;
 
     use super::*;
+
+    #[test]
+    fn an_age_says_the_one_unit_that_matters() {
+        let s = std::time::Duration::from_secs;
+        assert_eq!(age_label(s(0)), "now");
+        assert_eq!(age_label(s(59)), "now");
+        assert_eq!(age_label(s(60)), "1m");
+        assert_eq!(age_label(s(3_599)), "59m");
+        assert_eq!(age_label(s(3_600)), "1h");
+        assert_eq!(age_label(s(86_399)), "23h");
+        assert_eq!(age_label(s(86_400 * 3)), "3d");
+    }
 
     #[test]
     fn return_is_drawn_as_text_not_as_an_emoji() {
@@ -1145,7 +1281,7 @@ mod tests {
         };
         assert_eq!(
             order(false),
-            ["Go to zsh", "Go to claude", "Go to studio", "New note", "Zoom in", "Open notes.md"]
+            ["zsh", "claude", "studio", "New note", "Zoom in", "Open notes.md"]
         );
         assert_eq!(order(true)[0], "Open notes.md");
         let typed = path_items("~/proj/");

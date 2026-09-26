@@ -380,6 +380,7 @@ impl WorkspaceView {
         if watched || !slow {
             return;
         }
+        self.log_finished(session, &done);
         self.finished.insert(session, done);
         cx.notify();
     }

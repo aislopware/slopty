@@ -390,12 +390,20 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// A session changed directory (OSC 7), and the worker says which repository that is in.
-    pub fn session_moved(&mut self, session: SessionId, cwd: &str, repo: Option<&str>) {
+    /// A session changed directory (OSC 7) or branch, and the worker says which repository
+    /// and branch that is.
+    pub fn session_moved(
+        &mut self,
+        session: SessionId,
+        cwd: &str,
+        repo: Option<&str>,
+        branch: Option<&str>,
+    ) {
         for w in self.workers.values_mut() {
             if let Some(summary) = w.sessions.get_mut(&session) {
                 summary.cwd = Some(cwd.to_owned());
                 summary.repo = repo.map(str::to_owned);
+                summary.branch = branch.map(str::to_owned);
             }
         }
     }
@@ -488,8 +496,9 @@ impl WorkspaceView {
             TerminalViewEvent::Exited(status) => this.session_exited(sid, *status, cx),
             TerminalViewEvent::CloseConfirmed => this.close_shell(sid, cx),
             TerminalViewEvent::Title(_) => cx.notify(),
-            TerminalViewEvent::Cwd { path, repo } => {
-                this.session_moved(sid, path, repo.as_deref());
+            TerminalViewEvent::Cwd { path, repo, branch } => {
+                this.session_moved(sid, path, repo.as_deref(), branch.as_deref());
+                cx.notify();
             }
             TerminalViewEvent::Notice(text) => this.show_notice(text.clone(), cx),
             TerminalViewEvent::CommandFinished { command, exit, elapsed } => {

@@ -125,6 +125,11 @@ pub struct Prepared {
     link: Hsla,
     /// The scrollbar's thumb over the grid's right edge, while the bar shows.
     scrollbar: Option<(Bounds<Pixels>, Hsla)>,
+    /// The failed blocks' rows as `(top, height)` bands: washed edge to edge, a bar at the
+    /// left edge.
+    failed: Vec<(Pixels, Pixels)>,
+    /// The failed blocks' wash and bar colours, and the bar's width.
+    failed_look: FailedLook,
     /// Text drawn over the grid: the input method's composition and the "took" captions.
     overlay: Vec<(Point<Pixels>, ShapedLine)>,
     /// The keys whose guesses the overlay shows (the predictor stamps each with the key's
@@ -290,14 +295,34 @@ fn cursor_span(line: Option<&slopty_grid::Line>, col: u16) -> u16 {
     if wide { 2 } else { 1 }
 }
 
-/// The command-block separator for a prompt-start row: the terminal foreground, faint, or
-/// the chrome's error tone when the command before it reported a non-zero status.
+/// The command-block separator for a prompt-start row: the terminal foreground, faint. A
+/// failed block says so with its own bar and wash ([`FailedLook`]), not with its rule.
 #[must_use]
-pub fn separator_color(theme: &Theme, exit: Option<u8>) -> Hsla {
-    if exit.is_some_and(|code| code != 0) {
-        hsla_alpha(theme.surfaces.error, alpha::STRONG)
-    } else {
-        hsla_alpha(theme.terminal.fg, alpha::FAINT)
+pub fn separator_color(theme: &Theme) -> Hsla {
+    hsla_alpha(theme.terminal.fg, alpha::FAINT)
+}
+
+/// How a block whose command failed is drawn, as Warp does it: a bar of the error tone down
+/// the block's left edge and a faint wash of it over the whole block.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FailedLook {
+    /// Over the block's rows, edge to edge.
+    pub wash: Hsla,
+    /// Down the element's left edge, in the inset beside the text.
+    pub bar: Hsla,
+    /// The bar's width, at the zoom it is drawn at.
+    pub bar_width: Pixels,
+}
+
+impl FailedLook {
+    /// The look at `zoom`.
+    #[must_use]
+    pub fn new(theme: &Theme, zoom: f32) -> Self {
+        Self {
+            wash: hsla_alpha(theme.surfaces.error, alpha::FAINT),
+            bar: hsla(theme.surfaces.error),
+            bar_width: px(theme.spacing.xxs * zoom),
+        }
     }
 }
 
@@ -1205,6 +1230,16 @@ impl Element for TerminalElement {
             // in that stretch opens the terminal rather than following a command, and a rule
             // over it would only double the tile header's hairline.
             let mut blank_from_start = rows_view.first().is_some_and(|r| r.index.0 == 0);
+            let hovered = view.hovered_block();
+            let failed = state
+                .failed_runs(&rows_view)
+                .into_iter()
+                .map(|run| {
+                    let top = origin.y + line_height * f32::from(run.start);
+                    (top, line_height * f32::from(run.end.saturating_sub(run.start)))
+                })
+                .collect();
+            let failed_look = FailedLook::new(theme, zoom);
             for (i, row) in rows_view.iter().enumerate() {
                 let opens_terminal = blank_from_start;
                 if row.line.is_some_and(|l| l.cells.iter().any(|c| !plain_space(c))) {
@@ -1346,15 +1381,14 @@ impl Element for TerminalElement {
                             if last == index { end.min(grid_cols) } else { grid_cols },
                         )
                     });
-                // A prompt starts here: rule off the command above it, red when it failed.
-                // On the grid's top edge a neutral rule would lie a padding under the tile
-                // header's hairline and read as a double line; a failed command's red one still
-                // says something there.
-                let failed = line.mark.exit().is_some_and(|code| code != 0);
-                let separator =
-                    (line.mark.starts_prompt() && !opens_terminal && (screen_row > 0 || failed))
-                        .then(|| separator_color(theme, line.mark.exit()));
+                // A prompt starts here: rule off the command above it. On the grid's top edge
+                // the rule would lie a padding under the tile header's hairline and read as a
+                // double line.
+                let separator = (line.mark.starts_prompt() && !opens_terminal && screen_row > 0)
+                    .then(|| separator_color(theme));
+                // A hovered block says how long it took in its own facts, drawn over this row.
                 if line.mark.starts_prompt()
+                    && hovered != Some(index)
                     && let Some(elapsed) = view.took(index)
                 {
                     let text = super::view::took_label(elapsed);
@@ -1488,6 +1522,8 @@ impl Element for TerminalElement {
                 scrollbar: scrollbar.and_then(|(color, history, offset)| {
                     scrollbar_thumb(&metrics, history, offset).map(|thumb| (thumb, color))
                 }),
+                failed,
+                failed_look,
                 overlay,
                 shown: predicted
                     .map(|(guesses, _)| guesses.iter().map(|p| p.seq).collect())
@@ -1556,24 +1592,43 @@ impl Element for TerminalElement {
         // its edge): the selection keeps growing and scrolls past the top or bottom. So is
         // the pointer's way to the scrollbar and away from it, off the card too.
         let view = self.view.clone();
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+        let grid_hitbox = prepared.hitbox.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble {
                 return;
             }
             if event.pressed_button.is_some() {
                 view.update(cx, |view, cx| view.drag_move(event, cx));
             }
-            let near = bounds.contains(&event.position) && near_scrollbar(&m, event.position);
+            let inside = bounds.contains(&event.position);
+            let near = inside && near_scrollbar(&m, event.position);
             view.update(cx, |view, cx| view.pointer_near_scrollbar(near, cx));
+            // Over the grid the hovered block follows the pointer. Where something covers the
+            // grid it holds, so the block's own facts and the sticky header over it keep it.
+            if !inside {
+                view.update(cx, |view, cx| view.pointer_over(None, cx));
+            } else if grid_hitbox.is_hovered(window) {
+                view.update(cx, |view, cx| view.pointer_over(Some(event.position), cx));
+            }
         });
         // Out of the window the pointer is not near anything, and no move says so.
         let view = self.view.clone();
         window.on_mouse_event(move |_: &MouseExitEvent, phase, _window, cx| {
             if phase == DispatchPhase::Bubble {
-                view.update(cx, |view, cx| view.pointer_near_scrollbar(false, cx));
+                view.update(cx, |view, cx| {
+                    view.pointer_near_scrollbar(false, cx);
+                    view.pointer_over(None, cx);
+                });
             }
         });
         window.paint_quad(fill(bounds, prepared.background));
+        let look = prepared.failed_look;
+        for &(top, height) in &prepared.failed {
+            let band = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height));
+            window.paint_quad(fill(band, look.wash));
+            window
+                .paint_quad(fill(Bounds::new(band.origin, size(look.bar_width, height)), look.bar));
+        }
         for row in &prepared.rows {
             if let Some(color) = row.separator {
                 let w = m.cell_width * f32::from(m.cols);

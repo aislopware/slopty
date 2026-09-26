@@ -26,6 +26,7 @@ use crate::browser::BrowserView;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize, Status};
+use crate::kit;
 
 /// A tile's header height, in points at zoom 1.
 pub(super) const HEADER_H: f32 = 28.0;
@@ -45,6 +46,13 @@ const PROGRESS: f32 = 2.0;
 
 /// The group every tile's header actions hover with.
 const TILE_GROUP: &str = "tile";
+
+/// The group a tab's close button hovers with.
+const TAB_GROUP: &str = "tab";
+
+/// The widest a tab grows in a tabbed column's tab row, in points at zoom 1: past it the tabs
+/// read as one long bar rather than as tabs.
+const TAB_MAX: f32 = 200.0;
 
 /// The group a header's window controls (fullscreen, close) hover with: they show while the
 /// pointer is on the header itself, not anywhere over the body.
@@ -112,8 +120,6 @@ struct Edges {
     right: bool,
     /// A tile is stacked below it in its column: it draws the divider on its bottom edge.
     below: bool,
-    /// It is the only tile in view (the one tile of its workspace, or fullscreen).
-    alone: bool,
 }
 
 /// A note's title, "note" while it is empty.
@@ -403,8 +409,8 @@ impl WorkspaceView {
         right.into_iter().chain(below).collect()
     }
 
-    /// Where another tile continues from this one, and whether it is the one tile in view.
-    /// Read off its place in the layout: two lengths, no walk over the tiles.
+    /// Where another tile continues from this one. Read off its place in the layout: two
+    /// lengths, no walk over the tiles.
     fn edges(&self, placed: &Placed) -> Edges {
         let pos = placed.pos;
         let columns = self.layout.workspaces().get(pos.workspace).map_or(&[][..], |w| w.columns());
@@ -414,7 +420,6 @@ impl WorkspaceView {
         Edges {
             right: !placed.fullscreen && pos.column.saturating_add(1) < columns.len(),
             below: pos.tile.saturating_add(1) < stacked,
-            alone: placed.fullscreen || (columns.len() <= 1 && stacked <= 1),
         }
     }
 
@@ -468,9 +473,6 @@ impl WorkspaceView {
             _ => None,
         };
         let ink = if focused { s.text } else { s.text_muted };
-        let status = self.tile_status(tile, item, cx);
-        let mark = crate::icons::status_mark(theme, status, k)
-            .debug_selector(move || format!("status-{}", id.as_uuid()));
         let badge = agent.map(|(session, a)| self.agent_badge(tile, session, a, chrome, cx));
         let unwatched = match &item.kind {
             ItemKind::Terminal { session } => self.finished.get(session).map(|f| (*session, f)),
@@ -489,6 +491,7 @@ impl WorkspaceView {
                 .size(px((theme.spacing.xs + theme.spacing.xxs) * k))
                 .rounded_full()
                 .bg(hsla(s.accent))
+                .into_any_element()
         });
         // An agent the worker had to guess at: offer the hooks that would make it precise.
         let hooks = agent
@@ -514,7 +517,7 @@ impl WorkspaceView {
                 .h(px(PROGRESS * k))
                 .w(gpui::relative(upload.fraction()))
                 .bg(hsla(s.accent));
-            let pill = tab_stop(pill, s.accent)
+            let pill = tab_stop(kit::tabular(pill), s.accent)
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_upload(xfer, cx)))
                 .into_any_element();
             (pill, bar)
@@ -522,8 +525,9 @@ impl WorkspaceView {
         let (upload, progress) = upload.unzip();
         let ports = self.port_pills(tile, item, chrome, cx);
         let actions = self.header_actions(tile, item, chrome, cx);
-        // The actions stay out of sight until the tile is hovered or focused: a wall of tiles
-        // reads as titles, not buttons. Touch has no hover, so the focused tile shows them.
+        // The kind's own actions stay out of sight until the tile is hovered or focused: a wall
+        // of tiles reads as titles, not buttons. Touch has no hover, so the focused tile shows
+        // them.
         let actions = div()
             .flex()
             .flex_none()
@@ -531,31 +535,9 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xs * k))
             .when(!focused, |el| el.invisible().group_hover(TILE_GROUP, gpui::Styled::visible))
             .children(actions);
-        let controls = self.window_controls(tile, focused, k, cx);
-        let tabs = placed.tabs.map(|(active, count)| {
-            div().flex_none().text_color(hsla(s.text_muted)).child(ChromeText::new(
-                format!("{}/{count}", active.saturating_add(1)),
-                px(theme.typography.small()),
-                k,
-            ))
-        });
-        // A file with an edit not yet on disk says so with a dot after its name, as an editor's
-        // tab does; saving keeps the dot until the worker has written it.
-        let unsaved = self.files.get(&id).is_some_and(|v| {
-            let v = v.read(cx);
-            v.dirty() || v.saving()
-        });
-        let unsaved = unsaved.then(|| {
-            div()
-                .id("unsaved")
-                .debug_selector(move || format!("unsaved-{}", id.as_uuid()))
-                .role(Role::Image)
-                .aria_label("Unsaved changes")
-                .flex_none()
-                .size(px(theme.spacing.sm * k))
-                .rounded_full()
-                .bg(hsla(s.text_secondary))
-        });
+        let readouts: Vec<gpui::AnyElement> =
+            badge.into_iter().chain(finished).chain(unseen).collect();
+        let strip = self.trailing_strip(tile, readouts, focused, k, cx);
         // Where the tile is: a shell's directory, a page's address when the title is not it.
         let place = match &item.kind {
             ItemKind::Terminal { session } => {
@@ -581,80 +563,62 @@ impl WorkspaceView {
                 .min_w_0()
                 .max_w(px(HEADER_URL_MAX * k))
                 .overflow_hidden()
+                .font_family(crate::palette::mono_family(theme))
                 .text_color(hsla(s.text_muted))
                 .child(
-                    ChromeText::new(text, px(theme.typography.ui_size), k)
+                    ChromeText::new(text, px(theme.typography.small()), k)
                         .fill()
                         .zooming(chrome.zooming),
                 )
         });
-        // The worker's name, where more than one could be meant.
-        let worker_chip =
+        // The worker's name, where more than one could be meant: quiet text after a server
+        // glyph, a fact about the tile rather than a control.
+        let worker =
             (self.workers.len() > 1).then(|| self.workers.get(&tile.worker)).flatten().map(|w| {
                 let name = w.name.clone();
+                let muted = hsla(s.text_muted);
                 div()
                     .id("worker")
                     .debug_selector(move || format!("worker-{}", id.as_uuid()))
                     .role(Role::Label)
                     .aria_label(SharedString::from(name.clone()))
                     .flex_none()
-                    .px(px(theme.spacing.sm * k))
-                    .py(px(theme.spacing.xxs * k))
-                    .rounded(px(theme.radii.xs * k))
-                    .bg(hsla_alpha(s.text_secondary, alpha::FAINT))
-                    .text_size(px(theme.typography.small() * k))
-                    .text_color(hsla(s.text_secondary))
+                    .flex()
+                    .items_center()
+                    .gap(px(theme.spacing.xs * k))
+                    .text_color(muted)
+                    .child(
+                        crate::icons::icon(theme, IconName::Server, IconSize::Inline, muted)
+                            .size(px(theme.typography.small() * k)),
+                    )
                     .child(
                         ChromeText::new(name, px(theme.typography.small()), k)
                             .zooming(chrome.zooming),
                     )
             });
-        let lead = self.file_proxy(item, tile, ink, chrome, cx).unwrap_or_else(|| {
-            let agent = agent.is_some();
-            crate::icons::icon(theme, kind_icon(item, agent), IconSize::Inline, hsla(ink))
-                .size(px(theme.typography.icon() * k))
-                .into_any_element()
+        // A file with an edit not yet on disk says so with a dot after its name, as an editor's
+        // tab does; saving keeps the dot until the worker has written it.
+        let unsaved = self.files.get(&id).is_some_and(|v| {
+            let v = v.read(cx);
+            v.dirty() || v.saving()
         });
-        let renaming = self.rename.as_ref().filter(|r| r.tile == tile).map(|r| r.input.clone());
+        let unsaved = unsaved.then(|| {
+            div()
+                .id("unsaved")
+                .debug_selector(move || format!("unsaved-{}", id.as_uuid()))
+                .role(Role::Image)
+                .aria_label("Unsaved changes")
+                .flex_none()
+                .size(px(theme.spacing.sm * k))
+                .rounded_full()
+                .bg(hsla(s.text_secondary))
+        });
         let heading = SharedString::from(if kind == title {
             title.clone()
         } else {
             format!("{kind} {title}")
         });
-        let name = match renaming {
-            // The name field takes the title's place; a click in it must not start a move.
-            Some(input) => div()
-                .id("rename")
-                .debug_selector(move || format!("rename-{}", id.as_uuid()))
-                .flex_1()
-                .overflow_hidden()
-                .cursor_text()
-                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                .child(Input::new(&input).aria_label("Tile name"))
-                .into_any_element(),
-            None => div()
-                .debug_selector(move || format!("name-{}", id.as_uuid()))
-                .min_w_0()
-                .overflow_hidden()
-                .child(
-                    ChromeText::new(title, px(theme.typography.ui_size), k)
-                        .fill()
-                        .zooming(chrome.zooming),
-                )
-                .into_any_element(),
-        };
-        // The title and its place share what the right side leaves, the place giving way
-        // first.
-        let names = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.sm * k))
-            .child(name)
-            .children(place);
-        // Every header is its body's surface with a hairline under it: focus is told by the
-        // veil over the other tiles' bodies. One that needs the human says so along its top.
+        // One that needs the human says so along its top.
         let attention = agent.is_some_and(|(_, a)| needs_human(a)).then(|| {
             div()
                 .debug_selector(move || format!("attention-{}", id.as_uuid()))
@@ -665,7 +629,12 @@ impl WorkspaceView {
                 .h(px(ATTENTION_BAR * k))
                 .bg(hsla(s.warn))
         });
-        div()
+        let tabbed = placed.tabs.is_some();
+        // Focus is told by the header: the focused one is its body's surface in primary text,
+        // with nothing between them, so the tile reads as one piece; the others step down to
+        // the panel, muted, with a quiet hairline over their bodies. A tabbed column's header
+        // is its tab row, whose tabs draw their own edges.
+        let header = div()
             .id("title")
             .debug_selector(move || format!("title-{}", id.as_uuid()))
             .group(HEADER_GROUP)
@@ -676,11 +645,6 @@ impl WorkspaceView {
             .w_full()
             .flex_none()
             .flex()
-            .items_center()
-            .px(px(theme.spacing.inset() * k))
-            .gap(px(theme.spacing.sm * k))
-            .border_b_1()
-            .border_color(hsla(s.border))
             .text_size(px(theme.typography.ui_size * k))
             .text_color(hsla(ink))
             .font_family(theme.typography.ui_family.clone())
@@ -697,23 +661,215 @@ impl WorkspaceView {
                     }
                     cx.stop_propagation();
                 }),
-            )
-            .child(lead)
-            .child(names)
-            .when_some(unsaved, gpui::ParentElement::child)
-            .when_some(tabs, gpui::ParentElement::child)
-            .children(ports)
-            .when_some(upload, gpui::ParentElement::child)
-            .when_some(hooks, gpui::ParentElement::child)
-            .when_some(worker_chip, gpui::ParentElement::child)
-            .child(mark)
-            .when_some(badge, gpui::ParentElement::child)
-            .when_some(finished, gpui::ParentElement::child)
-            .when_some(unseen, gpui::ParentElement::child)
-            .child(actions)
-            .child(controls)
+            );
+        let header = if tabbed {
+            let tabs = self.render_tabs(placed, chrome, cx);
+            // What the tabs leave is the bar's, hairline and all; the tile's controls end it.
+            let rest = div()
+                .flex_none()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(theme.spacing.sm * k))
+                .pr(px(theme.spacing.inset() * k))
+                .border_b_1()
+                .border_color(hsla(s.border_subtle))
+                .children(ports)
+                .when_some(upload, gpui::ParentElement::child)
+                .when_some(hooks, gpui::ParentElement::child)
+                .child(actions)
+                .child(strip);
+            header.bg(hsla(s.panel)).child(tabs).child(rest)
+        } else {
+            let lead = self.leading_slot(tile, item, ink, k, cx);
+            let name = self.header_name(tile, id, title, chrome);
+            // The title and its place share what the right side leaves, the place giving way
+            // first.
+            let names = div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.sm * k))
+                .child(name)
+                .children(place);
+            header
+                .items_center()
+                .px(px(theme.spacing.inset() * k))
+                .gap(px(theme.spacing.sm * k))
+                .map(|el| if focused { el.bg(hsla(theme.content())) } else { el.bg(hsla(s.panel)) })
+                .when(!focused, |el| el.border_b_1().border_color(hsla(s.border_subtle)))
+                .child(lead)
+                .child(names)
+                .when_some(unsaved, gpui::ParentElement::child)
+                .when_some(worker, gpui::ParentElement::child)
+                .children(ports)
+                .when_some(upload, gpui::ParentElement::child)
+                .when_some(hooks, gpui::ParentElement::child)
+                .child(actions)
+                .child(strip)
+        };
+        header
             .when_some(progress, gpui::ParentElement::child)
             .when_some(attention, gpui::ParentElement::child)
+            .into_any_element()
+    }
+
+    /// The header's leading slot: the kind's icon at rest and the status mark once there is
+    /// one (working, waiting, failed, done, away), in one fixed square so every title starts
+    /// on the same edge, as the navigator's rows and the palette's do. On a Mac a file's slot
+    /// is its proxy, dragged out as a document window's title icon is.
+    fn leading_slot(
+        &self,
+        tile: TileRef,
+        item: &Item,
+        ink: slopty_theme::Rgb,
+        k: f32,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let id = item.id;
+        let agent = match item.kind {
+            ItemKind::Terminal { session } => self.agent_state(session).is_some(),
+            _ => false,
+        };
+        let status = self.tile_status(tile, item, cx);
+        let slot =
+            crate::palette::status_slot(&self.theme, kind_icon(item, agent), status, hsla(ink), k)
+                .debug_selector(move || format!("status-{}", id.as_uuid()))
+                .into_any_element();
+        self.file_proxy(item, tile, slot, k, cx)
+    }
+
+    /// The title, or the field that renames the tile in its place.
+    fn header_name(
+        &self,
+        tile: TileRef,
+        id: slopty_core::ItemId,
+        title: String,
+        chrome: Chrome,
+    ) -> gpui::AnyElement {
+        let renaming = self.rename.as_ref().filter(|r| r.tile == tile).map(|r| r.input.clone());
+        match renaming {
+            // The name field takes the title's place; a click in it must not start a move.
+            Some(input) => div()
+                .id("rename")
+                .debug_selector(move || format!("rename-{}", id.as_uuid()))
+                .flex_1()
+                .overflow_hidden()
+                .cursor_text()
+                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                .child(Input::new(&input).aria_label("Tile name"))
+                .into_any_element(),
+            None => div()
+                .debug_selector(move || format!("name-{}", id.as_uuid()))
+                .min_w_0()
+                .overflow_hidden()
+                .child(
+                    ChromeText::new(title, px(self.theme.typography.ui_size), chrome.k)
+                        .fill()
+                        .zooming(chrome.zooming),
+                )
+                .into_any_element(),
+        }
+    }
+
+    /// A tabbed column's tab row: a tab per tile in the column, each with its leading slot,
+    /// its title and a close button that shows on the tab's hover (always on the one shown).
+    /// The shown tab is its body's surface with no edge under it, as the focused header is;
+    /// the rest sit on the panel with the bar's hairline under them.
+    fn render_tabs(&self, placed: &Placed, chrome: Chrome, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let k = chrome.k;
+        let pos = placed.pos;
+        let column = self
+            .layout
+            .workspaces()
+            .get(pos.workspace)
+            .and_then(|w| w.columns().get(pos.column))
+            .map(|c| c.tiles().iter().map(slopty_client::layout::Tile::tile).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let tabs = column.into_iter().filter_map(|tab| {
+            let item = self.item(tab)?;
+            let id = item.id;
+            let shown = tab == placed.tile;
+            let ink = match (shown, placed.focused) {
+                (true, true) => s.text,
+                (true, false) => s.text_secondary,
+                (false, _) => s.text_muted,
+            };
+            let agent = match item.kind {
+                ItemKind::Terminal { session } => self.agent_state(session).is_some(),
+                _ => false,
+            };
+            let status = self.tile_status(tab, item, cx);
+            let slot =
+                crate::palette::status_slot(theme, kind_icon(item, agent), status, hsla(ink), k);
+            let title = self.card_title(tab, item, cx);
+            let name = self.header_name(tab, id, title, chrome);
+            let close = kit::icon_button_at(
+                theme,
+                format!("tab-close-{}", id.as_uuid()),
+                IconName::X,
+                CLOSE_TILE,
+                k,
+            )
+            .on_click(cx.listener(move |this, _ev, window, cx| this.close_tile(tab, window, cx)))
+            .when(!shown, |el| el.invisible().group_hover(TAB_GROUP, gpui::Styled::visible));
+            Some(
+                div()
+                    .id(SharedString::from(format!("tab-{}", id.as_uuid())))
+                    .debug_selector(move || format!("tab-{}", id.as_uuid()))
+                    .group(TAB_GROUP)
+                    .role(Role::Tab)
+                    .aria_label(SharedString::from(self.card_title(tab, item, cx)))
+                    .aria_selected(shown)
+                    .flex_1()
+                    .min_w_0()
+                    .max_w(px(TAB_MAX * k))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(theme.spacing.xs * k))
+                    .pl(px(theme.spacing.sm * k))
+                    .pr(px(theme.spacing.xs * k))
+                    .border_r_1()
+                    .text_color(hsla(ink))
+                    .map(|el| {
+                        if shown {
+                            el.border_color(hsla(s.border_subtle)).bg(hsla(theme.content()))
+                        } else {
+                            el.border_b_1()
+                                .border_color(hsla(s.border_subtle))
+                                .hover(move |el| el.bg(hsla(s.raised)))
+                        }
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            if ev.click_count == 2 {
+                                this.start_rename(tab, window, cx);
+                            } else {
+                                this.begin_move(tab, ev, cx);
+                            }
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(slot)
+                    .child(div().flex_1().min_w_0().overflow_hidden().child(name))
+                    .child(close),
+            )
+        });
+        // The tabs and the bar after them grow alike, a tab no wider than `TAB_MAX`, so a few
+        // tabs keep their titles whole and the bar's hairline runs on from the last.
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .children(tabs)
+            .child(div().flex_1().h_full().border_b_1().border_color(hsla(s.border_subtle)))
             .into_any_element()
     }
 
@@ -780,10 +936,13 @@ impl WorkspaceView {
                 let url = forward.worker_url();
                 let worker = tile.worker;
                 let forward = forward.clone();
-                div()
+                // A port is a number: set in the mono face with figures of one width, as a
+                // path is.
+                kit::tabular(div())
                     .flex()
                     .flex_none()
                     .gap(px(theme.spacing.xxs * chrome.k))
+                    .font_family(crate::palette::mono_family(theme))
                     .child(tab_stop(in_tile, theme.surfaces.accent).on_click(cx.listener(
                         move |this, _ev, _w, cx| this.open_browser(Some(worker), &url, cx),
                     )))
@@ -879,19 +1038,23 @@ impl WorkspaceView {
         actions
     }
 
-    /// Fullscreen and close, at the header's right end: shown while the pointer is on the
-    /// header, and always on the focused tile (touch has no hover). Each focuses its tile and
-    /// runs the action its key runs, so a click and ⌃⌘F or ⌘W do the same thing.
-    fn window_controls(
+    /// The header's right end: one fixed strip where the tile's readouts (the agent's pill, a
+    /// finished command's, the unseen dot) sit at rest and fullscreen and close take their
+    /// place while the pointer is on the header. It is never narrower than the two buttons, so
+    /// the swap moves nothing beside it. The focused tile with nothing to say shows its
+    /// buttons at rest (touch has no hover). Each button focuses its tile and runs the action
+    /// its key runs, so a click and ⌃⌘F or ⌘W do the same thing.
+    fn trailing_strip(
         &self,
         tile: TileRef,
+        readouts: Vec<gpui::AnyElement>,
         focused: bool,
         k: f32,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let id = tile.item.as_uuid();
-        let fullscreen = crate::kit::icon_button_at(
+        let fullscreen = kit::icon_button_at(
             theme,
             format!("fullscreen-{id}"),
             IconName::Maximize2,
@@ -907,19 +1070,44 @@ impl WorkspaceView {
             }
             window.dispatch_action(Box::new(FullscreenTile), cx);
         }));
-        let close =
-            crate::kit::icon_button_at(theme, format!("close-{id}"), IconName::X, CLOSE_TILE, k)
-                .on_click(cx.listener(move |this, _ev, window, cx| {
-                    this.close_tile(tile, window, cx);
-                }));
-        div()
+        let close = kit::icon_button_at(theme, format!("close-{id}"), IconName::X, CLOSE_TILE, k)
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                this.close_tile(tile, window, cx);
+            }));
+        let quiet = readouts.is_empty();
+        let controls = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
             .flex()
-            .flex_none()
             .items_center()
-            .when(!focused, |el| el.invisible().group_hover(HEADER_GROUP, gpui::Styled::visible))
+            .when(!(focused && quiet), |el| {
+                el.invisible().group_hover(HEADER_GROUP, gpui::Styled::visible)
+            })
             .child(fullscreen)
-            .child(close)
-            .into_any_element()
+            .child(close);
+        let readouts = div()
+            .debug_selector(move || format!("readouts-{id}"))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs * k))
+            .group_hover(HEADER_GROUP, gpui::Styled::invisible)
+            .children(readouts);
+        kit::tabular(
+            div()
+                .debug_selector(move || format!("strip-{id}"))
+                .relative()
+                .flex_none()
+                .h_full()
+                .min_w(px(2.0 * kit::icon_button_side(theme) * k))
+                .flex()
+                .items_center()
+                .justify_end(),
+        )
+        .child(readouts)
+        .child(controls)
+        .into_any_element()
     }
 
     /// Close `tile` as ⌘W closes the focused one: a shell asks first while its command runs,
@@ -1065,64 +1253,57 @@ impl WorkspaceView {
         &self,
         item: &Item,
         tile: TileRef,
-        ink: slopty_theme::Rgb,
-        chrome: Chrome,
+        lead: gpui::AnyElement,
+        k: f32,
         cx: &Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let ItemKind::File { path } = &item.kind else { return None };
+    ) -> gpui::AnyElement {
+        let ItemKind::File { path } = &item.kind else { return lead };
         let theme = &self.theme;
-        let k = chrome.k;
         let id = item.id;
         let path = path.clone();
         let worker = tile.worker;
-        Some(
-            div()
-                .id("file-proxy")
-                .debug_selector(move || format!("file-proxy-{}", id.as_uuid()))
-                .role(Role::Button)
-                .aria_label("Drag the file out")
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(theme.typography.icon_large() * k))
-                .rounded(px(theme.radii.xs * k))
-                .hover(|s| s.bg(hsla_alpha(theme.surfaces.text_secondary, alpha::FAINT)))
-                .cursor_grab()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _ev, _w, cx| {
-                        this.drag_out(worker, &path);
-                        cx.stop_propagation();
-                    }),
-                )
-                .child(
-                    crate::icons::icon(theme, IconName::FileText, IconSize::Inline, hsla(ink))
-                        .size(px(theme.typography.icon() * k)),
-                )
-                .into_any_element(),
-        )
+        div()
+            .id("file-proxy")
+            .debug_selector(move || format!("file-proxy-{}", id.as_uuid()))
+            .role(Role::Button)
+            .aria_label("Drag the file out")
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(theme.typography.icon_large() * k))
+            .rounded(px(theme.radii.xs * k))
+            .hover(|s| s.bg(hsla_alpha(theme.surfaces.text_secondary, alpha::FAINT)))
+            .cursor_grab()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _ev, _w, cx| {
+                    this.drag_out(worker, &path);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(lead)
+            .into_any_element()
     }
 
-    /// No file leaves the app by a drag here.
+    /// No file leaves the app by a drag here: the slot is only the slot.
     #[cfg(not(target_os = "macos"))]
     #[expect(clippy::unused_self, reason = "the macOS twin draws the proxy")]
     const fn file_proxy(
         &self,
         _item: &Item,
         _tile: TileRef,
-        _ink: slopty_theme::Rgb,
-        _chrome: Chrome,
+        lead: gpui::AnyElement,
+        _k: f32,
         _cx: &Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        None
+    ) -> gpui::AnyElement {
+        lead
     }
 
-    /// The body: its content, a veil over it while another tile has the focus, and the state
-    /// pill. A terminal's grid is sized from where its tile comes to rest, not from the
-    /// rectangle in motion, so a sliding or springing column resizes no PTY frame by frame:
-    /// the grid is laid out at the resting size and clipped to the moving one. The veil is an
-    /// element of its own over the content, so a cached body stays cached as the focus moves.
+    /// The body: its content and the state pill. A terminal's grid is sized from where its
+    /// tile comes to rest, not from the rectangle in motion, so a sliding or springing column
+    /// resizes no PTY frame by frame: the grid is laid out at the resting size and clipped to
+    /// the moving one. Nothing lies over an unfocused body: its header says it is not focused.
     fn render_body(
         &self,
         placed: &Placed,
@@ -1133,19 +1314,11 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let state = self.body_state(placed.tile, item);
         let content = self.render_content(placed, item, chrome, window, cx);
-        let id = item.id;
-        let veiled = !placed.focused && !self.edges(placed).alone;
-        let veil = veiled.then(|| {
-            div()
-                .debug_selector(move || format!("veil-{}", id.as_uuid()))
-                .absolute()
-                .inset_0()
-                .bg(hsla_alpha(self.theme.surfaces.canvas, alpha::FAINT))
-        });
-        let pill = state.map(|state| self.render_state_pill(placed.tile, item, &state, chrome, cx));
-        if veil.is_none() && pill.is_none() {
+        let Some(pill) =
+            state.map(|state| self.render_state_pill(placed.tile, item, &state, chrome, cx))
+        else {
             return content;
-        }
+        };
         div()
             .flex_1()
             .min_h_0()
@@ -1154,8 +1327,7 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             .child(content)
-            .when_some(veil, gpui::ParentElement::child)
-            .when_some(pill, gpui::ParentElement::child)
+            .child(pill)
             .into_any_element()
     }
 

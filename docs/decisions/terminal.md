@@ -1616,3 +1616,43 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   1 ms instead of 11 to 18 (MEASUREMENTS, "the ptyd tap, framed once"). Tests:
   `byte_strings_keep_the_wire_of_a_sequence_of_bytes`,
   `the_borrowed_output_frame_is_the_requests_frame`.
+
+- ✅ **A failed block wears a bar and a wash, and says how it ended under the pointer**
+  (2026-09-26). Amends the 2026-09-05 ruling that a failed command's separator turns red. A
+  1 px red rule at the top of the next prompt was easy to miss, and it sat at the wrong end:
+  it marked the prompt that reported the failure, not the command's own rows. As in Warp, a
+  block whose command exited non-zero now carries a 2 pt bar of the `error` token down the
+  element's left edge (in the inset beside the text, `spacing.xxs` wide) and a wash of
+  `error` at `alpha::FAINT` across its rows, from its prompt to the next one. Every separator
+  is the neutral rule now, never on the grid's top row. Rulings: (1) a block's status is its
+  own command's, read from the next prompt's row (`TermState::block_exit`); `BlockHead::exit`
+  and `CommandBlock::exit` now carry that instead of the status of the command before the
+  prompt, which had turned the sticky header red under a block that succeeded;
+  (2) `TermState::failed_runs` picks the rows once per frame from the marks. It walks up from
+  the bottom carrying the status, starts from the first prompt below the view, and leaves
+  rows above the first prompt to no block, so a block cut off by either edge is still washed.
+  The alternate screen has no blocks; (3) under the pointer a finished or running block
+  shows its facts at the right end of its prompt row: "Exit 1" in the error tone ("Exit 0"
+  muted, "Running" before the next prompt), its duration however short, and a "…" button
+  ("Block actions") that opens the block menu a right click opens. The facts replace the
+  row's "took" caption while shown. When the prompt has scrolled above, the sticky header
+  shows them in place of its caption. Hover is followed by the element's window-level move
+  listener, so the facts and the header over the grid keep their block. Nothing is hovered
+  on the line still being typed. The figures are tabular; (4) the sticky header sits on the
+  content surface with the neutral rule under it, its text starts at the grid's first column
+  (`spacing.inset()` at the zoom), and a failed block's bar and wash continue up into it.
+  The bars and washes cost about 1 µs a frame and the hovered facts about 15 µs while shown
+  (MEASUREMENTS, "failed blocks in the paint"). Tests:
+  `failed_runs_cover_the_blocks_whose_command_failed` and the exits in
+  `prompt_navigation_and_last_output_follow_the_marks` (client);
+  `cmd_up_and_down_walk_the_prompts_and_separators_follow` (bars and washes read from the
+  scene), `a_hovered_block_shows_its_status_duration_and_menu` (headless); golden
+  `terminal-failed-block`.
+
+- ✅ **The branch follows a shell to the navigator** (2026-09-26). The worker's
+  `TermEvent::Cwd` carries the branch. `Effect::Cwd` and `TerminalViewEvent::Cwd` pass it on,
+  `TermState::branch` and `TerminalView::branch` hold it, and the workspace writes it into
+  the session's `SessionSummary::branch` alongside the directory and the repository. A `cd`
+  or a checkout therefore reaches the navigator and the status bar without a new summary.
+  Tests: `events_are_kept_and_re_emitted_as_effects` (client),
+  `a_cwd_with_a_new_branch_updates_the_summary` (headless workspace).

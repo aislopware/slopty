@@ -75,15 +75,15 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
     assert!(tree.iter().any(|n| n.is("Heading", Some("Workers"))), "{tree:#?}");
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
 
-    // "go to" is in the tiles' and the workers' lines, and in no command's.
-    cx.simulate_keystrokes("g o space t o");
+    // "studio" names the worker and where its tile runs, and no command.
+    cx.simulate_keystrokes("s t u d i o");
     cx.run_until_parked();
     assert!(top(cx, "palette-heading-tiles").is_some());
     assert!(top(cx, "palette-heading-workers").is_some());
     assert!(top(cx, "palette-heading-commands").is_none(), "an empty group hides its heading");
 
-    // Only the workers are left: one group, no heading at all.
-    cx.simulate_keystrokes("space l a p");
+    // Only the other worker is left: one group, no heading at all.
+    cx.simulate_keystrokes("backspace backspace backspace backspace backspace backspace l a p");
     cx.run_until_parked();
     assert!(cx.debug_bounds("palette-item-0").is_some(), "the laptop's line");
     assert!(cx.debug_bounds("palette-item-1").is_none());

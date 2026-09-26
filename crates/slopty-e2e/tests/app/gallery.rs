@@ -1,7 +1,7 @@
 //! Every state of the app worth looking at, rendered by the app's own renderer and held as a
 //! golden: the first run, the panels that add a worker, a workspace of columns in both themes,
 //! the overview, the palette, the settings, the empty workspace, an agent that needs the
-//! human, a remote tile, an upload and a forwarded port.
+//! human, a remote tile, an upload and a forwarded port, the inbox, and a failed command block.
 //!
 //! A golden passes or fails on its numbers. The tolerance is blind to a word of chrome text
 //! (`docs/decisions/ui.md`), so each scenario also asserts the chrome it shows through the
@@ -340,5 +340,140 @@ async fn a_remote_window_waits_in_its_chrome() {
         .unwrap();
     assert!(dump.a11y_node("Heading", Some("window Safari")).is_some(), "{:#?}", dump.a11y);
     golden(drv, &dir, "remote-window").await;
+    stack.shutdown().await;
+}
+
+/// The bell's inbox as a mailbox: an agent waiting on a permission and a long command that
+/// finished while the human was in another column, each a two-line row naming its worker and
+/// directory, under the Unread and All views.
+#[tokio::test]
+async fn the_inbox_lists_what_waits_and_what_finished() {
+    if !gated() {
+        return;
+    }
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let first = first_shell(&mut stack.driver).await.terminals[0].session.clone();
+    let drv = &mut stack.driver;
+    drv.type_text("sleep 6").await.unwrap();
+    drv.keys("enter").await.unwrap();
+    drv.keys("cmd-n").await.unwrap();
+    let dump = drv.wait_for("a second shell", STEP, |d| d.terminals.len() == 2).await.unwrap();
+    let second = dump.terminals.iter().find(|t| t.session != first).unwrap().session.clone();
+    drv.wait_for("the sleep to finish unwatched", STEP + Duration::from_secs(8), |d| {
+        d.a11y.iter().any(|n| {
+            n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("Done · "))
+        })
+    })
+    .await
+    .unwrap();
+    stack.play_hook(&second, "PermissionRequest", r#","tool_name":"Bash""#).await.unwrap();
+    let drv = &mut stack.driver;
+    let dump = drv
+        .wait_for("the agent blocked", STEP, |d| {
+            d.a11y_node("Button", Some("1 needs you")).is_some()
+        })
+        .await
+        .unwrap();
+    let [x, y, w, h] = dump.a11y_node("Button", Some("Inbox")).expect("the bell").bounds;
+    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    let dump = drv
+        .wait_for("the inbox", STEP, |d| d.a11y_node("Dialog", Some("Inbox")).is_some())
+        .await
+        .unwrap();
+    for heading in ["Needs you", "Finished"] {
+        assert!(dump.a11y_node("Heading", Some(heading)).is_some(), "{heading}: {:#?}", dump.a11y);
+    }
+    for tab in ["Unread", "All"] {
+        assert!(dump.a11y_node("Tab", Some(tab)).is_some(), "{tab}: {:#?}", dump.a11y);
+    }
+    assert!(
+        dump.a11y
+            .iter()
+            .any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("sleep 6 · Done"))),
+        "{:#?}",
+        dump.a11y
+    );
+    // The pointer leaves the bell, so the golden holds the inbox at rest.
+    drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
+    golden(drv, &dir, "inbox").await;
+    stack.shutdown().await;
+}
+
+/// A command that failed, under the pointer: its block wears the error bar down the left edge
+/// and the faint wash, and says how it ended and how long it ran, with "…" for its menu. The
+/// harness's driver types a command that succeeds and one that fails; the pointer rests on the
+/// failed one's output.
+#[tokio::test]
+async fn a_failed_command_block_says_so_under_the_pointer() {
+    if !gated() {
+        return;
+    }
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(&mut stack.driver).await;
+    let drv = &mut stack.driver;
+    drv.type_text("echo fine").await.unwrap();
+    drv.keys("enter").await.unwrap();
+    drv.type_text("ls /e2e-missing").await.unwrap();
+    drv.keys("enter").await.unwrap();
+    let failure = "No such file or directory";
+    let dump = drv
+        .wait_for("the failure and the prompt after it", STEP, |d| {
+            d.terminals.first().is_some_and(|t| {
+                let at = t.rows.iter().position(|r| r.contains(failure));
+                at.is_some_and(|at| usize::from(t.cursor[1]) > at)
+            })
+        })
+        .await
+        .unwrap();
+    let term = &dump.terminals[0];
+    let row = term.rows.iter().position(|r| r.contains(failure)).unwrap();
+    let [x, y, w, h] = dump.a11y_node("Terminal", None).expect("the grid").bounds;
+    // The grid's rows share its height inside the inset (12 pt a side): the middle of the
+    // failure's row, clear of the text.
+    let line = (h - 24.0) / f32::from(term.size[1]);
+    let at = y + 12.0 + line * (f32::from(u16::try_from(row).unwrap()) + 0.5);
+    drv.ok(&Command::Move { x: w.mul_add(0.6, x), y: at }).await.unwrap();
+    let dump = drv
+        .wait_for("the block's facts", STEP, |d| {
+            d.a11y_node("Button", Some("Block actions")).is_some()
+        })
+        .await
+        .unwrap();
+    assert!(dump.a11y_node("Button", Some("Block actions")).is_some(), "{:#?}", dump.a11y);
+    golden(drv, &dir, "terminal-failed-block").await;
+    stack.shutdown().await;
+}
+
+/// Two shells in one tabbed column: the header is a tab row, a tab per shell with its slot and
+/// its title, the shown one on its body's surface.
+#[tokio::test]
+async fn a_tabbed_column_draws_its_tab_row() {
+    if !gated() {
+        return;
+    }
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    drv.open(&["cat"], 1).await.unwrap();
+    drv.wait_for("a second column", STEP, |d| d.items.len() == 2).await.unwrap();
+    drv.keys("cmd-[").await.unwrap();
+    drv.keys("cmd-alt-t").await.unwrap();
+    let dump = drv
+        .wait_for("one tabbed column", STEP, |d| {
+            d.items.len() == 2
+                && d.items.iter().all(|i| i.pos[1] == 0)
+                && labels(d, "Tab").len() == 2
+        })
+        .await
+        .unwrap();
+    assert!(dump.a11y.iter().all(|n| n.label.as_deref() != Some("2/2")), "{:#?}", dump.a11y);
+    drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
+    golden(drv, &dir, "tabbed-column").await;
     stack.shutdown().await;
 }
