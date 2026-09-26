@@ -1335,3 +1335,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   191 Mbit/s at 60 ms but only 186 at 20 ms, against 310 with the default, so it is not simply
   taken; it needs its own look at start-up overshoot on loopback. *Upstream:* propose patch 6
   to noq with its test.
+
+  ✅ *Ruled 2026-09-27: the connection keeps noq's 1.25 MB stream window.* On a quiet machine
+  (release, three runs a cell, runs within 2%) one 16 MiB stream went from 213 to 305 Mbit/s at
+  30 ms and from 106 to 182 at 60 ms with a 4 MB window, and 8 or 16 MB added nothing (start-up
+  within 16 MiB is the next limit). But the same 4 MB window made a terminal's echo worse beside
+  six busy sessions on a 20 Mbit/s link, in all three alternating passes: p90 7.2, 9.0 and
+  6.7 ms against 5.8, 7.0 and 5.8, max 16 to 78 ms against 9 to 11. That link's product is
+  ~10 KB, so the window is not what the network sees; it is the terminal pump's backpressure.
+  A small window stalls a busy session's writes and its actor folds frames together; a large
+  one lets stale frames queue in noq's send buffer ahead of the echo. Latency comes first, so
+  the window stays, and a larger one belongs on bulk streams alone. noq sets it per connection
+  only, so that takes either a per-stream window in the vendored noq-proto and noq, or a large
+  file sent as parallel ranges; neither is done. `SLOPTY_STREAM_WINDOW` (bytes) sets it for
+  measurement (MEASUREMENTS, "the stream window against echo").

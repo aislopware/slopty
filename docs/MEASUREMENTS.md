@@ -5757,3 +5757,32 @@ max 112 µs. One echo waits at most that long, once per 750 ms, so the probe sta
 ```sh
 cargo nextest run -p slopty-pty describing_a_process_costs --run-ignored only --no-capture
 ```
+
+## 2026-09-27 — the stream window against echo
+
+A quiet machine (load under 10, no builds), release. One 16 MiB bulk stream through
+`slopty-shape` (delay only), Mbit/s, three runs a cell, all within 2%:
+
+| one way | 1.25 MB (noq default) | 4 MB | 8 MB | 16 MB |
+| --- | --- | --- | --- | --- |
+| 5 ms | 480–490 | 475–487 | 481–485 | 475–484 |
+| 15 ms | 212–213 | 304–307 | 303–312 | 303–306 |
+| 30 ms | 105–107 | 181–182 | 191–192 | 191–192 |
+
+`echo_beside_session_floods` (six sessions flooding, one echoing, 20 Mbit/s, 2 ms each way, lifted
+stream), three alternating passes per window, echo in ms:
+
+| window | p90 | p99 | max |
+| --- | --- | --- | --- |
+| 1.25 MB | 5.81, 6.96, 5.82 | 8.98, 9.23, 8.11 | 10.7, 9.8, 9.4 |
+| 4 MB | 7.17, 8.97, 6.65 | 8.85, 12.22, 8.98 | 15.7, 77.6, 16.1 |
+
+The window stays at noq's default (`docs/decisions/transport.md`).
+
+```sh
+UP_MS=30 SLOPTY_STREAM_WINDOW=4194304 cargo nextest run -p slopty-net --release \
+  --test bulk_over_delay --run-ignored only --no-capture
+SLOPTY_STREAM_WINDOW=4194304 cargo nextest run -p slopty-net --release \
+  --test echo_beside_sessions --run-ignored only --no-capture
+```
+

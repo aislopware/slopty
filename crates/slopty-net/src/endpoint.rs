@@ -72,6 +72,9 @@ pub const UNBOUNDED_SUFFIX: &str = "-unbounded";
 /// Set to `1`, noq writes queued datagrams ahead of every stream, as it ships (diagnostics:
 /// measuring against [`crate::streams::AHEAD_OF_DATAGRAMS`]).
 pub const DATAGRAMS_FIRST_ENV: &str = "SLOPTY_DATAGRAMS_FIRST";
+/// Environment override for each stream's receive window, in bytes (diagnostics: measuring one
+/// bulk stream past noq's default).
+pub const STREAM_WINDOW_ENV: &str = "SLOPTY_STREAM_WINDOW";
 /// Environment override for the initial congestion window, in packets (diagnostics).
 pub const INITIAL_WINDOW_ENV: &str = "SLOPTY_QUIC_IW";
 /// Initial congestion window, in packets of the initial 1200-byte datagram size.
@@ -118,6 +121,13 @@ pub fn transport_config() -> TransportConfig {
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_STREAMS))
         .max_concurrent_uni_streams(VarInt::from_u32(MAX_STREAMS))
         .stream_priority_before_datagrams(streams_ahead_of_datagrams());
+    if let Some(window) = std::env::var(STREAM_WINDOW_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|bytes| *bytes > 0)
+    {
+        config.stream_receive_window(VarInt::from_u32(window));
+    }
     config
 }
 
