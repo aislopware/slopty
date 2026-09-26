@@ -73,6 +73,12 @@ struct Args {
     /// on its own.
     #[arg(long, env = "SLOPTY_SERVER")]
     server: Option<String>,
+    /// Ask macOS for Screen Recording and Accessibility when either is missing. The installed
+    /// daemon passes it: until a process asks, macOS neither prompts nor lists it, so a grant
+    /// cannot be given. A worker a test starts never asks, since each prompt lands on the
+    /// screen of whoever uses this Mac.
+    #[arg(long)]
+    ask_permissions: bool,
     /// Sync this named pasteboard instead of the general one; also `SLOPTY_PASTEBOARD`. For
     /// tests, which must never touch the user's clipboard.
     #[arg(long, env = "SLOPTY_PASTEBOARD", hide = true)]
@@ -400,21 +406,19 @@ async fn run() -> Result<()> {
         tracing::debug!(ms = took.as_millis(), "cursor warmed up");
     });
     if !slopty_input::can_post() {
-        tracing::warn!(
-            "no post-event (Accessibility) access: remote-window input will be dropped; \
-             asking macOS now"
-        );
-        let _granted = slopty_input::request_post();
+        tracing::warn!("no post-event (Accessibility) access: remote-window input will be dropped");
+        if args.ask_permissions {
+            let _granted = slopty_input::request_post();
+        }
     }
     // Preflighting is not enough: until a process asks, macOS neither prompts nor lists the
     // binary under Screen Recording, so every stream fails with -3801 and there is nothing to
     // switch on. Asking costs one prompt, once, per signed identity.
     if !slopty_capture::can_capture() {
-        tracing::warn!(
-            "no Screen Recording access: windows and displays cannot be streamed; \
-             asking macOS now"
-        );
-        let _granted = slopty_capture::request_capture();
+        tracing::warn!("no Screen Recording access: windows and displays cannot be streamed");
+        if args.ask_permissions {
+            let _granted = slopty_capture::request_capture();
+        }
     }
     if args.print_addr {
         #[expect(clippy::print_stdout, reason = "the address is what a harness waits for")]

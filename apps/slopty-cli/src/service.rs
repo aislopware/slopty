@@ -116,7 +116,7 @@ pub fn plists(opts: &InstallOpts, bin_dir: &Path, data_dir: &Path) -> Vec<(Strin
         d.insert("LimitLoadToSessionType".into(), Value::String("Aqua".into()));
         Value::Dictionary(d)
     };
-    let mut worker_args = Vec::new();
+    let mut worker_args = vec!["--ask-permissions".to_owned()];
     if let Some(port) = opts.port {
         worker_args.push("--port".to_owned());
         worker_args.push(port.to_string());
@@ -545,6 +545,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "a bad address writes nothing");
     }
 
+    /// The installed worker is the one process that asks macOS for its grants: a worker a
+    /// test starts never puts a prompt on the screen.
     #[test]
     fn plists_carry_the_paths_and_flags() {
         let opts = InstallOpts {
@@ -563,7 +565,14 @@ mod tests {
             .collect();
         assert_eq!(
             argv,
-            ["/opt/slopty/bin/slopty-worker", "--port", "45551", "--bind", "192.168.1.10"]
+            [
+                "/opt/slopty/bin/slopty-worker",
+                "--ask-permissions",
+                "--port",
+                "45551",
+                "--bind",
+                "192.168.1.10"
+            ]
         );
         let env = worker["EnvironmentVariables"].as_dictionary().unwrap();
         assert_eq!(env["SLOPTY_WORKER_SOCKET"].as_string(), Some("/data/slopty/run/worker.sock"));

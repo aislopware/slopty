@@ -101,6 +101,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`slopty_capture::request_capture`), logged at `warn` beside it. Costs one prompt, once, per
   signed identity — which is exactly one now that the identity is stable. `slopty worker doctor`
   still reports both, so a headless install can gate on it.
+  - Amended 2026-09-26: **only the installed daemon asks.** Every worker a test started asked
+    too, as a fresh unsigned binary, so each gate put an Accessibility and a Screen Recording
+    prompt on the screen of whoever used this Mac. `slopty worker install` now passes
+    `--ask-permissions` and nothing else does. A worker without the grant also never reaches
+    ScreenCaptureKit: `Pipeline::shareable` preflights and answers `NotPermitted`, since an
+    enumeration without the grant raises the private-window consent prompt. Test:
+    `plists_carry_the_paths_and_flags`.
 
 - 🔬 Whether macOS 26 drops modifier combos from unsigned processes — slop-desk claims it, we have
   never seen it. Verify with a ⌘ chord through an unsigned daemon against a signed one.

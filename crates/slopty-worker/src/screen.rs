@@ -146,6 +146,9 @@ pub enum ScreenError {
     /// The window is gone from the window list.
     #[error("the window is gone")]
     WindowGone,
+    /// This process may not record the screen (`slopty worker doctor` says how to grant it).
+    #[error("this worker has no Screen Recording permission")]
+    NotPermitted,
     /// A callback-based framework call never completed.
     #[error("screen pipeline closed")]
     Closed,
@@ -2362,6 +2365,11 @@ impl<P: Platform> Pipeline<P> {
         });
         if let Some(content) = cached.and_then(|c| c.downcast::<Content<P>>().ok()) {
             return Ok(content);
+        }
+        // Asked without the grant, ScreenCaptureKit puts a consent prompt on the screen of
+        // whoever sits at this Mac; the preflight asks nobody.
+        if !Source::<P>::can_capture() {
+            return Err(ScreenError::NotPermitted);
         }
         let (tx, rx) = oneshot::channel();
         Source::<P>::enumerate(move |result| {

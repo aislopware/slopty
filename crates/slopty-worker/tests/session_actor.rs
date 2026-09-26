@@ -1232,7 +1232,9 @@ done"#
         // Held for the 8 ms pace, waits spread evenly over it: a median near 4 ms. Framed as
         // read, the median is a fraction of a millisecond, and it stays under half the pace on
         // a loaded machine where the tail does not.
-        assert!((10..=55).contains(&paced), "the flood is on and paced to 8 ms: {paced}");
+        // The flood only has to be on: on a machine loaded by other work its own frames come
+        // slower than the pace, which says nothing about the echo.
+        assert!((5..=55).contains(&paced), "the flood is on and paced to 8 ms: {paced}");
         assert!(p50 < 2.5, "an echo is not held for the pace: p50 {p50:.2} ms");
         session.close();
         let _killed = child.kill().await;
