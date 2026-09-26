@@ -742,6 +742,10 @@ struct Actor {
     tapped_since_checkpoint: usize,
     /// A tap did not fit the channel: ptyd's ring has a hole until the next checkpoint.
     tap_lost: bool,
+    /// The last state formatted was too large for ptyd to keep. Until one fits, ptyd's ring is
+    /// all a replacement worker gets, so the output is tapped whatever was lost and nothing
+    /// forces a checkpoint early; the quiet spells still try.
+    oversize: bool,
     /// A resize ptyd has not been told of, because the tap channel was full.
     size_untold: Option<TermSize>,
     /// When the next checkpoint is due (`CHECKPOINT_AFTER` past the last output).
@@ -873,6 +877,7 @@ impl Actor {
             dirty_since_checkpoint: true,
             tapped_since_checkpoint: 0,
             tap_lost: false,
+            oversize: false,
             size_untold: None,
             checkpoint_due: None,
             checkpoint_owed: false,
@@ -1097,13 +1102,23 @@ impl Actor {
                 Err(e) => Err(e.to_string()),
             };
             if let Err(e) = sent {
-                // Full or gone: the ring has a hole. The next checkpoint replaces the ring, so
-                // pull it forward rather than leaving a replay that would misparse mid-sequence.
-                tracing::warn!(session = %self.id, error = %e, "output tap dropped; checkpointing early");
-                self.tap_lost = true;
+                if self.oversize {
+                    // No checkpoint can replace the ring, so the taps go on past the hole.
+                    tracing::warn!(session = %self.id, error = %e, "output tap dropped");
+                } else {
+                    // Full or gone: the ring has a hole. The next checkpoint replaces the ring,
+                    // so pull it forward rather than leaving a replay that would misparse
+                    // mid-sequence.
+                    tracing::warn!(session = %self.id, error = %e, "output tap dropped; checkpointing early");
+                    self.tap_lost = true;
+                }
             }
         }
-        if self.tap_lost || self.tapped_since_checkpoint >= CHECKPOINT_EVERY_BYTES {
+        // Nothing forces a checkpoint that cannot fit: owed on every read, it would format the
+        // whole history after each one (MEASUREMENTS.md, "a state too large to keep").
+        if !self.oversize
+            && (self.tap_lost || self.tapped_since_checkpoint >= CHECKPOINT_EVERY_BYTES)
+        {
             // Taken by the caller once this read is framed ([`Self::checkpoint_if_owed`]),
             // rather than through the timer: the select prefers the master, and a flood that
             // keeps it readable would starve a timer indefinitely.
@@ -1169,9 +1184,13 @@ impl Actor {
         );
         if state.len() > CHECKPOINT_MAX_BYTES {
             // ptyd would refuse the frame; keep the ring instead (it holds the output since
-            // the last checkpoint that did fit) and try again at the next quiet spell.
-            tracing::warn!(session = %self.id, bytes = state.len(), "checkpoint too large; skipped");
+            // the last checkpoint that did fit, and what fits of the output after it) and try
+            // again at the next quiet spell.
+            if !std::mem::replace(&mut self.oversize, true) {
+                tracing::warn!(session = %self.id, bytes = state.len(), "checkpoint too large; skipped");
+            }
             self.tapped_since_checkpoint = 0;
+            self.tap_lost = false;
             return;
         }
         match self.tap.try_send(Tap::Checkpoint { id: self.id, state }) {
@@ -1179,6 +1198,7 @@ impl Actor {
                 self.dirty_since_checkpoint = false;
                 self.tapped_since_checkpoint = 0;
                 self.tap_lost = false;
+                self.oversize = false;
             }
             Err(e) => {
                 // Try again after the next quiet spell; the ring keeps growing meanwhile.

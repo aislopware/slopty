@@ -1289,3 +1289,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   link writer, the pumps, noq's drivers; the CLI, plus its stdin thread): under the same spin the
   CLI's whole echo went from p90 166–270 ms and maxima over a second to p90 20–23 ms and maxima
   under 60 ms.
+
+- ✅ **An echo lifts its session stream above the other sessions** (2026-09-26). The control
+  stream and every session stream sit at `AHEAD_OF_DATAGRAMS`, and noq round-robins equal
+  priorities a packet each. An echo written beside other busy sessions therefore waited a
+  packet from each. The pump sets the stream to `ECHO_PRIORITY` (1) before a frame the actor
+  marked as an echo, and back to `AHEAD_OF_DATAGRAMS` at the next frame that is not one
+  (`slopty_net::streams::EchoLift`). noq files a stream by the priority it had when data was
+  queued, so the priority is set before the write. Six sessions flooding a 20 Mbit/s link beside
+  the typed one: the echo's p50 fell from 10.2–18.2 ms to 7.6–13.0 ms in all six alternated
+  pairs, and p99 from 30–73 ms to 11–25 ms. Below the link's rate the two are within noise
+  (MEASUREMENTS, "an echo beside other busy sessions"). The echo also goes ahead of the control
+  stream; QUIC orders nothing across streams anyway, so nothing relied on the old order. Test:
+  `a_lifted_echo_overtakes_other_sessions_queued_frames` (loopback: 900 B of the other sessions
+  ahead of it instead of 29 700).

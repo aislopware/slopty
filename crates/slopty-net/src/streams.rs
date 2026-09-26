@@ -23,6 +23,13 @@ use crate::framed::{FramedRecv, FramedSend};
 /// of behind a keyframe's datagrams. A tunnel or a file, below it, cannot starve video.
 pub const AHEAD_OF_DATAGRAMS: i32 = 0;
 
+/// Send priority of a session stream while it carries a viewer's echo.
+///
+/// Every session stream and the control stream sit at [`AHEAD_OF_DATAGRAMS`], and noq
+/// round-robins equal priorities a packet each, so an echo written beside other sessions' floods
+/// waited a packet per busy stream. Raised, it leaves in the next packet ([`EchoLift`]).
+pub const ECHO_PRIORITY: i32 = 1;
+
 /// Send priority of tunnels: behind video, since a download through a forwarded port has no
 /// bound but the link; ahead of files.
 pub const TUNNEL_PRIORITY: i32 = -1;
@@ -32,9 +39,36 @@ pub const TUNNEL_PRIORITY: i32 = -1;
 pub const BULK_PRIORITY: i32 = -2;
 
 const _: () = assert!(
-    BULK_PRIORITY < TUNNEL_PRIORITY && TUNNEL_PRIORITY < AHEAD_OF_DATAGRAMS,
-    "files, then tunnels, then everything that goes ahead of video"
+    BULK_PRIORITY < TUNNEL_PRIORITY
+        && TUNNEL_PRIORITY < AHEAD_OF_DATAGRAMS
+        && AHEAD_OF_DATAGRAMS < ECHO_PRIORITY,
+    "files, then tunnels, then everything that goes ahead of video, then an echo"
 );
+
+/// A session stream's priority, following its frames: at [`ECHO_PRIORITY`] from an echo
+/// until a frame that is not one (the viewer's input has been answered), then back at
+/// [`AHEAD_OF_DATAGRAMS`].
+///
+/// noq files a stream by the priority it had when data was queued on it, so the priority is
+/// set before the frame is written.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EchoLift {
+    raised: bool,
+}
+
+impl EchoLift {
+    /// Before a frame goes on `stream`: `echo` is whether it answers a viewer's input.
+    pub fn before_frame(&mut self, stream: &FramedSend<TermEvent>, echo: bool) {
+        if echo == self.raised {
+            return;
+        }
+        let priority = if echo { ECHO_PRIORITY } else { AHEAD_OF_DATAGRAMS };
+        // A stream that is gone fails the write that follows, which ends its pump.
+        if stream.set_priority(priority).is_ok() {
+            self.raised = echo;
+        }
+    }
+}
 
 /// A unidirectional stream the peer opened.
 #[derive(Debug)]

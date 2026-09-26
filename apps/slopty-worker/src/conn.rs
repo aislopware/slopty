@@ -640,8 +640,12 @@ async fn pump(
     // Something a later frame depends on went since the last frame: that frame is not copied,
     // since its copy could overtake it.
     let mut depended_on = false;
+    let mut lift = slopty_net::streams::EchoLift::default();
     while let Some(event) = events.recv().await {
         let send_from = std::time::Instant::now();
+        if event.is_frame() {
+            lift.before_frame(&stream, event.is_echo());
+        }
         if let Err(e) = stream.send_raw(event.wire()).await {
             tracing::debug!(%client, %session, error = %e, "session stream ended");
             break;

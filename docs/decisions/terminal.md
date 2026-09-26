@@ -1680,3 +1680,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`Actor::checkpoint_if_owed`). Formatting only what changed since the last checkpoint would
   make each run sub-millisecond, and needs the formatter in `slopty-engine`; it is left open.
   Test: `a_key_after_a_pause_does_not_wait_for_the_checkpoint` (actor).
+
+- ✅ **A state too large to keep stops forcing checkpoints** (2026-09-26). A full history of
+  full-width coloured rows at 200 columns formats to 17.5 MB, past the 12.6 MB ptyd keeps. Plain
+  text fits up to about 250 columns. The actor dropped such a state but left `tap_lost` set, so
+  a session that had lost a tap owed a checkpoint on every read. Each read then formatted the
+  whole state after its frame, 70–78 ms, and the taps stayed stopped (MEASUREMENTS, "a state too
+  large to keep"). Now a state found too large sets `oversize`. That clears `tap_lost`, keeps the
+  taps going past any later hole, and forces no checkpoint (neither for a lost tap nor every
+  1 MiB) until one fits. The quiet spells still try, so a `clear` or a resize that shrinks the
+  history brings the checkpoint back. Until then a replacement worker replays ptyd's ring, the
+  newest 4 MiB, as after any overflow. The actor's time after an echo's frame went from 70–78 ms
+  to 0.04–0.11 ms p50. Capping the history a checkpoint carries, or formatting only what changed,
+  would let such a session be kept whole; both belong in `slopty-engine`. Test:
+  `a_state_too_large_to_keep_is_not_formatted_for_every_read` (actor).

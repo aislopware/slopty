@@ -5434,3 +5434,89 @@ cargo test -p slopty-ui --release --lib dense_screen_cost -- --ignored --nocaptu
 
 Logs: `/tmp/dense-ab2.log` (before, 1, 1 + 2), `/tmp/dense-ab3.log` (3 against 1 + 2),
 `/tmp/sample-dense-u.txt`, `/tmp/sample-dense-r.txt`.
+
+## 2026-09-26 — a state too large to keep
+
+mac-studio, the test profile (optimised, libghostty-vt ReleaseFast), load average 8–15. ptyd
+takes a checkpoint of at most `MAX_CHECKPOINT_BYTES` (12 578 816 B). The formatted state of a full
+50 000-line history, `slopty-engine`'s `checkpoint` at 50 rows (a throwaway probe, not kept):
+
+| rows | state | format |
+| --- | --- | --- |
+| 80 columns of digits | 4.06 MB | 10.6 ms |
+| 200 columns of digits | 10.06 MB | 23.1 ms |
+| 250 columns of digits | 12.56 MB, just under | 28.1 ms |
+| 120 columns, a 256-colour run every 20 | 10.60 MB | 44.3 ms |
+| 200 columns, a 256-colour run every 20 | **17.52 MB, too large** | 71.5 ms |
+
+So plain text at 200 columns fits and full coloured rows at 200 columns do not. A state that did
+not fit was formatted and dropped, and `tap_lost` was never cleared. A session whose tap had
+missed the queue (ptyd behind while the history filled) therefore owed a checkpoint on every
+read, and every read formatted the whole state on the actor's thread after its frame. The test
+fills that history at 200 × 50 with the tap queue unread, so a tap is lost, then types 20 keys
+30 ms apart. After each acking frame it asks the actor for a snapshot, and times how long the
+actor stays busy after the frame:
+
+```sh
+cargo nextest run -p slopty-worker --test session_actor \
+  -E 'test(a_state_too_large_to_keep_is_not_formatted_for_every_read)' --no-capture
+```
+
+| run | load | busy after the frame p50 / p90 / max | output taps after the fill |
+| --- | --- | --- | --- |
+| before 1 | 9 | 77.75 / 82.49 / 84.66 ms | 0 |
+| after 1 | 8 | **0.05** / 0.20 / 4.85 ms | 20 |
+| before 2 | 9 | 70.37 / 72.78 / 74.84 ms | 0 |
+| after 2 | 10 | **0.04** / 0.05 / 0.07 ms | 20 |
+| before 3 | 15 | 70.46 / 70.84 / 71.55 ms | 0 |
+| after 3 | 8 | **0.11** / 0.40 / 12.83 ms | 20 |
+
+Before, each read cost a 70–78 ms format, and a key typed inside it waited for all of it. The
+taps had stopped for good too, so ptyd's ring stayed as it was when the tap was lost. After, a
+state found too large clears `tap_lost`, and no checkpoint is forced (neither by a lost tap nor
+every 1 MiB) until one fits. The taps go on, so the ring keeps the newest output, as it does
+after any overflow. Each quiet spell still tries once, which costs what a fitting session's
+checkpoint costs, only larger (71 ms here). Formatting only what changed would remove that too,
+and it needs `slopty-engine`'s formatter.
+
+## 2026-09-26 — an echo beside other busy sessions
+
+mac-studio, release, load average 7–15. Every session stream sits at one priority and noq
+round-robins equal priorities a packet each. An echo written while other sessions' frames wait
+therefore goes out after one packet from each of them. The worker's pump now raises the typed
+session's stream to `ECHO_PRIORITY` before an echo frame and lowers it again at the next frame
+that is not one (`slopty_net::streams::EchoLift`).
+
+On a 1 MB/s shaped link, 32 other session streams each hold 64 frames of about a packet, then the
+typed stream writes its echo. The number is how many of their bytes reach the client first
+(`a_lifted_echo_overtakes_other_sessions_queued_frames`, three runs, identical each time):
+
+| stream | other sessions' bytes ahead of the echo |
+| --- | --- |
+| default priority | 29 700 (33 frames: a turn for each stream, and one) |
+| lifted | **900** (the frame already on its way) |
+
+Six busy sessions beside one echoing session, each writing a frame every 8 ms (the actor's
+pace), through `slopty-shape` at 20 Mbit/s with 2 ms each way and a 100 ms queue. There are
+200 keys a run, and the arms alternate on fresh connections, three rounds each:
+
+```sh
+SLOPTY_FLOOD_BYTES=4000 cargo nextest run -p slopty-net --release --test echo_beside_sessions \
+  --run-ignored only --no-capture
+```
+
+| floods | arm | echo p50 per round | all: p50 / p90 / p99 / max |
+| --- | --- | --- | --- |
+| 3 000 B (90 % of the link), run 1 | default | 7.04, 7.61, 7.01 ms | 7.15 / 10.60 / 15.77 / 59.31 ms |
+| | lifted | 5.56, 5.69, 7.57 ms | 5.78 / 9.23 / 23.40 / 63.05 ms |
+| 3 000 B, run 2 | default | 5.61, 5.59, 6.86 ms | 5.67 / 11.63 / 26.05 / 99.43 ms |
+| | lifted | 5.62, 5.89, 8.46 ms | 6.07 / 10.76 / 38.52 / 81.58 ms |
+| 4 000 B (120 %), run 1 | default | 17.45, 10.87, 11.73 ms | 12.16 / 21.61 / 73.31 / 232.94 ms |
+| | lifted | 7.75, 8.20, 7.70 ms | **7.81** / 9.89 / 11.12 / 11.51 ms |
+| 4 000 B, run 2 | default | 10.94, 18.18, 10.24 ms | 11.95 / 20.59 / 30.07 / 41.02 ms |
+| | lifted | 7.66, 13.00, 7.59 ms | **8.33** / 16.66 / 24.62 / 54.50 ms |
+
+With the floods under the link, the queues rarely hold several sessions at once, and the two arms
+are within noise of each other. With them over it, every session always has data waiting, and
+the lifted echo was 2.7–9.7 ms sooner at the median in all six pairs. That is the case the change
+is for: typing into one terminal while others stream to a slow link.

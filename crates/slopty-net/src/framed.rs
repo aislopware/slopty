@@ -60,6 +60,17 @@ impl<T: Serialize> FramedSend<T> {
     pub fn finish(&mut self) -> Result<(), NetError> {
         self.stream.finish().map_err(|e| NetError::stream(&e))
     }
+
+    /// Set the send priority of what is written next: noq sends the highest first and
+    /// round-robins equal ones a packet each.
+    pub fn set_priority(&self, priority: i32) -> Result<(), NetError> {
+        self.stream.set_priority(priority).map_err(|e| NetError::stream(&e))
+    }
+
+    /// The send priority of what is written next.
+    pub fn priority(&self) -> Result<i32, NetError> {
+        self.stream.priority().map_err(|e| NetError::stream(&e))
+    }
 }
 
 impl<T: DeserializeOwned> FramedRecv<T> {

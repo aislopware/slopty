@@ -1385,6 +1385,92 @@ done"#
         let _killed = child.kill().await;
     }
 
+    /// A state too large for ptyd to keep is formatted and thrown away, so it is not formatted
+    /// again for every read. A tap that did not fit (ptyd behind while the history filled) owes
+    /// a checkpoint on each read until one lands, and one that does not fit never lands: each
+    /// key's read then formatted the whole history on the actor's thread after its frame, where
+    /// the next key waits. Once the state is known not to fit, the output is tapped again (the
+    /// ring is all a replacement worker gets) and nothing forces a checkpoint.
+    #[tokio::test]
+    async fn a_state_too_large_to_keep_is_not_formatted_for_every_read() {
+        // 50 000 full 200-column rows, each ten runs of a 256-colour foreground: a formatted
+        // state past `MAX_CHECKPOINT_BYTES`. Then `cat`.
+        let script = "read x; awk 'BEGIN { for (i = 0; i < 50000; i++) { s = \"\"; \
+                      for (r = 0; r < 10; r++) s = s sprintf(\"\\033[38;5;%dm%020d\", \
+                      (i + r * 25) % 256, i * 10 + r); print s \"\\033[0m\" } }'; \
+                      echo filled; exec cat";
+        let (session, mut child, mut taps) =
+            start_keeping(&["/bin/sh", "-c", script], Vec::new(), None, 50_000);
+        let me = ClientId::new();
+        let (tx, rx) = mpsc::channel(4096);
+        session.attach(me, size(200, 50), tx).unwrap();
+        let mut stamps = stamped(rx);
+        // ptyd falls behind: nothing takes the taps while the history fills, so one is lost.
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        let filling = tokio::time::Instant::now();
+        let deadline = filling + Duration::from_secs(120);
+        loop {
+            if let session::Text::Screen { screen, .. } =
+                session.read(session::Read::Screen).await.unwrap()
+                && screen.rows.iter().any(|r| r.starts_with("filled"))
+            {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the history never filled");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let filled = filling.elapsed();
+        let (kept_tx, mut kept) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(tap) = taps.recv().await {
+                let _sent = kept_tx.send(tap);
+            }
+        });
+        // The quiet spell's attempt (two seconds past the `\r`) finds the state too large.
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        while tokio::time::timeout(Duration::from_millis(100), stamps.recv()).await.is_ok() {}
+        while kept.try_recv().is_ok() {}
+        let (mut waits, mut busy) = (Vec::new(), Vec::new());
+        for seq in 1..=20_u64 {
+            let asked = tokio::time::Instant::now();
+            session.request(me, key(seq, KeyCode::X, "x")).unwrap();
+            let framed = loop {
+                let (at, ev) = tokio::time::timeout(Duration::from_secs(5), stamps.recv())
+                    .await
+                    .expect("an event")
+                    .expect("sink open");
+                if let TermEvent::Frame(f) = ev
+                    && f.input_ack >= seq
+                {
+                    break at;
+                }
+            };
+            waits.push(framed.duration_since(asked));
+            // What the actor does after the echo's frame, before it answers again.
+            let _snapshot = session.snapshot().await.unwrap();
+            busy.push(framed.elapsed());
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        let (mut outputs, mut checkpoints) = (0_u32, 0_u32);
+        while let Ok(tap) = kept.try_recv() {
+            match tap {
+                Tap::Output(_) => outputs += 1,
+                Tap::Checkpoint { .. } => checkpoints += 1,
+                Tap::Resize { .. } => {}
+            }
+        }
+        let (p50, p90, max) = spread(&mut waits);
+        let (b50, b90, bmax) = spread(&mut busy);
+        eprintln!(
+            "MEASURE a state too large to keep (filled in {filled:.1?}): key -> acking frame p50 {p50:.2} p90 {p90:.2} max {max:.2} ms; after the frame, busy p50 {b50:.2} p90 {b90:.2} max {bmax:.2} ms; {outputs} output taps, {checkpoints} checkpoints"
+        );
+        assert_eq!(checkpoints, 0, "the state does not fit");
+        assert!(outputs >= 20, "the echoes are tapped again: {outputs}");
+        assert!(b50 < 3.0, "a read does not format the state: p50 {b50:.2} ms after its frame");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
     /// A viewer whose connection drains slower than the program writes is sent frames as its
     /// connection takes them: what it shows is a frame or two old, not a queue of seconds, and
     /// the last frame shows where the program ended.

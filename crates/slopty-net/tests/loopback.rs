@@ -427,4 +427,123 @@ mod tests {
         worker_task.await.unwrap();
         relayed.abort();
     }
+
+    /// How much of the other sessions' queued frames reaches the client ahead of an echo
+    /// written after them, on a link that takes two seconds to carry them all.
+    async fn flood_before_echo(lifted: bool) -> u64 {
+        /// Busy sessions beside the typed one, each with 64 frames of about a packet queued.
+        const FLOODS: usize = 32;
+        const FRAME_TEXT: usize = 900;
+        let listener =
+            WorkerListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), Admission::default())
+                .unwrap();
+        let worker_addr = listener.local_addr().unwrap();
+        let link = slopty_shape::Link {
+            delay: Duration::from_millis(1),
+            jitter: Duration::ZERO,
+            loss: 0.0,
+            rate: 1_000_000,
+            queue: 1_000_000,
+        };
+        let relay = std::sync::Arc::new(
+            slopty_shape::relay::Relay::bind(
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                worker_addr,
+                link,
+                1,
+            )
+            .await
+            .unwrap(),
+        );
+        let relayed = {
+            let relay = std::sync::Arc::clone(&relay);
+            tokio::spawn(async move { relay.run().await })
+        };
+        let (go, flood) = tokio::sync::oneshot::channel::<()>();
+        let worker_task = tokio::spawn(async move {
+            let mut client = listener.accept().await.unwrap();
+            client.tx.send(&WorkerMsg::HelloAck(ack(WorkerId::new()))).await.unwrap();
+            let wait = streams::SESSION_STREAM_WAIT;
+            let mut typed =
+                streams::open_session(&client.conn, SessionId::new(), wait).await.unwrap();
+            typed.send(&TermEvent::Bell).await.unwrap();
+            let mut busy = Vec::new();
+            for _ in 0..FLOODS {
+                let mut stream =
+                    streams::open_session(&client.conn, SessionId::new(), wait).await.unwrap();
+                stream.send(&TermEvent::Bell).await.unwrap();
+                busy.push(stream);
+            }
+            flood.await.unwrap();
+            // Past start-up, as in `a_session_frame_overtakes_queued_datagrams`.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let frame = TermEvent::Title("x".repeat(FRAME_TEXT));
+            for stream in &mut busy {
+                for _ in 0..64 {
+                    stream.send(&frame).await.unwrap();
+                }
+            }
+            let mut lift = streams::EchoLift::default();
+            if lifted {
+                lift.before_frame(&typed, true);
+            }
+            assert_eq!(
+                typed.priority().unwrap(),
+                if lifted { streams::ECHO_PRIORITY } else { streams::AHEAD_OF_DATAGRAMS }
+            );
+            typed.send(&TermEvent::Bell).await.unwrap();
+            lift.before_frame(&typed, false);
+            assert_eq!(typed.priority().unwrap(), streams::AHEAD_OF_DATAGRAMS, "lowered after");
+            client.conn.closed().await;
+        });
+        let endpoint = bind_client().unwrap();
+        let conn = connect_addr(&endpoint, relay.addr().unwrap(), hello()).await.unwrap();
+        let Uni::Session { rx: mut echoes, .. } = streams::accept_uni(&conn.conn).await.unwrap()
+        else {
+            panic!("the typed session's stream");
+        };
+        assert_eq!(echoes.recv().await.unwrap(), TermEvent::Bell);
+        let flooded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut readers = Vec::new();
+        for _ in 0..FLOODS {
+            let Uni::Session { rx: mut events, .. } =
+                streams::accept_uni(&conn.conn).await.unwrap()
+            else {
+                panic!("a busy session's stream");
+            };
+            let flooded = std::sync::Arc::clone(&flooded);
+            readers.push(tokio::spawn(async move {
+                while let Ok(event) = events.recv().await {
+                    if let TermEvent::Title(text) = event {
+                        flooded.fetch_add(text.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+        go.send(()).unwrap();
+        let echo = tokio::time::timeout(Duration::from_secs(10), echoes.recv()).await.unwrap();
+        let ahead = flooded.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(echo.unwrap(), TermEvent::Bell);
+        conn.close();
+        worker_task.abort();
+        for reader in readers {
+            reader.abort();
+        }
+        relayed.abort();
+        ahead
+    }
+
+    /// An echo written beside other sessions' queued frames: at the default priority noq
+    /// round-robins it with them, a packet from each busy stream first; lifted, it takes the
+    /// next packet.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lifted_echo_overtakes_other_sessions_queued_frames() {
+        let flat = flood_before_echo(false).await;
+        let lifted = flood_before_echo(true).await;
+        eprintln!("MEASURE other sessions' bytes ahead of the echo: flat {flat}, lifted {lifted}");
+        assert!(
+            lifted.saturating_mul(2) < flat,
+            "lifted, {lifted} B came first; at the default priority, {flat} B"
+        );
+    }
 }
