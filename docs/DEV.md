@@ -35,7 +35,8 @@ dependencies. Each fork carries our commits on its default branch, rebased onto 
   any conflict that is not `Cargo.lock`. Then gate, e2e app + ios, and a DECISIONS entry.
 
 ## Gate
-`cargo gate` is fmt, clippy `-D warnings` on all targets and all three triples, nextest,
+`cargo gate` is fmt, clippy `-D warnings` on all targets and all three Apple triples (and on
+`x86_64-unknown-linux-musl` for the server and the crates under it), nextest,
 doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It checks the **index**,
 not the working tree: the staged blobs are synced into `target/gate/tree` (submodules checked
 out at the commit the index pins, under `target/gate/modules`) and checked in parallel lanes on

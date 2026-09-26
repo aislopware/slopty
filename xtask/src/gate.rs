@@ -14,7 +14,9 @@ use anyhow::{Context as _, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use xshell::{Shell, cmd};
 
-use crate::tools::{TRIPLES, has, host_only_present, quiet_step, repo_root};
+use crate::tools::{
+    LINUX_CRATES, LINUX_TRIPLE, TRIPLES, has, host_only_present, quiet_step, repo_root,
+};
 
 /// Gate options.
 #[derive(Clone, Copy, Debug)]
@@ -89,7 +91,14 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
         }
         handles.push(("clippy host", scope.spawn(|| lint_host(&lane("clippy host")?))));
         if !quick {
-            handles.push(("clippy ios", scope.spawn(|| lint_ios(&lane("clippy ios")?))));
+            handles.push((
+                "clippy ios",
+                scope.spawn(|| -> Result<()> {
+                    let sh = lane("clippy ios")?;
+                    lint_ios(&sh)?;
+                    lint_linux(&sh)
+                }),
+            ));
         }
         handles.push(("tests", scope.spawn(|| test(&lane("tests")?, &[]))));
         if !quick {
@@ -324,10 +333,22 @@ pub fn fmt(sh: &Shell, apply: bool) -> Result<()> {
     Ok(())
 }
 
-/// Clippy on every triple: [`lint_host`] then [`lint_ios`].
+/// Clippy on every triple: [`lint_host`], [`lint_ios`], then [`lint_linux`].
 pub fn lint(sh: &Shell) -> Result<()> {
     lint_host(sh)?;
-    lint_ios(sh)
+    lint_ios(sh)?;
+    lint_linux(sh)
+}
+
+/// Clippy for Linux on [`LINUX_CRATES`], libraries and binaries. Without the workspace hack:
+/// its features pull in the client's GPUI, which is not what a server builds.
+pub fn lint_linux(sh: &Shell) -> Result<()> {
+    let crates: Vec<String> =
+        LINUX_CRATES.iter().flat_map(|c| ["-p".to_owned(), (*c).to_owned()]).collect();
+    quiet_step(
+        &format!("clippy {LINUX_TRIPLE}"),
+        cmd!(sh, "cargo clippy {crates...} --target {LINUX_TRIPLE} -- -D warnings"),
+    )
 }
 
 /// Clippy on the host with every target (tests, benches, examples) in one pass.

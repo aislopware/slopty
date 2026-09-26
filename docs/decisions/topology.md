@@ -608,3 +608,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `events_are_read_from_a_cursor_and_waited_for` (the exit),
     `slopty-tools` `an_item_opens_from_one_kind_and_answers_to_a_prefix`, and the
     `workspace_items` goldens.
+
+- ✅ **The server builds for Linux, and a gate lane keeps it so** (2026-09-27). The topology puts
+  the server on any always-on box, and the box most people have for that runs Linux. The server
+  and what it stands on (`slopty-core`, `slopty-proto`, `slopty-tailnet`, `slopty-net`,
+  `slopty-tools`, `slopty-server`, `slopty-serverd`) already passed clippy for
+  `x86_64-unknown-linux-musl` untouched; nothing kept it that way. The gate's iOS lane now runs
+  clippy `-D warnings` for that triple on those crates after the iOS pass, and
+  `cargo xtask check` does it for any of them it is given. The target is in
+  `rust-toolchain.toml`. The lane builds without the workspace hack, whose features would pull
+  the client's GPUI into a server build.
+  - Musl, since a static binary is how a server ships to a box it did not build on. Linking is
+    not checked: clippy stops before it, and a cross linker is a release concern.
+  - Not yet: the worker and the CLI. The CLI takes the worker's and the client's crates, which
+    call libproc, ScreenCaptureKit, VideoToolbox and the pasteboard directly; a Linux worker
+    needs those behind platform seams first (`slopty-platform` is where they go).

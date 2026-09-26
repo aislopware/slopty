@@ -8,6 +8,22 @@ use xshell::{Shell, cmd};
 pub const TRIPLES: [&str; 3] =
     ["aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim"];
 
+/// The Linux triple the server's crates are linted for. Static musl is how a Linux server ships.
+pub const LINUX_TRIPLE: &str = "x86_64-unknown-linux-musl";
+
+/// The crates that build for Linux and must go on doing so: the server and what it stands on.
+/// A Linux worker and client come later; until then this lane keeps macOS-only calls out of the
+/// server's path (`docs/decisions/topology.md`, "The server builds for Linux").
+pub const LINUX_CRATES: [&str; 7] = [
+    "slopty-core",
+    "slopty-proto",
+    "slopty-tailnet",
+    "slopty-net",
+    "slopty-tools",
+    "slopty-server",
+    "slopty-serverd",
+];
+
 /// The package every `cargo xtask check` build names beside the checked crates, so each crate
 /// set resolves the third-party dependencies with the workspace's features and shares their
 /// builds (`workspace-hack/src/lib.rs`).
