@@ -136,17 +136,27 @@ pub fn scrim(theme: &Theme) -> Hsla {
     hsla_alpha(theme.elevation.shade, theme.elevation.scrim)
 }
 
-/// The backdrop an overlay sits on: the window under the [`scrim`], the dialog near the top.
+/// Where every overlay's top sits, as a share of the window's height below its safe area.
+///
+/// The palette, the pickers, the settings and the add-worker dialog open at one place, so
+/// moving from one to the next does not make the eye hunt for it.
+pub const MODAL_ANCHOR: f32 = 0.2;
+
+/// The layer an overlay is laid out on: the dialog [`MODAL_ANCHOR`] down the window, centred.
 ///
 /// Near the top so a phone's keyboard, which rises from the bottom, covers fewer of its rows;
 /// under the window's safe area, so a phone's status bar and Dynamic Island never sit on it.
 /// A column, so the dialog in it is laid out along the height it has: with a phone's keyboard
 /// up, that is less than the dialog's ceiling.
 ///
+/// Nothing dims the window: a list typed at (the palette, a picker) floats over the work, as
+/// Zed's and Warp's do, and is gone with a keystroke. A modal takes [`backdrop`].
+///
 /// The caller adds the identity, the key handling and the dismiss on a click through.
 #[must_use]
-pub fn backdrop(theme: &Theme, window: &Window) -> Div {
+pub fn anchor(theme: &Theme, window: &Window) -> Div {
     let safe = window.insets().effective();
+    let height = f32::from(window.viewport_size().height);
     div()
         .absolute()
         .inset_0()
@@ -154,8 +164,14 @@ pub fn backdrop(theme: &Theme, window: &Window) -> Div {
         .flex_col()
         .items_center()
         .px(px(theme.spacing.md))
-        .pt(px(theme.spacing.xl * 2.0) + safe.top)
-        .bg(scrim(theme))
+        .pt(px(height * MODAL_ANCHOR) + safe.top)
+}
+
+/// The [`anchor`] under the [`scrim`]: for a modal that holds the window until it is answered
+/// (the settings, adding a worker).
+#[must_use]
+pub fn backdrop(theme: &Theme, window: &Window) -> Div {
+    anchor(theme, window).bg(scrim(theme))
 }
 
 /// The shell every overlay wears: one radius, [`elevate`]d, the UI font.
@@ -184,11 +200,18 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
 }
 
+/// How far a framed [`button`]'s words sit in from its edge: its pad and its hairline. A
+/// button whose words line up with text above it starts this much to the left.
+#[must_use]
+pub fn button_text_inset(theme: &Theme) -> f32 {
+    theme.spacing.md + 1.0
+}
+
 /// How loud a [`button`] is. One primary per surface; the rest are secondary, or ghost where
 /// a frame would crowd a bar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ButtonKind {
-    /// The one action the surface is for: an accent fill.
+    /// The one action the surface is for: the accent fill, with the fills' ink on it.
     Primary,
     /// Another way on: the panel with a hairline, so it holds its edge on any surface.
     Secondary,
@@ -232,7 +255,7 @@ pub fn button(
         .child(label);
     let el = match kind {
         ButtonKind::Primary => {
-            el.border_color(hsla(s.accent)).bg(hsla(s.accent)).text_color(hsla(s.accent_fg))
+            el.border_color(hsla(s.accent_fill)).bg(hsla(s.accent_fill)).text_color(hsla(s.fill_fg))
         }
         ButtonKind::Secondary => el
             .border_color(hsla(s.border))
@@ -460,8 +483,10 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.secondary_foreground = hsla(s.text);
     c.secondary_hover = hsla(s.overlay);
     c.secondary_active = hsla(s.overlay);
-    c.primary = hsla(s.accent);
-    c.primary_foreground = hsla(s.accent_fg);
+    // A primary button is a fill, so it takes the fill and its ink: the accent's text tone is
+    // a pale blue in dark, lifted for reading on the canvas, and a button in it read as disabled.
+    c.primary = hsla(s.accent_fill);
+    c.primary_foreground = hsla(s.fill_fg);
     c.link = hsla(s.accent);
     c.link_hover = hsla(s.accent);
     c.link_active = hsla(s.accent);
@@ -570,8 +595,8 @@ mod tests {
                 assert_eq!(kit.mode.is_dark(), variant == Variant::Dark);
                 assert_eq!(kit.colors.background, hsla(theme.surfaces.panel));
                 assert_eq!(kit.colors.foreground, hsla(theme.surfaces.text));
-                assert_eq!(kit.colors.primary, hsla(theme.surfaces.accent));
-                assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.accent_fg));
+                assert_eq!(kit.colors.primary, hsla(theme.surfaces.accent_fill), "a fill");
+                assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.fill_fg));
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
                 assert_eq!(kit.colors.ring, hsla(theme.surfaces.accent));
                 assert_eq!(kit.colors.title_bar, hsla(theme.surfaces.canvas));
@@ -686,6 +711,65 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The accent's text tone is never a fill: lifted for reading on the canvas, it is a pale
+    /// blue in dark, and a button or a ticked box in it read as disabled. A fill takes
+    /// `accent_fill` with the fills' ink.
+    #[test]
+    fn the_accent_text_tone_is_never_a_fill() {
+        let mut wrong = Vec::new();
+        for dir in ["slopty-ui/src", "slopty-app/src"] {
+            for (file, line_no, line) in chrome_lines(dir) {
+                let squeezed: String = line.split_whitespace().collect();
+                let fills =
+                    [".bg(hsla(s.accent))", ".bg(hsla(theme.surfaces.accent))", "{s.accent}else"];
+                if fills.iter().any(|f| squeezed.contains(f)) && squeezed.contains(".bg(") {
+                    wrong.push(format!("{file}:{line_no}: {line}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Chrome context (a header's directory, the status bar's path, the palette's column, a
+    /// row's second line) is in the UI face. The mono face is for a port's number and the
+    /// settings file, and nothing else calls for it.
+    #[test]
+    fn the_mono_face_is_for_ports_and_the_settings_file() {
+        let uses: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
+            .into_iter()
+            .flat_map(chrome_lines)
+            .filter(|(_, _, line)| {
+                line.contains("mono_family(") && !line.contains("fn mono_family")
+            })
+            .map(|(file, line_no, _)| format!("{file}:{line_no}"))
+            .collect();
+        let allowed = |at: &String| {
+            ["slopty-ui/src/workspace/tile.rs", "slopty-ui/src/settings_editor.rs"]
+                .iter()
+                .any(|file| at.contains(file))
+        };
+        assert!(uses.iter().all(allowed), "mono outside ports and settings: {uses:#?}");
+        assert_eq!(uses.len(), 2, "the port pill and the settings field: {uses:#?}");
+    }
+
+    /// A list typed at (the palette, a picker) floats on the bare [`anchor`]; the modals that
+    /// hold the window until answered (the settings, adding a worker) dim it with the
+    /// [`backdrop`]. Both open at one place.
+    #[test]
+    fn a_list_floats_and_a_modal_dims() {
+        let calls = |file: &str, call: &str| {
+            let (ui, app) = (chrome_lines("slopty-ui/src"), chrome_lines("slopty-app/src"));
+            ui.into_iter().chain(app).any(|(f, _, l)| f.ends_with(file) && l.contains(call))
+        };
+        for list in ["slopty-ui/src/palette.rs", "slopty-ui/src/picker.rs"] {
+            assert!(calls(list, "kit::anchor("), "{list} lays out on the anchor");
+            assert!(!calls(list, "kit::backdrop("), "{list} dims nothing");
+        }
+        for modal in ["slopty-ui/src/settings_editor.rs", "slopty-app/src/lib.rs"] {
+            assert!(calls(modal, "kit::backdrop("), "{modal} is a modal");
+        }
     }
 
     /// Under the touch density an icon button is a finger's 44 pt round the same icon, and the

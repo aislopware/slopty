@@ -907,7 +907,7 @@ impl TerminalView {
                 .py(px(spacing.xxs))
                 .rounded(px(radii.xs))
                 .cursor_pointer()
-                .when(accent, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
+                .when(accent, |el| el.bg(hsla(s.accent_fill)).text_color(hsla(s.fill_fg)))
                 .when(!accent, |el| {
                     el.text_color(hsla(s.text_secondary))
                         .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
@@ -3308,7 +3308,9 @@ impl TerminalView {
                 bare("terminal-search-regex")
                     .role(gpui::accesskit::Role::Button)
                     .aria_label(if search.regex { "Plain text" } else { "Regular expression" })
-                    .when(search.regex, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
+                    .when(search.regex, |el| {
+                        el.bg(hsla(s.accent_fill)).text_color(hsla(s.fill_fg))
+                    })
                     .child(".*")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_search_regex(cx))),
             )

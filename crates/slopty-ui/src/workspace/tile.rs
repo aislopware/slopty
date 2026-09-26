@@ -136,7 +136,8 @@ struct Edges {
 /// A note's title, "note" while it is empty.
 ///
 /// Its first non-empty line with Markdown's heading, list, quote and task marks stripped, cut
-/// to [`NOTE_TITLE_CHARS`]. A note with task lines counts them after it: `Plan · 1/3`.
+/// to [`NOTE_TITLE_CHARS`]. How far its tasks got is context, not title: the header says it
+/// after the title, the navigator on the second line.
 #[must_use]
 pub fn note_title(text: &str) -> String {
     let line = text
@@ -150,21 +151,14 @@ pub fn note_title(text: &str) -> String {
                 .trim()
         })
         .find(|l| !l.is_empty());
-    let mut title = match line {
+    match line {
         None => "note".to_owned(),
         Some(line) if line.chars().count() > NOTE_TITLE_CHARS => {
             let cut: String = line.chars().take(NOTE_TITLE_CHARS).collect();
             format!("{}…", cut.trim_end())
         }
         Some(line) => line.to_owned(),
-    };
-    if let Some((done, total)) = note_progress(text) {
-        title.push_str(" · ");
-        title.push_str(&done.to_string());
-        title.push('/');
-        title.push_str(&total.to_string());
     }
-    title
 }
 
 /// How many of a note's task lines are ticked, and how many there are; `None` without any.
@@ -181,17 +175,20 @@ pub fn note_progress(text: &str) -> Option<(usize, usize)> {
     (total > 0).then_some((done, total))
 }
 
-/// A file card's title: the file's name, with the directory it is in when there is one
-/// (`main.rs · src`), so two `mod.rs` cards can be told apart.
+/// A file card's title: the file's name.
 #[must_use]
 pub fn file_title(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
-    let mut parts = trimmed.rsplit('/');
-    let name = parts.next().filter(|n| !n.is_empty()).unwrap_or(trimmed);
-    match parts.next().filter(|d| !d.is_empty()) {
-        Some(dir) => format!("{name} · {dir}"),
-        None => name.to_owned(),
-    }
+    trimmed.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(trimmed).to_owned()
+}
+
+/// The directory a file is in, as its header gives it after the title (`src`), so two `mod.rs`
+/// cards can be told apart; `None` for a bare name.
+#[must_use]
+pub fn file_dir(path: &str) -> Option<String> {
+    let mut parts = path.trim_end_matches('/').rsplit('/');
+    parts.next();
+    parts.next().filter(|d| !d.is_empty()).map(str::to_owned)
 }
 
 /// Where a shell is, short: the last two components of `path`, with the home directory as `~`
@@ -569,7 +566,9 @@ impl WorkspaceView {
             let pill = pill("upload", id, upload.label(), s.text_secondary, theme, chrome)
                 .role(Role::Button)
                 .aria_label("Cancel upload");
+            // How far it got, as a line along the header's foot in the accent fill.
             let bar = div()
+                .debug_selector(move || format!("upload-progress-{}", id.as_uuid()))
                 .absolute()
                 .left_0()
                 .bottom_0()
@@ -596,21 +595,27 @@ impl WorkspaceView {
             .children(actions);
         let readouts: Vec<gpui::AnyElement> =
             badge.into_iter().chain(finished).chain(unseen).collect();
-        let strip = self.trailing_strip(tile, readouts, focused, k, cx);
-        // Where the tile is: a shell's directory, a page's address when the title is not it.
+        let strip = self.trailing_strip(placed, readouts, k, cx);
+        // The title's context: where a shell or a file is, a page's address when the title is
+        // not it, how far a note's tasks got. Muted, in the UI face as every header's context
+        // is, with no separator: the colour tells it from the title.
         let place = match &item.kind {
             ItemKind::Terminal { session } => {
                 self.summary(*session).and_then(|s| s.cwd.as_deref()).map(cwd_tail)
             }
+            ItemKind::File { path } => file_dir(path),
             ItemKind::Browser { .. } => self.browsers.get(&id).and_then(|v| {
                 let v = v.read(cx);
                 (item.name.is_some() || !v.page().title.trim().is_empty())
                     .then(|| v.short_url().to_owned())
             }),
-            _ => None,
+            ItemKind::Note { text } => {
+                note_progress(text).map(|(done, total)| format!("{done}/{total}"))
+            }
+            ItemKind::Window { .. } | ItemKind::Display { .. } => None,
         };
         // A directory keeps the folder it ends in; an address keeps its host.
-        let path = matches!(item.kind, ItemKind::Terminal { .. });
+        let path = matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::File { .. });
         let place = place.map(|text| {
             let mut place = div();
             // Gives way long before the title does: a narrow tile keeps its name whole and
@@ -624,7 +629,6 @@ impl WorkspaceView {
                 .min_w_0()
                 .max_w(px(HEADER_URL_MAX * k))
                 .overflow_hidden()
-                .font_family(crate::palette::mono_family(theme))
                 .text_color(hsla(s.text_muted))
                 .child(
                     if path {
@@ -704,14 +708,20 @@ impl WorkspaceView {
             // first.
             // The unsaved dot follows the title it qualifies, as an editor's tab has it, not
             // the far end of the bar.
+            let named = div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs * k))
+                .child(name)
+                .when_some(unsaved, gpui::ParentElement::child);
             let names = div()
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .items_center()
                 .gap(px(theme.spacing.sm * k))
-                .child(name)
-                .when_some(unsaved, gpui::ParentElement::child)
+                .child(named)
                 .children(place);
             header
                 .items_center()
@@ -818,7 +828,8 @@ impl WorkspaceView {
             };
             let status = self.tile_status(tab, item, cx);
             let slot =
-                crate::palette::status_slot(theme, kind_icon(item, agent), status, hsla(ink), k);
+                crate::palette::status_slot(theme, kind_icon(item, agent), status, hsla(ink), k)
+                    .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
             let title = self.card_title(tab, item, cx);
             let name = self.header_name(tab, id, title, chrome);
             let close = kit::icon_button_at(
@@ -847,7 +858,9 @@ impl WorkspaceView {
                     .flex()
                     .items_center()
                     .gap(px(theme.spacing.xs * k))
-                    .pl(px(theme.spacing.sm * k))
+                    // On the edge grid, as a single header's slot is: the first tab's kind sits
+                    // where the tile above's or below's does.
+                    .pl(px(theme.spacing.inset() * k))
                     .pr(px(theme.spacing.xs * k))
                     .border_r_1()
                     .text_color(hsla(ink))
@@ -1122,35 +1135,42 @@ impl WorkspaceView {
     /// its key runs, so a click and ⌃⌘F or ⌘W do the same thing.
     fn trailing_strip(
         &self,
-        tile: TileRef,
+        placed: &Placed,
         readouts: Vec<gpui::AnyElement>,
-        focused: bool,
         k: f32,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
+        let (tile, focused) = (placed.tile, placed.focused);
         let id = tile.item.as_uuid();
-        let fullscreen = kit::icon_button_at(
-            theme,
-            format!("fullscreen-{id}"),
-            IconName::Maximize2,
-            FULLSCREEN_TILE,
-            k,
-        )
-        .on_click(cx.listener(move |this, _ev, window, cx| {
-            this.focus_tile(tile, cx);
-            // The action runs from the focused element up; the workspace takes the focus when
-            // nothing inside it has it, so the action reaches the handler on its root.
-            if !this.focus.contains_focused(window, cx) {
-                window.focus(&this.focus, cx);
-            }
-            window.dispatch_action(Box::new(FullscreenTile), cx);
-        }));
+        // On a phone a column is the screen's width already: fullscreen would add nothing.
+        let view_w = f32::from(self.viewport.size.width);
+        let offer_fullscreen =
+            view_w >= self.layout.config().phone_below || placed.target.w + 1.0 < view_w;
+        let fullscreen = offer_fullscreen.then(|| {
+            kit::icon_button_at(
+                theme,
+                format!("fullscreen-{id}"),
+                IconName::Maximize2,
+                FULLSCREEN_TILE,
+                k,
+            )
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                this.focus_tile(tile, cx);
+                // The action runs from the focused element up; the workspace takes the focus when
+                // nothing inside it has it, so the action reaches the handler on its root.
+                if !this.focus.contains_focused(window, cx) {
+                    window.focus(&this.focus, cx);
+                }
+                window.dispatch_action(Box::new(FullscreenTile), cx);
+            }))
+        });
         let close = kit::icon_button_at(theme, format!("close-{id}"), IconName::X, CLOSE_TILE, k)
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.close_tile(tile, window, cx);
             }));
         let quiet = readouts.is_empty();
+        let buttons = if offer_fullscreen { 2.0 } else { 1.0 };
         let controls = div()
             .absolute()
             .top_0()
@@ -1161,7 +1181,7 @@ impl WorkspaceView {
             .when(!(focused && quiet), |el| {
                 el.invisible().group_hover(HEADER_GROUP, gpui::Styled::visible)
             })
-            .child(fullscreen)
+            .children(fullscreen)
             .child(close);
         let readouts = div()
             .debug_selector(move || format!("readouts-{id}"))
@@ -1176,7 +1196,7 @@ impl WorkspaceView {
                 .relative()
                 .flex_none()
                 .h_full()
-                .min_w(px(2.0 * kit::icon_button_side(theme) * k))
+                .min_w(px(buttons * kit::icon_button_side(theme) * k))
                 .flex()
                 .items_center()
                 .justify_end(),

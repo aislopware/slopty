@@ -3,9 +3,10 @@
 //!
 //! Two views. *Unread* lists the agents waiting (*Needs you*) and the long commands that ended
 //! unwatched and are still badged on their headers (*Finished*); *All* keeps every command the
-//! inbox ever took, newest first, read or not. A row is two lines: the command or the agent's
-//! words with its status word on the right, then its worker and directory with its age on the
-//! right, which swaps for a mark-read button under the pointer. Reading is the header's badge
+//! inbox ever took, newest first, read or not. A row is two lines on the navigator's rhythm:
+//! the command or the agent's words with its age on the right, which swaps for a mark-read
+//! button under the pointer; then what the section heading does not already say (a failed
+//! command's exit), how long it took, its tile, worker and directory. Reading is the header's badge
 //! going: a row marked read, "Mark all read", or its tile looked at. The history holds the
 //! last [`LOG_MAX`] commands.
 
@@ -27,8 +28,8 @@ use super::{Finished, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize, Status, icon, status_mark};
-use crate::kit::{meta, tabular};
-use crate::palette::{age_label, mono_family, quiet_line, section_heading};
+use crate::kit::{self, meta, tabular};
+use crate::palette::{age_label, quiet_line, section_heading};
 
 /// The popover's width, in points.
 const INBOX_W: f32 = 360.0;
@@ -76,8 +77,10 @@ struct Row {
     status: Status,
     /// The first line: the command or the agent's words.
     what: String,
-    /// The first line's right edge, in the status's tone: "Needs you", "Done", "Exit 1".
-    word: String,
+    /// A status word the section heading does not already say, in the status's tone, leading
+    /// the second line: "Exit 1". A command that ended well and an agent that waits say
+    /// nothing: *Finished* and *Needs you* over them already do, and the mark leads the row.
+    word: Option<String>,
     /// The second line's words before the directory: how long it took, the tile, the worker.
     meta: String,
     cwd: Option<String>,
@@ -168,8 +171,8 @@ impl WorkspaceView {
     fn finished_row(&self, logged: &Logged, unread: bool, now: Instant) -> Row {
         let done = &logged.done;
         let (status, word) = match done.exit {
-            Some(0) | None => (Status::Done, Status::Done.label().to_owned()),
-            Some(code) => (Status::Failed, format!("Exit {code}")),
+            Some(0) | None => (Status::Done, None),
+            Some(code) => (Status::Failed, Some(format!("Exit {code}"))),
         };
         let command = done.command.lines().next().unwrap_or_default().trim();
         let what = if command.is_empty() { "Command".to_owned() } else { command.to_owned() };
@@ -221,7 +224,7 @@ impl WorkspaceView {
             id: format!("inbox-waiting-{session}"),
             status: Status::NeedsYou,
             what,
-            word: Status::NeedsYou.label().to_owned(),
+            word: None,
             meta: join(&[title.as_deref().unwrap_or_default(), worker]),
             cwd: self.summary(session).and_then(|s| s.cwd.as_deref()).map(super::tile::cwd_tail),
             age,
@@ -233,7 +236,7 @@ impl WorkspaceView {
     /// The popover's panel.
     pub(super) fn render_inbox(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let panel = self.inbox_panel(cx);
-        crate::kit::fade_in(panel, "inbox-fade", cx)
+        kit::fade_in(panel, "inbox-fade", cx)
     }
 
     fn inbox_panel(&self, cx: &Context<Self>) -> gpui::Stateful<Div> {
@@ -261,7 +264,7 @@ impl WorkspaceView {
                 quiet_line(theme, "inbox-empty", ALL_CAUGHT_UP).into_any_element()
             }
         });
-        crate::kit::elevate(div(), theme)
+        kit::elevate(div(), theme)
             .id("inbox")
             .debug_selector(|| "inbox".to_owned())
             .role(Role::Dialog)
@@ -364,18 +367,19 @@ impl WorkspaceView {
             .children(mark_all)
     }
 
-    /// One two-line row: the status mark, then the words over the worker and the directory,
-    /// with the status word and the age down the right edge. Clicked, it goes there and the
-    /// inbox closes.
+    /// One two-line row on the navigator's rhythm: the status mark beside the first line,
+    /// the words with the age at the right edge (the mark-read button in its place under the
+    /// pointer), then the meta line. Clicked, it goes there and the inbox closes.
     fn inbox_row(&self, row: Row, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
-        let pad = spacing.inset() - spacing.xs;
+        let (first_h, second_h) = super::navigator::line_heights(theme);
         let group = SharedString::from(row.id.clone());
+        let said = row.word.clone().unwrap_or_else(|| row.status.label().to_owned());
         let label = SharedString::from(join(&[
             &row.what,
-            &row.word,
+            &said,
             &row.meta,
             row.cwd.as_deref().unwrap_or_default(),
         ]));
@@ -396,12 +400,13 @@ impl WorkspaceView {
                 .role(Role::Button)
                 .aria_label("Mark read")
                 .absolute()
-                .right(px(pad))
-                .bottom(px(spacing.xs))
+                .right_0()
+                .top_0()
+                .h(px(first_h))
                 .flex()
                 .items_center()
                 .justify_center()
-                .size(px(theme.typography.icon_large()))
+                .w(px(theme.typography.icon_large()))
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .invisible()
@@ -416,7 +421,7 @@ impl WorkspaceView {
         let has_read = mark_read.is_some();
         let (word_id, age_id) = (format!("{}-word", row.id), format!("{}-age", row.id));
         let age = row.age.map(|age| {
-            tabular(div())
+            meta(tabular(div()), theme)
                 .debug_selector(move || age_id)
                 .flex_none()
                 .when(has_read, |el| el.group_hover(group.clone(), gpui::Styled::invisible))
@@ -424,10 +429,13 @@ impl WorkspaceView {
         });
         let go = row.go;
         let first = div()
+            .relative()
+            .h(px(first_h))
+            .line_height(px(first_h))
             .flex()
             .items_center()
             .min_w_0()
-            .gap(px(spacing.sm))
+            .gap(px(spacing.xs))
             .child(
                 div()
                     .flex_1()
@@ -438,74 +446,60 @@ impl WorkspaceView {
                     .text_color(hsla(ink))
                     .child(SharedString::from(row.what)),
             )
-            .child(
-                meta(div(), theme)
-                    .debug_selector(move || word_id)
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .text_color(hsla(tone))
-                    .child(SharedString::from(row.word)),
-            );
+            .children(age)
+            .children(mark_read);
+        let word = row.word.map(|word| {
+            div()
+                .debug_selector(move || word_id)
+                .flex_none()
+                .text_color(hsla(tone))
+                .child(SharedString::from(word))
+        });
+        let place = join(&[&row.meta, row.cwd.as_deref().unwrap_or_default()]);
+        let separated = word.is_some() && !place.is_empty();
         let second = meta(div(), theme)
+            .h(px(second_h))
+            .line_height(px(second_h))
             .flex()
             .items_center()
             .min_w_0()
-            .gap(px(spacing.sm))
+            .gap(px(spacing.xs))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .children(word)
+            .when(separated, |el| el.child("\u{b7}"))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(spacing.xs))
-                    .child(
-                        div()
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .child(SharedString::from(row.meta.clone())),
-                    )
-                    .when(!row.meta.is_empty() && row.cwd.is_some(), |el| el.child("·"))
-                    .children(row.cwd.map(|cwd| {
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .font_family(mono_family(theme))
-                            .child(SharedString::from(cwd))
-                    })),
-            )
-            .children(age);
-        let el = div()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(SharedString::from(place)),
+            );
+        let el = kit::row(theme, kit::Row::Two)
             .id(ElementId::Name(row.id.clone().into()))
             .debug_selector(move || row.id)
             .group(group)
             .role(Role::Button)
             .aria_label(label)
-            .relative()
-            .flex_none()
             // The fill a base unit in from the popover's edges; the mark on the edge grid.
             .mx(px(spacing.xs))
-            .px(px(pad))
-            .py(px(spacing.xs))
-            .flex()
-            .items_start()
-            .gap(px(spacing.sm))
+            .px(px(spacing.inset() - spacing.xs))
+            .gap(px(spacing.xs))
+            .items_center()
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla(s.raised)))
-            .child(mark)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
-                    .flex_col()
-                    .gap(px(spacing.xxs))
-                    .child(first)
-                    .child(second),
-            )
-            .children(mark_read);
+                    .items_start()
+                    .gap(px(spacing.xs))
+                    .child(div().h(px(first_h)).flex().items_center().child(mark))
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(first).child(second)),
+            );
         tab_stop(el, s.accent)
             .on_click(cx.listener(move |this, _ev, _w, cx| {
                 this.menu = None;
@@ -531,7 +525,7 @@ fn section(theme: &Theme, selector: &'static str, text: &'static str) -> gpui::S
 /// An inbox that has never held anything: the line, and what lands here, on the edge grid.
 fn never_held(theme: &Theme) -> gpui::Stateful<Div> {
     let s = &theme.surfaces;
-    crate::kit::inset_x(div(), theme)
+    kit::inset_x(div(), theme)
         .id("inbox-empty")
         .debug_selector(|| "inbox-empty".to_owned())
         .role(Role::Status)

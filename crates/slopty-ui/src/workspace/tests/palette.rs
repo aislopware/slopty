@@ -138,9 +138,9 @@ fn without_a_keyboard_the_palette_prints_no_chords(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("palette-legend").is_none(), "nor a legend");
 }
 
-/// Every line's title starts on one edge within its section: a tile's or a worker's kind
-/// icon sits in a fixed slot, whose mark a status takes over, and a command carries no icon,
-/// so its title starts on the edge grid, left of theirs.
+/// Every line's title starts on one edge: a tile's or a worker's kind icon sits in a fixed
+/// slot, whose mark a status takes over, and a command, with no icon, keeps the slot empty, so
+/// the list reads down one left edge.
 #[gpui::test]
 fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
     use crate::palette::Section::{Commands, Tiles, Workers};
@@ -189,7 +189,8 @@ fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
     assert!(tile_x > row_x, "the icon slot comes first");
     assert!((edge(Workers).1 - tile_x).abs() < 0.5, "a worker's title on a tile's edge");
     let (command_row, command_x) = edge(Commands);
-    assert!((command_row - row_x).abs() < 0.5 && command_x < tile_x, "no slot on a command");
+    assert!((command_row - row_x).abs() < 0.5, "a command's row on the same edge");
+    assert!((command_x - tile_x).abs() < 0.5, "an empty slot keeps a command's title on it");
 }
 
 /// The empty workspace offers the three ways to begin with their keys, read from the bindings,
@@ -313,10 +314,11 @@ fn the_overview_labels_keep_their_size_at_any_zoom(cx: &mut TestAppContext) {
     assert!((new - new_after).abs() < 0.01, "{new} then {new_after}");
 }
 
-/// On a desktop the palette hangs a fifth of the way down the window and takes at most
-/// three fifths of its height under its ceiling, shorter still when it lists less. On a phone
-/// it is a sheet from the top, the window's width, down to the keyboard, with its foot in view
-/// and a fade over the list's end while more runs on below it.
+/// On a desktop the palette hangs a fifth of the way down the window (the one modal anchor)
+/// and takes at most three fifths of its height under its ceiling, shorter still when it lists
+/// less. On a phone it is a sheet from the top, the window's width,
+/// down to the keyboard, with its foot in view. On both a fade covers the list's end while
+/// more runs on below it.
 #[gpui::test]
 fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -325,7 +327,7 @@ fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContex
     open_palette(cx);
     let (w, h) = VIEWPORT;
     let brief = cx.debug_bounds("palette").expect("drawn");
-    let fifth = h / 5.0;
+    let fifth = h * crate::kit::MODAL_ANCHOR;
     assert!((f32::from(brief.top()) - fifth).abs() < 0.5, "a fifth down: {brief:?}");
     cx.simulate_input("e");
     cx.run_until_parked();
@@ -333,7 +335,10 @@ fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContex
     let ceiling = crate::kit::Overlay::List.bounds().1.min(h * 0.6);
     assert!((f32::from(full.size.height) - ceiling).abs() < 0.5, "at its ceiling: {full:?}");
     assert!(brief.size.height < full.size.height, "the brief list is shorter: {brief:?}");
-    assert!(cx.debug_bounds("palette-more").is_none(), "a desktop list has its scrollbar");
+    // The row the ceiling cuts fades out above the foot rather than ending on its hairline.
+    cx.update(Window::simulate_next_frame);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("palette-more").is_some(), "a cut row fades on a desktop too");
     assert!(w > 700.0, "a desktop window");
 
     // The fade reads the list's extent a frame late: the tests have no frame loop to run it.

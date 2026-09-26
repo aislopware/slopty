@@ -186,13 +186,13 @@ mod tests {
     /// A shown moment, by which app.
     type Shown = Option<(Instant, String)>;
 
-    /// The "N need(s) you" pill's label, if the top bar shows one.
+    /// The bell's badge ("1 new"), if the top bar shows one: the one count of what waits.
     fn needs_you(d: &Dump) -> Option<String> {
         d.a11y
             .iter()
-            .filter(|n| n.role == "Button")
+            .filter(|n| n.role == "Status")
             .filter_map(|n| n.label.clone())
-            .find(|l| l.ends_with("needs you") || l.ends_with("need you"))
+            .find(|l| l.ends_with(" new"))
     }
 
     /// Click the middle of `session`'s tile on `drv` (revealing it instead when this client's
@@ -398,7 +398,7 @@ mod tests {
         let blocked = |d: &Dump| {
             d.terminal(&session)
                 .is_some_and(|t| t.agent.as_deref() == Some("blocked:permission:Bash"))
-                && needs_you(d).as_deref() == Some("1 needs you")
+                && needs_you(d).as_deref() == Some("1 new")
         };
         let start = Instant::now();
         let da = a.wait_for("the badge on A", STEP, blocked).await.unwrap();
@@ -418,9 +418,9 @@ mod tests {
         a.click(x, y).await.unwrap();
         let want = format!("terminal:{session}");
         let da = a.wait_for("A's terminal revealed", STEP, |d| d.focused == want).await.unwrap();
-        assert_eq!(needs_you(&da).as_deref(), Some("1 needs you"), "{da:#?}");
+        assert_eq!(needs_you(&da).as_deref(), Some("1 new"), "{da:#?}");
         let db = b.dump().await.unwrap();
-        assert_eq!(needs_you(&db).as_deref(), Some("1 needs you"), "{db:#?}");
+        assert_eq!(needs_you(&db).as_deref(), Some("1 new"), "{db:#?}");
 
         // The agent proceeds (what Claude Code does after Yes): the worker says so to both.
         pair.stack.play_hook(&session, "PreToolUse", r#","tool_name":"Bash""#).await.unwrap();
@@ -699,7 +699,7 @@ mod tests {
         let blocked = |d: &Dump| {
             d.terminal(&first)
                 .is_some_and(|t| t.agent.as_deref() == Some("blocked:permission:Bash"))
-                && needs_you(d).as_deref() == Some("1 needs you")
+                && needs_you(d).as_deref() == Some("1 new")
         };
         a.wait_for("the badge on the Mac", STEP, blocked).await.unwrap();
         b.wait_for("the badge on the phone", STEP, blocked).await.unwrap();

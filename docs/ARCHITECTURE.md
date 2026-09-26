@@ -839,8 +839,8 @@ as a pill in the terminal's title bar and outlines the item when the agent needs
 A blocked badge (permission, question or elicitation) is itself the button: a click reveals
 and focuses the terminal so the human answers Claude Code's own prompt there; Slopty never
 answers for them. Finding them: ⌘⇧A (the "Next Agent Needing You" menu item) reveals and focuses the
-next waiting terminal in reading order, cycling from the active item; the top bar shows an
-"N need you" pill with the count that does the same on a click or a tap (the phone's way in).
+next waiting terminal in reading order, cycling from the active item; the bell's badge counts
+what is new and its inbox lists the waiting agents under "Needs you" (the phone's way in).
 `slopty hook install|uninstall|status` manage the registration in `~/.claude/settings.json`;
 `slopty hook report working|blocked|done|idle|gone [message]`, run from inside a session by any
 program (a wrapper around another agent), is the same relay with the agent's own word, and
@@ -909,18 +909,19 @@ recognizer, the pinch) and not just GPUI's dispatch; the pure mappings (HID usag
 `UITouchPhase` → phase, the US layout stand-in) are unit-tested on the host in the fork.
 **Design system.** Every chrome surface draws from `slopty-theme` and nothing else (ruling
 "Design tokens" in DECISIONS): a four-step neutral ladder (`canvas`, `panel`, `raised`,
-`overlay`), one hairline (`border`), three text levels, one accent with its foreground, and
+`overlay`), one hairline (`border`), three text levels, one accent with its fill and the
+fill's text (`accent_fill`, `fill_fg`), and
 three status tones (`success`, `warn`, `error`) that the chrome uses only where state carries
-meaning (worker dot, agent badge and outline, "N need you", failed result, failed-command
+meaning (worker dot, agent badge and outline, the bell's badge, failed result, failed-command
 separator). Geometry comes from `radii` (xs 4 / sm 6 / md 8), the 4/8 pt `spacing` scale
 (2 / 4 / 8 / 12 / 16 / 24) and a type scale hanging off `ui_size` (`caption` −3, `small` −1,
 `title` +2), so the settings' font size moves every label together; alphas for tints, hover
 washes, the scrim and the separators are the `alpha` constants. Hairlines carry the elevation,
 shadows are `shadow_sm` on floating layers only (picker, worker switcher, search bar, "↓ latest").
 Focus is one accent hairline: the active item's frame and the search bar while
-they hold the caret. Pills (title bar, badge, "N need you") are `small()` text on a `TINT`
+they hold the caret. Pills (title bar, badge) are `small()` text on a `TINT`
 fill of their tone with the tone as text; buttons are `radii.sm` with `raised` → `overlay`
-hover/pressed, and the one primary action on a surface is an accent fill with `accent_fg`.
+hover/pressed, and the one primary action on a surface is `accent_fill` with `fill_fg` text.
 gpui-kit's widgets (inputs, Markdown `TextView`) read gpui-kit's own theme, which
 `slopty_ui::kit::sync` rewrites from the same tokens on every theme change, and the Markdown in
 a note gets `markdown_line_height`, paragraph gaps of one base unit, headings
@@ -1093,8 +1094,8 @@ client endpoint, with its own reconnect loop and silence check) per worker
 (`slopty_app::workers`), all feeding the one `WorkspaceView` under the worker's `WorkerKey`
 (its `WorkerId`'s 128 bits). A dropped link keeps the worker's tiles ("reconnecting"); the
 next connection's snapshot reconciles them. The titlebar names only the workers that are down;
-the "…" menu adds a worker and forgets one. The "N need you" pill and the Dock badge count
-agents across every worker, and a tap goes to the next one wherever it is. A banner names only
+the "…" menu adds a worker and opens the workers list. The bell's inbox and the Dock badge count
+agents across every worker, and ⌘⇧A goes to the next one wherever it is. A banner names only
 a session, which the workspace finds on whichever worker runs it. The known workers are
 `workers.json` in the client's data dir (`slopty_net::known`): a list of `{ address, name,
 worker_id }` keyed by the id, so a worker that moves keeps its row and its tiles; a dial that

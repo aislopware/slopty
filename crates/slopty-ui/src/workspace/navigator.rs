@@ -35,7 +35,7 @@
 //! tile whose row is out of view scrolls into it.
 
 use std::collections::HashSet;
-use std::mem::discriminant;
+use std::mem::{Discriminant, discriminant};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::accesskit::Role;
@@ -55,7 +55,7 @@ use slopty_theme::{Theme, Typography};
 
 use super::actions::ToggleNavigator;
 use super::agents::{Waiting, agent_status_text};
-use super::rollup::{Rollup, age_at, meta_line, rollup_slot};
+use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
 use super::tile::{cwd_tail, kind_icon, note_progress};
 use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
@@ -166,10 +166,10 @@ impl Default for NavList {
 }
 
 impl NavList {
-    /// Take this frame's rows. Where a row's kind changed, the list forgets its height and
-    /// measures it on its next layout.
+    /// Take this frame's rows. Where a row's shape changed (its kind, or a tile's line
+    /// count), the list forgets its height and measures it on its next layout.
     fn set_rows(&mut self, rows: Vec<NavRow>) {
-        let same = |(a, b): &(&NavRow, &NavRow)| discriminant(*a) == discriminant(*b);
+        let same = |(a, b): &(&NavRow, &NavRow)| a.shape() == b.shape();
         let old = self.rows.len();
         let head = self.rows.iter().zip(&rows).take_while(same).count();
         let spliced = head != old || old != rows.len();
@@ -316,7 +316,7 @@ pub(super) fn until_age_changes(age: Duration) -> Duration {
 }
 
 /// A note's second line: its progress when it has tasks, else its first line after the
-/// title, else what it is.
+/// title, else nothing (its icon says it is a note).
 pub(super) fn note_meta(text: &str) -> String {
     if let Some((done, total)) = note_progress(text) {
         return format!("{done} of {total} done");
@@ -326,8 +326,7 @@ pub(super) fn note_meta(text: &str) -> String {
         .filter(|l| !l.is_empty())
         .nth(1)
         .map(|l| l.trim_start_matches(['#', '-', '*', '>', ' ']).trim().to_owned())
-        .filter(|l| !l.is_empty())
-        .unwrap_or_else(|| "Note".to_owned())
+        .unwrap_or_default()
 }
 
 /// Whether `query` (already lowercase) is in any of `hay`; an empty query is in everything.
@@ -422,8 +421,14 @@ fn lead_slot(theme: &Theme, child: impl gpui::IntoElement) -> Div {
         .child(child)
 }
 
-/// The height of a row's first and second lines.
-fn line_heights(theme: &Theme) -> (f32, f32) {
+/// How far a row icon's glyph sits in from its slot's edge: the slot is `icon_large`, the
+/// glyph `icon`, centred.
+pub(super) fn glyph_margin(theme: &Theme) -> f32 {
+    (theme.typography.icon_large() - theme.typography.icon()) / 2.0
+}
+
+/// The height of a row's first and second lines, the navigator's and the inbox's alike.
+pub(super) fn line_heights(theme: &Theme) -> (f32, f32) {
     let typo = &theme.typography;
     (typo.ui_size * TILE_LINE, typo.meta() * TILE_LINE)
 }
@@ -493,6 +498,13 @@ enum NavRow {
     Tile(NavTile),
     /// The filter left nothing.
     Nothing,
+}
+
+impl NavRow {
+    /// What a row's height follows: its kind, and for a tile whether it has a second line.
+    const fn shape(&self) -> (Discriminant<Self>, bool) {
+        (discriminant(self), matches!(self, Self::Tile(t) if t.meta.is_empty()))
+    }
 }
 
 impl WorkspaceView {
@@ -670,38 +682,39 @@ impl WorkspaceView {
         rollup
     }
 
-    /// What a tile's second line says, and its age: a shell's directory, its agent's words
-    /// or its last command, its branch; a page's address; a file's directory; a note's
-    /// progress; else its kind. A shell or a file with no directory names its worker in the
-    /// directory's place, so the line never reads as nothing.
+    /// What a tile's second line says, and its age: a shell's agent words or its command,
+    /// then where it is (its directory and branch); a page's address; a file's directory; a
+    /// note's progress or next line. Empty when nothing is worth a line: the worker's name is
+    /// its header's, a home directory alone says nothing, and a kind is its icon's. Such a
+    /// row is one line.
     fn tile_meta(
         &self,
         item: &Item,
-        worker: &str,
         now: SystemTime,
         cx: &gpui::App,
     ) -> (String, Option<Duration>) {
         match &item.kind {
             ItemKind::Terminal { session } => {
                 let summary = self.summary(*session);
-                let place = summary.and_then(|s| s.cwd.as_deref()).map(cwd_tail);
-                let place = place.as_deref().unwrap_or(worker);
                 let agent = self
                     .agent_state(*session)
                     .filter(|a| a.status != AgentStatus::None)
                     .map(agent_status_text);
                 let command = agent.is_none().then(|| self.last_command(*session, cx)).flatten();
+                let doing = agent.or(command);
                 let branch = summary.and_then(|s| s.branch.as_deref());
-                let meta =
-                    meta_line([Some(place), agent.as_deref().or(command.as_deref()), branch]);
+                let place = summary
+                    .and_then(|s| s.cwd.as_deref())
+                    .map(cwd_tail)
+                    .filter(|p| p != "~" || doing.is_some() || branch.is_some());
+                let meta = meta_line([doing.as_deref(), place.as_deref(), branch]);
                 (meta, summary.and_then(|s| age_at(s.started_ms, now)))
             }
             ItemKind::Browser { url } => (crate::browser::short_url(url).to_owned(), None),
             ItemKind::File { .. } => {
-                (self.cwd_of(item).map_or_else(|| worker.to_owned(), |dir| cwd_tail(&dir)), None)
+                (self.cwd_of(item).map(|dir| cwd_tail(&dir)).unwrap_or_default(), None)
             }
-            ItemKind::Window { .. } => ("Window".to_owned(), None),
-            ItemKind::Display { .. } => ("Display".to_owned(), None),
+            ItemKind::Window { .. } | ItemKind::Display { .. } => (String::new(), None),
             ItemKind::Note { text } => (note_meta(text), None),
         }
     }
@@ -735,7 +748,7 @@ impl WorkspaceView {
                 let (mark, unseen) = self.tile_marks(tile, item, cx);
                 rollup.add(mark, unseen);
                 let title = self.card_title(tile, item, cx);
-                let (meta, age) = self.tile_meta(item, &w.name, now, cx);
+                let (meta, age) = self.tile_meta(item, now, cx);
                 if !named && !matches(&query, &[&title, &meta]) {
                     continue;
                 }
@@ -1048,8 +1061,9 @@ impl WorkspaceView {
             .occlude()
             .size_full()
             .pl(if mode == Mode::Docked { px(0.0) } else { safe.left })
-            // The drawer runs through the home indicator's band; its rows stop above it.
-            .when(mode == Mode::Drawer, |panel| panel.pb(safe.bottom))
+            // Laid over the frame it runs through the home indicator's band; its rows stop
+            // above it.
+            .when(mode != Mode::Docked, |panel| panel.pb(safe.bottom))
             .flex()
             .flex_col()
             .bg(hsla(s.panel))
@@ -1235,8 +1249,14 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xs))
             .child(title(agent.title.clone(), hsla(s.text)))
             .children(time);
+        // The agent's words, then where it runs, as a tile's second line reads.
         let words = (!agent.words.is_empty()).then(|| {
-            div().flex_none().text_color(hsla(agent.status.tone(theme))).child(agent.words.clone())
+            div()
+                .flex_none()
+                .flex()
+                .gap(px(theme.spacing.xs))
+                .child(div().text_color(hsla(agent.status.tone(theme))).child(agent.words.clone()))
+                .when(!agent.place.is_empty(), |el| el.child(META_SEPARATOR.trim()))
         });
         let line2 = meta(div(), theme)
             .h(px(second))
@@ -1326,6 +1346,7 @@ impl WorkspaceView {
                 Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark), 1.0)),
             };
         let name = div()
+            .debug_selector(move || format!("nav-worker-name-{key}"))
             .flex_1()
             .min_w_0()
             .overflow_hidden()
@@ -1451,7 +1472,8 @@ impl WorkspaceView {
         let ink = if selected { s.text } else { s.text_secondary };
         let id = t.tile.item.as_uuid();
         let (first, second) = line_heights(theme);
-        let lead = crate::palette::status_slot(theme, t.kind, None, hsla(s.text_muted), 1.0);
+        let lead = crate::palette::status_slot(theme, t.kind, None, hsla(s.text_muted), 1.0)
+            .debug_selector(move || format!("nav-kind-{id}"));
         // One mark at the line's end: the state while there is one (it says unseen too, as
         // "Done" and "Failed" are), else the unseen dot, else the age.
         let end = match status_word(t.mark) {
@@ -1485,18 +1507,21 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xs))
             .child(title(t.title.clone(), hsla(ink)))
             .children(end);
-        let line2 = meta(div(), theme)
-            .debug_selector(move || format!("nav-meta-{id}"))
-            .h(px(second))
-            .line_height(px(second))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(t.meta.clone());
+        let line2 = (!t.meta.is_empty()).then(|| {
+            meta(div(), theme)
+                .debug_selector(move || format!("nav-meta-{id}"))
+                .h(px(second))
+                .line_height(px(second))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(t.meta.clone())
+        });
+        let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
         let tile = t.tile;
         row(
             theme,
-            kit::Row::Two,
+            lines,
             ElementId::Name(format!("nav-tile-{id}").into()),
             format!("nav-tile-{id}"),
             label.into(),
@@ -1505,8 +1530,9 @@ impl WorkspaceView {
         // The two lines sit in the middle of the row at either density, the kind beside the
         // first.
         .items_center()
-        // Under the worker's name: past its icon and the gap after it.
-        .pl(px(theme.spacing.inset() + theme.typography.icon_large()))
+        // The kind's glyph under the worker's name, past its icon and the gap after it: the
+        // slot is wider than the glyph centred in it, so it starts that margin to the left.
+        .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
         .child(
             div()
                 .debug_selector(move || format!("nav-lines-{id}"))
@@ -1516,7 +1542,7 @@ impl WorkspaceView {
                 .items_start()
                 .gap(px(theme.spacing.xs))
                 .child(div().h(px(first)).flex().items_center().child(lead))
-                .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2)),
+                .child(div().flex_1().min_w_0().flex().flex_col().child(line1).children(line2)),
         )
         .when(self.nav.list.autoscroll == Some(tile), |row| {
             row.child(
@@ -1616,12 +1642,13 @@ mod tests {
         assert_eq!(turn_label(Duration::from_mins(62)), "1 h 02 m");
     }
 
-    /// A note's second line is its progress, else its next line, else its kind.
+    /// A note's second line is its progress, else its next line, else nothing: its icon says
+    /// it is a note, and its row is one line.
     #[test]
     fn a_notes_second_line_says_how_far_it_got() {
         assert_eq!(note_meta("# Release\n- [x] tag\n- [ ] notes\n- [ ] ship\n"), "1 of 3 done");
         assert_eq!(note_meta("Groceries\n- milk\n"), "milk");
-        assert_eq!(note_meta("Just a title\n"), "Note");
+        assert_eq!(note_meta("Just a title\n"), "");
     }
 
     /// Only a state worth a word gets one: at rest or out of reach, the row says nothing.

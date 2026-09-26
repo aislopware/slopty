@@ -33,7 +33,7 @@ use super::actions::{OpenPalette, ToggleNavigator, ToggleStats};
 use super::navigator::Mode;
 use super::rollup::{Rollup, rollup_slot};
 use super::strip::NEW_WORKSPACE;
-use super::{MenuEntry, WorkspaceView};
+use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::IconName;
@@ -224,8 +224,8 @@ impl WorkspaceView {
         });
         let dots = self.render_indicator(cx);
 
-        // Right: the inbox and "…". Who needs you is counted on the bell and named in the
-        // status bar, which also goes to them.
+        // Right: the inbox and "…". Who needs you is counted once, on the bell; its rows go to
+        // them.
         let total = self.drawn_waiting.len();
         let unread = total.saturating_add(self.finished.len());
         let bell = has_workers.then(|| {
@@ -489,11 +489,12 @@ impl WorkspaceView {
     }
 
     /// The one workspace there is: its name in the strong weight (what it holds after it, in
-    /// meta, where there is room) and its rollup; nothing to switch between, so no tab.
+    /// meta, where there is room); nothing to switch between, so no tab. Nor a rollup: with one
+    /// workspace it says only what the bell's badge already counts.
     fn render_lone_workspace(&self, ix: usize, wide: bool, cx: &gpui::App) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let (label, meta, rollup) = self.tab_words(ix, cx);
+        let (label, meta, _rollup) = self.tab_words(ix, cx);
         div()
             .id(("ws-tab", ix))
             .debug_selector(move || format!("ws-tab-{ix}"))
@@ -520,7 +521,6 @@ impl WorkspaceView {
                     .child(SharedString::from(self.workspace_name_at(ix))),
             )
             .when(wide, |el| el.child(kit::meta(div(), theme).flex_none().child(meta)))
-            .child(rollup_slot(theme, format!("ws-rollup-{ix}"), rollup, true))
             .into_any_element()
     }
 
@@ -616,6 +616,7 @@ impl WorkspaceView {
                 String::new()
             };
             MenuEntry {
+                group: MenuGroup::Navigation,
                 label: label.into(),
                 detail: detail.into(),
                 run: Rc::new(move |window, cx| {
@@ -640,13 +641,40 @@ impl WorkspaceView {
                     }),
                 ];
                 entries.extend(self.more_entries.iter().cloned());
+                // The hosts popover, which the status bar's count opens only while a worker is
+                // down. A phone's bar has no room for the popover, nor this row.
+                let phone = self.width(window) < self.layout.config().phone_below;
+                if !self.workers.is_empty() && !phone {
+                    let entity = entity.clone();
+                    entries.push(MenuEntry {
+                        group: MenuGroup::Connections,
+                        label: "Workers".into(),
+                        detail: SharedString::default(),
+                        run: Rc::new(move |_window, cx| {
+                            let _gone = entity.update(cx, Self::toggle_hosts);
+                        }),
+                    });
+                }
+                entries.sort_by_key(|entry| entry.group);
                 entries
             }
         };
-        let rows: Vec<gpui::AnyElement> = entries
-            .into_iter()
-            .enumerate()
-            .map(|(i, entry)| {
+        let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(entries.len());
+        let mut group = entries.first().map(|entry| entry.group);
+        for (i, entry) in entries.into_iter().enumerate() {
+            if group != Some(entry.group) {
+                group = Some(entry.group);
+                rows.push(
+                    div()
+                        .debug_selector(move || format!("menu-separator-{i}"))
+                        .flex_none()
+                        .my(px(spacing.xs))
+                        .h(px(1.0))
+                        .bg(hsla(s.border_subtle))
+                        .into_any_element(),
+                );
+            }
+            rows.push({
                 let run = Rc::clone(&entry.run);
                 let entity = entity.clone();
                 let row = kit::row(theme, kit::Row::One)
@@ -685,13 +713,14 @@ impl WorkspaceView {
                         run(window, cx);
                     })
                     .into_any_element()
-            })
-            .collect();
-        // Under its button, a base unit below the bar (the inbox keeps that gap itself): the
-        // bell sits one button and a gap in from "…".
-        let (anchor, gap) = match which {
-            MenuKind::Inbox => (kit::icon_button_side(theme) + spacing.xxs, 0.0),
-            MenuKind::More => (0.0, spacing.xs),
+            });
+        }
+        // A base unit below the bar (the inbox keeps that gap itself), the right edge on the
+        // window's inset, where the tiles' headers end: a popover lined up with what it covers
+        // rather than hung off its button a few points in.
+        let gap = match which {
+            MenuKind::Inbox => 0.0,
+            MenuKind::More => spacing.xs,
         };
         let panel = if which == MenuKind::Inbox {
             self.render_inbox(cx)
@@ -717,7 +746,7 @@ impl WorkspaceView {
                 div()
                     .absolute()
                     .top(px(titlebar_height(theme) + gap) + safe.top)
-                    .right(px(spacing.md + anchor) + safe.right)
+                    .right(px(spacing.inset()) + safe.right)
                     .child(panel),
             );
         let layer = crate::palette::Layer::Popover.priority();

@@ -1,16 +1,17 @@
 //! The bar along the bottom: where the focused tile runs, and how things are going.
 //!
 //! On the left, where the human is: the server's state while it does not answer, then the
-//! focused tile's worker (crossed out while it is away), its directory in mono (inside a
+//! focused tile's worker (a warn dot before it while it is away), its directory (inside a
 //! repository, the repository's name and the path within it) and the branch checked out there,
-//! read as one path. On the right, the ports forwarded here (which list them when clicked), the
-//! uploads in flight, what is wrong with the focused worker's link when something is (a link
-//! that is up says nothing), the round trip to it, the count of workers with a dot only when one
-//! of them is not up (which opens the hosts popover: each worker's link, connect and forget),
-//! and the agents at work and waiting, which jumps to the next one waiting when clicked. The
-//! frame time shows only with the stream stats (⌘⇧I). Each readout is meta text, its figures
-//! tabular, and a state is a small dot of its fill beside quiet words: the tile and the bell
-//! carry the loud marks. A phone keeps the worker, the round trip and the agents.
+//! read as one path in the UI face. On the right, the ports forwarded here (which list them
+//! when clicked), the uploads in flight, what is wrong with the focused worker's link when
+//! something is (a link that is up says nothing), the round trip to it, the count of workers
+//! only while one of them is not up (which opens the hosts popover: each worker's link,
+//! connect and forget), and the agents at work. Who waits on the human is counted once, on the
+//! bell. The frame time shows only with the stream stats (⌘⇧I). Each readout is meta text with
+//! no icon, its figures tabular, and a state is a small dot of its fill beside quiet words: the
+//! tile and the bell carry the loud marks. A phone keeps the worker, the round trip and the
+//! agents.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again.
 
@@ -34,7 +35,7 @@ use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
 use crate::kit::{self, meta, tabular};
-use crate::palette::{mono_family, section_heading};
+use crate::palette::section_heading;
 
 /// The bar's height.
 pub(super) const STATUSBAR_H: f32 = 26.0;
@@ -89,19 +90,11 @@ impl std::fmt::Debug for Bar {
     }
 }
 
-/// The agents at a glance: `2 working · 1 needs you`; empty when none works or waits.
+/// The agents at work: `2 working`; empty when none is. Who waits on the human is counted
+/// once, on the bell.
 #[must_use]
-fn agent_summary(working: usize, waiting: usize) -> String {
-    let mut parts = Vec::new();
-    if working > 0 {
-        parts.push(format!("{working} working"));
-    }
-    match waiting {
-        0 => {}
-        1 => parts.push("1 needs you".to_owned()),
-        n => parts.push(format!("{n} need you")),
-    }
-    parts.join(" · ")
+fn agent_summary(working: usize) -> String {
+    if working == 0 { String::new() } else { format!("{working} working") }
 }
 
 /// Uploads in flight at a glance: `1 upload · 42%`.
@@ -227,6 +220,7 @@ impl WorkspaceView {
         let safe = window.insets().effective();
         let muted = hsla(s.text_muted);
 
+        // A state is a dot of its fill beside its words; no readout wears an icon.
         let server = self.server_status.clone().map(|text| {
             let text = SharedString::from(sentence(&text));
             readout("server-status", text.clone())
@@ -234,14 +228,15 @@ impl WorkspaceView {
                 .items_center()
                 .gap(px(spacing.xs))
                 .text_color(hsla(s.text_secondary))
-                .child(icon(theme, IconName::ServerOff, IconSize::Inline, hsla(s.warn_fill)))
+                .child(state_dot(theme, s.warn_fill))
                 .child(text)
         });
         let worker = self.status_worker();
         let link = worker.and_then(|k| self.workers.get(&k));
         let name = link.map(|w| {
-            let away = (!w.status.is_up())
-                .then(|| icon(theme, IconName::ServerOff, IconSize::Inline, hsla(s.warn_fill)));
+            let away = (!w.status.is_up()).then(|| {
+                state_dot(theme, s.warn_fill).debug_selector(|| "status-worker-away".to_owned())
+            });
             readout("status-worker", SharedString::from(w.name.clone()))
                 .flex()
                 .items_center()
@@ -265,7 +260,6 @@ impl WorkspaceView {
                 .min_w_0()
                 .overflow_hidden()
                 .text_ellipsis()
-                .font_family(mono_family(theme))
                 .child(cwd)
         });
         let branch = session.and_then(|s| s.branch.clone()).map(|branch| {
@@ -310,9 +304,7 @@ impl WorkspaceView {
 
         let ports = (!phone).then(|| self.forwarded_count()).filter(|n| *n > 0).map(|n| {
             let text = SharedString::from(counted(n, "port", "ports"));
-            let el = button("status-ports", text.clone(), theme)
-                .child(icon(theme, IconName::Cable, IconSize::Inline, muted))
-                .child(tabular(div()).child(text));
+            let el = button("status-ports", text.clone(), theme).child(tabular(div()).child(text));
             tab_stop(el, s.accent).on_click(cx.listener(|this, _ev, window, cx| {
                 this.list_ports(&super::actions::ListPorts, window, cx);
             }))
@@ -322,12 +314,7 @@ impl WorkspaceView {
                 (d.saturating_add(u.done), t.saturating_add(u.total))
             });
             let text: SharedString = transfers_label(self.uploads.len(), done, total).into();
-            readout("status-transfers", text.clone())
-                .flex()
-                .items_center()
-                .gap(px(spacing.xs))
-                .child(icon(theme, IconName::Upload, IconSize::Inline, muted))
-                .child(tabular(div()).child(text))
+            tabular(readout("status-transfers", text.clone())).child(text)
         });
         // How the tailnet carries the link, beside its round trip; a DERP relay in the warning
         // tone, being the slow path.
@@ -349,17 +336,16 @@ impl WorkspaceView {
             readout("status-link", word.clone()).text_color(hsla(mark.tone(theme))).child(word)
         });
         let frame = frame.map(|text| tabular(readout("status-frame", text.clone())).child(text));
-        let workers = (!phone).then(|| self.workers_button(cx));
-        let (working, waiting) = (self.working_count(), self.drawn_waiting.len());
-        let agents = (working > 0 || waiting > 0).then(|| {
-            let text: SharedString = agent_summary(working, waiting).into();
-            let fill = if waiting > 0 { s.warn_fill } else { s.accent_fill };
-            let pill = button("status-agents", text.clone(), theme)
-                .child(state_dot(theme, fill))
-                .child(tabular(div()).child(text));
-            tab_stop(pill, s.accent).on_click(cx.listener(|this, _ev, window, cx| {
-                this.next_attention(&super::actions::NextAttention, window, cx);
-            }))
+        let workers = (!phone).then(|| self.workers_button(cx)).flatten();
+        let working = self.working_count();
+        let agents = (working > 0).then(|| {
+            let text: SharedString = agent_summary(working).into();
+            readout("status-agents", text.clone())
+                .flex()
+                .items_center()
+                .gap(px(spacing.xs))
+                .child(state_dot(theme, s.accent_fill))
+                .child(tabular(div()).child(text))
         });
         let right = div()
             .flex_none()
@@ -393,8 +379,9 @@ impl WorkspaceView {
         meta(bar, theme).child(left).child(right).children(hosts).into_any_element()
     }
 
-    /// "N workers", with a dot in the worst link's tone when any is not up; opens the hosts.
-    fn workers_button(&self, cx: &Context<Self>) -> Stateful<Div> {
+    /// "N workers" with a dot in the worst link's tone, only while any is not up (all up, the
+    /// count says nothing worth the bar); opens the hosts, as the "…" menu's Workers does.
+    fn workers_button(&self, cx: &Context<Self>) -> Option<Stateful<Div>> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let count = self.workers.len();
@@ -404,24 +391,19 @@ impl WorkspaceView {
             .filter_map(|w| worker_health(&w.status))
             .map(|(m, _)| m)
             .collect();
+        let worst = *down.first()?;
         let text = counted(count, "worker", "workers");
-        let label = match down.len() {
-            0 => text.clone(),
-            n => format!("{text}, {n} not connected"),
-        };
-        let dot = down.first().map(|mark| {
-            div()
-                .debug_selector(|| "status-workers-dot".to_owned())
-                .flex_none()
-                .size(px(theme.spacing.xs + theme.spacing.xxs))
-                .rounded_full()
-                .bg(hsla(state_fill(theme, *mark)))
-        });
+        let label = format!("{text}, {} not connected", down.len());
+        let dot = state_dot(theme, state_fill(theme, worst))
+            .debug_selector(|| "status-workers-dot".to_owned());
         let el = button("status-workers", label.into(), theme)
-            .children(dot)
+            .child(dot)
             .child(tabular(div()).child(SharedString::from(text)))
             .when(self.bar.hosts_open, |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)));
-        tab_stop(el, s.accent).on_click(cx.listener(|this, _ev, _window, cx| this.toggle_hosts(cx)))
+        Some(
+            tab_stop(el, s.accent)
+                .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_hosts(cx))),
+        )
     }
 
     /// The hosts popover over the bar's right end: each worker with its link, and what can be
@@ -692,10 +674,8 @@ mod tests {
 
     #[test]
     fn the_readouts_say_what_they_count() {
-        assert_eq!(agent_summary(2, 1), "2 working · 1 needs you");
-        assert_eq!(agent_summary(0, 3), "3 need you");
-        assert_eq!(agent_summary(1, 0), "1 working");
-        assert_eq!(agent_summary(0, 0), "");
+        assert_eq!(agent_summary(2), "2 working");
+        assert_eq!(agent_summary(0), "", "waiting is the bell's to count");
         assert_eq!(transfers_label(1, 42, 100), "1 upload · 42%");
         assert_eq!(transfers_label(2, 0, 0), "2 uploads · 0%");
         assert_eq!(counted(1, "port", "ports"), "1 port");

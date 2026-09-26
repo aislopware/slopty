@@ -91,11 +91,7 @@ async fn a_file_is_edited_saved_and_caught_changing_under_an_edit() {
         .unwrap();
     let info = file_of(&dump).unwrap();
     assert!(!info.edited && info.trouble.is_none() && info.read_only.is_none(), "{info:?}");
-    assert!(
-        dump.a11y_node("Heading", Some("file main.rs · project")).is_some(),
-        "{:#?}",
-        dump.a11y
-    );
+    assert!(dump.a11y_node("Heading", Some("file main.rs")).is_some(), "{:#?}", dump.a11y);
     golden(drv, &dir, "editor").await;
 
     drv.type_text("// edited\n").await.unwrap();

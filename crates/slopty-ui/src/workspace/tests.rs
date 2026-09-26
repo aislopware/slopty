@@ -288,17 +288,22 @@ fn swipe(
 fn a_note_is_titled_by_its_first_line() {
     assert_eq!(note_title(""), "note");
     assert_eq!(note_title("\n\n  # Plan  \nmore"), "Plan");
-    assert_eq!(note_title("- [ ] ship it\n- [x] test it"), "ship it · 1/2");
+    assert_eq!(note_title("- [ ] ship it\n- [x] test it"), "ship it", "progress is context");
+    assert_eq!(note_progress("- [ ] ship it\n- [x] test it"), Some((1, 2)));
     let long = "a".repeat(NOTE_TITLE_CHARS + 5);
     assert_eq!(note_title(&long).chars().count(), NOTE_TITLE_CHARS + 1, "cut, with an ellipsis");
     assert_eq!(note_progress("no tasks"), None);
 }
 
+/// A file's title is its name; the directory it is in is the header's context after it.
 #[test]
-fn a_file_card_is_titled_by_its_name_and_directory() {
-    assert_eq!(file_title("/w/src/main.rs"), "main.rs · src");
+fn a_file_card_is_titled_by_its_name_and_placed_by_its_directory() {
+    assert_eq!(file_title("/w/src/main.rs"), "main.rs");
+    assert_eq!(tile::file_dir("/w/src/main.rs").as_deref(), Some("src"));
     assert_eq!(file_title("main.rs"), "main.rs");
+    assert_eq!(tile::file_dir("main.rs"), None);
     assert_eq!(file_title("/etc/"), "etc");
+    assert_eq!(tile::file_dir("/etc/"), None, "the root is no directory to name");
 }
 
 /// A file tile asks the worker for its text, takes the keyboard when focused, sends ⌘S as a
@@ -1101,7 +1106,7 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.needs_you_count()), 1);
     assert!(events.borrow().contains(&WorkspaceEvent::NeedsYou(1)), "{:?}", events.borrow());
-    assert!(cx.debug_bounds("status-agents").is_some(), "the status bar says so");
+    assert!(cx.debug_bounds("bell-count").is_some(), "the bell says so");
     cx.simulate_keystrokes("cmd-shift-a");
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(waiting));
@@ -1196,7 +1201,7 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
         view.read_with(cx, |v, _| (v.needs_you_count(), v.needs_you_on(studio.key))),
         (1, 1)
     );
-    assert!(cx.debug_bounds("status-agents").is_some(), "the status bar counts it");
+    assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts it");
     studio.drain();
 
     cx.simulate_keystrokes("cmd-shift-a");
@@ -1252,6 +1257,8 @@ fn the_servers_word_leads_the_status_bar(cx: &mut TestAppContext) {
     assert!(bar.contains(&server.center()), "in the status bar: {server:?} {bar:?}");
     let worker = cx.debug_bounds("status-worker").expect("drawn");
     assert!(server.right() <= worker.left(), "first, on the left: {server:?} {worker:?}");
+    let away = cx.debug_bounds("status-worker-away").expect("a dot says the worker is away");
+    assert!(worker.contains(&away.center()) && away.size.width < px(8.0), "a dot: {away:?}");
 
     view.update_in(cx, |v, _w, cx| v.set_server_status(None, cx));
     cx.run_until_parked();

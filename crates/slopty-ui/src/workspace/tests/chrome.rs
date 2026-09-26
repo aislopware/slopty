@@ -288,20 +288,26 @@ fn the_handle_straddles_the_edge_and_a_double_click_resets_it(cx: &mut TestAppCo
     assert!((width - slopty_client::layout::Navigator::DEFAULT_WIDTH).abs() < 0.5, "{width}");
 }
 
-/// Workspaces of their own are tabs, a lone one only its name; where the bar has room a tab
-/// says what it holds under its name. The title bar has no second "+".
+/// Workspaces of their own are tabs, a lone one only its name, with no rollup mark: the bell
+/// already counts what waits. Where the bar has room a tab says what it holds under its name.
+/// The title bar has no second "+".
 #[gpui::test]
 fn a_lone_workspace_is_its_name_and_tabs_say_what_they_hold(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let _shells = three_shells(&view, cx, &studio);
+    let [(asking, _), ..] = three_shells(&view, cx, &studio);
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(asking), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts the one waiting");
+    assert!(cx.debug_bounds("ws-rollup-0").is_none(), "a lone name carries no second mark");
     let remote = connect(&view, cx, 2, "remote");
     let _far = opens(&view, cx, &remote, SessionId::new(), remote.me, 1);
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("Heading", Some("Workspace 1, 4 tiles"))), "{tree:#?}");
+    let heading = Some("Workspace 1, 4 tiles, 1 needs you");
+    assert!(tree.iter().any(|n| n.is("Heading", heading)), "{tree:#?}");
     assert!(cx.debug_bounds("add").is_none(), "one \"+\", for a workspace");
     // The name is whole beside what the workspace holds: a lone name is not held to a tab's
     // width.
@@ -419,4 +425,58 @@ fn a_second_press_on_the_menu_button_closes_its_menu(cx: &mut TestAppContext) {
     cx.simulate_click(more, Modifiers::none());
     cx.run_until_parked();
     assert!(cx.debug_bounds("menu").is_none(), "the second press closes it");
+}
+
+/// The "…" menu reads in sections, a hairline between each: where to go, the settings, then
+/// the connections, whatever order the app handed its rows in. Its Workers row opens the
+/// hosts popover, which the status bar no longer offers while every worker is up.
+#[gpui::test]
+fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shells = three_shells(&view, cx, &studio);
+    let entry = |group, label: &'static str| MenuEntry {
+        group,
+        label: label.into(),
+        detail: SharedString::default(),
+        run: Rc::new(|_window, _cx| {}),
+    };
+    view.update(cx, |v, cx| {
+        let entries = vec![
+            entry(MenuGroup::Connections, "Add a worker"),
+            entry(MenuGroup::Settings, "Settings"),
+        ];
+        v.set_more_menu(entries, cx);
+    });
+    let more = cx.debug_bounds("more").expect("… is drawn").center();
+    cx.simulate_click(more, Modifiers::none());
+    cx.run_until_parked();
+    let top = |cx: &mut VisualTestContext, label: &str| {
+        let selector = Box::leak(format!("menu-{label}").into_boxed_str());
+        f32::from(cx.debug_bounds(selector).unwrap_or_else(|| panic!("{label}")).top())
+    };
+    let order = ["Command palette", "Overview", "Stream stats", "Settings", "Add a worker"];
+    let tops: Vec<f32> = order.iter().map(|label| top(cx, label)).collect();
+    assert!(tops.windows(2).all(|w| w[0] < w[1]), "{order:?} at {tops:?}");
+    assert!(top(cx, "Add a worker") < top(cx, "Workers"), "the hosts close the connections");
+    let hairlines = (0..8).filter(|i| {
+        let selector = Box::leak(format!("menu-separator-{i}").into_boxed_str());
+        cx.debug_bounds(selector).is_some()
+    });
+    assert_eq!(hairlines.count(), 2, "one between each of the three sections");
+    let settings = top(cx, "Settings");
+    let separator = (0..8)
+        .find_map(|i| {
+            let selector = Box::leak(format!("menu-separator-{i}").into_boxed_str());
+            cx.debug_bounds(selector)
+        })
+        .expect("a hairline");
+    assert!(f32::from(separator.top()) < settings, "the settings open a section");
+
+    let workers = Box::leak("menu-Workers".to_owned().into_boxed_str());
+    let at = cx.debug_bounds(workers).expect("Workers").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.hosts_open()), "Workers opens the hosts");
+    assert!(cx.debug_bounds("status-workers").is_none(), "with every worker up");
 }

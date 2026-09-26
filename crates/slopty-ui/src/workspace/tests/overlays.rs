@@ -28,12 +28,13 @@ fn labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<Strin
     tree.into_iter().filter_map(|n| n.label).collect()
 }
 
-/// An inbox row reads down its right edge: the status word on its first line, in the word a
-/// scan of the fleet reads ("Needs you", "Exit 101"), and how long ago on its second, a waiting
-/// agent's too, counted from the worker's stamp so a reconnect keeps it. The popover stands a
-/// base unit clear of the title bar.
+/// An inbox row is two lines on the navigator's rhythm. The first ends in how long ago, a
+/// waiting agent's too, counted from the worker's stamp so a reconnect keeps it. No word
+/// repeats the section heading over it ("Needs you" under *Needs you*); a failed command's
+/// exit leads the second line. The popover stands a base unit clear of the title bar, its right
+/// edge on the window's inset.
 #[gpui::test]
-fn an_inbox_row_says_its_status_and_age_down_the_right_edge(cx: &mut TestAppContext) {
+fn an_inbox_row_says_its_age_first_and_no_word_its_heading_does(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let (asking, failed) = (SessionId::new(), SessionId::new());
@@ -53,25 +54,25 @@ fn an_inbox_row_says_its_status_and_age_down_the_right_edge(cx: &mut TestAppCont
     cx.run_until_parked();
     click(cx, "bell");
 
-    let gap = Theme::default().spacing.xs;
+    let theme = Theme::default();
     let inbox = bounds(cx, "inbox");
-    assert!(f32::from(inbox.top()) >= TITLEBAR_H + gap - 0.5, "{inbox:?}");
-    let names = labels(&view, cx);
-    for (row, word) in [
-        (format!("inbox-waiting-{asking}"), "Needs you"),
-        (format!("inbox-finished-{failed}"), "Exit 101"),
-    ] {
-        let (edge, said, ago) = (
-            bounds(cx, leak(row.clone())),
-            bounds(cx, leak(format!("{row}-word"))),
-            bounds(cx, leak(format!("{row}-age"))),
-        );
-        let right = f32::from(edge.right());
-        assert!((f32::from(said.right()) - f32::from(ago.right())).abs() < 0.5, "{said:?} {ago:?}");
-        assert!(right - f32::from(said.right()) < Theme::default().spacing.inset() + 0.5);
-        assert!(ago.top() > said.top(), "the word on the first line, the age under it");
-        assert!(names.iter().any(|l| l.contains(word)), "{word}: {names:#?}");
+    assert!(f32::from(inbox.top()) >= TITLEBAR_H + theme.spacing.xs - 0.5, "{inbox:?}");
+    let right = VIEWPORT.0 - theme.spacing.inset();
+    assert!((f32::from(inbox.right()) - right).abs() < 0.5, "on the inset: {inbox:?}");
+    let two = crate::kit::Row::Two.height(&theme);
+    for row in [format!("inbox-waiting-{asking}"), format!("inbox-finished-{failed}")] {
+        let (edge, ago) = (bounds(cx, leak(row.clone())), bounds(cx, leak(format!("{row}-age"))));
+        assert!((f32::from(edge.size.height) - two).abs() < 0.5, "the navigator's rhythm");
+        assert!(ago.center().y < edge.center().y, "line one: {ago:?} in {edge:?}");
+        let inset = f32::from(edge.right()) - f32::from(ago.right());
+        assert!(inset < theme.spacing.inset() + 0.5, "at the right edge: {ago:?} {edge:?}");
     }
+    let waiting = format!("inbox-waiting-{asking}-word");
+    assert!(cx.debug_bounds(leak(waiting)).is_none(), "no \"Needs you\" under Needs you");
+    let exit = bounds(cx, leak(format!("inbox-finished-{failed}-word")));
+    let age = bounds(cx, leak(format!("inbox-finished-{failed}-age")));
+    assert!(exit.top() >= age.bottom() - px(0.5), "the exit on the second line: {exit:?}");
+    assert!(labels(&view, cx).iter().any(|l| l.contains("Exit 101")));
 }
 
 /// The inbox's empty states come in two tiers: one that has never held anything says what

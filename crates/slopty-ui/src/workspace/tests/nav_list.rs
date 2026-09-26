@@ -1,6 +1,6 @@
 //! The navigator's list in the headless workspace: it lays out only the rows in view, brings
-//! the focused tile's row into view, gives a shell with no directory a second line, and on a
-//! phone runs its drawer through the home indicator's band.
+//! the focused tile's row into view, keeps a row with nothing to add to one line, and laid
+//! over the frame runs through the home indicator's band.
 
 use gpui::{AppContext as _, Bounds, Context, IntoElement, Render, Window};
 
@@ -10,7 +10,7 @@ use super::*;
 fn notes(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, fake: &Fake, n: usize) {
     let note = || Item {
         id: ItemId::new(),
-        kind: ItemKind::Note { text: "a note\n".into() },
+        kind: ItemKind::Note { text: "a note\nits second line\n".into() },
         sleeping: false,
         name: None,
     };
@@ -98,16 +98,44 @@ fn the_focused_tiles_row_scrolls_into_view(cx: &mut TestAppContext) {
     assert!(in_view(&view, cx, shell), "a new row at the end came into view with it");
 }
 
-/// A shell with no directory yet reads its worker's name where the directory goes, so its
-/// second line is never a lone age.
+/// A row under its worker's header never repeats the worker's name: a shell with no directory
+/// yet, or only its home, has nothing to add, and its row is one line. A directory, a command
+/// or an agent's words give it its second.
 #[gpui::test]
-fn a_shell_with_no_directory_names_its_worker(cx: &mut TestAppContext) {
+fn a_row_with_nothing_to_add_is_one_line(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let bare = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let home = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 2, Some("/Users/me"));
+    let work = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 3, Some("/w/oss/app"));
     let lines = view.read_with(cx, WorkspaceView::navigator_lines);
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0].1, "studio", "{lines:?}");
+    let metas: Vec<&str> = lines.iter().map(|(_, meta, _)| meta.as_str()).collect();
+    assert!(!metas.contains(&"studio"), "no worker's name under its header: {metas:?}");
+    assert!(!metas.contains(&"~"), "a home alone says nothing: {metas:?}");
+    assert!(metas.contains(&"oss/app"), "{metas:?}");
+    let height = |cx: &mut VisualTestContext, t: TileRef| {
+        f32::from(cx.debug_bounds(selector("nav-tile", t.item)).expect("drawn").size.height)
+    };
+    let theme = Theme::default();
+    assert!((height(cx, bare) - crate::kit::Row::One.height(&theme)).abs() < 0.5);
+    assert!((height(cx, home) - crate::kit::Row::One.height(&theme)).abs() < 0.5);
+    assert!((height(cx, work) - crate::kit::Row::Two.height(&theme)).abs() < 0.5);
+    let meta = |id: ItemId| format!("nav-meta-{}", id.as_uuid());
+    assert!(cx.debug_bounds(Box::leak(meta(bare.item).into_boxed_str())).is_none());
+}
+
+/// A tile's kind glyph sits under its worker's name, the list reading as a tree.
+#[gpui::test]
+fn a_tiles_glyph_sits_under_its_workers_name(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let name = format!("nav-worker-name-{}", studio.key);
+    let kind = format!("nav-kind-{}", shell.item.as_uuid());
+    let name = cx.debug_bounds(Box::leak(name.into_boxed_str())).expect("the name");
+    let kind = cx.debug_bounds(Box::leak(kind.into_boxed_str())).expect("the glyph's slot");
+    let glyph = f32::from(kind.left()) + navigator::glyph_margin(&Theme::default());
+    assert!((glyph - f32::from(name.left())).abs() < 0.5, "{kind:?} under {name:?}");
 }
 
 /// The home indicator's band under the workspace, as the app lays it out on a phone.
@@ -132,7 +160,19 @@ impl Render for Phone {
 /// the workspace, not only to the workspace's.
 #[gpui::test]
 fn the_phone_drawer_runs_through_the_home_indicator_band(cx: &mut TestAppContext) {
-    const PHONE: (f32, f32) = (390.0, 844.0);
+    runs_through_the_band(cx, (390.0, 844.0), navigator::Mode::Drawer);
+}
+
+/// On an iPad, and anywhere else the navigator is laid over the frame, it and its scrim run to
+/// the window's bottom edge as the phone's drawer does.
+#[gpui::test]
+fn the_overlaid_navigator_runs_through_the_home_indicator_band(cx: &mut TestAppContext) {
+    runs_through_the_band(cx, (700.0, 900.0), navigator::Mode::Overlay);
+}
+
+/// Open the navigator in a window of `(w, h)` over the band, where it sits in `mode`: it and
+/// its scrim end at the window's bottom edge.
+fn runs_through_the_band(cx: &mut TestAppContext, (w, h): (f32, f32), mode: navigator::Mode) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         cx.bind_keys(key_bindings());
@@ -148,19 +188,20 @@ fn the_phone_drawer_runs_through_the_home_indicator_band(cx: &mut TestAppContext
         window.focus(&focus, cx);
         Phone(view)
     });
-    cx.simulate_resize(size(px(PHONE.0), px(PHONE.1)));
+    cx.simulate_resize(size(px(w), px(h)));
     cx.run_until_parked();
     let view = host.read_with(cx, |host, _| host.0.clone());
     let studio = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.nav.drawn), Some(mode));
 
     let workspace = cx.debug_bounds("workspace").expect("the workspace is drawn");
     let drawer = cx.debug_bounds("navigator").expect("the drawer is open");
     let scrim = cx.debug_bounds("navigator-away").expect("over its scrim");
-    assert!((f32::from(workspace.bottom()) - (PHONE.1 - BAND)).abs() < 0.5, "{workspace:?}");
-    assert!((f32::from(drawer.bottom()) - PHONE.1).abs() < 0.5, "to the bottom: {drawer:?}");
-    assert!((f32::from(scrim.bottom()) - PHONE.1).abs() < 0.5, "the scrim too: {scrim:?}");
+    assert!((f32::from(workspace.bottom()) - (h - BAND)).abs() < 0.5, "{workspace:?}");
+    assert!((f32::from(drawer.bottom()) - h).abs() < 0.5, "to the bottom: {drawer:?}");
+    assert!((f32::from(scrim.bottom()) - h).abs() < 0.5, "the scrim too: {scrim:?}");
     assert!(drawer.top() == workspace.top(), "from the top: {drawer:?}");
 }

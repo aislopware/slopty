@@ -518,7 +518,7 @@ impl Render for WindowPicker {
         let empty = rows.is_empty();
         let title = "Jump to a session, or add a window from the worker";
 
-        let root = crate::kit::backdrop(&theme, window)
+        let root = crate::kit::anchor(&theme, window)
             .id("picker-backdrop")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))

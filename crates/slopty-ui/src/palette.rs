@@ -28,9 +28,6 @@ pub(crate) const LEGEND: [(&str, &str); 3] = [("↩", "open"), ("esc", "close"),
 /// How many commands an empty field lists: the ones run last, then the first of the rest.
 pub const RECENT_COMMANDS: usize = 5;
 
-/// Where the palette's top sits on a desktop, as a share of the window's height from its top.
-const ANCHOR: f32 = 0.2;
-
 /// The most of the window's height the palette takes on a desktop, under its ceiling.
 const SHARE: f32 = 0.6;
 
@@ -632,6 +629,12 @@ pub(crate) fn icon_slot(theme: &Theme, name: IconName, color: gpui::Hsla) -> gpu
         .child(icons::icon(theme, name, IconSize::Inline, color))
 }
 
+/// The leading slot of a row with nothing to show in it: the same square, empty, so its title
+/// starts where the titles beside it do.
+pub(crate) fn empty_slot(theme: &Theme) -> gpui::Div {
+    div().flex_none().size(px(theme.typography.icon_large()))
+}
+
 /// A row's leading slot, one fixed square for every list (the palette, the pickers, the
 /// inbox, the tile headers): the kind icon while there is nothing to say, the status mark once
 /// there is, so every title starts on one edge and a state reads in the same place on every
@@ -676,7 +679,8 @@ pub fn age_label(age: std::time::Duration) -> String {
     }
 }
 
-/// The UI's monospace family: paths in chrome are set in it.
+/// The UI's monospace family: a port's number and the settings file are set in it. Paths in
+/// chrome are context, in the UI face.
 pub(crate) fn mono_family(theme: &Theme) -> SharedString {
     theme.typography.mono_families.first().cloned().unwrap_or_default().into()
 }
@@ -1088,13 +1092,10 @@ impl CommandPalette {
                 context = context.child("·");
             }
             context = context.child(
+                // A path in the UI face, as every other context in the chrome is; mono is
+                // for ports and figures.
                 div()
-                    .when(path, |el| {
-                        el.min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .font_family(mono_family(theme))
-                    })
+                    .when(path, |el| el.min_w_0().overflow_hidden().text_ellipsis())
                     .when(!path, gpui::Styled::flex_none)
                     .child(SharedString::from(text)),
             );
@@ -1115,9 +1116,14 @@ impl CommandPalette {
             .active(move |st| st.bg(hsla(overlay)))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(cx.listener(move |_this, _ev, _window, cx| Self::choose(&chosen_item, cx)))
-            .children(
-                item.icon.map(|icon| status_slot(theme, icon, item.status, hsla(icon_ink), 1.0)),
-            )
+            .child(match item.icon {
+                Some(icon) => {
+                    status_slot(theme, icon, item.status, hsla(icon_ink), 1.0).into_any_element()
+                }
+                // A command has no kind to show but keeps the slot, so its title starts on the
+                // edge the tiles' and the workers' titles do.
+                None => empty_slot(theme).into_any_element(),
+            })
             .child(
                 div()
                     .debug_selector(move || format!("palette-title-{ix}"))
@@ -1189,12 +1195,9 @@ impl Render for CommandPalette {
         let height = f32::from(viewport.height);
         let sheet = f32::from(viewport.width) < self.sheet_below;
         let safe_top = window.insets().effective().top;
-        let backdrop = crate::kit::backdrop(&theme, window);
-        let backdrop = if sheet {
-            backdrop.px_0().pt(safe_top)
-        } else {
-            backdrop.pt(px(height * ANCHOR) + safe_top)
-        };
+        // No scrim: a list typed at floats over the work (`kit::anchor`).
+        let backdrop = crate::kit::anchor(&theme, window);
+        let backdrop = if sheet { backdrop.px_0().pt(safe_top) } else { backdrop };
         let dialog = crate::kit::dialog(&theme, crate::kit::Overlay::List);
         let dialog = if sheet {
             // A sheet from the top: the window's width, down to the keyboard.
@@ -1210,17 +1213,17 @@ impl Render for CommandPalette {
             let ceiling = crate::kit::Overlay::List.bounds().1;
             dialog.max_h(px(ceiling.min(height * SHARE)))
         };
-        // A touch list has no scrollbar: a fade over its foot says there is more below. The
-        // scroll's extent is the last layout's, so the frame after this one checks it again (a
-        // list just opened, or narrowed by a query) and draws once more only if it changed.
-        self.more_below = sheet && self.runs_on();
-        if sheet {
-            cx.on_next_frame(window, |this, _window, cx| {
-                if this.runs_on() != this.more_below {
-                    cx.notify();
-                }
-            });
-        }
+        // A fade over the list's foot says there is more below: a touch list has no scrollbar,
+        // and on a desktop the row the list's height cuts would otherwise end on the foot's
+        // hairline, read as a row that lost its bottom. The scroll's extent is the last
+        // layout's, so the frame after this one checks it again (a list just opened, or
+        // narrowed by a query) and draws once more only if it changed.
+        self.more_below = self.runs_on();
+        cx.on_next_frame(window, |this, _window, cx| {
+            if this.runs_on() != this.more_below {
+                cx.notify();
+            }
+        });
         let fade = self.more_below.then(|| {
             let solid = hsla(s.elevated);
             div()

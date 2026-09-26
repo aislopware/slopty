@@ -518,6 +518,12 @@ fn a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths(cx: &mut 
     let label = view.read_with(cx, |v, _| v.upload_on(tile).map(|(_, u)| u.label()));
     assert_eq!(label.as_deref(), Some("\u{2191} 42%"));
     assert!(cx.debug_bounds(selector("upload", tile.item)).is_some(), "the tile shows it");
+    let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
+    let line = cx.debug_bounds(selector("upload-progress", tile.item)).expect("a progress line");
+    assert!((f32::from(line.size.height) - 2.0).abs() < 0.01, "2 pt: {line:?}");
+    assert!(line.bottom() <= header.bottom() && line.bottom() >= header.bottom() - px(1.5));
+    let share = f32::from(line.size.width) / f32::from(header.size.width);
+    assert!((share - 0.42).abs() < 0.02, "along the header as far as it got: {share}");
 
     let paths = vec!["/Users/me/work/my notes.txt".to_owned(), "/tmp/b".to_owned()];
     view.update_in(cx, |v, _window, cx| v.xfer_message(XferMsg::Finished { xfer, paths }, cx));
@@ -534,6 +540,7 @@ fn a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths(cx: &mut 
         .collect();
     assert_eq!(pasted, ["'/Users/me/work/my notes.txt' /tmp/b "], "one bracketable paste");
     assert!(cx.debug_bounds(selector("upload", tile.item)).is_none(), "done: the progress goes");
+    assert!(cx.debug_bounds(selector("upload-progress", tile.item)).is_none(), "and its line");
 
     // A second drop is cancelled from its progress pill.
     let other = dir.path().join("b.bin");

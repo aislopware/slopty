@@ -370,9 +370,22 @@ impl Finished {
 /// What a menu row does when clicked.
 pub type MenuRun = Rc<dyn Fn(&mut Window, &mut App)>;
 
-/// An entry of the titlebar's "…" menu the app adds (settings, workers).
+/// The sections of the titlebar's "…" menu, in their order, a hairline between each.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum MenuGroup {
+    /// Where to go and what to see: the palette, the overview, the stream stats.
+    Navigation,
+    /// The settings.
+    Settings,
+    /// The server and the workers: connecting, adding, the hosts.
+    Connections,
+}
+
+/// An entry of the titlebar's "…" menu the app adds (settings, the server, adding a worker).
 #[derive(Clone)]
 pub struct MenuEntry {
+    /// The section it is listed in.
+    pub group: MenuGroup,
     /// What the row says.
     pub label: SharedString,
     /// Muted text on the right ("connected", "⌘,").
@@ -1418,15 +1431,16 @@ impl WorkspaceView {
             )
             .children(handle);
         match mode {
-            // A phone's workspace ends above the home indicator's band (and the key bar, when
-            // it shows), which the app draws below it. The drawer is drawn after everything and
-            // unclipped, down to the window's bottom edge, so it and its scrim cover the band;
-            // a phone's workspace starts at the window's top.
-            navigator::Mode::Drawer => {
+            // A touch device's workspace ends above the home indicator's band (and the key
+            // bar, when it shows), which the app draws below it. Laid over the frame, on a
+            // phone or an iPad, the panel is drawn after everything and unclipped, down to the
+            // window's bottom edge, so it and its scrim cover the band; the workspace starts
+            // at the window's top.
+            navigator::Mode::Drawer | navigator::Mode::Overlay => {
                 gpui::deferred(away.bottom_auto().h(window.viewport_size().height))
                     .into_any_element()
             }
-            navigator::Mode::Docked | navigator::Mode::Overlay => away.into_any_element(),
+            navigator::Mode::Docked => away.into_any_element(),
         }
     }
 }

@@ -675,10 +675,11 @@ impl WorkspaceView {
             // stays readable however many workspaces the overview fits.
             let label_top = r.y - pad - theme.spacing.xl;
             if tiles == 0 {
+                // Its words on the edge the names above and the panes in the cards start on.
                 let button =
                     kit::button(theme, "overview-new-workspace", NEW_WORKSPACE, ButtonKind::Ghost)
                         .absolute()
-                        .left(px(left.unwrap_or(r.x) - pad))
+                        .left(px(left.unwrap_or(r.x) - kit::button_text_inset(theme)))
                         .top(px(label_top))
                         .opacity(fade)
                         .on_click(cx.listener(move |this, _ev, _w, cx| {

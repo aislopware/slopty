@@ -523,17 +523,17 @@ pub struct Surfaces {
     pub text_secondary: Rgb,
     /// Hints, timestamps, folds, inactive titles, second lines.
     pub text_muted: Rgb,
-    /// Focus ring, active border, the primary action, links.
+    /// Focus ring, active border, links: the accent as text and hairlines. A primary action
+    /// is a fill, so it takes [`Self::accent_fill`].
     pub accent: Rgb,
-    /// Text on an accent fill.
-    pub accent_fg: Rgb,
     /// Connected, agent done: as text.
     pub success: Rgb,
     /// Agent waiting, "N need you", muted, reconnecting: as text.
     pub warn: Rgb,
     /// A failed result or command, a pairing error: as text.
     pub error: Rgb,
-    /// The accent as a mark: an unseen dot, a busy bar, a drop wash.
+    /// The accent as a mark or a fill: an unseen dot, a busy bar, a drop wash, the primary
+    /// action, a ticked box, a key that is on.
     pub accent_fill: Rgb,
     /// Success as a mark: a dot, a bar, a badge, a wash.
     pub success_fill: Rgb,
@@ -542,7 +542,7 @@ pub struct Surfaces {
     pub warn_fill: Rgb,
     /// Error as a mark: a failed block's wash, a dot, a badge.
     pub error_fill: Rgb,
-    /// Text on any of the four fills: a badge's count.
+    /// Text on any of the four fills: a badge's count, a primary button's label.
     pub fill_fg: Rgb,
 }
 
@@ -584,7 +584,6 @@ struct Tones {
     text_secondary: Rgb,
     text_muted: Rgb,
     accent: Rgb,
-    accent_fg: Rgb,
     success: Rgb,
     warn: Rgb,
     error: Rgb,
@@ -611,7 +610,6 @@ const DARK_TONES: Tones = Tones {
     text_secondary: Rgb::hex(0xb4b9c3),
     text_muted: Rgb::hex(0x8b919c),
     accent: Rgb::hex(0x8ab4f8),
-    accent_fg: Rgb::hex(0x0a0b0e),
     success: Rgb::hex(0x98c379),
     warn: Rgb::hex(0xe5c07b),
     error: Rgb::hex(0xf06c75),
@@ -637,7 +635,6 @@ const LIGHT_TONES: Tones = Tones {
     text_secondary: Rgb::hex(0x4b4f58),
     text_muted: Rgb::hex(0x66666b),
     accent: Rgb::hex(0x2a63c4),
-    accent_fg: Rgb::hex(0xffffff),
     success: Rgb::hex(0x187633),
     warn: Rgb::hex(0x8b5d00),
     error: Rgb::hex(0xc7212c),
@@ -719,7 +716,6 @@ impl Surfaces {
             text_secondary,
             text_muted,
             accent: lift(t.accent, &under, t.pole, AA),
-            accent_fg: t.accent_fg,
             success: lift(t.success, &under, t.pole, AA),
             warn: lift(t.warn, &under, t.pole, AA),
             error: lift(t.error, &under, t.pole, AA),
@@ -1062,7 +1058,6 @@ mod tests {
             luma(light.text_muted) > luma(light.text_secondary)
                 && luma(light.text_secondary) > luma(light.text)
         );
-        assert_ne!(dark.accent_fg, light.accent_fg, "text on the accent flips with the variant");
 
         let r = Radii::default();
         assert!(r.xs < r.sm && r.sm < r.md);
@@ -1288,9 +1283,6 @@ mod tests {
                 "{name}: secondary {secondary:.2}, muted {muted:.2}"
             );
             assert!(text >= secondary * LEVEL, "{name}: text {text:.2}, secondary {secondary:.2}");
-            // The accent is also a surface of its own, with its own foreground on it.
-            let on_accent = s.accent_fg.contrast(s.accent);
-            assert!(on_accent >= AA, "{name}: accent_fg on accent is {on_accent:.2}");
         }
     }
 

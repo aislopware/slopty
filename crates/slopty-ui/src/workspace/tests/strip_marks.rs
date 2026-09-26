@@ -199,8 +199,12 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
         .expect("a pane in the first card");
     near(f32::from(pane.left() - first.left()), pad);
 
+    // One left edge: the panes in the card, the name over it, the ghost button's words.
     let new = bounds(cx, "overview-new-workspace");
-    near(f32::from(new.left()), f32::from(second.left()));
+    let name = bounds(cx, "overview-name-1");
+    near(f32::from(name.left()), f32::from(second.left()) + pad);
+    let words = f32::from(new.left()) + crate::kit::button_text_inset(&theme);
+    near(words, f32::from(name.left()));
     assert!(new.top() >= second.bottom() - px(0.5), "under the last card");
     assert!(f32::from(new.size.height) < f32::from(second.size.height) / 2.0, "compact");
     cx.simulate_click(new.center(), Modifiers::default());

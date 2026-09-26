@@ -71,9 +71,9 @@ fn the_filter_keeps_the_rows_that_match(cx: &mut TestAppContext) {
 }
 
 /// A shell's row reads two lines: its title, ended by its age from the session's start, then
-/// its directory, what its agent says and its branch. Once the agent waits on the human, the
-/// state takes the age's place in a word, and the row is not washed: the *Needs you* section
-/// already leads with it.
+/// what its agent says, its directory and its branch, in the order every second line keeps. Once
+/// the agent waits on the human, the state takes the age's place in a word, and the row is not
+/// washed: the *Needs you* section already leads with it.
 #[gpui::test]
 fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -120,7 +120,7 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     assert!(
         lines.contains(&(
             "shell".to_owned(),
-            format!("oss/slopty \u{2022} {words} \u{2022} main"),
+            format!("{words} \u{b7} oss/slopty \u{b7} main"),
             Some("5m".into())
         )),
         "{lines:#?}"
@@ -311,7 +311,7 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
 fn a_rows_two_lines_sit_in_its_middle(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let tile = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/w/oss/app"));
     let id = tile.item.as_uuid();
     for (density, height) in
         [(slopty_theme::Density::COMPACT, 40.0), (slopty_theme::Density::TOUCH, 56.0)]

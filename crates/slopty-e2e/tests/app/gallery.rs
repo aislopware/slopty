@@ -142,7 +142,7 @@ async fn a_workspace_of_columns_in_both_themes() {
     drv.open(&["cat"], 1).await.unwrap();
     // The note commits its text on a timer; its title follows the first line.
     drv.wait_for("a third column, the note titled", STEP, |d| {
-        d.items.len() == 3 && d.a11y_node("Heading", Some("note Release · 1/3")).is_some()
+        d.items.len() == 3 && d.a11y_node("Heading", Some("note Release")).is_some()
     })
     .await
     .unwrap();
@@ -274,11 +274,12 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
         .wait_for("the agent blocked", STEP, |d| {
             d.terminal(&session)
                 .is_some_and(|t| t.agent.as_deref() == Some("blocked:permission:Bash"))
-                && d.a11y_node("Button", Some("1 needs you")).is_some()
+                && d.a11y_node("Status", Some("1 new")).is_some()
         })
         .await
         .unwrap();
-    assert!(dump.a11y_node("Button", Some("1 needs you")).is_some(), "{:#?}", dump.a11y);
+    // The bell's badge is the one count of what waits.
+    assert!(dump.a11y_node("Status", Some("1 new")).is_some(), "{:#?}", dump.a11y);
     golden(drv, &dir, "agent-needs-you").await;
     // The navigator names the waiting agent in its row, beside the tile's own mark.
     drv.ok(&Command::Resize { width: 1280.0, height: 800.0 }).await.unwrap();
@@ -411,7 +412,7 @@ async fn the_inbox_lists_what_waits_and_what_finished() {
     let drv = &mut stack.driver;
     let dump = drv
         .wait_for("the agent blocked", STEP, |d| {
-            d.a11y_node("Button", Some("1 needs you")).is_some()
+            d.workers.iter().map(|w| w.needs_you).sum::<usize>() == 1
         })
         .await
         .unwrap();

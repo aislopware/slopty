@@ -68,13 +68,21 @@ fn shell_in_repo(
     (session, tile)
 }
 
+/// Open or close the hosts popover as the "…" menu's Workers does, the count being absent
+/// while every worker is up.
+fn toggle_hosts(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) {
+    view.update(cx, WorkspaceView::toggle_hosts);
+    cx.run_until_parked();
+}
+
 fn finished(command: &str, exit: u8) -> Finished {
     Finished { command: command.to_owned(), exit: Some(exit), elapsed: Duration::from_secs(40) }
 }
 
 /// The left of the bar says where the focused shell is: its worker, the repository and the
-/// path within it, and the branch. The right counts the ports forwarded here, which list them,
-/// and the workers; the frame time waits for the stream stats.
+/// path within it, and the branch. The right counts the ports forwarded here, which list them;
+/// the workers go uncounted while every one is up, and the frame time waits for the stream
+/// stats.
 #[gpui::test]
 fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -89,11 +97,11 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, forwards, cx));
     cx.run_until_parked();
     let names = labels(&view, cx);
-    for readout in ["studio", "slopty/crates/ui", "branch main", "2 ports", "1 worker"] {
+    for readout in ["studio", "slopty/crates/ui", "branch main", "2 ports"] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
     assert!(cx.debug_bounds("status-frame").is_none(), "no frame time without the stats");
-    assert!(cx.debug_bounds("status-workers-dot").is_none(), "a worker that is up says nothing");
+    assert!(cx.debug_bounds("status-workers").is_none(), "a worker that is up says nothing");
 
     click(cx, "status-ports");
     let lines = view.read_with(cx, |v, cx| {
@@ -103,7 +111,7 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
     assert_eq!(lines, 4, "a tile and a browser line for each port");
 }
 
-/// "N workers" wears a dot once a worker is not up, and opens the hosts popover: each worker
+/// "N workers" shows, with a dot, once a worker is not up, and opens the hosts popover: each worker
 /// with its round trip or what is wrong, the app's connect and forget under the pointer, and
 /// a way to add one. A row goes to its worker; a click elsewhere closes it.
 #[gpui::test]
@@ -190,13 +198,13 @@ fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut Tes
     assert!(cx.debug_bounds(leak(format!("nav-path-{studio_key}"))).is_none(), "direct is quiet");
     assert!(cx.debug_bounds(leak(format!("nav-path-{laptop_key}"))).is_some());
 
-    click(cx, "status-workers");
+    toggle_hosts(&view, cx);
     let names = labels(&view, cx);
     for row in ["studio, Direct, 4.2 ms", "laptop, DERP · fra", "lan"] {
         assert!(names.iter().any(|l| l == row), "{row}: {names:#?}");
     }
     assert!(cx.debug_bounds(leak(format!("hosts-path-{lan_key}"))).is_none(), "nothing said");
-    click(cx, "status-workers");
+    toggle_hosts(&view, cx);
 
     view.update_in(cx, |v, _w, cx| {
         v.disconnect_worker(laptop_key, WorkerStatus::Reconnecting("lost".into()), cx);

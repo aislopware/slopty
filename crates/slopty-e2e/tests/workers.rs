@@ -70,20 +70,27 @@ mod tests {
             .and_then(|i| i.session.as_deref())
     }
 
-    /// The "N need(s) you" pill's label and centre, if the top bar shows one.
-    fn pill(d: &Dump) -> Option<(String, (f32, f32))> {
+    /// The centre of the node with `role` whose label `matches`, if it is drawn.
+    fn centre(d: &Dump, role: &str, matches: impl Fn(&str) -> bool) -> Option<(f32, f32)> {
         d.a11y
             .iter()
-            .filter(|n| n.role == "Button")
-            .find(|n| {
-                n.label
-                    .as_deref()
-                    .is_some_and(|l| l.ends_with("need you") || l.ends_with("needs you"))
-            })
+            .filter(|n| n.role == role)
+            .find(|n| n.label.as_deref().is_some_and(&matches))
             .map(|n| {
                 let [left, top, width, height] = n.bounds;
-                (n.label.clone().unwrap_or_default(), (left + width / 2.0, top + height / 2.0))
+                (left + width / 2.0, top + height / 2.0)
             })
+    }
+
+    /// The bell's badge ("1 new") and the bell's centre, if the top bar shows a count: the one
+    /// count of what waits on the human.
+    fn pill(d: &Dump) -> Option<(String, (f32, f32))> {
+        let count = d
+            .a11y
+            .iter()
+            .filter(|n| n.role == "Status")
+            .find_map(|n| n.label.clone().filter(|l| l.ends_with(" new")))?;
+        Some((count, centre(d, "Button", |l| l == "Inbox")?))
     }
 
     /// Focus worker `name`'s terminal (and its keyboard), wherever the layout has it.
@@ -195,7 +202,7 @@ mod tests {
             .wait_for("the pill to show B's one waiting agent", STEP, |d| {
                 focused_worker(d) == Some(A)
                     && worker(d, B).is_some_and(|w| w.needs_you == 1)
-                    && pill(d).is_some_and(|(l, _)| l == "1 needs you")
+                    && pill(d).is_some_and(|(l, _)| l == "1 new")
             })
             .await
             .unwrap();
@@ -206,12 +213,19 @@ mod tests {
         // The count is the sum across workers: worker A contributes nothing.
         assert_eq!(worker(&d, A).unwrap().needs_you, 0, "{d:#?}");
 
-        // A tap on the pill focuses B's waiting session, in the same layout.
+        // The bell's inbox lists B's waiting session, and its row focuses it, in the same layout.
         let (_, (px, py)) = pill(&d).unwrap();
         stack.driver.click(px, py).await.unwrap();
+        let inbox = stack
+            .driver
+            .wait_for("the inbox", STEP, |d| d.a11y_node("Dialog", Some("Inbox")).is_some())
+            .await
+            .unwrap();
+        let (rx, ry) = centre(&inbox, "Button", |l| l.contains("Needs you")).unwrap();
+        stack.driver.click(rx, ry).await.unwrap();
         stack
             .driver
-            .wait_for("the pill tap to reveal B's session", STEP, |d| {
+            .wait_for("the inbox row to reveal B's session", STEP, |d| {
                 focused_worker(d) == Some(B) && d.focused == format!("terminal:{session_b}")
             })
             .await

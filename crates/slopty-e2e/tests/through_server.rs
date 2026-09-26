@@ -75,11 +75,12 @@ mod tests {
         d.items.iter().find(|i| i.active).map(|i| i.worker.as_str())
     }
 
-    /// The "N need(s) you" pill's label, if the top bar shows one.
+    /// The bell's badge ("1 new"), if the top bar shows one: the one count of what waits.
     fn pill(d: &Dump) -> Option<String> {
-        d.a11y.iter().filter(|n| n.role == "Button").find_map(|n| {
-            n.label.clone().filter(|l| l.ends_with("need you") || l.ends_with("needs you"))
-        })
+        d.a11y
+            .iter()
+            .filter(|n| n.role == "Status")
+            .find_map(|n| n.label.clone().filter(|l| l.ends_with(" new")))
     }
 
     /// Give worker `name`'s shell the keyboard; its session.
@@ -208,7 +209,7 @@ mod tests {
             .wait_for("the pill to show far's waiting agent", STEP, |d| {
                 focused_worker(d) == Some(NEAR)
                     && worker(d, FAR).is_some_and(|w| w.needs_you == 1)
-                    && pill(d).as_deref() == Some("1 needs you")
+                    && pill(d).as_deref() == Some("1 new")
             })
             .await
             .unwrap();

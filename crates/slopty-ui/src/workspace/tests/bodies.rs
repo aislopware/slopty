@@ -50,8 +50,8 @@ fn a_remote_window_waits_blank_then_says_what_is_opening(cx: &mut TestAppContext
     assert!(said, "past the grace it says what opens where");
 }
 
-/// A file with an unsaved edit carries its dot right after its title, a base unit on, not at
-/// the far end of the header.
+/// A file with an unsaved edit carries its dot right after its title's text, a half unit on,
+/// before the directory the file is in, and not at the far end of the header.
 #[gpui::test]
 fn the_unsaved_dot_follows_the_title(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -75,7 +75,9 @@ fn the_unsaved_dot_follows_the_title(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let name = bounds(cx, selector("name", tile.item));
     let dot = bounds(cx, selector("unsaved", tile.item));
-    near(f32::from(dot.left() - name.right()), Theme::default().spacing.sm);
+    let place = bounds(cx, selector("place", tile.item));
+    near(f32::from(dot.left() - name.right()), Theme::default().spacing.xs);
+    assert!(place.left() > dot.right(), "the directory after them: {place:?} {dot:?}");
 }
 
 /// A shell whose last command failed leaves the failure to the grid while the grid shows it,

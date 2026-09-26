@@ -385,7 +385,8 @@ mod tests {
         );
     }
 
-    /// The dialog is as tall as the file: a short one leaves room for a few lines to type,
+    /// The dialog opens at the one modal anchor, where the palette does, and is as tall as the
+    /// file: a short one leaves room for a few lines to type,
     /// each line typed grows it by one, and past [`MAX_ROWS`] it stops and the field scrolls.
     #[gpui::test]
     fn the_dialog_is_as_tall_as_the_file(cx: &mut TestAppContext) {
@@ -400,6 +401,9 @@ mod tests {
         assert_eq!(rows(cx), MIN_ROWS, "two lines get the fewest");
         let viewport = cx.update(|window, _cx| f32::from(window.viewport_size().height));
         assert!(short < viewport * 0.5, "not a share of the window: {short} of {viewport}");
+        let top = f32::from(cx.debug_bounds("settings-editor").expect("the dialog").top());
+        let anchor = viewport * crate::kit::MODAL_ANCHOR;
+        assert!((top - anchor).abs() < 0.5, "where the palette opens: {top} for {anchor}");
 
         for _ in 0..MIN_ROWS {
             cx.simulate_keystrokes("enter");

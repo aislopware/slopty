@@ -494,8 +494,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   | `surfaces.text` | `E6E6E6` | `1D1D1F` | primary |
   | `surfaces.text_secondary` | `B4B9C3` | `4B4F58` | labels, tool summaries, counts |
   | `surfaces.text_muted` | `8B919C` | `66666B` | hints, timestamps, folds, inactive titles |
-  | `surfaces.accent` | `8AB4F8` | `2A63C4` | focus ring, active border, primary action, links |
-  | `surfaces.accent_fg` | `0A0B0E` | `FFFFFF` | text on an accent fill |
+  | `surfaces.accent` | `8AB4F8` | `2A63C4` | focus ring, active border, links (text and hairlines only) |
   | `surfaces.success` | `98C379` | `187633` | connected, agent done |
   | `surfaces.warn` | `E5C07B` | `8B5D00` | agent waiting, "N need you", muted, reconnecting |
   | `surfaces.error` | `F06C75` | `C7212C` | failed result, failed command, pairing error |
@@ -522,7 +521,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `spacing.sm`/`spacing.xxs` padding, `small()` type, `TINT` fill of their tone with the tone
   as text. Buttons: `radii.sm`, `spacing.md`/`spacing.xs` padding in a dialog and
   `spacing.sm`/`spacing.xs` in a bar; the one primary action per surface is an accent fill
-  with `accent_fg` text, a secondary one is `raised` → `overlay`. Key caps are `raised` on the
+  with `accent_fg` text, a secondary one is `raised` → `overlay`. (Amended 2026-09-27 (design audit): a fill takes
+  `accent_fill` with `fill_fg`, and `accent_fg` is gone; see **Fills are fills** below.) Key caps are `raised` on the
   `panel` bar, the accent when armed. Markdown in the conversation gets
   `markdown_line_height`, paragraph gaps of one base unit, headings stepping down from
   `title()` to the base, code in the terminal mono at `small()` on `raised`. gpui-kit's own
@@ -957,7 +957,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
   The five were darkened 5–10% with the hue held (table above). `chrome_text_clears_wcag_aa`
   checks all seven inks against all four surfaces in both variants, plus `accent_fg` on an
-  accent fill: a status label follows its card and a card can sit on any surface, so checking
+  accent fill (Amended 2026-09-27 (design audit): the accent is no longer a fill, so that pair went with
+  `accent_fg`; `status_fills_read_as_their_hue` holds `fill_fg` on `accent_fill` to AA): a status label follows its card and a card can sit on any surface, so checking
   an ink against the one surface it usually has is checking the easy case.
 
 - ✅ **A title is cut for an ellipsis only when it is more than half a pixel too wide.**
@@ -1171,7 +1172,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - A selected palette or picker row was an accent tint, the loudest fill on screen after
     the primary button, for the row the arrow keys are on. It is `overlay`, the neutral step
     Zed, Linear and Raycast use; hover is `raised` and no longer paints over the selection.
-    The accent keeps to focus, the primary action, links and a text selection.
+    The accent keeps to focus, the primary action, links and a text selection. (Amended 2026-09-27 (design audit):
+    the primary action is the accent *fill*, not this text tone.)
   - Text in the palette, the picker and settings started on three edges within 10 pt: a
     gpui-kit field pads itself (10 pt at its default size), so the typed text sat right of the
     rows below it. The field's pad is taken off and the container pads to the rows' edge
@@ -1714,19 +1716,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and opens the hosts popover. Last comes the agent summary. The frame time is a
     measurement, not a fact about the work, so it shows only with the stream stats (⌘⇧I).
     Every count, age, port and round trip is set in tabular figures (`kit::tabular`).
+    Amended 2026-09-27 (design audit): the directory is in the UI face, as all chrome context is (mono is for ports
+    and figures). `N workers` shows only while a worker is down; with every link up it said
+    nothing, and the "…" menu's *Workers* opens the popover instead. The agent summary counts
+    only the agents at work: who waits on the human is the bell's count alone.
   - **Hosts popover.** It lists each worker in a 28 pt row: the server mark or the status
     mark, the name, and the round trip or the word for what is wrong. Under the pointer the
     row shows *Connect* (only while the link is down) and *Forget* (only for a worker added
     by address). *Add a worker* sits at the foot. Connecting and forgetting are the app's, so
     the app hands the workspace those actions (`set_host_actions`). *Connect* wakes the
-    worker's redial out of its backoff; *Forget* is the "…" menu's forget. A row goes to the
+    worker's redial out of its backoff; *Forget* is the "…" menu's forget. (Amended 2026-09-27 (design audit): the "…"
+    menu no longer lists a *Forget* row per worker; the popover's is the one place.) A row goes to the
     worker's tiles, and a click anywhere else closes the popover.
   - **Inbox** (`inbox.rs`). The inbox keeps a history of the last 200 commands that finished
     unwatched, which gives it the *All* view the 2026-09-25 entry lacked. *Unread* is what is
     still badged on a header: read state is the badge, so reading a row, looking at its tile
     and clearing its badge are one act. A later command in the same session replaces the
     earlier one's badge, so the earlier row counts as read. Each row has two lines: the
-    command (or the agent's words), then the outcome, worker and directory in mono. The age
+    command (or the agent's words), then the outcome, worker and directory in mono.
+    (Amended 2026-09-27 (design audit): see **The design audit** below for the rows' rhythm and words.) The age
     on the right swaps for a mark-read button under the pointer. *Mark all read* clears every
     badge. An agent waiting is not marked read: answering it is what reads it. Newest first.
     With nothing unread the inbox says "You're all caught up" under an inbox mark.
@@ -1734,7 +1742,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     section heading already says, and it pushed the name right. The row leads with one fixed
     slot, `palette::status_slot`, which holds the kind icon at rest and the status mark once
     there is a state; the picker, the navigator and the tile headers share it. A muted second
-    column gives the worker (once there are two) and the directory in mono. The session's age
+    column gives the worker (once there are two) and the directory in mono (Amended 2026-09-27 (design audit): in
+    the UI face). The session's age
     (from the worker's `started_ms`) sits right-aligned. The filter matches that column too,
     so a worker's or a directory's name finds its tiles. Section headings are `small()` in the
     strong weight, as the plan's type discipline keeps `caption()` for badges.
@@ -1893,11 +1902,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     a frame fell to about 1.2 ms (MEASUREMENTS, "the navigator as a virtual list").
   - A focus move scrolls its row into view once, so a list the human scrolled away stays put.
   - A shell with no directory names its worker on line 2, so the line is never a lone age.
+    Amended 2026-09-27 (design audit): a row under its worker's header never repeats the worker's name. A row with
+    nothing to add is one line (`kit::Row::One`), and the age ends its first line either way.
   - On a phone the drawer and its scrim draw above the workspace down to the window's bottom
-    edge, through the home-indicator band; the rows stay inset by the safe area.
+    edge, through the home-indicator band; the rows stay inset by the safe area. Amended 2026-09-27 (design audit):
+    so does the navigator laid over the frame on an iPad (`Mode::Overlay`).
   Tests (`workspace/tests/nav_list.rs`): `the_navigator_draws_only_the_rows_in_view`,
-  `the_focused_tiles_row_scrolls_into_view`, `a_shell_with_no_directory_names_its_worker`,
-  `the_phone_drawer_runs_through_the_home_indicator_band`.
+  `the_focused_tiles_row_scrolls_into_view`, `a_row_with_nothing_to_add_is_one_line`,
+  `the_phone_drawer_runs_through_the_home_indicator_band`,
+  `the_overlaid_navigator_runs_through_the_home_indicator_band`.
 
 - ✅ **The chrome is derived from the content, and what floats is elevated** (2026-09-27, UI
   wave 2 foundation). The design review of the goldens found overlays painted on `panel`, which
@@ -1976,6 +1989,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - An empty field lists the tiles, the workers and five commands: the ones last run from
     the palette (app-wide, newest first), then the first bound actions. Typing lists all of it.
   - Commands carry no icon. The leading slot is for tiles and workers, and a status takes it.
+    Amended 2026-09-27 (design audit): a command keeps the slot, empty, so every title in the list starts on one
+    left edge; two edges read as misalignment, not as a grouping.
     A tile's right edge says its status word ("Working", "Needs you") while it is not idle,
     in the status tone, else its age past a minute. A worker's says its state in sentence
     case, else its round trip. The kind ("Note", "File") sits in the muted context column.
@@ -1985,13 +2000,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - On a phone (narrower than `phone_below`) the palette is a sheet from the top at the
     window's width, down to the keyboard. A fade over the list's foot shows while rows run on
     below, because a touch list has no scrollbar. Opening the palette puts the drawer or the
-    overlaid navigator away.
+    overlaid navigator away. Amended 2026-09-27 (design audit): the desktop list wears the same fade, since the row
+    its height cut ended on the foot's hairline and read as broken. The palette and the
+    pickers dim nothing (`kit::anchor`); the scrim is for the modals (`kit::backdrop`).
   - Empty states come in tiers. A filter that leaves nothing is one quiet line on the edge
     grid ("No command matches", the picker's "Nothing matches", an inbox emptied by reading).
     A list with nothing to hold at all says why: the picker's "Nothing on the canvas…", and an
     inbox that has never held anything names what lands there. None of them has an icon.
   - An inbox row reads down its right edge. The status word ("Needs you", "Done", "Exit 101")
-    is on line one and the age on line two. A waiting agent's age is counted from the worker's
+    is on line one and the age on line two. (Amended 2026-09-27 (design audit): the age ends line one and no word
+    repeats the section heading; an exit leads line two.) A waiting agent's age is counted from the worker's
     `since_ms`, so a reconnect keeps it. The popover stands `spacing.xs` clear of the title
     bar.
   Tests: palette `an_empty_field_lists_the_tiles_and_the_recent_commands`,
@@ -1999,7 +2017,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone`,
   `the_icon_slot_keeps_every_title_on_one_edge`, `the_palette_finds_an_unnamed_note`,
   `opening_the_palette_puts_the_phone_drawer_away`,
-  `an_inbox_row_says_its_status_and_age_down_the_right_edge`,
+  `an_inbox_row_says_its_age_first_and_no_word_its_heading_does`,
   `an_empty_inbox_explains_itself_once`; picker
   `the_picker_waits_for_the_listing_and_says_when_nothing_is_left`.
 
@@ -2033,7 +2051,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   of a 402 pt phone. On touch the field ends in a Paste, since the phone has no ⌘V, and the
   primary action spans the panel. Over the workspace the panel is a dialog like the others:
   `kit::elevate`d on `kit::backdrop` (scrim, near the top, under the safe area), closed by
-  Cancel, Esc or a click outside it.
+  Cancel, Esc or a click outside it. Amended 2026-09-27 (design audit): the first run's page is the content surface,
+  not the canvas (in dark the near-black read as nothing having loaded); the field's example
+  is the panel's own kind of host; a server the tailnet found is named in the blurb's place;
+  the dialog opens at the one modal anchor.
   Tests: app `the_first_run_sits_a_third_down_on_every_device`,
   `the_dialog_closes_on_esc_or_a_click_outside`.
 
@@ -2045,6 +2066,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   only exists on glass. A symbol's cap is square and a word's is a small step wider each side,
   never grown: the terminal's row fits the narrowest iPad and scrolls on a phone. An end with
   keys past it fades into the bar, read from the row's scroll state after layout.
+  Amended 2026-09-27 (design audit): where the row fits (an iPad) its groups spread along the bar, as a keyboard's
+  do: esc, tab and the modifiers at the left, the arrows in the middle, the symbols and the
+  word keys (Copy, Paste, Find) at the right. A lit key is the accent fill. Test:
+  `a_wide_key_bar_spreads_its_groups`.
   Tests: app `the_key_caps_keep_their_width`, `the_key_row_fades_where_keys_run_past_the_edge`.
 
 - ✅ **Touch density on iOS** (2026-09-27, UI wave 2 app shell). `settings::theme_for` sets
@@ -2061,7 +2086,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   panes all round (so the md radius clears their square corners), and a 2 pt accent ring
   round the active one. The gap above a workspace holds the name plus both cards' margins.
   The trailing empty workspace is a compact ghost "New workspace" button where the next name
-  would go, on the last card's left edge; it opens that workspace. Below zoom 0.5 a tile is
+  would go, on the last card's left edge; it opens that workspace. (Amended 2026-09-27 (design audit): its words
+  start where the names and the panes do, `kit::button_text_inset` left of them.) Below zoom 0.5 a tile is
   its header and body surfaces only. The body's surface is laid over its view rather than the
   view dropped, so the keyboard stays in the focused terminal or editor through the overview.
   - Amended 2026-09-27: shapes alone made every tile the same blank card, so each surface
@@ -2101,7 +2127,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_failure_the_grid_shows_leaves_the_header_slot_alone`.
 
 - ✅ **Tile details: editor bar, unsaved dot, tabs, ports, page buttons, empty workspace, note
-  title** (2026-09-27, UI wave 2 tiles). The file's conflict bar starts on the header's inset
+  title** (2026-09-27, UI wave 2 tiles). (Amended 2026-09-27 (design audit): see **The design audit** below for
+  the header's context and the dot.) The file's conflict bar starts on the header's inset
   after a warn mark, with "Reload" as a small secondary button and "Overwrite", the way that
   loses the disk's text, as the quieter ghost. The unsaved dot follows the title. A tabbed
   column's tabs take their titles' widths between 120 and 200 pt. A forwarded port is one
@@ -2146,6 +2173,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     "Failed"), else the unseen dot, else its age from a minute on. The leading slot keeps the
     kind: one mark per row, and the state reads down the right edge. Line two is all meta
     text: directory, agent words or last command, branch; a note's task progress or next line.
+    Amended 2026-09-27 (design audit): one part order everywhere, what it is doing then where (agent words or last
+    command, directory, branch), joined by " · " as the rest of the chrome joins facts; a home
+    directory alone, a kind word and the worker's name are left out, and a row with nothing
+    left is one line. *Needs you* and *Working* rows read the agent's words, then worker and
+    directory, in the same order.
   - A row waiting on the human is washed in `warn_fill` at `alpha::FAINT`.
   - A worker's header drops the tile count (its rows are the count) and names its round trip
     only from 20 ms, where typing starts to feel remote; the hosts popover always has it.
@@ -2173,7 +2205,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   weight. A tab that goes folds its width away over 160 ms, at once under Reduce Motion or with
   moves off. The dots show only while a column is out of view and never under the laid-over
   navigator. The right "+" is gone (the palette, ⌘T and the navigator's "+" open things), and
-  the rollup is a dot of its fill, the bell's badge the one count. The menus and the inbox
+  the rollup is a dot of its fill, the bell's badge the one count. (Amended 2026-09-27 (design audit): a lone
+  workspace's name carries no rollup; with one workspace it only repeated the bell.) The menus and the inbox
   paint at `Layer::Popover`, under the bell or "…".
   Tests: workspace `a_lone_workspace_is_its_name_and_tabs_say_what_they_hold`,
   `a_closing_tab_folds_away_unless_motion_is_reduced`,
@@ -2186,6 +2219,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   focused tile, its steps a quiet chevron apart, with no icon but a down worker's. Readouts
   are meta text in sentence case ("RTT 4.2 ms", "Frame 1.1 ms"), and a state is a small dot
   of its fill beside `text_secondary` words, so the tile and the bell keep the loud marks.
+  Amended 2026-09-27 (design audit): no readout wears an icon. The server's state and a down worker take the warn
+  dot, and the ports and uploads are their words alone.
   Tests: workspace `the_servers_word_leads_the_status_bar`,
   `the_status_bar_reads_the_focused_tile_and_its_link`.
 
@@ -2193,7 +2228,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   **Attention is said once per place**. The tile still showed it twice: a 2 pt warn bar along
   the header's top and the pill in the header. The pill always comes with a waiting agent, is
   the button to its prompt, and sits beside the status slot's warn mark, so the bar is gone.
-  The bell's badge and the status bar's count remain the one global count each. Likewise a
+  The bell's badge and the status bar's count remain the one global count each.
+  (Amended 2026-09-27 (design audit): the bell's badge is the one global count; the status bar's "N needs you" is
+  gone, and ⌘⇧A still goes to the next one waiting.) Likewise a
   command that finished unwatched: its slot's mark says done or failed in its tone and the
   unseen dot says it went unwatched, so the "Done · 6.0 s" readout beside them is quiet
   `text_secondary` text, still the button to the shell, not a third tinted pill. Test:
@@ -2233,3 +2270,83 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_worker_closing_with_not_granted_is_told_from_other_closes`,
   `a_refusal_is_reported_by_name_and_the_link_keeps_dialling`; net
   `a_not_granted_close_is_its_own_error`.
+
+- ✅ **The design audit: fills are fills, one count, one left edge, context in the UI face**
+  (2026-09-27). An audit of every golden against Warp, Zed and monocode found controls that
+  read as disabled, attention said twice, lists on two left edges, and context set three
+  ways. This entry amends the rulings it names in place (each marked "Amended 2026-09-27
+  (design audit)").
+  - **Fills are fills.** The dark accent (`8AB4F8`) is a text tone, lifted to read on the
+    canvas; as a button's fill it looked disabled. A fill now takes `accent_fill` with
+    `fill_fg`: the primary button (`kit::button`, gpui-kit's `primary`), a ticked task box in
+    a note, a lit key on the key bar, the terminal's accent buttons and the regex toggle.
+    `fill_fg` on `accent_fill` clears AA in both variants, where white on the light fill
+    would not (3.7). With nothing left drawing text on the accent, `accent_fg` is gone.
+    `kit` `the_accent_text_tone_is_never_a_fill` holds it.
+  - **One count of what waits.** The bell's badge is the only global count. The status bar
+    counts only the agents at work, and a lone workspace's name carries no rollup dot, since
+    with one workspace it only repeated the bell. ⌘⇧A still goes to the next one waiting.
+  - **The status bar says what is wrong, in words.** `N workers` shows only while a worker is
+    down (all up, it said nothing); the "…" menu's *Workers* opens the hosts popover. No
+    readout wears an icon. The server's state and a down worker take the warn dot, and the
+    ports and uploads are words. An upload's progress is the 2 pt `accent_fill` line along its
+    tile header's foot, which was already drawn and is now held by a test.
+  - **One left edge in a list.** A palette command keeps the leading slot, empty, so its
+    title starts where a tile's or a worker's does. A tab of a tabbed column starts its kind
+    on the header inset (12 pt, it was 8). A tile row's kind glyph sits under its worker's
+    name. The overview's "New workspace" words start where the workspace names and the panes
+    do.
+  - **One modal anchor, and a scrim only for a modal.** Every overlay's top sits a fifth of
+    the way down (`kit::MODAL_ANCHOR`), so the palette and the settings open at one place. The
+    palette and the pickers are lists typed at and float with no scrim (`kit::anchor`); the
+    settings and adding a worker hold the window and dim it (`kit::backdrop`). The desktop
+    palette fades its list's foot while more runs on below, so a cut row no longer ends on the
+    foot's hairline.
+  - **Navigator and inbox rows share a rhythm.** Second lines read what a tile is doing, then
+    where: agent words or command, directory, branch, joined by " · ". They leave out the
+    worker's name under its own header, a home directory alone, and a kind word, and a row with
+    nothing left is one line (its height follows, `NavRow::shape`). *Needs you* and *Working*
+    rows put a " · " between the agent's words and the place. Inbox rows are the navigator's
+    two lines (`kit::row`, `Row::Two`). The age ends line one and swaps for mark-read under the
+    pointer. No word repeats the section heading ("Needs you" under *Needs you*, "Done" under
+    *Finished*); a failed command's exit leads line two in its tone. The popover's right edge
+    sits on the window inset, like the "…" menu's.
+  - **A header is its title, then its context.** The context is muted, in the UI face, with
+    no separator: a shell's directory, a file's folder, a note's task count (`2/3`), a page's
+    host. A file's title is its name and a note's its first line; neither carries a " · "
+    suffix any more. The unsaved dot follows the title's text by `spacing.xs`, before the
+    folder. The status bar's breadcrumb and the palette's context column are in the UI face
+    too. Mono is kept for ports and figures.
+  - **The "…" menu in sections.** Navigation (palette, overview, stream stats), settings, then
+    connections (the server, adding a worker, *Workers*), a hairline between them
+    (`MenuGroup`). The per-worker *Forget* rows are gone; forgetting is the hosts popover's.
+  - **Touch.** The navigator laid over the frame on an iPad runs, with its scrim, through the
+    home-indicator band, as the phone's drawer does. A phone's tile, already the screen's
+    width, offers no fullscreen button. Where the key bar's row fits (an iPad) its groups
+    spread: esc, tab and the modifiers left, arrows centred, symbols and Copy, Paste, Find
+    right.
+  - **First run.** The page is the content surface, not the canvas. The field's example is the
+    panel's own kind of host ("home-server or 100.64.0.1" for a server, "mac-studio or
+    100.64.0.3" for a worker). A server the tailnet found is named in the blurb's place, its
+    name in the text colour, its address already in the field. The discovery has no gallery
+    scene: the e2e stack runs no tailnet, and filling `Adding::found` from a test hook would
+    fake the network. The headless test drives `offer_found` directly instead.
+  Tests: kit `the_kit_theme_follows_the_tokens`, `the_accent_text_tone_is_never_a_fill`,
+  `a_list_floats_and_a_modal_dims`, `the_mono_face_is_for_ports_and_the_settings_file`; settings_editor `the_dialog_is_as_tall_as_the_file` (its
+  anchor); workspace `a_lone_workspace_is_its_name_and_tabs_say_what_they_hold`,
+  `the_status_bar_reads_the_focused_tile_and_its_link`,
+  `the_status_bar_says_where_the_shell_is_and_counts_what_is_shared`,
+  `the_servers_word_leads_the_status_bar`,
+  `a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths`,
+  `the_icon_slot_keeps_every_title_on_one_edge`,
+  `the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone`,
+  `a_row_with_nothing_to_add_is_one_line`, `a_tiles_glyph_sits_under_its_workers_name`,
+  `a_tile_row_reads_its_age_or_its_state_then_its_place`,
+  `an_inbox_row_says_its_age_first_and_no_word_its_heading_does`,
+  `a_header_is_its_title_then_its_context_in_the_ui_face`, `the_unsaved_dot_follows_the_title`,
+  `a_tabbed_column_draws_a_tab_per_tile`, `the_overview_lifts_each_workspace_and_offers_a_new_one`,
+  `the_more_menu_groups_its_rows_into_sections`,
+  `the_overlaid_navigator_runs_through_the_home_indicator_band`,
+  `a_tile_that_fills_a_phone_offers_no_fullscreen`; app `a_wide_key_bar_spreads_its_groups`,
+  `the_panel_names_its_host_and_the_server_the_tailnet_found`. The goldens are to be recorded
+  again with this change.

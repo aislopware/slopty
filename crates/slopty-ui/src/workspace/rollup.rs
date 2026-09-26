@@ -134,7 +134,10 @@ pub(super) fn age_at(started_ms: u64, now: SystemTime) -> Option<Duration> {
     })
 }
 
-/// The navigator's second line: the parts that say something, joined by a bullet.
+/// What joins the parts of a meta line, as everywhere else in the chrome joins facts.
+pub(super) const META_SEPARATOR: &str = " \u{b7} ";
+
+/// The navigator's second line: the parts that say something, joined by a middle dot.
 pub(super) fn meta_line<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> String {
     parts
         .into_iter()
@@ -142,7 +145,7 @@ pub(super) fn meta_line<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) ->
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
-        .join(" \u{2022} ")
+        .join(META_SEPARATOR)
 }
 
 #[cfg(test)]
@@ -194,7 +197,7 @@ mod tests {
     fn the_second_line_skips_what_says_nothing() {
         assert_eq!(
             meta_line([Some("oss/slopty"), None, Some(" "), Some("main")]),
-            "oss/slopty • main"
+            "oss/slopty · main"
         );
         assert_eq!(meta_line([None, None]), "");
     }

@@ -39,8 +39,8 @@ use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
 use slopty_ui::terminal::TerminalView;
 use slopty_ui::workspace::{
-    HostActions, KeyTarget, MenuEntry, MenuRun, WorkerLink, WorkerStatus, WorkspaceEvent,
-    WorkspaceView,
+    HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, WorkerLink, WorkerStatus,
+    WorkspaceEvent, WorkspaceView,
 };
 pub use workers::actions::{AddWorker, ConnectServer, DisconnectServer};
 use workers::{Hearing, Tick, WorkerSlot};
@@ -110,6 +110,36 @@ fn cap_width(label: &str, spacing: Spacing) -> f32 {
     if label.chars().count() > 1 { 2.0_f32.mul_add(spacing.sm, side) } else { side }
 }
 
+/// Where a key sits on a row wide enough to spread the bar out (an iPad's): the keys the soft
+/// keyboard lacks at the left, the arrows in the middle, the symbols and the word keys (Copy,
+/// Paste, Find) at the right, as a hardware keyboard's own groups sit apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KeyGroup {
+    /// Esc, Tab and the sticky modifiers.
+    Lead,
+    /// The four arrows.
+    Arrows,
+    /// Shell symbols, then the word keys.
+    Trail,
+}
+
+/// The group `label`'s key belongs to.
+fn key_group(label: &str) -> KeyGroup {
+    match label {
+        "esc" | "tab" | "⌃" | "⌘" => KeyGroup::Lead,
+        "←" | "↑" | "↓" | "→" => KeyGroup::Arrows,
+        _ => KeyGroup::Trail,
+    }
+}
+
+/// How wide a row of `labels`' caps is, a gap between each and at its ends.
+fn key_row_width<'a>(labels: impl IntoIterator<Item = &'a str>, spacing: Spacing) -> f32 {
+    let (count, caps) = labels
+        .into_iter()
+        .fold((0.0_f32, 0.0_f32), |(n, w), label| (n + 1.0, w + cap_width(label, spacing)));
+    2.0_f32.mul_add(spacing.xs, (count - 1.0).max(0.0).mul_add(spacing.xs, caps))
+}
+
 /// Which ends of the key row fade, as `(leading, trailing)`: the leading one once the row is
 /// scrolled off its start, the trailing one while keys remain past the edge. `scrolled` is how
 /// far the row is scrolled in and `max` how far it can be (zero when it fits).
@@ -136,6 +166,17 @@ enum Panel {
     Server,
     /// One worker by address, for a setup without a server.
     Worker,
+}
+
+impl Panel {
+    /// The address field's example: the kind of host this panel is for, by name or by its
+    /// tailnet IP. A server is usually a small always-on box, a worker a Mac someone works on.
+    const fn example(self) -> &'static str {
+        match self {
+            Self::Server => "home-server or 100.64.0.1",
+            Self::Worker => "mac-studio or 100.64.0.3",
+        }
+    }
 }
 
 /// The panel that connects to a server or adds a worker by address: shown until this
@@ -454,8 +495,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The app's rows in the titlebar's "…" menu: settings, adding a worker, and forgetting
-    /// each one.
+    /// The app's rows in the titlebar's "…" menu: the settings, then the server and adding a
+    /// worker. Forgetting a worker is the hosts popover's, beside the worker it forgets.
     fn refresh_menu(&self, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
         let mut entries = Vec::new();
@@ -470,6 +511,7 @@ impl Workspace {
         {
             let this = this.clone();
             entries.push(MenuEntry {
+                group: MenuGroup::Settings,
                 label: "Settings".into(),
                 detail: hint(&OpenSettings).into(),
                 run: Rc::new(move |window, cx| {
@@ -481,6 +523,7 @@ impl Workspace {
             let this = this.clone();
             let entry = match self.server_address() {
                 Some(address) => MenuEntry {
+                    group: MenuGroup::Connections,
                     label: "Disconnect from the server".into(),
                     detail: address.host().to_owned().into(),
                     run: Rc::new(move |window, cx| {
@@ -488,6 +531,7 @@ impl Workspace {
                     }),
                 },
                 None => MenuEntry {
+                    group: MenuGroup::Connections,
                     label: "Connect to a server".into(),
                     detail: SharedString::default(),
                     run: Rc::new(move |window, cx| {
@@ -498,27 +542,14 @@ impl Workspace {
             };
             entries.push(entry);
         }
-        {
-            let this = this.clone();
-            entries.push(MenuEntry {
-                label: "Add a worker".into(),
-                detail: hint(&AddWorker).into(),
-                run: Rc::new(move |window, cx| {
-                    let _gone =
-                        this.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
-                }),
-            });
-        }
-        for slot in self.workers.iter().filter(|s| s.added) {
-            let (this, id) = (this.clone(), slot.id);
-            entries.push(MenuEntry {
-                label: format!("Forget {}", slot.name).into(),
-                detail: SharedString::default(),
-                run: Rc::new(move |window, cx| {
-                    let _gone = this.update(cx, |ws, cx| ws.forget_worker(id, window, cx));
-                }),
-            });
-        }
+        entries.push(MenuEntry {
+            group: MenuGroup::Connections,
+            label: "Add a worker".into(),
+            detail: hint(&AddWorker).into(),
+            run: Rc::new(move |window, cx| {
+                let _gone = this.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
+            }),
+        });
         self.view.update(cx, |v, cx| v.set_more_menu(entries, cx));
         self.refresh_hosts(cx);
     }
@@ -717,12 +748,14 @@ impl Workspace {
             if adding.mode != mode {
                 adding.mode = mode;
                 adding.error = None;
+                adding.address.update(cx, |input, cx| {
+                    input.set_placeholder(mode.example(), window, cx);
+                });
                 cx.notify();
             }
             return;
         }
-        let address =
-            cx.new(|cx| InputState::new(window, cx).placeholder("mac-studio or 100.64.0.3"));
+        let address = cx.new(|cx| InputState::new(window, cx).placeholder(mode.example()));
         self.subscriptions.push(cx.subscribe(&address, |this, _input, event, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.add_from_panel(cx);
@@ -745,19 +778,28 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Some(found)) = rx.await else { return };
-            let _updated = this.update_in(cx, |ws, window, cx| {
-                let Some(adding) = &mut ws.adding else { return };
-                let empty = adding.address.read(cx).value().trim().is_empty();
-                if adding.mode != Panel::Server || adding.busy || !empty {
-                    return;
-                }
-                let at = found.addr.ip().to_string();
-                adding.address.update(cx, |input, cx| input.set_value(at, window, cx));
-                adding.found = Some(found.name);
-                cx.notify();
-            });
+            let _updated = this.update_in(cx, |ws, window, cx| ws.offer_found(found, window, cx));
         })
         .detach();
+    }
+
+    /// The tailnet found `found`: its address goes in the field and its name in the blurb,
+    /// unless the person has moved on (typed something, switched to a worker, or connected).
+    fn offer_found(
+        &mut self,
+        found: slopty_net::discover::Found,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(adding) = &mut self.adding else { return };
+        let empty = adding.address.read(cx).value().trim().is_empty();
+        if adding.mode != Panel::Server || adding.busy || !empty {
+            return;
+        }
+        let at = found.addr.ip().to_string();
+        adding.address.update(cx, |input, cx| input.set_value(at, window, cx));
+        adding.found = Some(found.name);
+        cx.notify();
     }
 
     /// Close the panel (only offered while there is somewhere else to be).
@@ -932,11 +974,28 @@ impl Workspace {
                 Panel::Server,
             ),
         };
+        // A server the tailnet found is named in the blurb's place, the name in the text colour
+        // so it reads as the answer, with the address already in the field below it.
         let blurb = match (&adding.found, adding.mode) {
             (Some(name), Panel::Server) => {
-                SharedString::from(format!("Found {name} on your tailnet."))
+                let said = SharedString::from(format!("Found {name} on your tailnet"));
+                let at = "Found ".len();
+                let named =
+                    gpui::HighlightStyle { color: Some(hsla(s.text)), ..Default::default() };
+                div()
+                    .id("add-worker-found")
+                    .debug_selector(|| "add-worker-found".to_owned())
+                    .role(Role::Status)
+                    .aria_label(said.clone())
+                    .child(
+                        gpui::StyledText::new(said)
+                            .with_highlights([(at..at.saturating_add(name.len()), named)]),
+                    )
             }
-            _ => SharedString::from(blurb),
+            _ => div()
+                .id("add-worker-blurb")
+                .debug_selector(|| "add-worker-blurb".to_owned())
+                .child(blurb),
         };
         let welcome = self.welcome();
         let status = match (&adding.error, adding.busy) {
@@ -1016,10 +1075,9 @@ impl Workspace {
                             .child(title),
                     )
                     .child(
-                        div()
+                        blurb
                             .text_size(px(theme.typography.small()))
-                            .text_color(hsla(s.text_muted))
-                            .child(blurb),
+                            .text_color(hsla(s.text_muted)),
                     ),
             )
             .child(address)
@@ -1050,7 +1108,9 @@ impl Workspace {
                 .pt(safe.top)
                 .pb(safe.bottom)
                 .px(px(spacing.lg))
-                .bg(hsla(s.canvas))
+                // A page of content, not a bar: the content surface the tiles' bodies take,
+                // where the canvas's near-black read as nothing having loaded yet.
+                .bg(hsla(theme.content()))
                 .child(div().flex_grow(1.0))
                 .child(panel)
                 .child(div().flex_grow(2.0))
@@ -1081,9 +1141,11 @@ impl Workspace {
         window: &mut Window,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
+        let safe = window.insets().effective();
+        let width = f32::from(window.viewport_size().width - safe.left - safe.right);
         let row = match target {
-            KeyTarget::Terminal(terminal) => self.terminal_key_bar(terminal, cx),
-            KeyTarget::Screen(screen) => self.screen_key_bar(screen, cx),
+            KeyTarget::Terminal(terminal) => self.terminal_key_bar(terminal, width, cx),
+            KeyTarget::Screen(screen) => self.screen_key_bar(screen, width, cx),
         };
         // The offset is the one this frame scrolled to; the extent is the last layout's, so a
         // bar just shown, turned or resized is looked at again once it is laid out.
@@ -1127,6 +1189,43 @@ impl Workspace {
         key_bar_fades(scrolled, f32::from(self.key_bar_scroll.max_offset().x))
     }
 
+    /// The key bar's row with `keys` in it. Where they all fit in `width` (an iPad), their
+    /// groups spread along it ([`key_group`]); where they do not (a phone), one line in the
+    /// order given that scrolls sideways.
+    fn key_row_of(
+        &self,
+        keys: Vec<(&'static str, gpui::AnyElement)>,
+        width: f32,
+    ) -> gpui::Stateful<gpui::Div> {
+        let spacing = self.theme.spacing;
+        let row = self.key_row();
+        if key_row_width(keys.iter().map(|(label, _)| *label), spacing) > width {
+            return row.children(keys.into_iter().map(|(_, key)| key));
+        }
+        let group = || div().flex().items_center().gap(px(spacing.xs));
+        let (mut lead, mut arrows, mut symbols, mut words) =
+            (group(), group(), Vec::new(), Vec::new());
+        for (label, key) in keys {
+            match key_group(label) {
+                KeyGroup::Lead => lead = lead.child(key),
+                KeyGroup::Arrows => arrows = arrows.child(key),
+                KeyGroup::Trail if label.chars().count() > 1 => words.push(key),
+                KeyGroup::Trail => symbols.push(key),
+            }
+        }
+        row.debug_selector(|| "key-bar-spread".to_owned())
+            .child(lead.flex_1().debug_selector(|| "key-group-lead".to_owned()))
+            .child(arrows.flex_none().debug_selector(|| "key-group-arrows".to_owned()))
+            .child(
+                group()
+                    .flex_1()
+                    .justify_end()
+                    .debug_selector(|| "key-group-trail".to_owned())
+                    .children(symbols)
+                    .children(words),
+            )
+    }
+
     /// The key bar's row, before its keys: one line that scrolls sideways.
     fn key_row(&self) -> gpui::Stateful<gpui::Div> {
         let spacing = self.theme.spacing;
@@ -1144,8 +1243,8 @@ impl Workspace {
     }
 
     /// A key cap of the bar: `elevated` under the `border` hairline so it holds its edges on
-    /// the `canvas` bar in both variants, `overlay` while pressed, the accent with its
-    /// foreground when `lit` (armed or toggled on).
+    /// the `canvas` bar in both variants, `overlay` while pressed, the accent fill with the
+    /// fills' ink when `lit` (armed or toggled on).
     fn key_cap(
         &self,
         id: String,
@@ -1155,7 +1254,7 @@ impl Workspace {
     ) -> gpui::Stateful<gpui::Div> {
         let s = &self.theme.surfaces;
         let spacing = self.theme.spacing;
-        let pressed = if lit { s.accent } else { s.overlay };
+        let pressed = if lit { s.accent_fill } else { s.overlay };
         div()
             .id(SharedString::from(id))
             .flex_none()
@@ -1166,10 +1265,10 @@ impl Workspace {
             .justify_center()
             .rounded(px(self.theme.radii.sm))
             .border_1()
-            .border_color(hsla(if lit { s.accent } else { s.border }))
+            .border_color(hsla(if lit { s.accent_fill } else { s.border }))
             .text_size(px(text_size))
-            .text_color(hsla(if lit { s.accent_fg } else { s.text }))
-            .bg(hsla(if lit { s.accent } else { s.elevated }))
+            .text_color(hsla(if lit { s.fill_fg } else { s.text }))
+            .bg(hsla(if lit { s.accent_fill } else { s.elevated }))
             .active(move |el| el.bg(hsla(pressed)))
     }
 
@@ -1196,10 +1295,15 @@ impl Workspace {
     }
 
     /// The bar over a remote window: chords and arrows, copy and paste through the worker.
-    fn screen_key_bar(&self, screen: &Entity<ScreenView>, cx: &Context<Self>) -> gpui::AnyElement {
+    fn screen_key_bar(
+        &self,
+        screen: &Entity<ScreenView>,
+        width: f32,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
         let view = screen.read(cx);
         let (control, command) = (view.sticky(Sticky::Control), view.sticky(Sticky::Command));
-        let mut bar = self.key_row();
+        let mut keys: Vec<(&'static str, gpui::AnyElement)> = Vec::new();
         for (label, key, typed) in SCREEN_BAR_KEYS {
             let sticky = match key {
                 "" => Some(Sticky::Control),
@@ -1209,48 +1313,51 @@ impl Workspace {
             let lit = matches!(sticky, Some(Sticky::Control) if control)
                 || matches!(sticky, Some(Sticky::Command) if command);
             let target = screen.clone();
-            bar =
-                bar.child(self.bar_key(format!("skey-{label}"), label, lit, move |_window, cx| {
-                    target.update(cx, |v, cx| match sticky {
-                        Some(which) => {
-                            let on = !v.sticky(which);
-                            v.set_sticky(which, on, cx);
-                        }
-                        None => v.press(
-                            gpui::Keystroke {
-                                modifiers: gpui::Modifiers::default(),
-                                key: key.to_owned(),
-                                key_char: typed.map(str::to_owned),
-                            },
-                            cx,
-                        ),
-                    });
-                }));
+            let el = self.bar_key(format!("skey-{label}"), label, lit, move |_window, cx| {
+                target.update(cx, |v, cx| match sticky {
+                    Some(which) => {
+                        let on = !v.sticky(which);
+                        v.set_sticky(which, on, cx);
+                    }
+                    None => v.press(
+                        gpui::Keystroke {
+                            modifiers: gpui::Modifiers::default(),
+                            key: key.to_owned(),
+                            key_char: typed.map(str::to_owned),
+                        },
+                        cx,
+                    ),
+                });
+            });
+            keys.push((label, el.into_any_element()));
         }
         let target = screen.clone();
-        bar = bar.child(self.bar_key("skey-copy".to_owned(), "Copy", false, move |_w, cx| {
+        let copy = self.bar_key("skey-copy".to_owned(), "Copy", false, move |_w, cx| {
             target.update(cx, ScreenView::copy_key);
-        }));
+        });
+        keys.push(("Copy", copy.into_any_element()));
         let target = screen.clone();
-        bar = bar.child(self.bar_key("skey-paste".to_owned(), "Paste", false, move |_w, cx| {
+        let paste = self.bar_key("skey-paste".to_owned(), "Paste", false, move |_w, cx| {
             target.update(cx, ScreenView::paste_key);
-        }));
-        bar.into_any_element()
+        });
+        keys.push(("Paste", paste.into_any_element()));
+        self.key_row_of(keys, width).into_any_element()
     }
 
     fn terminal_key_bar(
         &self,
         terminal: &Entity<TerminalView>,
+        width: f32,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let s = &self.theme.surfaces;
         let armed = terminal.read(cx).sticky_control();
         let armed_command = terminal.read(cx).sticky_command();
         let has_selection = terminal.read(cx).selection().is_some();
-        let bar = self.key_row();
         let ui = self.theme.typography.ui_size;
         let small = self.theme.typography.small();
-        let mut keys: Vec<gpui::AnyElement> = Vec::with_capacity(BAR_KEYS.len().saturating_add(2));
+        let mut keys: Vec<(&'static str, gpui::AnyElement)> =
+            Vec::with_capacity(BAR_KEYS.len().saturating_add(2));
         for (label, key, typed) in BAR_KEYS {
             let is_control = key.is_empty();
             let is_command = key == "cmd";
@@ -1282,7 +1389,7 @@ impl Workspace {
                     }
                 });
             });
-            keys.push(key_el.into_any_element());
+            keys.push((label, key_el.into_any_element()));
         }
         // The phone has no ⌘C/⌘V: while text is selected the bar offers copy, otherwise paste.
         let target = terminal.clone();
@@ -1304,7 +1411,7 @@ impl Workspace {
             });
         });
         // Right after the arrows: on a phone it is in view before the row scrolls.
-        keys.insert(ARROWS_END.min(keys.len()), clipboard.into_any_element());
+        keys.insert(ARROWS_END.min(keys.len()), (clip_label, clipboard.into_any_element()));
         // No ⌘F either: "Find" opens the search bar, or closes it while it is open.
         let target = terminal.clone();
         let finding = terminal.read(cx).finding();
@@ -1322,8 +1429,8 @@ impl Workspace {
                 }
             });
         });
-        keys.push(find.into_any_element());
-        bar.children(keys).into_any_element()
+        keys.push(("Find", find.into_any_element()));
+        self.key_row_of(keys, width).into_any_element()
     }
 }
 
@@ -1759,12 +1866,28 @@ mod tests {
     fn the_key_caps_keep_their_width() {
         let spacing = Theme::default().spacing;
         let labels = BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Paste", "Find"]);
-        let (count, caps) = labels
-            .fold((0.0_f32, 0.0_f32), |(n, w), label| (n + 1.0, w + cap_width(label, spacing)));
-        let row = 2.0_f32.mul_add(spacing.xs, (count - 1.0).mul_add(spacing.xs, caps));
+        let row = key_row_width(labels, spacing);
         assert!(row > 402.0 && row < 744.0, "{row}");
         assert!((cap_width("|", spacing) - cap_side(spacing)).abs() < f32::EPSILON, "square");
         assert!(cap_side(spacing) < KEY_BAR_H, "a cap sits inside its bar");
+    }
+
+    /// Where the row fits (an iPad) its keys spread in three groups: what the soft keyboard
+    /// lacks at the left, the arrows in the middle, the symbols and the word keys at the right.
+    #[test]
+    fn a_wide_key_bar_spreads_its_groups() {
+        let spacing = Theme::default().spacing;
+        let group = |labels: &[&str]| labels.iter().map(|l| key_group(l)).collect::<Vec<_>>();
+        assert!(group(&["esc", "tab", "⌃", "⌘"]).iter().all(|g| *g == KeyGroup::Lead));
+        assert!(group(&["←", "↑", "↓", "→"]).iter().all(|g| *g == KeyGroup::Arrows));
+        let trail = group(&["~", "|", "/", "-", "Copy", "Paste", "Find"]);
+        assert!(trail.iter().all(|g| *g == KeyGroup::Trail));
+        let terminal = BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Paste", "Find"]);
+        let screen = SCREEN_BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Copy", "Paste"]);
+        for row in [key_row_width(terminal, spacing), key_row_width(screen, spacing)] {
+            assert!(row <= 744.0, "every bar spreads on the narrowest iPad: {row}");
+        }
+        assert!(key_row_width(["esc"], spacing) > 0.0, "one key is a row");
     }
 
     /// The shell in a headless window with the add-worker panel up, `worker` ones known so
@@ -1824,6 +1947,52 @@ mod tests {
                 "{w}×{h}: {above} above, {below} below"
             );
         }
+    }
+
+    /// Each panel's field gives an example of its own kind of host, and switching panels
+    /// switches it. A server the tailnet found is named where the blurb was, its address in
+    /// the field, unless the person has already typed one.
+    #[gpui::test]
+    fn the_panel_names_its_host_and_the_server_the_tailnet_found(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        let example = |cx: &mut VisualTestContext| {
+            ws.read_with(cx, |ws, cx| {
+                ws.adding
+                    .as_ref()
+                    .map(|a| a.address.read(cx).presentation().placeholder().to_string())
+            })
+        };
+        assert_eq!(example(cx).as_deref(), Some(Panel::Worker.example()));
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(example(cx).as_deref(), Some(Panel::Server.example()));
+        assert_ne!(Panel::Server.example(), Panel::Worker.example());
+
+        let found = |name: &str| slopty_net::discover::Found {
+            name: name.to_owned(),
+            addr: std::net::SocketAddr::from(([100, 64, 0, 1], 7_000)),
+        };
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| ws.offer_found(found("home-server"), window, cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("add-worker-found").is_some(), "named where the blurb was");
+        assert!(cx.debug_bounds("add-worker-blurb").is_none());
+        let typed = ws.read_with(cx, |ws, cx| {
+            ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())
+        });
+        assert_eq!(typed.as_deref(), Some("100.64.0.1"), "its address, ready to connect");
+
+        // A second answer does not overwrite what is in the field.
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| ws.offer_found(found("other"), window, cx));
+        });
+        let named = ws.read_with(cx, |ws, _| ws.adding.as_ref().and_then(|a| a.found.clone()));
+        assert_eq!(named.as_deref(), Some("home-server"));
     }
 
     /// Over the workspace the panel is a dialog: Esc closes it, and so does a click outside

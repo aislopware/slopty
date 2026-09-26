@@ -41,17 +41,31 @@ fn a_place_is_its_last_two_directories_with_home_as_a_tilde() {
     assert_eq!(cwd_tail("/"), "/");
 }
 
-/// A shell's header names where it is; a note, which is nowhere, names no place.
+/// A header is its title, then its context, muted with no separator: a shell's directory, a
+/// file's, a note's progress. A note with no tasks has none. (That the context is in the UI
+/// face is `kit`'s `the_mono_face_is_for_ports_and_the_settings_file`: the test platform
+/// shapes every family alike.)
 #[gpui::test]
-fn a_shell_header_names_its_directory(cx: &mut TestAppContext) {
+fn a_header_is_its_title_then_its_context_in_the_ui_face(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell =
         opens_in(&view, cx, &fake, SessionId::new(), fake.me, 1, Some("/Users/w/src/slopty"));
-    let note = arrives(&view, cx, &fake, ItemKind::Note { text: "plan".into() }, 2);
+    let file = arrives(&view, cx, &fake, ItemKind::File { path: "/w/src/main.rs".into() }, 2);
+    let tasks = "# Release\n- [x] tag\n- [ ] ship\n".to_owned();
+    let release = arrives(&view, cx, &fake, ItemKind::Note { text: tasks }, 3);
     let nodes = tree(cx);
-    assert!(nodes.iter().any(|n| n.is("Label", Some("src/slopty"))), "{nodes:#?}");
-    assert!(cx.debug_bounds(selector("place", shell.item)).is_some());
+    for label in ["src/slopty", "1/2", "src"] {
+        assert!(nodes.iter().any(|n| n.is("Label", Some(label))), "{label}: {nodes:#?}");
+    }
+    assert!(!nodes.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains(" · "))));
+    for tile in [shell, release, file] {
+        assert!(cx.debug_bounds(selector("place", tile.item)).is_some(), "{tile:?}");
+    }
+    let note = arrives(&view, cx, &fake, ItemKind::Note { text: "plan".into() }, 4);
+    view.update(cx, |v, cx| v.focus_tile(note, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("title", note.item)).is_some(), "its header is drawn");
     assert!(cx.debug_bounds(selector("place", note.item)).is_none(), "a note has no place");
 }
 
@@ -588,13 +602,20 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
 }
 
 /// A tabbed column's header is a tab row: a tab per tile with its title, the shown one
-/// selected; a click on a tab shows and focuses it, and a tab's close closes its tile.
+/// selected, each tab's kind on the edge grid a single header's is on; a click on a tab shows
+/// and focuses it, and a tab's close closes its tile.
 #[gpui::test]
 fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    let single = f32::from(
+        cx.debug_bounds(selector("status", first.item)).expect("the slot").left()
+            - cx.debug_bounds(selector("title", first.item)).expect("the header").left(),
+    );
+    let inset = Theme::default().spacing.inset();
+    assert!((single - inset).abs() < 0.5, "a single header's slot on the grid: {single}");
     cx.simulate_keystrokes("cmd-[");
     cx.simulate_keystrokes("cmd-alt-t");
     cx.run_until_parked();
@@ -605,6 +626,9 @@ fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     };
     let (a, b) = (tab(cx, first), tab(cx, second));
     assert_eq!(a.top(), b.top(), "side by side in one row");
+    let slot = cx.debug_bounds(selector("tab-slot", first.item)).expect("the tab's slot");
+    let tabbed = f32::from(slot.left() - a.left());
+    assert!((tabbed - single).abs() < 0.5, "a tab's slot on the same grid: {tabbed}");
     assert!(a.right() <= b.left(), "in the column's order");
     let tabs: Vec<_> = tree(cx).into_iter().filter(|n| n.role == "Tab").collect();
     assert_eq!(tabs.len(), 2, "{tabs:#?}");
@@ -622,4 +646,24 @@ fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let left: Vec<TileRef> = view.read_with(cx, |v, _| v.layout().tiles().collect());
     assert_eq!(left, vec![first], "its close closed that tab's tile");
+}
+
+/// On a phone a column is the screen's width already, so its header offers no fullscreen;
+/// on a desktop, where a column is part of the strip, it does.
+#[gpui::test]
+fn a_tile_that_fills_a_phone_offers_no_fullscreen(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    let button = |cx: &mut VisualTestContext| {
+        let id = format!("fullscreen-{}", shell.item.as_uuid());
+        cx.debug_bounds(Box::leak(id.into_boxed_str())).is_some()
+    };
+    assert!(button(cx), "a desktop column can fill the strip");
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert!(!button(cx), "a phone's column already does");
+    assert!(cx.debug_bounds(selector("close", shell.item)).is_some(), "close stays");
 }

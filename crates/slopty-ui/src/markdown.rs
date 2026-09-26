@@ -265,12 +265,13 @@ pub fn task_row(
         .items_center()
         .justify_center()
         .border_1()
-        .border_color(hsla(if done { s.accent } else { s.text_muted }))
-        // A ticked box is the accent with a tick in it; a filled grey square read as a glyph
-        // the font was missing.
+        .border_color(hsla(if done { s.accent_fill } else { s.text_muted }))
+        // A ticked box is the accent fill with a tick in it, as a native checkbox is; a filled
+        // grey square read as a glyph the font was missing, and the accent's text tone read as
+        // a disabled box in dark.
         .when(done, |b| {
-            b.bg(hsla(s.accent))
-                .text_color(hsla(s.accent_fg))
+            b.bg(hsla(s.accent_fill))
+                .text_color(hsla(s.fill_fg))
                 .text_size(px(theme.typography.caption() * scale))
                 .line_height(px(side))
                 .child("\u{2713}")
