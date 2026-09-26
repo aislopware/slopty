@@ -569,8 +569,8 @@ impl Receiving {
         Ok(())
     }
 
-    /// The file is whole: sync it, give it `mode` (when not 0) and its modification time,
-    /// rename it into place and sync the directory.
+    /// The file is whole: give it `mode` (when not 0) and its modification time, hand its
+    /// bytes to the drive and rename it into place.
     pub fn finish(self, mode: u32, mtime_ms: u64) -> Result<Landed, XferError> {
         use std::os::unix::fs::PermissionsExt as _;
         if self.at != self.size {
@@ -583,11 +583,11 @@ impl Receiving {
         if mode & 0o777 != 0 {
             self.file.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
         }
-        self.file.sync_all()?;
+        // A plain fsync, not the drive-cache flush `sync_all` is on Apple platforms, and no
+        // directory sync: 0.2 ms a file against 7.6 (MEASUREMENTS.md, "syncing a landed
+        // file"). A cut stream's bytes are still fully synced for its resume (`keep`).
+        rustix::fs::fsync(&self.file).map_err(std::io::Error::from)?;
         std::fs::rename(partial_of(&self.target), &self.target)?;
-        if let Some(dir) = self.target.parent() {
-            File::open(dir)?.sync_all()?;
-        }
         Ok(Landed { path: self.target, size: self.size, hash: self.hasher.finalize().into() })
     }
 

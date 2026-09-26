@@ -29,6 +29,7 @@ slopty-platform.workspace = true
 slopty-proto.workspace = true
 slopty-pty.workspace = true
 thiserror.workspace = true
+rustix.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

@@ -5657,3 +5657,41 @@ edits landed in the tree between the runs, so its change is not this one's numbe
 ```sh
 cargo test -p slopty-ui --lib measure_an_echo_frame_beside_the_chrome -- --ignored --nocapture
 ```
+
+## 2026-09-27 — uploading many small files
+
+An upload waited for the worker to acknowledge each file's stream before opening the next, so
+a tree of small files paid a round trip per file. 100 files of 4 KiB through the shaping relay
+at a 20 ms round trip (no rate limit, no loss), timed at the worker from `Begin` to the last
+byte of the last file:
+
+| client | time | per file |
+|---|---|---|
+| a round trip per file (before) | 2.154 s, 2.166 s | 21.6 ms |
+| up to 16 finished streams awaiting acknowledgement at once (after) | 150 ms, 156 ms | 1.5 ms |
+
+The files' bytes now follow each other; a stream the worker stops or loses is sent again from
+what it holds, as before. The walk of a dropped tree also moved off the async runtime
+(`spawn_blocking`), which it held for as long as a large directory took to stat.
+
+```sh
+cargo nextest run -p slopty-client -E 'test(many_small_files)' --no-capture
+```
+
+## 2026-09-27 — syncing a landed file
+
+What each landed file cost in syncs, 100 files of 4 KiB written, synced and renamed on this
+Mac's internal SSD (`/tmp`, release build of a scratch program), per file:
+
+| after the write | ms per file |
+|---|---|
+| nothing | 0.15–0.17 |
+| `sync_all` (`F_FULLFSYNC` on Apple platforms) | 3.77–4.11 |
+| `sync_all` and a directory `sync_all` (before, both sides) | 7.59–7.70 |
+| plain `fsync` (after) | 0.20 |
+
+A download also ran `sync_data` every 8 MiB, which a resume never needed: what a resume claims
+to hold is synced when it is asked for. A landed file, whose digest has matched, now gets a plain
+`fsync` before its rename and no directory sync, on the client and the worker. Ten thousand
+small files went from about 76 s of syncing to 2 s. A cut stream's bytes are still fully synced
+for its resume.

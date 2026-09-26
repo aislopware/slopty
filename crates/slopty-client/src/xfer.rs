@@ -358,13 +358,22 @@ pub struct Uplink {
 /// Every file is sent before this returns; the worker's `Done`, `Progress` and `Finished` arrive
 /// on the control stream. An error is the reason the transfer stopped, already reported to the
 /// worker as [`XferMsg::Failed`].
+///
+/// A file's bytes follow the last one's at once: up to 16 finished streams wait for
+/// the worker's acknowledgement together, where waiting on each would cost a round trip per
+/// file. A stream that fails is sent again from what the worker holds.
 pub async fn upload(
     up: &Uplink,
     xfer: XferId,
     files: &[PathBuf],
     dest: Dest,
 ) -> Result<(), String> {
-    let found = entries(files).map_err(|e| e.to_string());
+    // The walk of a dropped tree is blocking I/O: off the runtime that carries the keystrokes.
+    let files = files.to_vec();
+    let found = tokio::task::spawn_blocking(move || entries(&files))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|walked| walked.map_err(|e| e.to_string()));
     let list = match found {
         Ok(list) => list,
         Err(error) => {
@@ -375,15 +384,62 @@ pub async fn upload(
     let bytes = list.iter().fold(0_u64, |sum, e| sum.saturating_add(e.size));
     let count = u32::try_from(list.len()).unwrap_or(u32::MAX);
     send(up, XferMsg::Begin { xfer, dest: Some(dest), files: count, bytes }).await?;
-    for entry in &list {
-        if let Err(error) = send_with_resume(up, xfer, entry).await {
-            if !up.table.cancelled(xfer) {
-                fail(up, xfer, Some(entry.name.clone()), &error).await;
+    let sent = send_all(up, xfer, &list).await;
+    if let Err((entry, error)) = &sent
+        && !up.table.cancelled(xfer)
+    {
+        fail(up, xfer, entry.map(|e| e.name.clone()), error).await;
+    }
+    sent.map_err(|(_, error)| error)
+}
+
+/// Finished streams waiting for the worker's acknowledgement at once.
+const IN_FLIGHT: usize = 16;
+
+/// A finished stream's acknowledgement as its task hands it back: the file's place in the
+/// list, and whether the worker took every byte.
+type Acked = Option<Result<(usize, Result<(), String>), tokio::task::JoinError>>;
+
+/// Every file of `list`, the next one's bytes following the last's; the file that could not be
+/// sent and why.
+async fn send_all<'a>(
+    up: &Uplink,
+    xfer: XferId,
+    list: &'a [Entry],
+) -> Result<(), (Option<&'a Entry>, String)> {
+    let mut confirming = tokio::task::JoinSet::new();
+    for (ix, entry) in list.iter().enumerate() {
+        match send_file(up, xfer, entry, 0).await {
+            Ok(acked) => {
+                confirming.spawn(async move { (ix, acked.await) });
             }
-            return Err(error);
+            Err(error) => resume(up, xfer, entry, error).await.map_err(|e| (Some(entry), e))?,
+        }
+        while confirming.len() >= IN_FLIGHT {
+            acknowledged(up, xfer, list, confirming.join_next().await).await?;
         }
     }
+    while let Some(done) = confirming.join_next().await {
+        acknowledged(up, xfer, list, Some(done)).await?;
+    }
     Ok(())
+}
+
+/// One acknowledgement: a file the worker stopped or lost is sent again from what it holds.
+async fn acknowledged<'a>(
+    up: &Uplink,
+    xfer: XferId,
+    list: &'a [Entry],
+    done: Acked,
+) -> Result<(), (Option<&'a Entry>, String)> {
+    match done {
+        None | Some(Ok((_, Ok(())))) => Ok(()),
+        Some(Ok((ix, Err(error)))) => {
+            let entry = list.get(ix).ok_or_else(|| (None, "a file out of the list".to_owned()))?;
+            resume(up, xfer, entry, error).await.map_err(|e| (Some(entry), e))
+        }
+        Some(Err(e)) => Err((None, e.to_string())),
+    }
 }
 
 async fn send(up: &Uplink, msg: XferMsg) -> Result<(), String> {
@@ -395,32 +451,42 @@ async fn fail(up: &Uplink, xfer: XferId, name: Option<String>, error: &str) {
     let _closed = send(up, XferMsg::Failed { xfer, name, error: error.to_owned() }).await;
 }
 
-/// One file, resumed from what the worker holds after a cut stream.
-async fn send_with_resume(up: &Uplink, xfer: XferId, entry: &Entry) -> Result<(), String> {
-    let mut offset = 0_u64;
-    let mut attempt = 0_u32;
-    loop {
-        attempt = attempt.saturating_add(1);
-        match send_file(up, xfer, entry, offset).await {
+/// `entry` again after its stream failed with `error`, from what the worker holds, until it
+/// lands or [`ATTEMPTS`] have failed.
+async fn resume(up: &Uplink, xfer: XferId, entry: &Entry, error: String) -> Result<(), String> {
+    let mut error = error;
+    for _attempt in 1..ATTEMPTS {
+        if up.table.cancelled(xfer) {
+            return Err("cancelled".to_owned());
+        }
+        tracing::debug!(%xfer, name = %entry.name, %error, "stream cut; resuming");
+        let answer = up.table.wait_offset(xfer, entry.name.clone());
+        send(up, XferMsg::Resume { xfer, name: entry.name.clone() }).await?;
+        let offset = tokio::time::timeout(OFFSET_WAIT, answer)
+            .await
+            .map_err(|_elapsed| "the worker did not say how much it holds".to_owned())?
+            .map_err(|_dropped| "link closed".to_owned())?
+            .min(entry.size);
+        let sent = match send_file(up, xfer, entry, offset).await {
+            Ok(acked) => acked.await,
+            Err(e) => Err(e),
+        };
+        match sent {
             Ok(()) => return Ok(()),
-            Err(_) if up.table.cancelled(xfer) => return Err("cancelled".to_owned()),
-            Err(e) if attempt >= ATTEMPTS => return Err(e),
-            Err(e) => {
-                tracing::debug!(%xfer, name = %entry.name, error = %e, "stream cut; resuming");
-                let answer = up.table.wait_offset(xfer, entry.name.clone());
-                send(up, XferMsg::Resume { xfer, name: entry.name.clone() }).await?;
-                offset = tokio::time::timeout(OFFSET_WAIT, answer)
-                    .await
-                    .map_err(|_elapsed| "the worker did not say how much it holds".to_owned())?
-                    .map_err(|_dropped| "link closed".to_owned())?
-                    .min(entry.size);
-            }
+            Err(e) => error = e,
         }
     }
+    if up.table.cancelled(xfer) { Err("cancelled".to_owned()) } else { Err(error) }
 }
 
-/// Send `entry` from `offset` on a bulk stream of its own.
-async fn send_file(up: &Uplink, xfer: XferId, entry: &Entry, offset: u64) -> Result<(), String> {
+/// Send `entry` from `offset` on a bulk stream of its own and finish it; what is returned
+/// resolves once the worker has acknowledged every byte, or says why it did not.
+async fn send_file(
+    up: &Uplink,
+    xfer: XferId,
+    entry: &Entry,
+    offset: u64,
+) -> Result<impl Future<Output = Result<(), String>> + Send + 'static, String> {
     let header = BulkHeader {
         xfer,
         purpose: Purpose::Upload,
@@ -446,11 +512,13 @@ async fn send_file(up: &Uplink, xfer: XferId, entry: &Entry, offset: u64) -> Res
     }
     stream.finish().map_err(|e| e.to_string())?;
     // A stream the worker stopped after the last write surfaces here rather than in a write.
-    match stream.stopped().await {
-        Ok(None) => Ok(()),
-        Ok(Some(code)) => Err(format!("the worker stopped the stream ({code})")),
-        Err(e) => Err(e.to_string()),
-    }
+    Ok(async move {
+        match stream.stopped().await {
+            Ok(None) => Ok(()),
+            Ok(Some(code)) => Err(format!("the worker stopped the stream ({code})")),
+            Err(e) => Err(e.to_string()),
+        }
+    })
 }
 
 /// Ask the worker for `path` (a file, or a directory sent as its files) as transfer `xfer`, and
@@ -538,6 +606,20 @@ async fn durable(partial: &Path) -> u64 {
     file.metadata().await.map_or(0, |m| m.len())
 }
 
+/// A whole, checked file's bytes handed to the drive before it is renamed into place.
+///
+/// A plain `fsync`, not `F_FULLFSYNC` (which Rust's `sync_all` is on Apple platforms): the
+/// full flush costs 3.8 ms a file on this Mac's SSD against 0.2 ms, and a directory sync as
+/// much again, so ten thousand small files spent over a minute syncing (MEASUREMENTS.md,
+/// "syncing a landed file"). What a resume claims to hold is still fully synced
+/// ([`durable`]); a landed file has passed its digest, and cp, Finder and rsync sync nothing.
+async fn landed_data(file: &tokio::fs::File) -> std::io::Result<()> {
+    let file = file.try_clone().await?.into_std().await;
+    tokio::task::spawn_blocking(move || rustix::fs::fsync(&file).map_err(std::io::Error::from))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 /// Where `target`'s bytes are written until it is whole and checked.
 #[must_use]
 pub fn partial_of(target: &Path) -> PathBuf {
@@ -545,10 +627,6 @@ pub fn partial_of(target: &Path) -> PathBuf {
     name.push(".partial");
     PathBuf::from(name)
 }
-
-/// A download's partial file is synced after this many bytes, so what a retry claims to hold
-/// is on the disk.
-const SYNC_EVERY: u64 = 8 << 20;
 
 /// How long a whole file waits for the worker's digest, which rides the control stream.
 const DIGEST_WAIT: Duration = Duration::from_secs(10);
@@ -601,7 +679,7 @@ async fn write_file(
     let (mut file, mut hasher) = open_partial(&partial, header.offset).await.map_err(io)?;
     fetch.state.lock().files.insert(header.name.clone(), None);
     let expected = header.size.saturating_sub(header.offset);
-    let (mut got, mut unsynced) = (0_u64, 0_u64);
+    let mut got = 0_u64;
     let cut = loop {
         if !table.current(header.xfer) {
             break Some("given up".to_owned());
@@ -620,13 +698,7 @@ async fn write_file(
         }
         hasher.update(&chunk);
         got = got.saturating_add(n);
-        unsynced = unsynced.saturating_add(n);
-        if unsynced >= SYNC_EVERY {
-            file.sync_data().await.map_err(io)?;
-            unsynced = 0;
-        }
     };
-    file.sync_all().await.map_err(io)?;
     if let Some(why) = cut {
         return Err(format!("{}: cut at {got} of {expected} bytes: {why}", header.name));
     }
@@ -639,6 +711,7 @@ async fn write_file(
         let _gone = tokio::fs::remove_file(&partial).await;
         return Err(format!("{}: the digest does not match the worker's", header.name));
     }
+    landed_data(&file).await.map_err(io)?;
     {
         use std::os::unix::fs::PermissionsExt as _;
         let mode = std::fs::Permissions::from_mode(header.mode & 0o777);
@@ -650,11 +723,6 @@ async fn write_file(
         file.into_std().await.set_modified(mtime).map_err(io)?;
     }
     tokio::fs::rename(&partial, &target).await.map_err(io)?;
-    if let Some(parent) = target.parent()
-        && let Ok(parent) = tokio::fs::File::open(parent).await
-    {
-        let _synced = parent.sync_all().await;
-    }
     let mut state = fetch.state.lock();
     state.files.insert(header.name.clone(), Some(target.clone()));
     if !state.landed.contains(&target) {
