@@ -112,23 +112,7 @@ fn window_info(w: &SCWindow) -> Option<WindowInfo> {
 
 fn display_info(d: &SCDisplay) -> DisplayInfo {
     // SAFETY: plain property read on a valid object.
-    let id = unsafe { d.displayID() };
-    // SAFETY: plain property read on a valid object.
-    let frame = unsafe { d.frame() };
-    let pixels_wide = objc2_core_graphics::CGDisplayPixelsWide(id);
-    let scale = if frame.size.width > 0.0 {
-        to_f32(f64::from(u32::try_from(pixels_wide).unwrap_or(u32::MAX)) / frame.size.width)
-    } else {
-        1.0
-    };
-    let hz = crate::geometry::display_refresh_hz(id).unwrap_or(60.0);
-    DisplayInfo {
-        id,
-        w: to_f32(frame.size.width),
-        h: to_f32(frame.size.height),
-        scale,
-        hz: to_f32(hz),
-    }
+    crate::geometry::display_info(unsafe { d.displayID() })
 }
 
 #[expect(clippy::cast_possible_truncation, reason = "geometry in points fits f32 exactly")]

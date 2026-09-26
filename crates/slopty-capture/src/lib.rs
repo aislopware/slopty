@@ -33,9 +33,9 @@ pub use content::{Shareable, enumerate};
 pub use cursor::{AlphaAt, Layout, bgra_premultiplied, cursor_shape, warm_cursor};
 #[cfg(target_os = "macos")]
 pub use geometry::{
-    Above, can_capture, counts_as_occluder, display_bounds, display_enclosing, occluded, occluders,
-    pointer_location, pointer_moves, request_capture, target_bounds, window_bounds,
-    window_on_screen, window_owner_pid, window_state, window_title,
+    Above, active_displays, can_capture, counts_as_occluder, display_bounds, display_enclosing,
+    display_info, occluded, occluders, pointer_location, pointer_moves, request_capture,
+    target_bounds, window_bounds, window_on_screen, window_owner_pid, window_state, window_title,
 };
 #[cfg(target_os = "macos")]
 pub use sck::ScreenCaptureKit;

@@ -251,7 +251,7 @@ fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) 
     );
     let daemon = daemon.clone();
     tokio::spawn(async move {
-        let (caps, watched) = tokio::sync::watch::channel(slopty_worker::caps::probe(&[]).await);
+        let (caps, watched) = tokio::sync::watch::channel(slopty_worker::caps::probe(&[]));
         tokio::spawn(server::run(daemon, orchestrator, endpoint, addr, watched));
         let agents = slopty_worker::caps::installed_agents().await;
         caps.send_modify(|c| c.agents.clone_from(&agents));

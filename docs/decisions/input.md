@@ -108,6 +108,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     ScreenCaptureKit: `Pipeline::shareable` preflights and answers `NotPermitted`, since an
     enumeration without the grant raises the private-window consent prompt. Test:
     `plists_carry_the_paths_and_flags`.
+  - Also 2026-09-26: **the installed worker stopped asking every five seconds.** Its
+    capability watch listed the displays through ScreenCaptureKit on each tick, and on macOS 26
+    each such enumeration by a process not yet allowed to bypass the private window picker
+    raised that prompt again: tccd logged 960 requests from the worker in 40 minutes. The watch
+    now reads the displays from CoreGraphics (`slopty_capture::active_displays`, the same
+    `display_info` formula the stream's listing uses), which needs no grant and asks nobody.
+    ScreenCaptureKit is reached only when someone opens or lists a stream, so the prompt comes
+    at most once, when it is first used, and "Allow" holds it for the month macOS gives. Test:
+    `the_displays_are_listed_without_a_grant`.
 
 - 🔬 Whether macOS 26 drops modifier combos from unsigned processes — slop-desk claims it, we have
   never seen it. Verify with a ⌘ chord through an unsigned daemon against a signed one.

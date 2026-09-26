@@ -15,7 +15,7 @@ use objc2_core_graphics::{
     kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerPID,
 };
 use slopty_core::WindowId;
-use slopty_proto::screen::CaptureTarget;
+use slopty_proto::screen::{CaptureTarget, DisplayInfo};
 
 #[cfg(test)]
 use crate::source::{Crop, crop_for};
@@ -51,6 +51,50 @@ pub fn target_refresh_hz(target: CaptureTarget) -> Option<f64> {
         CaptureTarget::Window(id) => first_display_under(&window_bounds(id)?)?,
     };
     display_refresh_hz(display)
+}
+
+/// Every active display, from CoreGraphics. Unlike ScreenCaptureKit's enumeration this needs no
+/// Screen Recording grant and raises no consent prompt, so a watch may read it as often as it
+/// likes.
+#[must_use]
+pub fn active_displays() -> Vec<DisplayInfo> {
+    let mut ids = [0_u32; 32];
+    let mut count = 0_u32;
+    let room = u32::try_from(ids.len()).unwrap_or(0);
+    // SAFETY: `ids` has room for `max_displays` entries and `count` is a valid out pointer.
+    let err = unsafe {
+        objc2_core_graphics::CGGetActiveDisplayList(room, ids.as_mut_ptr(), &raw mut count)
+    };
+    if err != objc2_core_graphics::CGError::Success {
+        return Vec::new();
+    }
+    let n = usize::try_from(count).unwrap_or(0).min(ids.len());
+    ids.iter().take(n).map(|&id| display_info(id)).collect()
+}
+
+/// A display's size in points, backing scale and refresh rate.
+#[must_use]
+pub fn display_info(id: u32) -> DisplayInfo {
+    let frame = CGDisplayBounds(id);
+    let pixels_wide = objc2_core_graphics::CGDisplayPixelsWide(id);
+    let scale = if frame.size.width > 0.0 {
+        to_f32(f64::from(u32::try_from(pixels_wide).unwrap_or(u32::MAX)) / frame.size.width)
+    } else {
+        1.0
+    };
+    let hz = display_refresh_hz(id).unwrap_or(60.0);
+    DisplayInfo {
+        id,
+        w: to_f32(frame.size.width),
+        h: to_f32(frame.size.height),
+        scale,
+        hz: to_f32(hz),
+    }
+}
+
+#[expect(clippy::cast_possible_truncation, reason = "geometry in points fits f32 exactly")]
+const fn to_f32(v: f64) -> f32 {
+    v as f32
 }
 
 /// The first display `rect` touches.
@@ -329,6 +373,21 @@ pub fn request_capture() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The displays read without ScreenCaptureKit, by a test binary that holds no Screen
+    /// Recording grant: each with a size, a scale and a rate, as the stream's listing reads it.
+    #[test]
+    fn the_displays_are_listed_without_a_grant() {
+        let displays = active_displays();
+        if displays.is_empty() {
+            eprintln!("skipped: no display attached");
+            return;
+        }
+        for d in &displays {
+            assert!(d.w > 0.0 && d.h > 0.0 && d.scale >= 1.0 && d.hz > 0.0, "{d:?}");
+            assert!((display_bounds(d.id).w - f64::from(d.w)).abs() < 0.5, "{d:?}");
+        }
+    }
 
     const DISPLAY: Rect = Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 };
     /// A second display to the right, as CoreGraphics lays them out (global points).

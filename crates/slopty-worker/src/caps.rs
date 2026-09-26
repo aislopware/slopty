@@ -60,7 +60,7 @@ async fn version_of(program: &str) -> Option<String> {
 }
 
 /// Everything about this worker as it is now; `agents` from [`installed_agents`].
-pub async fn probe(agents: &[InstalledAgent]) -> WorkerCaps {
+pub fn probe(agents: &[InstalledAgent]) -> WorkerCaps {
     let can_capture = slopty_capture::can_capture();
     WorkerCaps {
         os: Os::MacOs,
@@ -71,8 +71,8 @@ pub async fn probe(agents: &[InstalledAgent]) -> WorkerCaps {
         memory: sysctl_u64(c"hw.memsize").unwrap_or(0),
         // Every Apple-silicon Mac encodes both in hardware (VideoToolbox).
         encoders: vec![VideoCodec::Hevc, VideoCodec::H264],
-        // Without Screen Recording the enumeration fails anyway, and asking could prompt.
-        displays: if can_capture { displays().await } else { Vec::new() },
+        // Without Screen Recording no display can be streamed, so none is offered.
+        displays: if can_capture { displays() } else { Vec::new() },
         agents: agents.to_vec(),
         can_capture,
         can_inject: slopty_input::can_post(),
@@ -81,18 +81,14 @@ pub async fn probe(agents: &[InstalledAgent]) -> WorkerCaps {
     }
 }
 
-async fn displays() -> Vec<DisplayCap> {
-    match crate::screen::shareable().await {
-        Ok(content) => content
-            .displays()
-            .into_iter()
-            .map(|d| DisplayCap { id: d.id, w: d.w, h: d.h, scale: d.scale, hz: d.hz })
-            .collect(),
-        Err(e) => {
-            tracing::debug!(error = %e, "displays not listed");
-            Vec::new()
-        }
-    }
+/// The displays, from CoreGraphics. The watch reads them every few seconds, and a
+/// ScreenCaptureKit enumeration that often raises the private-window consent prompt again and
+/// again until someone at this Mac allows it.
+fn displays() -> Vec<DisplayCap> {
+    slopty_capture::active_displays()
+        .into_iter()
+        .map(|d| DisplayCap { id: d.id, w: d.w, h: d.h, scale: d.scale, hz: d.hz })
+        .collect()
 }
 
 /// Keep `caps` current until every receiver is gone: permissions and displays every 5 s, the
@@ -106,7 +102,7 @@ pub async fn watch(caps: watch::Sender<WorkerCaps>, agents: Vec<InstalledAgent>)
         if caps.is_closed() {
             return;
         }
-        let mut next = probe(&agents).await;
+        let mut next = probe(&agents);
         let load_due = load_at.elapsed() >= LOAD_PERIOD;
         if load_due {
             load_at = tokio::time::Instant::now();
@@ -181,9 +177,9 @@ fn sysctl_u64(name: &CStr) -> Option<u64> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn the_probe_reads_this_mac() {
-        let caps = probe(&[]).await;
+    #[test]
+    fn the_probe_reads_this_mac() {
+        let caps = probe(&[]);
         assert!(
             caps.os_version.split('.').next().is_some_and(|major| major.parse::<u32>().is_ok()),
             "{caps:?}"
