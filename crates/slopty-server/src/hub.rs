@@ -32,7 +32,7 @@ use slopty_proto::orchestration::{
 use slopty_proto::server::{
     Event, FromServer, Liveness, Refusal, Registration, RequestId, ToServer, WorkerCaps, WorkerInfo,
 };
-use slopty_proto::terminal::SessionSummary;
+use slopty_proto::terminal::{SessionState, SessionSummary};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 /// How long an unreachable worker has to reconnect before it is presumed gone (Nomad's TTL plus
@@ -595,8 +595,15 @@ impl Lease {
                 }
             }
             ToServer::SessionOpened(summary) => {
-                // A known session reports a change (a resize): no event of its own.
+                // A known session reports a change (a resize, a new directory): no event of its
+                // own, but for its program exiting.
                 if let Some(known) = entry.sessions.iter_mut().find(|s| s.id == summary.id) {
+                    if let (SessionState::Running, SessionState::Exited { status }) =
+                        (known.state, summary.state)
+                    {
+                        let term = TermRef { worker, session: summary.id };
+                        hub.happen(Happening::SessionExited { term, status });
+                    }
                     known.clone_from(&summary);
                 } else {
                     entry.sessions.push(summary.clone());
@@ -671,7 +678,13 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::WriteFile { worker, .. }
         | Verb::ListDir { worker, .. }
         | Verb::Stat { worker, .. }
-        | Verb::ListPorts { worker } => Some(*worker),
+        | Verb::ListPorts { worker }
+        | Verb::ListItems { worker }
+        | Verb::OpenItem { worker, .. }
+        | Verb::ListWindows { worker } => Some(*worker),
+        Verb::RenameItem { item, .. } | Verb::RemoveItem { item } | Verb::PointAt { item } => {
+            Some(item.worker)
+        }
         Verb::SendInput { term, .. }
         | Verb::ReadScreen { term }
         | Verb::ReadOutput { term, .. }
@@ -741,7 +754,7 @@ pub(crate) mod tests {
     use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, BlockReason};
     use slopty_proto::orchestration::{Screen, TermRef};
     use slopty_proto::server::Os;
-    use slopty_proto::terminal::{CloseReason, SessionState};
+    use slopty_proto::terminal::CloseReason;
 
     use super::*;
 
@@ -1110,6 +1123,17 @@ pub(crate) mod tests {
         assert_eq!((seen[0].seq, seen[1].seq, next), (now, now + 1, now + 2));
         lease.handle(ToServer::SessionOpened(summary(session)));
         assert!(events(&hub, Some(next), 0).await.0.is_empty(), "a known session's update");
+        let exited =
+            SessionSummary { state: SessionState::Exited { status: 2 }, ..summary(session) };
+        lease.handle(ToServer::SessionOpened(exited.clone()));
+        let (seen, next, _) = events(&hub, Some(next), 0).await;
+        assert!(
+            matches!(seen.as_slice(), [HubEvent { what: Happening::SessionExited { term, status: 2 }, .. }]
+                if term.session == session),
+            "the program's exit is an event: {seen:?}"
+        );
+        lease.handle(ToServer::SessionOpened(exited));
+        assert!(events(&hub, Some(next), 0).await.0.is_empty(), "and only once");
 
         // A wait wakes for the next event, however long before its timeout it comes.
         let waiting = tokio::spawn({

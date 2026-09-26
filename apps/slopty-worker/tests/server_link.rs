@@ -9,12 +9,16 @@ mod tests {
     use std::process::Stdio;
     use std::time::Duration;
 
-    use slopty_core::WorkerId;
+    use slopty_core::{ClientId, WorkerId};
     use slopty_net::admission::Admission;
+    use slopty_net::client::{bind_client, connect_addr};
     use slopty_net::framed::{FramedRecv, FramedSend};
     use slopty_net::server::{AcceptedLink, ServerListener};
+    use slopty_proto::WorkerMsg;
+    use slopty_proto::handshake::Hello;
+    use slopty_proto::items::{ItemKind, ItemOp, ItemSync};
     use slopty_proto::orchestration::{
-        ErrorCode, Input, Outcome, Size, TermRef, Verb, WaitUntil, Waited,
+        ErrorCode, Input, ItemRef, Outcome, Size, TermRef, Verb, WaitUntil, Waited,
     };
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer};
     use slopty_proto::terminal::{CloseReason, SessionState};
@@ -251,6 +255,76 @@ mod tests {
 
         let ports = peer.ask(Verb::ListPorts { worker }).await;
         assert!(matches!(ports, Outcome::Ports(_)), "the link still answers: {ports:?}");
+    }
+
+    /// Items an orchestrator puts on the workspace reach a client as they happen: a page appears
+    /// with its name, is renamed, is pointed at and goes. A terminal's item is refused both ways,
+    /// since its session owns it.
+    #[tokio::test]
+    async fn an_orchestrated_item_reaches_a_client_and_leaves_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+        let worker = reg.worker;
+        let endpoint = bind_client().unwrap();
+        let hello = Hello { client: ClientId::new(), name: "watcher".to_owned() };
+        // The worker listens on every interface; its own machine reaches it on loopback.
+        let at = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, daemons.listen.port()));
+        let mut client =
+            tokio::time::timeout(STEP, connect_addr(&endpoint, at, hello)).await.unwrap().unwrap();
+        let mut next_items = async move || loop {
+            let msg = tokio::time::timeout(STEP, client.rx.recv()).await.unwrap().unwrap();
+            if let WorkerMsg::Items(sync @ (ItemSync::Delta { .. } | ItemSync::Pointed { .. })) =
+                msg
+            {
+                return sync;
+            }
+        };
+
+        let url = "http://localhost:5173/".to_owned();
+        let kind = ItemKind::Browser { url };
+        let opened = Verb::OpenItem { worker, kind: kind.clone(), name: Some("app".to_owned()) };
+        let Outcome::Item(item) = peer.ask(opened).await else { panic!("the page opens") };
+        let ItemSync::Delta { op: ItemOp::Upsert(shown), .. } = next_items().await else {
+            panic!("the client hears the page")
+        };
+        assert_eq!((shown.id, &shown.kind, shown.name.as_deref()), (item.item, &kind, Some("app")));
+        let Outcome::Items(listed) = peer.ask(Verb::ListItems { worker }).await else { panic!() };
+        assert_eq!(listed, [shown]);
+
+        let rename = Verb::RenameItem { item, name: Some("  docs ".to_owned()) };
+        assert_eq!(peer.ask(rename).await, Outcome::Done);
+        let ItemSync::Delta { op: ItemOp::Upsert(renamed), .. } = next_items().await else {
+            panic!("the client hears the name")
+        };
+        assert_eq!(renamed.name.as_deref(), Some("docs"), "trimmed as a person's is");
+
+        assert_eq!(peer.ask(Verb::PointAt { item }).await, Outcome::Done);
+        let ItemSync::Pointed { item: at, .. } = next_items().await else { panic!("pointed") };
+        assert_eq!(at, item.item);
+
+        assert_eq!(peer.ask(Verb::RemoveItem { item }).await, Outcome::Done);
+        assert!(
+            matches!(next_items().await, ItemSync::Delta { op: ItemOp::Remove(id), .. } if id == item.item)
+        );
+        let gone = peer.ask(Verb::PointAt { item }).await;
+        assert!(matches!(gone, Outcome::Error { code: ErrorCode::UnknownItem, .. }), "{gone:?}");
+
+        let Outcome::Opened(term) = peer.ask(open(worker, dir.path())).await else { panic!() };
+        let ItemSync::Delta { op: ItemOp::Upsert(shell), .. } = next_items().await else {
+            panic!("the terminal's item")
+        };
+        let theirs = ItemRef { worker, item: shell.id };
+        let kept = peer.ask(Verb::RemoveItem { item: theirs }).await;
+        assert!(matches!(kept, Outcome::Error { code: ErrorCode::Invalid, .. }), "{kept:?}");
+        let session = ItemKind::Terminal { session: term.session };
+        let refused = peer.ask(Verb::OpenItem { worker, kind: session, name: None }).await;
+        assert!(matches!(refused, Outcome::Error { code: ErrorCode::Invalid, .. }), "{refused:?}");
+        endpoint.close(0_u32.into(), b"done");
     }
 
     #[tokio::test]

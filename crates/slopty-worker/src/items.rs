@@ -73,6 +73,39 @@ impl ItemStore {
         }
     }
 
+    /// Every item, by id.
+    #[must_use]
+    pub fn items(&self) -> Vec<Item> {
+        self.inner.registry.lock().items.values().cloned().collect()
+    }
+
+    /// The item `id`, if the registry holds it.
+    #[must_use]
+    pub fn get(&self, id: ItemId) -> Option<Item> {
+        self.inner.registry.lock().items.get(&id).cloned()
+    }
+
+    /// Change the item `id` in place, checked as a proposal is, with no other change between
+    /// the read and the write. Returns the delta to broadcast.
+    pub fn update(
+        &self,
+        id: ItemId,
+        by: ClientId,
+        change: impl FnOnce(&mut Item),
+    ) -> Result<ItemSync, WorkerError> {
+        let delta = {
+            let mut registry = self.inner.registry.lock();
+            let mut item = registry.items.get(&id).cloned().ok_or(WorkerError::NoSuchItem)?;
+            change(&mut item);
+            let op = sanitize(ItemOp::Upsert(item))?;
+            apply_in(&mut registry, &op)?;
+            registry.version = registry.version.saturating_add(1);
+            ItemSync::Delta { version: registry.version, by, op }
+        };
+        self.persist();
+        Ok(delta)
+    }
+
     /// Current version.
     #[must_use]
     pub fn version(&self) -> u64 {

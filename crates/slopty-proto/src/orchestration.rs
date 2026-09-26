@@ -14,9 +14,11 @@
 //! watches the whole fleet.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{SessionId, WorkerId};
+use slopty_core::{ItemId, SessionId, WorkerId};
 
 use crate::agent::{AgentKind, AgentStatus, SessionAgent};
+use crate::items::{Item, ItemKind};
+use crate::screen::{DisplayInfo, WindowInfo};
 use crate::server::{Liveness, WorkerInfo};
 use crate::terminal::SessionSummary;
 
@@ -27,6 +29,15 @@ pub struct TermRef {
     pub worker: WorkerId,
     /// The session on that worker.
     pub session: SessionId,
+}
+
+/// An item on a worker's workspace.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ItemRef {
+    /// The worker whose registry holds it.
+    pub worker: WorkerId,
+    /// The item.
+    pub item: ItemId,
 }
 
 /// A terminal's grid in character cells.
@@ -230,6 +241,43 @@ pub enum Verb {
         /// Which.
         worker: WorkerId,
     },
+    /// The items on a worker's workspace; answered with [`Outcome::Items`].
+    ListItems {
+        /// Where.
+        worker: WorkerId,
+    },
+    /// Put an item on a worker's workspace, where every client shows it; answered with
+    /// [`Outcome::Item`]. A terminal comes with [`Verb::OpenTerminal`] instead.
+    OpenItem {
+        /// Where.
+        worker: WorkerId,
+        /// What it shows.
+        kind: ItemKind,
+        /// A name for its tile.
+        name: Option<String>,
+    },
+    /// Name an item, or take its name away.
+    RenameItem {
+        /// Which.
+        item: ItemRef,
+        /// The new name; none shows what the item's content says.
+        name: Option<String>,
+    },
+    /// Take an item off the workspace; a terminal goes with [`Verb::Close`] instead.
+    RemoveItem {
+        /// Which.
+        item: ItemRef,
+    },
+    /// Point every client at an item: each offers a jump to it.
+    PointAt {
+        /// Which.
+        item: ItemRef,
+    },
+    /// The windows and displays a worker can stream; answered with [`Outcome::Screens`].
+    ListWindows {
+        /// Where.
+        worker: WorkerId,
+    },
 }
 
 /// Which [`HubEvent`]s a [`Verb::Events`] returns.
@@ -313,6 +361,14 @@ pub enum Happening {
         status: AgentStatus,
         /// What it says, for a human.
         detail: Option<String>,
+    },
+    /// A terminal's program exited; the terminal stays, its last screen readable, until it is
+    /// closed.
+    SessionExited {
+        /// Which.
+        term: TermRef,
+        /// Exit status, or the signal number negated.
+        status: i32,
     },
 }
 
@@ -428,6 +484,8 @@ pub enum ErrorCode {
     WorkerUnreachable,
     /// No such terminal.
     UnknownTerminal,
+    /// No such item.
+    UnknownItem,
     /// A malformed argument (a bad key name, a bad pattern).
     Invalid,
     /// The worker could not do it (a file error, a spawn failure).
@@ -472,7 +530,8 @@ pub enum Outcome {
     /// For [`Verb::ListPorts`].
     Ports(Vec<Port>),
     /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`], [`Verb::WriteFile`],
-    /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`]).
+    /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::RenameItem`],
+    /// [`Verb::RemoveItem`], [`Verb::PointAt`]).
     Done,
     /// It failed.
     Error {
@@ -498,5 +557,16 @@ pub enum Outcome {
         next: u64,
         /// Events after `since` the server no longer holds.
         missed: u64,
+    },
+    /// For [`Verb::ListItems`].
+    Items(Vec<Item>),
+    /// For [`Verb::OpenItem`].
+    Item(ItemRef),
+    /// For [`Verb::ListWindows`].
+    Screens {
+        /// Windows, front to back.
+        windows: Vec<WindowInfo>,
+        /// Displays.
+        displays: Vec<DisplayInfo>,
     },
 }

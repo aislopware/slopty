@@ -15,6 +15,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
+use slopty_core::WindowId;
+use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{ErrorCode, EventFilter, Input, Size, WaitUntil};
 
 use crate::ops::{self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_WAIT_MS, Spec};
@@ -253,6 +255,61 @@ struct WriteFileArgs {
     encoding: Encoding,
 }
 
+/// `open_item`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OpenItemArgs {
+    /// Worker name or id; the only worker online when omitted.
+    worker: Option<String>,
+    /// A web page, `http` or `https`; a localhost address is the worker's own.
+    url: Option<String>,
+    /// A text file on the worker to edit, absolute.
+    file: Option<String>,
+    /// A note's Markdown.
+    note: Option<String>,
+    /// A window to stream live, by its id from `list_windows`.
+    window: Option<u32>,
+    /// A whole display to stream live, by its id from `list_windows`.
+    display: Option<u32>,
+    /// A short name for the tile.
+    name: Option<String>,
+}
+
+/// An item alone.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ItemArgs {
+    /// The item, as `list_items` prints it (`worker/item`).
+    item: String,
+}
+
+/// `rename_item`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RenameItemArgs {
+    /// The item, as `list_items` prints it (`worker/item`).
+    item: String,
+    /// The new name; omitted takes the name away, and the tile says what it shows.
+    name: Option<String>,
+}
+
+impl OpenItemArgs {
+    fn kind(self) -> Result<(ItemKind, Option<String>), ToolError> {
+        let kinds = [
+            self.url.map(|url| ItemKind::Browser { url }),
+            self.file.map(|path| ItemKind::File { path }),
+            self.note.map(|text| ItemKind::Note { text }),
+            self.window.map(|id| ItemKind::Window { window: WindowId(id) }),
+            self.display.map(|display| ItemKind::Display { display }),
+        ];
+        let mut given = kinds.into_iter().flatten();
+        match (given.next(), given.next()) {
+            (Some(kind), None) => Ok((kind, self.name)),
+            _ => Err(ToolError::invalid("give exactly one of url, file, note, window, display")),
+        }
+    }
+}
+
 /// `cols` and `rows` together, or neither.
 fn size(cols: Option<u16>, rows: Option<u16>) -> Result<Option<Size>, ToolError> {
     match (cols, rows) {
@@ -410,7 +467,8 @@ pub fn list() -> Vec<Tool> {
         tool::<EventsArgs>(
             "events",
             "What happened across every worker, oldest first: agent status changes (`agent`, \
-             with `term` and `needs_human`), terminals opened and closed, workers online, \
+             with `term` and `needs_human`), terminals opened, exited (with `exit_status`) \
+             and closed, workers online, \
              unreachable, gone or removed. Blocks until at least one event or `timeout_ms`. \
              Returns `events`, `next` and `missed` (events dropped from the server's log). Pass \
              `next` back as `since` to go on without gaps. With `agent_input` it waits for the \
@@ -469,6 +527,47 @@ pub fn list() -> Vec<Tool> {
             "list_ports",
             "TCP ports listening in a worker's terminals' process trees, with the process and \
              the `term` it runs in: how to find the dev server a terminal started.",
+            Kind::Read,
+        ),
+        tool::<WorkerArgs>(
+            "list_items",
+            "The items on a worker's workspace, which every person's Slopty shows as tiles: \
+             `item` (the handle the item tools take, copy it verbatim), `kind` (terminal, \
+             window, display, note, file, browser), `name` when one was given, `sleeping`, and \
+             what it shows (`term`, `window`, `display`, `text`, `path` or `url`).",
+            Kind::Read,
+        ),
+        tool::<OpenItemArgs>(
+            "open_item",
+            "Put a tile on a worker's workspace for every person to see, and return its `item`. \
+             Give exactly one of: `url`, a web page (a localhost address is the worker's own, \
+             so the dev server list_ports finds opens as the worker serves it); `file`, a text \
+             file to edit; `note`, Markdown; `window` or `display`, streamed live, with ids \
+             from list_windows. A terminal comes with open_terminal instead.",
+            Kind::Write,
+        ),
+        tool::<RenameItemArgs>(
+            "rename_item",
+            "Give an item's tile a name, or take it away (omit `name`) so the tile says what \
+             it shows.",
+            Kind::Write,
+        ),
+        tool::<ItemArgs>(
+            "remove_item",
+            "Take an item off its workspace. A terminal's item goes with close_terminal.",
+            Kind::Destroy,
+        ),
+        tool::<ItemArgs>(
+            "point_at",
+            "Point every person looking at the workspace at an item: each Slopty offers a jump \
+             to its tile. For a result someone should look at now.",
+            Kind::Write,
+        ),
+        tool::<WorkerArgs>(
+            "list_windows",
+            "The windows and displays a worker can stream, for open_item: `windows` (`window` \
+             id, app, title, display, on_screen, width and height in points) and `displays` \
+             (`display` id, width, height, scale, hz).",
             Kind::Read,
         ),
         tool::<ForgetWorkerArgs>(
@@ -642,6 +741,38 @@ async fn run<D: Dispatch>(
             ops::forget_worker(&mut res, &a.worker).await?;
             json(&view::DONE)
         }
+        "list_items" => {
+            let a: WorkerArgs = args(arguments)?;
+            let (worker, items) = ops::items(&mut res, a.worker.as_deref()).await?;
+            json(&view::items(worker, &items))
+        }
+        "open_item" => {
+            let a: OpenItemArgs = args(arguments)?;
+            let worker = a.worker.clone();
+            let (kind, name) = a.kind()?;
+            let item = ops::open_item(&mut res, worker.as_deref(), kind, name).await?;
+            json(&view::opened_item(item))
+        }
+        "rename_item" => {
+            let a: RenameItemArgs = args(arguments)?;
+            ops::rename_item(&mut res, &a.item, a.name).await?;
+            json(&view::DONE)
+        }
+        "remove_item" => {
+            let a: ItemArgs = args(arguments)?;
+            ops::remove_item(&mut res, &a.item).await?;
+            json(&view::DONE)
+        }
+        "point_at" => {
+            let a: ItemArgs = args(arguments)?;
+            ops::point_at(&mut res, &a.item).await?;
+            json(&view::DONE)
+        }
+        "list_windows" => {
+            let a: WorkerArgs = args(arguments)?;
+            let (_worker, windows, displays) = ops::windows(&mut res, a.worker.as_deref()).await?;
+            json(&view::screens(&windows, &displays))
+        }
         other => Err(ToolError::invalid(format!("no tool is called {other}"))),
     }
 }
@@ -666,8 +797,9 @@ async fn with_progress<T>(wait: impl Future<Output = T>, progress: Option<Progre
 mod tests {
     use parking_lot::Mutex;
     use serde_json::json;
-    use slopty_core::{SessionId, WorkerId};
-    use slopty_proto::orchestration::{Outcome, TermRef, Verb, Waited};
+    use slopty_core::{ItemId, SessionId, WorkerId};
+    use slopty_proto::items::Item;
+    use slopty_proto::orchestration::{ItemRef, Outcome, TermRef, Verb, Waited};
     use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
 
@@ -675,6 +807,10 @@ mod tests {
 
     fn studio() -> WorkerId {
         "0199a000-0000-7000-8000-000000000001".parse().unwrap()
+    }
+
+    fn page() -> ItemId {
+        "0199a1b1-c3d4-7000-8000-0000000017e5".parse().unwrap()
     }
 
     fn shell() -> SessionId {
@@ -749,6 +885,13 @@ mod tests {
                     code: ErrorCode::UnknownTerminal,
                     message: "no such terminal".to_owned(),
                 },
+                Verb::OpenItem { worker, .. } => Outcome::Item(ItemRef { worker, item: page() }),
+                Verb::ListItems { .. } => Outcome::Items(vec![Item {
+                    id: page(),
+                    kind: ItemKind::Browser { url: "http://localhost:5173/".to_owned() },
+                    sleeping: false,
+                    name: None,
+                }]),
                 _ => Outcome::Done,
             }
         }
@@ -786,6 +929,12 @@ mod tests {
                 "list_dir",
                 "stat",
                 "list_ports",
+                "list_items",
+                "open_item",
+                "rename_item",
+                "remove_item",
+                "point_at",
+                "list_windows",
                 "forget_worker",
             ]
         );
@@ -976,5 +1125,32 @@ mod tests {
         assert_eq!(*reported.lock(), [every, every.saturating_mul(2)], "at 10 s and 20 s of 25");
         let Some(Verb::WaitFor { timeout_ms, .. }) = fake.verbs().pop() else { panic!() };
         assert_eq!(timeout_ms, 30_000, "passed through; the server caps it");
+    }
+
+    /// An item is opened from exactly one of its kinds and named by a prefix of its id, which
+    /// resolves against the worker's items before the verb goes.
+    #[tokio::test]
+    async fn an_item_opens_from_one_kind_and_answers_to_a_prefix() {
+        let fake = Fake::default();
+        let (failed, text) =
+            call_json(&fake, "open_item", json!({ "url": "http://a/", "note": "x" })).await;
+        assert!(failed && text.contains("exactly one"), "{text}");
+        let open = json!({ "url": "http://localhost:5173/", "name": "app" });
+        let (failed, text) = call_json(&fake, "open_item", open).await;
+        assert!(!failed, "{text}");
+        let handle = format!("{}/{}", studio(), page());
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), json!({ "item": handle }));
+        let kind = ItemKind::Browser { url: "http://localhost:5173/".to_owned() };
+        let name = Some("app".to_owned());
+        assert_eq!(fake.verbs().pop(), Some(Verb::OpenItem { worker: studio(), kind, name }));
+
+        let (failed, text) =
+            call_json(&fake, "point_at", json!({ "item": "mac-studio/0199a1b1" })).await;
+        assert!(!failed, "{text}");
+        let item = ItemRef { worker: studio(), item: page() };
+        assert_eq!(fake.verbs().pop(), Some(Verb::PointAt { item }));
+        let (failed, text) = call_json(&fake, "rename_item", json!({ "item": "0199a1b1" })).await;
+        assert!(!failed, "{text}");
+        assert_eq!(fake.verbs().pop(), Some(Verb::RenameItem { item, name: None }));
     }
 }

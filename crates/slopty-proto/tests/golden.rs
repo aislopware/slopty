@@ -775,13 +775,15 @@ mod golden {
 
 #[cfg(test)]
 mod orchestration {
-    use slopty_core::{SessionId, WorkerId};
+    use slopty_core::{ItemId, SessionId, WindowId, WorkerId};
     use slopty_proto::agent::{AgentKind, AgentStatus, BlockReason};
     use slopty_proto::codec;
+    use slopty_proto::items::{Item, ItemKind};
     use slopty_proto::orchestration::{
-        DirEntry, EventFilter, FileKind, FileStat, Happening, HubEvent, Outcome, Size, TermRef,
-        Verb,
+        DirEntry, EventFilter, FileKind, FileStat, Happening, HubEvent, ItemRef, Outcome, Size,
+        TermRef, Verb,
     };
+    use slopty_proto::screen::{DisplayInfo, WindowInfo};
     use slopty_proto::server::{FromServer, ToServer};
     use uuid::Uuid;
 
@@ -885,6 +887,45 @@ mod orchestration {
         let forget =
             ToServer::Request { id: 10, verb: Verb::ForgetWorker { worker: term().worker } };
         snap("server_request_forget", &forget);
+        let exited = HubEvent {
+            seq: 43,
+            at_ms: 1_790_000_000_000,
+            what: Happening::SessionExited { term: term(), status: -9 },
+        };
+        let answer = Outcome::Events { events: vec![exited], next: 44, missed: 0 };
+        snap("server_reply_session_exited", &FromServer::Reply { id: 11, outcome: answer });
+    }
+
+    #[test]
+    fn workspace_items() {
+        let worker = term().worker;
+        let item = ItemRef { worker, item: ItemId::from_uuid(Uuid::from_u128(0x1_7e5)) };
+        let kind = ItemKind::Browser { url: "http://localhost:5173/".to_owned() };
+        let open = Verb::OpenItem { worker, kind: kind.clone(), name: Some("app".to_owned()) };
+        snap("server_request_open_item", &request(open));
+        snap("server_reply_item", &reply(Outcome::Item(item)));
+        let listed = Item { id: item.item, kind, sleeping: false, name: None };
+        snap("server_reply_items", &reply(Outcome::Items(vec![listed])));
+        let rename = Verb::RenameItem { item, name: Some("docs".to_owned()) };
+        snap("server_request_rename_item", &request(rename));
+        snap("server_request_remove_item", &request(Verb::RemoveItem { item }));
+        snap("server_request_point_at", &request(Verb::PointAt { item }));
+        snap("server_request_list_windows", &request(Verb::ListWindows { worker }));
+        let window = WindowInfo {
+            id: WindowId(4242),
+            app: "Safari".to_owned(),
+            bundle_id: Some("com.apple.Safari".to_owned()),
+            title: "Docs".to_owned(),
+            x: 0.0,
+            y: 25.0,
+            w: 1280.0,
+            h: 800.0,
+            display: 1,
+            on_screen: true,
+        };
+        let display = DisplayInfo { id: 1, w: 2560.0, h: 1440.0, scale: 2.0, hz: 120.0 };
+        let screens = Outcome::Screens { windows: vec![window], displays: vec![display] };
+        snap("server_reply_screens", &reply(screens));
     }
 }
 

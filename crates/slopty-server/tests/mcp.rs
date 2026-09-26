@@ -145,6 +145,12 @@ mod tests {
                 "list_dir",
                 "stat",
                 "list_ports",
+                "list_items",
+                "open_item",
+                "rename_item",
+                "remove_item",
+                "point_at",
+                "list_windows",
                 "forget_worker",
             ]
         );
@@ -284,7 +290,7 @@ mod tests {
 
         let inside = SocketAddr::from(([127, 0, 0, 1], port));
         let listed = rpc(inside, 1, "tools/list", None, json!({})).await;
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 19);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 25);
         serving.abort();
     }
 }

@@ -569,10 +569,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty_tailnet` (the three locations, status paths, whois, grants, the LocalAPI
     against a fake daemon, and `this_machine_is_its_own_users_node` against the real one),
     `slopty_net::admission`'s `the_tailnet_says_who_is_calling_and_what_they_may_do` and
-    `without_a_daemon_the_tailnet_is_let_in_by_address_and_the_lan_is_not`,
+    `without_a_daemon_only_loopback_and_the_listed_ranges_get_in`,
+    `tailscale_is_looked_up_again_when_missing_or_failing`,
     `slopty_platform::proc_files`, `slopty_net::discover`'s
     `the_tagged_server_is_tried_first_and_phones_never` and
     `a_listening_server_answers_and_a_closed_port_does_not`, the server's
     `a_worker_on_the_servers_machine_is_published_at_its_tailnet_address`, the worker's
     `a_client_hears_its_path_when_it_changes_and_only_then`, and the CLI's
     `doctor_report_names_the_binary_and_flags_missing_permissions`.
+
+- ✅ **Orchestration arranges the workspace too** (2026-09-27). The verb set named `list_items`
+  from the start, but only terminals had verbs, so an agent could start a dev server and not
+  show anyone the page it served. Six verbs now reach the worker's item registry, the same one
+  a client's tiles come from: `ListItems`, `OpenItem` (a page, a file to edit, a note, a
+  window or a display), `RenameItem`, `RemoveItem`, `PointAt` and `ListWindows` (what
+  `OpenItem` can stream). As tools they are `list_items`, `open_item`, `rename_item`,
+  `remove_item`, `point_at` and `list_windows`; in the CLI, `slopty item list|open|rename|
+  remove|point` and `slopty windows`.
+  - **An item is a handle like a terminal.** `ItemRef` is worker and item, printed
+    `worker/item` and resolved from an id prefix as a session is.
+  - **The registry decides as it does for a client.** An orchestrated change goes through the
+    same checks (a web address is `http` or `https`, a name is trimmed and at most 128
+    characters) and reaches every client as a delta from the nil client, so nobody takes it
+    for its own echo. A rename reads and writes the item under one lock.
+  - **A terminal's item belongs to its session.** `OpenItem` refuses a terminal (a session has
+    to start first: `OpenTerminal`), and `RemoveItem` refuses a terminal's item (`Close` ends
+    both).
+  - **Pointing** is the client's `Point`, sent from the orchestrator as "Orchestration": each
+    client offers a jump to the tile. It says nothing about who asked; the verbs carry no
+    caller.
+  - **A program's exit is an event.** A terminal whose program ends stays listed with its last
+    screen, so the server heard the exit only as one more summary update and logged nothing;
+    `events` could not tell a fleet-wide watcher that a build finished. The hub now logs
+    `SessionExited { term, status }` when a listed session goes from running to exited, once.
+  - Not done: installing an agent's hooks on a worker from a verb. `slopty hook install` runs
+    on the worker, and a verb that writes `~/.claude/settings.json` wants its own ruling.
+  - Tests: `slopty-workerd` `an_orchestrated_item_reaches_a_client_and_leaves_it`, the hub's
+    `events_are_read_from_a_cursor_and_waited_for` (the exit),
+    `slopty-tools` `an_item_opens_from_one_kind_and_answers_to_a_prefix`, and the
+    `workspace_items` goldens.

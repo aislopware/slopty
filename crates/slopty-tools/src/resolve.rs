@@ -1,11 +1,15 @@
-//! Turning what a person or a model types into ids: a worker by id, name or id prefix, and a
-//! terminal as `worker/session` with a session-id prefix, or a session alone.
+//! Turning what a person or a model types into ids.
+//!
+//! A worker goes by id, name or id prefix; a terminal as `worker/session` with a session-id
+//! prefix, or a session alone; an item likewise as `worker/item`, or an item alone on the only
+//! worker online.
 //!
 //! Full ids cost no round trip; anything else asks for the directory or the terminal list, the
 //! directory at most once per resolver.
 
-use slopty_core::{SessionId, WorkerId};
-use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, Verb};
+use slopty_core::{ItemId, SessionId, WorkerId};
+use slopty_proto::items::Item;
+use slopty_proto::orchestration::{ErrorCode, ItemRef, Outcome, TermRef, Verb};
 use slopty_proto::server::{Liveness, WorkerInfo};
 use slopty_proto::terminal::SessionSummary;
 
@@ -71,6 +75,20 @@ impl<'a, D: Dispatch> Resolver<'a, D> {
         }
     }
 
+    /// An item from `worker/item` or a bare item on the only worker online, the item part an
+    /// id or a prefix of one and the worker part as [`Self::worker`] takes it.
+    pub async fn item(&mut self, needle: &str) -> Result<ItemRef, ToolError> {
+        let (worker, item) = split_handle(needle, "an item; write it as worker/item")?;
+        let worker = self.worker(worker).await?;
+        if let Ok(item) = item.parse::<ItemId>() {
+            return Ok(ItemRef { worker, item });
+        }
+        match self.dispatch.call(Verb::ListItems { worker }).await {
+            Outcome::Items(items) => pick_item(worker, &items, item),
+            other => Err(ToolError::unexpected(other)),
+        }
+    }
+
     /// A terminal from `worker/session` or a bare session, each part an id or a prefix and the
     /// worker part also a name.
     pub async fn term(&mut self, needle: &str) -> Result<TermRef, ToolError> {
@@ -85,17 +103,21 @@ impl<'a, D: Dispatch> Resolver<'a, D> {
 
 /// `worker/session` split at its last `/`; a needle without one is a session alone.
 pub fn split_term(needle: &str) -> Result<(Option<&str>, &str), ToolError> {
+    split_handle(needle, "a terminal; write it as worker/session")
+}
+
+/// `worker/id` split at its last `/`, or an id alone; `not` finishes the refusal of a malformed
+/// one.
+fn split_handle<'n>(needle: &'n str, not: &str) -> Result<(Option<&'n str>, &'n str), ToolError> {
     let needle = needle.trim();
-    let (worker, session) = match needle.rsplit_once('/') {
+    let (worker, id) = match needle.rsplit_once('/') {
         Some((w, s)) => (Some(w.trim()), s.trim()),
         None => (None, needle),
     };
-    if session.is_empty() || worker.is_some_and(str::is_empty) {
-        return Err(ToolError::invalid(format!(
-            "{needle:?} is not a terminal; write it as worker/session"
-        )));
+    if id.is_empty() || worker.is_some_and(str::is_empty) {
+        return Err(ToolError::invalid(format!("{needle:?} is not {not}")));
     }
-    Ok((worker, session))
+    Ok((worker, id))
 }
 
 /// The worker `needle` names: an exact id, then an exact name, then a case-blind name, then a
@@ -168,6 +190,21 @@ pub fn pick_session(
             "{prefix:?} matches {} terminals; give more of the id: {}",
             many.len(),
             many.iter().map(|(w, s)| format!("{w}/{}", s.id)).collect::<Vec<_>>().join(", ")
+        ))),
+    }
+}
+
+/// The one item on `worker` whose id starts with `prefix`.
+pub fn pick_item(worker: WorkerId, items: &[Item], prefix: &str) -> Result<ItemRef, ToolError> {
+    let prefix = prefix.to_lowercase();
+    let hits: Vec<_> = items.iter().filter(|i| i.id.to_string().starts_with(&prefix)).collect();
+    match hits.as_slice() {
+        [one] => Ok(ItemRef { worker, item: one.id }),
+        [] => Err(ToolError::new(ErrorCode::UnknownItem, format!("no item matches {prefix:?}"))),
+        many => Err(ToolError::invalid(format!(
+            "{prefix:?} matches {} items; give more of the id: {}",
+            many.len(),
+            many.iter().map(|i| i.id.to_string()).collect::<Vec<_>>().join(", ")
         ))),
     }
 }

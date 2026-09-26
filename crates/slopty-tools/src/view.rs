@@ -13,9 +13,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WorkerId};
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
+use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
-    Command, DirEntry, FileKind, FileStat, Happening, HubEvent, Line, Port, Screen, TermRef, Waited,
+    Command, DirEntry, FileKind, FileStat, Happening, HubEvent, ItemRef, Line, Port, Screen,
+    TermRef, Waited,
 };
+use slopty_proto::screen::{DisplayInfo, WindowInfo};
 use slopty_proto::server::{Liveness, Os, WorkerInfo};
 use slopty_proto::terminal::{SessionState, SessionSummary};
 
@@ -28,6 +31,11 @@ const MIN_PREFIX: usize = 8;
 /// A terminal's full handle.
 pub fn term_string(term: TermRef) -> String {
     format!("{}/{}", term.worker, term.session)
+}
+
+/// An item's full handle.
+pub fn item_string(item: ItemRef) -> String {
+    format!("{}/{}", item.worker, item.item)
 }
 
 /// Everything `slopty workers` shows: the directory and the terminals, each with its agent.
@@ -257,6 +265,9 @@ pub struct EventView<'a> {
     agent: Option<AgentView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<&'a str>,
+    /// A program's exit status, or its signal number negated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_status: Option<i32>,
 }
 
 /// A new terminal, for JSON.
@@ -802,6 +813,7 @@ pub fn event(e: &HubEvent) -> EventView<'_> {
         command: None,
         agent: None,
         detail: None,
+        exit_status: None,
     };
     match &e.what {
         Happening::Worker { worker, name, liveness: l } => {
@@ -827,6 +839,12 @@ pub fn event(e: &HubEvent) -> EventView<'_> {
             view.kind = "session_closed";
             view.worker = term.worker;
             view.term = Some(term_string(*term));
+        }
+        Happening::SessionExited { term, status } => {
+            view.kind = "session_exited";
+            view.worker = term.worker;
+            view.term = Some(term_string(*term));
+            view.exit_status = Some(*status);
         }
         Happening::Agent { term, kind, status, detail } => {
             view.kind = "agent";
@@ -854,6 +872,7 @@ pub fn event_text<S: std::hash::BuildHasher>(
             format!("opened  {}  {}", term(&t), summary.title)
         }
         Happening::SessionClosed { term: t } => format!("closed  {}", term(t)),
+        Happening::SessionExited { term: t, status } => format!("exited  {}  {status}", term(t)),
         Happening::Agent { term: t, kind, status, detail } => {
             let said = format!("{}  {}", agent_name(*kind), status_text(status, None));
             match detail {
@@ -904,6 +923,194 @@ impl ShortTerms {
         let prefix = session.get(..self.prefix).unwrap_or(&session);
         format!("{worker}/{prefix}")
     }
+}
+
+/// An item on a workspace, for JSON: its handle, its kind and the one field that says what it
+/// shows.
+#[derive(Debug, Serialize)]
+pub struct ItemView<'a> {
+    item: String,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    sleeping: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    term: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
+}
+
+/// A new item, for JSON.
+#[derive(Debug, Serialize)]
+pub struct OpenedItemView {
+    item: String,
+}
+
+/// A window a worker can stream, for JSON.
+#[derive(Debug, Serialize)]
+pub struct WindowView<'a> {
+    window: u32,
+    app: &'a str,
+    title: &'a str,
+    display: u32,
+    on_screen: bool,
+    width: f32,
+    height: f32,
+}
+
+/// A display a worker can stream, for JSON.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct DisplayView {
+    display: u32,
+    width: f32,
+    height: f32,
+    scale: f32,
+    hz: f32,
+}
+
+/// What a worker can stream, for JSON.
+#[derive(Debug, Serialize)]
+pub struct ScreensView<'a> {
+    windows: Vec<WindowView<'a>>,
+    displays: Vec<DisplayView>,
+}
+
+const fn kind_word(kind: &ItemKind) -> &'static str {
+    match kind {
+        ItemKind::Terminal { .. } => "terminal",
+        ItemKind::Window { .. } => "window",
+        ItemKind::Display { .. } => "display",
+        ItemKind::Note { .. } => "note",
+        ItemKind::File { .. } => "file",
+        ItemKind::Browser { .. } => "browser",
+    }
+}
+
+/// A workspace's items, for JSON.
+pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
+    items
+        .iter()
+        .map(|i| {
+            let mut view = ItemView {
+                item: item_string(ItemRef { worker, item: i.id }),
+                kind: kind_word(&i.kind),
+                name: i.name.as_deref(),
+                sleeping: i.sleeping,
+                term: None,
+                window: None,
+                display: None,
+                text: None,
+                path: None,
+                url: None,
+            };
+            match &i.kind {
+                ItemKind::Terminal { session } => {
+                    view.term = Some(term_string(TermRef { worker, session: *session }));
+                }
+                ItemKind::Window { window } => view.window = Some(window.0),
+                ItemKind::Display { display } => view.display = Some(*display),
+                ItemKind::Note { text } => view.text = Some(text),
+                ItemKind::File { path } => view.path = Some(path),
+                ItemKind::Browser { url } => view.url = Some(url),
+            }
+            view
+        })
+        .collect()
+}
+
+/// A workspace's items, for a person.
+pub fn items_text(worker: WorkerId, items: &[Item]) -> String {
+    if items.is_empty() {
+        return "no items\n".to_owned();
+    }
+    let rows = items
+        .iter()
+        .map(|i| {
+            let shows = match &i.kind {
+                ItemKind::Terminal { session } => {
+                    term_string(TermRef { worker, session: *session })
+                }
+                ItemKind::Window { window } => window.0.to_string(),
+                ItemKind::Display { display } => display.to_string(),
+                ItemKind::Note { text } => text.lines().next().unwrap_or_default().to_owned(),
+                ItemKind::File { path } => path.clone(),
+                ItemKind::Browser { url } => url.clone(),
+            };
+            vec![
+                i.id.to_string(),
+                kind_word(&i.kind).to_owned(),
+                i.name.clone().unwrap_or_default(),
+                shows,
+            ]
+        })
+        .collect();
+    table(&["ITEM", "KIND", "NAME", "SHOWS"], rows)
+}
+
+/// A new item, for JSON.
+pub fn opened_item(item: ItemRef) -> OpenedItemView {
+    OpenedItemView { item: item_string(item) }
+}
+
+/// What a worker can stream, for JSON.
+pub fn screens<'a>(windows: &'a [WindowInfo], displays: &[DisplayInfo]) -> ScreensView<'a> {
+    ScreensView {
+        windows: windows
+            .iter()
+            .map(|w| WindowView {
+                window: w.id.0,
+                app: &w.app,
+                title: &w.title,
+                display: w.display,
+                on_screen: w.on_screen,
+                width: w.w,
+                height: w.h,
+            })
+            .collect(),
+        displays: displays
+            .iter()
+            .map(|d| DisplayView {
+                display: d.id,
+                width: d.w,
+                height: d.h,
+                scale: d.scale,
+                hz: d.hz,
+            })
+            .collect(),
+    }
+}
+
+/// What a worker can stream, for a person.
+pub fn screens_text(windows: &[WindowInfo], displays: &[DisplayInfo]) -> String {
+    let size = |w: f32, h: f32| format!("{w:.0}x{h:.0}");
+    let windows = windows
+        .iter()
+        .map(|w| {
+            vec![
+                w.id.0.to_string(),
+                w.app.clone(),
+                w.title.clone(),
+                w.display.to_string(),
+                size(w.w, w.h),
+            ]
+        })
+        .collect();
+    let displays = displays
+        .iter()
+        .map(|d| vec![d.id.to_string(), size(d.w, d.h), format!("{}x", d.scale), d.hz.to_string()])
+        .collect();
+    let mut out = table(&["WINDOW", "APP", "TITLE", "DISPLAY", "SIZE"], windows);
+    out.push('\n');
+    out.push_str(&table(&["DISPLAY", "SIZE", "SCALE", "HZ"], displays));
+    out
 }
 
 /// Left-aligned columns two spaces apart, a header row first, no trailing blanks.

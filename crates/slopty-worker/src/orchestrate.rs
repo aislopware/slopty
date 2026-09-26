@@ -22,14 +22,16 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use slopty_core::{ClientId, SessionId, WorkerId};
+use slopty_core::{ClientId, ItemId, SessionId, WorkerId};
 use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
+use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::orchestration::{
-    Command, DirEntry, ErrorCode, FileKind, FileStat, Input, Line, Outcome, Screen, Size, TermRef,
-    Verb, WaitUntil,
+    Command, DirEntry, ErrorCode, FileKind, FileStat, Input, ItemRef, Line, Outcome, Screen, Size,
+    TermRef, Verb, WaitUntil,
 };
+use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
@@ -40,6 +42,9 @@ use crate::{ItemStore, Worker, WorkerError};
 /// Who orchestration acts as, for the session actor (its errors go nowhere: the verb's own
 /// outcome reports them) and for the item deltas it causes (nobody's echo).
 const ORCHESTRATOR: ClientId = ClientId::nil();
+
+/// Who a [`Verb::PointAt`] says pointed, as a client's toast names it.
+const POINTER_NAME: &str = "Orchestration";
 
 /// Lines one `ReadOutput` returns at most, whatever it asks: a reply is one control-stream
 /// frame, and a caller pages on with `next`.
@@ -245,7 +250,78 @@ impl Orchestrator {
                 let path = crate::file::expand_home(Path::new(&path));
                 blocking(move || stat(&path)).await.map(Outcome::Stat)
             }
+            Verb::ListItems { worker } => {
+                self.mine(worker)?;
+                Ok(Outcome::Items(inner.items.items()))
+            }
+            Verb::OpenItem { worker, kind, name } => {
+                self.mine(worker)?;
+                if matches!(kind, ItemKind::Terminal { .. }) {
+                    return Err(Failure::new(
+                        ErrorCode::Invalid,
+                        "a terminal comes with OpenTerminal, which starts its session",
+                    ));
+                }
+                let item = Item { id: ItemId::new(), kind, sleeping: false, name };
+                let id = item.id;
+                self.change(ItemOp::Upsert(item))?;
+                Ok(Outcome::Item(ItemRef { worker, item: id }))
+            }
+            Verb::RenameItem { item, name } => {
+                self.item(item)?;
+                let delta = inner
+                    .items
+                    .update(item.item, ORCHESTRATOR, |it| it.name = name)
+                    .map_err(item_failure)?;
+                let _sent = inner.events.send(WorkerMsg::Items(delta));
+                Ok(Outcome::Done)
+            }
+            Verb::RemoveItem { item } => {
+                if matches!(self.item(item)?.kind, ItemKind::Terminal { .. }) {
+                    return Err(Failure::new(
+                        ErrorCode::Invalid,
+                        "a terminal's item goes when the terminal closes; use Close",
+                    ));
+                }
+                self.change(ItemOp::Remove(item.item))?;
+                Ok(Outcome::Done)
+            }
+            Verb::PointAt { item } => {
+                self.item(item)?;
+                let pointed = ItemSync::Pointed {
+                    client: ORCHESTRATOR,
+                    name: POINTER_NAME.to_owned(),
+                    item: item.item,
+                };
+                let _sent = inner.events.send(WorkerMsg::Items(pointed));
+                Ok(Outcome::Done)
+            }
+            Verb::ListWindows { worker } => {
+                self.mine(worker)?;
+                match crate::screen::listing().await {
+                    Ok(ScreenEvent::Listing { windows, displays }) => {
+                        Ok(Outcome::Screens { windows, displays })
+                    }
+                    Ok(_other) => Err(unexpected()),
+                    Err(e) => Err(Failure::new(ErrorCode::Failed, e.to_string())),
+                }
+            }
         }
+    }
+
+    /// Apply an item change as orchestration's and announce it to every client.
+    fn change(&self, op: ItemOp) -> Result<(), Failure> {
+        let delta = self.inner.items.apply(op, ORCHESTRATOR).map_err(item_failure)?;
+        let _sent = self.inner.events.send(WorkerMsg::Items(delta));
+        Ok(())
+    }
+
+    /// The item `item` names, on this worker.
+    fn item(&self, item: ItemRef) -> Result<Item, Failure> {
+        self.mine(item.worker)?;
+        self.inner.items.get(item.item).ok_or_else(|| {
+            Failure::new(ErrorCode::UnknownItem, format!("no item {} on this worker", item.item))
+        })
     }
 
     /// The session's summary as a client's list shows it, if the session runs.
@@ -563,6 +639,14 @@ pub async fn list_commands(
             exit: b.exit.filter(|_| b.finished).map(i32::from),
         })
         .collect())
+}
+
+/// An item change the registry refused: a missing item, or a bad name, path, address or note.
+fn item_failure(e: WorkerError) -> Failure {
+    match e {
+        WorkerError::NoSuchItem => Failure::new(ErrorCode::UnknownItem, e.to_string()),
+        other => Failure::new(ErrorCode::Invalid, other.to_string()),
+    }
 }
 
 fn unexpected() -> Failure {
