@@ -443,7 +443,7 @@ impl Workspace {
     }
 
     /// Connect to `id` and keep it connected: each drop (worker restart, network change,
-    /// silence) is redialled on the shared backoff ([`slopty_client::redial`]); the loop ends
+    /// silence) is redialled on the shared backoff ([`slopty_net::redial`]); the loop ends
     /// when the worker is dropped.
     /// While the server says the worker is away the loop waits for it to come back online
     /// (or for [`server::HOLD_RETRY`], in case the server is the one that cannot see it).
@@ -451,7 +451,7 @@ impl Workspace {
         let handle = self.runtime.clone();
         let view = self.view.clone();
         cx.spawn(async move |this, cx| {
-            let mut redial = slopty_client::redial::Redial::default();
+            let mut redial = slopty_net::redial::Redial::default();
             let mut held = false;
             loop {
                 let Ok(Some(plan)) = this.update(cx, |ws, _cx| ws.plan(id)) else {
@@ -1018,11 +1018,11 @@ impl Workspace {
                 }));
         }
         let target = screen.clone();
-        bar = bar.child(self.bar_key("skey-copy".to_owned(), "copy", false, move |_w, cx| {
+        bar = bar.child(self.bar_key("skey-copy".to_owned(), "Copy", false, move |_w, cx| {
             target.update(cx, ScreenView::copy_key);
         }));
         let target = screen.clone();
-        bar = bar.child(self.bar_key("skey-paste".to_owned(), "paste", false, move |_w, cx| {
+        bar = bar.child(self.bar_key("skey-paste".to_owned(), "Paste", false, move |_w, cx| {
             target.update(cx, ScreenView::paste_key);
         }));
         bar.into_any_element()
@@ -1073,7 +1073,7 @@ impl Workspace {
                         let on = !t.sticky_command();
                         t.set_sticky_command(on, cx);
                     } else {
-                        t.bar_key(
+                        t.press(
                             gpui::Keystroke {
                                 modifiers: gpui::Modifiers::default(),
                                 key: key.to_owned(),
@@ -1088,16 +1088,16 @@ impl Workspace {
         }
         // The phone has no ⌘C/⌘V: while text is selected the bar offers copy, otherwise paste.
         let target = terminal.clone();
-        let clip_label = if has_selection { "copy" } else { "paste" };
+        let clip_label = if has_selection { "Copy" } else { "Paste" };
         let clipboard = self
             .key_cap("key-clipboard".to_owned(), clip_label, has_selection, small)
             .role(Role::Button)
-            .aria_label(if has_selection { "Copy" } else { "Paste" })
+            .aria_label(clip_label)
             .child(clip_label);
         let clipboard = tab_stop(clipboard, s.accent).on_click(move |_ev, window, cx| {
             target.update(cx, |t, cx| {
                 if has_selection {
-                    // Copy, then the key reads "paste" again.
+                    // Copy, then the key reads "Paste" again.
                     t.copy(&slopty_ui::terminal::Copy, window, cx);
                     t.clear_selection(cx);
                 } else {
@@ -1107,14 +1107,14 @@ impl Workspace {
         });
         // Right after the arrows: on a phone it is in view before the row scrolls.
         keys.insert(ARROWS_END.min(keys.len()), clipboard.into_any_element());
-        // No ⌘F either: "find" opens the search bar, or closes it while it is open.
+        // No ⌘F either: "Find" opens the search bar, or closes it while it is open.
         let target = terminal.clone();
         let finding = terminal.read(cx).finding();
         let find = self
-            .key_cap("key-find".to_owned(), "find", finding, small)
+            .key_cap("key-find".to_owned(), "Find", finding, small)
             .role(Role::Button)
             .aria_label(if finding { "Close find" } else { "Find" })
-            .child("find");
+            .child("Find");
         let find = tab_stop(find, s.accent).on_click(move |_ev, window, cx| {
             target.update(cx, |t, cx| {
                 if finding {

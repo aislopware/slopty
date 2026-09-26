@@ -13,7 +13,7 @@ mod tests {
     use slopty_net::framed::FramedRecv;
     use slopty_net::streams::{self, Uni};
     use slopty_net::{ClientMsg, WorkerMsg};
-    use slopty_proto::handshake::{Caps, ClientKind, Hello};
+    use slopty_proto::handshake::Hello;
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest, SourceState};
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
@@ -174,13 +174,7 @@ mod tests {
     /// A fresh endpoint (new client id) dialing `addr`: a cold QUIC connection.
     async fn dial(addr: SocketAddr) -> (slopty_net::Endpoint, WorkerConn) {
         let endpoint = bind_client().unwrap();
-        let hello = Hello {
-            client: ClientId::new(),
-            kind: ClientKind::Tool,
-            name: "e2e".to_owned(),
-            app_version: "0".to_owned(),
-            caps: Caps::empty(),
-        };
+        let hello = Hello { client: ClientId::new(), name: "e2e".to_owned() };
         let worker = tokio::time::timeout(STEP, connect_addr(&endpoint, addr, hello))
             .await
             .unwrap()
@@ -344,13 +338,19 @@ mod tests {
         let markers = dir.path().join("markers");
         std::fs::create_dir_all(&markers).unwrap();
         let title = format!("slopty echo {}", std::process::id());
-        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
-            .arg(&markers)
-            .arg(&title)
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn the idle window");
-        wait_for_marker(&markers.join("ready"), "the idle window").await;
+        // Without the fixture (a lone package's test build) the opens target no window and fail
+        // at ScreenCaptureKit, which is load all the same.
+        let mut helper = idle_window_bin().map(|bin| {
+            Command::new(bin)
+                .arg(&markers)
+                .arg(&title)
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn the idle window")
+        });
+        if helper.is_some() {
+            wait_for_marker(&markers.join("ready"), "the idle window").await;
+        }
 
         let (_guard, mut worker) = connect(dir.path()).await;
         let size = TermSize { cols: 80, rows: 24, ..TermSize::default() };
@@ -474,8 +474,10 @@ mod tests {
 
         writer.abort();
         reader.abort();
-        std::fs::write(markers.join("quit"), b"").unwrap();
-        let _stopped = helper.wait().await;
+        if let Some(helper) = helper.as_mut() {
+            std::fs::write(markers.join("quit"), b"").unwrap();
+            let _stopped = helper.wait().await;
+        }
     }
 
     fn p50_p99_max(samples: &[f64]) -> (f64, f64, f64) {
@@ -624,13 +626,7 @@ mod tests {
         let mut config = slopty_net::crypto::client_config();
         config.transport_config(std::sync::Arc::new(transport));
         endpoint.set_default_client_config(config);
-        let hello = Hello {
-            client: ClientId::new(),
-            kind: ClientKind::Tool,
-            name: "e2e".to_owned(),
-            app_version: "0".to_owned(),
-            caps: Caps::empty(),
-        };
+        let hello = Hello { client: ClientId::new(), name: "e2e".to_owned() };
         let mut worker = tokio::time::timeout(STEP, connect_addr(&endpoint, addr, hello))
             .await
             .unwrap()
@@ -2007,7 +2003,7 @@ mod tests {
         let markers = dir.path().join("markers");
         std::fs::create_dir_all(&markers).unwrap();
         let title = format!("slopty idle {}", std::process::id());
-        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
+        let mut helper = Command::new(idle_window())
             .arg(&markers)
             .arg(&title)
             .kill_on_drop(true)
@@ -2181,22 +2177,26 @@ mod tests {
         close_endpoint(&endpoint).await;
     }
 
-    /// [`bin`] for a binary whose package is not named after it, built every time rather than
-    /// only when it is missing: this one is a test fixture that changes with the test, and a
-    /// stale copy left beside the daemons would quietly test the previous version of it.
-    fn bin_of(package: &str, name: &str) -> PathBuf {
-        let worker = PathBuf::from(env!("CARGO_BIN_EXE_slopty-worker"));
-        let path = worker.with_file_name(name);
-        let release = worker.parent().is_some_and(|dir| dir.ends_with("release"));
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut build = std::process::Command::new(cargo);
-        build.args(["build", "-p", package, "--bin", name]);
-        if release {
-            build.arg("--release");
-        }
-        let status = build.status().expect("run cargo");
-        assert!(status.success(), "build {name}");
-        path
+    /// The idle-window fixture as the run built it: `cargo xtask e2e` builds every binary a
+    /// suite spawns up front and names the directory in `SLOPTY_E2E_BIN_DIR`, and a workspace
+    /// test build (the gate's) puts it beside the worker, as it builds every package's binaries.
+    /// Never built here: a `cargo build` inside a test waits on the build lock for as long as
+    /// any other build holds it.
+    fn idle_window_bin() -> Option<PathBuf> {
+        let dir = std::env::var_os("SLOPTY_E2E_BIN_DIR").map_or_else(
+            || {
+                let worker = PathBuf::from(env!("CARGO_BIN_EXE_slopty-worker"));
+                worker.parent().map(std::path::Path::to_path_buf).unwrap_or_default()
+            },
+            PathBuf::from,
+        );
+        let path = dir.join("slopty-idle-window");
+        path.exists().then_some(path)
+    }
+
+    /// [`idle_window_bin`] for the screen tests, which have no use without it.
+    fn idle_window() -> PathBuf {
+        idle_window_bin().expect("slopty-idle-window is built: run these through `cargo xtask e2e`")
     }
 
     /// Where both windows of the crop test open, in screen points from the bottom left: the same
@@ -2471,7 +2471,7 @@ mod tests {
     /// is behind the target.
     async fn crop_hide(behind: Behind) -> HideRun {
         let dir = tempfile::tempdir().unwrap();
-        let helper_bin = bin_of("slopty-e2e", "slopty-idle-window");
+        let helper_bin = idle_window();
         // The thing that must never reach the client, in the rectangle the crop covers. It
         // repaints throughout: without something changing there, ScreenCaptureKit has no new
         // frame for the rectangle once the target goes, and every assertion below about what is
@@ -2760,7 +2760,7 @@ mod tests {
         let markers = dir.path().join("markers");
         std::fs::create_dir_all(&markers).unwrap();
         let title = format!("slopty quiet {}", std::process::id());
-        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
+        let mut helper = Command::new(idle_window())
             .arg(&markers)
             .arg(&title)
             .kill_on_drop(true)
@@ -2871,7 +2871,7 @@ mod tests {
         let markers = dir.path().join("markers");
         std::fs::create_dir_all(&markers).unwrap();
         let title = format!("slopty late {}", std::process::id());
-        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
+        let mut helper = Command::new(idle_window())
             .arg(&markers)
             .arg(&title)
             .arg(CROP_ORIGIN)
@@ -2988,7 +2988,7 @@ mod tests {
         let markers = dir.path().join("markers");
         std::fs::create_dir_all(&markers).unwrap();
         let title = format!("slopty {open} {}", std::process::id());
-        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
+        let mut helper = Command::new(idle_window())
             .arg(&markers)
             .arg(&title)
             .arg(CROP_ORIGIN)

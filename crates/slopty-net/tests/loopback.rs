@@ -7,32 +7,20 @@ mod tests {
 
     use slopty_core::{ClientId, SessionId, WorkerId};
     use slopty_net::admission::Admission;
-    use slopty_net::client::{HandshakeError, bind_client, connect, connect_addr};
+    use slopty_net::client::{bind_client, connect, connect_addr};
     use slopty_net::streams::{self, Uni};
     use slopty_net::worker::WorkerListener;
     use slopty_net::{HostAddr, NetError, WorkerMsg};
-    use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck};
+    use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::terminal::TermEvent;
     use slopty_proto::transfer::{BulkHeader, Purpose};
 
     fn hello() -> Hello {
-        Hello {
-            client: ClientId::new(),
-            kind: ClientKind::Tool,
-            name: "test".to_owned(),
-            app_version: "0".to_owned(),
-            caps: Caps::empty(),
-        }
+        Hello { client: ClientId::new(), name: "test".to_owned() }
     }
 
     fn ack(worker: WorkerId) -> HelloAck {
-        HelloAck {
-            worker,
-            name: "worker".to_owned(),
-            app_version: "0".to_owned(),
-            caps: Caps::empty(),
-            sessions: Vec::new(),
-        }
+        HelloAck { worker, name: "worker".to_owned(), sessions: Vec::new() }
     }
 
     /// A worker on every interface, any port, answering each `Hello` with `ack(id)` and holding
@@ -254,10 +242,7 @@ mod tests {
         let started = Instant::now();
         let err = connect_addr(&endpoint, link_local, hello()).await.unwrap_err();
         let took = started.elapsed();
-        assert!(
-            matches!(&err, HandshakeError::Net(NetError::Connect(why)) if why.contains("refused")),
-            "{err:?}"
-        );
+        assert!(matches!(&err, NetError::Connect(why) if why.contains("refused")), "{err:?}");
         assert!(took < Duration::from_secs(1), "refused at once, not timed out: {took:?}");
 
         // Loopback is admitted whatever the list says, and it is the first client through.
@@ -275,7 +260,7 @@ mod tests {
         let endpoint = bind_client().unwrap();
         let started = Instant::now();
         let err = connect_addr(&endpoint, addr, hello()).await.unwrap_err();
-        assert!(matches!(err, HandshakeError::Net(NetError::Connect(_))), "{err:?}");
+        assert!(matches!(err, NetError::Connect(_)), "{err:?}");
         assert!(started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
     }
 

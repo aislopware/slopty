@@ -9,8 +9,6 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use slopty_net::client::bind_client;
-use slopty_net::known::KnownWorkers;
-use slopty_proto::handshake::ClientKind;
 use slopty_proto::orchestration::{EventFilter, Happening, Input, Size, WaitUntil, Waited};
 use slopty_proto::server::Role;
 use slopty_tools::ops::{
@@ -316,12 +314,7 @@ impl UntilArgs {
 /// Connect to the server, run `cmd`, print its answer.
 pub async fn run(cmd: VerbCmd, server: Option<&str>, data_dir: &Path, json: bool) -> Result<()> {
     let address = link::locate(server, data_dir)?;
-    let client = KnownWorkers::open_in(data_dir)?.client();
-    let role = Role::Client {
-        client,
-        kind: ClientKind::Tool,
-        name: format!("slopty @ {}", crate::client::machine_name()),
-    };
+    let role = Role::Client { name: format!("slopty @ {}", crate::client::machine_name()) };
     let endpoint = bind_client()?;
     let result = match Link::connect(&endpoint, &address, role).await {
         Ok(link) => execute(cmd, &link, json).await,

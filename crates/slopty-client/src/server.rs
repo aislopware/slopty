@@ -65,7 +65,7 @@ async fn run(
     mut first: Option<ServerLink>,
     tx: mpsc::Sender<ServerEvent>,
 ) {
-    let mut redial = crate::redial::Redial::default();
+    let mut redial = slopty_net::redial::Redial::default();
     loop {
         let dialled = match first.take() {
             Some(link) => Ok(link),

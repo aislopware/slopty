@@ -40,7 +40,7 @@ mod tests {
     use slopty_net::streams::{self, Uni};
     use slopty_net::worker::WorkerListener;
     use slopty_net::{ClientMsg, Connection, WorkerMsg, congestion};
-    use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck};
+    use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::terminal::{TermEvent, TermRequest};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -289,13 +289,8 @@ mod tests {
     ) {
         let mut client = listener.accept().await.unwrap();
         let _unwatched = accepted.send(client.conn.clone());
-        let ack = HelloAck {
-            worker: WorkerId::new(),
-            name: "worker".to_owned(),
-            app_version: "0".to_owned(),
-            caps: Caps::empty(),
-            sessions: Vec::new(),
-        };
+        let ack =
+            HelloAck { worker: WorkerId::new(), name: "worker".to_owned(), sessions: Vec::new() };
         client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
         let wait = streams::SESSION_STREAM_WAIT;
         let mut stream = streams::open_session(&client.conn, SessionId::new(), wait).await.unwrap();
@@ -531,13 +526,7 @@ mod tests {
             tokio::spawn(async move { relay.run().await })
         };
         let endpoint = bind_client().unwrap();
-        let hello = Hello {
-            client: ClientId::new(),
-            kind: ClientKind::Tool,
-            name: "echo".to_owned(),
-            app_version: "0".to_owned(),
-            caps: Caps::empty(),
-        };
+        let hello = Hello { client: ClientId::new(), name: "echo".to_owned() };
         let mut worker = connect_addr(&endpoint, relay.addr().unwrap(), hello).await.unwrap();
         let samples = Arc::new(Mutex::new(Vec::new()));
         let watcher = tokio::spawn(watch(

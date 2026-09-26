@@ -8,7 +8,7 @@ use slopty_core::ClientId;
 use slopty_net::client::{WorkerConn, bind_client, connect};
 use slopty_net::known::{KnownWorker, KnownWorkers};
 use slopty_net::{Endpoint, HostAddr};
-use slopty_proto::handshake::{Caps, ClientKind, Hello};
+use slopty_proto::handshake::Hello;
 
 /// How long a closing endpoint may take to tell its peers.
 const CLOSE_GRACE: Duration = Duration::from_millis(500);
@@ -23,13 +23,7 @@ fn known(data_dir: &Path) -> Result<KnownWorkers> {
 }
 
 fn hello(client: ClientId) -> Hello {
-    Hello {
-        client,
-        kind: ClientKind::Tool,
-        name: format!("slopty cli @ {}", machine_name()),
-        app_version: env!("CARGO_PKG_VERSION").to_owned(),
-        caps: Caps::empty(),
-    }
+    Hello { client, name: format!("slopty cli @ {}", machine_name()) }
 }
 
 /// This machine's name as its peers' logs show it: the host name, one `uname` call.

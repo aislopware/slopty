@@ -8,11 +8,10 @@ mod units {
     use slopty_core::{ClientId, ItemId};
     use slopty_proto::codec::{self, CodecError, MAX_FRAME_BYTES};
     use slopty_proto::file::FILE_BYTES;
-    use slopty_proto::handshake::Rejection;
     use slopty_proto::input::CellMetrics;
     use slopty_proto::items::ItemSync;
     use slopty_proto::media::{Kind, MediaHeader, flags};
-    use slopty_proto::terminal::{MAX_OSC52_BYTES, TermSize};
+    use slopty_proto::terminal::{MAX_FETCH_LINES, MAX_OSC52_BYTES, TermSize};
     use slopty_proto::{ClientMsg, WorkerMsg};
     use zerocopy::FromZeros as _;
 
@@ -20,6 +19,7 @@ mod units {
     fn the_limits_are_the_numbers_the_docs_name() {
         assert_eq!(FILE_BYTES, 524_288);
         assert_eq!(MAX_OSC52_BYTES, 262_144);
+        assert_eq!(MAX_FETCH_LINES, 4096);
         assert_eq!(slopty_proto::transfer::INLINE_CLIP_BYTES, 65_536);
         assert_eq!(MAX_FRAME_BYTES, 16_777_216);
         let size = TermSize {
@@ -82,6 +82,5 @@ mod units {
             item: ItemId::new(),
         };
         assert_eq!(WorkerMsg::Items(pointed).kind(), "Items");
-        assert_eq!(WorkerMsg::Rejected(Rejection::Busy).kind(), "Rejected");
     }
 }

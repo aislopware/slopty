@@ -8,7 +8,7 @@ mod golden {
         Cursor, CursorShape, Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes,
     };
     use slopty_proto::datagram::{ClientDatagram, term_datagram};
-    use slopty_proto::handshake::{Caps, ClientKind, Hello};
+    use slopty_proto::handshake::Hello;
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
     use slopty_proto::orchestration::Port;
     use slopty_proto::screen::{Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenRequest};
@@ -46,10 +46,7 @@ mod golden {
             "client_hello",
             &ClientMsg::Hello(Hello {
                 client: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                kind: ClientKind::IPad,
                 name: "iPad".to_owned(),
-                app_version: "0.1.0".to_owned(),
-                caps: Caps::HEVC | Caps::OPUS | Caps::PREDICTION,
             }),
         );
     }
@@ -719,13 +716,13 @@ mod golden {
         snap(
             "server_worker_hello",
             &ToServer::Hello {
-                role: Role::Worker(Registration {
+                role: Role::Worker(Box::new(Registration {
                     worker,
                     name: "mac-studio".to_owned(),
                     port: 45570,
                     caps: caps.clone(),
                     sessions: Vec::new(),
-                }),
+                })),
             },
         );
         let term = TermRef { worker, session: session() };

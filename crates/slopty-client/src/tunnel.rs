@@ -289,8 +289,12 @@ async fn splice(
     };
     match &broke {
         Broke::Tunnel(_) => {
-            // A zero linger turns the close into a reset, as when no stream could be had.
-            let _linger = to_app.as_ref().set_zero_linger();
+            // A zero linger turns the close into a reset, as when no stream could be had. The
+            // halves go back together first: a write half dropped alone sends a FIN, and the
+            // peer would read that clean end before the reset.
+            if let Ok(socket) = from_app.reunite(to_app) {
+                let _linger = socket.set_zero_linger();
+            }
         }
         Broke::App(_) => {
             let _reset = send.reset(0_u32.into());

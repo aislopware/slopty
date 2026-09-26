@@ -1881,11 +1881,6 @@ impl TerminalView {
         unstuck || scrolled || guessing || shows
     }
 
-    /// A key of the phone's bar: [`Self::press`].
-    pub fn bar_key(&mut self, keystroke: Keystroke, cx: &mut Context<Self>) {
-        self.press(keystroke, cx);
-    }
-
     /// The visible rows as text, top to bottom, trailing spaces trimmed; a row still being
     /// fetched is empty. What a self-test reads instead of pixels.
     #[must_use]

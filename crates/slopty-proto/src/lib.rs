@@ -136,8 +136,6 @@ impl ClientMsg {
 pub enum WorkerMsg {
     /// Reply to `Hello`.
     HelloAck(handshake::HelloAck),
-    /// Rejected `Hello`.
-    Rejected(handshake::Rejection),
     /// A session now exists (in reply to `OpenSession`, or created by another client).
     SessionOpened(terminal::SessionSummary),
     /// A session is gone.
@@ -214,7 +212,6 @@ impl WorkerMsg {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::HelloAck(_) => "HelloAck",
-            Self::Rejected(_) => "Rejected",
             Self::SessionOpened(_) => "SessionOpened",
             Self::SessionClosed { .. } => "SessionClosed",
             Self::Term { .. } => "Term",

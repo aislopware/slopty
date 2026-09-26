@@ -1550,7 +1550,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the fetches in flight with the numbering they were asked in: a range in flight is not asked
   again, an answer for a numbering that has gone is dropped, and a whole frame (a new stream)
   asks again for what is still missing. Requests are at most 4096 lines
-  (`slopty_client::term::FETCH_CHUNK`). ⌘C walks the selection in order and writes the
+  (`slopty_proto::terminal::MAX_FETCH_LINES`). ⌘C walks the selection in order and writes the
   clipboard once every line is in, asking for a line that never came; the text is built a
   line at a time (`SelectionText`), so it never needs the whole history cached at once.
   Found on the way: `GhosttyEngine::lines` answered a range wholly below its oldest line with

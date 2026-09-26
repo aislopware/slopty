@@ -167,7 +167,8 @@ mod tests {
         let worker = WorkerId::new();
         let endpoint = bind_client().unwrap();
         let quic = HostAddr::from(server.quic_addr());
-        let link = connect(&endpoint, &quic, Role::Worker(registration(worker))).await.unwrap();
+        let link =
+            connect(&endpoint, &quic, Role::Worker(Box::new(registration(worker)))).await.unwrap();
         let working = tokio::spawn(work(link));
 
         let data = tempfile::tempdir().unwrap();
@@ -266,7 +267,8 @@ mod tests {
         let worker = WorkerId::new();
         let endpoint = bind_client().unwrap();
         let quic = HostAddr::from(server.quic_addr());
-        let link = connect(&endpoint, &quic, Role::Worker(registration(worker))).await.unwrap();
+        let link =
+            connect(&endpoint, &quic, Role::Worker(Box::new(registration(worker)))).await.unwrap();
         let working = tokio::spawn(work(link));
 
         let data = tempfile::tempdir().unwrap();

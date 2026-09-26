@@ -31,7 +31,7 @@ pub async fn serve(listener: ServerListener, hub: Hub) {
         let hub = hub.clone();
         tokio::spawn(async move {
             match link.role.clone() {
-                Role::Worker(registration) => worker(hub, link, registration).await,
+                Role::Worker(registration) => worker(hub, link, *registration).await,
                 Role::Client { name, .. } | Role::Agent { name } => client(hub, link, name).await,
             }
         });

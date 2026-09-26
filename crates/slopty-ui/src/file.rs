@@ -917,7 +917,7 @@ impl FileView {
         let count: SharedString = if search.needle.is_empty() {
             SharedString::default()
         } else if search.hits.is_empty() {
-            "none".into()
+            "No matches".into()
         } else {
             let at = search.current.map_or(0, |c| c.saturating_add(1));
             format!("{at}/{}", search.hits.len()).into()

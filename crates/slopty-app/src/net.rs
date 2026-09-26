@@ -9,7 +9,7 @@ use slopty_net::client::{bind_client, connect};
 use slopty_net::known::{KnownWorker, KnownWorkers};
 use slopty_net::server::ServerLink;
 use slopty_proto::ClientMsg;
-use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck};
+use slopty_proto::handshake::{Hello, HelloAck};
 use slopty_proto::server::Role;
 use tokio::sync::mpsc;
 
@@ -46,19 +46,15 @@ fn endpoint() -> Result<slopty_net::Endpoint, String> {
     Ok(ENDPOINT.get_or_init(|| bound).clone())
 }
 
-/// Our greeting: which app this is, by platform.
+/// Which app this is, by platform, as workers and the server show it.
+#[cfg(target_os = "ios")]
+const NAME: &str = "Slopty for iPhone";
+#[cfg(not(target_os = "ios"))]
+const NAME: &str = "Slopty for Mac";
+
+/// Our greeting.
 fn hello(client: ClientId) -> Hello {
-    #[cfg(target_os = "ios")]
-    let (kind, name) = (ClientKind::IPhone, "Slopty for iPhone");
-    #[cfg(not(target_os = "ios"))]
-    let (kind, name) = (ClientKind::Mac, "Slopty for Mac");
-    Hello {
-        client,
-        kind,
-        name: name.to_owned(),
-        app_version: env!("CARGO_PKG_VERSION").to_owned(),
-        caps: Caps::empty(),
-    }
+    Hello { client, name: NAME.to_owned() }
 }
 
 /// The workers this installation has added, by name.
@@ -142,9 +138,8 @@ pub async fn connect_to(id: WorkerId, address: Option<HostAddr>) -> Result<Conne
 }
 
 /// Who this app is to the server.
-fn server_role(client: ClientId) -> Role {
-    let Hello { client, kind, name, .. } = hello(client);
-    Role::Client { client, kind, name }
+fn server_role() -> Role {
+    Role::Client { name: NAME.to_owned() }
 }
 
 /// Dial the server at `address` once, to prove it answers before it is saved; the link goes on
@@ -155,8 +150,7 @@ fn server_role(client: ClientId) -> Role {
 /// When nothing answers there, or it refuses this app.
 pub async fn link_server(address: &HostAddr) -> Result<ServerLink> {
     let endpoint = endpoint().map_err(anyhow::Error::msg)?;
-    let role = server_role(known()?.client());
-    slopty_net::server::connect(&endpoint, address, role)
+    slopty_net::server::connect(&endpoint, address, server_role())
         .await
         .with_context(|| format!("connect to {address}"))
 }
@@ -166,13 +160,12 @@ pub async fn link_server(address: &HostAddr) -> Result<ServerLink> {
 ///
 /// # Errors
 ///
-/// When the endpoint cannot be bound or the store read.
+/// When the endpoint cannot be bound.
 pub fn serve_directory(
     address: HostAddr,
     first: Option<ServerLink>,
 ) -> Result<(ServerTask, mpsc::Receiver<ServerEvent>), String> {
     let endpoint = endpoint()?;
-    let role = server_role(known().map_err(|e| format!("{e:#}"))?.client());
     let runtime = tokio::runtime::Handle::current();
-    Ok(slopty_client::server::spawn(&runtime, endpoint, address, role, first))
+    Ok(slopty_client::server::spawn(&runtime, endpoint, address, server_role(), first))
 }

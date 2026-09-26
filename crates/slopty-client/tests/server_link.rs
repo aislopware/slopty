@@ -7,18 +7,17 @@ mod tests {
 
     use slopty_client::directory::{Change, Directory, ServerState};
     use slopty_client::server::{ServerEvent, spawn};
-    use slopty_core::{ClientId, WorkerId};
+    use slopty_core::WorkerId;
     use slopty_net::HostAddr;
     use slopty_net::admission::Admission;
     use slopty_net::server::{AcceptedLink, ServerListener};
-    use slopty_proto::handshake::ClientKind;
     use slopty_proto::server::{FromServer, Liveness, Os, Role, WorkerCaps, WorkerInfo};
     use tokio::sync::mpsc;
 
     const WAIT: Duration = Duration::from_secs(20);
 
     fn role() -> Role {
-        Role::Client { client: ClientId::new(), kind: ClientKind::Tool, name: "test".to_owned() }
+        Role::Client { name: "test".to_owned() }
     }
 
     fn worker(id: WorkerId, liveness: Liveness) -> WorkerInfo {

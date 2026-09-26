@@ -14,8 +14,8 @@ use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, Text
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
 use slopty_proto::codec;
 use slopty_proto::terminal::{
-    ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_OSC52_BYTES, TermColors, TermEvent,
-    TermRequest, TermSize,
+    ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, TermColors,
+    TermEvent, TermRequest, TermSize,
 };
 use slopty_pty::PtyMaster;
 use slopty_pty::protocol::OutputFrame;
@@ -1727,7 +1727,7 @@ impl Actor {
             }
             TermRequest::Focus { focused } => self.engine.encode_focus(focused, &mut bytes),
             TermRequest::FetchLines { start, count } => {
-                match self.engine.lines(start, count.min(4096)) {
+                match self.engine.lines(start, count.min(MAX_FETCH_LINES)) {
                     Ok((start, lines)) => {
                         self.send_to(client, &TermEvent::Lines { start, lines });
                     }

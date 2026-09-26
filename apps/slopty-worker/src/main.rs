@@ -425,9 +425,6 @@ async fn main() -> Result<()> {
             }
         }
     };
-    let _sent = daemon
-        .events
-        .send(slopty_proto::WorkerMsg::Rejected(slopty_proto::handshake::Rejection::Busy));
     daemon.listener.endpoint().close(0_u32.into(), b"worker shutting down");
     let _drained = tokio::time::timeout(
         std::time::Duration::from_secs(1),

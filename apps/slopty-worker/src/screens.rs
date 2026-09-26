@@ -384,7 +384,7 @@ mod tests {
         slopty_net::Connection,
         (slopty_net::worker::WorkerListener, slopty_net::Endpoint),
     ) {
-        use slopty_proto::handshake::{Caps, ClientKind, Hello};
+        use slopty_proto::handshake::Hello;
         let listener = slopty_net::worker::WorkerListener::bind(
             std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             slopty_net::admission::Admission::default(),
@@ -392,13 +392,7 @@ mod tests {
         .unwrap();
         let addr = listener.local_addr().unwrap();
         let endpoint = slopty_net::client::bind_client().unwrap();
-        let hello = Hello {
-            client: slopty_core::ClientId::new(),
-            kind: ClientKind::Tool,
-            name: "bench".to_owned(),
-            app_version: "0".to_owned(),
-            caps: Caps::empty(),
-        };
+        let hello = Hello { client: slopty_core::ClientId::new(), name: "bench".to_owned() };
         let dialing = endpoint.clone();
         let client =
             tokio::spawn(
@@ -408,8 +402,6 @@ mod tests {
         let ack = slopty_proto::handshake::HelloAck {
             worker: slopty_core::WorkerId::new(),
             name: "bench".to_owned(),
-            app_version: "0".to_owned(),
-            caps: Caps::empty(),
             sessions: Vec::new(),
         };
         accepted.tx.send(&slopty_net::WorkerMsg::HelloAck(ack)).await.unwrap();

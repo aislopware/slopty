@@ -291,7 +291,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     also pings on each tick (`WorkerLink::ping`), so a worker that comes back is found within
     half a second, not at noq's probe backoff of up to 2 s.
   - Redials follow one rule for the server link and every worker link
-    (`slopty_client::redial`): 250 ms after a drop, doubling to 2 s, back to 250 ms after a
+    (`slopty_net::redial`): 250 ms after a drop, doubling to 2 s, back to 250 ms after a
     link that held for 10 s. The worker links waited 1 s and backed off to 10 s. The server
     link's cap drops from 5 s to 2 s.
   - A dial gives up after 2 s instead of 5 (`HANDSHAKE_TIMEOUT`). noq's Initial probes back off
@@ -306,7 +306,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   connects 0.6 to 0.8 s later. The link is given up 5.6 to 5.7 s after the kill, and a restart
   3 s after that connects 0.5 to 0.6 s later. Tests: `redials_back_off_from_a_quarter_second_to_two`
   and `a_steady_link_starts_the_backoff_again_and_a_flapping_one_does_not`
-  (`slopty_client::redial`), `the_silence_bars_are_three_and_five_keep_alives`, the two `Hearing`
+  (`slopty_net::redial`), `the_silence_bars_are_three_and_five_keep_alives`, the two `Hearing`
   tests and
   `a_silent_link_pings_and_is_given_up_at_once_when_the_server_says_the_worker_is_back`
   (`slopty_app::workers`), and

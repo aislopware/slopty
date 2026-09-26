@@ -15,7 +15,7 @@ mod tests {
     use slopty_net::streams::{self, RawRecv, Uni};
     use slopty_net::worker::{AcceptedClient, WorkerListener};
     use slopty_net::{ClientMsg, HostAddr, WorkerMsg};
-    use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck};
+    use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::orchestration::Port;
     use slopty_proto::transfer::{
         BulkHeader, ClipItem, ClipMsg, Dest, Offer, Peer, Purpose, XferMsg,
@@ -26,13 +26,7 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(20);
 
     fn hello() -> Hello {
-        Hello {
-            client: ClientId::new(),
-            kind: ClientKind::Tool,
-            name: "test".to_owned(),
-            app_version: "0".to_owned(),
-            caps: Caps::empty(),
-        }
+        Hello { client: ClientId::new(), name: "test".to_owned() }
     }
 
     /// A worker that greets one client and hands its end to the test, and the client's link.
@@ -43,13 +37,7 @@ mod tests {
         let worker = WorkerId::new();
         let accepted = tokio::spawn(async move {
             let mut client = listener.accept().await.unwrap();
-            let ack = HelloAck {
-                worker,
-                name: "worker".to_owned(),
-                app_version: "0".to_owned(),
-                caps: Caps::empty(),
-                sessions: Vec::new(),
-            };
+            let ack = HelloAck { worker, name: "worker".to_owned(), sessions: Vec::new() };
             client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
             client
         });
@@ -290,6 +278,31 @@ mod tests {
         assert!(failed.unwrap_err().contains("digest"), "three tries, then the reason");
         assert!(!into.path().join("a.txt").exists());
         assert!(!into.path().join("a.txt.partial").exists(), "bad bytes are not kept to resume");
+    }
+
+    /// A stream whose header has not all arrived (as when its packet is lost) holds up only
+    /// itself: the session stream opened after it is read and delivered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stream_waiting_on_its_header_does_not_hold_up_the_next() {
+        let (client, _link, mut events) = pair().await;
+        let mut stalled = client.conn.open_uni().await.unwrap();
+        stalled.write_all(&[9]).await.unwrap();
+        let session = SessionId::new();
+        let mut stream = streams::open_session(&client.conn, session, streams::SESSION_STREAM_WAIT)
+            .await
+            .unwrap();
+        stream.send(&slopty_proto::terminal::TermEvent::Bell).await.unwrap();
+        loop {
+            match tokio::time::timeout(WAIT, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Term { session: s, event } if s == session => {
+                    assert_eq!(event, slopty_proto::terminal::TermEvent::Bell);
+                    break;
+                }
+                LinkEvent::Disconnected(why) => panic!("{why}"),
+                _ => {}
+            }
+        }
+        drop(stalled);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -536,7 +536,7 @@ mod tests {
 
     /// Where a string literal on a line is drawn as chrome text or read out as an accessible
     /// name: the first literal after one of these calls. The helpers whose first argument is
-    /// an element id (`pill`, a text button) draw a later literal instead.
+    /// an element id (`pill`, a text button, a key cap) draw a later literal instead.
     const DRAWN: [&str; 8] = [
         ".child(\"",
         "ChromeText::new(\"",
@@ -547,7 +547,7 @@ mod tests {
         "notice(\"",
         "title(\"",
     ];
-    const DRAWN_AFTER_ID: [&str; 3] = ["pill(", "button(", "heading("];
+    const DRAWN_AFTER_ID: [&str; 5] = ["pill(", "button(", "heading(", "key_cap(", "bar_key("];
 
     /// A literal drawn as chrome text that starts lowercase: `"take"` on a pill, `"opening…"`
     /// in a body. Sentence case is checked on the text drawn, not only on the names a screen
@@ -580,8 +580,9 @@ mod tests {
     /// Chrome text is drawn in sentence case, as the constants above are written.
     #[test]
     fn a_drawn_label_is_sentence_case() {
-        let wrong: Vec<String> = chrome_lines("slopty-ui/src")
+        let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
             .into_iter()
+            .flat_map(chrome_lines)
             .filter_map(|(file, line_no, line)| {
                 lowercase_label(&line).map(|text| format!("{file}:{line_no}: lowercase: {text:?}"))
             })
@@ -599,6 +600,10 @@ mod tests {
         assert!(lowercase_label(r#"button(copy_id, "Copy code", "Copy")"#).is_none());
         assert!(lowercase_label(r#"kit::button(theme, "new-shell", "New shell", kind)"#).is_none());
         assert!(lowercase_label(r#".aria_label("mute")"#).is_some());
+        assert!(lowercase_label(r#".key_cap("key-find".to_owned(), "find", on, small)"#).is_some());
+        assert!(
+            lowercase_label(r#"self.bar_key(format!("skey-{label}"), label, lit, f)"#).is_none()
+        );
         assert!(lowercase_label(r#".id("file-bar").child(text)"#).is_none(), "an id");
         assert!(lowercase_label(r#"// .child("a comment")"#).is_none());
         assert!(lowercase_label(r#".aria_label("settings.toml")"#).is_none(), "a file name");

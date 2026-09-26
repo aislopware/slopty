@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use noq::{Connection, Endpoint};
-use slopty_proto::handshake::{Hello, HelloAck, Rejection};
+use slopty_proto::handshake::{Hello, HelloAck};
 use slopty_proto::{ClientMsg, WorkerMsg};
 
 use crate::NetError;
@@ -19,17 +19,6 @@ use crate::framed::{FramedRecv, FramedSend};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long to wait for the worker's answer to `Hello`.
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Errors from the handshake: the worker said no, or the transport failed.
-#[derive(Debug, thiserror::Error)]
-pub enum HandshakeError {
-    /// The worker refused.
-    #[error("rejected: {0:?}")]
-    Rejected(Rejection),
-    /// Transport.
-    #[error(transparent)]
-    Net(#[from] NetError),
-}
 
 /// A live connection to a worker after a successful `Hello`.
 #[derive(Debug)]
@@ -58,7 +47,7 @@ pub async fn connect(
     endpoint: &Endpoint,
     addr: &HostAddr,
     hello: Hello,
-) -> Result<WorkerConn, HandshakeError> {
+) -> Result<WorkerConn, NetError> {
     let (conn, remote) = dial_any(endpoint, addr, None).await?;
     greet(conn, remote, hello).await
 }
@@ -91,7 +80,7 @@ pub async fn connect_addr(
     endpoint: &Endpoint,
     addr: SocketAddr,
     hello: Hello,
-) -> Result<WorkerConn, HandshakeError> {
+) -> Result<WorkerConn, NetError> {
     let conn = dial(endpoint, addr, &addr.ip().to_string(), None).await?;
     greet(conn, addr, hello).await
 }
@@ -115,11 +104,7 @@ pub(crate) async fn dial(
 }
 
 /// `Hello` on a fresh control stream, and the worker's answer.
-async fn greet(
-    conn: Connection,
-    remote: SocketAddr,
-    hello: Hello,
-) -> Result<WorkerConn, HandshakeError> {
+async fn greet(conn: Connection, remote: SocketAddr, hello: Hello) -> Result<WorkerConn, NetError> {
     let (send, recv) = conn.open_bi().await.map_err(|e| NetError::stream(&e))?;
     let mut tx = FramedSend::<ClientMsg>::new(send);
     let mut rx = FramedRecv::<WorkerMsg>::new(recv);
@@ -129,11 +114,7 @@ async fn greet(
         .map_err(|_elapsed| NetError::Protocol("hello ack timeout"))??;
     match reply {
         WorkerMsg::HelloAck(ack) => Ok(WorkerConn { conn, remote, ack, tx, rx }),
-        WorkerMsg::Rejected(why) => {
-            conn.close(0_u32.into(), b"rejected");
-            Err(HandshakeError::Rejected(why))
-        }
-        _other => Err(NetError::Protocol("expected HelloAck").into()),
+        _other => Err(NetError::Protocol("expected HelloAck")),
     }
 }
 

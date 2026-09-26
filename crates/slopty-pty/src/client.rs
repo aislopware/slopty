@@ -56,7 +56,7 @@ impl Drop for PtydClient {
 }
 
 impl PtydClient {
-    /// Connect and complete the hello exchange.
+    /// Connect.
     ///
     /// The receiver yields each child exit as ptyd reports it, and ends once the connection to
     /// ptyd is gone: the worker then holds masters nobody keeps for the next worker, and can
@@ -71,11 +71,7 @@ impl PtydClient {
         let (exits, exits_rx) = mpsc::unbounded_channel();
         let (replies, replies_rx) = mpsc::unbounded_channel();
         let reader = tokio::spawn(read_loop(Arc::clone(&stream), replies_rx, exits));
-        let mut client = Self { stream, replies, reader };
-        match client.call(&PtydRequest::Hello).await?.0 {
-            PtydEvent::Hello { .. } => Ok((client, exits_rx)),
-            _ => Err(PtyError::UnexpectedReply),
-        }
+        Ok((Self { stream, replies, reader }, exits_rx))
     }
 
     /// Spawn a session; returns the child pid.

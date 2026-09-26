@@ -1234,6 +1234,12 @@ mod worker_tests {
 
     const STREAM: StreamId = StreamId(5);
 
+    /// Seconds to wait on the system frameworks (`VideoToolbox`'s decoder, `CoreAudio` opening a
+    /// player): nothing here measures them, and on a machine busy with a parallel test run
+    /// they take tens of seconds (`docs/decisions/testing.md`). A bound only so a stuck
+    /// framework fails with the stats rather than at the harness's kill.
+    const FOR_THE_MACHINE: u64 = 100;
+
     /// A worker on its own runtime, with what it sent back caught for inspection.
     struct Harness {
         rt: tokio::runtime::Runtime,
@@ -1363,7 +1369,7 @@ mod worker_tests {
         for d in packetize_ltr(&mut packetizer, true, Some(7), 1_000) {
             h.route(d);
         }
-        h.wait_for("the rejection", 3, |handle| handle.stats().decode_errors == 1);
+        h.wait_for("the rejection", FOR_THE_MACHINE, |handle| handle.stats().decode_errors == 1);
         let refreshes = h.handle.stats().refreshes;
         for d in packetize_ltr(&mut packetizer, false, Some(8), 2_000) {
             h.route(d);
@@ -1417,7 +1423,7 @@ mod worker_tests {
         for d in packetizer.retransmit(0, &[1]) {
             h.route(d);
         }
-        h.wait_for("the frame", 3, |handle| {
+        h.wait_for("the frame", FOR_THE_MACHINE, |handle| {
             let s = handle.stats();
             s.frames == 1 && s.frames_retransmit == 1 && s.decode_errors == 1
         });
@@ -1429,8 +1435,32 @@ mod worker_tests {
         assert_eq!(stats.parity_permille, 0);
         assert!(stats.bytes > 3000 && stats.datagrams >= 5, "{stats:?}");
 
-        // Audio, muted: the first packet starts opening the player off the worker, which keeps
-        // delivering video meanwhile (CoreAudio's first client took ~7 s on this machine).
+        // The worker's source hint reaches the worker.
+        assert!(h.handle.source_live());
+        h.handle.set_source_live(false);
+        assert!(!h.handle.source_live());
+
+        // The connection goes: the next feedback fails and the worker stops.
+        h.alive.store(false, Ordering::Relaxed);
+        let datagrams = packetize(&mut packetizer, false, 3_000);
+        for d in datagrams.iter().skip(1) {
+            h.route(d.clone());
+        }
+        h.wait_for("the worker to finish", 3, |handle| {
+            handle.task.as_ref().is_some_and(JoinHandle::is_finished)
+        });
+        assert_eq!(h.handle.stream(), STREAM);
+        drop(h.handle);
+        assert!(h.router.inner.lock().attached.is_empty(), "dropping the handle unroutes");
+    }
+
+    /// Audio, muted: the first packet starts opening the player off the worker, which keeps
+    /// delivering video meanwhile; once it is open a gap is counted and concealed and a late
+    /// duplicate is not played. The only test here that opens `CoreAudio` (the `coreaudio` test
+    /// group), so nothing else waits on the machine's audio stack.
+    #[test]
+    fn audio_waits_for_the_player_without_holding_video_and_counts_gaps() {
+        let mut h = Harness::start();
         assert!(!h.handle.muted());
         h.handle.set_muted(true);
         assert!(h.handle.muted());
@@ -1445,15 +1475,16 @@ mod worker_tests {
         assert_eq!(packets.len(), 3);
         let mut seq = 1;
         h.route(audio_datagram(STREAM, seq, 0, &packets[0]).unwrap());
-        // A keyframe: the first was rejected, so nothing else would be let through.
-        for d in packetize(&mut packetizer, true, 2_000) {
+        let mut packetizer = Packetizer::new(STREAM);
+        packetizer.set_parity_permille(0);
+        for d in packetize(&mut packetizer, true, 1_000) {
             h.route(d);
         }
-        h.wait_for("a frame while the player opens", 3, |handle| handle.stats().frames == 2);
+        h.wait_for("a frame while the player opens", 3, |handle| handle.stats().frames == 1);
         let router = h.router.clone();
         let routed = Arc::clone(&h.routed);
         let opus = packets.clone();
-        h.wait_for("the player", 45, |handle| {
+        h.wait_for("the player", FOR_THE_MACHINE, |handle| {
             seq += 1;
             routed.fetch_add(1, Ordering::Relaxed);
             router.route(
@@ -1475,24 +1506,6 @@ mod worker_tests {
         let late = h.settle();
         assert_eq!(late.audio_lost, after.audio_lost + 1, "too late to play");
         assert_eq!(late.audio_packets, after.audio_packets, "not played");
-
-        // The worker's source hint reaches the worker.
-        assert!(h.handle.source_live());
-        h.handle.set_source_live(false);
-        assert!(!h.handle.source_live());
-
-        // The connection goes: the next feedback fails and the worker stops.
-        h.alive.store(false, Ordering::Relaxed);
-        let datagrams = packetize(&mut packetizer, false, 3_000);
-        for d in datagrams.iter().skip(1) {
-            h.route(d.clone());
-        }
-        h.wait_for("the worker to finish", 3, |handle| {
-            handle.task.as_ref().is_some_and(JoinHandle::is_finished)
-        });
-        assert_eq!(h.handle.stream(), STREAM);
-        drop(h.handle);
-        assert!(h.router.inner.lock().attached.is_empty(), "dropping the handle unroutes");
     }
 
     /// A control channel nobody drains fills up; the worker drops its reports and goes on

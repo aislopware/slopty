@@ -10,10 +10,9 @@
 //! that each side sends its role's messages, framed by [`crate::codec`] like the rest.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ClientId, SessionId, WorkerId};
+use slopty_core::{SessionId, WorkerId};
 
 use crate::agent::AgentEvent;
-use crate::handshake::ClientKind;
 use crate::orchestration::{Outcome, Verb};
 use crate::screen::VideoCodec;
 use crate::terminal::{CloseReason, SessionSummary};
@@ -21,14 +20,10 @@ use crate::terminal::{CloseReason, SessionSummary};
 /// Who is dialling the server.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Role {
-    /// A worker registering itself.
-    Worker(Registration),
+    /// A worker registering itself; boxed, being ten times the size of the other roles.
+    Worker(Box<Registration>),
     /// A client app or the CLI.
     Client {
-        /// Stable identity of the installation.
-        client: ClientId,
-        /// What kind.
-        kind: ClientKind,
         /// Its name ("Cong's iPad").
         name: String,
     },

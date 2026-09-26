@@ -123,7 +123,6 @@ struct Connection {
     state: Arc<State>,
     inbox: fdpass::Inbox,
     attached: HashSet<SessionId>,
-    greeted: bool,
 }
 
 /// Whatever a connection held goes back to ptyd's care when it goes, however it went: the
@@ -143,14 +142,7 @@ impl Drop for Connection {
 
 impl Connection {
     fn new(id: u64, stream: UnixStream, state: Arc<State>) -> Self {
-        Self {
-            id,
-            stream,
-            state,
-            inbox: fdpass::Inbox::default(),
-            attached: HashSet::new(),
-            greeted: false,
-        }
+        Self { id, stream, state, inbox: fdpass::Inbox::default(), attached: HashSet::new() }
     }
 
     /// Serve until the worker hangs up or the connection fails. However it ends, dropping the
@@ -197,17 +189,7 @@ impl Connection {
     }
 
     async fn handle(&mut self, req: PtydRequest) -> Result<()> {
-        if !self.greeted {
-            return match req {
-                PtydRequest::Hello => {
-                    self.greeted = true;
-                    self.reply(&PtydEvent::Hello { pid: std::process::id() }, None).await
-                }
-                _ => anyhow::bail!("first message must be Hello"),
-            };
-        }
         match req {
-            PtydRequest::Hello => self.error(None, "already greeted").await,
             PtydRequest::Spawn { id, spec } => {
                 if self.session(id).is_some() {
                     return self.error(Some(id), "session id already exists").await;

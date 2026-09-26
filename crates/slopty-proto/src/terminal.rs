@@ -139,7 +139,8 @@ pub enum TermRequest {
         /// True when focused.
         focused: bool,
     },
-    /// Ask for scrollback lines `[start, start + count)`.
+    /// Ask for scrollback lines `[start, start + count)`. The worker serves at most
+    /// [`MAX_FETCH_LINES`] in one answer.
     FetchLines {
         /// First absolute line.
         start: LineIndex,
@@ -197,6 +198,9 @@ impl TermRequest {
         }
     }
 }
+
+/// Most lines one [`TermRequest::FetchLines`] is answered with; a client asks in chunks of it.
+pub const MAX_FETCH_LINES: u32 = 4096;
 
 /// Bytes of frames a viewer that answers markers may have on their way unconfirmed. At
 /// 250 kB/s a quarter of a second; the transport's own stream window (1.25 MB) was five.

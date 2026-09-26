@@ -214,8 +214,7 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let ran = run(&data, &fake.address(), &["--json", "workers"]).await;
         assert!(ran.ok, "{}", ran.stderr);
-        let Role::Client { kind, name, .. } = fake.next_role().await else { panic!("a client") };
-        assert_eq!(kind, slopty_proto::handshake::ClientKind::Tool);
+        let Role::Client { name } = fake.next_role().await else { panic!("a client") };
         assert!(name.starts_with("slopty @ "), "{name}");
         let workers: Value = serde_json::from_str(&ran.stdout).unwrap();
         let term = format!("{}/{}", studio(), agent());

@@ -233,3 +233,20 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   (0.56 s) is what isolated the volume; the disk image is what isolated the flag. An `xtask` change
   that re-signed every test binary before each run was written against that wrong cause and has
   been reverted. Change one variable per measurement, and a copy to another volume is a variable.
+
+- ✅ **No test runs cargo, and only the audio test waits on CoreAudio** (2026-09-26). The
+  worker's end-to-end tests built their idle-window fixture with `cargo build` on every run.
+  Whenever another build held the lock, the test waited past its 120 s limit. The fixture now
+  comes from the build that ran the tests. `cargo xtask e2e` builds every binary a suite
+  spawns before it starts and names their directory in `SLOPTY_E2E_BIN_DIR`, and a workspace
+  test build, like the gate's, puts the fixture beside the worker. The echo test runs without
+  the window when the fixture was not built. Its window opens then fail at ScreenCaptureKit,
+  which still loads the worker. The screen tests, gated on `SLOPTY_SCREEN_E2E`, require the
+  fixture. The client's screen-worker test had covered cursor, reassembly, NACKs, the worker
+  stopping with its connection, and audio, all in one. Every failure on record was its wait
+  for the player: the Opus encoder took about 40 s in a loaded gate, and the player had not
+  opened 45 s later. The audio half is now `audio_waits_for_the_player_without_holding_video_and_counts_gaps`,
+  alone in the `coreaudio` group, and the video half no longer waits on audio. The waits on
+  VideoToolbox and on CoreAudio are bounded at 100 s (`FOR_THE_MACHINE`). None of them
+  measures the framework, so the bound only makes a stuck framework fail with the stats. The
+  waits on the worker's own logic stay at 3 s.

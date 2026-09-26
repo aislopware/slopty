@@ -121,11 +121,14 @@ async fn session(
         caps: now,
         sessions: daemon.worker.summaries().await,
     };
-    let link = match slopty_net::server::connect(endpoint, addr, Role::Worker(registration)).await {
-        Ok(link) => link,
-        Err(DialError::Refused(Refusal::DuplicateWorker)) => return Err(Ended::Duplicate),
-        Err(DialError::Net(e)) => return Err(e.into()),
-    };
+    let link =
+        match slopty_net::server::connect(endpoint, addr, Role::Worker(Box::new(registration)))
+            .await
+        {
+            Ok(link) => link,
+            Err(DialError::Refused(Refusal::DuplicateWorker)) => return Err(Ended::Duplicate),
+            Err(DialError::Net(e)) => return Err(e.into()),
+        };
     let ServerLink { conn, remote, name, tx, mut rx } = link;
     redial.linked(std::time::Instant::now());
     tracing::info!(server = %name, %remote, "registered with the server");

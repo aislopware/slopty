@@ -63,20 +63,16 @@ mod tests {
 
     #[expect(clippy::disallowed_methods, reason = "a test thread polling another process")]
     fn idle_window(dir: &std::path::Path) -> (Idle, WindowId) {
-        let exe = std::env::current_exe().unwrap();
-        let profile = exe.parent().and_then(std::path::Path::parent).unwrap();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut build = std::process::Command::new(cargo);
-        build.args(["build", "-p", "slopty-e2e", "--bin", "slopty-idle-window"]);
-        if profile.ends_with("release") {
-            build.arg("--release");
-        }
-        assert!(build.status().unwrap().success(), "build the idle window");
-        let child = std::process::Command::new(profile.join("slopty-idle-window"))
-            .arg(dir)
-            .arg("slopty geometry cost")
-            .spawn()
-            .unwrap();
+        // Built up front by `cargo xtask e2e`, never here: a `cargo build` inside a test waits on
+        // the build lock for as long as any other build holds it.
+        let bins = std::env::var_os("SLOPTY_E2E_BIN_DIR")
+            .expect("SLOPTY_E2E_BIN_DIR is set: run this through `cargo xtask e2e screen`");
+        let child =
+            std::process::Command::new(std::path::Path::new(&bins).join("slopty-idle-window"))
+                .arg(dir)
+                .arg("slopty geometry cost")
+                .spawn()
+                .unwrap();
         let pid = i32::try_from(child.id()).unwrap();
         let idle = Idle(child, dir.to_path_buf());
         let started = std::time::Instant::now();

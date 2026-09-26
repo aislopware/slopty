@@ -6,12 +6,11 @@
 mod tests {
     use std::time::Duration;
 
-    use slopty_core::{ClientId, SessionId, WorkerId};
+    use slopty_core::{SessionId, WorkerId};
     use slopty_net::HostAddr;
     use slopty_net::admission::Admission;
     use slopty_net::client::bind_client;
     use slopty_net::server::{DialError, ServerLink, connect};
-    use slopty_proto::handshake::ClientKind;
     use slopty_proto::orchestration::{ErrorCode, Line, Outcome, Screen, TermRef, Verb};
     use slopty_proto::server::{
         FromServer, Liveness, Os, Refusal, Registration, Role, ToServer, WorkerCaps,
@@ -38,17 +37,17 @@ mod tests {
     }
 
     fn worker_role(worker: WorkerId) -> Role {
-        Role::Worker(Registration {
+        Role::Worker(Box::new(Registration {
             worker,
             name: "fake-worker".to_owned(),
             port: 45999,
             caps: caps(),
             sessions: Vec::new(),
-        })
+        }))
     }
 
     fn client_role() -> Role {
-        Role::Client { client: ClientId::new(), kind: ClientKind::Tool, name: "test".to_owned() }
+        Role::Client { name: "test".to_owned() }
     }
 
     fn screen() -> Screen {

@@ -15,7 +15,7 @@ use slopty_core::{ClientId, SessionId, StreamId, XferId};
 use slopty_net::worker::AcceptedClient;
 use slopty_net::{ClientMsg, Connection, NetError, WorkerMsg};
 use slopty_proto::datagram::ClientDatagram;
-use slopty_proto::handshake::{Caps, HelloAck};
+use slopty_proto::handshake::HelloAck;
 use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::items::ItemSync;
 use slopty_proto::screen::{Feedback, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest};
@@ -205,8 +205,6 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     let ack = HelloAck {
         worker: daemon.id,
         name: daemon.name.clone(),
-        app_version: env!("CARGO_PKG_VERSION").to_owned(),
-        caps: Caps::empty(),
         sessions: daemon.worker.summaries().await,
     };
     let mut heard = Heard {

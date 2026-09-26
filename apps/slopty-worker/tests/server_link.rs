@@ -108,7 +108,7 @@ mod tests {
             let mut tx = link.tx;
             let welcome = FromServer::Welcome { name: "fake".into() };
             tx.send(&welcome).await.unwrap();
-            (Self { conn: link.conn, tx, rx: link.rx, heard: Vec::new(), next: 1 }, registration)
+            (Self { conn: link.conn, tx, rx: link.rx, heard: Vec::new(), next: 1 }, *registration)
         }
 
         async fn send(&mut self, verb: Verb) -> u64 {

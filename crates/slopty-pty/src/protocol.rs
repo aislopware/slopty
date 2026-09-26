@@ -44,12 +44,10 @@ pub fn socket_path() -> PathBuf {
         .map_or_else(|| std::env::temp_dir().join("slopty").join("ptyd.sock"), PathBuf::from)
 }
 
-/// The worker → ptyd.
+/// The worker → ptyd. Nothing is versioned: ptyd and the worker are built and installed
+/// together.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum PtydRequest {
-    /// First message. Nothing is versioned: ptyd and the worker are built and installed
-    /// together.
-    Hello,
     /// Create a PTY and spawn on it. Answer: `Spawned` or `Error`.
     Spawn {
         /// Chosen by the worker.
@@ -104,11 +102,6 @@ pub enum PtydRequest {
 /// ptyd → the worker.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum PtydEvent {
-    /// Reply to `Hello`.
-    Hello {
-        /// Daemon pid.
-        pid: u32,
-    },
     /// Spawned.
     Spawned {
         /// The session it is about.
@@ -239,7 +232,7 @@ fn output_frame(id: SessionId, bytes: &[u8]) -> Result<Vec<u8>, PtyError> {
     }
     impl Serialize for Output<'_> {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            let mut v = serializer.serialize_struct_variant("PtydRequest", 3, "Output", 2)?;
+            let mut v = serializer.serialize_struct_variant("PtydRequest", 2, "Output", 2)?;
             v.serialize_field("id", &self.id)?;
             v.serialize_field("bytes", &Bytes(self.bytes))?;
             v.end()
@@ -290,7 +283,6 @@ mod tests {
     fn tap_copy_cost() {
         #[derive(Serialize)]
         enum Derived {
-            _Hello,
             _Spawn,
             _Attach,
             Output { id: SessionId, bytes: Vec<u8> },
@@ -324,7 +316,6 @@ mod tests {
     fn byte_strings_keep_the_wire_of_a_sequence_of_bytes() {
         #[derive(Serialize)]
         enum Derived {
-            _Hello,
             _Spawn,
             _Attach,
             _Output,

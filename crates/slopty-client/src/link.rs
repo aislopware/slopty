@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, StreamId, XferId};
 use slopty_net::client::WorkerConn;
 use slopty_net::framed::FramedRecv;
-use slopty_net::streams::{RawRecv, Uni, accept_uni};
+use slopty_net::streams::{RawRecv, Uni, read_uni};
 use slopty_net::{ClientMsg, NetError, WorkerMsg};
 use slopty_proto::datagram::{ClientDatagram, TermDatagram, parse_term_datagram};
 use slopty_proto::handshake::HelloAck;
@@ -145,38 +145,33 @@ impl WorkerLink {
         let stream_events = events_tx.clone();
         let (pump_echoes, pump_taken) = (echoes.clone(), Arc::clone(&copies_taken));
         let (bulk_table, bulk_clips) = (Arc::clone(&table), Arc::clone(&clips));
+        // Each header is read on the stream's own task: one lost and retransmitted holds up
+        // only its stream, not the accepts behind it.
         tasks.spawn(async move {
             loop {
-                let uni = match accept_uni(&acceptor_conn).await {
-                    Ok(uni) => uni,
+                let recv = match acceptor_conn.accept_uni().await {
+                    Ok(recv) => recv,
                     Err(e) => {
-                        tracing::debug!(error = %e, "accept_uni ended");
-                        if acceptor_conn.close_reason().is_some() {
-                            break;
-                        }
-                        continue;
+                        tracing::debug!(error = %e, "unidirectional streams end");
+                        break;
                     }
                 };
-                match uni {
-                    Uni::Session { session, rx } => {
-                        let copies = pump_echoes.open(session);
-                        let pump = Pump {
-                            session,
-                            events: stream_events.clone(),
-                            echoes: pump_echoes.clone(),
-                            taken: Arc::clone(&pump_taken),
-                        };
-                        tokio::spawn(pump_session(pump, rx, copies));
+                let (events, echoes, taken) =
+                    (stream_events.clone(), pump_echoes.clone(), Arc::clone(&pump_taken));
+                let (table, clips) = (Arc::clone(&bulk_table), Arc::clone(&bulk_clips));
+                tokio::spawn(async move {
+                    match read_uni(recv).await {
+                        Ok(Uni::Session { session, rx }) => {
+                            let copies = echoes.open(session);
+                            let pump = Pump { session, events, echoes, taken };
+                            pump_session(pump, rx, copies).await;
+                        }
+                        Ok(Uni::Bulk { header, rx }) => {
+                            receive_bulk(header, rx, table, clips).await;
+                        }
+                        Err(e) => tracing::debug!(error = %e, "unidirectional stream refused"),
                     }
-                    Uni::Bulk { header, rx } => {
-                        tokio::spawn(receive_bulk(
-                            header,
-                            rx,
-                            Arc::clone(&bulk_table),
-                            Arc::clone(&bulk_clips),
-                        ));
-                    }
-                }
+                });
             }
         });
 

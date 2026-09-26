@@ -7,16 +7,13 @@ use slopty_grid::{
     CellWidth, Cursor, Line, LineFlags, LineIndex, Screen, Scrollback, SemanticMark, TermModes,
 };
 use slopty_proto::terminal::{
-    ColorOverrides, Frame, IMAGE_CACHE_BYTES, Placement, SearchMatch, TermEvent, TermRequest,
-    TermSize,
+    ColorOverrides, Frame, IMAGE_CACHE_BYTES, MAX_FETCH_LINES, Placement, SearchMatch, TermEvent,
+    TermRequest, TermSize,
 };
 
 /// Lines kept client-side; the worker retains 50k. Past it the lines farthest from the view
 /// go first (see [`Scrollback`]), so what was fetched to be looked at stays.
 pub const CACHE_LINES: usize = 20_000;
-
-/// Most lines one `FetchLines` asks for: the worker serves no more in one answer.
-pub const FETCH_CHUNK: u32 = 4096;
 
 /// What the UI or connection should do after an event was applied.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -632,7 +629,7 @@ impl TermState {
     }
 
     /// Ask for the lines of `[start, start + count)` that are neither held nor already asked
-    /// for, in requests of at most [`FETCH_CHUNK`] lines.
+    /// for, in requests of at most [`MAX_FETCH_LINES`] lines.
     pub fn request_lines(&mut self, start: LineIndex, count: u64) -> Vec<Effect> {
         let mut out = Vec::new();
         for (gap, len) in self.scrollback.missing(start, count) {
@@ -653,8 +650,8 @@ impl TermState {
                     .map(|f| f.start.0)
                     .min()
                     .unwrap_or(u64::MAX);
-                let to = end.min(next_asked).min(from.saturating_add(u64::from(FETCH_CHUNK)));
-                let count = u32::try_from(to.saturating_sub(from)).unwrap_or(FETCH_CHUNK);
+                let to = end.min(next_asked).min(from.saturating_add(u64::from(MAX_FETCH_LINES)));
+                let count = u32::try_from(to.saturating_sub(from)).unwrap_or(MAX_FETCH_LINES);
                 self.in_flight.push_back(Fetch {
                     start: LineIndex(from),
                     end: LineIndex(to),

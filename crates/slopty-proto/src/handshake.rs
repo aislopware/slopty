@@ -1,57 +1,17 @@
 //! Connection establishment.
 
-use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, WorkerId};
 
 use crate::terminal::SessionSummary;
-
-/// What kind of client is connecting; workers use it for defaults (e.g. touch-sized hit targets).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum ClientKind {
-    /// The macOS app.
-    Mac,
-    /// The iPad app.
-    IPad,
-    /// The iPhone app.
-    IPhone,
-    /// A headless tool (`slopty` CLI, tests).
-    Tool,
-}
-
-bitflags! {
-    /// Optional features. A worker never uses a capability the client did not announce.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct Caps: u32 {
-        /// Can decode HEVC Main.
-        const HEVC = 1 << 0;
-        /// Can decode HEVC Main10 (HDR).
-        const HEVC_MAIN10 = 1 << 1;
-        /// Can decode H.264 (fallback only).
-        const H264 = 1 << 2;
-        /// Can play Opus audio.
-        const OPUS = 1 << 3;
-        /// Accepts kitty graphics image payloads on session streams.
-        const KITTY_GRAPHICS = 1 << 4;
-        /// Runs client-side prediction and wants `input_ack` in frames.
-        const PREDICTION = 1 << 5;
-    }
-}
 
 /// First message from a client.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Hello {
     /// Stable identity of this client installation.
     pub client: ClientId,
-    /// Kind.
-    pub kind: ClientKind,
     /// Human-readable name shown on the worker ("Cong's iPad").
     pub name: String,
-    /// App version string.
-    pub app_version: String,
-    /// Features.
-    pub caps: Caps,
 }
 
 /// Worker's acceptance.
@@ -62,17 +22,6 @@ pub struct HelloAck {
     pub worker: WorkerId,
     /// Worker name ("mac-studio").
     pub name: String,
-    /// Worker app version.
-    pub app_version: String,
-    /// Worker features.
-    pub caps: Caps,
     /// Sessions currently alive on the worker, so the client can reattach immediately.
     pub sessions: Vec<SessionSummary>,
-}
-
-/// Why a `Hello` was refused.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Rejection {
-    /// Too many clients.
-    Busy,
 }

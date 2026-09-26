@@ -97,12 +97,11 @@ mod roundtrip {
         .expect("the session is handed back")
     }
 
-    /// A raw connection that has said `Hello` and asked for `id`, its requests written as
+    /// A raw connection that has asked for `id`, its requests written as
     /// `extra` follows them.
     async fn raw_attach(daemon: &Daemon, id: SessionId, extra: &[u8]) -> tokio::net::UnixStream {
         let mut raw = tokio::net::UnixStream::connect(&daemon.socket).await.unwrap();
-        let mut out = slopty_proto::codec::encode(&PtydRequest::Hello).unwrap().to_vec();
-        out.extend_from_slice(&slopty_proto::codec::encode(&PtydRequest::Attach { id }).unwrap());
+        let mut out = slopty_proto::codec::encode(&PtydRequest::Attach { id }).unwrap().to_vec();
         out.extend_from_slice(extra);
         raw.write_all(&out).await.unwrap();
         raw

@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow};
-use slopty_client::redial::Redial;
 use slopty_net::endpoint::SERVER_PORT;
+use slopty_net::redial::Redial;
 use slopty_net::server::{DialError, ServerLink, connect};
 use slopty_net::{Endpoint, HostAddr, NetError};
 use slopty_proto::codec::CodecError;
@@ -96,7 +96,7 @@ impl Link {
     }
 
     /// A link held for the process lifetime: it dials in the background and redials whenever
-    /// the connection drops, on the backoff every link follows ([`slopty_client::redial`]). A
+    /// the connection drops, on the backoff every link follows ([`slopty_net::redial`]). A
     /// call made while the server is down tries a dial at once and fails with the reason when
     /// that does not get through.
     ///

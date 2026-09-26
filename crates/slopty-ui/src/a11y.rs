@@ -58,9 +58,8 @@ pub fn key_name(label: &str) -> &'static str {
         "/" => "Slash",
         "|" => "Pipe",
         "~" => "Tilde",
-        "copy" => "Copy",
-        "paste" => "Paste",
-        "select" => "Select",
+        "Copy" => "Copy",
+        "Paste" => "Paste",
         _ => "Key",
     }
 }

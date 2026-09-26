@@ -104,13 +104,13 @@ mod tests {
         .unwrap();
         let worker = WorkerId::new();
         let endpoint = bind_client().unwrap();
-        let role = Role::Worker(Registration {
+        let role = Role::Worker(Box::new(Registration {
             worker,
             name: "fake-worker".to_owned(),
             port: 45550,
             caps: caps(),
             sessions: Vec::new(),
-        });
+        }));
         let _lease =
             slopty_net::server::connect(&endpoint, &HostAddr::from(server.quic_addr()), role)
                 .await
@@ -210,13 +210,13 @@ mod tests {
         .unwrap();
         let worker = WorkerId::new();
         let endpoint = bind_client().unwrap();
-        let role = Role::Worker(Registration {
+        let role = Role::Worker(Box::new(Registration {
             worker,
             name: "fake-worker".to_owned(),
             port: 45550,
             caps: caps(),
             sessions: Vec::new(),
-        });
+        }));
         let mut link =
             slopty_net::server::connect(&endpoint, &HostAddr::from(server.quic_addr()), role)
                 .await

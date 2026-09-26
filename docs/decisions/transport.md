@@ -1241,3 +1241,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_restarted_worker_resets_the_old_connection_within_a_keep_alive` (no reset within 3 s with
   the sample at 0), `a_peer_outside_the_admitted_ranges_is_refused_before_the_handshake`, and
   `an_initial_close_holds_the_header_sample_when_the_tag_is_shorter` in noq-proto.
+
+- ✅ **The greetings carry only what a peer reads** (2026-09-26). A client's `Hello` is its
+  identity and its name; the worker's `HelloAck` is its identity, its name and its sessions.
+  The client kind, both app versions and the capability flags are gone: every binary is built
+  together, so a version told nothing, and no peer read a kind or a flag. `WorkerMsg::Rejected`
+  went with them. The worker never refused a `Hello`, and the one place that sent `Rejected`
+  was its shutdown, which closes the endpoint anyway. A client dialling the server names
+  itself and nothing more (`Role::Client { name }`), since the server reads only the name.
+  ptyd lost its hello round trip: its reply carried a pid nobody read, so a worker now
+  connects and sends its first request. One redial rule serves every link,
+  `slopty_net::redial`, where the client used to keep a verbatim copy.
+
+- ✅ **A worker's reset reaches the browser as a reset, never as a clean end first**
+  (2026-09-26). `splice` split the browser's socket into halves, and on a stream failure set
+  a zero linger and dropped them. Dropping the write half on its own sends a FIN, so the
+  browser could read a clean end of file before the reset landed; the test caught it as a
+  read of 0 bytes about one run in fifty. The halves are now joined back into the socket
+  before it is dropped, so the only thing the browser sees is the reset. Test:
+  `a_stream_the_worker_resets_resets_the_browser`, 200 runs in a row under
+  `--stress-count`.
+
+- ✅ **A client reads each stream's header on that stream's own task** (2026-09-26). The link
+  accepted a unidirectional stream and read its header inside the accept loop. A header whose
+  packet was lost therefore held up every stream behind it until the retransmission arrived.
+  The loop now only accepts, and each stream's task reads its own header with
+  `streams::read_uni`, as the worker already did. Test:
+  `a_stream_waiting_on_its_header_does_not_hold_up_the_next` (`slopty-client`), where a stream
+  with half a header stays open while a session stream opened after it is delivered.
