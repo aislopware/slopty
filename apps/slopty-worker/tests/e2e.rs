@@ -321,11 +321,12 @@ mod tests {
     }
 
     /// Keystroke echo while the same connection keeps the worker busy with slow requests: quick
-    /// open walking 20 000 files, and window streams opening (onto the idle window where Screen
-    /// Recording is granted; failing at ScreenCaptureKit where it is not). None of that may put
-    /// a terminal's echo behind it.
+    /// open walking 20 000 files and, with `SLOPTY_SCREEN_E2E=1`, window streams opening onto an
+    /// idle window. None of that may put a terminal's echo behind it. The windows are opt-in
+    /// because every fresh test binary asking ScreenCaptureKit puts a consent prompt on screen.
     #[tokio::test(flavor = "multi_thread")]
     async fn echo_is_not_held_behind_slow_requests() {
+        let screens = std::env::var_os("SLOPTY_SCREEN_E2E").is_some();
         let dir = tempfile::tempdir().unwrap();
         let tree = dir.path().join("tree");
         for d in 0..200 {
@@ -340,7 +341,7 @@ mod tests {
         let title = format!("slopty echo {}", std::process::id());
         // Without the fixture (a lone package's test build) the opens target no window and fail
         // at ScreenCaptureKit, which is load all the same.
-        let mut helper = idle_window_bin().map(|bin| {
+        let mut helper = idle_window_bin().filter(|_| screens).map(|bin| {
             Command::new(bin)
                 .arg(&markers)
                 .arg(&title)
@@ -375,19 +376,23 @@ mod tests {
 
         // Where Screen Recording is granted the listing names the idle window; where it is not
         // there is no listing, and an open fails at ScreenCaptureKit instead.
-        worker.tx.send(&ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
-        let window = tokio::time::timeout(
-            Duration::from_secs(2),
-            next_msg(&mut worker, |m| match m {
-                WorkerMsg::Screen(ScreenEvent::Listing { windows, .. }) => {
-                    Some(windows.iter().find(|w| w.title == title).map(|w| w.id))
-                }
-                _ => None,
-            }),
-        )
-        .await
-        .ok()
-        .flatten();
+        let window = if screens {
+            worker.tx.send(&ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                next_msg(&mut worker, |m| match m {
+                    WorkerMsg::Screen(ScreenEvent::Listing { windows, .. }) => {
+                        Some(windows.iter().find(|w| w.title == title).map(|w| w.id))
+                    }
+                    _ => None,
+                }),
+            )
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
         eprintln!("idle window: {window:?}");
         let target = CaptureTarget::Window(window.unwrap_or(WindowId(u32::MAX)));
 
@@ -424,9 +429,11 @@ mod tests {
                     let started = std::time::Instant::now();
                     let find = ClientMsg::FindFiles { root: root.clone(), query: "nothing".into() };
                     send.send(find).await.unwrap();
-                    let open = ScreenRequest::Open { target, quality: Quality::default() };
-                    send.send(ClientMsg::Screen(open)).await.unwrap();
-                    let (mut found, mut screen) = (false, false);
+                    if screens {
+                        let open = ScreenRequest::Open { target, quality: Quality::default() };
+                        send.send(ClientMsg::Screen(open)).await.unwrap();
+                    }
+                    let (mut found, mut screen) = (false, !screens);
                     while !(found && screen) {
                         match tokio::time::timeout(STEP, answers.recv()).await.unwrap().unwrap() {
                             WorkerMsg::FoundFiles { .. } => {

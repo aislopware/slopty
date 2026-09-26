@@ -1056,6 +1056,7 @@ mod tests {
         assert!(energy > 1.0, "decoded audio is silent: {energy}");
     }
 
+    /// Silence: this opens the machine's real output, which may be carrying someone's audio.
     #[test]
     #[expect(clippy::disallowed_methods, reason = "a test waiting on the audio thread")]
     fn player_starts_and_drains() {
@@ -1063,7 +1064,7 @@ mod tests {
         let at = Instant::now();
         for seq in 1..=3 {
             let at = at + Duration::from_millis(u64::from(seq) * 20);
-            player.push(&vec![0.1; PACKET_SAMPLES], Arrival { seq, at });
+            player.push(&vec![0.0; PACKET_SAMPLES], Arrival { seq, at });
         }
         assert!(player.queued() <= PACKET_SAMPLES * 3);
         std::thread::sleep(Duration::from_millis(150));
