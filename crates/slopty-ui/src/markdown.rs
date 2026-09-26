@@ -271,7 +271,7 @@ pub fn task_row(
         // a disabled box in dark.
         .when(done, |b| {
             b.bg(hsla(s.accent_fill))
-                .text_color(hsla(s.fill_fg))
+                .text_color(hsla(s.accent_ink))
                 .text_size(px(theme.typography.caption() * scale))
                 .line_height(px(side))
                 .child("\u{2713}")

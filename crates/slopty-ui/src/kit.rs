@@ -254,9 +254,10 @@ pub fn button(
         .cursor_pointer()
         .child(label);
     let el = match kind {
-        ButtonKind::Primary => {
-            el.border_color(hsla(s.accent_fill)).bg(hsla(s.accent_fill)).text_color(hsla(s.fill_fg))
-        }
+        ButtonKind::Primary => el
+            .border_color(hsla(s.accent_fill))
+            .bg(hsla(s.accent_fill))
+            .text_color(hsla(s.accent_ink)),
         ButtonKind::Secondary => el
             .border_color(hsla(s.border))
             .bg(hsla(s.panel))
@@ -486,7 +487,7 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     // A primary button is a fill, so it takes the fill and its ink: the accent's text tone is
     // a pale blue in dark, lifted for reading on the canvas, and a button in it read as disabled.
     c.primary = hsla(s.accent_fill);
-    c.primary_foreground = hsla(s.fill_fg);
+    c.primary_foreground = hsla(s.accent_ink);
     c.link = hsla(s.accent);
     c.link_hover = hsla(s.accent);
     c.link_active = hsla(s.accent);
@@ -596,7 +597,7 @@ mod tests {
                 assert_eq!(kit.colors.background, hsla(theme.surfaces.panel));
                 assert_eq!(kit.colors.foreground, hsla(theme.surfaces.text));
                 assert_eq!(kit.colors.primary, hsla(theme.surfaces.accent_fill), "a fill");
-                assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.fill_fg));
+                assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.accent_ink));
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
                 assert_eq!(kit.colors.ring, hsla(theme.surfaces.accent));
                 assert_eq!(kit.colors.title_bar, hsla(theme.surfaces.canvas));

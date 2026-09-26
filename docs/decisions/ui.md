@@ -381,8 +381,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **Notes are shared text, last writer wins.** `ItemKind::Note { text }` was already in the
   document; the client now edits it in place with gpui-kit's `TextareaState` (`NoteView`).
-  Edits go to the host as an `Upsert` of the whole item after a 400 ms typing pause and on
-  blur; a remote change is applied only while this client is not editing. No merge: notes are
+  Edits go to the host after a 400 ms typing pause and on blur (as `SetNote`, the text alone,
+  since 2026-09-27: multi-client.md, "An item change carries only the field it changes"); a remote change is applied only while this client is not editing. No merge: notes are
   short and the canvas has one author at a time in practice. ⌘⇧N / "+ note" places a 320×240
   note in the next free slot and reveals + focuses it at once: the document applies our op
   optimistically, and keying that off the host's echo failed on the phone, where a frame
@@ -2350,3 +2350,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_tile_that_fills_a_phone_offers_no_fullscreen`; app `a_wide_key_bar_spreads_its_groups`,
   `the_panel_names_its_host_and_the_server_the_tailnet_found`. The goldens are to be recorded
   again with this change.
+
+- ✅ **The accent fill has its own ink** (2026-09-27, golden review). The design audit gave every
+  fill one text colour, `fill_fg`, near black, which is right on the amber and green badges. On
+  the phone's first-run page it put a black "Connect" on a bright blue, which reads as a
+  disabled or foreign control: a native primary button is white on a deep blue. White on the
+  light variant's old `3b82f6` is 3.7:1, so the light `accent_fill` is now `2563eb` and its text
+  is `accent_ink`, white, 5.2:1. The dark variant keeps its lighter blue with dark ink, where
+  white would be 2.6:1. `fill_fg` stays for the success, warn and error fills. Everything that
+  sits on the accent fill takes `accent_ink`: the kit's primary button and gpui-kit's
+  `primary_foreground`, a ticked note box, a lit key cap, the terminal's accent buttons. Tests:
+  the theme's fills test holds `accent_ink` on `accent_fill` and `fill_fg` on the rest to AA in
+  both variants; `the_kit_theme_follows_the_tokens`.

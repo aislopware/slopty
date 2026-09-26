@@ -542,8 +542,12 @@ pub struct Surfaces {
     pub warn_fill: Rgb,
     /// Error as a mark: a failed block's wash, a dot, a badge.
     pub error_fill: Rgb,
-    /// Text on any of the four fills: a badge's count, a primary button's label.
+    /// Text on the success, warn and error fills: a badge's count.
     pub fill_fg: Rgb,
+    /// Text on the accent fill: a primary button's label, a tick, a key that is on. White on a
+    /// deep blue in the light variant, as a native primary button is; dark on the lighter blue
+    /// of the dark one.
+    pub accent_ink: Rgb,
 }
 
 /// What a ladder step is mixed toward from the content.
@@ -592,6 +596,7 @@ struct Tones {
     warn_fill: Rgb,
     error_fill: Rgb,
     fill_fg: Rgb,
+    accent_ink: Rgb,
 }
 
 /// Dark: the bars and the navigator sink toward black, everything above the content climbs
@@ -618,6 +623,7 @@ const DARK_TONES: Tones = Tones {
     warn_fill: Rgb::hex(0xf5b83d),
     error_fill: Rgb::hex(0xf0555f),
     fill_fg: Rgb::hex(0x0a0b0e),
+    accent_ink: Rgb::hex(0x0a0b0e),
 };
 
 /// Light: every step below the content darkens toward the text; what floats goes to white.
@@ -638,11 +644,12 @@ const LIGHT_TONES: Tones = Tones {
     success: Rgb::hex(0x187633),
     warn: Rgb::hex(0x8b5d00),
     error: Rgb::hex(0xc7212c),
-    accent_fill: Rgb::hex(0x3b82f6),
+    accent_fill: Rgb::hex(0x2563eb),
     success_fill: Rgb::hex(0x2da44e),
     warn_fill: Rgb::hex(0xf0a000),
     error_fill: Rgb::hex(0xef4b52),
     fill_fg: Rgb::hex(0x0a0b0e),
+    accent_ink: Rgb::hex(0xffffff),
 };
 
 /// The least contrast `fg` has on any of `surfaces`.
@@ -724,6 +731,7 @@ impl Surfaces {
             warn_fill: t.warn_fill,
             error_fill: t.error_fill,
             fill_fg: t.fill_fg,
+            accent_ink: t.accent_ink,
         }
     }
 }
@@ -1406,8 +1414,9 @@ mod tests {
                 let (sat, light) = sl(fill);
                 assert!(sat >= 0.5, "{variant:?}: {name} is greyed ({sat:.2})");
                 assert!((0.4..=0.75).contains(&light), "{variant:?}: {name} lightness {light:.2}");
-                let ink = s.fill_fg.contrast(fill);
-                assert!(ink >= AA, "{variant:?}: a count on {name} is {ink:.2}");
+                let on = if name == "accent_fill" { s.accent_ink } else { s.fill_fg };
+                let ink = on.contrast(fill);
+                assert!(ink >= AA, "{variant:?}: text on {name} is {ink:.2}");
                 if variant == Variant::Dark {
                     for (surface, under) in under_text(&s, theme.content()) {
                         let seen = fill.contrast(under);

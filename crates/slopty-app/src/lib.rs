@@ -1267,7 +1267,7 @@ impl Workspace {
             .border_1()
             .border_color(hsla(if lit { s.accent_fill } else { s.border }))
             .text_size(px(text_size))
-            .text_color(hsla(if lit { s.fill_fg } else { s.text }))
+            .text_color(hsla(if lit { s.accent_ink } else { s.text }))
             .bg(hsla(if lit { s.accent_fill } else { s.elevated }))
             .active(move |el| el.bg(hsla(pressed)))
     }
