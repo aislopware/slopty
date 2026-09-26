@@ -1686,6 +1686,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     half took only the space.
   - Test: view `either_half_of_a_wide_character_is_the_character`.
 
+- ✅ **Upstream sync of 2026-09-26 evening, and the editor's gutter gap** (2026-09-26). zed
+  rebased onto main `70e686c2a3` (2 commits: the extension page's upsell and a Windows remote
+  server build, neither in anything Slopty builds). gpui-kit rebased onto main `7afd1708` (6
+  commits); `ghostty`, the toolchains and the crates were current.
+  - **gpui-kit**: a focusable list paints `Role::List` on its container, a form takes its
+    styled refinements, and a table's highlights stop remapping quadratically. The input
+    accessibility fix (#3246) came and went: upstream reverted it (#3253) because it broke
+    reverse tab traversal, so nothing changes for Slopty's fields.
+  - **Our commit on the fork**: `EditorState::line_number_gap`, the space between the line
+    numbers and the text, which was a fixed 6 pt. The file tile sets it to `spacing.md`, so
+    the code no longer starts flush against its numbers (golden review #9). Test (fork):
+    `line_number_gap_widens_the_gutter_by_its_difference`; goldens `editor*`.
+
 - ✅ **The status bar states facts, the inbox is a mailbox, and palette rows say where**
   (2026-09-26). The reference study found the status bar showing a debug readout and the inbox
   and palette rows with too little to tell one from another. This ruling amends the status
@@ -2179,3 +2192,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   unseen dot says it went unwatched, so the "Done · 6.0 s" readout beside them is quiet
   `text_secondary` text, still the button to the shell, not a third tinted pill. Test:
   `a_tile_that_needs_you_says_so_once_in_its_header`.
+  The navigator did the same: its *Needs you* section lists the agent, and the agent's row
+  under its worker was washed in the warn fill too, beside its warn-toned "Needs you" word.
+  The wash is gone; the section leads and the word stays (golden
+  `agent-needs-you-navigator`). Test: `a_tile_row_reads_its_age_or_its_state_then_its_place`.

@@ -222,7 +222,10 @@ impl FileView {
         cx: &mut Context<Self>,
     ) -> Self {
         let editor = cx.new(|cx| {
-            let mut state = EditorState::new(window, cx).folding(false).soft_wrap(false);
+            let mut state = EditorState::new(window, cx)
+                .folding(false)
+                .soft_wrap(false)
+                .line_number_gap(px(theme.spacing.md));
             state.set_searchable(false, cx);
             state
         });

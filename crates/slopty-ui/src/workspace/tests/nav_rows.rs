@@ -72,7 +72,8 @@ fn the_filter_keeps_the_rows_that_match(cx: &mut TestAppContext) {
 
 /// A shell's row reads two lines: its title, ended by its age from the session's start, then
 /// its directory, what its agent says and its branch. Once the agent waits on the human, the
-/// state takes the age's place in a word, and the row is washed.
+/// state takes the age's place in a word, and the row is not washed: the *Needs you* section
+/// already leads with it.
 #[gpui::test]
 fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -143,7 +144,7 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
                 && near(q.bounds.size.height.0, row.size.height)
         })
     });
-    assert!(washed, "a row waiting on the human is washed");
+    assert!(!washed, "a row waiting on the human is not washed a second time");
 }
 
 /// A note's row says how far its tasks got, not that it is a note.

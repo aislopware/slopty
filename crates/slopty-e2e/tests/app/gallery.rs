@@ -1,7 +1,9 @@
 //! Every state of the app worth looking at, rendered by the app's own renderer and held as a
 //! golden: the first run, the panels that add a worker, a workspace of columns in both themes,
-//! the overview, the palette, the settings, the empty workspace, an agent that needs the
-//! human, a remote tile, an upload and a forwarded port, the inbox, and a failed command block.
+//! the overview, the palette, the settings, the "…" menu, the empty workspace, an agent that
+//! needs the human (on its tile and in the navigator), a remote tile, an upload and a forwarded
+//! port, the inbox, and a failed command block; the first run, the navigator, the inbox and the
+//! failed block dark as well.
 //!
 //! A golden passes or fails on its numbers. The tolerance is blind to a word of chrome text
 //! (`docs/decisions/ui.md`), so each scenario also asserts the chrome it shows through the
@@ -81,6 +83,13 @@ async fn the_first_run_offers_one_way_in() {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.wait_for("the connect panel", STEP, |d| d.adding).await.unwrap();
     golden(drv, &dir, "first-run").await;
+    stack.set_appearance("dark").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
+    golden(drv, &dir, "first-run-dark").await;
+    stack.set_appearance("light").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
     let dump = drv.dump().await.unwrap();
     assert_eq!(labels(&dump, "Heading"), ["Connect to a server"], "{:#?}", dump.a11y);
     // The way in and the other way in; no menu, no tile, no column marks to wonder about.
@@ -191,10 +200,32 @@ async fn a_workspace_of_columns_in_both_themes() {
     .await
     .unwrap();
 
+    let dump = drv.dump().await.unwrap();
+    let [x, y, w, h] = dump.a11y_node("Button", Some("More")).expect("the menu button").bounds;
+    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    drv.wait_for("the menu", STEP, |d| d.a11y_node("Menu", None).is_some()).await.unwrap();
+    drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
+    golden(drv, &dir, "more-menu").await;
+    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    drv.wait_for("the menu closed", STEP, |d| d.a11y_node("Menu", None).is_none()).await.unwrap();
+
     stack.set_appearance("dark").unwrap();
     let drv = &mut stack.driver;
     drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
     golden(drv, &dir, "workspace-dark").await;
+    drv.ok(&Command::Resize { width: 1280.0, height: 800.0 }).await.unwrap();
+    drv.wait_for("the navigator docked", STEP, |d| {
+        d.a11y_node("Navigation", Some("Navigator")).is_some()
+    })
+    .await
+    .unwrap();
+    golden(drv, &dir, "workspace-navigator-dark").await;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    drv.wait_for("the navigator gone again", STEP, |d| {
+        d.a11y_node("Navigation", Some("Navigator")).is_none()
+    })
+    .await
+    .unwrap();
     drv.keys("cmd-shift-p").await.unwrap();
     drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
         .await
@@ -249,6 +280,14 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
         .unwrap();
     assert!(dump.a11y_node("Button", Some("1 needs you")).is_some(), "{:#?}", dump.a11y);
     golden(drv, &dir, "agent-needs-you").await;
+    // The navigator names the waiting agent in its row, beside the tile's own mark.
+    drv.ok(&Command::Resize { width: 1280.0, height: 800.0 }).await.unwrap();
+    drv.wait_for("the navigator docked", STEP, |d| {
+        d.a11y_node("Navigation", Some("Navigator")).is_some()
+    })
+    .await
+    .unwrap();
+    golden(drv, &dir, "agent-needs-you-navigator").await;
     stack.shutdown().await;
 }
 
@@ -398,6 +437,14 @@ async fn the_inbox_lists_what_waits_and_what_finished() {
     // The pointer leaves the bell, so the golden holds the inbox at rest.
     drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
     golden(drv, &dir, "inbox").await;
+    stack.set_appearance("dark").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the dark inbox", STEP, |d| {
+        d.dark && d.a11y_node("Dialog", Some("Inbox")).is_some()
+    })
+    .await
+    .unwrap();
+    golden(drv, &dir, "inbox-dark").await;
     stack.shutdown().await;
 }
 
@@ -445,6 +492,14 @@ async fn a_failed_command_block_says_so_under_the_pointer() {
         .unwrap();
     assert!(dump.a11y_node("Button", Some("Block actions")).is_some(), "{:#?}", dump.a11y);
     golden(drv, &dir, "terminal-failed-block").await;
+    stack.set_appearance("dark").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the dark block", STEP, |d| {
+        d.dark && d.a11y_node("Button", Some("Block actions")).is_some()
+    })
+    .await
+    .unwrap();
+    golden(drv, &dir, "terminal-failed-block-dark").await;
     stack.shutdown().await;
 }
 

@@ -15,8 +15,9 @@
 //! its title, ended by its state in a word ("Needs you", "Working", "Done", "Failed"), else
 //! the unseen dot, else its age past a minute; then, muted, its directory (its worker's name
 //! where it has none), what its agent says or its last command and its branch, or a note's
-//! progress. A row waiting on the human is washed in the warn fill. A row flies the camera to
-//! what it names. Workspaces are the title bar's tabs, not a section here.
+//! progress. A row waiting on the human is not washed: the *Needs you* section above already
+//! leads with it, and its word says so in the warn tone. A row flies the camera to what it
+//! names. Workspaces are the title bar's tabs, not a section here.
 //!
 //! On a window wide enough it docks beside the rest of the frame, 248 pt by default, dragged
 //! from 200 to 400 by a 12 pt handle centred on its right edge, which a double-click puts back
@@ -49,7 +50,7 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::items::{Item, ItemKind};
-use slopty_theme::{Theme, Typography, alpha};
+use slopty_theme::{Theme, Typography};
 
 use super::actions::ToggleNavigator;
 use super::agents::{Waiting, agent_status_text};
@@ -58,7 +59,7 @@ use super::tile::{cwd_tail, kind_icon, note_progress};
 use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 use crate::icons::{IconName, IconSize, Status, icon, status_icon, status_mark};
 use crate::kit::{self, meta, tabular};
 
@@ -1401,8 +1402,7 @@ impl WorkspaceView {
     }
 
     /// A tile's row: its kind, its title and at the end of that line its state in a word (or
-    /// the unseen dot, or its age), then the muted second line. Waiting on the human, the row
-    /// is washed in the warn fill.
+    /// the unseen dot, or its age), then the muted second line.
     fn tile_row(
         &self,
         t: &NavTile,
@@ -1464,7 +1464,6 @@ impl WorkspaceView {
             .text_ellipsis()
             .child(t.meta.clone());
         let tile = t.tile;
-        let wash = t.mark == Some(Status::NeedsYou) && !selected;
         row(
             theme,
             kit::Row::Two,
@@ -1478,7 +1477,6 @@ impl WorkspaceView {
         .items_center()
         // Under the worker's name: past its icon and the gap after it.
         .pl(px(theme.spacing.inset() + theme.typography.icon_large()))
-        .when(wash, |row| row.bg(hsla_alpha(s.warn_fill, alpha::FAINT)))
         .child(
             div()
                 .debug_selector(move || format!("nav-lines-{id}"))
