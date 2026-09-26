@@ -163,7 +163,6 @@ async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
                         match reason {
                             CloseReason::Requested => "closed",
                             CloseReason::Exited => "exited",
-                            CloseReason::WorkerShutdown => "worker shut down",
                         }
                         .to_owned(),
                         0,

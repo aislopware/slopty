@@ -167,7 +167,7 @@ impl Link {
 impl Dispatch for Link {
     async fn call(&self, verb: Verb) -> Outcome {
         self.request(verb).await.unwrap_or_else(|e| Outcome::Error {
-            code: ErrorCode::Failed,
+            code: ErrorCode::ServerUnreachable,
             message: format!("{e:#}"),
         })
     }

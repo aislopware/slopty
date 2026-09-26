@@ -378,8 +378,6 @@ pub enum ScreenEvent {
         /// Shape, or `None` when hidden.
         shape: Option<CursorShape>,
     },
-    /// Window list changed (a window appeared or vanished).
-    ListingChanged,
     /// The capture target started or stopped producing pictures. Sent when the state changes,
     /// so a client that never gets one treats the stream as `Live` (the old behaviour).
     Source {

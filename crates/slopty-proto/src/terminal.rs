@@ -107,8 +107,6 @@ pub enum CloseReason {
     Requested,
     /// The child exited and the session was not retained.
     Exited,
-    /// The worker is shutting down.
-    WorkerShutdown,
 }
 
 /// Client → worker, scoped to one session.

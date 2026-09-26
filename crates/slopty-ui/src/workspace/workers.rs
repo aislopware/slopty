@@ -728,7 +728,6 @@ impl WorkspaceView {
                     }
                 }
             }
-            ScreenEvent::ListingChanged => {}
         }
         cx.notify();
     }
