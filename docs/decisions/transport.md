@@ -1310,3 +1310,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   setting any Mach thread policy takes the thread out of the QoS system, dropping the
   user-interactive class that cut a loaded echo's p90 eightfold. Kept the class (MEASUREMENTS,
   "timers fire late by the thread's latency tier").
+
+- ✅ **BBR3 takes its first round trip from the acknowledged packet** (2026-09-27,
+  MEASUREMENTS "one bulk stream over a long round trip"). One upload through the shaping relay
+  with nothing but delay reached 10 Mbit/s at a 60 ms round trip, with no loss and a 2.3 MB
+  window at the end. noq's connection hands an ACK to the controller before it feeds the ACK's
+  round trip to the `RttEstimator`, and BBR3 built its first rate sample from the estimator,
+  which on the first ACK still holds the configured initial RTT. That became `BBR.min_rtt`.
+  Slopty's `INITIAL_RTT` is 5 ms, so on any path longer than that the minimum stood at 5 ms
+  until the 10 s filter expired, the window was sized to `2 × bw × 5 ms` and the flow could not
+  fill even that fraction of the pipe fast enough to raise `bw`. The vendored noq-proto now takes
+  the packet's own `now - send_time`, as every later sample already did and as the draft's
+  `RS.rtt` is defined (`vendor/noq-proto/SLOPTY.md`, patch 6). The 2 × BDP bound is untouched;
+  its round trip was always measured per packet in `slopty_net::congestion`.
+
+  *Kept.* `INITIAL_RTT` stays 5 ms: it sets the handshake's first retransmission, and the bug was
+  the controller reading it as a measurement. Paths shorter than 5 ms never showed it, because
+  their first real sample was lower and replaced it; that is also why the 4 ms shaped link of
+  `echo_beside_flood` saw nothing.
+
+  🔬 *Next ceiling.* With the minimum right, one stream's rate is `stream_receive_window /
+  RTT`: noq's default 1.25 MB (sized for 100 Mbit/s at 100 ms) gives about 166 Mbit/s at 60 ms,
+  and the delivery rates measured sit on that line at 20, 40 and 60 ms. An 8 MiB window reached
+  191 Mbit/s at 60 ms but only 186 at 20 ms, against 310 with the default, so it is not simply
+  taken; it needs its own look at start-up overshoot on loopback. *Upstream:* propose patch 6
+  to noq with its test.

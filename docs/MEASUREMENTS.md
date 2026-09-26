@@ -5695,3 +5695,65 @@ to hold is synced when it is asked for. A landed file, whose digest has matched,
 `fsync` before its rename and no directory sync, on the client and the worker. Ten thousand
 small files went from about 76 s of syncing to 2 s. A cut stream's bytes are still fully synced
 for its resume.
+
+## 2026-09-27 — one bulk stream over a long round trip
+
+One 16 MiB bulk stream, client to worker, through `slopty-shape` adding a one-way delay and
+nothing else (no rate limit, no loss), timed at the receiver from the stream's opening to its
+last byte. Default controller (bounded BBR3), `INITIAL_RTT` 5 ms, test build, Mac Studio with
+other sessions building (load average 15 to 20). Two runs a cell, Mbit/s:
+
+| one way (round trip) | before | after |
+| --- | --- | --- |
+| 0 ms | 476, 440 | 597, 524 |
+| 5 ms (10 ms) | 425, 313 | 429, 475 |
+| 10 ms (20 ms) | 147, 113 | 310, 314 |
+| 15 ms (30 ms) | 93, 96 | 213, 213 |
+| 20 ms (40 ms) | 10, 12 | 160, 161 |
+| 30 ms (60 ms) | 10, 10 | 111, 107 |
+
+Before, at 60 ms the sender ended with no loss, a 2.3 MB window and 10 Mbit/s. BBR3's own state
+showed why: `min_rtt` 5 ms against real samples of 60 ms, from the first ACK on. noq calls the
+controller's `on_ack` before it feeds that ACK's round trip to the `RttEstimator`, and BBR3 took
+its first rate sample's RTT from the estimator, which still held the initial RTT. No later sample
+was lower, so the 5 ms minimum stood for the 10 s filter, and the window
+(`2 × bw × min_rtt + extra_acked`) was a twelfth of the path's product. The flow reached its rate
+only when the minimum expired, which is why a 16 MiB transfer took 13 s. At 10 and 15 ms each way
+extra_acked covered part of the shortfall. The vendored noq-proto now takes the packet's own round
+trip, as every later sample did (`vendor/noq-proto/SLOPTY.md`, patch 6).
+
+After, the fastest delivery rate each run measured sits on `1.25 MB / RTT`: 60.6 MB/s at 20 ms,
+41.7 at 30, 30.6 at 40 and 20.2 at 60. That is noq's default stream receive window (sized for
+100 Mbit/s at 100 ms), the next ceiling for one stream. An 8 MiB window, one run each, reached
+191 Mbit/s at 60 ms and 186 at 20 ms, against 310 at 20 ms with the default, so it is not taken
+here. `SLOPTY_CC=cubic` had reached 102 to 115 Mbit/s at 60 ms before the fix, the same window
+limit. The file upload the bug was found in went from 10 to 114 Mbit/s at 60 ms; `slopty-client`'s
+`a_large_file_fills_a_long_round_trip` now holds 16 MiB there under 3 s.
+
+`echo_beside_a_video_flood`, release, one run after the fix: every arm inside the ranges of
+"noq's BBR3 against the draft" (bursts: echo p99 16.0 ms, queue p99 8.0 / max 11.6 ms, window
+p50 32 kB; halved: echo p99 17.6 ms, queue max 14.4 ms, nothing lost). Its link has a 4 ms round
+trip, below the 5 ms initial RTT, so the first real sample always replaced the stale one there.
+
+```sh
+UP_MS=<one-way ms> cargo nextest run -p slopty-net --test bulk_over_delay --run-ignored only --no-capture
+cargo nextest run -p slopty-net --test bulk_over_delay    # the 80 Mbit/s floor at 0, 5, 10 and 30 ms
+cd vendor/noq-proto && CARGO_TARGET_DIR=../../target/noq-vendor cargo test --lib \
+  the_first_ack_measures_min_rtt_from_its_own_packet && rm Cargo.lock
+cargo nextest run -p slopty-net --release --test echo_beside_flood --run-ignored only --no-capture
+```
+
+"Before" is the patched tree with the one line put back (`rtt: rtt.get()`).
+
+## 2026-09-27 — describing a terminal's foreground process
+
+The agent watcher probes every session every 750 ms, and the probe runs on the session's actor,
+the thread that also carries its output and echo: `tcgetpgrp` on the master, then
+`proc_pidinfo` (`PROC_PIDTBSDINFO` and `PROC_PIDVNODEPATHINFO`) and the `KERN_PROCARGS2` sysctl
+for the group leader. An audit asked whether that should move off the actor. Describing the test
+process 2,000 times, test build, Mac Studio under other sessions' builds: p50 7.6 µs, p99 50.5 µs,
+max 112 µs. One echo waits at most that long, once per 750 ms, so the probe stays where it is.
+
+```sh
+cargo nextest run -p slopty-pty describing_a_process_costs --run-ignored only --no-capture
+```

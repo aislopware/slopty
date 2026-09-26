@@ -1666,7 +1666,7 @@ impl Bbr3 {
         packet_number: u64,
         space: SpaceKind,
         _app_limited: bool,
-        rtt: &RttEstimator,
+        _rtt: &RttEstimator,
     ) {
         self.check_recovery_done(sent);
         self.delivered += bytes;
@@ -1706,7 +1706,11 @@ impl Bbr3 {
                 }
             } else {
                 let rate_sample = BbrRateSample {
-                    rtt: rtt.get(),
+                    // The packet's own round trip, as the draft's `RS.rtt`. The estimator takes
+                    // this ACK's sample only after the controller has seen it, so on the first
+                    // ACK it still holds the configured initial RTT; an initial RTT below the
+                    // path's would stand as `BBR.min_rtt` for the whole `MinRTTFilterLen`.
+                    rtt: now - p.send_time,
                     interval: Duration::ZERO,
                     delivery_rate: 0.0,
                     is_app_limited: p.is_app_limited,
@@ -7269,6 +7273,33 @@ mod test {
             ms.sort_by(f64::total_cmp);
             ms
         }
+    }
+
+    /// The first ACK's round trip is the packet's own, not the estimator's. The connection hands
+    /// the controller an ACK before it feeds the ACK's sample to the `RttEstimator`, so on the
+    /// first ACK the estimator still holds the configured initial RTT. With an initial RTT of
+    /// 5 ms on a 60 ms path, taking the estimator's value set `BBR.min_rtt` to 5 ms, and no later
+    /// sample is lower, so it stood for the ten seconds of `MinRTTFilterLen`: the window was
+    /// sized to a twelfth of the path's product and one bulk stream crawled at a few Mbit/s.
+    #[test]
+    fn the_first_ack_measures_min_rtt_from_its_own_packet() {
+        const MSS: u64 = 1200;
+        let initial_rtt = Duration::from_millis(5);
+        let path_rtt = Duration::from_millis(60);
+        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        // What the connection passes the controller: the estimator before this ACK's sample.
+        let rtt = RttEstimator::new(initial_rtt);
+        let sent = Instant::now();
+        for pn in 0..10 {
+            bbr.on_packet_sent(sent, MSS as u16, pn, SpaceKind::Data);
+        }
+        let now = sent + path_rtt;
+        for pn in 0..10 {
+            bbr.on_ack(now, sent, MSS, pn, SpaceKind::Data, false, &rtt);
+        }
+        bbr.on_end_acks(now, 0, false, Some(9), SpaceKind::Data);
+        assert_eq!(bbr.min_rtt, path_rtt, "not the initial RTT of {initial_rtt:?}");
+        assert_eq!(bbr.rs.map(|rs| rs.rtt), Some(path_rtt));
     }
 
     /// Video that leaves the connection idle between frames, through a bottleneck that releases

@@ -1,6 +1,6 @@
-//! An upload of many small files over a link with a real round trip: each file's bytes follow
-//! the last one's rather than waiting for its acknowledgement (MEASUREMENTS, "uploading many
-//! small files").
+//! Uploads over a link with a real round trip: each small file's bytes follow the last one's
+//! rather than waiting for its acknowledgement (MEASUREMENTS, "uploading many small files"), and
+//! one large file fills the path (MEASUREMENTS, "one bulk stream over a long round trip").
 
 #[cfg(test)]
 mod tests {
@@ -112,5 +112,14 @@ mod tests {
             took < serial.checked_div(4).unwrap(),
             "{took:?} against {serial:?} for a round trip each"
         );
+    }
+
+    /// One large file over a 60 ms round trip goes at the link's pace, not at one congestion
+    /// window per round trip: 16 MiB took 13 s (10 Mbit/s) while BBR3 took its first round trip
+    /// from the 5 ms initial estimate, and 1.2 s (114 Mbit/s) since.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_large_file_fills_a_long_round_trip() {
+        let took = upload(1, 16 << 20, Duration::from_millis(30)).await;
+        assert!(took < Duration::from_secs(3), "16 MiB over a 60 ms round trip took {took:?}");
     }
 }

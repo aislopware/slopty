@@ -1,4 +1,4 @@
-# noq-proto, vendored with five patches
+# noq-proto, vendored with six patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -49,6 +49,19 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    the client dropped it as too short to decode. It now pads with PADDING frames up to the
    sample, which a real AEAD's tag already covers, so nothing changes for TLS. Test:
    `an_initial_close_holds_the_header_sample_when_the_tag_is_shorter`.
+
+6. `fix(proto): Take BBR3's first round trip from the acknowledged packet`
+
+   BBR3's first rate sample took its RTT from the `RttEstimator` it is handed, but the
+   connection calls `on_ack` before it feeds that ACK's sample to the estimator, so on the first
+   ACK the estimator still holds the configured initial RTT. That value became `BBR.min_rtt`.
+   Upstream's 333 ms default is above any real path and the next sample replaces it, but an
+   initial RTT below the path's stands for the ten seconds of `MinRTTFilterLen`, since no later
+   sample is lower. Slopty's 5 ms against a 60 ms path sized the window to a twelfth of the
+   bandwidth-delay product, and one bulk stream ran at 10 Mbit/s. Every later sample already
+   used `now - P.send_time`, the draft's `RS.rtt` (draft-ietf-ccwg-bbr-06 section 4.1.2.3), and
+   the first now does too. Test: `the_first_ack_measures_min_rtt_from_its_own_packet`
+   (docs/MEASUREMENTS.md, "one bulk stream over a long round trip").
 
 Commits 2 and 3 share `VideoSim` in the `bbr3` tests: a screen encoder's frames through one
 bottleneck, paced by noq's token bucket. `video_through_one_bottleneck` (ignored) prints what
