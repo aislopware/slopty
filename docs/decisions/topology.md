@@ -602,8 +602,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     screen, so the server heard the exit only as one more summary update and logged nothing;
     `events` could not tell a fleet-wide watcher that a build finished. The hub now logs
     `SessionExited { term, status }` when a listed session goes from running to exited, once.
-  - Not done: installing an agent's hooks on a worker from a verb. `slopty hook install` runs
-    on the worker, and a verb that writes `~/.claude/settings.json` wants its own ruling.
+  - No verb installs an agent's hooks: an agent `SpawnAgent` starts carries them on
+    `--settings` (`claude-code.md`), and the settings file changes only when a person asks.
   - Tests: `slopty-workerd` `an_orchestrated_item_reaches_a_client_and_leaves_it`, the hub's
     `events_are_read_from_a_cursor_and_waited_for` (the exit),
     `slopty-tools` `an_item_opens_from_one_kind_and_answers_to_a_prefix`, and the

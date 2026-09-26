@@ -38,7 +38,8 @@ mod tests {
             let release = worker.parent().is_some_and(|dir| dir.ends_with("release"));
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
             let mut build = std::process::Command::new(cargo);
-            build.args(["build", "-p", name]);
+            let package = if name == "slopty" { "slopty-cli" } else { name };
+            build.args(["build", "-p", package, "--bin", name]);
             if release {
                 build.arg("--release");
             }
@@ -56,8 +57,31 @@ mod tests {
 
     /// Start ptyd, then the worker pointed at `server`, in `dir`.
     async fn daemons(dir: &std::path::Path, server: SocketAddr) -> Daemons {
+        daemons_finding(dir, server, None).await
+    }
+
+    /// As [`daemons`], with `programs` searched first for a command's program.
+    async fn daemons_finding(
+        dir: &std::path::Path,
+        server: SocketAddr,
+        programs: Option<&std::path::Path>,
+    ) -> Daemons {
+        let path = programs.map(|first| {
+            let rest = std::env::var_os("PATH").unwrap_or_default();
+            std::env::join_paths(
+                std::iter::once(first.to_owned()).chain(std::env::split_paths(&rest)),
+            )
+            .unwrap()
+        });
+        let with_path = |command: &mut Command| {
+            if let Some(path) = &path {
+                command.env("PATH", path);
+            }
+        };
         let ptyd_sock = dir.join("ptyd.sock");
-        let mut ptyd = Command::new(bin("slopty-ptyd"))
+        let mut ptyd = Command::new(bin("slopty-ptyd"));
+        with_path(&mut ptyd);
+        let mut ptyd = ptyd
             .arg("--socket")
             .arg(&ptyd_sock)
             .stdout(Stdio::null())
@@ -72,7 +96,9 @@ mod tests {
             }
         };
         tokio::time::timeout(STEP, ready).await.expect("ptyd socket");
-        let mut worker = Command::new(bin("slopty-worker"))
+        let mut worker = Command::new(bin("slopty-worker"));
+        with_path(&mut worker);
+        let mut worker = worker
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
             .arg("--ctl-socket")
@@ -325,6 +351,97 @@ mod tests {
         let refused = peer.ask(Verb::OpenItem { worker, kind: session, name: None }).await;
         assert!(matches!(refused, Outcome::Error { code: ErrorCode::Invalid, .. }), "{refused:?}");
         endpoint.close(0_u32.into(), b"done");
+    }
+
+    /// An agent the server starts reports its status with no hooks in anyone's settings: the
+    /// worker hands `claude` the relay beside it on `--settings`, merged into the caller's own.
+    /// A stand-in `claude` records what it was given in a session (and answers the worker's
+    /// `--version` probe outside one), and the relay runs as Claude Code would run it from those
+    /// settings.
+    #[tokio::test]
+    async fn a_spawned_agent_reports_through_the_relay_it_was_handed() {
+        use slopty_proto::agent::{AgentKind, AgentSource};
+
+        let dir = tempfile::tempdir().unwrap();
+        let programs = dir.path().join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        let (argv, env) = (dir.path().join("argv"), dir.path().join("env"));
+        let script = format!(
+            "#!/bin/sh\n\
+             [ -n \"$SLOPTY_SESSION\" ] || {{ echo '2.1.283 (Claude Code)'; exit 0; }}\n\
+             printf '%s\\n' \"$SLOPTY_SESSION\" \"$SLOPTY_WORKER_SOCKET\" > '{env}'\n\
+             for a in \"$@\"; do printf '%s\\0' \"$a\"; done > '{argv}.part'\n\
+             mv '{argv}.part' '{argv}'\n\
+             exec sleep 60\n",
+            env = env.display(),
+            argv = argv.display(),
+        );
+        let claude = programs.join("claude");
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let relay = bin("slopty");
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons =
+            daemons_finding(dir.path(), server.local_addr().unwrap(), Some(&programs)).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+
+        let spawn = Verb::SpawnAgent {
+            worker: reg.worker,
+            agent: AgentKind::ClaudeCode,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: None,
+            args: ["--settings", r#"{"model":"haiku"}"#, "--verbose"].map(String::from).to_vec(),
+            env: Vec::new(),
+            size: None,
+        };
+        let Outcome::Opened(term) = peer.ask(spawn).await else { panic!("the agent starts") };
+        let recorded = async {
+            loop {
+                if let Ok(bytes) = std::fs::read(&argv) {
+                    return bytes;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        let bytes = tokio::time::timeout(STEP, recorded).await.expect("claude ran");
+        let args: Vec<String> = bytes
+            .split(|b| *b == 0)
+            .filter(|word| !word.is_empty())
+            .map(|word| String::from_utf8(word.to_vec()).unwrap())
+            .collect();
+        let [flag, settings, rest @ ..] = args.as_slice() else { panic!("{args:?}") };
+        assert_eq!((flag.as_str(), rest), ("--settings", &["--verbose".to_owned()][..]));
+        let settings: serde_json::Value = serde_json::from_str(settings).unwrap();
+        assert_eq!(settings["model"], "haiku", "the caller's settings are kept");
+        for event in slopty_agent::HOOK_EVENTS {
+            assert!(slopty_agent::hooks::has_relay(&settings, event), "{event}");
+        }
+        let entry = &settings["hooks"]["SessionStart"][0]["hooks"][0];
+        assert_eq!(entry["command"].as_str().map(PathBuf::from), Some(relay));
+
+        let env = std::fs::read_to_string(&env).unwrap();
+        let [session, socket] = env.lines().collect::<Vec<_>>()[..] else { panic!("{env:?}") };
+        let mut hook = Command::new(entry["command"].as_str().unwrap())
+            .args(entry["args"].as_array().unwrap().iter().filter_map(|a| a.as_str()))
+            .env("SLOPTY_SESSION", session)
+            .env("SLOPTY_WORKER_SOCKET", socket)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = br#"{"hook_event_name":"SessionStart","source":"startup"}"#;
+        tokio::io::AsyncWriteExt::write_all(&mut hook.stdin.take().unwrap(), payload)
+            .await
+            .unwrap();
+        assert!(tokio::time::timeout(STEP, hook.wait()).await.unwrap().unwrap().success());
+        peer.heard(|m| {
+            matches!(m, ToServer::Agent(ev) if ev.session == term.session
+                && ev.kind == AgentKind::ClaudeCode && ev.source == AgentSource::Hook)
+        })
+        .await;
     }
 
     #[tokio::test]

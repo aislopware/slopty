@@ -324,17 +324,11 @@ async fn fetching_until(held: Option<&Held>) {
     }
 }
 
-/// Register `slopty hook` in the worker's Claude Code settings, for a client that saw an agent
-/// the hooks are not reporting. Answers with the line the client shows as a notice.
-///
-/// The relay to register is the `slopty` binary shipped beside this daemon: in a bundle both
-/// live in `Contents/MacOS`, and in a build tree both live in `target/<profile>`.
+/// Register the `slopty hook` shipped beside this daemon in the worker's Claude Code settings,
+/// for a client that saw an agent the hooks are not reporting. Answers with the line the client
+/// shows as a notice.
 async fn install_hooks() -> (bool, String) {
-    let Some(relay) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(exe.parent()?.join("slopty")))
-        .filter(|path| path.exists())
-    else {
+    let Some(relay) = slopty_agent::hooks::relay_beside_this_binary() else {
         return (false, "the slopty command is not installed beside the worker".to_owned());
     };
     let installed = tokio::task::spawn_blocking(move || {

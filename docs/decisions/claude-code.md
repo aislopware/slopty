@@ -986,3 +986,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   reconnects reads the same start. The wire goldens moved (`worker_agent_hook`,
   `worker_agent_process`, `worker_session_opened`). Test:
   `the_status_is_stamped_when_its_phase_changes`.
+
+- ✅ **An agent the server starts brings its hooks along** (2026-09-27, verified against Claude
+  Code 2.1.283). `SpawnAgent` started `claude` with no way to report unless someone had run
+  `slopty hook install` on that worker, and it then typed the first prompt after the fallback
+  wait instead of on the ready hook. The worker now hands `claude` the relay beside it on
+  `--settings`, for that run only. Two behaviours were checked with a hook that appends to a
+  file: hooks from project settings and from `--settings` both run, and the same handler in both
+  runs once, so a machine that also has the hooks installed hears each event once. The second
+  check: of two `--settings`, only the last is kept, whole. So `slopty_agent::hooks::with_relay`
+  reads the caller's last `--settings` (JSON, or a file from the agent's directory), adds the
+  relay and passes it as the only one. A value it cannot read is passed on untouched for
+  Claude Code to report.
+  - No `InstallHooks` verb. `~/.claude/settings.json` belongs to the person; it changes when
+    they ask, from the CLI or the app's offer (`ClientMsg::InstallHooks`). Agents that
+    orchestration starts no longer need it.
+  - Test: `a_spawned_agent_reports_through_the_relay_it_was_handed` (worker; a stand-in `claude`
+    records its arguments, and the relay runs from the settings it was handed) and
+    `a_run_gets_the_relay_on_the_one_settings_it_keeps`.

@@ -50,6 +50,63 @@ pub fn install_at(path: &Path, command: &str) -> std::io::Result<Outcome> {
     Ok(Outcome::Changed)
 }
 
+/// The `slopty` relay shipped beside the running binary: in a bundle every binary lives in
+/// `Contents/MacOS`, and in a build tree in `target/<profile>`.
+#[must_use]
+pub fn relay_beside_this_binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("slopty")).filter(|path| path.exists())
+}
+
+/// `claude` arguments that also register the relay at `command`, for that run alone, so an
+/// agent Slopty starts reports its status whatever this machine's settings say.
+///
+/// Claude Code keeps only the last `--settings` it is given, whole. So the caller's own (JSON,
+/// or a file relative to `cwd`) is read, gets the relay, and becomes the one `--settings`
+/// left; one that cannot be read is passed on untouched for Claude Code to report. A handler
+/// the user's settings register as well runs once.
+#[must_use]
+pub fn with_relay(args: Vec<String>, command: &str, cwd: &Path) -> Vec<String> {
+    let mut rest = Vec::with_capacity(args.len());
+    let mut given = None;
+    let mut words = args.iter().cloned();
+    while let Some(word) = words.next() {
+        if word == "--" {
+            rest.push(word);
+            rest.extend(words.by_ref());
+        } else if word == SETTINGS_FLAG
+            && let Some(value) = words.next()
+        {
+            given = Some(value);
+        } else if let Some(value) = word.strip_prefix("--settings=") {
+            given = Some(value.to_owned());
+        } else {
+            rest.push(word);
+        }
+    }
+    let doc = match given {
+        None => Some(json!({})),
+        Some(value) => settings_value(&value, cwd),
+    };
+    let Some(mut doc) = doc else {
+        return args;
+    };
+    install(&mut doc, command);
+    [SETTINGS_FLAG.to_owned(), doc.to_string()].into_iter().chain(rest).collect()
+}
+
+const SETTINGS_FLAG: &str = "--settings";
+
+/// A `--settings` value as Claude Code reads it: JSON when it opens an object, else a file.
+fn settings_value(value: &str, cwd: &Path) -> Option<Value> {
+    let text = if value.trim_start().starts_with('{') {
+        value.to_owned()
+    } else {
+        std::fs::read_to_string(cwd.join(value)).ok()?
+    };
+    serde_json::from_str::<Value>(&text).ok().filter(Value::is_object)
+}
+
 /// Remove the relay from the settings at `path`.
 ///
 /// # Errors
@@ -287,6 +344,55 @@ mod tests {
         assert!(uninstall(&mut doc));
         assert_eq!(doc, original);
         assert!(!uninstall(&mut doc));
+    }
+
+    /// The relay rides along on `--settings`: added when the caller passes none, merged into
+    /// the caller's JSON or file (the last one given, as Claude Code reads them), and never
+    /// taken from after `--`. An unreadable value is left for Claude Code to report.
+    #[test]
+    fn a_run_gets_the_relay_on_the_one_settings_it_keeps() {
+        let relay = "/opt/Slopty/slopty";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let words = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
+        let settings = |out: &[String]| -> Value {
+            assert_eq!(
+                out.iter()
+                    .take_while(|a| *a != "--")
+                    .filter(|a| a.starts_with(SETTINGS_FLAG))
+                    .count(),
+                1,
+                "{out:?}"
+            );
+            assert_eq!(out.first().map(String::as_str), Some(SETTINGS_FLAG));
+            serde_json::from_str(out.get(1).expect("value")).expect("json")
+        };
+        let registers = |doc: &Value| HOOK_EVENTS.iter().all(|event| has_relay(doc, event));
+
+        let out = with_relay(words(&["--model", "opus"]), relay, dir.path());
+        let doc = settings(&out);
+        assert!(registers(&doc));
+        assert_eq!(doc["hooks"]["Stop"][0]["hooks"][0], relay_entry(relay));
+        assert_eq!(out.get(2..), Some(words(&["--model", "opus"]).as_slice()));
+
+        let args = ["--settings", r#"{"model":"haiku"}"#, "-p", "--settings={\"theme\":\"dark\"}"];
+        let doc = settings(&with_relay(words(&args), relay, dir.path()));
+        assert!(registers(&doc));
+        assert_eq!((doc.get("model"), &doc["theme"]), (None, &json!("dark")), "the last one wins");
+
+        std::fs::write(dir.path().join("ci.json"), r#"{"env":{"CI":"1"}}"#).expect("write");
+        let doc = settings(&with_relay(words(&["--settings", "ci.json"]), relay, dir.path()));
+        assert!(registers(&doc));
+        assert_eq!(doc["env"]["CI"], json!("1"), "a file is read from the working directory");
+
+        let out = with_relay(words(&["--", "--settings", "x"]), relay, dir.path());
+        assert!(registers(&settings(&out)));
+        assert_eq!(out.get(2..), Some(words(&["--", "--settings", "x"]).as_slice()));
+
+        for unreadable in
+            [&["--settings", "missing.json"][..], &["--settings", "{nope"], &["--settings=[1]"]]
+        {
+            assert_eq!(with_relay(words(unreadable), relay, dir.path()), words(unreadable));
+        }
     }
 
     #[test]

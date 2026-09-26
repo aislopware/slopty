@@ -252,6 +252,7 @@ fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) 
         daemon.worker.clone(),
         daemon.items.clone(),
         daemon.events.clone(),
+        slopty_agent::hooks::relay_beside_this_binary(),
     );
     let daemon = daemon.clone();
     tokio::spawn(async move {

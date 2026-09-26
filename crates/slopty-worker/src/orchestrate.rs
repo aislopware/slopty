@@ -18,7 +18,7 @@ use std::collections::BinaryHeap;
 use std::ffi::OsString;
 use std::io::{Read as _, Seek as _};
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -132,6 +132,7 @@ struct Inner {
     worker: Worker,
     items: ItemStore,
     events: broadcast::Sender<WorkerMsg>,
+    relay: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Orchestrator {
@@ -142,15 +143,16 @@ impl std::fmt::Debug for Orchestrator {
 
 impl Orchestrator {
     /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry and
-    /// client broadcast.
+    /// client broadcast. The agents it starts report through the hook relay at `relay`.
     #[must_use]
     pub fn new(
         id: WorkerId,
         worker: Worker,
         items: ItemStore,
         events: broadcast::Sender<WorkerMsg>,
+        relay: Option<PathBuf>,
     ) -> Self {
-        Self { inner: Arc::new(Inner { id, worker, items, events }) }
+        Self { inner: Arc::new(Inner { id, worker, items, events, relay }) }
     }
 
     /// Answer one verb. Every failure is an [`Outcome::Error`].
@@ -378,6 +380,14 @@ impl Orchestrator {
         // returns.
         let events = self.inner.events.subscribe();
         let Spawn { cwd, args, env, size } = spawn;
+        let args = match self.inner.relay.as_deref() {
+            Some(relay) => {
+                let relay = relay.to_string_lossy().into_owned();
+                let dir = crate::file::expand_home(Path::new(&cwd));
+                blocking(move || Ok(slopty_agent::hooks::with_relay(args, &relay, &dir))).await?
+            }
+            None => args,
+        };
         let req = OpenSession {
             size,
             cwd: Some(cwd),
