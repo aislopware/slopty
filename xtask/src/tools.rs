@@ -8,6 +8,11 @@ use xshell::{Shell, cmd};
 pub const TRIPLES: [&str; 3] =
     ["aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim"];
 
+/// The package every `cargo xtask check` build names beside the checked crates, so each crate
+/// set resolves the third-party dependencies with the workspace's features and shares their
+/// builds (`workspace-hack/src/lib.rs`).
+pub const WORKSPACE_HACK: &str = "workspace-hack";
+
 /// Crates that only build on the host triple: they wrap host-only frameworks (`ScreenCaptureKit`,
 /// `CGEvent`, PTYs) or are dev tools. The client crates (`slopty-ui`, `slopty-app`) build for iOS
 /// through the fork's `gpui_ios`.

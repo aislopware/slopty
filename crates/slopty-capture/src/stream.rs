@@ -17,7 +17,7 @@ use objc2_core_foundation::{
 use objc2_core_graphics::kCGDisplayStreamYCbCrMatrix_ITU_R_709_2;
 use objc2_core_media::{
     CMAudioFormatDescriptionGetStreamBasicDescription, CMBlockBuffer, CMClock, CMSampleBuffer,
-    CMTime, CMTimeFlags,
+    CMTime, CMTimeFlags, kCMTimeZero,
 };
 use objc2_core_video::{
     CVPixelBuffer, kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
@@ -674,11 +674,12 @@ fn completion(
 fn stream_configuration(config: &CaptureConfig) -> Retained<SCStreamConfiguration> {
     // SAFETY: plain constructor.
     let c = unsafe { SCStreamConfiguration::new() };
-    let interval = CMTime {
-        value: 1,
-        timescale: i32::from(config.fps.max(1)),
-        flags: CMTimeFlags::Valid,
-        epoch: 0,
+    let interval = if config.fps == 0 {
+        // SCStream.h: "Set this to kCMTimeZero to capture at display's native refresh rate."
+        // SAFETY: an immutable CoreMedia constant, read by value.
+        unsafe { kCMTimeZero }
+    } else {
+        CMTime { value: 1, timescale: i32::from(config.fps), flags: CMTimeFlags::Valid, epoch: 0 }
     };
     // SAFETY: plain property write on the fresh configuration object.
     unsafe {

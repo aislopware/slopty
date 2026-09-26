@@ -142,3 +142,50 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     now snapshots the **index** (`git cat-file --batch` into `target/gate/tree`, submodules at
     their pinned commits), so what it passes is exactly what the commit records.
   - Removed: the prek hooks, `.pre-commit-config.yaml` and prek from `xtask setup`.
+
+- ✅ **target/ stays bounded: one feature set per dependency, and a sweep of what nothing uses**
+  (2026-09-26). `target/` reached 374 GB on the Lacie drive and 212 GB a day after a manual
+  clean (`debug/deps` 85 GB, `debug/incremental` 25 GB, the gate lanes 74 GB), with 150–285
+  incremental caches per crate and 41 builds of `gpui`.
+  - **Why it grew.** Cargo unifies features only over the packages one invocation selects.
+    Every `cargo xtask check -p <set>` therefore resolved `syn`, `proc-macro2`, `serde_core`,
+    `tokio`, `libc` and the rest with other features (`cargo tree -e features`: 8 of the 26
+    packages under `-p slopty-proto` differ from `--workspace`, 14–35 under other sets, on all
+    three triples). A dependency's features are part of its unit hash and of every hash above
+    it, so each new set compiled and kept its own copy of the dependencies and of the crates
+    that use them. On top of that, cargo never deletes a unit: a `cargo update`, a fork
+    rebase or a new toolchain leaves the old ones behind in every target dir, gate lanes
+    included. `resolver.feature-unification = "workspace"` would settle the first half inside
+    cargo, but cargo 1.98.1 still ignores it without `-Zfeature-unification`.
+  - **One feature set.** `workspace-hack/` is a `cargo hakari` crate: the feature union of every
+    third-party dependency per triple, for normal and build dependencies. No crate depends on
+    it, which is the unusual part. The union carries the tests' features: GPUI's
+    `test-support`, tokio's `test-util` (its clock then takes a lock on every read) and
+    `serde_json`'s `preserve_order`. As a dependency of every member, as hakari's docs set it
+    up, they would ship in the app and the daemons. Instead `cargo xtask check` names it
+    beside the checked crates in every build step: `cargo tree` then shows 0 third-party
+    packages whose features differ from `--workspace`, for every set tried, on the host and
+    both iOS triples, so a check builds exactly what the gate builds and shipped builds are
+    untouched. The gate's tools lane runs `cargo hakari generate --diff`, `cargo gate --fix`
+    regenerates it, and taplo leaves the generated manifest alone. The cost: the first check
+    in a target dir builds the whole union once, GPUI included (687 s for a clippy pass and
+    1 900 s for a full `check` under a load average above 100); every check shares it after
+    that.
+  - **A sweep.** `cargo xtask prune`, run after every `check` and `gate`, deletes the units no
+    build has read for a day (the `.fingerprint` dir with its `deps/` and `build/` artifacts,
+    and any artifact whose unit is gone) and the incremental caches no compile has touched
+    for a day, in every target dir under `target/`. Each dir is pruned under cargo's own
+    `.cargo-lock`, so no build runs in it meanwhile. After a check or gate the pass skips a
+    dir whose lock is held; by hand it waits. Use comes from access times, because cargo reads
+    a unit's fingerprint files on every build that includes it, fresh or not. APFS updates an
+    access time only while it is not later than the modification time, so the sweep sets the
+    access times to the epoch when each window opens. Any read in the window then stamps
+    them, and a unit is gone after one to two idle days. A wanted unit that goes is rebuilt,
+    its dependencies from sccache.
+  - **Not done.** `cargo-sweep`: its `--time` reads access times as they are, and APFS stops
+    updating those once a file has been read after its last write, so it would delete live
+    units. The hakari hack as every member's dependency, for the reason above.
+    `CARGO_INCREMENTAL=0` in the gate lanes: a gate after a small edit is fast because of
+    the lanes' incremental caches, and the sweep bounds them. A `cargo clean` of the lanes
+    when `Cargo.lock` changes would make every gate after a sync cold. Numbers:
+    MEASUREMENTS "target/ growth under varied check sets".

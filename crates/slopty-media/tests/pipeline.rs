@@ -94,7 +94,7 @@ mod tests {
                 capture_ts_us: 1_000,
             };
             let stamp = self.send_ms_lo();
-            self.tx.packetize(&frame, stamp).unwrap().clone()
+            self.tx.packetize(&frame, stamp, |_| {}).unwrap().clone()
         }
 
         /// Feed datagrams. Parity arriving after its frame completed is a duplicate, and after
@@ -1383,7 +1383,7 @@ mod tests {
                 ltr_refresh: false,
                 capture_ts_us: 0,
             };
-            let sent = tx.packetize(&frame, 0).unwrap().clone();
+            let sent = tx.packetize(&frame, 0, |_| {}).unwrap().clone();
             let parity = usize::from(sent.layout.parity_count);
             let total = sent.datagrams.len();
 

@@ -1871,3 +1871,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_round_trips_share_the_right_edge_and_hold_still`; rollup
   `a_rollup_shows_what_waits_then_what_works_then_what_is_unseen`, `a_tile_counts_once`,
   `an_age_runs_from_the_start`, `the_second_line_skips_what_says_nothing`.
+
+- ✅ **The navigator is a virtual list, and the phone's drawer runs to the window's foot**
+  (2026-09-27, the navigator cost 6.4 ms a frame at 120 rows in debug).
+  - GPUI's `list` over a `ListState`, not `uniform_list`: headings, worker rows and two-line
+    tile rows differ in height. Each frame builds plain row data; only rows within 80 pt of the
+    view get elements, and a row whose kind changes forgets only its own height. The share of
+    a frame fell to about 1.2 ms (MEASUREMENTS, "the navigator as a virtual list").
+  - A focus move scrolls its row into view once, so a list the human scrolled away stays put.
+  - A shell with no directory names its worker on line 2, so the line is never a lone age.
+  - On a phone the drawer and its scrim draw above the workspace down to the window's bottom
+    edge, through the home-indicator band; the rows stay inset by the safe area.
+  Tests (`workspace/tests/nav_list.rs`): `the_navigator_draws_only_the_rows_in_view`,
+  `the_focused_tiles_row_scrolls_into_view`, `a_shell_with_no_directory_names_its_worker`,
+  `the_phone_drawer_runs_through_the_home_indicator_band`.

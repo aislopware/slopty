@@ -181,19 +181,64 @@ impl Cadence {
     }
 }
 
-/// Whether a capture taken `elapsed_us` after the last encoded one is due at `cadence_fps`.
+/// One frame's period at `fps`, microseconds; a second at 0.
+const fn period_us(fps: u16) -> u64 {
+    match 1_000_000_u64.checked_div(fps as u64) {
+        Some(us) => us,
+        None => 1_000_000,
+    }
+}
+
+/// The cadence gate: which captures reach the encoder at the rung in force.
 ///
-/// Early by an eighth of the period still counts as due: ScreenCaptureKit delivers on the display's
-/// beat with a little jitter either way, and a strict comparison sends a frame that arrives 0.2 ms
-/// early to the back of the next period, which halves the cadence that actually goes out.
-#[must_use]
-pub const fn frame_due(elapsed_us: u64, cadence_fps: u16) -> bool {
-    let fps = if cadence_fps == 0 { 1 } else { cadence_fps as u64 };
-    let period_us = match 1_000_000_u64.checked_div(fps) {
-        Some(period) => period,
-        None => 0,
-    };
-    elapsed_us.saturating_add(period_us / 8) >= period_us
+/// Captures land on the display's beat, not on the rung's. A gate measured from the last encoded
+/// frame turns a 60 fps rung on a 75 Hz display (captures 13.3 ms apart) into 37.5 fps: 13.3 ms is
+/// short of the period, 26.7 ms clears it, and the 10 ms by which it overshoots is thrown away.
+/// This keeps the rung's own schedule instead. Each frame claims the next slot, and a capture that
+/// lands late in its slot leaves the lateness as credit for the one after, so the 60 fps rung on
+/// that display sends four captures in five. The credit is at most one period: a capture more
+/// than a period past its slot ends a pause, and the schedule restarts from it. An eighth of the
+/// period early still counts as due, since captures jitter either way around the beat
+/// (MEASUREMENTS.md, "capture on a 75 Hz display").
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Pace {
+    /// The next slot, microseconds on the capture clock; 0 before any frame.
+    next_us: u64,
+}
+
+impl Pace {
+    /// Pick the schedule back up at the slot `next_us` (what [`Self::next_us`] returned).
+    #[must_use]
+    pub const fn resume(next_us: u64) -> Self {
+        Self { next_us }
+    }
+
+    /// The next slot, to store and [`Self::resume`] from.
+    #[must_use]
+    pub const fn next_us(self) -> u64 {
+        self.next_us
+    }
+
+    /// The earliest a capture passes the gate at `fps`.
+    #[must_use]
+    pub const fn due_at(self, fps: u16) -> u64 {
+        self.next_us.saturating_sub(period_us(fps) / 8)
+    }
+
+    /// Whether a capture taken at `at_us` is due at `fps`.
+    #[must_use]
+    pub const fn due(self, at_us: u64, fps: u16) -> bool {
+        at_us >= self.due_at(fps)
+    }
+
+    /// A frame taken at `at_us` went to the encoder at `fps`, due or not (a keyframe is never
+    /// held back): it claims the slot, and the next is one period on. A frame more than a period
+    /// past its slot ends a pause, and the next slot is a period after it.
+    pub const fn sent(&mut self, at_us: u64, fps: u16) {
+        let period = period_us(fps);
+        let slot = self.next_us.saturating_add(period);
+        self.next_us = if at_us > slot { at_us.saturating_add(period) } else { slot };
+    }
 }
 
 /// One decision window: the reports since the last decision, summed.
@@ -766,23 +811,80 @@ mod tests {
         assert_eq!(c.update(20_000_000), Some(120));
     }
 
+    /// The encoded frames a steady stream of captures `beat_us` apart makes through the gate at
+    /// `fps` over `frames` captures, with the largest gap between two of them.
+    fn through_the_gate(beat_us: u64, jitter_us: &[i64], fps: u16, frames: u64) -> (u64, u64) {
+        let mut pace = Pace::default();
+        let (mut sent, mut last, mut widest) = (0_u64, None::<u64>, 0_u64);
+        for i in 0..frames {
+            let wobble = usize::try_from(i).unwrap_or(0).checked_rem(jitter_us.len());
+            let wobble = wobble.and_then(|w| jitter_us.get(w)).copied().unwrap_or(0);
+            let at =
+                i.saturating_mul(beat_us).saturating_add(1_000_000).saturating_add_signed(wobble);
+            if pace.due(at, fps) {
+                pace.sent(at, fps);
+                sent = sent.saturating_add(1);
+                if let Some(last) = last {
+                    widest = widest.max(at.saturating_sub(last));
+                }
+                last = Some(at);
+            }
+        }
+        (sent, widest)
+    }
+
     #[test]
-    fn a_capture_is_due_at_the_cadences_period_give_or_take_an_eighth() {
-        // 60 fps captures at 30: every other one.
-        assert!(!frame_due(16_667, 30));
-        assert!(frame_due(33_334, 30));
-        // At 15 one in four, and a capture a hair early is still due.
-        assert!(!frame_due(50_000, 15));
-        assert!(frame_due(66_667, 15));
-        assert!(frame_due(62_000, 15));
-        assert!(!frame_due(57_000, 15));
-        // A cadence equal to the capture rate keeps every frame, jitter and all.
-        assert!(frame_due(16_500, 60));
-        // A stream that has sent nothing for a while never holds the next frame back.
-        assert!(frame_due(500_000, 60));
-        assert!(
-            frame_due(1_000_000, 0),
-            "a zero cadence is one frame a second, not a division trap"
-        );
+    fn a_rung_under_the_display_rate_keeps_its_rate_on_the_displays_beat() {
+        // 75 Hz: four captures in five at 60 fps, never two beats apart for more than one gap.
+        let beat = 13_333;
+        let (sent, widest) = through_the_gate(beat, &[0], 60, 750);
+        assert_eq!(sent, 600, "a second of 75 Hz captures makes 60 frames");
+        assert!(widest <= beat.saturating_mul(2).saturating_add(1), "{widest}");
+        // At the display's rate every capture goes, and so it does with the beat's jitter.
+        assert_eq!(through_the_gate(beat, &[0], 75, 750).0, 750);
+        assert_eq!(through_the_gate(beat, &[-300, 250, 0, 400, -150], 75, 750).0, 750);
+        // 60 Hz at 30 and at 15: every second and every fourth capture, exactly.
+        let beat = 16_667;
+        assert_eq!(through_the_gate(beat, &[0], 30, 600).0, 300);
+        assert_eq!(through_the_gate(beat, &[-200, 300, 100], 30, 600).0, 300);
+        assert_eq!(through_the_gate(beat, &[0], 15, 600).0, 150);
+        // 120 Hz at 60, and 75 Hz at 30: the rung, not the beat, sets the rate.
+        assert_eq!(through_the_gate(8_333, &[0], 60, 1_200).0, 600);
+        assert_eq!(through_the_gate(13_333, &[0], 30, 750).0, 300);
+    }
+
+    #[test]
+    fn a_pause_restarts_the_schedule_from_the_capture_that_ends_it() {
+        let mut pace = Pace::default();
+        assert!(pace.due(1_000_000, 60), "the first capture is due");
+        pace.sent(1_000_000, 60);
+        assert!(!pace.due(1_013_333, 60), "a beat later is too soon at 60");
+        assert!(pace.due(1_014_584, 60), "an eighth of the period early is due");
+        // A second of nothing, then a second of captures on a 75 Hz beat: the capture that ends
+        // the pause goes, the next beat is too soon, and from there four in five go.
+        let start = 2_000_000;
+        let beats: Vec<u64> =
+            (0..75_u64).map(|i| i.saturating_mul(13_333).saturating_add(start)).collect();
+        let mut sent = Vec::new();
+        for &at in &beats {
+            if pace.due(at, 60) {
+                pace.sent(at, 60);
+                sent.push(at);
+            }
+        }
+        assert_eq!((sent.first(), sent.get(1)), (beats.first(), beats.get(2)), "{sent:?}");
+        assert_eq!(sent.len(), 60, "{sent:?}");
+        // A frame sent though not due (a keyframe) claims a slot all the same.
+        let mut pace = Pace::default();
+        pace.sent(1_000_000, 30);
+        pace.sent(1_005_000, 30);
+        assert!(!pace.due(1_060_000, 30), "the keyframe took the slot at 1 033 333");
+        assert!(pace.due(1_062_500, 30));
+        assert_eq!(Pace::resume(pace.next_us()), pace);
+        // A zero cadence is one frame a second, not a division trap.
+        let mut pace = Pace::default();
+        pace.sent(5_000_000, 0);
+        assert!(!pace.due(5_500_000, 0));
+        assert!(pace.due(6_000_000, 0));
     }
 }

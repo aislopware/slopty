@@ -121,14 +121,13 @@ fn display_info(d: &SCDisplay) -> DisplayInfo {
     } else {
         1.0
     };
-    let hz = objc2_core_graphics::CGDisplayCopyDisplayMode(id)
-        .map_or(60.0, |mode| objc2_core_graphics::CGDisplayMode::refresh_rate(Some(&mode)));
+    let hz = crate::geometry::display_refresh_hz(id).unwrap_or(60.0);
     DisplayInfo {
         id,
         w: to_f32(frame.size.width),
         h: to_f32(frame.size.height),
         scale,
-        hz: to_f32(if hz > 0.0 { hz } else { 60.0 }),
+        hz: to_f32(hz),
     }
 }
 

@@ -102,9 +102,30 @@ mod diffs {
         joiner
     }
 
+    // Twenty seeds in four tests, so nextest spreads them over the cores: one test running all
+    // twenty took 100 s on a loaded machine.
     #[test]
-    fn every_diff_applied_by_index_shows_the_terminal() {
-        for seed in 1..=20_u64 {
+    fn every_diff_applied_by_index_shows_the_terminal_seeds_1_to_5() {
+        every_diff_applied_by_index_shows_the_terminal(1..=5);
+    }
+
+    #[test]
+    fn every_diff_applied_by_index_shows_the_terminal_seeds_6_to_10() {
+        every_diff_applied_by_index_shows_the_terminal(6..=10);
+    }
+
+    #[test]
+    fn every_diff_applied_by_index_shows_the_terminal_seeds_11_to_15() {
+        every_diff_applied_by_index_shows_the_terminal(11..=15);
+    }
+
+    #[test]
+    fn every_diff_applied_by_index_shows_the_terminal_seeds_16_to_20() {
+        every_diff_applied_by_index_shows_the_terminal(16..=20);
+    }
+
+    fn every_diff_applied_by_index_shows_the_terminal(seeds: std::ops::RangeInclusive<u64>) {
+        for seed in seeds {
             let mut rng = Lcg(seed);
             let (mut subject, mut mirror) = (engine(30, 8), engine(30, 8));
             let mut viewers = vec![Viewer::default()];

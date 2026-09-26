@@ -803,9 +803,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   guard dropped 1016 of 1149 captures, an effective 4.5 fps, but it dropped them wherever the send
   buffer happened to be full, and the encoder went on sizing every frame for a 60 fps stream.
   `slopty_media::Cadence` now picks the rung — the client's `fps` ceiling, then 60, 30 and 15 — as
-  the fastest whose frames each get 8 KB at the target in force, and `frame_due` admits a capture
-  only when its timestamp is a period past the last encoded one (an eighth of a period of slack,
-  or SCK's jitter halves the cadence that goes out). Climbing back costs 12 KB a frame rather than
+  the fastest whose frames each get 8 KB at the target in force, and the cadence gate admits a
+  capture only when the rung's schedule has a slot for it (`slopty_media::Pace`; it was a period
+  past the last encoded capture until 2026-09-26, see "The capture follows the display's beat"). Climbing back costs 12 KB a frame rather than
   8, so the ladder does not flap around one threshold. Three consequences, all deliberate:
   capture keeps running at the ceiling, so a change on screen is still seen within one display
   beat and only the *sending* slows; `frame_fits` reads the rung, so its two-frame budget is two
@@ -820,7 +820,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `dnctl`. Tests: `the_cadence_drops_a_rung_when_a_frame_can_no_longer_hold_8_kb`,
   `climbing_back_costs_more_than_leaving_so_the_ladder_does_not_flap`,
   `the_ladder_never_passes_the_ceiling_the_client_asked_for`,
-  `a_capture_is_due_at_the_cadences_period_give_or_take_an_eighth`,
+  `a_rung_under_the_display_rate_keeps_its_rate_on_the_displays_beat`,
   `a_collapsed_target_takes_the_stream_down_the_cadence_ladder`,
   `the_cadence_gate_hands_the_encoder_one_capture_a_period`.
 
@@ -1070,3 +1070,49 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   now run on the blocking pool (`build_encoder`, `retire`), so `set_quality` and
   `check_geometry` are async, and the thread is held for 2 to 3 µs (MEASUREMENTS, "encoder
   sessions off the runtime").
+
+- ✅ **The capture follows the display's beat, and the cadence gate keeps the rung's schedule**
+  (2026-09-26). This machine's panel runs at 75 Hz. With `minimumFrameInterval` at 1/60 its
+  captures came 13.3 or 26.7 ms apart, and a gate that measured from the last encoded frame
+  rejected every 13.3 ms one: a display stream at the default 60 fps sent 33–35 fps with 30 ms
+  between frames (MEASUREMENTS, "capture on a 75 Hz display"). Three changes:
+  - The worker reads the refresh of the target's display (`CaptureSource::refresh_hz`, the
+    window's display for a window). The frame rate is the client's ceiling or that refresh,
+    whichever is lower, since a display draws no faster, and the encoder, the cadence ladder and
+    the frame guard all use it.
+  - The capture asks for `kCMTimeZero` (`CaptureConfig::fps` 0), which SCStream.h documents as
+    the display's native rate. A capture throttled to the rung's interval on a beat that does not
+    divide it cannot be picked evenly from. When the refresh cannot be read, the capture keeps
+    the ceiling's interval as before.
+  - `slopty_media::Pace` replaces `frame_due`. Each encoded frame claims the rung's next slot,
+    and a capture late in its slot carries the lateness to the next, so 60 fps on a 75 Hz beat
+    is four captures in five. The credit is at most one period. A capture more than a period
+    past its slot ends a pause and restarts the schedule, so no burst follows a still picture.
+    The eighth of a period of early slack stays.
+  Capturing every beat costs a ScreenCaptureKit callback per beat, even when a low rung encodes
+  only some of them. That is the price of seeing a change within one beat. 🔬 Hardware "after"
+  is owed; it needs the launchd worker rebuilt. Tests: `configs_follow_the_displays_refresh`,
+  `a_rung_under_the_display_rate_keeps_its_rate_on_the_displays_beat`,
+  `a_pause_restarts_the_schedule_from_the_capture_that_ends_it`,
+  `the_cadence_gate_hands_the_encoder_one_capture_a_period`.
+
+- ✅ **A frame's data leaves before its parity is computed** (2026-09-26). `Packetizer::packetize`
+  hands the data datagrams to its `ship` callback, then runs Reed–Solomon over them and hands
+  on the parity. The worker sends both from the callback under the packetizer's lock, so a
+  NACK's answer never overtakes its frame. The first fragment of a 300 KB keyframe is handed on
+  after about 30 µs rather than about 270 µs under load (MEASUREMENTS, "data before parity").
+  Test: `an_encoded_packet_is_sent_and_a_nack_answers_from_history` (two calls: data, then
+  parity).
+
+- ✅ **The client's reassembler keeps its 2 ms tick** (2026-09-26). Sleeping until the
+  reassembler's next deadline (NACK, retry, loss deadline, refresh repeat) instead of a fixed 2 ms
+  while frames are pending was built and measured on a lost tail fragment, the case only the
+  timer serves. Its median NACK lateness was no better in six alternated pairs and worse in five
+  (MEASUREMENTS, "the reassembler's 2 ms tick stays"). The tick restarts after each arrival, so
+  it is already in phase with the silence that matters, and tokio rounds a deadline up to its
+  millisecond. Rejected. `tail_loss_nack_lateness` stays as the instrument.
+
+- ✅ **The UDP receive buffer stays at the macOS default** (2026-09-26). No datagram of ours was
+  dropped for a full socket buffer across keyframe-heavy and lossy loopback streams, and the
+  machine-wide counter did not move (MEASUREMENTS, "UDP receive buffer"). `SO_RCVBUF` is set
+  when a measurement shows drops, and not before.

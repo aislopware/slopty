@@ -39,8 +39,8 @@ use slopty_core::StreamId;
 use slopty_input::{InputError, InputSink as _, Pointer, PointerWatch};
 pub use slopty_media::PathSample;
 use slopty_media::{
-    Cadence, Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Packetizer, RateController,
-    Redundancy, audio_datagram, cursor_datagram, frame_due, heartbeat_datagram,
+    Cadence, Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Pace, Packetizer, RateController,
+    Redundancy, audio_datagram, cursor_datagram, heartbeat_datagram,
 };
 use slopty_proto::media::MAX_DATAGRAM;
 use slopty_proto::screen::{
@@ -277,15 +277,9 @@ struct Asks {
 ///
 /// `asks` says what the held capture could answer. The capture at `captured_us` goes out once the
 /// picture has gone quiet ([`quiet_after_us`]) and, unless a keyframe is wanted, once the
-/// cadence at `fps` is due again after the frame encoded at `last_us`: the same gate a fresh
-/// capture passes, so a repair never spends more than the rung allows.
-const fn repair_at(
-    asks: Asks,
-    captured_us: u64,
-    last_us: u64,
-    fps: u16,
-    ceiling_fps: u16,
-) -> Option<u64> {
+/// cadence gate lets a capture through again at `due_us` ([`Pace::due_at`]): the same gate a
+/// fresh capture passes, so a repair never spends more than the rung allows.
+const fn repair_at(asks: Asks, captured_us: u64, due_us: u64, ceiling_fps: u16) -> Option<u64> {
     if !asks.owed && !asks.refresh && !asks.keyframe {
         return None;
     }
@@ -293,9 +287,7 @@ const fn repair_at(
     if asks.keyframe {
         return Some(quiet);
     }
-    let period = period_us(fps);
-    let due = last_us.saturating_add(period).saturating_sub(period / 8);
-    Some(if due > quiet { due } else { quiet })
+    Some(if due_us > quiet { due_us } else { quiet })
 }
 
 /// One frame's period at `fps`, microseconds; a second at 0.
@@ -1163,8 +1155,10 @@ struct Shared<P: Platform = Native> {
     fps: std::sync::atomic::AtomicU16,
     /// The cadence the client asked for; the ladder never climbs past it.
     fps_ceiling: std::sync::atomic::AtomicU16,
-    /// `capture_ts_us` of the last frame handed to the encoder; the cadence gate's clock.
+    /// The presentation time of the last frame handed to the encoder; the next must be later.
     last_encoded_us: AtomicU64,
+    /// The cadence gate's next slot ([`Pace::next_us`]); read and moved under `held`.
+    pace_us: AtomicU64,
     /// What a keyframe costs on this stream, as [`keyframe_estimate`] tracks it; `0` until one
     /// has been encoded.
     keyframe_bytes: AtomicU64,
@@ -1245,6 +1239,7 @@ impl<P: Platform> Shared<P> {
             fps: std::sync::atomic::AtomicU16::new(fps),
             fps_ceiling: std::sync::atomic::AtomicU16::new(fps),
             last_encoded_us: AtomicU64::new(0),
+            pace_us: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
             keyframe_deferred_us: AtomicU64::new(0),
             ltr: Mutex::new(LtrBook::default()),
@@ -1517,6 +1512,8 @@ impl<P: Platform> Shared<P> {
         // would put it behind the frame already encoded from it.
         let last = self.last_encoded_us.load(Ordering::Relaxed);
         let at = if fresh { frame.capture_ts_us } else { now };
+        let fps = self.fps.load(Ordering::Relaxed);
+        let mut pace = Pace::resume(self.pace_us.load(Ordering::Relaxed));
         // The cadence rung, before the congestion guard: a capture the ladder is not asking for is
         // not a frame the link failed to carry, and skipping it is what gives the next one the
         // bytes to be worth sending. No refresh is owed, the client is missing nothing.
@@ -1525,7 +1522,7 @@ impl<P: Platform> Shared<P> {
         // not urgent in the same way — at a collapsed rate the guard below sets one on every frame
         // it drops, and letting those through would take the cadence off exactly where it is
         // needed.
-        let due = frame_due(at.saturating_sub(last), self.fps.load(Ordering::Relaxed));
+        let due = pace.due(at, fps);
         if !due && !want_keyframe {
             return Attempt::NotDue;
         }
@@ -1557,6 +1554,8 @@ impl<P: Platform> Shared<P> {
         // The encoder wants presentation times that only go forward.
         let pts = at.max(last.saturating_add(1));
         self.last_encoded_us.store(pts, Ordering::Relaxed);
+        pace.sent(at, fps);
+        self.pace_us.store(pace.next_us(), Ordering::Relaxed);
         self.owed.store(false, Ordering::Relaxed);
         if !fresh {
             self.counters.repaired.fetch_add(1, Ordering::Relaxed);
@@ -1590,10 +1589,14 @@ impl<P: Platform> Shared<P> {
         repair_at(
             Asks { owed: self.owed.load(Ordering::Relaxed), refresh, keyframe },
             captured,
-            self.last_encoded_us.load(Ordering::Relaxed),
-            self.fps.load(Ordering::Relaxed),
+            self.due_at(),
             self.fps_ceiling.load(Ordering::Relaxed),
         )
+    }
+
+    /// The earliest the cadence gate lets a capture through at the rung in force.
+    fn due_at(&self) -> u64 {
+        Pace::resume(self.pace_us.load(Ordering::Relaxed)).due_at(self.fps.load(Ordering::Relaxed))
     }
 
     /// Send the held capture again at `now`, unless the target is no longer on screen.
@@ -1740,14 +1743,16 @@ impl<P: Platform> Shared<P> {
             capture_ts_us,
         };
         let max = self.sink.max_size().map_or(MAX_DATAGRAM, |m| m.min(MAX_DATAGRAM));
-        let cut = {
-            let mut packetizer = self.packetizer.lock();
-            packetizer.set_max_datagram(max);
-            packetizer.packetize(&frame, send_ms_lo(now)).map(|sent| sent.datagrams.clone())
-        };
-        match cut {
-            Ok(datagrams) => self.send_video(&datagrams, now),
-            Err(e) => tracing::warn!(stream = %self.id, error = %e, "packetize failed"),
+        let mut packetizer = self.packetizer.lock();
+        packetizer.set_max_datagram(max);
+        // The data leaves before the parity is computed over it (MEASUREMENTS.md, "data before
+        // parity"). Under the packetizer's lock, so a NACK's answer never overtakes the frame.
+        let cut = packetizer
+            .packetize(&frame, send_ms_lo(now), |datagrams| self.send_video(datagrams, now))
+            .map(drop);
+        drop(packetizer);
+        if let Err(e) = cut {
+            tracing::warn!(stream = %self.id, error = %e, "packetize failed");
         }
     }
 }
@@ -2191,8 +2196,19 @@ impl ResizeDebounce {
 /// 1.48 against 2.35 — the same within the run-to-run spread the table records.
 const QUEUE_DEPTH: u8 = 3;
 
-/// Capture and encoder settings for a target at a requested quality.
-fn configs(native: (u32, u32), quality: &Quality) -> (CaptureConfig, EncoderConfig) {
+/// Capture and encoder settings for a target at a requested quality, on a display refreshing at
+/// `refresh_hz` when that is known.
+///
+/// A display draws no faster than it refreshes, so the frame rate is the one asked for or the
+/// display's, whichever is lower. The capture runs at the display's own beat: the cadence gate
+/// ([`Pace`]) picks the rung's frames from it, which a capture throttled to the rung's interval
+/// cannot give it on a display whose beat does not divide that interval (MEASUREMENTS.md,
+/// "capture on a 75 Hz display").
+fn configs(
+    native: (u32, u32),
+    quality: &Quality,
+    refresh_hz: Option<f64>,
+) -> (CaptureConfig, EncoderConfig) {
     let scale =
         if quality.scale.is_finite() { f64::from(quality.scale).clamp(0.05, 1.0) } else { 1.0 };
     let side = |px: u32| -> u32 {
@@ -2201,12 +2217,15 @@ fn configs(native: (u32, u32), quality: &Quality) -> (CaptureConfig, EncoderConf
         v.next_multiple_of(2)
     };
     let (width, height) = (side(native.0), side(native.1));
-    let fps = quality.fps.clamp(1, 240);
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
+    let display =
+        refresh_hz.filter(|hz| hz.is_finite()).map(|hz| hz.round().clamp(1.0, 240.0) as u16);
+    let fps = display.map_or(quality.fps, |hz| quality.fps.min(hz)).clamp(1, 240);
     let format = PixelFormat::Nv12Full;
     let capture = CaptureConfig {
         width,
         height,
-        fps,
+        fps: if display.is_some() { 0 } else { fps },
         format,
         queue_depth: QUEUE_DEPTH,
         audio: true,
@@ -2260,6 +2279,8 @@ pub struct Pipeline<P: Platform> {
     point_scale: f64,
     /// Last requested quality; re-applied when the target changes size.
     quality: Quality,
+    /// The refresh rate of the target's display when the stream opened ([`configs`]).
+    refresh_hz: Option<f64>,
     /// What the client has been told about the source, and the frame history it follows.
     source: SourceTracker,
     /// The enumeration the target was resolved from; filters for a path switch come from it.
@@ -2402,14 +2423,15 @@ impl<P: Platform> Pipeline<P> {
         let enumerated = t0.elapsed();
         let (resolved, path) = resolve::<P>(&content, target)?;
         let native = Source::<P>::pixel_size(&resolved);
-        let (mut capture_config, encoder_config) = configs(native, &quality);
+        let refresh_hz = Source::<P>::refresh_hz(target);
+        let (mut capture_config, encoder_config) = configs(native, &quality, refresh_hz);
         capture_config.crop = Source::<P>::crop(&resolved);
 
         let shared = Arc::new(Shared::new(
             id,
             sink,
             encoder_config.bitrate_bps,
-            capture_config.fps,
+            encoder_config.fps,
             path == WindowPath::DisplayCrop,
         ));
         let zoom = f64::from(capture_config.width) / f64::from(native.0);
@@ -2494,6 +2516,7 @@ impl<P: Platform> Pipeline<P> {
             injector,
             point_scale,
             quality,
+            refresh_hz,
             source: SourceTracker::new(Instant::now()),
             content,
             path,
@@ -2544,9 +2567,12 @@ impl<P: Platform> Pipeline<P> {
     /// capture; a bitrate-only change is applied in place, cadence included.
     pub async fn set_quality(&mut self, quality: &Quality) -> Result<(), ScreenError> {
         self.quality = *quality;
-        let (capture_config, encoder_config) = configs(self.native, quality);
+        let (capture_config, encoder_config) = configs(self.native, quality, self.refresh_hz);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
-        if desired == self.desired && encoder_config.codec == self.encoder_config.codec {
+        // The rate is the encoder's alone while the capture follows the display's beat.
+        let same_rate = encoder_config.fps == self.encoder_config.fps;
+        if desired == self.desired && same_rate && encoder_config.codec == self.encoder_config.codec
+        {
             if encoder_config.bitrate_bps != self.encoder_config.bitrate_bps {
                 // The client moved its ceiling; the controller keeps its place under it, and the
                 // rung follows the target the way a rate decision moves it.
@@ -2595,7 +2621,7 @@ impl<P: Platform> Pipeline<P> {
         };
         tracing::info!(stream = %self.id, from = ?self.native, to = ?native, "target resized");
         self.native = native;
-        let (capture_config, encoder_config) = configs(native, &self.quality);
+        let (capture_config, encoder_config) = configs(native, &self.quality, self.refresh_hz);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
         self.reconfigure(desired, encoder_config).await?;
         Ok(Some(ScreenEvent::Geometry {
@@ -2809,8 +2835,8 @@ impl<P: Platform> Pipeline<P> {
         self.shared.apply_bitrate(target);
         // A new quality sets a new ceiling, and the ladder starts from it again: the rung that was
         // in force answered a bitrate the client has just replaced.
-        self.shared.fps_ceiling.store(desired.fps, Ordering::Relaxed);
-        self.shared.fps.store(desired.fps, Ordering::Relaxed);
+        self.shared.fps_ceiling.store(encoder_config.fps, Ordering::Relaxed);
+        self.shared.fps.store(encoder_config.fps, Ordering::Relaxed);
         self.shared.apply_cadence(target);
         let zoom = f64::from(desired.width) / f64::from(self.native.0);
         self.shared.zoom.store(zoom.to_bits(), Ordering::Relaxed);
@@ -3029,13 +3055,7 @@ async fn repair_loop<P: Platform>(shared: Arc<Shared<P>>) {
         let wait = match shared.repair_now(now) {
             Attempt::Sent | Attempt::Nothing => continue,
             // A keyframe put off for a refresh waits for the cadence like any frame.
-            Attempt::NotDue => {
-                let due = shared
-                    .last_encoded_us
-                    .load(Ordering::Relaxed)
-                    .saturating_add(period.saturating_sub(period / 8));
-                due.saturating_sub(now).max(1_000)
-            }
+            Attempt::NotDue => shared.due_at().saturating_sub(now).max(1_000),
             // The link or the encoder is not taking it; ask again a period on, not on a spin.
             Attempt::NoRoom | Attempt::Failed => period,
         };
@@ -3333,7 +3353,7 @@ mod tests {
     #[test]
     fn configs_clamp_the_quality_and_keep_even_sides() {
         let q = Quality { fps: 500, bitrate_bps: 1, scale: 0.3333, codec: VideoCodec::Hevc };
-        let (capture, encoder) = configs((1_001, 777), &q);
+        let (capture, encoder) = configs((1_001, 777), &q, None);
         assert_eq!((capture.width, capture.height), (334, 260), "scaled, rounded up to even");
         assert_eq!(capture.fps, 240, "fps clamped");
         assert_eq!(capture.format, PixelFormat::Nv12Full, "full range, what the client samples");
@@ -3341,13 +3361,27 @@ mod tests {
         assert_eq!((encoder.width, encoder.height, encoder.fps), (334, 260, 240));
 
         let nan = Quality { scale: f32::NAN, codec: VideoCodec::H264, ..q };
-        let (capture, encoder) = configs((100, 100), &nan);
+        let (capture, encoder) = configs((100, 100), &nan, None);
         assert_eq!((capture.width, capture.height), (100, 100), "a NaN scale is native");
         assert_eq!(encoder.codec, VideoCodec::H264, "the codec asked for");
 
         let tiny = Quality { scale: 0.0001, ..q };
-        let (capture, _encoder) = configs((10, 10), &tiny);
+        let (capture, _encoder) = configs((10, 10), &tiny, None);
         assert_eq!((capture.width, capture.height), (2, 2), "never below two pixels");
+    }
+
+    /// Known, the display's refresh bounds the rate and the capture follows its beat.
+    #[test]
+    fn configs_follow_the_displays_refresh() {
+        let q = |fps| Quality { fps, ..Quality::default() };
+        let (capture, encoder) = configs((1_920, 1_080), &q(60), Some(75.0));
+        assert_eq!((capture.fps, encoder.fps), (0, 60), "the display's beat, the rung asked for");
+        let (capture, encoder) = configs((1_920, 1_080), &q(120), Some(75.0));
+        assert_eq!((capture.fps, encoder.fps), (0, 75), "no faster than the display draws");
+        let (_capture, encoder) = configs((1_920, 1_080), &q(60), Some(59.94));
+        assert_eq!(encoder.fps, 60);
+        let (capture, encoder) = configs((1_920, 1_080), &q(60), Some(f64::NAN));
+        assert_eq!((capture.fps, encoder.fps), (60, 60), "an unreadable refresh keeps the ask");
     }
 
     #[test]
@@ -3677,7 +3711,7 @@ mod tests {
     fn config(crop: Option<Crop>) -> CaptureConfig {
         let quality =
             Quality { fps: 60, bitrate_bps: 8_000_000, scale: 1.0, codec: VideoCodec::Hevc };
-        CaptureConfig { crop, ..configs((600, 400), &quality).0 }
+        CaptureConfig { crop, ..configs((600, 400), &quality, None).0 }
     }
 
     #[test]
@@ -3792,9 +3826,10 @@ mod tests {
         assert_eq!((stats.datagrams, stats.queue_full), (5, 4));
     }
 
-    /// An access unit from the encoder is packetized and handed over in one call, and counted; a
-    /// NACK for a frame in the packetizer's history answers with those fragments, one outside it
-    /// with nothing, and none at all while QUIC holds more than the frame budget.
+    /// An access unit from the encoder is packetized and handed over in two calls, its data and
+    /// then the parity computed over it, and counted; a NACK for a frame in the packetizer's
+    /// history answers with those fragments, one outside it with nothing, and none at all while
+    /// QUIC holds more than the frame budget.
     #[test]
     fn an_encoded_packet_is_sent_and_a_nack_answers_from_history() {
         let (shared, wire) = shared_for_frames();
@@ -3809,7 +3844,7 @@ mod tests {
         shared.on_packet(&packet);
         let sent = wire.drain();
         assert!(sent.len() >= 3, "3 000 bytes under the MTU: {}", sent.len());
-        assert_eq!(wire.calls.load(Ordering::Relaxed), 1, "the frame in one call");
+        assert_eq!(wire.calls.load(Ordering::Relaxed), 2, "the data, then its parity");
         let stats = shared.stats();
         assert_eq!((stats.encoded, stats.datagrams), (1, sent.len() as u64));
         shared.nack(0, &[0, 1]);
@@ -4141,10 +4176,11 @@ mod tests {
         assert_eq!(shared.stats().repaired, 1);
         assert_eq!(shared.repair_at(), None, "sent once");
 
-        // A refresh on the still picture: answered from the held capture a period on.
+        // A refresh on the still picture: answered from the held capture at the rung's next
+        // slot, which the repair, 8 ms late in its own, brought nearer by that much.
         shared.request_refresh(3, false);
         let refresh_at = shared.repair_at().expect("a refresh is owed");
-        assert_eq!(refresh_at, at + 33_333 - 4_166);
+        assert_eq!(refresh_at, base + 2 * 33_333 - 4_166);
         assert_eq!(shared.repair_now(refresh_at), Attempt::Sent);
         assert!(!shared.pending.lock().refresh, "the refresh went out with it");
         assert_eq!(shared.stats().repaired, 2);
@@ -4165,13 +4201,13 @@ mod tests {
         // would be due at +29.2 ms, but the repair waits to +41.7 ms, past the next capture.
         let owed = Asks { owed: true, ..Asks::default() };
         let keyframe = Asks { keyframe: true, ..Asks::default() };
-        let at = repair_at(owed, base + 16_667, base, 30, 60);
+        let at = repair_at(owed, base + 16_667, base + 33_333 - 4_166, 60);
         assert_eq!(at, Some(base + 16_667 + 25_000));
         // A 120 Hz ceiling on a 60 Hz panel waits as long, not 12.5 ms.
-        assert_eq!(repair_at(owed, base, base, 120, 120), Some(base + 25_000));
+        assert_eq!(repair_at(owed, base, base, 120), Some(base + 25_000));
         // A keyframe does not wait for the cadence, only for the quiet.
-        assert_eq!(repair_at(keyframe, base, base, 15, 60), Some(base + 25_000));
-        assert_eq!(repair_at(Asks::default(), base, base, 60, 60), None, "nothing owed");
+        assert_eq!(repair_at(keyframe, base, base + 66_667, 60), Some(base + 25_000));
+        assert_eq!(repair_at(Asks::default(), base, base, 60), None, "nothing owed");
     }
 
     /// The parity rides the same link as the frame, so the encoder gets the target less its

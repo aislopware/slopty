@@ -128,7 +128,8 @@ pub struct CaptureConfig {
     pub width: u32,
     /// Output height in pixels (even).
     pub height: u32,
-    /// Frame rate ceiling.
+    /// Frame rate ceiling; 0 captures at the display's own refresh, whatever it is
+    /// (`minimumFrameInterval` = `kCMTimeZero`).
     pub fps: u16,
     /// Pixel layout.
     pub format: PixelFormat,
@@ -312,6 +313,9 @@ pub trait CaptureSource: 'static {
 
     /// The bounds of a display or window, in global points.
     fn target_bounds(target: CaptureTarget) -> Option<Rect>;
+    /// The refresh rate of the display the target is drawn on, in hertz; `None` when it
+    /// cannot be read.
+    fn refresh_hz(target: CaptureTarget) -> Option<f64>;
     /// A window's bounds, on-screen state and owner, in one read; `None` once it is gone.
     fn window_state(id: WindowId) -> Option<WindowState>;
     /// A window's bounds.

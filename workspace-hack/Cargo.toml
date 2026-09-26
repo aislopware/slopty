@@ -1,0 +1,187 @@
+# Generated in part by `cargo hakari generate` (the section between the markers); the rest is
+# ours. `cargo gate` fails when the section is stale; `cargo gate --fix` rewrites it.
+
+[package]
+name = "workspace-hack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Every third-party feature the workspace turns on, co-selected by `cargo xtask check` so any crate set shares one set of dependency builds"
+
+[lints]
+workspace = true
+
+[lib]
+test = false
+doctest = false
+
+### BEGIN HAKARI SECTION
+[dependencies]
+aho-corasick = { version = "1" }
+anstyle = { version = "1" }
+arrayvec = { version = "0.7", default-features = false, features = ["std"] }
+bit-set = { version = "0.8" }
+bit-vec = { version = "0.8" }
+bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
+bytemuck = { version = "1", default-features = false, features = ["aarch64_simd", "extern_crate_alloc", "wasm_simd"] }
+byteorder = { version = "1" }
+bytes = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+collections = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["test-support"] }
+crossbeam-utils = { version = "0.8" }
+derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
+fastrand = { version = "2", features = ["js"] }
+fixedbitset = { version = "0.5", default-features = false, features = ["std"] }
+futures-channel = { version = "0.3", features = ["sink"] }
+futures-io = { version = "0.3" }
+futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
+gpui = { git = "https://github.com/aislopware/zed.git", features = ["test-support"] }
+http_client = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["test-support"] }
+image = { version = "0.25", default-features = false, features = ["dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "pnm", "qoi", "rayon", "tga", "tiff", "webp"] }
+insta = { version = "1", features = ["json", "redactions", "yaml"] }
+libc = { version = "0.2", features = ["extra_traits"] }
+log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
+memchr = { version = "2" }
+num-traits = { version = "0.2", features = ["i128", "libm"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFBase", "CFCGTypes", "CFData", "CFDate", "CFDictionary", "CFMachPort", "CFNumber", "CFRunLoop", "CFString", "CFURL", "std"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColorSpace", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "std"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-core-graphics", "std"] }
+once_cell = { version = "1" }
+ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
+rand = { version = "0.9" }
+rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
+regex-syntax = { version = "0.8" }
+rmcp = { version = "3", default-features = false, features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
+rust-i18n-support = { version = "4", default-features = false, features = ["codegen"] }
+schemars = { version = "1", features = ["chrono04", "indexmap2", "uuid1"] }
+serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", features = ["alloc", "rc"] }
+serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
+slab = { version = "0.4" }
+smallvec = { version = "1", default-features = false, features = ["const_new", "union"] }
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+toml_datetime = { version = "1", features = ["serde"] }
+toml_parser = { version = "1" }
+tracing-core = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["fast-rng", "serde", "v4", "v5", "v7"] }
+winnow = { version = "1" }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
+
+[build-dependencies]
+aho-corasick = { version = "1" }
+anstyle = { version = "1" }
+collections = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["test-support"] }
+crossbeam-utils = { version = "0.8" }
+derive_more-impl = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
+log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
+memchr = { version = "2" }
+num-traits = { version = "0.2", features = ["i128", "libm"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = { version = "1" }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
+regex-syntax = { version = "0.8" }
+rust-i18n-support = { version = "4", default-features = false, features = ["codegen"] }
+serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", features = ["alloc", "rc"] }
+serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
+smallvec = { version = "1", default-features = false, features = ["const_new", "union"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
+syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
+toml_datetime = { version = "1", features = ["serde"] }
+toml_parser = { version = "1" }
+winnow = { version = "1" }
+
+[target.aarch64-apple-darwin.dependencies]
+concurrent-queue = { version = "2" }
+either = { version = "1", default-features = false, features = ["use_std"] }
+errno = { version = "0.3" }
+event-listener = { version = "5" }
+futures-lite = { version = "2" }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+gpui_apple = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
+gpui_macos = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
+gpui_platform = { git = "https://github.com/aislopware/zed.git", features = ["font-kit", "runtime_shaders", "test-support", "wayland", "x11"] }
+itertools = { version = "0.13" }
+objc2 = { version = "0.6" }
+objc2-app-kit = { version = "0.3" }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGColor", "CGContext", "CGDisplayStream", "CGFont", "CGPath", "objc2"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["CMAttachment", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSync", "CMTaggedBufferGroup", "CMTime", "CMTimeRange", "objc2", "objc2-core-audio-types", "objc2-core-video", "std"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["objc2"] }
+objc2-foundation = { version = "0.3" }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["SCError", "SCScreenshotManager", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "std"] }
+regex = { version = "1" }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+semver = { version = "1", features = ["serde"] }
+
+[target.aarch64-apple-darwin.build-dependencies]
+bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
+either = { version = "1", default-features = false, features = ["use_std"] }
+errno = { version = "0.3" }
+fastrand = { version = "2", features = ["js"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+itertools = { version = "0.13" }
+libc = { version = "0.2", features = ["extra_traits"] }
+once_cell = { version = "1" }
+regex = { version = "1" }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+semver = { version = "1", features = ["serde"] }
+
+[target.aarch64-apple-ios.dependencies]
+concurrent-queue = { version = "2" }
+errno = { version = "0.3" }
+event-listener = { version = "5" }
+futures-lite = { version = "2" }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+gpui_apple = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
+gpui_ios = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
+mio = { version = "1", features = ["net", "os-ext"] }
+objc2 = { version = "0.6" }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLSession", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIDragItem", "UIDragSession", "UIDropInteraction", "UIEvent", "UIFeedbackGenerator", "UIImage", "UIInteraction", "UINotificationFeedbackGenerator", "UIPasteboard", "UIResponder", "UIView", "block2", "objc2-core-foundation", "std"] }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+
+[target.aarch64-apple-ios.build-dependencies]
+bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
+errno = { version = "0.3" }
+fastrand = { version = "2", features = ["js"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+libc = { version = "0.2", features = ["extra_traits"] }
+once_cell = { version = "1" }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+
+[target.aarch64-apple-ios-sim.dependencies]
+concurrent-queue = { version = "2" }
+errno = { version = "0.3" }
+event-listener = { version = "5" }
+futures-lite = { version = "2" }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+gpui_apple = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
+gpui_ios = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
+mio = { version = "1", features = ["net", "os-ext"] }
+objc2 = { version = "0.6" }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLSession", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIDragItem", "UIDragSession", "UIDropInteraction", "UIEvent", "UIFeedbackGenerator", "UIImage", "UIInteraction", "UINotificationFeedbackGenerator", "UIPasteboard", "UIResponder", "UIView", "block2", "objc2-core-foundation", "std"] }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+
+[target.aarch64-apple-ios-sim.build-dependencies]
+bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
+errno = { version = "0.3" }
+fastrand = { version = "2", features = ["js"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+libc = { version = "0.2", features = ["extra_traits"] }
+once_cell = { version = "1" }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+
+### END HAKARI SECTION

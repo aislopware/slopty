@@ -1,0 +1,7 @@
+# `cargo hakari` keeps `workspace-hack/Cargo.toml` (docs/decisions/tooling.md, "target/ stays
+# bounded"). Options: https://docs.rs/cargo-hakari/latest/cargo_hakari/config
+hakari-package = "workspace-hack"
+dep-format-version = "4"
+# Hakari's resolver 2 is cargo's resolver 3 without the MSRV-aware version pick.
+resolver = "2"
+platforms = [ "aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim" ]

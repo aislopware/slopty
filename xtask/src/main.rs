@@ -13,6 +13,7 @@ mod gate;
 mod icon;
 mod ime;
 mod ios;
+mod prune;
 mod release;
 mod run;
 mod setup;
@@ -67,6 +68,16 @@ enum Cmd {
         /// `target/gate/tree` (CI, where the tree is the commit).
         #[arg(long)]
         in_place: bool,
+    },
+    /// Delete the build units and incremental caches nothing has used for a while, in every
+    /// target dir under `target/` (also run, skipping busy dirs, after `check` and `gate`).
+    Prune {
+        /// Hours a unit may go unused before it goes.
+        #[arg(long, default_value_t = prune::DEFAULT_IDLE_HOURS)]
+        idle_hours: u64,
+        /// Show what would go without deleting it.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// The slow checks that run on a schedule, not per commit: Miri, sanitizers, the feature
     /// powerset, coverage, mutation testing.
@@ -149,10 +160,21 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Setup { no_tools } => setup::run(&sh, no_tools),
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
-        Cmd::Check { packages } => check::run(&sh, &packages),
-        Cmd::Gate { fix, quick, in_place } => {
-            gate::run(&sh, gate::Options { fix, quick, in_place })
+        Cmd::Check { packages } => {
+            let checked = check::run(&sh, &packages);
+            prune::auto();
+            checked
         }
+        Cmd::Gate { fix, quick, in_place } => {
+            let gated = gate::run(&sh, gate::Options { fix, quick, in_place });
+            prune::auto();
+            gated
+        }
+        Cmd::Prune { idle_hours, dry_run } => prune::run(prune::Options {
+            idle: std::time::Duration::from_secs(idle_hours.saturating_mul(3600)),
+            wait: true,
+            dry_run,
+        }),
         Cmd::Deep { cmd } => deep::run(&sh, &cmd),
         Cmd::Profile { cmd } => {
             sh.create_dir("target/profile")?;

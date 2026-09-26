@@ -47,6 +47,7 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
     if opts.fix {
         // Fixers write to the working tree; the snapshot reads the index, so stage their edits.
         fmt(sh, true)?;
+        hakari(sh, true)?;
         shear(sh, true)?;
         typos(sh, true)?;
     }
@@ -78,6 +79,7 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
                 scope.spawn(|| -> Result<()> {
                     let sh = lane("tools")?;
                     deny(&sh)?;
+                    hakari(&sh, false)?;
                     shear(&sh, false)?;
                     typos(&sh, false)?;
                     // `committed` reads the history, which only the checkout has.
@@ -369,6 +371,13 @@ pub fn doc(sh: &Shell, open: bool) -> Result<()> {
 
 fn deny(sh: &Shell) -> Result<()> {
     quiet_step("cargo deny", cmd!(sh, "cargo deny --workspace check"))
+}
+
+/// `workspace-hack` carries the workspace's current feature union (`cargo xtask check` builds
+/// against it): regenerated under `--fix`, a stale one fails the gate.
+fn hakari(sh: &Shell, fix: bool) -> Result<()> {
+    let diff: &[&str] = if fix { &[] } else { &["--diff"] };
+    quiet_step("cargo hakari", cmd!(sh, "cargo hakari generate {diff...}"))
 }
 
 fn shear(sh: &Shell, fix: bool) -> Result<()> {

@@ -5051,3 +5051,198 @@ cargo test -p slopty-ui --lib measure_the_navigator -- --ignored --nocapture
 ```
 
 Log: `target/logs/navigator-measure.log`.
+
+## 2026-09-26 — the navigator as a virtual list
+
+The navigator's rows became GPUI's `list` over a `ListState`, which lays out and draws only
+the rows in view and two tile rows' height past each edge (`workspace/navigator.rs`). Each
+frame still works out what every row says (the filter, the attention order and a folded
+worker's rollup need all of them), but builds elements for about 20 rows instead of 120. The
+same test and workspace as the entry above, in one test build (the `dev` profile). The
+baseline was taken the same afternoon, before the change, at a load average of about 120; the
+runs after at about 70.
+
+| run | docked p50 | docked p95 | hidden p50 | hidden p95 |
+| --- | --- | --- | --- | --- |
+| before | 7.66 ms | 33.61 ms | 1.24 ms | 1.50 ms |
+| after 1 | 2.44 ms | 15.86 ms | 1.23 ms | 12.78 ms |
+| after 2 | 2.50 ms | 18.33 ms | 1.24 ms | 4.64 ms |
+| after 3 | 2.46 ms | 4.55 ms | 1.88 ms | 5.83 ms |
+
+What the navigator adds at p50 fell from about 6.4 ms to about 1.2 ms. The p95s are the
+machine's load, not the list: the hidden runs spread as widely. What is left is the listing
+of all 120 tiles and the rows in view. The list measures every row once, when it first shows
+or its width changes, so dragging the navigator's edge still lays out every row in each frame
+of the drag.
+
+```sh
+cargo test -p slopty-ui --lib measure_the_navigator -- --ignored --nocapture
+```
+
+Log: `target/logs/navigator-measure.log`.
+
+## 2026-09-26 — target/ growth under varied check sets
+
+What one `cargo clippy --all-targets --target aarch64-apple-darwin` adds to a fresh target dir
+per crate set, run in order, before and after `cargo xtask check` named `workspace-hack` beside
+the crates (`docs/decisions/tooling.md`, "target/ stays bounded"). Units are `.fingerprint`
+entries (one per crate build: a library, a test, a build script). Mac Studio, sccache warm,
+other sessions building throughout (load average 20–30), so the seconds are rough; the unit
+counts are not.
+
+| crate set, in order | before: s | units compiled | units in dir | size | after: s | units compiled | units in dir | size |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `slopty-proto` | 54 | 57 | 89 | 215 MB | 687 | 436 | 634 | 938 MB |
+| `slopty-proto slopty-net` | 49 | 88 | 196 | 509 MB | 54 | 22 | 663 | 1.0 GB |
+| `slopty-net` | 12 | 10 | 211 | 618 MB | 3 | 0 | 663 | 1.0 GB |
+| `slopty-client` | 19 | 32 | 254 | 772 MB | 71 | 13 | 685 | 1.1 GB |
+
+Before, `slopty-proto` was checked three times (once per set) and every set added units for
+the same crates; after, it was checked once and a set only adds its own crates. The first
+check pays for the whole feature union (GPUI included) once per target dir.
+
+The same once-only cost in the shared `target/debug`: the first `cargo xtask check -p xtask`
+took 1 900 s (clippy 226 s, nextest 1 251 s building the union's libraries, rustdoc 420 s) at a
+load average of 110–150; the next one took 90 s. Afterwards `cargo clippy -p slopty-proto -p
+workspace-hack` compiled nothing after a `-p slopty-grid -p slopty-proto` run.
+
+The sweep (`cargo xtask prune`), first passes on 2026-09-26: `target/` was 212 GB. The first
+automatic passes deleted the gate lanes' incremental caches older than a day (16.4 GB by the
+dry run). `cargo xtask prune --idle-hours 3` then deleted 1 230 caches untouched for three
+hours, 48.5 GB (22.7 GB in `debug`, 21.1 GB in the gate lanes). `target/` was then 163 GB.
+Units go only after a full idle window, and the first pass only opened one, so `debug/deps`
+(85 GB, 113 builds of `slopty-client`, 41 of `gpui`) shrinks from the next day on.
+
+```sh
+# before: plain sets; after: add `-p workspace-hack`, each in a fresh CARGO_TARGET_DIR
+for set in "-p slopty-proto" "-p slopty-proto -p slopty-net" "-p slopty-net" "-p slopty-client"; do
+  cargo clippy ${=set} --all-targets --target aarch64-apple-darwin
+  ls target/tmp/probe/{debug,aarch64-apple-darwin/debug}/.fingerprint | wc -l
+done
+```
+
+## 2026-09-26 — capture on a 75 Hz display, data before parity, the reassembler's tick, UDP drops
+
+mac-studio (M1 Max), main display 1920×1080 at **75 Hz** (`system_profiler SPDisplaysDataType`
+and the worker's own listing agree), load average 107–196 from other sessions throughout, so
+tails here are the machine's. Source: a Ghostty window running `yes` (1120×852, mostly on the
+window filter because other windows overlap it), launched by hand and killed after.
+
+### Capture against encode, before (the installed worker, release `d8139d6`)
+
+The installed launchd worker is the only process here with Screen Recording, so the "before"
+is it, driven by the release CLI on loopback, 10 s a run:
+
+```sh
+target/release/slopty bench screen --worker 127.0.0.1:45550 --list          # display 3, the window
+target/release/slopty bench screen --worker 127.0.0.1:45550 --window <id> --seconds 10 [--fps 75|120]
+target/release/slopty bench screen --worker 127.0.0.1:45550 --display 3 --seconds 10 [--fps 75|120]
+```
+
+| target | ceiling | captured / s | encoded / s | decoded fps | arrival gap p50 | capture→decoded p50 / p90 |
+| --- | --- | --- | --- | --- | --- | --- |
+| display | 60 (default) | 52.8 | 34.9 | 34.7 | 30.5 ms | 8.4 / 11.8 ms |
+| display | 60 (default) | 48.3 | 32.9 | 32.9 | 31.0 ms | 8.5 / 15.4 ms |
+| display | 75 | — | — | 67.9 | 13.8 ms | 7.4 / 12.1 ms |
+| display | 120 | 54.4 | 54.4 | 55.2 | 13.6 ms | 5.2 / 10.7 ms |
+| window | 60 (default) | 47.8 | 47.4 | 47.4 | 17.9 ms | 9.9 / 15.2 ms |
+| window | 60 (default) | 54.9 | 54.6 | 54.5 | 17.6 ms | 9.5 / 11.8 ms |
+| window | 75 | 65.1 | 64.9 | 64.8 | 14.0 ms | 8.8 / 11.0 ms |
+| window | 120 | 66.2 | 65.8 | 65.8 | 13.4 ms | 10.2 / 12.2 ms |
+
+On the display path at the default ceiling the cadence gate threw away a third of what was
+captured: `minimumFrameInterval` 1/60 on a 75 Hz beat delivers a mix of 13.3 and 26.7 ms gaps,
+and a gate measured from the last encoded frame rejects every 13.3 ms one (13.3 + 2.1 < 16.7),
+so 33–35 fps went out of a 60 fps rung with 30 ms between frames. The window filter composites
+off the display's beat, so its captures rarely met the gate (474 of 478 encoded); what capped it
+was the 1/60 interval. With a ceiling at or above the panel's rate every capture passes, 65–68
+fps, with Ghostty's own drawing under this load the limit. (The worker's counters are missing
+from the 75 row: that run did not print them.)
+
+### After: the capture on the display's beat, the gate on the rung's schedule
+
+Capture now asks for `minimumFrameInterval` = `kCMTimeZero` (SCStream.h: "capture at display's
+native refresh rate") whenever the target's display refresh is known, the frame rate is the
+ceiling or the display's rate, whichever is lower, and `slopty_media::Pace` keeps the rung's
+schedule with the lateness carried as credit. The gate on a synthetic beat (the unit tests
+`a_rung_under_the_display_rate_keeps_its_rate_on_the_displays_beat` and
+`a_pause_restarts_the_schedule_from_the_capture_that_ends_it`):
+
+| beat | rung | old gate (from the last encoded) | `Pace` |
+| --- | --- | --- | --- |
+| 75 Hz | 60 | 37.5 fps, every gap 26.7 ms | **60.0 fps**, four in five, widest gap 26.7 ms |
+| 75 Hz | 75 | 75 | 75, with ±0.4 ms jitter too |
+| 60 Hz | 30 / 15 | 30 / 15 | 30 / 15 |
+| 120 Hz | 60 | 60 | 60 |
+
+**Owed, on hardware:** the same bench against a worker built from this change. It needs the
+launchd worker reinstalled (`cargo xtask sign`, `slopty worker install`), which this session was
+not to restart; a worker started from a shell here has no Screen Recording (`slopty worker
+doctor`: ✘). Expected: display at the default ceiling 60 fps encoded (from 33–35), arrival gap
+p50 13.3 ms.
+
+### Capture to the glass: not reachable yet
+
+Capture → decoded on loopback is the bench's column above: p50 5.2–9.9 ms. Nothing can yet time
+decoded → presented against a capture: the app self-test (`cargo xtask e2e app`, pair's display
+scenario) starts its own worker from the shell, which cannot capture (no Screen Recording), and
+cannot be pointed at the launchd worker. Screenshots are not an option. Closing it needs one of:
+the e2e harness able to stream from the installed worker, or the pacer (`slopty-client::pacing`)
+keeping capture → present beside arrival → present, which on loopback shares the worker's clock
+(`host_now_us`, mach time).
+
+### Data before parity
+
+```sh
+cargo nextest run -p slopty-media --release --run-ignored only -E 'test(packetize_cost)' --no-capture
+```
+
+`packetize` hands the data datagrams on before Reed–Solomon runs over them, then the parity. The
+"whole frame" column is when the first datagram left before (nothing went until the frame was
+cut), the next when it leaves now. Three runs, µs:
+
+| frame | whole frame cut | first datagram handed on |
+| --- | --- | --- |
+| 300 KB keyframe, 200‰ (305 datagrams) | 596 / 273 / 268 | **80 / 34 / 29** |
+| 62 KB P-frame, 200‰ (64 datagrams) | 30.1 / 31.5 / 29.4 | **5.9 / 5.3 / 5.1** |
+| 300 KB keyframe, no parity | 104 / 31 / 41 | 95 / 29 / 35 |
+
+The 131 µs of the 2026-09-24 table is this machine quiet; the ratio is what carries. The worker
+sends in two calls a frame (data, then parity) under the packetizer's lock, so a NACK's answer
+never overtakes the frame.
+
+### The reassembler's 2 ms tick stays
+
+The client's stream loop sleeps a fixed 2 ms while frames are pending. The candidate slept until
+the reassembler's next deadline instead (the next NACK, retry, loss deadline or refresh repeat,
+at most 25 ms). A lost tail fragment is silence, so its NACK waits on this timer and on nothing
+else. The number is the NACK's send past its due time (the last fragment's arrival plus the
+2.5 ms delay at a 10 ms RTT), 200 frames a run. Both builds came from one target dir and ran
+alternately:
+
+```sh
+cargo test -p slopty-client --lib tail_loss_nack_lateness -- --ignored --nocapture
+```
+
+| run | load | 2 ms tick p50 / p90 / p99 / max | next deadline p50 / p90 / p99 / max |
+| --- | --- | --- | --- |
+| 1 | 180–196 | 2.35 / 5.21 / 10.37 / 15.62 ms | 1.99 / 4.71 / 7.97 / 11.49 ms |
+| 2 | 180–196 | 1.38 / 3.69 / 7.97 / 10.96 ms | 1.65 / 3.04 / 8.63 / 14.48 ms |
+| 3 | 180–196 | 1.30 / 3.16 / 9.16 / 11.37 ms | 1.64 / 3.03 / 8.07 / 19.62 ms |
+| 4 | 40–60 | 1.48 / 3.90 / 7.01 / 8.03 ms | 1.82 / 3.64 / 6.57 / 14.92 ms |
+| 5 | 40–60 | 1.29 / 1.63 / 5.73 / 6.04 ms | 1.86 / 3.11 / 6.85 / 8.33 ms |
+| 6 | 40–60 | 1.30 / 2.57 / 6.38 / 9.11 ms | 1.48 / 3.06 / 8.06 / 11.02 ms |
+
+Rejected: the median was no better in any pair, and worse in five of six. The tick restarts after
+every arrival, so its phase is the last fragment's, and at a 2.5 ms delay its second tick already
+lands near the due time. A deadline is rounded up to tokio's millisecond anyway, so whatever the
+tick lost comes back in the timer's own rounding and wake-up. Precision below that would need a
+timer other than tokio's. The measurement test stays for the next attempt.
+
+### UDP receive buffer: no drops of ours
+
+`netstat -s -p udp` counts 41 007 datagrams "dropped due to full socket buffers" machine-wide
+(Tailscale shares the counter). Across a 20 s display stream at 75 fps and 60 Mbit/s, and the
+same with 5 % injected loss (`SLOPTY_DROP_PERMILLE=50`, refreshes and retransmissions), the
+counter did not move: 0 drops each. A 1080p keyframe (≤ ~300 KB) fits the 768 KiB default many
+times over, so `SO_RCVBUF` stays as it is until a larger picture shows drops.

@@ -11,6 +11,7 @@ const TOOLS: &[(&str, &str)] = &[
     ("cargo-deny", "0.20.2"),
     ("cargo-shear", "1.14.0"),
     ("cargo-hack", "0.6.45"),
+    ("cargo-hakari", "0.9.39"),
     ("cargo-llvm-cov", "0.9.1"),
     ("cargo-mutants", "27.1.0"),
     ("cargo-insta", "1.48.0"),

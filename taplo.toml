@@ -8,8 +8,9 @@ include = [
     "crates/**/*.toml",
     "xtask/**/*.toml",
 ]
-# Vendored crates keep their published manifests byte for byte (`*.toml` above reaches them).
-exclude = [ "vendor/**" ]
+# Vendored crates keep their published manifests byte for byte (`*.toml` above reaches them);
+# `cargo hakari` writes the workspace-hack manifest in its own style.
+exclude = [ "vendor/**", "workspace-hack/Cargo.toml" ]
 
 [formatting]
 align_entries = false

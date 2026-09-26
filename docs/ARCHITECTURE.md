@@ -321,11 +321,11 @@ Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame mo
 ## 3. Remote windows: Parsec-class pipeline
 
 ```
-SCStream(display | window-as-display-crop | window, 420f BT.709, minimumFrameInterval, queueDepth=2, showsCursor=false)
+SCStream(display | window-as-display-crop | window, 420f BT.709, minimumFrameInterval=0 (the display's beat), queueDepth=3, showsCursor=false)
   → VTCompressionSession(HEVC, EnableLowLatencyRateControl @ creation, RealTime,
                          AllowFrameReordering=false, AllowOpenGOP=false, MaxFrameDelayCount=0,
                          EnableLTR, MaxKeyFrameInterval=∞, AverageBitRate + DataRateLimits)
-  → packetize (≤1200 B datagrams, 16 B header) → reed-solomon-simd parity per frame
+  → packetize (≤1200 B datagrams, 16 B header; the data sent, then reed-solomon-simd parity per frame)
   → QUIC datagrams                                      ── client: NACK/refresh datagrams; LTR acks + telemetry on the control stream
 client: reassemble/recover → VTDecompressionSession(RealTime) → CVPixelBuffer (IOSurface)
   → gpui surface (CVMetalTextureCache, zero copy) → present on arrival (next vsync)
@@ -580,7 +580,8 @@ reported (`stalled_ms` / `stalls` in the report) freezes the target, loss while 
 it, a clean window grows it; every decision goes back to the client as `ScreenEvent::Rate`
 for the stats overlay and the bench; pure, no clocks, tested; `Cadence` → the frame rate that
 target affords, a ladder of the client's ceiling then 60/30/15 chosen on bytes per frame, with
-`frame_due` the gate the worker runs each capture through (decisions/video.md, the cadence ladder);
+`Pace` the gate the worker runs each capture through, keeping the rung's schedule on the display's
+beat (decisions/video.md, the cadence ladder and "The capture follows the display's beat");
 `heartbeat_datagram` → a bare
 `Kind::Heartbeat` header the worker sends after `HEARTBEAT_AFTER` of silence so a still screen
 or a capture gap does not read as a link stall at the receiver), `slopty-worker::screen`

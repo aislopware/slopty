@@ -36,9 +36,9 @@ dependencies. Each fork carries our commits on its default branch, rebased onto 
 
 ## Gate
 `cargo gate` is fmt, clippy `-D warnings` on all targets and all three triples, nextest,
-doctests, rustdoc, deny, shear, typos, taplo and `committed`. It checks the **index**, not the
-working tree: the staged blobs are synced into `target/gate/tree` (submodules checked out at
-the commit the index pins, under `target/gate/modules`) and checked in parallel lanes on
+doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It checks the **index**,
+not the working tree: the staged blobs are synced into `target/gate/tree` (submodules checked
+out at the commit the index pins, under `target/gate/modules`) and checked in parallel lanes on
 `target/gate/*` target dirs. Several agents edit this one checkout at once, so stage exactly
 the change you mean to land (`git add <paths>`), gate it, and commit it; the tree stays free to
 edit meanwhile. `--quick` is fmt + host clippy + tests; `--fix` runs the fixers on the tree
@@ -46,7 +46,21 @@ first (stage what they changed); `--in-place` checks the tree itself (CI). Per-l
 in the log.
 
 `cargo xtask check -p <crate>…` runs the same steps on named crates only, on the working tree:
-what an agent that owns those crates runs before it reports.
+what an agent that owns those crates runs before it reports. Its builds name `workspace-hack`
+beside the crates, so every crate set resolves the third-party dependencies with the features
+the gate gives them and reuses one build of each; a bare `cargo nextest run -p <crate>`
+resolves its own and builds its own copies (add `-p workspace-hack` to share).
+`cargo hakari generate` rewrites the hack when a manifest changes its dependencies
+(`cargo gate --fix` runs it; the gate fails on a stale one).
+
+## Disk
+`target/` would grow without end: cargo never deletes a unit, and every `cargo update`, fork
+rebase, toolchain or new feature set leaves the old ones behind. `cargo xtask prune` deletes, in
+every target dir under `target/`, the units no build has read for a day (with their `deps/`
+and `build/` artifacts) and the incremental caches no compile has touched for a day. It runs
+after every `check` and `gate`, skipping a dir whose build lock is held; by hand it waits for
+the lock (`--idle-hours N`, `--dry-run`). How it knows a unit is in use:
+`docs/decisions/tooling.md`, "target/ stays bounded".
 
 ## Deep checks (on a schedule, not per commit)
 `cargo xtask deep <check>` runs what is too slow for the gate, each on its own target dir

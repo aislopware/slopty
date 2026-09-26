@@ -1300,6 +1300,7 @@ mod bars;
 mod cwd;
 mod frame;
 mod measure;
+mod nav_list;
 mod nav_rows;
 mod palette;
 mod remote;

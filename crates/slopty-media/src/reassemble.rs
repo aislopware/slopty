@@ -1468,7 +1468,7 @@ mod cost_tests {
                         ltr_refresh: false,
                         capture_ts_us: n,
                     };
-                    packetizer.packetize(&frame, 0).unwrap().datagrams.clone()
+                    packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone()
                 })
                 .collect();
             let now = Instant::now();

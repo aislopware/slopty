@@ -97,6 +97,10 @@ impl CaptureSource for ScreenCaptureKit {
         geometry::target_bounds(target)
     }
 
+    fn refresh_hz(target: CaptureTarget) -> Option<f64> {
+        geometry::target_refresh_hz(target)
+    }
+
     fn window_state(id: WindowId) -> Option<WindowState> {
         geometry::window_state(id)
     }

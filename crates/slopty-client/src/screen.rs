@@ -1247,6 +1247,8 @@ mod worker_tests {
         handle: ScreenHandle,
         control: mpsc::Receiver<ClientMsg>,
         feedback: Arc<Mutex<Vec<Feedback>>>,
+        /// When each NACK left, by frame.
+        nacked: Arc<Mutex<Vec<(u32, Instant)>>>,
         /// The connection is up; `false` makes the next feedback send fail.
         alive: Arc<AtomicBool>,
         /// Datagrams handed to the router, to know when the worker has seen them all.
@@ -1265,13 +1267,19 @@ mod worker_tests {
             let router = ScreenRouter::with_loss(0);
             let (control_tx, control) = mpsc::channel(64);
             let feedback = Arc::new(Mutex::new(Vec::new()));
+            let nacked = Arc::new(Mutex::new(Vec::new()));
             let alive = Arc::new(AtomicBool::new(true));
             let caught = Arc::clone(&feedback);
+            let stamped = Arc::clone(&nacked);
             let up = Arc::clone(&alive);
             let uplink = Uplink {
                 control: control_tx,
                 feedback: Box::new(move |bytes| {
+                    let at = Instant::now();
                     if let Some(fb) = decode_feedback(&bytes) {
+                        if let Feedback::Nack { frame, .. } = fb {
+                            stamped.lock().push((frame, at));
+                        }
                         caught.lock().push(fb);
                     }
                     up.load(Ordering::Relaxed)
@@ -1285,6 +1293,7 @@ mod worker_tests {
                 handle,
                 control,
                 feedback,
+                nacked,
                 alive,
                 routed: Arc::default(),
                 acked: Vec::new(),
@@ -1355,7 +1364,7 @@ mod worker_tests {
         let data = frame_bytes();
         let frame =
             EncodedFrame { data: &data, keyframe, ltr_token, ltr_refresh: false, capture_ts_us };
-        packetizer.packetize(&frame, 0).unwrap().datagrams.clone()
+        packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone()
     }
 
     /// A frame the decoder rejects asks the worker for a refresh at once and holds back what
@@ -1386,6 +1395,52 @@ mod worker_tests {
             handle.stats().first_frame_at.is_some_and(|t| t.elapsed() > REPORT_EVERY * 4)
         });
         assert!(h.acked.is_empty(), "nothing decoded, nothing acknowledged: {:?}", h.acked);
+    }
+
+    /// How late a lost tail fragment is asked for: each NACK's send against the instant the
+    /// reassembler's own delay makes it due, the last fragment's arrival plus the NACK delay for
+    /// the harness's 10 ms round trip. Only silence waits on the loop's timer, and a lost tail is
+    /// exactly that silence. A measurement, run by hand (MEASUREMENTS.md, "the reassembler's 2 ms
+    /// tick stays").
+    #[test]
+    #[ignore = "measurement: prints the NACK's lateness"]
+    #[expect(clippy::cast_precision_loss, reason = "microseconds printed as milliseconds")]
+    fn tail_loss_nack_lateness() {
+        const TRIALS: u32 = 200;
+        let mut h = Harness::start();
+        let mut packetizer = Packetizer::new(STREAM);
+        packetizer.set_parity_permille(0);
+        let delay = Config::default().nack_delay.for_rtt(Duration::from_millis(10));
+        let mut late_us: Vec<u64> = Vec::new();
+        for trial in 0..TRIALS {
+            let datagrams = packetize(&mut packetizer, true, trial.saturating_add(1));
+            let (tail, body) = datagrams.split_last().unwrap();
+            for d in body {
+                h.route(d.clone());
+            }
+            let due = Instant::now().checked_add(delay).unwrap();
+            let nacked = Arc::clone(&h.nacked);
+            h.wait_for("the nack", 3, |_handle| nacked.lock().iter().any(|(f, _)| *f == trial));
+            let at = nacked.lock().iter().find(|(f, _)| *f == trial).map(|(_, at)| *at).unwrap();
+            late_us.push(
+                u64::try_from(at.saturating_duration_since(due).as_micros()).unwrap_or(u64::MAX),
+            );
+            h.route(tail.clone());
+            h.wait_for("the frame", FOR_THE_MACHINE, |handle| {
+                handle.stats().frames == u64::from(trial).saturating_add(1)
+            });
+        }
+        late_us.sort_unstable();
+        let at = |q: usize| late_us.get(late_us.len().saturating_sub(1).saturating_mul(q) / 100);
+        let ms = |v: Option<&u64>| v.map_or(0.0, |&us| us as f64 / 1e3);
+        eprintln!(
+            "MEASURE nack lateness past last arrival + {delay:?}: p50 {:.2} / p90 {:.2} / p99 {:.2} / max {:.2} ms (n={})",
+            ms(at(50)),
+            ms(at(90)),
+            ms(at(99)),
+            ms(late_us.last()),
+            late_us.len()
+        );
     }
 
     #[test]

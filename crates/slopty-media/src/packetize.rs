@@ -173,6 +173,10 @@ impl Packetizer {
     /// Cut `frame` into datagrams and add parity. `send_ms_lo` is the low byte of the worker's
     /// millisecond clock, stamped on every datagram.
     ///
+    /// `ship` is handed the data datagrams as soon as they are cut, before the parity is computed
+    /// over them, and then the parity: Reed–Solomon over a keyframe takes longer than the first
+    /// fragments need to be on their way (MEASUREMENTS.md, "data before parity").
+    ///
     /// Every datagram, parity included, is written once into one buffer laid out as the wire
     /// wants it (header, shard, header, shard, …) and handed out as slices of it: the bitstream
     /// is copied once, and a frame costs one allocation however many datagrams it makes.
@@ -180,6 +184,7 @@ impl Packetizer {
         &mut self,
         frame: &EncodedFrame<'_>,
         send_ms_lo: u8,
+        mut ship: impl FnMut(&[Bytes]),
     ) -> Result<&SentFrame, MediaError> {
         let layout = layout(frame.data.len(), self.parity_permille, self.max_payload)?;
         let number = self.next_frame;
@@ -223,6 +228,18 @@ impl Packetizer {
             rest = later;
         }
 
+        let data = wire.split().freeze();
+        let slices = |wire: &Bytes, count: usize| -> Vec<Bytes> {
+            (0..count)
+                .map(|i| {
+                    let start = i.saturating_mul(stride);
+                    wire.slice(start..start.saturating_add(stride))
+                })
+                .collect()
+        };
+        let mut datagrams = slices(&data, data_count);
+        ship(&datagrams);
+
         if parity_count > 0 {
             let encoder = match self.encoder.as_mut() {
                 Some(encoder) => {
@@ -235,7 +252,7 @@ impl Packetizer {
                     shard_bytes,
                 )?),
             };
-            for datagram in wire.chunks_exact(stride) {
+            for datagram in data.chunks_exact(stride) {
                 encoder.add_original_shard(datagram.get(HEADER_BYTES..).unwrap_or_default())?;
             }
             let parity = encoder.encode()?;
@@ -246,15 +263,11 @@ impl Packetizer {
                 wire.put_slice(header.as_bytes());
                 wire.put_slice(shard);
             }
+            let parity = slices(&wire.freeze(), parity_count);
+            ship(&parity);
+            datagrams.extend(parity);
         }
 
-        let wire = wire.freeze();
-        let datagrams: Vec<Bytes> = (0..count)
-            .map(|i| {
-                let start = i.saturating_mul(stride);
-                wire.slice(start..start.saturating_add(stride))
-            })
-            .collect();
         self.datagrams_sent = self.datagrams_sent.saturating_add(datagrams.len() as u64);
         if self.history.len() >= HISTORY_FRAMES {
             self.history.pop_front();
@@ -393,7 +406,7 @@ mod tests {
                 ltr_refresh: false,
                 capture_ts_us: 0,
             };
-            p.packetize(&frame, 0).unwrap().layout.shard_bytes
+            p.packetize(&frame, 0, |_| {}).unwrap().layout.shard_bytes
         };
         assert!(shard(1168) <= 1152);
         assert_eq!(
@@ -422,7 +435,7 @@ mod tests {
             ltr_refresh: false,
             capture_ts_us: 99,
         };
-        let sent = p.packetize(&frame, 7).unwrap().clone();
+        let sent = p.packetize(&frame, 7, |_| {}).unwrap().clone();
         assert_eq!(sent.frame, 0);
         assert_eq!(sent.layout.data_count, 5);
         assert_eq!(sent.layout.parity_count, 1);
@@ -458,7 +471,7 @@ mod tests {
             capture_ts_us: 0,
         };
         for _ in 0..HISTORY_FRAMES + 2 {
-            p.packetize(&frame, 0).unwrap();
+            p.packetize(&frame, 0, |_| {}).unwrap();
         }
         assert!(p.retransmit(0, &[0]).is_empty(), "evicted from history");
         let all = p.retransmit(u32::try_from(HISTORY_FRAMES).unwrap(), &[]);
@@ -509,7 +522,7 @@ mod tests {
             ltr_refresh: false,
             capture_ts_us: 0,
         };
-        let sent = p.packetize(&frame, 0).unwrap();
+        let sent = p.packetize(&frame, 0, |_| {}).unwrap();
         let wire = sent.bytes();
         assert_eq!(wire, sent.datagrams.iter().map(Bytes::len).sum::<usize>());
         assert_eq!(wire, sent.datagrams.len() * (sent.layout.shard_bytes + HEADER_BYTES));
@@ -517,7 +530,7 @@ mod tests {
         assert_eq!(p.next_frame(), 1);
 
         p.set_parity_permille(0);
-        let sent = p.packetize(&frame, 0).unwrap();
+        let sent = p.packetize(&frame, 0, |_| {}).unwrap();
         assert_eq!(sent.layout.parity_count, 0);
         assert_eq!(sent.datagrams.len(), usize::from(sent.layout.data_count), "no parity work");
         assert_eq!(p.next_frame(), 2);
@@ -525,10 +538,10 @@ mod tests {
         // The budget reaches the cut through `layout`'s clamp: floored, and rounded down to even.
         let total = data.len() + FRAME_PREFIX_BYTES;
         p.set_max_datagram(MIN_PAYLOAD + HEADER_BYTES - 1);
-        let floored = p.packetize(&frame, 0).unwrap().layout.data_count;
+        let floored = p.packetize(&frame, 0, |_| {}).unwrap().layout.data_count;
         assert_eq!(usize::from(floored), total.div_ceil(MIN_PAYLOAD), "never under the floor");
         p.set_max_datagram(MIN_PAYLOAD + HEADER_BYTES + 3);
-        let even = p.packetize(&frame, 0).unwrap().layout.data_count;
+        let even = p.packetize(&frame, 0, |_| {}).unwrap().layout.data_count;
         assert_eq!(usize::from(even), total.div_ceil(MIN_PAYLOAD + 2), "rounded down to even");
     }
 
@@ -546,7 +559,7 @@ mod tests {
             ltr_refresh: true,
             capture_ts_us: 5,
         };
-        let sent = p.packetize(&frame, 3).unwrap().clone();
+        let sent = p.packetize(&frame, 3, |_| {}).unwrap().clone();
         let stride = HEADER_BYTES + sent.layout.shard_bytes;
         for pair in sent.datagrams.windows(2) {
             let gap = pair[1].as_ptr() as usize - pair[0].as_ptr() as usize;
@@ -586,8 +599,10 @@ mod tests {
         assert_eq!(rebuilt, shard(1));
     }
 
-    /// What cutting one frame costs on the VideoToolbox callback thread: a 62 KB P-frame and a
-    /// 300 KB keyframe at the default parity and at none. `docs/MEASUREMENTS.md` records runs.
+    /// What cutting one frame costs on the VideoToolbox callback thread, and how soon its first
+    /// datagram is handed on: a 62 KB P-frame and a 300 KB keyframe at the default parity and at
+    /// none. Until the data went ahead of the parity the first datagram left only once the whole
+    /// frame was cut, the "per frame" column. `docs/MEASUREMENTS.md` records runs.
     #[test]
     #[ignore = "a measurement; run with --run-ignored only --no-capture in release"]
     fn packetize_cost() {
@@ -604,15 +619,24 @@ mod tests {
                 let mut p = Packetizer::new(StreamId(1));
                 p.set_parity_permille(permille);
                 let rounds = 2_000_u32;
+                let mut first = std::time::Duration::ZERO;
                 let started = std::time::Instant::now();
                 let mut datagrams = 0_usize;
                 for _ in 0..rounds {
-                    datagrams =
-                        datagrams.wrapping_add(p.packetize(&frame, 0).unwrap().datagrams.len());
+                    let began = std::time::Instant::now();
+                    let mut shipped = None;
+                    let sent = p
+                        .packetize(&frame, 0, |_| {
+                            shipped.get_or_insert_with(|| began.elapsed());
+                        })
+                        .unwrap();
+                    datagrams = datagrams.wrapping_add(sent.datagrams.len());
+                    first = first.saturating_add(shipped.unwrap_or_default());
                 }
                 let per = started.elapsed() / rounds;
                 eprintln!(
-                    "{name} {len} B, parity {permille}‰: {per:?} per frame, {} datagrams",
+                    "{name} {len} B, parity {permille}‰: {per:?} per frame, first datagram handed on after {:?}, {} datagrams",
+                    first / rounds,
                     datagrams / rounds as usize
                 );
             }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = [ "crates/*", "apps/*", "xtask" ]
+members = [ "crates/*", "apps/*", "xtask", "workspace-hack" ]
 # default-members: every member builds on the worker; iOS-only crates are cfg-gated internally
 exclude = [ "vendor", ".research" ]
 
