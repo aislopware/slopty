@@ -2394,6 +2394,11 @@ mod tests {
         e.set_line_discipline(LineDiscipline { echo: true, canonical: false });
         let frame = e.take_frame(0).unwrap().expect("echo back on");
         assert!(frame.modes.prediction_allowed());
+        // zsh at its prompt (`stty -a`: `-icanon -echo`): zle echoes each key itself.
+        e.set_line_discipline(LineDiscipline { echo: false, canonical: false });
+        let frame = e.take_frame(0).unwrap().expect("a line editor took the tty");
+        assert!(frame.modes.contains(TermModes::ECHO_OFF), "{:?}", frame.modes);
+        assert!(frame.modes.prediction_allowed(), "a line editor's prompt is guessed at");
     }
 
     #[test]

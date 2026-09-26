@@ -1303,3 +1303,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   stream; QUIC orders nothing across streams anyway, so nothing relied on the old order. Test:
   `a_lifted_echo_overtakes_other_sessions_queued_frames` (loopback: 900 B of the other sessions
   ahead of it instead of 29 700).
+
+- ❌ **No latency tier 0 on the keystroke threads** (2026-09-26). A tokio timer in a launchd
+  job fires 2–4 ms late at 1–8 ms (timer coalescing by the thread's latency tier, plus tokio's
+  millisecond wheel), and `THREAD_LATENCY_QOS_POLICY` tier 0 saves 0.4–1.6 ms of that. But
+  setting any Mach thread policy takes the thread out of the QoS system, dropping the
+  user-interactive class that cut a loaded echo's p90 eightfold. Kept the class (MEASUREMENTS,
+  "timers fire late by the thread's latency tier").

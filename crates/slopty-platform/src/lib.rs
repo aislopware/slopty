@@ -150,6 +150,27 @@ pub fn hide_pointer_until_moved() {
     }
 }
 
+/// The refresh period of the screen the app draws on.
+///
+/// The main screen on macOS (the one with the key window), the first window scene's screen on
+/// iOS. Read from its most frames a second, so a `ProMotion` panel reads 8.3 ms whatever rate
+/// it idles at. Main thread only (AppKit, UIKit); `None` off it, and before a screen or scene
+/// exists.
+#[must_use]
+pub fn display_refresh() -> Option<std::time::Duration> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    #[cfg(target_os = "macos")]
+    let fps = objc2_app_kit::NSScreen::mainScreen(mtm)?.maximumFramesPerSecond();
+    #[cfg(target_os = "ios")]
+    let fps = {
+        let scenes = objc2_ui_kit::UIApplication::sharedApplication(mtm).connectedScenes();
+        let scene = scenes.iter().find_map(|s| s.downcast::<objc2_ui_kit::UIWindowScene>().ok())?;
+        scene.screen().maximumFramesPerSecond()
+    };
+    let fps = u32::try_from(fps).ok()?;
+    std::time::Duration::from_secs(1).checked_div(fps)
+}
+
 /// Whether the ⌥ key down in the event being handled is the right one.
 ///
 /// AppKit's `modifierFlags` carry the device-dependent side bits GPUI drops; read off the

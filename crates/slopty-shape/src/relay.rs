@@ -251,13 +251,57 @@ async fn send_in_order(
     started: Instant,
     mut queue: mpsc::UnboundedReceiver<Outgoing>,
 ) {
+    let mut timer = Timer::new();
     while let Some(Outgoing { leaves, packet, to }) = queue.recv().await {
-        let wait = leaves.saturating_sub(started.elapsed());
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
+        timer.until(started, leaves).await;
         if let Err(error) = socket.send_to(&packet, to).await {
             tracing::warn!(%error, %to, "send");
+        }
+    }
+}
+
+/// The finest wait tokio's timer takes: it rounds every deadline up to its next millisecond.
+const TICK: Duration = Duration::from_millis(1);
+
+/// Waits that end when they were asked to, on a timer that fires late.
+///
+/// macOS coalesces a timer by a share of its length that depends on the process's latency
+/// tier: at tier 2 (`kern.timer_coalesce_tier2_scale` 1) a 5 ms sleep returns after 7.5 ms,
+/// std or tokio alike, and tokio adds up to [`TICK`] of rounding on top. A relay that simply
+/// slept its delay turned a 5 ms hop into 7–8 ms (MEASUREMENTS, "the prediction threshold over
+/// a shaped link"). So the timer is asked for the wait shortened by the lateness it has shown,
+/// and the last stretch, under a tick, is yielded through.
+#[derive(Debug)]
+struct Timer {
+    /// How late the timer fires, as a share of the wait asked for; learned as it goes.
+    late: f64,
+}
+
+impl Timer {
+    /// What lateness is assumed before the first wait: the worst of the tiers a desktop
+    /// process runs at, so the first packets wake early rather than late.
+    const fn new() -> Self {
+        Self { late: 1.0 }
+    }
+
+    /// Return once the run begun at `started` is `due` old.
+    async fn until(&mut self, started: Instant, due: Duration) {
+        loop {
+            let left = due.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return;
+            }
+            let ask = left.saturating_sub(TICK).div_f64(1.0 + self.late);
+            if ask < TICK {
+                // A yield comes back after the runtime has polled its sockets, so the other
+                // direction and the reads go on while this one waits out the last stretch.
+                tokio::task::yield_now().await;
+                continue;
+            }
+            let asked = Instant::now();
+            tokio::time::sleep(ask).await;
+            let late = asked.elapsed().saturating_sub(ask).div_duration_f64(ask);
+            self.late += (late - self.late) / 8.0;
         }
     }
 }
@@ -360,6 +404,38 @@ mod tests {
         let took = sent.elapsed();
         assert!(took >= Duration::from_millis(150), "held for the delay, took {took:?}");
         assert!(took < Duration::from_millis(600), "and not much longer, took {took:?}");
+    }
+
+    /// A short delay is held for itself, not for what the OS timer adds to it: on this Mac a
+    /// 5 ms sleep returns after 7.5, which made a 10 ms round trip take 15.
+    #[tokio::test]
+    async fn a_short_round_trip_takes_what_the_link_says() {
+        const PINGS: usize = 21;
+        let worker = end().await;
+        let client = end().await;
+        let link = Link { delay: Duration::from_millis(5), ..Link::CLEAR };
+        let relay =
+            Arc::new(Relay::bind(wildcard(), worker.local_addr().unwrap(), link, 1).await.unwrap());
+        let address = relay.addr().unwrap();
+        tokio::spawn({
+            let relay = Arc::clone(&relay);
+            async move { relay.run().await }
+        });
+
+        let mut buf = [0_u8; 16];
+        let mut trips = Vec::with_capacity(PINGS);
+        for _ping in 0..PINGS {
+            let sent = Instant::now();
+            client.send_to(b"key", address).await.unwrap();
+            let (_len, from) = worker.recv_from(&mut buf).await.unwrap();
+            worker.send_to(b"echo", from).await.unwrap();
+            let _echo = client.recv_from(&mut buf).await.unwrap();
+            trips.push(sent.elapsed());
+        }
+        trips.sort_unstable();
+        let (least, median) = (trips[0], trips[PINGS / 2]);
+        assert!(least >= Duration::from_millis(10), "held for both delays, least {least:?}");
+        assert!(median < Duration::from_micros(12_500), "and no more, median {median:?}");
     }
 
     // Multi-threaded on purpose: this is where a task per packet would actually reorder, because

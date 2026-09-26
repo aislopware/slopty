@@ -5520,3 +5520,68 @@ With the floods under the link, the queues rarely hold several sessions at once,
 are within noise of each other. With them over it, every session always has data waiting, and
 the lifted echo was 2.7–9.7 ms sooner at the median in all six pairs. That is the case the change
 is for: typing into one terminal while others stream to a slow link.
+
+## 2026-09-26 — the prediction threshold over a shaped link
+
+Scenario (d) of the smooth suite through `slopty-shape`'s relay (`Stack::launch_shaped`): the
+app and a debug worker on this Mac, the relay adding half the round trip each way, 60 keys typed
+into zsh a run, with `SLOPTY_PREDICT` never, always and adaptive. Echo and predicted are key to
+glass, p50 / p90 ms; "link" is the round trip the connection measured and the predictor was
+told. Load average 9–19.
+
+```sh
+D=$PWD/target/e2e-predict SLOPTY_DATA_DIR=$D SLOPTY_PTYD_SOCKET=$D/run/ptyd.sock \
+  SLOPTY_WORKER_SOCKET=$D/run/worker.sock SLOPTY_E2E_BIN_DIR=$PWD/target/debug \
+  SLOPTY_E2E_ARTIFACTS=$D/artifacts SLOPTY_SMOOTH_E2E=1 \
+  RUST_LOG=info,slopty_ui::terminal::view=debug \
+  cargo nextest run -p slopty-e2e --test smooth --no-capture -E 'test(typing_over_a_shaped)'
+```
+
+First, with the ruling of the day before, no key was predicted even with `always`: every zsh
+prompt carried `ECHO_OFF` (decisions/terminal.md, "A line editor's prompt is guessed at").
+With that fixed, the old 25 ms threshold against half a 60 Hz refresh, adaptive:
+
+| shaped rtt | link | never: echo | 25 ms: guesses | ½ refresh: echo | ½ refresh: guess | keys guessed |
+| --- | --- | --- | --- | --- | --- | --- |
+| 5 ms | 6.4–14.6 ms | 31.9 / 73.9 | none | 37.5 / 53.8 | 25.8 / 30.4 | 41 of 60 |
+| 10 ms | 11.0–11.6 ms | 34.8 / 56.2 | none | 34.7 / 44.0 | **20.6 / 28.5** | 55 of 60 |
+| 15 ms | 16.6–16.9 ms | 38.3 / 44.8 | none | 36.7 / 44.7 | **21.1 / 28.7** | 54 of 60 |
+| 20 ms | 22.4 ms | 42.6 / 52.4 | none | | | |
+
+No run had a miss or a late guess. The five or six keys not guessed at 10 and 15 ms are the
+warm-up hits. With `always`, the guess reached the glass 21.5–23.6 ms p50 at every round
+trip; the floor is the compositor's 19–21 ms. At 5 ms the loaded runs measured a link of
+14.6 ms and so guessed; on a quiet 5 ms link half a 60 Hz refresh (8.3 ms) is not reached.
+
+The relay itself held its delays late at first: on this Mac a tokio timer fires 25–50 % past
+its interval (timer coalescing by the process's latency tier, plus tokio's millisecond), so a
+configured 10 ms round trip read key → arrived 13.9 / 24.0 ms. Its `Timer` now asks for the
+wait less the lateness it has seen and yields through the last stretch: 10.7 / 14.9 ms
+(`a_short_round_trip_takes_what_the_link_says`, median under 12.5 ms at 5 ms each way).
+
+## 2026-09-26 — timers fire late by the thread's latency tier
+
+A throwaway binary slept 300 times each on tokio's timer (a multi-thread runtime, the sleep in
+a spawned task) at 1, 2, 5 and 8 ms, run as a launchd agent with `ProcessType Interactive` as
+the daemons are, twice per arm, arms back to back, load average 9–40. Lateness past the
+interval asked for, p50 / p90 ms:
+
+| runtime threads | 1 ms | 2 ms | 5 ms | 8 ms |
+| --- | --- | --- | --- | --- |
+| unclassed | 2.02 / 2.18 | 2.30 / 2.60 | 2.99 / 4.03 | 4.07 / 5.48 |
+| `QOS_CLASS_USER_INTERACTIVE` | 1.88 / 2.08 | 2.22 / 2.56 | 2.74 / 4.00 | 3.86 / 5.40 |
+| `THREAD_LATENCY_QOS_POLICY` tier 0 | 1.53 / 1.66 | 1.78 / 1.88 | 2.16 / 2.59 | 2.49 / 3.05 |
+
+Run from a shell instead, a `std::thread::sleep` of 5 ms came 1.26 ms late either way, and 0.65
+ms at tier 0. `kern.timer_coalesce_tier{0,1,2}_scale` read 3, 2 and 1 here: the kernel may fire a
+timer late by an eighth, a quarter or a half of its interval, by the thread's tier, up to 1 ms
+at tier 0. What is left at tier 0 is tokio's rounding to its millisecond wheel.
+
+Tier 0 is not taken. `thread_policy_set` with the latency policy takes the thread out of the
+QoS system: its `pthread_get_qos_class_np` then reads `QOS_CLASS_UNSPECIFIED`, in either order
+of the two calls, which undoes the user-interactive class that took a loaded echo's p90 from
+166–270 ms to 20–23 ms ("the keystroke path under an all-core spin"). The class is worth
+tenfold more than the 1–1.6 ms a tier-0 timer saves. What the lateness costs, and where:
+the worker's 8 ms output pace (echoes are exempt), noq's 2 ms ACK delay and its pacer, and the
+2 ms echo copies. A timer that must fire on time asks for less and yields through the last
+stretch, as `slopty-shape`'s relay now does; none on the keystroke path has needed it.

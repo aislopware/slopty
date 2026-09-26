@@ -48,6 +48,14 @@ mod tests {
     /// one and a half 60 Hz periods (measured 3.9 ms on the Mac Studio with other sessions
     /// building; see MEASUREMENTS "canvas frame time").
     const PAN_P95_LIMIT: Duration = Duration::from_millis(25);
+    /// Round trips the shaped typing scenario runs at: under the tailnet's echo p50 of 10–12 ms,
+    /// at it, and a refresh or more past it.
+    const SHAPED_RTTS: [Duration; 4] = [
+        Duration::from_millis(5),
+        Duration::from_millis(10),
+        Duration::from_millis(15),
+        Duration::from_millis(20),
+    ];
 
     /// A shell that prints as fast as it can, one varied line at a time: the worker frames it
     /// at its own rate, every visible row changes on every frame, and nothing is typed.
@@ -424,6 +432,42 @@ mod tests {
                 );
                 assert!(latency.predicted > 0, "no predictions drawn: {latency:?}");
                 assert_eq!(latency.guess_late, 0, "a guess fell behind its frame: {latency:?}");
+            }
+        }
+    }
+
+    /// Scenario (d) over a mesh-like round trip: the relay adds half of each of
+    /// [`SHAPED_RTTS`] each way, and the keys are typed with the guesses drawn never, always,
+    /// and as the adaptive policy decides. Where a guess lands ahead of the echo, and by how much,
+    /// decides the predictor's `SLOW_LINK` (MEASUREMENTS, "the prediction threshold over a
+    /// shaped link"). Misses are the app's `prediction miss` lines
+    /// (`RUST_LOG=slopty_ui::terminal::view=debug`).
+    #[tokio::test]
+    async fn typing_over_a_shaped_round_trip_on_the_mac() {
+        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
+            return;
+        }
+        for rtt in SHAPED_RTTS {
+            let link = slopty_shape::Link { delay: rtt / 2, ..slopty_shape::Link::CLEAR };
+            for policy in ["never", "always", "adaptive"] {
+                let env = [("SLOPTY_PREDICT", policy)];
+                let (mut stack, _relay) =
+                    Stack::launch_shaped("e2e-smooth-shaped", &env, link).await.unwrap();
+                let drv = &mut stack.driver;
+                drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+                ready(drv).await;
+                focus_first_shell(drv).await;
+                let latency = typing(drv).await;
+                // The round trip the predictor was told, as the connection measured it.
+                let told = drv.dump().await.unwrap().workers.first().and_then(|w| w.rtt_us);
+                let label = format!("(d) mac, rtt {} ms, SLOPTY_PREDICT={policy}", rtt.as_millis());
+                println!("MEASURE {label}: {} · link rtt {told:?} µs", latency.row());
+                println!("MEASURE {label} hops: {}", latency.hops());
+                stack.shutdown().await;
+                assert!(latency.echoed >= TYPED_MIN, "{latency:?}");
+                if policy == "always" {
+                    assert!(latency.predicted > 0, "no predictions drawn: {latency:?}");
+                }
             }
         }
     }

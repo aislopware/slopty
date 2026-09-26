@@ -30,8 +30,9 @@ bitflags! {
         const CURSOR_HIDDEN = 1 << 7;
         /// DEC 1: application cursor keys.
         const APP_CURSOR_KEYS = 1 << 8;
-        /// The pty does not echo what is typed (`termios` `ECHO` off, as at a password
-        /// prompt); never predict here.
+        /// The pty does not echo what is typed (`termios` `ECHO` off). With [`Self::CANONICAL`]
+        /// that is a password prompt; without it, a line editor (zle, readline, fish) that
+        /// echoes the keys itself.
         const ECHO_OFF = 1 << 9;
         /// The pty's input is line-buffered (`termios` `ICANON`): a plain `read`, not a line
         /// editor.
@@ -52,18 +53,17 @@ impl TermModes {
     }
 
     /// Whether typing plausibly echoes at the cursor, so local echo may be predicted: not
-    /// on the alternate screen (a full-screen program draws what it likes), not with echo off,
-    /// not with the cursor hidden, not while a program owns the mouse. The kitty keyboard
-    /// protocol does not count against it: it changes how a key is encoded, not whether the
-    /// shell echoes it (fish turns it on at every prompt).
+    /// on the alternate screen (a full-screen program draws what it likes), not at a password
+    /// prompt (echo off with the tty buffering the line), not with the cursor hidden, not while
+    /// a program owns the mouse. Echo off alone is every line editor at its prompt: zle,
+    /// readline and fish turn off `ECHO` and `ICANON` and echo each key themselves. The kitty
+    /// keyboard protocol does not count against it: it changes how a key is encoded, not
+    /// whether the shell echoes it (fish turns it on at every prompt).
     #[must_use]
     pub const fn prediction_allowed(self) -> bool {
-        !self.intersects(
-            Self::ALT_SCREEN
-                .union(Self::ECHO_OFF)
-                .union(Self::CURSOR_HIDDEN)
-                .union(Self::MOUSE_TRACKING),
-        )
+        !self.contains(Self::ECHO_OFF.union(Self::CANONICAL))
+            && !self
+                .intersects(Self::ALT_SCREEN.union(Self::CURSOR_HIDDEN).union(Self::MOUSE_TRACKING))
     }
 }
 
@@ -83,6 +83,9 @@ mod tests {
         assert!(TermModes::empty().prediction_allowed());
         assert!(TermModes::CANONICAL.prediction_allowed());
         assert!(TermModes::KITTY_KEYBOARD.prediction_allowed(), "fish's prompt");
+        // zsh's prompt reads `-icanon -echo` in `stty -a`: the line editor echoes.
+        assert!(TermModes::ECHO_OFF.prediction_allowed(), "a line editor at its prompt");
+        assert!(!(TermModes::ECHO_OFF | TermModes::CANONICAL).prediction_allowed(), "a password");
         for off in [
             TermModes::ECHO_OFF,
             TermModes::ALT_SCREEN,

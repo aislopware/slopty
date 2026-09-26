@@ -8,8 +8,9 @@
 //! guess whose cell still shows what it covered is not a miss: the frame was cut from a read
 //! that held other output, and the echo is still to come.
 //!
-//! Visibility is adaptive: predictions are only drawn when the link is slow enough for them to
-//! matter and the recent track record is clean, so a LAN session never sees a wrong glyph.
+//! Visibility is adaptive: predictions are only drawn when the round trip is at least half a
+//! display refresh, where a guess reaches the glass a frame ahead of the echo on most keys, and
+//! the recent track record is clean, so a LAN session never sees a wrong glyph.
 //!
 //! Any key that is not a plain printable one (Enter, an arrow, a control chord, ⌥ as Alt) moves
 //! the cursor where the predictor cannot follow: the guesses are dropped and none is made until
@@ -42,8 +43,11 @@ pub enum Policy {
     Always,
 }
 
-/// Link RTT above which predictions are worth drawing at all.
-pub const SLOW_LINK: Duration = Duration::from_millis(25);
+/// The display's refresh period until the caller says otherwise ([`Predictor::set_refresh`]).
+///
+/// 60 Hz, the slowest panel Slopty draws on, so an unknown display never guesses on a link a
+/// faster one would not.
+pub const DEFAULT_REFRESH: Duration = Duration::from_nanos(16_666_667);
 /// RTT above which predictions draw without waiting for a confirmed hit.
 pub const VERY_SLOW_LINK: Duration = Duration::from_millis(120);
 /// A prediction unconfirmed for this long is treated as a miss.
@@ -92,6 +96,8 @@ pub struct Predictor {
     /// The cursor's row as the last frame left it: where the next guess lands.
     cursor_line: Option<(u16, Arc<Line>)>,
     rtt: Option<Duration>,
+    /// The refresh period of the display the guesses are drawn on.
+    refresh: Duration,
     hits: u32,
     total_hits: u64,
     total_misses: u64,
@@ -124,6 +130,7 @@ impl Predictor {
             covered: VecDeque::new(),
             cursor_line: None,
             rtt: None,
+            refresh: DEFAULT_REFRESH,
             hits: 0,
             total_hits: 0,
             total_misses: 0,
@@ -146,6 +153,25 @@ impl Predictor {
     /// Latest smoothed RTT from the transport.
     pub const fn set_rtt(&mut self, rtt: Option<Duration>) {
         self.rtt = rtt;
+    }
+
+    /// The refresh period of the display the guesses are drawn on (13.3 ms at 75 Hz).
+    pub const fn set_refresh(&mut self, period: Duration) {
+        self.refresh = period;
+    }
+
+    /// The round trip from which guesses are drawn on a warmed-up link: half a refresh.
+    ///
+    /// A guess is painted as the key is pressed and its echo a round trip later, so the echo
+    /// misses the refresh the guess is shown in on about `rtt / refresh` of the keys, and the
+    /// gain is about the round trip on average. Through a shaped link (MEASUREMENTS, "the
+    /// prediction threshold over a shaped link") a guess was on the glass 7, 11, 15 and 20 ms
+    /// ahead of the echo at 5, 10, 15 and 20 ms, with no misses. On loopback it gains 1 to
+    /// 4 ms, and each key then draws a frame of its own with its echo a refresh behind. From
+    /// half a refresh on, most keys gain a whole frame.
+    #[must_use]
+    pub fn slow_link(&self) -> Duration {
+        self.refresh.checked_div(2).unwrap_or(self.refresh)
     }
 
     /// Lifetime hit / miss counts.
@@ -182,7 +208,7 @@ impl Predictor {
                     return false;
                 }
                 let Some(rtt) = self.rtt else { return false };
-                rtt >= VERY_SLOW_LINK || (rtt >= SLOW_LINK && self.hits >= WARMUP_HITS)
+                rtt >= VERY_SLOW_LINK || (rtt >= self.slow_link() && self.hits >= WARMUP_HITS)
             }
         }
     }
@@ -463,12 +489,50 @@ mod tests {
         assert_eq!(p.stats(), (2, 1));
     }
 
+    /// A warmed-up link draws its guesses from half the display's refresh on: 8.3 ms until the
+    /// display is known, 6.7 ms at 75 Hz, 4.2 ms at 120 Hz.
+    #[test]
+    fn guesses_show_from_half_a_refresh() {
+        let t0 = Instant::now();
+        let warm = |refresh: Option<Duration>, rtt_us: u64| {
+            let mut p = Predictor::new(Policy::Adaptive);
+            if let Some(refresh) = refresh {
+                p.set_refresh(refresh);
+            }
+            p.set_rtt(Some(Duration::from_micros(rtt_us)));
+            for (seq, typed, echoed) in [(1, "a", "a"), (2, "b", "ab")] {
+                let col = u16::try_from(seq).unwrap() - 1;
+                let _guess = p.on_key(&key(seq, typed), cursor(0, col), 80, TermModes::empty(), t0);
+                assert_eq!(p.on_frame(&screen_with(0, echoed), seq, 0, t0).hits, 1, "{echoed}");
+            }
+            let _c = p.on_key(&key(3, "c"), cursor(0, 2), 80, TermModes::empty(), t0);
+            p.visible(t0)
+        };
+        assert!(!warm(None, 8_300), "under half of 60 Hz");
+        assert!(warm(None, 8_400), "past half of 60 Hz");
+        let hz75 = Some(Duration::from_nanos(13_333_333));
+        assert!(!warm(hz75, 6_600), "under half of 75 Hz");
+        assert!(warm(hz75, 6_700), "the tailnet's round trip and more");
+        let hz120 = Some(Duration::from_nanos(8_333_333));
+        assert!(!warm(hz120, 4_100), "under half of 120 Hz");
+        assert!(warm(hz120, 4_200), "half of 120 Hz");
+    }
+
     #[test]
     fn unsafe_modes_and_wraps_refuse() {
         let mut p = Predictor::new(Policy::Always);
         let now = Instant::now();
         assert!(p.on_key(&key(1, "a"), cursor(0, 0), 80, TermModes::ALT_SCREEN, now).is_none());
-        assert!(p.on_key(&key(2, "a"), cursor(0, 0), 80, TermModes::ECHO_OFF, now).is_none());
+        assert!(
+            p.on_key(
+                &key(2, "a"),
+                cursor(0, 0),
+                80,
+                TermModes::ECHO_OFF | TermModes::CANONICAL,
+                now
+            )
+            .is_none()
+        );
         assert!(p.on_key(&key(3, "a"), cursor(0, 79), 80, TermModes::empty(), now).is_none());
         let hidden = Cursor { visible: false, ..cursor(0, 0) };
         assert!(p.on_key(&key(4, "a"), hidden, 80, TermModes::empty(), now).is_none());

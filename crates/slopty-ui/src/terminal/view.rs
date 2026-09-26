@@ -458,6 +458,15 @@ fn policy_from_env() -> Policy {
     }
 }
 
+/// A predictor timed against the screen the view opens on: guesses show from half its refresh.
+fn predictor() -> Predictor {
+    let mut predictor = Predictor::new(policy_from_env());
+    if let Some(period) = slopty_platform::display_refresh() {
+        predictor.set_refresh(period);
+    }
+    predictor
+}
+
 impl Focusable for TerminalView {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus.clone()
@@ -497,7 +506,7 @@ impl TerminalView {
             motion_frames: 0,
             #[cfg(test)]
             renders: 0,
-            predictor: Predictor::new(policy_from_env()),
+            predictor: predictor(),
             latency: latency::KeyLatency::default(),
             marked: None,
             sticky_control: false,

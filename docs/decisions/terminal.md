@@ -1694,3 +1694,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   to 0.04–0.11 ms p50. Capping the history a checkpoint carries, or formatting only what changed,
   would let such a session be kept whole; both belong in `slopty-engine`. Test:
   `a_state_too_large_to_keep_is_not_formatted_for_every_read` (actor).
+
+- ✅ **A line editor's prompt is guessed at, and guesses show from half a refresh**
+  (2026-09-26), amending **The frames say when the tty stops echoing**. Two things kept every
+  guess off the glass on a mesh:
+  - zle, readline and fish turn off both `ECHO` and `ICANON` at their prompts and echo each
+    key themselves, so since that ruling every shell prompt carried `ECHO_OFF`, and
+    `prediction_allowed` refused it. A password prompt is echo off *with* the tty buffering
+    the line (`CANONICAL`). Only that pair now refuses. A raw read that echoes nothing
+    (`read -s -n1`, a pager's key prompt) is guessed at like a line editor: its guess is a
+    miss the next frame corrects, and a miss mutes the predictor, as on any link.
+  - The draw threshold was mosh's 25 ms, never measured here, above the tailnet's 10–12 ms
+    echo. It is now half the display's refresh (`Predictor::set_refresh`, read from
+    `slopty_platform::display_refresh`; 60 Hz until known), after the warm-up hits and with
+    the mute as before. Through a shaped link, adaptive prediction put the guess on the glass
+    14–16 ms ahead of the echo at 10 and 15 ms, with no misses. The old threshold drew none up
+    to 20 ms (MEASUREMENTS, "the prediction threshold over a shaped link").
+  Tests: `prediction_gates` (grid), `the_line_discipline_is_in_the_modes_and_sends_a_frame`
+  (engine), `guesses_show_from_half_a_refresh` (predict).

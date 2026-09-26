@@ -50,6 +50,8 @@ objc2-app-kit = { workspace = true, features = [
     "NSDraggingItem",
     "NSDraggingSession",
     "NSView",
+    # The refresh the terminal's guesses are timed against (`display_refresh`).
+    "NSScreen",
     "block2",
     # The browser tile (`web`): its first responder, the key and click watch, the snapshot.
     "NSBitmapImageRep",
@@ -83,6 +85,10 @@ objc2-ui-kit = { workspace = true, features = [
     # The browser tile (`web`): its views, the tap that focuses it, the snapshot.
     "UIView",
     "UIEvent",
+    # The refresh the terminal's guesses are timed against (`display_refresh`).
+    "UIScene",
+    "UIWindowScene",
+    "UIScreen",
     "UIImage",
     "objc2-core-foundation",
 ] }

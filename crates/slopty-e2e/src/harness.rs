@@ -619,6 +619,31 @@ impl Stack {
         Ok(stack)
     }
 
+    /// [`Self::launch_with`], but the app reaches the worker through a relay in this process
+    /// shaped as `link`, so the connection sees that round trip, jitter and loss.
+    /// [`Self::address`] is then the relay's. The relay stops when the returned handle drops.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`], or when the relay cannot bind.
+    pub async fn launch_shaped(
+        worker_name: &str,
+        env: &[(&str, &str)],
+        link: slopty_shape::Link,
+    ) -> Result<(Self, ShapedLink)> {
+        let dir = StackDir::new("slopty-e2e-")?;
+        let mut stack = Self::spawn_in(dir, worker_name, env).await?;
+        let direct: std::net::SocketAddr = stack.address.parse().context("the worker's address")?;
+        // The wildcard, as `SecondWorker`'s relay: it answers the app from the port it dialled.
+        let any = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
+        let relay = slopty_shape::relay::Relay::bind(any, direct, link, 0x5107_7e2e)
+            .await
+            .context("bind the relay")?;
+        stack.address = relay.addr()?.to_string();
+        let task = tokio::spawn(async move { relay.run().await });
+        Ok((Self::add(stack).await?, ShapedLink { _relay: RelayTask(task) }))
+    }
+
     /// Add the stack's worker in the app, as the panel would, and wait for it to connect.
     ///
     /// # Errors
@@ -1231,6 +1256,12 @@ impl Drop for RelayTask {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// The relay in front of a [`Stack::launch_shaped`] worker; dropping it stops the relay.
+#[derive(Debug)]
+pub struct ShapedLink {
+    _relay: RelayTask,
 }
 
 /// A second worker on this Mac, reached the way a worker on another Mac would be.
