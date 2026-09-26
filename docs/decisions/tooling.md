@@ -28,7 +28,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ nextest 0.9.146 · insta 1.48 · proptest 1.11 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
   cargo-deny 0.20.2 · cargo-shear 1.14.0 · cargo-hack 0.6.45 · cargo-semver-checks 0.50 ·
-  typos 1.50.2 · taplo 0.10 · bacon 3.25 · samply 0.13.1 · tracing-tracy 0.12.
+  typos 1.50.3 · taplo 0.10 · bacon 3.25 · samply 0.13.1 · tracing-tracy 0.12.
 
 - ✅ **Releases from Conventional Commits**: `committed` 1.1.11 lints every message
   (`cargo gate` over the range since the last tag); `git-cliff` 2.14.2 computes

@@ -1652,3 +1652,36 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     selection keeps a newline per row. The glyph cache key packing, the OpenGL/EGL fix and
     the tmux viewer fix are outside what libghostty-vt builds for Slopty.
   - Test: view `a_word_follows_a_soft_wrap_but_not_a_hard_break`.
+
+- ✅ **Upstream sync of 2026-09-26: either half of a wide character is the character**
+  (2026-09-26). zed rebased onto main `933d8d9381` (7 commits, fork head `909d7b3c58`),
+  gpui-kit onto main `f8cd4860` (12 commits, fork head `0e2f7dbc`), and `vendor/ghostty` moved
+  28 commits to ghostty main `6301810a4`. The libghostty-rs fork pins the same commit at
+  `801866f` with regenerated bindings. Stable 1.98.1 and nightly 2026-09-24 were current;
+  typos went to 1.50.3; `cargo update` moved `cc` and `zerocopy`. `cocoa`, `core-video`,
+  `generic-array` and `unicode-properties` stay where zed pins them.
+  - **zed** touched `gpui` in one place. The headless renderer factory now returns a
+    `Result`, for the Linux wgpu headless renderer. Slopty's tests go through
+    `gpui_platform`'s test support and never name the factory, so nothing moved here. Our
+    iOS `render_to_image` commit conflicted in `gpui_platform`'s `test-support` feature list;
+    the list now names both `gpui_ios` and upstream's `gpui_wgpu`. gpui-kit's lock had to
+    keep `unicode-properties` at 0.1.3, the version `gpui_web` pins exactly.
+  - **gpui-kit** fixed a Markdown line with inline code standing a device pixel or two
+    taller than a plain one. Notes draw Markdown with `TextView`, so a list with a code item
+    is now evenly spaced with no change on our side. `TextViewState::reveal_range`, the
+    `chart.grid` colour and the tree-sitter byte-offset fix touch nothing Slopty uses: the
+    file tile colours through syntect behind its own `InputHighlighter`.
+  - **ghostty** exposes render-state overscan and stable row ids in the C API, for a
+    renderer that scrolls smoothly and caches per row. Slopty's engine never scrolls
+    ghostty's viewport (clients scroll their own cached history), and a row id cannot stand
+    in for comparing the line: ghostty still marks every row dirty when the viewport moves,
+    and an id survives a write to its row. The bindings carry the new calls; the engine does
+    not use them. CSI 8 t (a program resizing the window) reaches only ghostty's app
+    runtime, not libghostty-vt, and a tile's size is the canvas's to set anyway. The reverse
+    wrap fix comes with the library.
+  - **Word selection** follows ghostty's fix for wide characters: a spacer resolves to the
+    character that owns it, a tail to the cell before and a head to the wide character that
+    wrapped onto the next row. Before this, the right half of an ideographic space
+    (U+3000) read as text, so a double-click on it took the word beside it, while the left
+    half took only the space.
+  - Test: view `either_half_of_a_wide_character_is_the_character`.

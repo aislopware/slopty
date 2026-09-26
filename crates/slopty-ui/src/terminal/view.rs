@@ -18,7 +18,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::term::{BlockHead, CommandBlock, TermImage};
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
-use slopty_grid::{Cursor, LineFlags, LineIndex, TermModes};
+use slopty_grid::{CellWidth, Cursor, LineFlags, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentStatus;
@@ -995,13 +995,23 @@ impl TerminalView {
 
     /// The word under `at` as inclusive cells: the run of non-blank cells around it, or just
     /// the cell when it is blank. Like Ghostty's word selection, the run follows a soft wrap
-    /// onto the next row but stops at a hard line break.
+    /// onto the next row but stops at a hard line break, and either half of a wide character
+    /// reads as the character.
     fn word_at(&self, at: (LineIndex, u16)) -> ((LineIndex, u16), (LineIndex, u16)) {
         let blank = |(index, col): (LineIndex, u16)| {
-            self.state
-                .line(index)
-                .and_then(|line| line.cells.get(usize::from(col)))
-                .is_none_or(|cell| cell.width.draws_text() && cell.text.as_str().trim().is_empty())
+            let cell = |index: LineIndex, col: u16| {
+                self.state.line(index).and_then(|line| line.cells.get(usize::from(col)))
+            };
+            let owner = cell(index, col).and_then(|c| match c.width {
+                CellWidth::Narrow | CellWidth::Wide => Some(c),
+                CellWidth::SpacerTail => cell(index, col.checked_sub(1)?),
+                CellWidth::SpacerHead => {
+                    let below = index.next();
+                    let wrapped = self.state.line(below)?.flags.contains(LineFlags::WRAPPED);
+                    cell(below, 0).filter(|c| wrapped && c.width == CellWidth::Wide)
+                }
+            });
+            owner.is_none_or(|c| c.text.as_str().trim().is_empty())
         };
         if blank(at) {
             return (at, at);
@@ -3429,7 +3439,7 @@ fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
 #[cfg(test)]
 mod tests {
     use gpui::{Entity, Pixels, TestAppContext, VisualTestContext, px, size};
-    use slopty_grid::{Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes};
+    use slopty_grid::{Cell, Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes};
     use slopty_proto::terminal::{Frame, TermRequest};
 
     use super::*;
@@ -4648,6 +4658,53 @@ mod tests {
             assert_eq!(word(view, 102, 1).1.as_deref(), Some("fgh"), "nor does it reach back");
             view.selection = Some(Selection::run((LineIndex(100), 0), (LineIndex(102), 9)));
             assert_eq!(view.selected_text().as_deref(), Some("say   rainbow abcdef\nfgh"));
+        });
+    }
+
+    /// Either half of a wide character reads as the character, as in Ghostty: a word of wide
+    /// characters is one word from any cell, over the spacer a wrapped one leaves at the edge,
+    /// and a wide blank (the ideographic space) parts two words from either half.
+    #[gpui::test]
+    fn either_half_of_a_wide_character_is_the_character(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let wide =
+            |text: &str| [Cell::wide(text, Style::DEFAULT), Cell::spacer_tail(Style::DEFAULT)];
+        let mut f = history_frame(100, &["", "", ""]);
+        if let TermEvent::Frame(frame) = &mut f {
+            // `ab日本語x` and a spacer head, wrapped onto `文 d`; then `日　本`.
+            let first = &mut frame.updates[0].line.cells;
+            first[0] = Cell::narrow('a', Style::DEFAULT);
+            first[1] = Cell::narrow('b', Style::DEFAULT);
+            first[2..4].clone_from_slice(&wide("日"));
+            first[4..6].clone_from_slice(&wide("本"));
+            first[6..8].clone_from_slice(&wide("語"));
+            first[8] = Cell::narrow('x', Style::DEFAULT);
+            first[9] = Cell { width: CellWidth::SpacerHead, ..Cell::BLANK };
+            let second = &mut frame.updates[1].line;
+            second.flags |= LineFlags::WRAPPED;
+            second.cells[0..2].clone_from_slice(&wide("文"));
+            second.cells[3] = Cell::narrow('d', Style::DEFAULT);
+            let third = &mut frame.updates[2].line.cells;
+            third[0..2].clone_from_slice(&wide("日"));
+            third[2..4].clone_from_slice(&wide("\u{3000}"));
+            third[4..6].clone_from_slice(&wide("本"));
+        }
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(f, cx);
+            let word = |view: &mut TerminalView, index: u64, col: u16| {
+                view.select_by_clicks(LineIndex(index), col, 2);
+                view.selection.map(Selection::ordered)
+            };
+            let whole = Some(((LineIndex(100), 0), (LineIndex(101), 1)));
+            for col in [2, 3, 7, 9] {
+                assert_eq!(word(view, 100, col), whole, "from column {col}");
+            }
+            assert_eq!(word(view, 101, 1), whole, "from the tail on the wrapped row");
+            assert_eq!(view.selected_text().as_deref(), Some("ab日本語x文"));
+            let space = |col| Some(((LineIndex(102), col), (LineIndex(102), col)));
+            assert_eq!(word(view, 102, 2), space(2), "the space's head is blank");
+            assert_eq!(word(view, 102, 3), space(3), "and so is its tail");
+            assert_eq!(word(view, 102, 5), Some(((LineIndex(102), 4), (LineIndex(102), 5))));
         });
     }
 

@@ -15,7 +15,7 @@ const TOOLS: &[(&str, &str)] = &[
     ("cargo-mutants", "27.1.0"),
     ("cargo-insta", "1.48.0"),
     ("cargo-semver-checks", "0.50.0"),
-    ("typos-cli", "1.50.2"),
+    ("typos-cli", "1.50.3"),
     ("taplo-cli", "0.10.0"),
     ("bacon", "3.25.0"),
     ("samply", "0.13.1"),
