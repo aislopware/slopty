@@ -116,7 +116,7 @@ pub fn plists(opts: &InstallOpts, bin_dir: &Path, data_dir: &Path) -> Vec<(Strin
         d.insert("LimitLoadToSessionType".into(), Value::String("Aqua".into()));
         Value::Dictionary(d)
     };
-    let mut worker_args = vec!["--ask-permissions".to_owned()];
+    let mut worker_args = vec!["--installed".to_owned()];
     if let Some(port) = opts.port {
         worker_args.push("--port".to_owned());
         worker_args.push(port.to_string());
@@ -567,7 +567,7 @@ mod tests {
             argv,
             [
                 "/opt/slopty/bin/slopty-worker",
-                "--ask-permissions",
+                "--installed",
                 "--port",
                 "45551",
                 "--bind",

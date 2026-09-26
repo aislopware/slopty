@@ -73,12 +73,13 @@ struct Args {
     /// on its own.
     #[arg(long, env = "SLOPTY_SERVER")]
     server: Option<String>,
-    /// Ask macOS for Screen Recording and Accessibility when either is missing. The installed
-    /// daemon passes it: until a process asks, macOS neither prompts nor lists it, so a grant
-    /// cannot be given. A worker a test starts never asks, since each prompt lands on the
-    /// screen of whoever uses this Mac.
+    /// Run as the installed daemon: ask macOS for Screen Recording and Accessibility when
+    /// either is missing (until a process asks, macOS neither prompts nor lists it, so a grant
+    /// cannot be given), and warm capture up at start. A worker a test starts does neither:
+    /// the prompts, the private-window consent that enumerating windows raises, and the audio
+    /// a warm-up capture opens all land on whoever uses this Mac.
     #[arg(long)]
-    ask_permissions: bool,
+    installed: bool,
     /// Sync this named pasteboard instead of the general one; also `SLOPTY_PASTEBOARD`. For
     /// tests, which must never touch the user's clipboard.
     #[arg(long, env = "SLOPTY_PASTEBOARD", hide = true)]
@@ -394,12 +395,14 @@ async fn run() -> Result<()> {
         daemon.listener.admission().ranges().iter().map(ToString::to_string).collect();
     tracing::info!(%id, name = %daemon.name, %listen, ?allow, "listening");
     // ScreenCaptureKit's first start in a process is slow; pay it now, not on the first window.
-    tokio::spawn(async {
-        match slopty_worker::screen::warm_up().await {
-            Ok(took) => tracing::debug!(ms = took.as_millis(), "capture warmed up"),
-            Err(e) => tracing::debug!(error = %e, "capture warm-up failed"),
-        }
-    });
+    if args.installed {
+        tokio::spawn(async {
+            match slopty_worker::screen::warm_up().await {
+                Ok(took) => tracing::debug!(ms = took.as_millis(), "capture warmed up"),
+                Err(e) => tracing::debug!(error = %e, "capture warm-up failed"),
+            }
+        });
+    }
     // So is AppKit's first look at the cursor (seconds); the shape loop must find it warm.
     tokio::task::spawn_blocking(|| {
         let took = slopty_capture::warm_cursor();
@@ -407,7 +410,7 @@ async fn run() -> Result<()> {
     });
     if !slopty_input::can_post() {
         tracing::warn!("no post-event (Accessibility) access: remote-window input will be dropped");
-        if args.ask_permissions {
+        if args.installed {
             let _granted = slopty_input::request_post();
         }
     }
@@ -416,7 +419,7 @@ async fn run() -> Result<()> {
     // switch on. Asking costs one prompt, once, per signed identity.
     if !slopty_capture::can_capture() {
         tracing::warn!("no Screen Recording access: windows and displays cannot be streamed");
-        if args.ask_permissions {
+        if args.installed {
             let _granted = slopty_capture::request_capture();
         }
     }
