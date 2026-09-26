@@ -443,7 +443,7 @@ impl WorkspaceView {
         let item =
             Item { id: ItemId::new(), kind: ItemKind::Note { text }, sleeping: false, name: None };
         let id = item.id;
-        self.propose(key, ItemOp::Upsert(item), cx);
+        self.propose(key, ItemOp::Add(item), cx);
         id
     }
 
@@ -460,9 +460,9 @@ impl WorkspaceView {
     /// A note's editor settled: write its text into the registry.
     pub(super) fn commit_note(&mut self, id: ItemId, text: String, cx: &mut Context<Self>) {
         let Some(tile) = self.tile_of(id) else { return };
-        let Some(mut item) = self.item(tile).cloned() else { return };
-        item.kind = ItemKind::Note { text };
-        self.propose(tile.worker, ItemOp::Upsert(item), cx);
+        if self.item(tile).is_some() {
+            self.propose(tile.worker, ItemOp::SetNote { id, text }, cx);
+        }
     }
 
     /// ⌘O: ask the context worker for its windows, and show the picker while it answers.
@@ -514,7 +514,7 @@ impl WorkspaceView {
         };
         let item = Item { id: ItemId::new(), kind, sleeping: false, name: None };
         self.titles.insert(item.id, title);
-        self.propose(key, ItemOp::Upsert(item), cx);
+        self.propose(key, ItemOp::Add(item), cx);
     }
 
     /// A file card for `path` on `key` (the context worker when `None`): an existing card for
@@ -547,7 +547,7 @@ impl WorkspaceView {
             };
             let id = item.id;
             tracing::info!(%id, %path, ?line, "open file card");
-            self.propose(key, ItemOp::Upsert(item), cx);
+            self.propose(key, ItemOp::Add(item), cx);
             id
         };
         match self.files.get(&id) {
@@ -734,7 +734,7 @@ impl WorkspaceView {
         if let Some(file) = closed.file {
             self.files.insert(tile.item, file);
         }
-        self.propose(tile.worker, ItemOp::Upsert(closed.item), cx);
+        self.propose(tile.worker, ItemOp::Add(closed.item), cx);
         if matches!(self.item(tile).map(|i| &i.kind), Some(ItemKind::File { .. })) {
             self.request_file(tile.item);
         }
@@ -794,10 +794,10 @@ impl WorkspaceView {
     /// `back` gives the keyboard back to whoever had it before the field.
     pub(super) fn finish_rename(&mut self, keep: bool, back: bool, cx: &mut Context<Self>) {
         let Some(rename) = self.rename.take() else { return };
-        if keep && let Some(mut item) = self.item(rename.tile).cloned() {
+        if keep && self.item(rename.tile).is_some() {
             let text = rename.input.read(cx).value().trim().to_owned();
-            item.name = (!text.is_empty()).then_some(text);
-            self.propose(rename.tile.worker, ItemOp::Upsert(item), cx);
+            let name = (!text.is_empty()).then_some(text);
+            self.propose(rename.tile.worker, ItemOp::Rename { id: rename.tile.item, name }, cx);
         }
         if back {
             self.rename_return = rename.return_to.or_else(|| Some(self.focus.clone()));

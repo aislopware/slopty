@@ -606,7 +606,7 @@ fn forwarded_ports_show_on_the_shell_tile(cx: &mut TestAppContext) {
         .drain()
         .into_iter()
         .filter_map(|m| match m {
-            ClientMsg::Items(ItemOp::Upsert(Item { kind: ItemKind::Browser { url }, .. })) => {
+            ClientMsg::Items(ItemOp::Add(Item { kind: ItemKind::Browser { url }, .. })) => {
                 Some(url)
             }
             _ => None,

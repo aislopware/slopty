@@ -62,7 +62,7 @@ fn shell_in_repo(
     };
     view.update_in(cx, |v, _window, cx| {
         v.session_opened(key, summary, cx);
-        v.apply_sync(key, ItemSync::Delta { version: 1, by: me, op: ItemOp::Upsert(item) }, cx);
+        v.apply_sync(key, ItemSync::Delta { version: 1, by: me, op: ItemOp::Add(item) }, cx);
     });
     cx.run_until_parked();
     (session, tile)

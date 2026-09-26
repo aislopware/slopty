@@ -8,12 +8,13 @@ mod tests {
     use std::time::Duration;
 
     use slopty_client::LinkEvent;
-    use slopty_core::{ClientId, SessionId, WindowId};
+    use slopty_core::{ClientId, ItemId, SessionId, WindowId};
     use slopty_net::client::{WorkerConn, bind_client, connect_addr};
     use slopty_net::framed::FramedRecv;
     use slopty_net::streams::{self, Uni};
     use slopty_net::{ClientMsg, WorkerMsg};
     use slopty_proto::handshake::Hello;
+    use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest, SourceState};
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
@@ -228,6 +229,34 @@ mod tests {
         match serde_json::from_str(reply.trim()).unwrap() {
             slopty_worker::ctl::CtlReply::Doctor(health) => health,
             other => panic!("unexpected ctl reply: {other:?}"),
+        }
+    }
+
+    /// A refused item proposal is answered with the registry as it is, so the proposer's
+    /// optimistic copy goes back in step instead of keeping a change nobody else has.
+    #[tokio::test]
+    async fn a_refused_item_op_brings_its_proposer_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let note = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: "kept".to_owned() },
+            sleeping: false,
+            name: None,
+        };
+        worker.tx.send(&ClientMsg::Items(ItemOp::Add(note.clone()))).await.unwrap();
+        let stale = Item { kind: ItemKind::Note { text: "stale".to_owned() }, ..note.clone() };
+        worker.tx.send(&ClientMsg::Items(ItemOp::Add(stale))).await.unwrap();
+        let mut refused = false;
+        loop {
+            match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {
+                WorkerMsg::Term { event: TermEvent::Error(_), .. } => refused = true,
+                WorkerMsg::Items(ItemSync::Snapshot { items, .. }) if refused => {
+                    assert_eq!(items, [note], "the held item, not the refused one");
+                    break;
+                }
+                _other => {}
+            }
         }
     }
 
@@ -690,7 +719,7 @@ mod tests {
         let (b_send, b_tasks) = split(b);
         // As in `a_client_that_falls_behind_gets_the_items_again`: several times what the
         // client's stream window, the worker's queue and its broadcast hold together.
-        let item = slopty_core::ItemId::new();
+        let item = ItemId::new();
         for _ in 0..300_000 {
             b_send.send(ClientMsg::Point { item }).await.unwrap();
         }
@@ -766,14 +795,14 @@ mod tests {
     /// to ignore).
     #[tokio::test]
     async fn a_pointing_reaches_the_others() {
-        use slopty_proto::items::ItemSync;
+        use ItemSync;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut guard, addr) = daemons(dir.path()).await;
         let (endpoint_a, mut a) = dial(addr).await;
         guard.1 = Some(endpoint_a);
         let (endpoint_b, mut b) = dial(addr).await;
-        let item = slopty_core::ItemId::new();
+        let item = ItemId::new();
         a.tx.send(&ClientMsg::Point { item }).await.unwrap();
         let mine = next_items(&mut a, |s| matches!(s, ItemSync::Pointed { .. })).await;
         let ItemSync::Pointed { client: a_client, .. } = mine else { panic!("{mine:?}") };
@@ -812,7 +841,7 @@ mod tests {
     /// gap.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_client_that_falls_behind_gets_the_items_again() {
-        use slopty_proto::items::ItemSync;
+        use ItemSync;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut guard, addr) = daemons(dir.path()).await;
@@ -826,7 +855,7 @@ mod tests {
         // Several times what the client's stream window, the worker's queue and its broadcast
         // hold together (about 30 000 pointings), well past what the worker's own receive window
         // lets this loop buffer ahead of it.
-        let item = slopty_core::ItemId::new();
+        let item = ItemId::new();
         for _ in 0..300_000 {
             b_tx.send(&ClientMsg::Point { item }).await.unwrap();
         }
@@ -934,10 +963,7 @@ mod tests {
     }
 
     /// The next item sync `wanted` on `worker`'s control stream, skipping everything else.
-    async fn next_items(
-        worker: &mut WorkerConn,
-        wanted: impl Fn(&slopty_proto::items::ItemSync) -> bool,
-    ) -> slopty_proto::items::ItemSync {
+    async fn next_items(worker: &mut WorkerConn, wanted: impl Fn(&ItemSync) -> bool) -> ItemSync {
         loop {
             match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {
                 WorkerMsg::Items(sync) if wanted(&sync) => break sync,

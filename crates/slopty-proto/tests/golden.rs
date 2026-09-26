@@ -367,7 +367,7 @@ mod golden {
             &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
                 version: 10,
                 by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: slopty_proto::items::ItemOp::Upsert(slopty_proto::items::Item {
+                op: slopty_proto::items::ItemOp::Add(slopty_proto::items::Item {
                     id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77)),
                     kind: slopty_proto::items::ItemKind::Browser {
                         url: "http://localhost:5173/".to_owned(),
@@ -382,7 +382,7 @@ mod golden {
             &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
                 version: 9,
                 by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: slopty_proto::items::ItemOp::Upsert(slopty_proto::items::Item {
+                op: slopty_proto::items::ItemOp::Add(slopty_proto::items::Item {
                     id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77)),
                     kind: slopty_proto::items::ItemKind::File {
                         path: "/w/slopty/src/main.rs".to_owned(),
@@ -397,7 +397,7 @@ mod golden {
             &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
                 version: 10,
                 by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: slopty_proto::items::ItemOp::Upsert(slopty_proto::items::Item {
+                op: slopty_proto::items::ItemOp::Add(slopty_proto::items::Item {
                     id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x78)),
                     kind: slopty_proto::items::ItemKind::Terminal {
                         session: SessionId::from_uuid(Uuid::from_u128(0x79)),
@@ -405,6 +405,24 @@ mod golden {
                     sleeping: false,
                     name: Some("build box".to_owned()),
                 }),
+            }),
+        );
+        snap(
+            "worker_item_renamed",
+            &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
+                version: 11,
+                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                op: slopty_proto::items::ItemOp::Rename {
+                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x78)),
+                    name: Some("api".to_owned()),
+                },
+            }),
+        );
+        snap(
+            "client_item_set_note",
+            &ClientMsg::Items(slopty_proto::items::ItemOp::SetNote {
+                id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7a)),
+                text: "# Plan\n".to_owned(),
             }),
         );
     }

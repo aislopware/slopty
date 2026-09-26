@@ -289,7 +289,7 @@ mod tests {
         let kind = ItemKind::Browser { url };
         let opened = Verb::OpenItem { worker, kind: kind.clone(), name: Some("app".to_owned()) };
         let Outcome::Item(item) = peer.ask(opened).await else { panic!("the page opens") };
-        let ItemSync::Delta { op: ItemOp::Upsert(shown), .. } = next_items().await else {
+        let ItemSync::Delta { op: ItemOp::Add(shown), .. } = next_items().await else {
             panic!("the client hears the page")
         };
         assert_eq!((shown.id, &shown.kind, shown.name.as_deref()), (item.item, &kind, Some("app")));
@@ -298,10 +298,10 @@ mod tests {
 
         let rename = Verb::RenameItem { item, name: Some("  docs ".to_owned()) };
         assert_eq!(peer.ask(rename).await, Outcome::Done);
-        let ItemSync::Delta { op: ItemOp::Upsert(renamed), .. } = next_items().await else {
+        let ItemSync::Delta { op: ItemOp::Rename { id, name }, .. } = next_items().await else {
             panic!("the client hears the name")
         };
-        assert_eq!(renamed.name.as_deref(), Some("docs"), "trimmed as a person's is");
+        assert_eq!((id, name.as_deref()), (item.item, Some("docs")), "trimmed as a person's is");
 
         assert_eq!(peer.ask(Verb::PointAt { item }).await, Outcome::Done);
         let ItemSync::Pointed { item: at, .. } = next_items().await else { panic!("pointed") };
@@ -315,7 +315,7 @@ mod tests {
         assert!(matches!(gone, Outcome::Error { code: ErrorCode::UnknownItem, .. }), "{gone:?}");
 
         let Outcome::Opened(term) = peer.ask(open(worker, dir.path())).await else { panic!() };
-        let ItemSync::Delta { op: ItemOp::Upsert(shell), .. } = next_items().await else {
+        let ItemSync::Delta { op: ItemOp::Add(shell), .. } = next_items().await else {
             panic!("the terminal's item")
         };
         let theirs = ItemRef { worker, item: shell.id };

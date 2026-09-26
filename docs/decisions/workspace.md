@@ -29,7 +29,8 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   client's data directory (debounced 500 ms, atomic rename; a missing or broken file costs the
   arrangement, never the app). The worker holds `ItemStore` (`<data>/items.json`): items lose
   `rect`, `z` and `group`; the ops are `Upsert`, `Remove` and `Sleep` (a rename is an
-  `Upsert`); a session's item is made when it opens and removed when it closes; notes stay
+  `Upsert`; superseded 2026-09-27 by field ops, multi-client.md "An item change carries only the
+  field it changes"); a session's item is made when it opens and removed when it closes; notes stay
   worker items behind the same interface, so they can move to the server later without a
   special case. `ClientMsg::Point` stays (the "go" toast on the others). The wire module is
   `slopty_proto::items` (`ItemSync`, `ItemOp`); `PROTOCOL_VERSION` 51 with re-accepted goldens.

@@ -141,7 +141,7 @@ fn opens_in(
     let key = fake.key;
     view.update_in(cx, |v, _window, cx| {
         v.session_opened(key, summary(session, cwd), cx);
-        v.apply_sync(key, ItemSync::Delta { version, by, op: ItemOp::Upsert(item) }, cx);
+        v.apply_sync(key, ItemSync::Delta { version, by, op: ItemOp::Add(item) }, cx);
     });
     cx.run_until_parked();
     tile
@@ -160,7 +160,7 @@ fn arrives(
     let key = fake.key;
     view.update_in(cx, |v, _window, cx| {
         let by = ClientId::new();
-        v.apply_sync(key, ItemSync::Delta { version, by, op: ItemOp::Upsert(item) }, cx);
+        v.apply_sync(key, ItemSync::Delta { version, by, op: ItemOp::Add(item) }, cx);
     });
     cx.run_until_parked();
     tile
@@ -910,8 +910,7 @@ fn a_closed_shell_can_be_taken_back(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let sent = fake.drain();
     assert!(
-        sent.iter()
-            .any(|m| matches!(m, ClientMsg::Items(ItemOp::Upsert(i)) if i.id == second.item)),
+        sent.iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Add(i)) if i.id == second.item)),
         "{sent:?}"
     );
     assert_eq!(column_of(&view, cx, second), 1, "back where it was");
@@ -994,12 +993,8 @@ fn a_tile_is_named_from_its_header(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("a p i enter");
     cx.run_until_parked();
     let sent = fake.drain();
-    assert!(
-        sent.iter().any(
-            |m| matches!(m, ClientMsg::Items(ItemOp::Upsert(i)) if i.name.as_deref() == Some("api"))
-        ),
-        "{sent:?}"
-    );
+    let api = ClientMsg::Items(ItemOp::Rename { id: tile.item, name: Some("api".to_owned()) });
+    assert_eq!(sent, vec![api], "the name alone");
     assert!(cx.debug_bounds(selector("rename", tile.item)).is_none(), "and it closed");
     let title = view.read_with(cx, |v, cx| v.card_title(tile, v.item(tile).unwrap(), cx));
     assert_eq!(title, "api");
@@ -1019,7 +1014,7 @@ fn a_new_note_opens_beside_the_focus_on_its_worker(cx: &mut TestAppContext) {
     let note = sent
         .iter()
         .find_map(|m| match m {
-            ClientMsg::Items(ItemOp::Upsert(i)) if matches!(i.kind, ItemKind::Note { .. }) => {
+            ClientMsg::Items(ItemOp::Add(i)) if matches!(i.kind, ItemKind::Note { .. }) => {
                 Some(i.id)
             }
             _ => None,
@@ -1046,7 +1041,7 @@ fn a_note_written_elsewhere_lands_now_or_when_the_editing_stops(cx: &mut TestApp
         .drain()
         .iter()
         .find_map(|m| match m {
-            ClientMsg::Items(ItemOp::Upsert(i)) if matches!(i.kind, ItemKind::Note { .. }) => {
+            ClientMsg::Items(ItemOp::Add(i)) if matches!(i.kind, ItemKind::Note { .. }) => {
                 Some(i.clone())
             }
             _ => None,
@@ -1057,8 +1052,8 @@ fn a_note_written_elsewhere_lands_now_or_when_the_editing_stops(cx: &mut TestApp
     };
     let (key, other) = (fake.key, ClientId::new());
     let written = |text: &str, version: u64| {
-        let item = Item { kind: ItemKind::Note { text: text.to_owned() }, ..note.clone() };
-        ItemSync::Delta { version, by: other, op: ItemOp::Upsert(item) }
+        let op = ItemOp::SetNote { id: note.id, text: text.to_owned() };
+        ItemSync::Delta { version, by: other, op }
     };
     view.update_in(cx, |v, _w, cx| v.apply_sync(key, written("from the phone", 3), cx));
     cx.run_until_parked();
@@ -1069,6 +1064,41 @@ fn a_note_written_elsewhere_lands_now_or_when_the_editing_stops(cx: &mut TestApp
     view.update_in(cx, |v, _w, cx| v.apply_sync(key, written("and again", 4), cx));
     cx.run_until_parked();
     assert_eq!(shown(&view, cx).as_deref(), Some("and again"), "taken at once while read");
+}
+
+/// A note's committed text goes to the worker as the text alone, so a name another client
+/// gave the note meanwhile is neither sent back nor lost here.
+#[gpui::test]
+fn a_note_commit_sends_only_its_text(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    let note = fake
+        .drain()
+        .iter()
+        .find_map(|m| match m {
+            ClientMsg::Items(ItemOp::Add(i)) if matches!(i.kind, ItemKind::Note { .. }) => {
+                Some(i.id)
+            }
+            _ => None,
+        })
+        .expect("the note went to the worker");
+    let (key, other) = (fake.key, ClientId::new());
+    let renamed = ItemOp::Rename { id: note, name: Some("plan".to_owned()) };
+    view.update_in(cx, |v, _w, cx| {
+        v.apply_sync(key, ItemSync::Delta { version: 3, by: other, op: renamed }, cx);
+        v.commit_note(note, "first line".to_owned(), cx);
+    });
+    cx.run_until_parked();
+    let sent = fake.drain();
+    let edit = ItemOp::SetNote { id: note, text: "first line".to_owned() };
+    assert_eq!(sent, vec![ClientMsg::Items(edit)]);
+    let tile = TileRef { worker: key, item: note };
+    let item = view.read_with(cx, |v, _| v.item(tile).cloned()).expect("still there");
+    assert_eq!(item.name.as_deref(), Some("plan"));
+    assert_eq!(item.kind, ItemKind::Note { text: "first line".to_owned() });
 }
 
 // ----- agents ------------------------------------------------------------------------------
@@ -1210,7 +1240,7 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
     assert!(
         asked.iter().any(|m| matches!(
             m,
-            ClientMsg::Items(ItemOp::Upsert(Item { kind: ItemKind::Terminal { session }, .. }))
+            ClientMsg::Items(ItemOp::Add(Item { kind: ItemKind::Terminal { session }, .. }))
                 if *session == untiled
         )),
         "a tile for the waiting session: {asked:?}"

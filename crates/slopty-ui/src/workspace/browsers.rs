@@ -42,7 +42,7 @@ impl WorkspaceView {
             name: None,
         };
         tracing::info!(id = %item.id, %url, "open browser tile");
-        self.propose(key, ItemOp::Upsert(item), cx);
+        self.propose(key, ItemOp::Add(item), cx);
         cx.notify();
     }
 

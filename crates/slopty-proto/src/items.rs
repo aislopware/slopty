@@ -64,11 +64,13 @@ pub struct Item {
 /// The longest name an item takes, in characters.
 pub const NAME_MAX: usize = 128;
 
-/// A proposed change. The worker validates and rebroadcasts as [`ItemSync::Delta`].
+/// A proposed change, carrying only what it changes, so two clients editing different fields
+/// of one item both land. The worker validates and rebroadcasts as [`ItemSync::Delta`].
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ItemOp {
-    /// Insert or replace (a rename is an upsert with the new name).
-    Upsert(Item),
+    /// A new item, or a just-closed one put back under its old id. Refused for an id the
+    /// registry holds, so a stale copy never overwrites a live item.
+    Add(Item),
     /// Remove.
     Remove(ItemId),
     /// Sleep or wake.
@@ -78,6 +80,34 @@ pub enum ItemOp {
         /// True to sleep.
         sleeping: bool,
     },
+    /// Name the item, or clear its name with `None`.
+    Rename {
+        /// Item.
+        id: ItemId,
+        /// The name as typed; the worker trims it, and a blank one is none.
+        name: Option<String>,
+    },
+    /// Replace a note's text. Refused for any other kind of item.
+    SetNote {
+        /// Item.
+        id: ItemId,
+        /// Markdown.
+        text: String,
+    },
+}
+
+impl ItemOp {
+    /// The item the op is about.
+    #[must_use]
+    pub const fn id(&self) -> ItemId {
+        match self {
+            Self::Add(item) => item.id,
+            Self::Remove(id)
+            | Self::Sleep { id, .. }
+            | Self::Rename { id, .. }
+            | Self::SetNote { id, .. } => *id,
+        }
+    }
 }
 
 /// Worker → client registry state.

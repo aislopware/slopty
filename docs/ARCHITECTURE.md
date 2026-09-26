@@ -627,7 +627,8 @@ window (`slopty-net::endpoint`).
 Every worker's items in one scrollable tiling workspace, niri's model
 (`docs/decisions/workspace.md`). Items: terminal, remote window, remote display, note, file, browser
 (`ItemKind` in `crates/slopty-proto/src/items.rs`). The worker keeps only the registry
-(`slopty-worker::items::ItemStore`: the items, their names and sleep; `Upsert`/`Remove`/`Sleep`,
+(`slopty-worker::items::ItemStore`: the items, their names and sleep; `Add`/`Rename`/`SetNote`/
+`Sleep`/`Remove`, each op carrying only the field it changes, a refused one answered with a snapshot,
 a session's item made and removed with it); `slopty-client::items::ItemDoc` mirrors it with
 optimistic local ops and recognises its own echo by `by == me`. Where each item sits is this
 device's alone: `slopty-client::layout` is a pure niri port (workspaces stacked vertically, one
@@ -910,7 +911,7 @@ recognizer, the pinch) and not just GPUI's dispatch; the pure mappings (HID usag
 **Design system.** Every chrome surface draws from `slopty-theme` and nothing else (ruling
 "Design tokens" in DECISIONS): a four-step neutral ladder (`canvas`, `panel`, `raised`,
 `overlay`), one hairline (`border`), three text levels, one accent with its fill and the
-fill's text (`accent_fill`, `fill_fg`), and
+fill's text (`accent_fill`, `accent_ink`), and
 three status tones (`success`, `warn`, `error`) that the chrome uses only where state carries
 meaning (worker dot, agent badge and outline, the bell's badge, failed result, failed-command
 separator). Geometry comes from `radii` (xs 4 / sm 6 / md 8), the 4/8 pt `spacing` scale
@@ -921,7 +922,7 @@ shadows are `shadow_sm` on floating layers only (picker, worker switcher, search
 Focus is one accent hairline: the active item's frame and the search bar while
 they hold the caret. Pills (title bar, badge) are `small()` text on a `TINT`
 fill of their tone with the tone as text; buttons are `radii.sm` with `raised` → `overlay`
-hover/pressed, and the one primary action on a surface is `accent_fill` with `fill_fg` text.
+hover/pressed, and the one primary action on a surface is `accent_fill` with `accent_ink` text.
 gpui-kit's widgets (inputs, Markdown `TextView`) read gpui-kit's own theme, which
 `slopty_ui::kit::sync` rewrites from the same tokens on every theme change, and the Markdown in
 a note gets `markdown_line_height`, paragraph gaps of one base unit, headings

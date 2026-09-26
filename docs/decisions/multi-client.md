@@ -147,3 +147,30 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   keeps the item registry (`ItemSync`), and pointing stays: ⌘⇧O relays `ItemSync::Pointed` to
   the other clients of the focused tile's worker, whose toast goes to that tile in their own
   layout. Tested by `a_pointing_reaches_the_others` against a live hostd.
+
+- ✅ **An item change carries only the field it changes** (2026-09-27). Every edit used to send
+  the whole item back (`ItemOp::Upsert`), built from the copy that client held. With a Mac, an
+  iPad and the orchestration verbs on one worker, two edits of different fields of one item
+  lost one of them: an iPad renaming a note while the Mac committed its text sent back the old
+  name or the old text, whichever landed second. The ops are now `Add(Item)`, `Rename { id,
+  name }`, `SetNote { id, text }`, `Sleep` and `Remove`. The worker checks each as before (a
+  name trimmed, blank as none, at most `NAME_MAX` characters; a note at most 64 KiB; a file path
+  and a web address on `Add`), bumps the version, persists, and rebroadcasts the op itself as
+  the delta. `SetNote` on anything but a note is refused. `Add` is refused for an id the
+  registry holds, so a stale copy can never overwrite a live item; putting a just-closed tile
+  back (⌘Z) is an `Add` of its old item, which works because the close removed it. The
+  orchestrator's rename is a `Rename` like a person's, and `ItemStore::update` (a read, a
+  change and a whole-item write under the lock) is gone. No `SetUrl`: nothing changes a
+  browser tile's address once it is open; one gets its own op when something does. Tests: the
+  store (`a_rename_and_a_note_edit_from_two_clients_both_survive`,
+  `adding_a_held_id_is_refused_and_a_removed_one_comes_back`,
+  `a_note_edit_takes_only_a_note_and_is_bounded`, the name rules on both `Rename` and `Add`),
+  the client document (`a_note_edit_keeps_the_name_and_a_stray_op_changes_nothing`), the
+  headless workspace (`a_note_commit_sends_only_its_text`, and the header rename sending the
+  name alone), the goldens `worker_item_renamed` and `client_item_set_note`, and a live worker
+  (`an_orchestrated_item_reaches_a_client_and_leaves_it`, where the rename arrives as a
+  `Rename`).
+  - **A refused op resyncs its proposer.** A client applies its own op before the worker
+    answers, so a refusal (a name too long, an `Add` of a held id) used to leave that copy out
+    of step until the next connection. The worker now follows the error with a snapshot to that
+    client alone. Test: `slopty-workerd` `a_refused_item_op_brings_its_proposer_the_registry`.

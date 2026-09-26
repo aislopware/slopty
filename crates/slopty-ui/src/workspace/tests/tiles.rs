@@ -89,7 +89,7 @@ fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContex
         v.session_opened(key, summary(here, Some("/srv/deployments/production-eu-west")), cx);
         v.session_opened(key, summary(nowhere, None), cx);
         for (version, item) in [(1, placed), (2, bare)] {
-            let op = ItemOp::Upsert(item);
+            let op = ItemOp::Add(item);
             v.apply_sync(key, ItemSync::Delta { version, by: fake.me, op }, cx);
         }
     });
@@ -415,7 +415,7 @@ fn an_exited_shell_offers_restart_and_close(cx: &mut TestAppContext) {
             ..summary(session, Some("/w/src"))
         };
         v.session_opened(key, exited, cx);
-        v.apply_sync(key, ItemSync::Delta { version: 1, by: me, op: ItemOp::Upsert(item) }, cx);
+        v.apply_sync(key, ItemSync::Delta { version: 1, by: me, op: ItemOp::Add(item) }, cx);
     });
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Status", Some("Exited · code 2"))), "{nodes:#?}");
@@ -549,7 +549,7 @@ fn the_closed_notice_takes_the_tile_back(cx: &mut TestAppContext) {
     click(cx, "toast-undo");
     let sent = fake.drain();
     assert!(
-        sent.iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Upsert(i)) if i.id == third.item)),
+        sent.iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Add(i)) if i.id == third.item)),
         "{sent:?}"
     );
     assert!(view.read_with(cx, |v, _| v.layout().contains(third)), "back");

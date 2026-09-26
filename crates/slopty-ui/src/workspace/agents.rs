@@ -402,7 +402,7 @@ impl WorkspaceView {
             sleeping: false,
             name: None,
         };
-        self.propose(worker, slopty_proto::items::ItemOp::Upsert(item), cx);
+        self.propose(worker, slopty_proto::items::ItemOp::Add(item), cx);
         self.pending_focus = Some(session);
     }
 

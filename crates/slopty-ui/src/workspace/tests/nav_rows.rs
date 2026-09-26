@@ -98,7 +98,7 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
         };
         v.session_opened(key, summary, cx);
         let by = studio.me;
-        v.apply_sync(key, ItemSync::Delta { version: 2, by, op: ItemOp::Upsert(item) }, cx);
+        v.apply_sync(key, ItemSync::Delta { version: 2, by, op: ItemOp::Add(item) }, cx);
     });
     cx.run_until_parked();
     let id = tile.item.as_uuid();

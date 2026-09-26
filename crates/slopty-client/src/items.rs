@@ -1,8 +1,9 @@
 //! One worker's item registry as a client sees it.
 //!
 //! The worker is authoritative: the client applies every [`ItemSync`] it receives and proposes
-//! changes as [`ItemOp`]s. So that a rename or a new note shows at once, the client applies its
-//! own proposals immediately (optimistic) and recognises the worker's echo of them.
+//! changes as [`ItemOp`]s, each carrying only the field it changes. So that a rename or a new
+//! note shows at once, the client applies its own proposals immediately (optimistic) and
+//! recognises the worker's echo of them.
 
 use std::collections::BTreeMap;
 
@@ -89,10 +90,7 @@ impl ItemDoc {
             }
             ItemSync::Delta { version, by, op } => {
                 self.version = version;
-                let known = match &op {
-                    ItemOp::Upsert(item) => self.items.contains_key(&item.id),
-                    ItemOp::Remove(id) | ItemOp::Sleep { id, .. } => self.items.contains_key(id),
-                };
+                let known = self.items.contains_key(&op.id());
                 if by == me && known {
                     // Already applied optimistically. Re-apply anyway so a worker-side
                     // sanitising (a trimmed name) wins.
@@ -106,25 +104,42 @@ impl ItemDoc {
         }
     }
 
-    /// Apply an op locally (the optimistic path with `by_me`, and the worker's deltas).
+    /// Apply an op locally (the optimistic path with `by_me`, and the worker's deltas). An op
+    /// on an item this registry does not have, or a note's text for another kind, changes
+    /// nothing.
     pub fn apply_op(&mut self, op: &ItemOp, by_me: bool) -> ItemChange {
+        let id = op.id();
         match op {
-            ItemOp::Upsert(item) => match self.items.insert(item.id, item.clone()) {
-                Some(_) => ItemChange::Changed(item.id),
-                None => ItemChange::Added { id: item.id, by_me },
+            ItemOp::Add(item) => match self.items.insert(id, item.clone()) {
+                Some(_) => ItemChange::Changed(id),
+                None => ItemChange::Added { id, by_me },
             },
-            ItemOp::Remove(id) => match self.items.remove(id) {
-                Some(_) => ItemChange::Removed(*id),
+            ItemOp::Remove(_) => match self.items.remove(&id) {
+                Some(_) => ItemChange::Removed(id),
                 None => ItemChange::Echo,
             },
-            ItemOp::Sleep { id, sleeping } => match self.items.get_mut(id) {
-                Some(item) => {
-                    item.sleeping = *sleeping;
-                    ItemChange::Changed(*id)
+            ItemOp::Sleep { sleeping, .. } => self.change(id, |item| {
+                item.sleeping = *sleeping;
+                true
+            }),
+            ItemOp::Rename { name, .. } => self.change(id, |item| {
+                item.name.clone_from(name);
+                true
+            }),
+            ItemOp::SetNote { text, .. } => self.change(id, |item| match &mut item.kind {
+                ItemKind::Note { text: note } => {
+                    note.clone_from(text);
+                    true
                 }
-                None => ItemChange::Echo,
-            },
+                _ => false,
+            }),
         }
+    }
+
+    /// Change item `id` in place; `change` says whether it took.
+    fn change(&mut self, id: ItemId, change: impl FnOnce(&mut Item) -> bool) -> ItemChange {
+        let Some(item) = self.items.get_mut(&id) else { return ItemChange::Echo };
+        if change(item) { ItemChange::Changed(id) } else { ItemChange::Echo }
     }
 }
 
@@ -157,9 +172,9 @@ mod tests {
         assert!(doc.is_empty());
     }
 
-    /// A snapshot replaces everything; another client's upsert is an addition not by me; my
-    /// own optimistic upsert is an addition by me whose echo is nothing, and the worker's
-    /// sanitised copy wins; the terminal the worker made for my `OpenSession` (never applied
+    /// A snapshot replaces everything; another client's addition is not by me; my own
+    /// optimistic addition is by me, and the echo of my rename is nothing while the worker's
+    /// trimmed name wins; the terminal the worker made for my `OpenSession` (never applied
     /// here first) is an addition by me.
     #[test]
     fn snapshot_then_deltas_and_echoes() {
@@ -173,21 +188,23 @@ mod tests {
         assert_eq!((doc.version(), doc.len()), (3, 2));
 
         let c = term();
-        let delta = ItemSync::Delta { version: 4, by: other, op: ItemOp::Upsert(c.clone()) };
+        let delta = ItemSync::Delta { version: 4, by: other, op: ItemOp::Add(c.clone()) };
         assert_eq!(doc.apply_sync(delta, me), ItemChange::Added { id: c.id, by_me: false });
 
-        let mut note = Item { kind: ItemKind::Note { text: String::new() }, ..term() };
+        let note = Item { kind: ItemKind::Note { text: String::new() }, ..term() };
         assert_eq!(
-            doc.apply_op(&ItemOp::Upsert(note.clone()), true),
+            doc.apply_op(&ItemOp::Add(note.clone()), true),
             ItemChange::Added { id: note.id, by_me: true }
         );
-        note.name = Some("plan".to_owned());
-        let echo = ItemSync::Delta { version: 5, by: me, op: ItemOp::Upsert(note.clone()) };
+        let typed = ItemOp::Rename { id: note.id, name: Some(" plan ".to_owned()) };
+        assert_eq!(doc.apply_op(&typed, true), ItemChange::Changed(note.id));
+        let trimmed = ItemOp::Rename { id: note.id, name: Some("plan".to_owned()) };
+        let echo = ItemSync::Delta { version: 5, by: me, op: trimmed };
         assert_eq!(doc.apply_sync(echo, me), ItemChange::Echo);
         assert_eq!(doc.get(note.id).and_then(|i| i.name.as_deref()), Some("plan"));
 
         let opened = term();
-        let delta = ItemSync::Delta { version: 6, by: me, op: ItemOp::Upsert(opened.clone()) };
+        let delta = ItemSync::Delta { version: 6, by: me, op: ItemOp::Add(opened.clone()) };
         assert_eq!(doc.apply_sync(delta, me), ItemChange::Added { id: opened.id, by_me: true });
         let session = match opened.kind {
             ItemKind::Terminal { session } => session,
@@ -195,8 +212,8 @@ mod tests {
         };
         assert_eq!(doc.item_for_session(session).map(|i| i.id), Some(opened.id));
 
-        let renamed = Item { name: Some("logs".to_owned()), ..a.clone() };
-        let delta = ItemSync::Delta { version: 7, by: other, op: ItemOp::Upsert(renamed) };
+        let renamed = ItemOp::Rename { id: a.id, name: Some("logs".to_owned()) };
+        let delta = ItemSync::Delta { version: 7, by: other, op: renamed };
         assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(a.id));
         let slept = ItemOp::Sleep { id: b.id, sleeping: true };
         let delta = ItemSync::Delta { version: 8, by: other, op: slept };
@@ -208,5 +225,39 @@ mod tests {
         let again = ItemSync::Delta { version: 10, by: other, op: ItemOp::Remove(a.id) };
         assert_eq!(doc.apply_sync(again, me), ItemChange::Echo, "gone already");
         assert_eq!(doc.version(), 10);
+    }
+
+    /// Another client's note edit changes only the text: the name this client just gave the
+    /// note stays. An edit or a rename of an item this registry lacks, and a note's text for
+    /// a shell, change nothing.
+    #[test]
+    fn a_note_edit_keeps_the_name_and_a_stray_op_changes_nothing() {
+        let me = ClientId::new();
+        let other = ClientId::new();
+        let mut doc = ItemDoc::default();
+        let shell = term();
+        let note = Item { kind: ItemKind::Note { text: "draft".to_owned() }, ..term() };
+        let items = vec![shell.clone(), note.clone()];
+        assert_eq!(doc.apply_sync(ItemSync::Snapshot { version: 1, items }, me), ItemChange::Reset);
+
+        let named = ItemOp::Rename { id: note.id, name: Some("plan".to_owned()) };
+        assert_eq!(doc.apply_op(&named, true), ItemChange::Changed(note.id));
+        let text = "draft, then more".to_owned();
+        let edit = ItemOp::SetNote { id: note.id, text: text.clone() };
+        let delta = ItemSync::Delta { version: 2, by: other, op: edit };
+        assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(note.id));
+        let now = doc.get(note.id).cloned();
+        assert_eq!(now.as_ref().and_then(|i| i.name.as_deref()), Some("plan"));
+        assert_eq!(now.map(|i| i.kind), Some(ItemKind::Note { text }));
+
+        let stray = ItemOp::SetNote { id: shell.id, text: "no".to_owned() };
+        assert_eq!(doc.apply_op(&stray, false), ItemChange::Echo);
+        assert_eq!(doc.get(shell.id), Some(&shell));
+        let gone = ItemId::new();
+        let edit = ItemOp::SetNote { id: gone, text: String::new() };
+        assert_eq!(doc.apply_op(&edit, false), ItemChange::Echo);
+        let rename = ItemOp::Rename { id: gone, name: None };
+        assert_eq!(doc.apply_op(&rename, false), ItemChange::Echo);
+        assert_eq!(doc.len(), 2);
     }
 }

@@ -264,16 +264,12 @@ impl Orchestrator {
                 }
                 let item = Item { id: ItemId::new(), kind, sleeping: false, name };
                 let id = item.id;
-                self.change(ItemOp::Upsert(item))?;
+                self.change(ItemOp::Add(item))?;
                 Ok(Outcome::Item(ItemRef { worker, item: id }))
             }
             Verb::RenameItem { item, name } => {
                 self.item(item)?;
-                let delta = inner
-                    .items
-                    .update(item.item, ORCHESTRATOR, |it| it.name = name)
-                    .map_err(item_failure)?;
-                let _sent = inner.events.send(WorkerMsg::Items(delta));
+                self.change(ItemOp::Rename { id: item.item, name })?;
                 Ok(Outcome::Done)
             }
             Verb::RemoveItem { item } => {

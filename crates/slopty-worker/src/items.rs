@@ -7,6 +7,7 @@
 //! each client's own business: the registry keeps no geometry.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -85,27 +86,6 @@ impl ItemStore {
         self.inner.registry.lock().items.get(&id).cloned()
     }
 
-    /// Change the item `id` in place, checked as a proposal is, with no other change between
-    /// the read and the write. Returns the delta to broadcast.
-    pub fn update(
-        &self,
-        id: ItemId,
-        by: ClientId,
-        change: impl FnOnce(&mut Item),
-    ) -> Result<ItemSync, WorkerError> {
-        let delta = {
-            let mut registry = self.inner.registry.lock();
-            let mut item = registry.items.get(&id).cloned().ok_or(WorkerError::NoSuchItem)?;
-            change(&mut item);
-            let op = sanitize(ItemOp::Upsert(item))?;
-            apply_in(&mut registry, &op)?;
-            registry.version = registry.version.saturating_add(1);
-            ItemSync::Delta { version: registry.version, by, op }
-        };
-        self.persist();
-        Ok(delta)
-    }
-
     /// Current version.
     #[must_use]
     pub fn version(&self) -> u64 {
@@ -144,7 +124,7 @@ impl ItemStore {
             };
             registry.items.insert(item.id, item.clone());
             registry.version = registry.version.saturating_add(1);
-            ItemSync::Delta { version: registry.version, by, op: ItemOp::Upsert(item) }
+            ItemSync::Delta { version: registry.version, by, op: ItemOp::Add(item) }
         };
         self.persist();
         Some(delta)
@@ -212,31 +192,51 @@ fn write_atomic(path: &Path, registry: &Registry) -> std::io::Result<()> {
 /// Reject nonsense before it reaches the registry.
 fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
     Ok(match op {
-        ItemOp::Upsert(mut item) => {
-            if let ItemKind::Note { text } = &item.kind
-                && text.len() > NOTE_MAX
-            {
-                return Err(WorkerError::Items("note too long".to_owned()));
-            }
-            if let ItemKind::File { path } = &item.kind
-                && (path.is_empty() || path.len() > PATH_MAX)
-            {
-                return Err(WorkerError::Items("bad file path".to_owned()));
-            }
-            if let ItemKind::Browser { url } = &item.kind
-                && !web_address(url)
-            {
-                return Err(WorkerError::Items("bad url".to_owned()));
-            }
-            // A name is what the human typed, trimmed; blank is no name at all.
-            item.name = item.name.take().map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
-            if item.name.as_ref().is_some_and(|n| n.chars().count() > NAME_MAX) {
-                return Err(WorkerError::Items("name too long".to_owned()));
-            }
-            ItemOp::Upsert(item)
+        ItemOp::Add(mut item) => {
+            check_kind(&item.kind)?;
+            item.name = clean_name(item.name)?;
+            ItemOp::Add(item)
+        }
+        ItemOp::Rename { id, name } => ItemOp::Rename { id, name: clean_name(name)? },
+        ItemOp::SetNote { id, text } => {
+            check_note(&text)?;
+            ItemOp::SetNote { id, text }
         }
         other @ (ItemOp::Remove(_) | ItemOp::Sleep { .. }) => other,
     })
+}
+
+fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
+    match kind {
+        ItemKind::Note { text } => check_note(text),
+        ItemKind::File { path } if path.is_empty() || path.len() > PATH_MAX => {
+            Err(WorkerError::Items("bad file path".to_owned()))
+        }
+        ItemKind::Browser { url } if !web_address(url) => {
+            Err(WorkerError::Items("bad url".to_owned()))
+        }
+        ItemKind::Terminal { .. }
+        | ItemKind::Window { .. }
+        | ItemKind::Display { .. }
+        | ItemKind::File { .. }
+        | ItemKind::Browser { .. } => Ok(()),
+    }
+}
+
+fn check_note(text: &str) -> Result<(), WorkerError> {
+    if text.len() > NOTE_MAX {
+        return Err(WorkerError::Items("note too long".to_owned()));
+    }
+    Ok(())
+}
+
+/// A name is what the human typed, trimmed; blank is no name at all.
+fn clean_name(name: Option<String>) -> Result<Option<String>, WorkerError> {
+    let name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+    if name.as_ref().is_some_and(|n| n.chars().count() > NAME_MAX) {
+        return Err(WorkerError::Items("name too long".to_owned()));
+    }
+    Ok(name)
 }
 
 /// An `http` or `https` address with a host, [`URL_MAX`] bytes at most, and nothing a URL
@@ -251,17 +251,27 @@ fn web_address(url: &str) -> bool {
         && !host.is_empty()
 }
 
+fn known(items: &mut BTreeMap<ItemId, Item>, id: ItemId) -> Result<&mut Item, WorkerError> {
+    items.get_mut(&id).ok_or(WorkerError::NoSuchItem)
+}
+
 fn apply_in(registry: &mut Registry, op: &ItemOp) -> Result<(), WorkerError> {
     match op {
-        ItemOp::Upsert(item) => {
-            registry.items.insert(item.id, item.clone());
-        }
+        ItemOp::Add(item) => match registry.items.entry(item.id) {
+            Entry::Occupied(_) => return Err(WorkerError::Items("item exists".to_owned())),
+            Entry::Vacant(slot) => {
+                slot.insert(item.clone());
+            }
+        },
         ItemOp::Remove(id) => {
             registry.items.remove(id).ok_or(WorkerError::NoSuchItem)?;
         }
-        ItemOp::Sleep { id, sleeping } => {
-            registry.items.get_mut(id).ok_or(WorkerError::NoSuchItem)?.sleeping = *sleeping;
-        }
+        ItemOp::Sleep { id, sleeping } => known(&mut registry.items, *id)?.sleeping = *sleeping,
+        ItemOp::Rename { id, name } => known(&mut registry.items, *id)?.name.clone_from(name),
+        ItemOp::SetNote { id, text } => match &mut known(&mut registry.items, *id)?.kind {
+            ItemKind::Note { text: note } => note.clone_from(text),
+            _ => return Err(WorkerError::Items("not a note".to_owned())),
+        },
     }
     Ok(())
 }
@@ -276,10 +286,10 @@ mod tests {
         (dir, store)
     }
 
-    fn upserted(delta: ItemSync) -> Item {
+    fn added(delta: ItemSync) -> Item {
         match delta {
-            ItemSync::Delta { op: ItemOp::Upsert(i), .. } => i,
-            other => panic!("an upsert, not {other:?}"),
+            ItemSync::Delta { op: ItemOp::Add(i), .. } => i,
+            other => panic!("an addition, not {other:?}"),
         }
     }
 
@@ -289,9 +299,9 @@ mod tests {
         let by = ClientId::new();
         let s1 = SessionId::new();
         let s2 = SessionId::new();
-        let a = upserted(store.ensure_terminal(s1, by).unwrap());
+        let a = added(store.ensure_terminal(s1, by).unwrap());
         assert!(store.ensure_terminal(s1, by).is_none(), "idempotent");
-        let b = upserted(store.ensure_terminal(s2, by).unwrap());
+        let b = added(store.ensure_terminal(s2, by).unwrap());
         assert_eq!(a.kind, ItemKind::Terminal { session: s1 });
         assert_ne!(a.id, b.id);
 
@@ -309,24 +319,116 @@ mod tests {
     }
 
     /// An item's name is kept as typed but trimmed, a blank one is no name, and one past
-    /// `NAME_MAX` characters is refused rather than cut (the client shows what was typed).
+    /// `NAME_MAX` characters is refused rather than cut (the client shows what was typed). A
+    /// rename and a new item's name are held to it alike.
     #[test]
     fn a_name_is_trimmed_blank_is_none_and_too_long_is_refused() {
         let (_dir, store) = store();
         let by = ClientId::new();
-        let item = upserted(store.ensure_terminal(SessionId::new(), by).unwrap());
-        let named =
-            |name: &str| ItemOp::Upsert(Item { name: Some(name.to_owned()), ..item.clone() });
-        let name_of = |delta: ItemSync| upserted(delta).name;
+        let id = added(store.ensure_terminal(SessionId::new(), by).unwrap()).id;
+        let named = |name: &str| ItemOp::Rename { id, name: Some(name.to_owned()) };
+        let name_of = |delta: ItemSync| match delta {
+            ItemSync::Delta { op: ItemOp::Rename { name, .. }, .. } => name,
+            other => panic!("a rename, not {other:?}"),
+        };
         assert_eq!(
             name_of(store.apply(named("  build box "), by).unwrap()).as_deref(),
             Some("build box")
         );
+        assert_eq!(store.get(id).unwrap().name.as_deref(), Some("build box"));
         assert_eq!(name_of(store.apply(named("   "), by).unwrap()), None);
+        assert_eq!(store.get(id).unwrap().name, None);
         let long = "n".repeat(NAME_MAX);
         assert_eq!(name_of(store.apply(named(&long), by).unwrap()).as_deref(), Some(long.as_str()));
         let err = store.apply(named(&"n".repeat(NAME_MAX + 1)), by).unwrap_err();
         assert!(matches!(err, WorkerError::Items(_)), "{err:?}");
+        assert_eq!(store.get(id).unwrap().name.as_deref(), Some(long.as_str()), "kept");
+
+        let note = |name: &str| Item {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: String::new() },
+            sleeping: false,
+            name: Some(name.to_owned()),
+        };
+        let fresh = added(store.apply(ItemOp::Add(note(" plan ")), by).unwrap());
+        assert_eq!(fresh.name.as_deref(), Some("plan"));
+        let err = store.apply(ItemOp::Add(note(&"n".repeat(NAME_MAX + 1))), by).unwrap_err();
+        assert!(matches!(err, WorkerError::Items(_)), "{err:?}");
+    }
+
+    /// Two clients each holding the same stale copy of a note, one renaming it and the other
+    /// editing its text, both land: each op carries only its own field.
+    #[test]
+    fn a_rename_and_a_note_edit_from_two_clients_both_survive() {
+        let (_dir, store) = store();
+        let (mac, ipad) = (ClientId::new(), ClientId::new());
+        let note = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: "draft".to_owned() },
+            sleeping: false,
+            name: None,
+        };
+        let _added = store.apply(ItemOp::Add(note.clone()), mac).unwrap();
+        let stale = note;
+        let rename = ItemOp::Rename { id: stale.id, name: Some("plan".to_owned()) };
+        let renamed = store.apply(rename, ipad).unwrap();
+        assert!(matches!(renamed, ItemSync::Delta { by, .. } if by == ipad));
+        let edit = ItemOp::SetNote { id: stale.id, text: "draft, then more".to_owned() };
+        let edited = store.apply(edit, mac).unwrap();
+        assert!(matches!(edited, ItemSync::Delta { version: 3, by, .. } if by == mac));
+        let now = store.get(stale.id).unwrap();
+        assert_eq!(now.name.as_deref(), Some("plan"));
+        assert_eq!(now.kind, ItemKind::Note { text: "draft, then more".to_owned() });
+    }
+
+    /// An id the registry holds cannot be added again, so a stale copy put back never
+    /// overwrites the live item; once removed, the same id comes back (a closed tile undone).
+    #[test]
+    fn adding_a_held_id_is_refused_and_a_removed_one_comes_back() {
+        let (_dir, store) = store();
+        let by = ClientId::new();
+        let item = added(store.ensure_terminal(SessionId::new(), by).unwrap());
+        let _named =
+            store.apply(ItemOp::Rename { id: item.id, name: Some("api".into()) }, by).unwrap();
+        let err = store.apply(ItemOp::Add(item.clone()), by).unwrap_err();
+        assert!(matches!(&err, WorkerError::Items(m) if m == "item exists"), "{err:?}");
+        assert_eq!(store.get(item.id).unwrap().name.as_deref(), Some("api"), "live item kept");
+        assert_eq!(store.version(), 2, "a refusal bumps nothing");
+
+        let _removed = store.apply(ItemOp::Remove(item.id), by).unwrap();
+        let back = added(store.apply(ItemOp::Add(item.clone()), by).unwrap());
+        assert_eq!(back, item);
+        assert_eq!(store.get(item.id), Some(item));
+    }
+
+    /// A note's text is set only on a note, is bounded like a new note's, and an unknown item
+    /// is refused.
+    #[test]
+    fn a_note_edit_takes_only_a_note_and_is_bounded() {
+        let (_dir, store) = store();
+        let by = ClientId::new();
+        let shell = added(store.ensure_terminal(SessionId::new(), by).unwrap());
+        let set = |id, text: String| ItemOp::SetNote { id, text };
+        let err = store.apply(set(shell.id, "hi".to_owned()), by).unwrap_err();
+        assert!(matches!(&err, WorkerError::Items(m) if m == "not a note"), "{err:?}");
+        assert_eq!(store.get(shell.id), Some(shell), "untouched");
+        let err = store.apply(set(ItemId::new(), String::new()), by).unwrap_err();
+        assert!(matches!(err, WorkerError::NoSuchItem), "{err:?}");
+
+        let note = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: String::new() },
+            sleeping: false,
+            name: None,
+        };
+        let _added = store.apply(ItemOp::Add(note.clone()), by).unwrap();
+        store.apply(set(note.id, "n".repeat(NOTE_MAX)), by).unwrap();
+        let err = store.apply(set(note.id, "n".repeat(NOTE_MAX + 1)), by).unwrap_err();
+        assert!(matches!(&err, WorkerError::Items(m) if m == "note too long"), "{err:?}");
+        let kept = store.get(note.id).unwrap().kind;
+        assert_eq!(kept, ItemKind::Note { text: "n".repeat(NOTE_MAX) });
+        let err = store.apply(ItemOp::Rename { id: ItemId::new(), name: None }, by).unwrap_err();
+        assert!(matches!(err, WorkerError::NoSuchItem), "{err:?}");
     }
 
     #[test]
@@ -337,7 +439,7 @@ mod tests {
         assert!(matches!(err, WorkerError::NoSuchItem));
         let err = store.apply(ItemOp::Sleep { id: ItemId::new(), sleeping: true }, by).unwrap_err();
         assert!(matches!(err, WorkerError::NoSuchItem));
-        let item = upserted(store.ensure_terminal(SessionId::new(), by).unwrap());
+        let item = added(store.ensure_terminal(SessionId::new(), by).unwrap());
         let slept = store.apply(ItemOp::Sleep { id: item.id, sleeping: true }, by).unwrap();
         assert!(matches!(slept, ItemSync::Delta { op: ItemOp::Sleep { sleeping: true, .. }, .. }));
         let ItemSync::Snapshot { items, .. } = store.snapshot() else { panic!("snapshot") };
@@ -388,13 +490,13 @@ mod tests {
         let by = ClientId::new();
         let item = |kind: ItemKind| Item { id: ItemId::new(), kind, sleeping: false, name: None };
         let note = |text: String| item(ItemKind::Note { text });
-        store.apply(ItemOp::Upsert(note("n".repeat(NOTE_MAX))), by).unwrap();
-        let err = store.apply(ItemOp::Upsert(note("n".repeat(NOTE_MAX + 1))), by).unwrap_err();
+        store.apply(ItemOp::Add(note("n".repeat(NOTE_MAX))), by).unwrap();
+        let err = store.apply(ItemOp::Add(note("n".repeat(NOTE_MAX + 1))), by).unwrap_err();
         assert!(matches!(&err, WorkerError::Items(m) if m == "note too long"), "{err:?}");
         let file = |path: String| item(ItemKind::File { path });
-        store.apply(ItemOp::Upsert(file("/".repeat(PATH_MAX))), by).unwrap();
+        store.apply(ItemOp::Add(file("/".repeat(PATH_MAX))), by).unwrap();
         for path in [String::new(), "/".repeat(PATH_MAX + 1)] {
-            let err = store.apply(ItemOp::Upsert(file(path)), by).unwrap_err();
+            let err = store.apply(ItemOp::Add(file(path)), by).unwrap_err();
             assert!(matches!(&err, WorkerError::Items(m) if m == "bad file path"), "{err:?}");
         }
     }
@@ -412,7 +514,7 @@ mod tests {
         };
         let long = format!("http://localhost/{}", "a".repeat(URL_MAX - 17));
         for url in ["http://localhost:5173/", "HTTPS://example.test/a?b#c", &long] {
-            store.apply(ItemOp::Upsert(page(url)), by).unwrap();
+            store.apply(ItemOp::Add(page(url)), by).unwrap();
         }
         let too_long = format!("{long}a");
         for url in [
@@ -425,7 +527,7 @@ mod tests {
             "",
             &too_long,
         ] {
-            let err = store.apply(ItemOp::Upsert(page(url)), by).unwrap_err();
+            let err = store.apply(ItemOp::Add(page(url)), by).unwrap_err();
             assert!(matches!(&err, WorkerError::Items(m) if m == "bad url"), "{url}: {err:?}");
         }
     }

@@ -791,7 +791,12 @@ impl Peer<'_> {
                 Ok(delta) => {
                     let _sent = self.daemon.events.send(WorkerMsg::Items(delta));
                 }
-                Err(e) => self.fail(SessionId::nil(), &e),
+                Err(e) => {
+                    self.fail(SessionId::nil(), &e);
+                    // The proposer applied its op to its own copy already; the registry as it
+                    // is puts that copy back in step.
+                    self.post(WorkerMsg::Items(self.daemon.items.snapshot()));
+                }
             },
             ClientMsg::Screen(req) => self.screen(req),
             ClientMsg::FindFiles { root, query } => {
