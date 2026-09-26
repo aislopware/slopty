@@ -325,3 +325,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `files_arriving_at_once_under_one_name_never_share_it`,
   `landings_are_discarded_and_a_dead_runs_are_swept`,
   `a_failure_never_removes_anything_outside_the_drop`.
+
+- ✅ **The pasteboard is used by one thread at a time, and the app reads it on the main thread**
+  (2026-09-27). An audit asked for the client's pasteboard reads to move off the main thread,
+  since a large or promised representation blocks until its owner provides it (`dataForType:`
+  is a synchronous round trip to the pasteboard server). What was found:
+  - AppKit's headers put no main-thread rule on `NSPasteboard`, but it is not Sendable, Apple
+    has told a developer through Feedback that it is not safe off the main thread (reported by
+    Wade Tregaskis, FB14885505), and crash reports show its type cache and its
+    `pasteboardWithName:` table racing when two threads use it at once. UIKit declares
+    `UIPasteboard` Sendable since the iOS 16 SDK.
+  - So the app keeps its reads on the main thread. They already happen only after the change
+    count moved and only when a remote tile takes the keyboard or before a paste, so a large
+    copy costs one read, not one per frame.
+  - The worker had the race: its poller reads on a blocking thread while a client's paste
+    writes from another. `slopty_input::pasteboard::MacBoard` now holds one process-wide lock
+    across every `NSPasteboard` call. Test: `threads_take_turns_on_the_pasteboard` (four
+    threads writing and reading a private pasteboard).

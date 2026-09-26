@@ -96,6 +96,13 @@ pub trait Board: Send + Sync {
     fn write(&self, items: &[Item]) -> Option<isize>;
 }
 
+/// Held across every `NSPasteboard` call in this process. AppKit documents no thread rule for it,
+/// but Apple has told a developer it is not safe off one thread, and crash reports show its type
+/// cache racing between two threads that use it at once. The worker polls from a blocking thread
+/// while a paste writes from another, so they take turns here.
+#[cfg(target_os = "macos")]
+static ONE_AT_A_TIME: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// `NSPasteboard`: the general pasteboard, or a named one.
 #[cfg(target_os = "macos")]
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -135,6 +142,7 @@ impl MacBoard {
         if self.name.is_none() {
             return;
         }
+        let _turn = ONE_AT_A_TIME.lock();
         let board = self.board();
         // SAFETY: `-[NSPasteboard releaseGlobally]` takes no arguments and returns void
         // (`NSPasteboard.h`); objc2 does not bind it.
@@ -158,21 +166,25 @@ impl MacBoard {
 #[cfg(target_os = "macos")]
 impl Board for MacBoard {
     fn change_count(&self) -> isize {
+        let _turn = ONE_AT_A_TIME.lock();
         self.board().changeCount()
     }
 
     fn types(&self) -> Vec<String> {
+        let _turn = ONE_AT_A_TIME.lock();
         self.first_item()
             .map(|item| item.types().iter().map(|t| t.to_string()).collect())
             .unwrap_or_default()
     }
 
     fn data(&self, uti: &str) -> Option<Vec<u8>> {
+        let _turn = ONE_AT_A_TIME.lock();
         // `dataForType:` copies the bytes out of the pasteboard server.
         Some(self.first_item()?.dataForType(&NSString::from_str(uti))?.to_vec())
     }
 
     fn file_urls(&self) -> Vec<String> {
+        let _turn = ONE_AT_A_TIME.lock();
         let Some(items) = self.board().pasteboardItems() else { return Vec::new() };
         let kind = Rep::FileUrl.uti();
         let kind = NSString::from_str(&kind);
@@ -187,6 +199,7 @@ impl Board for MacBoard {
     }
 
     fn write(&self, items: &[Item]) -> Option<isize> {
+        let _turn = ONE_AT_A_TIME.lock();
         let board = self.board();
         let _previous = board.clearContents();
         let objects: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = items
@@ -209,6 +222,31 @@ impl Board for MacBoard {
 #[cfg(target_os = "macos")]
 mod tests {
     use super::*;
+
+    /// Readers and writers on several threads at once, as the worker's poller and a paste are,
+    /// each see whole contents and nothing crashes.
+    #[test]
+    fn threads_take_turns_on_the_pasteboard() {
+        let board = MacBoard::unique();
+        let text = Rep::Text.uti();
+        std::thread::scope(|scope| {
+            for n in 0..4_u8 {
+                let (board, text) = (&board, &text);
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        let mine = vec![n; 64];
+                        board.write(&[vec![(text.clone(), mine)]]);
+                        let _count = board.change_count();
+                        let _types = board.types();
+                        if let Some(bytes) = board.data(text) {
+                            assert!(bytes.len() == 64 && bytes.iter().all(|b| *b == bytes[0]));
+                        }
+                    }
+                });
+            }
+        });
+        board.release();
+    }
 
     #[test]
     fn the_reps_are_apples_utis() {
