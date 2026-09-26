@@ -246,8 +246,9 @@ mod golden {
         );
     }
 
-    /// Where a session runs: the directory it reports and the repository the worker resolved it
-    /// to (protocol 14). The canvas groups shells by that root, so it is wire-visible.
+    /// Where a session runs: the directory it reports, the repository the worker resolved it
+    /// to and the branch checked out there, and when it started. The workspace groups shells
+    /// by that root and names them by the branch, so both are wire-visible.
     #[test]
     fn session_place() {
         use slopty_proto::terminal::{SessionState, SessionSummary};
@@ -258,6 +259,8 @@ mod golden {
                 title: "zsh".to_owned(),
                 cwd: Some("/w/slopty/crates/ui".to_owned()),
                 repo: Some("/w/slopty".to_owned()),
+                branch: Some("main".to_owned()),
+                started_ms: 1_790_000_000_000,
                 cols: 80,
                 rows: 24,
                 state: SessionState::Running,
@@ -277,6 +280,7 @@ mod golden {
                 event: TermEvent::Cwd {
                     path: "/w/slopty/crates/ui".to_owned(),
                     repo: Some("/w/slopty".to_owned()),
+                    branch: Some("feature/rows".to_owned()),
                 },
             },
         );
@@ -285,7 +289,7 @@ mod golden {
             "worker_term_cwd_no_repo",
             &WorkerMsg::Term {
                 session: session(),
-                event: TermEvent::Cwd { path: "/tmp".to_owned(), repo: None },
+                event: TermEvent::Cwd { path: "/tmp".to_owned(), repo: None, branch: None },
             },
         );
     }

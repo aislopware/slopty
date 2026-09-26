@@ -233,7 +233,14 @@ impl Connection {
                 let (backlog, dropped) = session.pause_reader().await;
                 let size = *session.size.lock();
                 let checkpoint = session.checkpoint.lock().clone();
-                let ev = PtydEvent::Attached { id, checkpoint, backlog, dropped, size };
+                let ev = PtydEvent::Attached {
+                    id,
+                    checkpoint,
+                    backlog,
+                    dropped,
+                    size,
+                    started_ms: session.started_ms,
+                };
                 self.reply(&ev, Some(session.master_fd())).await
             }
             PtydRequest::Output { id, bytes } => {

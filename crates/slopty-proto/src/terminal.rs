@@ -78,6 +78,14 @@ pub struct SessionSummary {
     /// The repository [`Self::cwd`] is in, if any: the directory holding its `.git` entry.
     /// Only the worker can resolve it, and a client that groups by repository must not guess.
     pub repo: Option<String>,
+    /// The branch [`Self::repo`] has checked out, or its commit abbreviated to seven hex
+    /// digits when `HEAD` is detached. Read again when the directory changes and when a
+    /// command ends, so a checkout shows by the next prompt.
+    pub branch: Option<String>,
+    /// Milliseconds since the Unix epoch when the session's program was spawned. Wall clock,
+    /// because the summary is held and relayed (the server hands it to clients that join
+    /// later) and an age measured at sending would be wrong by the time it is read.
+    pub started_ms: u64,
     /// Current size.
     pub cols: u16,
     /// Current size.
@@ -356,12 +364,14 @@ pub enum TermEvent {
     },
     /// Title changed.
     Title(String),
-    /// Working directory changed.
+    /// Working directory changed, or the branch checked out there did.
     Cwd {
         /// The new directory.
         path: String,
         /// The repository it is in, resolved by the worker. `None` outside a repository.
         repo: Option<String>,
+        /// That repository's branch, as [`SessionSummary::branch`].
+        branch: Option<String>,
     },
     /// BEL.
     Bell,

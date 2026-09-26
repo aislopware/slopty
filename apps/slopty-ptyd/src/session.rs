@@ -3,6 +3,7 @@
 use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use slopty_core::SessionId;
@@ -30,6 +31,8 @@ pub struct Session {
     pub id: SessionId,
     /// Child pid.
     pub pid: u32,
+    /// Milliseconds since the Unix epoch when the child was spawned.
+    pub started_ms: u64,
     /// Slave device.
     pub tty: PathBuf,
     /// Master, shared with the reader task.
@@ -72,12 +75,16 @@ impl Session {
         let tty = pty.slave_path().to_path_buf();
         let mut child = pty.spawn_with(spec, integration)?;
         let pid = child.id().unwrap_or(0);
+        let started_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let master = Arc::new(PtyMaster::new(pty.into_master())?);
         let (pause, _) = watch::channel(false);
         let (parked, _) = watch::channel(false);
         let session = Arc::new(Self {
             id,
             pid,
+            started_ms,
             tty,
             master,
             size: Mutex::new(spec.size),

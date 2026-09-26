@@ -26,6 +26,14 @@ mod actor {
         command: &[&str],
         checkpoint: Vec<u8>,
     ) -> (session::SessionHandle, tokio::process::Child, mpsc::Receiver<Tap>) {
+        start_with(command, checkpoint, None)
+    }
+
+    fn start_with(
+        command: &[&str],
+        checkpoint: Vec<u8>,
+        moves: Option<mpsc::UnboundedSender<SessionId>>,
+    ) -> (session::SessionHandle, tokio::process::Child, mpsc::Receiver<Tap>) {
         let (tap, tap_rx) = mpsc::channel(64);
         let pty = Pty::open(size(40, 6)).unwrap();
         let child = pty
@@ -46,6 +54,7 @@ mod actor {
             scrollback_lines: 1000,
             exited: None,
             port_hints: None,
+            moves,
         })
         .unwrap();
         (handle, child, tap_rx)
@@ -800,6 +809,71 @@ done
             })
             .collect();
         assert_eq!(clips, [cap], "the one at the cap arrives, the one past it does not");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// The branches a viewer was told, in order.
+    fn branches(events: &[TermEvent]) -> Vec<Option<&str>> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                TermEvent::Cwd { branch, .. } => Some(branch.as_deref()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The branch comes with the directory, and a checkout is seen when its command ends
+    /// (`133;D`): the viewers are told, the summary has it and the daemon hears the session
+    /// moved. A command that changed nothing tells nobody.
+    #[tokio::test]
+    async fn a_checkout_is_seen_at_the_next_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(tmp.path()).unwrap().join("project");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let root = repo.to_str().unwrap();
+        // A prompt, then per line read: the command runs (`C`), maybe checks out, ends (`D`).
+        let script = format!(
+            r#"prompt() {{ printf '\033]133;A\007$ \033]133;B\007'; }}
+printf '\033]7;file://localhost{root}\007'; prompt; printf 'READY\n'
+while read cmd; do
+  printf '\033]133;C\007'
+  [ "$cmd" = switch ] && printf 'ref: refs/heads/feature/rows\n' > '{root}/.git/HEAD'
+  printf '%s done\n\033]133;D;0\007' "$cmd"; prompt
+done"#
+        );
+        let (moves, mut moved) = mpsc::unbounded_channel();
+        let (session, mut child, _tap) =
+            start_with(&["/bin/sh", "-c", &script], Vec::new(), Some(moves));
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(256);
+        session.attach(me, size(40, 6), tx).unwrap();
+        // The place is resolved after the frame, so the directory follows the prompt.
+        let (events, _) =
+            wait_for(&mut rx, |ev, s| text(s).contains("READY") && !branches(ev).is_empty()).await;
+        assert_eq!(branches(&events), [Some("main")]);
+        let snap = session.snapshot().await.unwrap();
+        assert_eq!((snap.repo.as_deref(), snap.branch.as_deref()), (Some(root), Some("main")));
+        assert_eq!(moved.try_recv().ok(), Some(session.id()), "the first OSC 7 is a move");
+
+        session.request(me, TermRequest::Raw(b"true\r".to_vec())).unwrap();
+        let (mut events, _) = wait_for(&mut rx, |_, s| text(s).contains("true done")).await;
+        // The actor answers after it has finished with the read, so anything it sent for the
+        // command is queued by then.
+        let _flushed = session.snapshot().await.unwrap();
+        while let Ok(out) = rx.rx.try_recv() {
+            events.push(event(&out));
+        }
+        assert_eq!(branches(&events), [None::<&str>; 0], "nothing moved, nobody is told");
+        assert!(moved.try_recv().is_err(), "nor the daemon");
+
+        session.request(me, TermRequest::Raw(b"switch\r".to_vec())).unwrap();
+        let (events, _) = wait_for(&mut rx, |ev, _| !branches(ev).is_empty()).await;
+        assert_eq!(branches(&events), [Some("feature/rows")]);
+        assert_eq!(session.snapshot().await.unwrap().branch.as_deref(), Some("feature/rows"));
+        assert_eq!(moved.try_recv().ok(), Some(session.id()));
         session.close();
         let _killed = child.kill().await;
     }

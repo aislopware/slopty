@@ -31,6 +31,29 @@ struct Entry {
     handle: SessionHandle,
     command: Vec<String>,
     exited: Option<i32>,
+    /// When ptyd spawned the child, in Unix milliseconds.
+    started_ms: u64,
+}
+
+/// An [`Entry`] taken out of the table's lock, to be summarised.
+struct Listed {
+    id: SessionId,
+    handle: SessionHandle,
+    command: Vec<String>,
+    exited: Option<i32>,
+    started_ms: u64,
+}
+
+impl Listed {
+    fn of(id: SessionId, e: &Entry) -> Self {
+        Self {
+            id,
+            handle: e.handle.clone(),
+            command: e.command.clone(),
+            exited: e.exited,
+            started_ms: e.started_ms,
+        }
+    }
 }
 
 /// Environment variable naming the session a process runs in (its [`SessionId`]).
@@ -53,6 +76,9 @@ struct Inner {
     /// Sessions whose output named a local server ([`SessionStart::port_hints`]).
     port_hints: mpsc::UnboundedSender<SessionId>,
     port_hints_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
+    /// Sessions whose place changed ([`SessionStart::moves`]).
+    moves: mpsc::UnboundedSender<SessionId>,
+    moves_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
     /// The coding agents seen in the sessions, which every summary carries.
     agents: Arc<dyn Agents>,
     /// Since when each exited session has had no viewer.
@@ -77,6 +103,7 @@ impl Worker {
         let existing = client.list().await?;
         let (tap, tap_rx) = mpsc::channel(TAP_QUEUE);
         let (port_hints, port_hints_rx) = mpsc::unbounded_channel();
+        let (moves, moves_rx) = mpsc::unbounded_channel();
         let worker = Self {
             inner: Arc::new(Inner {
                 ptyd: tokio::sync::Mutex::new(client),
@@ -86,6 +113,8 @@ impl Worker {
                 session_env: Mutex::new(Vec::new()),
                 port_hints,
                 port_hints_rx: Mutex::new(Some(port_hints_rx)),
+                moves,
+                moves_rx: Mutex::new(Some(moves_rx)),
                 agents,
                 unwatched: Mutex::new(Unwatched::default()),
             }),
@@ -124,6 +153,13 @@ impl Worker {
     #[must_use]
     pub fn take_port_hints(&self) -> Option<mpsc::UnboundedReceiver<SessionId>> {
         self.inner.port_hints_rx.lock().take()
+    }
+
+    /// Take the receiver of moves (once): the sessions whose directory, repository or branch
+    /// changed, whose summaries are then out of date.
+    #[must_use]
+    pub fn take_moves(&self) -> Option<mpsc::UnboundedReceiver<SessionId>> {
+        self.inner.moves_rx.lock().take()
     }
 
     /// Record a child exit reported by ptyd, and tell the session's viewers.
@@ -180,8 +216,13 @@ impl Worker {
             scrollback_lines: SCROLLBACK_LINES,
             exited,
             port_hints: Some(self.inner.port_hints.clone()),
+            moves: Some(self.inner.moves.clone()),
         })?;
-        self.inner.sessions.lock().insert(id, Entry { handle: handle.clone(), command, exited });
+        let started_ms = attached.started_ms;
+        self.inner
+            .sessions
+            .lock()
+            .insert(id, Entry { handle: handle.clone(), command, exited, started_ms });
         Ok(handle)
     }
 
@@ -203,37 +244,48 @@ impl Worker {
 
     /// Summaries for the session list, each with the agent running in it now.
     pub async fn summaries(&self) -> Vec<SessionSummary> {
-        let entries: Vec<(SessionId, SessionHandle, Vec<String>, Option<i32>)> = self
-            .inner
-            .sessions
-            .lock()
-            .iter()
-            .map(|(id, e)| (*id, e.handle.clone(), e.command.clone(), e.exited))
-            .collect();
+        let entries: Vec<Listed> =
+            self.inner.sessions.lock().iter().map(|(id, e)| Listed::of(*id, e)).collect();
         let mut out = Vec::with_capacity(entries.len());
-        for (id, handle, command, exited) in entries {
-            let Ok(snap) = handle.snapshot().await else { continue };
-            let state = match exited.or(snap.exited) {
-                Some(status) => SessionState::Exited { status },
-                None => SessionState::Running,
-            };
-            let agent = self.inner.agents.status(id).filter(|a| a.status != AgentStatus::None);
-            out.push(SessionSummary {
-                id,
-                title: snap.title.clone().unwrap_or_else(|| {
-                    command.first().cloned().unwrap_or_else(|| "shell".to_owned())
-                }),
-                cwd: snap.cwd,
-                repo: snap.repo,
-                cols: snap.size.cols,
-                rows: snap.size.rows,
-                state,
-                viewers: snap.viewers,
-                command,
-                agent,
-            });
+        for listed in entries {
+            if let Some(summary) = self.summarise(listed).await {
+                out.push(summary);
+            }
         }
         out
+    }
+
+    /// The summary of session `id`, if it runs.
+    pub async fn summary(&self, id: SessionId) -> Option<SessionSummary> {
+        let listed = self.inner.sessions.lock().get(&id).map(|e| Listed::of(id, e))?;
+        self.summarise(listed).await
+    }
+
+    async fn summarise(&self, listed: Listed) -> Option<SessionSummary> {
+        let Listed { id, handle, command, exited, started_ms } = listed;
+        let snap = handle.snapshot().await.ok()?;
+        let state = match exited.or(snap.exited) {
+            Some(status) => SessionState::Exited { status },
+            None => SessionState::Running,
+        };
+        let agent = self.inner.agents.status(id).filter(|a| a.status != AgentStatus::None);
+        Some(SessionSummary {
+            id,
+            title: snap
+                .title
+                .clone()
+                .unwrap_or_else(|| command.first().cloned().unwrap_or_else(|| "shell".to_owned())),
+            cwd: snap.cwd,
+            repo: snap.repo,
+            branch: snap.branch,
+            started_ms,
+            cols: snap.size.cols,
+            rows: snap.size.rows,
+            state,
+            viewers: snap.viewers,
+            command,
+            agent,
+        })
     }
 
     /// What can be seen of every live session from outside it ([`Probe`]): the daemon's agent

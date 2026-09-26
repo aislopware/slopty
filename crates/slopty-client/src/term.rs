@@ -384,7 +384,7 @@ impl TermState {
                 self.title = Some(t.clone());
                 vec![Effect::Title(t)]
             }
-            TermEvent::Cwd { path, repo } => {
+            TermEvent::Cwd { path, repo, .. } => {
                 self.cwd = Some(path.clone());
                 self.repo.clone_from(&repo);
                 vec![Effect::Cwd { path, repo }]
@@ -1089,7 +1089,7 @@ mod tests {
         let mut state = TermState::new(size());
         assert_eq!(state.apply(TermEvent::Title("vim".into())), vec![Effect::Title("vim".into())]);
         assert_eq!(state.title(), Some("vim"));
-        let cwd = TermEvent::Cwd { path: "/w/app".into(), repo: Some("/w".into()) };
+        let cwd = TermEvent::Cwd { path: "/w/app".into(), repo: Some("/w".into()), branch: None };
         assert_eq!(
             state.apply(cwd),
             vec![Effect::Cwd { path: "/w/app".into(), repo: Some("/w".into()) }]

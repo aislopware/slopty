@@ -130,6 +130,11 @@ mod roundtrip {
         let daemon = start().await;
         let (mut client, mut exits) = PtydClient::connect(&daemon.socket).await.unwrap();
         let id = SessionId::new();
+        let unix_ms = || {
+            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+            u64::try_from(since.unwrap().as_millis()).unwrap()
+        };
+        let before = unix_ms();
         let pid = client
             .spawn(
                 id,
@@ -147,11 +152,14 @@ mod roundtrip {
             .await
             .unwrap();
         assert!(pid > 0);
+        let after = unix_ms();
 
         // Give the shell time to print while we're detached, so it lands in the ring.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let attached = client.attach(id).await.unwrap();
         assert_eq!(attached.size, size());
+        let started_ms = attached.started_ms;
+        assert!((before..=after).contains(&started_ms), "{before} ≤ {started_ms} ≤ {after}");
         assert!(
             String::from_utf8_lossy(&attached.backlog).contains("first"),
             "backlog: {:?}",
@@ -170,6 +178,7 @@ mod roundtrip {
         assert_eq!(list.len(), 1);
         assert!(!list[0].attached);
         let reattached = client2.attach(id).await.unwrap();
+        assert_eq!(reattached.started_ms, started_ms, "the next worker is told the same start");
         let text = String::from_utf8_lossy(&reattached.backlog).into_owned();
         assert!(
             text.contains("got:hello") && text.contains("last"),

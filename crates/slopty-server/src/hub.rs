@@ -768,6 +768,8 @@ pub(crate) mod tests {
             title: "zsh".to_owned(),
             cwd: None,
             repo: None,
+            branch: None,
+            started_ms: 0,
             cols: 80,
             rows: 24,
             state: SessionState::Running,

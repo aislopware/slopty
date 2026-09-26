@@ -20,7 +20,7 @@ pub const DEFAULT_BACKLOG_BYTES: usize = 4 << 20;
 pub const MAX_BACKLOG_BYTES: usize = DEFAULT_BACKLOG_BYTES;
 
 /// Room an `Attached` frame needs besides its checkpoint and backlog: the variant, the id, the
-/// two lengths, `dropped` and the size, well under this.
+/// two lengths, `dropped`, the size and the start time, well under this.
 const ATTACHED_ENVELOPE: usize = 4 << 10;
 
 /// The largest checkpoint ptyd keeps.
@@ -125,6 +125,9 @@ pub enum PtydEvent {
         dropped: u64,
         /// Size of record.
         size: TermSize,
+        /// Milliseconds since the Unix epoch when ptyd spawned the child. ptyd outlives the
+        /// worker, so this is the one place a session's start survives a worker restart.
+        started_ms: u64,
     },
     /// Generic success.
     Ok,
@@ -349,6 +352,7 @@ mod tests {
             backlog: vec![b'x'; MAX_BACKLOG_BYTES],
             dropped: u64::MAX,
             size,
+            started_ms: u64::MAX,
         };
         slopty_proto::codec::encode(&attached).unwrap();
     }

@@ -4968,3 +4968,28 @@ anything (`copy_frame` in `apps/slopty-worker/src/conn.rs`). Per echo frame over
 limit (about 1.2 kB): one allocation and copy of the frame, one task and one timer before; none
 after. Nothing changes for a frame that fits. No bench: the saving is the work removed, counted
 above.
+
+## 2026-09-26 — the branch at each prompt
+
+The session actor now finds a shell's repository **and** its branch (`HEAD` read as a file) when
+the shell reports its directory and when a command ends (`docs/decisions/workers.md`, "A
+session's summary carries its branch and its start"). The shell integrations send OSC 7 at every
+prompt, so this runs once per prompt. mac-studio (M1 Max), release, while other builds ran
+(load average 14–16). Each figure is the mean of 20 000 calls on a temp tree on the internal
+disk, with the directory four levels below the root:
+
+```sh
+cargo nextest run -p slopty-worker --release --lib --run-ignored only place_cost --no-capture
+```
+
+| | 3 runs |
+| --- | --- |
+| repository root (canonicalise, walk up for `.git`), which ran before the prompt's frame until now | 21.7, 21.4, 21.3 µs |
+| branch (find `HEAD`, read it) | 15.1, 15.0, 15.1 µs |
+| both, what a prompt now costs | 41.2, 39.7, 38.2 µs |
+
+The file system is slower than the frame. Until now the root walk ran inside the OSC 7 handler,
+so every prompt's frame waited about 21 µs for it. The actor now only notes that the place is
+due and resolves it after the read's frame has gone out. The prompt's frame waits for none of
+the 40 µs, and the viewers hear a `Cwd` event only when the directory, the repository or the
+branch has changed, where before they heard one at every prompt.

@@ -29,6 +29,8 @@ pub struct Attached {
     pub dropped: u64,
     /// Size of record.
     pub size: TermSize,
+    /// Milliseconds since the Unix epoch when ptyd spawned the child.
+    pub started_ms: u64,
 }
 
 /// A reply, with the fd that rode on it.
@@ -85,9 +87,10 @@ impl PtydClient {
     /// Take the master.
     pub async fn attach(&mut self, id: SessionId) -> Result<Attached, PtyError> {
         match self.call(&PtydRequest::Attach { id }).await? {
-            (PtydEvent::Attached { checkpoint, backlog, dropped, size, .. }, Some(master)) => {
-                Ok(Attached { master, checkpoint, backlog, dropped, size })
-            }
+            (
+                PtydEvent::Attached { checkpoint, backlog, dropped, size, started_ms, .. },
+                Some(master),
+            ) => Ok(Attached { master, checkpoint, backlog, dropped, size, started_ms }),
             (other, _) => Self::unexpected(other),
         }
     }

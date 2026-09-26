@@ -250,7 +250,7 @@ impl Orchestrator {
 
     /// The session's summary as a client's list shows it, if the session runs.
     pub async fn summary(&self, session: SessionId) -> Option<SessionSummary> {
-        self.inner.worker.summaries().await.into_iter().find(|s| s.id == session)
+        self.inner.worker.summary(session).await
     }
 
     /// Open a session and announce it the way a client's open is announced: the summary to
@@ -270,8 +270,7 @@ impl Orchestrator {
         // printed before the first wait still counts.
         handle.mark_if_unset(Position { line: 0, col: 0, epoch: 0 });
         let session = handle.id();
-        let summaries = inner.worker.summaries().await;
-        if let Some(summary) = summaries.into_iter().find(|s| s.id == session) {
+        if let Some(summary) = inner.worker.summary(session).await {
             let _sent = inner.events.send(WorkerMsg::SessionOpened(summary));
         }
         if let Some(delta) = inner.items.ensure_terminal(session, by) {

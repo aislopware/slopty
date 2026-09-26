@@ -67,6 +67,8 @@ mod tests {
             title: title.to_owned(),
             cwd: Some("/tmp".to_owned()),
             repo: None,
+            branch: None,
+            started_ms: 0,
             cols: 80,
             rows: 24,
             state: SessionState::Running,

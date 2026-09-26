@@ -162,6 +162,62 @@ mod tests {
         Input::Text(s.to_owned())
     }
 
+    /// A terminal's summary follows it: the server hears the directory, repository and branch
+    /// the shell reported, again when a command checks out another branch, and always the start
+    /// ptyd stamped when it spawned the shell.
+    #[tokio::test]
+    async fn the_server_hears_where_a_terminal_is_and_since_when() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(dir.path()).unwrap().join("project");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+        let unix_ms = || {
+            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+            u64::try_from(since.unwrap().as_millis()).unwrap()
+        };
+
+        let before = unix_ms();
+        let Outcome::Opened(term) = peer.ask(open(reg.worker, &repo)).await else {
+            panic!("the terminal opens");
+        };
+        let after = unix_ms();
+        let root = repo.to_string_lossy().into_owned();
+        let on = |branch: &'static str| {
+            let root = root.clone();
+            move |m: &ToServer| {
+                matches!(m, ToServer::SessionOpened(s) if s.id == term.session
+                    && s.cwd.as_deref() == Some(root.as_str())
+                    && s.repo.as_deref() == Some(root.as_str())
+                    && s.branch.as_deref() == Some(branch))
+            }
+        };
+        peer.heard(on("main")).await;
+
+        let switch = text("printf 'ref: refs/heads/feature/rows\\n' > .git/HEAD\n");
+        assert_eq!(peer.ask(Verb::SendInput { term, input: switch }).await, Outcome::Done);
+        peer.heard(on("feature/rows")).await;
+
+        let starts: Vec<u64> = peer
+            .heard
+            .iter()
+            .filter_map(|m| match m {
+                ToServer::SessionOpened(s) if s.id == term.session => Some(s.started_ms),
+                _ => None,
+            })
+            .collect();
+        assert!(starts.len() >= 3, "opened, then moved twice: {starts:?}");
+        assert!(
+            starts.iter().all(|at| (before..=after).contains(at)),
+            "{before}..={after}: {starts:?}"
+        );
+    }
+
     /// The largest read fits in one message on the link with its envelope, a file larger than
     /// one read is refused whole and read in parts, and the link goes on answering.
     #[tokio::test]

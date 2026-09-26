@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -173,6 +174,8 @@ pub struct Snapshot {
     pub cwd: Option<String>,
     /// The repository that cwd is in, resolved when it last changed.
     pub repo: Option<String>,
+    /// The branch that repository has checked out, as of the last directory change or command.
+    pub branch: Option<String>,
     /// The terminal's size, which the driver sets.
     pub size: TermSize,
     /// Clients attached to it.
@@ -477,6 +480,9 @@ pub struct SessionStart {
     pub exited: Option<i32>,
     /// Where the session says its output named a local server, so its ports get scanned.
     pub port_hints: Option<mpsc::UnboundedSender<SessionId>>,
+    /// Where the session says its directory, repository or branch changed, so its summary is
+    /// sent again.
+    pub moves: Option<mpsc::UnboundedSender<SessionId>>,
 }
 
 /// Spawn the actor thread.
@@ -705,8 +711,15 @@ struct Actor {
     cwd: Option<String>,
     /// The program's colour changes (OSC 4/10/11/12): broadcast, and sent to a late attach.
     program_colors: ColorOverrides,
-    /// [`crate::repo::root_of`] of `cwd`, resolved once per change rather than per summary.
+    /// [`crate::repo::root_of`] of `cwd`, resolved when the shell reports a directory and when
+    /// a command ends rather than per summary.
     repo: Option<String>,
+    /// [`crate::repo::branch_of`] of `repo`, resolved with it.
+    branch: Option<String>,
+    /// The directory the viewers were last told, with `repo` and `branch`.
+    told_cwd: Option<String>,
+    /// The shell reported a directory or a command ended since the place was last resolved.
+    place_due: bool,
     exited: Option<i32>,
     /// The master read EOF or failed: the child is gone, whatever its status turns out to be.
     pty_closed: bool,
@@ -738,6 +751,8 @@ struct Actor {
     activity: watch::Sender<Activity>,
     /// See [`SessionStart::port_hints`].
     port_hints: Option<mpsc::UnboundedSender<SessionId>>,
+    /// See [`SessionStart::moves`].
+    moves: Option<mpsc::UnboundedSender<SessionId>>,
     /// No port hint is sent before this, so a flood of addresses is one hint a second.
     next_hint: Option<tokio::time::Instant>,
 }
@@ -755,6 +770,13 @@ const CHECKPOINT_EVERY_BYTES: usize = 1 << 20;
 /// Larger states are not sent: ptyd hands the state and its ring over in one frame, and a
 /// state this size means a history far past any configured scrollback.
 const CHECKPOINT_MAX_BYTES: usize = slopty_pty::protocol::MAX_CHECKPOINT_BYTES;
+
+/// The repository `cwd` is in and the branch checked out there.
+fn place(cwd: Option<&str>) -> (Option<String>, Option<String>) {
+    let repo = cwd.and_then(crate::repo::root_of_str);
+    let branch = repo.as_deref().map(Path::new).and_then(crate::repo::branch_of);
+    (repo, branch)
+}
 
 /// When the frame for output that arrived at `now` should go out: now, or at the end of the
 /// previous frame's `MIN_FRAME_INTERVAL` if that is later.
@@ -800,7 +822,7 @@ impl Actor {
                 | EngineEvent::ClipboardWrite { .. } => {}
             }
         }
-        let repo = cwd.as_deref().and_then(crate::repo::root_of_str);
+        let (repo, branch) = place(cwd.as_deref());
         let master = Arc::new(PtyMaster::new(start.master)?);
         let (drained_tx, drained_rx) = mpsc::unbounded_channel();
         Ok(Self {
@@ -819,9 +841,12 @@ impl Actor {
             orphan: None,
             next_marker: 0,
             title,
+            told_cwd: cwd.clone(),
             cwd,
             program_colors,
             repo,
+            branch,
+            place_due: false,
             exited: start.exited,
             pty_closed: start.exited.is_some(),
             written_seq: 0,
@@ -841,6 +866,7 @@ impl Actor {
             boundary: Boundary::default(),
             activity,
             port_hints: start.port_hints,
+            moves: start.moves,
             next_hint: None,
         })
     }
@@ -928,6 +954,7 @@ impl Actor {
         self.after_output();
         self.arm_hold();
         let ended = self.engine.commands_ended();
+        self.place_due |= ended != self.activity.borrow().commands_ended;
         self.activity.send_modify(|a| {
             a.output = a.output.wrapping_add(1);
             a.commands_ended = ended;
@@ -944,6 +971,37 @@ impl Actor {
             self.flush_frame();
         } else if self.frame_due.is_none() {
             self.frame_due = Some(due);
+        }
+        // After the frame: the read that reports the directory carries the prompt too, and
+        // the file system is slower than the frame (MEASUREMENTS.md, "the branch at each
+        // prompt").
+        if std::mem::take(&mut self.place_due) {
+            self.resolve_place();
+        }
+    }
+
+    /// The shell reported its directory (OSC 7, at every prompt with the integration) or a
+    /// command ended (`133;D`, perhaps a `git switch` or a `git init`): find the repository and
+    /// the branch again, and when anything moved tell the viewers and the daemon.
+    fn resolve_place(&mut self) {
+        let Some(path) = self.cwd.clone() else { return };
+        let (repo, branch) = place(Some(&path));
+        if (Some(&path), &repo, &branch) == (self.told_cwd.as_ref(), &self.repo, &self.branch) {
+            return;
+        }
+        (self.repo, self.branch, self.told_cwd) = (repo, branch, Some(path.clone()));
+        self.broadcast(&TermEvent::Cwd {
+            path,
+            repo: self.repo.clone(),
+            branch: self.branch.clone(),
+        });
+        self.moved();
+    }
+
+    /// Tell the daemon the summary is out of date.
+    fn moved(&self) {
+        if let Some(moves) = &self.moves {
+            let _sent = moves.send(self.id);
         }
     }
 
@@ -1109,11 +1167,11 @@ impl Actor {
                     self.broadcast(&TermEvent::Title(t));
                 }
                 EngineEvent::Cwd(c) => {
-                    // A handful of `stat` calls, only when the shell says it moved. This is
-                    // the actor's own thread, which holds the PTY master and nothing else.
-                    self.repo = crate::repo::root_of_str(&c);
-                    self.cwd = Some(c.clone());
-                    self.broadcast(&TermEvent::Cwd { path: c, repo: self.repo.clone() });
+                    // Resolved once the frame is out: a handful of `stat` calls and one small
+                    // read, on the actor's own thread, which holds the PTY master and nothing
+                    // else.
+                    self.cwd = Some(c);
+                    self.place_due = true;
                 }
                 EngineEvent::ClipboardWrite { text } => {
                     // Same ceiling as pasteboard sync: a program can OSC 52 a whole file, and
@@ -1473,7 +1531,8 @@ impl Actor {
             self.send_to(client, &TermEvent::Title(t));
         }
         if let Some(path) = self.cwd.clone() {
-            self.send_to(client, &TermEvent::Cwd { path, repo: self.repo.clone() });
+            let (repo, branch) = (self.repo.clone(), self.branch.clone());
+            self.send_to(client, &TermEvent::Cwd { path, repo, branch });
         }
         if self.program_colors != ColorOverrides::default() {
             self.send_to(client, &TermEvent::Colors(self.program_colors.clone()));
@@ -1598,6 +1657,7 @@ impl Actor {
                     title: self.title.clone(),
                     cwd: self.cwd.clone(),
                     repo: self.repo.clone(),
+                    branch: self.branch.clone(),
                     size: self.engine.size(),
                     viewers: u16::try_from(self.viewers.len()).unwrap_or(u16::MAX),
                     exited: self.exited,

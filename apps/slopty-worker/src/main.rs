@@ -342,8 +342,7 @@ async fn main() -> Result<()> {
             while let Some((session, status)) = exits.recv().await {
                 tracing::info!(%session, status, "child exited");
                 daemon.worker.on_exit(session, status);
-                let summaries = daemon.worker.summaries().await;
-                if let Some(summary) = summaries.into_iter().find(|s| s.id == session) {
+                if let Some(summary) = daemon.worker.summary(session).await {
                     let _sent = daemon.events.send(slopty_proto::WorkerMsg::SessionOpened(summary));
                 }
             }
@@ -351,6 +350,18 @@ async fn main() -> Result<()> {
         });
     }
     tokio::spawn(close_stale_exits(daemon.clone()));
+    // A session that moved (`cd`, a checkout) has a stale summary everywhere it was sent: the
+    // server's listing and the clients that do not watch that session.
+    if let Some(mut moves) = daemon.worker.take_moves() {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            while let Some(session) = moves.recv().await {
+                if let Some(summary) = daemon.worker.summary(session).await {
+                    let _sent = daemon.events.send(slopty_proto::WorkerMsg::SessionOpened(summary));
+                }
+            }
+        });
+    }
 
     let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
     // Sessions (and the `slopty hook` relay inside them) find this daemon through its socket.

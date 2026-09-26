@@ -350,3 +350,43 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     pill counting the remote worker's waiting agent. No other golden has more than one worker.
     The second worker's private `HOME` is canonicalised, so its prompt reads `~` and not a
     `/private/var/…` path.
+
+- ✅ **A session's summary carries its branch and its start** (2026-09-26). The navigator's
+  two-line rows, the palette and the status bar name a shell by branch and show its age, and
+  only the worker can see either.
+  - **Branch.** `slopty_worker::repo::branch_of` reads the repository's `HEAD` as a file: a
+    `refs/heads/` name, any other ref as written below `refs/`, or the commit's first seven hex
+    digits when detached. In a worktree or a submodule `.git` is a file, and its `gitdir:` line
+    (relative to the root or absolute) leads to the `HEAD` that tree has. No `git` process runs.
+    The actor resolves the repository and the branch together when the shell reports its
+    directory (OSC 7, at every prompt with the integration) and when a command ends (`133;D`),
+    so a `git switch` or a `git init` shows by the next prompt. It resolves
+    them after the read's frame has gone out, never before it. There is no polling, so a
+    checkout made from another shell shows at this shell's next prompt. Cost: see
+    `docs/MEASUREMENTS.md`, "the branch at each prompt".
+  - **A move is announced twice.** The viewers get `TermEvent::Cwd { path, repo, branch }`.
+    The actor also sends its id on `SessionStart::moves`, and the daemon sends the fresh summary
+    as `SessionOpened` to every client and to the server, as it already did for an exit or a
+    resize. Before this, a summary kept the directory it had at open (usually none, since the
+    shell had not reported one yet), so the server's listing never showed a session's
+    directory. A prompt where nothing changed sends neither; the viewers used to get a `Cwd`
+    at every prompt.
+  - **Start.** `SessionSummary.started_ms` is wall-clock milliseconds since the Unix epoch,
+    stamped by ptyd when it spawns the child and handed over in `PtydEvent::Attached`, so a
+    worker restart keeps the session's age. It is not a duration: the server keeps summaries
+    and hands them to clients that join later, so a duration would already be stale when it
+    was read. The tailnet's machines run NTP, and an age shown in minutes does not notice a
+    skew of milliseconds.
+  - **Not carried: when the last command ended.** A summary goes out again only when a session
+    moves, exits or is resized. Carrying the end would send one to every client and the server
+    for every command, and an attached client already sees each `133;D` in the rows it gets,
+    so it can time the end itself.
+  - Wire: goldens `worker_session_opened`, `worker_term_cwd` and `worker_term_cwd_no_repo`
+    re-accepted; ptyd's `Attached` gained `started_ms`. Tests: the
+    `slopty_worker::repo` branch tests (checkout, worktree `gitdir:` relative and absolute,
+    detached `HEAD` SHA-1 and SHA-256, no readable `HEAD`),
+    `a_checkout_is_seen_at_the_next_prompt` in `slopty-worker/tests/session_actor.rs`,
+    `the_server_hears_where_a_terminal_is_and_since_when` in
+    `apps/slopty-worker/tests/server_link.rs` (a real ptyd and worker, a bash in a repository,
+    a checkout typed through the verb), and the start surviving a reattach in `slopty-ptyd`'s
+    `spawn_attach_detach_reattach_close`.

@@ -98,6 +98,8 @@ fn summary(session: SessionId, cwd: Option<&str>) -> SessionSummary {
         title: "shell".into(),
         cwd: cwd.map(str::to_owned),
         repo: None,
+        branch: None,
+        started_ms: 0,
         cols: 80,
         rows: 24,
         state: SessionState::Running,

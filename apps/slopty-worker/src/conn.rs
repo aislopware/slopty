@@ -751,8 +751,7 @@ impl Peer<'_> {
                     let session = handle.id();
                     // Whoever opened it sizes it, whichever client attaches first.
                     let _reserved = handle.reserve_driver(client);
-                    let summaries = daemon.worker.summaries().await;
-                    if let Some(summary) = summaries.into_iter().find(|s| s.id == session) {
+                    if let Some(summary) = daemon.worker.summary(session).await {
                         let _sent = daemon.events.send(WorkerMsg::SessionOpened(summary));
                     }
                     if let Some(delta) = daemon.items.ensure_terminal(session, client) {
@@ -1190,6 +1189,8 @@ mod tests {
             title: String::new(),
             cwd: None,
             repo: None,
+            branch: None,
+            started_ms: 0,
             cols: 80,
             rows: 24,
             state: SessionState::Running,
