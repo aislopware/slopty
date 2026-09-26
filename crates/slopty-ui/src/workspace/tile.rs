@@ -1398,11 +1398,41 @@ impl WorkspaceView {
                 ItemKind::Terminal { .. } | ItemKind::Note { .. } | ItemKind::File { .. }
             ))
         .then(|| {
+            // The shapes alone left every tile the same blank card. What each one is goes
+            // over it at the chrome's type scale, as the workspace names above the cards
+            // do: its kind's icon and its title, one line, centred.
+            let theme = &self.theme;
+            let muted = hsla(theme.surfaces.text_muted);
+            let agent = matches!(item.kind, ItemKind::Terminal { session } if self.agent_state(session).is_some());
+            let label = div()
+                .debug_selector(move || format!("shapes-label-{}", id.as_uuid()))
+                .max_w_full()
+                .px(px(theme.spacing.sm))
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(px(theme.typography.small()))
+                .font_family(theme.typography.ui_family.clone())
+                .text_color(hsla(theme.surfaces.text_secondary))
+                .child(crate::icons::icon(theme, kind_icon(item, agent), IconSize::Inline, muted).flex_none())
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(SharedString::from(self.card_title(placed.tile, item, cx))),
+                );
             div()
                 .debug_selector(move || format!("shapes-{}", id.as_uuid()))
                 .absolute()
                 .inset_0()
-                .bg(hsla(self.theme.terminal.bg))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(theme.terminal.bg))
+                .child(label)
         });
         if pill.is_none() && cover.is_none() {
             return content;

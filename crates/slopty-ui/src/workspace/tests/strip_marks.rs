@@ -234,6 +234,12 @@ fn a_small_overview_draws_tiles_as_shapes(cx: &mut TestAppContext) {
         .map(|(_, t)| cx.debug_bounds(selector("shapes", t.item)).expect("each under its surface"))
         .collect();
     assert!(covers.iter().any(|c| c.contains(&grid.center())), "{covers:?} over {grid:?}");
+    // Each shape still says what it is, at a size that reads, inside its own surface.
+    for ((_, t), cover) in shells.iter().zip(&covers) {
+        let label = cx.debug_bounds(selector("shapes-label", t.item)).expect("each shape named");
+        assert!(cover.contains(&label.center()), "{label:?} inside {cover:?}");
+        assert!(label.size.height >= px(12.0), "the label is chrome-sized: {label:?}");
+    }
     cx.simulate_keystrokes("cmd-alt-o");
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("shapes", first.item)).is_none(), "at rest, the text");

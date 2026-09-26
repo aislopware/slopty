@@ -2064,6 +2064,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   would go, on the last card's left edge; it opens that workspace. Below zoom 0.5 a tile is
   its header and body surfaces only. The body's surface is laid over its view rather than the
   view dropped, so the keyboard stays in the focused terminal or editor through the overview.
+  - Amended 2026-09-27: shapes alone made every tile the same blank card, so each surface
+    now carries its kind's icon and title, centred, at the chrome's type scale whatever the
+    zoom, as the workspace names above the cards do (Mission Control's labels, not niri's
+    scaled pixels, since scaled text is what the shapes replaced). The overview golden was
+    re-recorded by hand: the label sits inside the diff tolerance, so the old golden would
+    not have caught it going missing.
   Tests: ui `the_overview_lifts_each_workspace_and_offers_a_new_one`,
   `a_small_overview_draws_tiles_as_shapes`.
 
