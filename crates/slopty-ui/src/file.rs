@@ -14,6 +14,7 @@
 //! clipped (past `FILE_LINES` or `FILE_BYTES`) opens read-only, with the reason in one line.
 
 use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement as _, Render, SharedString,
@@ -29,7 +30,8 @@ use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight::Syntax;
-use crate::kit::FIND_PLACEHOLDER;
+use crate::icons::{IconName, IconSize};
+use crate::kit::{ButtonKind, FIND_PLACEHOLDER};
 use crate::terminal::{CloseFind, Find, FindNext, FindPrev};
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
@@ -53,6 +55,8 @@ pub(crate) const CHANGED_ON_DISK: &str = "Changed on disk";
 pub(crate) const RELOAD: &str = "Reload";
 /// The bar's way out that keeps the edit.
 pub(crate) const OVERWRITE: &str = "Overwrite";
+/// What a file tile says while its first read is out, once the wait is worth a word.
+pub(crate) const READING: &str = "Reading…";
 /// Why a save has no answer, after "Not saved: ".
 pub(crate) const LINK_LOST: &str = "the link dropped before the worker answered";
 
@@ -760,7 +764,7 @@ impl FileView {
     #[must_use]
     pub fn summary(&self, cx: &gpui::App) -> String {
         match &self.read {
-            None => "Reading…".to_owned(),
+            None => READING.to_owned(),
             Some(FileRead::Text { .. }) => {
                 let n = self.line_count(cx);
                 let mut parts =
@@ -792,7 +796,9 @@ impl FileView {
     }
 
     fn notice(&self, text: String) -> AnyElement {
+        let id = self.id.as_uuid();
         div()
+            .debug_selector(move || format!("file-notice-{id}"))
             .size_full()
             .flex()
             .items_center()
@@ -806,19 +812,22 @@ impl FileView {
     }
 
     /// The one line under the header: why the text is read-only, or what stopped a save and
-    /// the ways out. None when all is well.
+    /// the ways out. None when all is well. Its text starts on the header's inset, after the
+    /// tone's mark where there is trouble; "Reload" is the small secondary button and
+    /// "Overwrite", the way that loses the disk's text, the quieter ghost.
     fn render_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let k = self.zoom;
-        let (text, tone, actions): (SharedString, _, Vec<AnyElement>) = match &self.trouble {
+        let (text, mark, actions): (SharedString, _, Vec<AnyElement>) = match &self.trouble {
             Some(Trouble::Conflict) => (
                 CHANGED_ON_DISK.into(),
-                s.warn,
+                Some((IconName::CircleAlert, s.warn, s.warn_fill)),
                 vec![
                     self.bar_button(
                         "file-reload",
                         RELOAD,
+                        ButtonKind::Secondary,
                         cx.listener(|this, _ev, _w, cx| {
                             this.reload(cx);
                         }),
@@ -826,18 +835,25 @@ impl FileView {
                     self.bar_button(
                         "file-overwrite",
                         OVERWRITE,
+                        ButtonKind::Ghost,
                         cx.listener(|this, _ev, _w, cx| {
                             this.overwrite(cx);
                         }),
                     ),
                 ],
             ),
-            Some(Trouble::Failed(error)) => {
-                (format!("Not saved: {error}").into(), s.error, Vec::new())
-            }
-            None => (self.read_only.clone()?.into(), s.text_muted, Vec::new()),
+            Some(Trouble::Failed(error)) => (
+                format!("Not saved: {error}").into(),
+                Some((IconName::CircleX, s.error, s.error_fill)),
+                Vec::new(),
+            ),
+            None => (self.read_only.clone()?.into(), None, Vec::new()),
         };
         let id = self.id.as_uuid();
+        let wash = mark.map_or_else(
+            || hsla_alpha(s.text_muted, alpha::FAINT),
+            |(_, _, fill)| hsla_alpha(fill, alpha::FAINT),
+        );
         Some(
             div()
                 .id("file-bar")
@@ -848,19 +864,23 @@ impl FileView {
                 .flex()
                 .items_center()
                 .gap(px(theme.spacing.sm * k))
-                .px(px(theme.spacing.sm * k))
-                .py(px(theme.spacing.xxs * k))
+                .px(px(theme.spacing.inset() * k))
+                .py(px(theme.spacing.xs * k))
                 .border_b_1()
                 .border_color(hsla(s.border))
-                .bg(hsla_alpha(tone, alpha::FAINT))
+                .bg(wash)
                 .text_size(px(theme.typography.small() * k))
                 .font_family(theme.typography.ui_family.clone())
+                .children(mark.map(|(icon, tone, _)| {
+                    crate::icons::icon(theme, icon, IconSize::Inline, hsla(tone))
+                        .size(px(theme.typography.icon() * k))
+                }))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
-                        .text_color(hsla(if tone == s.text_muted { s.text_muted } else { s.text }))
+                        .text_color(hsla(if mark.is_some() { s.text } else { s.text_muted }))
                         .child(text),
                 )
                 .children(actions)
@@ -868,35 +888,46 @@ impl FileView {
         )
     }
 
+    /// One of the bar's ways out, at the bar's small size: the kit's secondary (the panel
+    /// with a hairline) or ghost (text until the pointer is on it), scaled with the zoom.
     fn bar_button(
         &self,
         part: &'static str,
         label: &'static str,
+        kind: ButtonKind,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     ) -> AnyElement {
         let theme = &self.theme;
-        let s = &theme.surfaces;
+        let s = theme.surfaces;
         let k = self.zoom;
         let id = self.id.as_uuid();
-        let wash = hsla_alpha(s.text, alpha::FAINT);
-        crate::a11y::tab_stop(
-            div()
-                .id(part)
-                .debug_selector(move || format!("{part}-{id}"))
-                .role(Role::Button)
-                .aria_label(label)
-                .flex_none()
-                .px(px(theme.spacing.sm * k))
-                .rounded(px(theme.radii.xs * k))
+        let button = div()
+            .id(part)
+            .debug_selector(move || format!("{part}-{id}"))
+            .role(Role::Button)
+            .aria_label(label)
+            .flex_none()
+            .px(px(theme.spacing.sm * k))
+            .py(px(theme.spacing.xxs * k))
+            .rounded(px(theme.radii.sm * k))
+            .border_1()
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .child(label);
+        let button = match kind {
+            ButtonKind::Secondary => button
+                .border_color(hsla(s.border))
+                .bg(hsla(s.panel))
                 .text_color(hsla(s.text))
-                .cursor_pointer()
-                .hover(move |st| st.bg(wash))
-                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                .child(label),
-            s.accent,
-        )
-        .on_click(on_click)
-        .into_any_element()
+                .hover(move |st| st.bg(hsla(s.raised)))
+                .active(move |st| st.bg(hsla(s.overlay))),
+            ButtonKind::Primary | ButtonKind::Ghost | ButtonKind::Link => button
+                .border_color(gpui::transparent_black())
+                .text_color(hsla(s.text_secondary))
+                .hover(move |st| st.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                .active(move |st| st.bg(hsla(s.overlay))),
+        };
+        crate::a11y::tab_stop(button, s.accent).on_click(on_click).into_any_element()
     }
 
     /// The find bar over the top-right corner, as the terminal's.
@@ -935,10 +966,7 @@ impl FileView {
             .px(px(spacing.sm))
             .py(px(spacing.xs))
             .rounded(px(radii.sm))
-            .bg(hsla(s.panel))
-            .border_1()
-            .border_color(hsla(s.border))
-            .shadow_sm()
+            .map(|el| crate::kit::elevate(el, theme))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text))
             .font_family(theme.typography.ui_family.clone())
@@ -1037,7 +1065,11 @@ impl Render for FileView {
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let text_size = self.text_size * self.zoom;
         let body = match &self.read {
-            None => self.notice("Reading…".to_owned()),
+            // Blank while a read in time would fill it; past the grace, a word.
+            None if !crate::screen::past_grace("file-reading", window, cx) => {
+                div().size_full().into_any_element()
+            }
+            None => self.notice(READING.to_owned()),
             Some(FileRead::Binary { .. } | FileRead::Missing { .. }) if self.base.is_none() => {
                 self.notice(self.summary(cx))
             }

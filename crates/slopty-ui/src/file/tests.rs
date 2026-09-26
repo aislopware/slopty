@@ -252,3 +252,16 @@ fn sizes_read_as_a_human_would() {
     assert_eq!(size_label(1536), "1.5 KB");
     assert_eq!(size_label(3 * 1024 * 1024), "3.0 MB");
 }
+
+/// Before the worker answers, the tile is blank for the loading grace, so a read that lands
+/// in time never flashes a word; past it, the tile says it is reading.
+#[gpui::test]
+fn reading_shows_only_after_the_grace(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/slow.rs");
+    let id = view.read_with(cx, |v, _| *v.id().as_uuid());
+    let notice: &'static str = Box::leak(format!("file-notice-{id}").into_boxed_str());
+    assert!(cx.debug_bounds(notice).is_none(), "blank within the grace");
+    cx.executor().advance_clock(crate::screen::LOADING_GRACE);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(notice).is_some(), "past it, a word");
+}

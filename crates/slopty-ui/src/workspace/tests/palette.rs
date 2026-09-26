@@ -138,10 +138,13 @@ fn without_a_keyboard_the_palette_prints_no_chords(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("palette-legend").is_none(), "nor a legend");
 }
 
-/// Every line's title starts on one edge: the kind icon sits in a fixed slot, and a status
-/// mark or a worker's name goes on the right, not before the title.
+/// Every line's title starts on one edge within its section: a tile's or a worker's kind
+/// icon sits in a fixed slot, whose mark a status takes over, and a command carries no icon,
+/// so its title starts on the edge grid, left of theirs.
 #[gpui::test]
 fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
+    use crate::palette::Section::{Commands, Tiles, Workers};
+
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _laptop = connect(&view, cx, 2, "laptop");
@@ -151,25 +154,42 @@ fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(waiting), cx));
     cx.run_until_parked();
     open_palette(cx);
-    let marked = view.read_with(cx, |v, cx| {
+    let lines = view.read_with(cx, |v, cx| {
         let palette = v.palette.clone().expect("open");
-        palette.read(cx).matches(cx).iter().take(6).map(|l| l.status.is_some()).collect::<Vec<_>>()
+        palette
+            .read(cx)
+            .matches(cx)
+            .iter()
+            .map(|l| (l.section, l.status.is_some()))
+            .collect::<Vec<_>>()
     });
+    let marked: Vec<bool> = lines.iter().map(|l| l.1).collect();
     assert!(marked.contains(&true) && marked.contains(&false), "rows with and without: {marked:?}");
-    let edges: Vec<(f32, f32)> = (0..6)
-        .map(|ix| {
+    let edges: Vec<(crate::palette::Section, f32, f32)> = lines
+        .iter()
+        .enumerate()
+        .map(|(ix, (section, _))| {
             let row: &'static str = Box::leak(format!("palette-item-{ix}").into_boxed_str());
             let title: &'static str = Box::leak(format!("palette-title-{ix}").into_boxed_str());
             let row = cx.debug_bounds(row).expect("a row");
             let title = cx.debug_bounds(title).expect("its title");
-            (f32::from(row.origin.x), f32::from(title.origin.x))
+            (*section, f32::from(row.origin.x), f32::from(title.origin.x))
         })
         .collect();
-    let (row_x, title_x) = edges[0];
-    assert!(title_x > row_x, "the icon slot comes first");
-    for (ix, (r, t)) in edges.iter().enumerate() {
-        assert!((r - row_x).abs() < 0.5 && (t - title_x).abs() < 0.5, "row {ix}: {edges:?}");
-    }
+    let edge = |wanted: crate::palette::Section| {
+        let xs: Vec<(f32, f32)> =
+            edges.iter().filter(|e| e.0 == wanted).map(|e| (e.1, e.2)).collect();
+        let first = *xs.first().unwrap_or_else(|| panic!("{wanted:?} rows: {edges:?}"));
+        for (r, t) in &xs {
+            assert!((r - first.0).abs() < 0.5 && (t - first.1).abs() < 0.5, "{wanted:?}: {xs:?}");
+        }
+        first
+    };
+    let (row_x, tile_x) = edge(Tiles);
+    assert!(tile_x > row_x, "the icon slot comes first");
+    assert!((edge(Workers).1 - tile_x).abs() < 0.5, "a worker's title on a tile's edge");
+    let (command_row, command_x) = edge(Commands);
+    assert!((command_row - row_x).abs() < 0.5 && command_x < tile_x, "no slot on a command");
 }
 
 /// The empty workspace offers the three ways to begin with their keys, read from the bindings,
@@ -266,61 +286,83 @@ fn cmd_o_shows_the_picker_while_the_worker_lists_its_windows(cx: &mut TestAppCon
 }
 
 /// The overview's names are chrome: the same size however far the overview zooms out to fit
-/// the workspaces. The place for a new workspace keeps its dashed outline with a plus and its
-/// name inside.
+/// the workspaces, and so is the button for a new workspace.
 #[gpui::test]
 fn the_overview_labels_keep_their_size_at_any_zoom(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     three_shells(&view, cx, &fake);
-    let overview = |cx: &mut VisualTestContext, new: &'static str| {
+    let overview = |cx: &mut VisualTestContext| {
         cx.simulate_keystrokes("cmd-alt-o");
         cx.run_until_parked();
         let zoom = view.read_with(cx, |v, _| v.drawn_zoom);
         let name = cx.debug_bounds("overview-name-0").expect("the first workspace's name");
-        let new = cx.debug_bounds(new).expect("the place for a new one");
+        let new = cx.debug_bounds("overview-new-workspace").expect("the button for a new one");
         cx.simulate_keystrokes("cmd-alt-o");
         cx.run_until_parked();
         (zoom, f32::from(name.size.height), f32::from(new.size.height))
     };
-    let (zoom, name, new) = overview(cx, "overview-name-1");
+    let (zoom, name, new) = overview(cx);
     // The focused tile goes down into a workspace of its own: three to fit, not two.
     cx.simulate_keystrokes("cmd-alt-shift-down");
     cx.run_until_parked();
-    let (fitted, name_after, new_after) = overview(cx, "overview-name-2");
+    let (fitted, name_after, new_after) = overview(cx);
     assert!(fitted < zoom, "more workspaces, smaller: {zoom} then {fitted}");
-    assert!(name > 0.0 && (name - new).abs() < 0.01, "one type size: {name} {new}");
+    assert!(name > 0.0 && new > 0.0);
     assert!((name - name_after).abs() < 0.01, "{name} then {name_after}");
     assert!((new - new_after).abs() < 0.01, "{new} then {new_after}");
 }
 
-/// A phone with its keyboard up leaves the workspace short: the palette gives up height to
-/// fit above the key bar, with its field on top, its foot on the bottom edge and the list
-/// scrolling between them, rather than running under the keyboard with its foot cut off. A
-/// window with room keeps the palette at its ceiling.
+/// On a desktop the palette hangs a fifth of the way down the window and takes at most
+/// three fifths of its height under its ceiling, shorter still when it lists less. On a phone
+/// it is a sheet from the top, the window's width, down to the keyboard, with its foot in view
+/// and a fade over the list's end while more runs on below it.
 #[gpui::test]
-fn the_palette_fits_above_a_phone_keyboard(cx: &mut TestAppContext) {
+fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     three_shells(&view, cx, &fake);
     open_palette(cx);
-    let tall = cx.debug_bounds("palette").expect("drawn");
-    let ceiling = crate::kit::Overlay::List.bounds().1;
-    assert!((f32::from(tall.size.height) - ceiling).abs() < 0.5, "at its ceiling: {tall:?}");
-
-    let short = 420.0;
-    cx.simulate_resize(size(px(390.0), px(short)));
+    let (w, h) = VIEWPORT;
+    let brief = cx.debug_bounds("palette").expect("drawn");
+    let fifth = h / 5.0;
+    assert!((f32::from(brief.top()) - fifth).abs() < 0.5, "a fifth down: {brief:?}");
+    cx.simulate_input("e");
     cx.run_until_parked();
+    let full = cx.debug_bounds("palette").expect("drawn");
+    let ceiling = crate::kit::Overlay::List.bounds().1.min(h * 0.6);
+    assert!((f32::from(full.size.height) - ceiling).abs() < 0.5, "at its ceiling: {full:?}");
+    assert!(brief.size.height < full.size.height, "the brief list is shorter: {brief:?}");
+    assert!(cx.debug_bounds("palette-more").is_none(), "a desktop list has its scrollbar");
+    assert!(w > 700.0, "a desktop window");
+
+    // The fade reads the list's extent a frame late: the tests have no frame loop to run it.
+    let next_frame = |cx: &mut VisualTestContext| {
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+    };
+    let (phone_w, short) = (390.0, 420.0);
+    cx.simulate_resize(size(px(phone_w), px(short)));
+    cx.run_until_parked();
+    next_frame(cx);
     let palette = cx.debug_bounds("palette").expect("drawn");
     let foot = cx.debug_bounds("palette-legend").expect("the foot is drawn");
-    let bottom = short - Theme::default().spacing.xl;
-    assert!(f32::from(palette.bottom()) <= bottom + 0.5, "over the keyboard: {palette:?}");
-    assert!(f32::from(palette.size.height) < ceiling, "{palette:?}");
+    assert!(f32::from(palette.top()).abs() < 0.5, "from the top: {palette:?}");
+    assert!((f32::from(palette.bottom()) - short).abs() < 0.5, "to the keyboard: {palette:?}");
+    assert!(
+        f32::from(palette.left()).abs() < 0.5 && (f32::from(palette.right()) - phone_w).abs() < 0.5,
+        "the window's width: {palette:?}"
+    );
     assert!(
         foot.bottom() <= palette.bottom() && foot.top() >= palette.top(),
         "the foot is inside: {foot:?} in {palette:?}"
     );
-    assert!(f32::from(palette.left()) >= 0.0 && f32::from(palette.right()) <= 390.0);
+    assert!(cx.debug_bounds("palette-more").is_some(), "more below: the fade says so");
+    // ↑ from the first line wraps to the last, and the list scrolls to its end.
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    next_frame(cx);
+    assert!(cx.debug_bounds("palette-more").is_none(), "nothing more below");
 }
 
 /// ↓ past the lines in view scrolls the palette's list with the selection, and a query that
@@ -330,6 +372,9 @@ fn the_palette_scrolls_to_the_selected_line(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let _studio = connect(&view, cx, 1, "studio");
     open_palette(cx);
+    // Every command with an e in it: past the brief list an empty field shows.
+    cx.simulate_input("e");
+    cx.run_until_parked();
     let inside = |cx: &mut VisualTestContext, line: &'static str| {
         let list = cx.debug_bounds("palette-list").expect("the list is drawn");
         let line = cx.debug_bounds(line).expect("the line is laid out");

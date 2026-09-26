@@ -20,6 +20,10 @@
 //! * `rollup` — what a folded worker or a workspace tab adds up to; the navigator's second line.
 //! * `statusbar` — the bar along the bottom: where the focused tile runs, the link, the agents.
 //! * `inbox` — the bell's list of what needs the human and what finished.
+//!
+//! The navigator, the title bar and the status bar are views of their own (`ChromeView`),
+//! drawn cached: a terminal's echo draws the terminal and the strip around it, never the
+//! chrome, which draws again only when the workspace itself changes or its own clock ticks.
 
 pub mod actions;
 mod agents;
@@ -44,8 +48,8 @@ use std::time::{Duration, Instant};
 pub use actions::*;
 pub use agents::{agent_status_text, banner_title, program_banner};
 use gpui::{
-    App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString, Task,
-    Window,
+    App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
+    StyleRefinement, Subscription, Task, WeakEntity, Window,
 };
 use slopty_client::ItemDoc;
 use slopty_client::layout::{Layout, LayoutConfig, Saved, TileRef, WorkerKey};
@@ -65,7 +69,7 @@ pub(crate) use tile::{
     PAUSED, READING, RECONNECTING, SESSION_ENDED, SLEEPING, TAKE, TAKE_OVER, UNMUTE,
 };
 pub use tile::{NOTE_TITLE_CHARS, file_title, note_progress, note_title};
-pub use titlebar::TITLEBAR_H;
+pub use titlebar::{TITLEBAR_H, titlebar_height};
 use tokio::sync::mpsc;
 
 use crate::file::FileView;
@@ -92,6 +96,79 @@ const STREAM_GRACE: Duration = Duration::from_secs(5);
 
 /// How long the layout waits after its last change before it is written to disk.
 const SAVE_AFTER: Duration = Duration::from_millis(500);
+
+/// The longest refresh of a screen the app draws on (60 Hz): a typed key's echo is awaited for
+/// its round trip and this much more before the working marks step on without it.
+const ECHO_SLACK: Duration = Duration::from_nanos(16_666_667);
+
+/// A region of the frame drawn as a view of its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Region {
+    Navigator,
+    Titlebar,
+    Statusbar,
+}
+
+/// One region of the workspace's chrome as a view of its own, so the frame can draw it
+/// cached. It holds nothing: it draws the workspace's region, and is drawn again only when
+/// notified, by the workspace changing ([`Chrome::notify`]) or by a clock of its own (an age,
+/// a turn's time, the frame time).
+struct ChromeView {
+    workspace: WeakEntity<WorkspaceView>,
+    region: Region,
+    /// How many times it has drawn: the proof that an echo leaves it be.
+    #[cfg(test)]
+    renders: usize,
+}
+
+impl gpui::Render for ChromeView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        use gpui::IntoElement as _;
+        #[cfg(test)]
+        {
+            self.renders = self.renders.saturating_add(1);
+        }
+        let region = self.region;
+        self.workspace
+            .update(cx, |workspace, cx| workspace.render_region(region, window, cx))
+            .unwrap_or_else(|_| gpui::Empty.into_any_element())
+    }
+}
+
+/// The chrome's three views.
+struct Chrome {
+    navigator: Entity<ChromeView>,
+    titlebar: Entity<ChromeView>,
+    statusbar: Entity<ChromeView>,
+}
+
+impl Chrome {
+    fn new(cx: &mut Context<WorkspaceView>) -> Self {
+        use gpui::AppContext as _;
+        let workspace = cx.weak_entity();
+        let mut view = |region| {
+            let workspace = workspace.clone();
+            cx.new(|_| ChromeView {
+                workspace,
+                region,
+                #[cfg(test)]
+                renders: 0,
+            })
+        };
+        Self {
+            navigator: view(Region::Navigator),
+            titlebar: view(Region::Titlebar),
+            statusbar: view(Region::Statusbar),
+        }
+    }
+
+    /// Draw every region again: the workspace changed, and any of them may show it.
+    fn notify(&self, cx: &mut App) {
+        for view in [&self.navigator, &self.titlebar, &self.statusbar] {
+            App::notify(cx, view.entity_id());
+        }
+    }
+}
 
 /// Things the surrounding app reacts to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -307,7 +384,7 @@ struct Rename {
     input: Entity<gpui_kit::component::input::InputState>,
     /// Who had the keyboard before the field: it goes back there after ↩ or Esc.
     return_to: Option<FocusHandle>,
-    _subscription: gpui::Subscription,
+    _subscription: Subscription,
 }
 
 /// A tile taken off, until [`UNDO_CLOSE`] passes or ⌘Z puts it back where it was. A live
@@ -362,6 +439,14 @@ pub struct WorkspaceView {
     items_dirty: bool,
     /// Who needs the human, worked out once per frame for everything that frame draws.
     drawn_waiting: Vec<agents::Waiting>,
+    /// The active workspace's strip as this frame lays it out: the title bar's column dots.
+    drawn_strip: slopty_client::layout::Strip,
+    /// The navigator, the title bar and the status bar, each a view of its own.
+    chrome: Chrome,
+    /// The command each shell runs, as its navigator row last said: a change draws it again.
+    running: HashMap<SessionId, Option<String>>,
+    /// Holds the working marks' steps while a typed key waits for its echo.
+    _keys: Subscription,
     /// Window titles the picker or a listing gave (the registry stores ids).
     titles: HashMap<ItemId, String>,
     /// Coding agents the workers observed, by session.
@@ -401,9 +486,13 @@ pub struct WorkspaceView {
     /// A keyboard is there to press chords on: always on a Mac, only when one is attached on
     /// a phone or tablet.
     hardware_keyboard: bool,
+    /// The phone's key bar shows under the workspace: the status bar gives it its row.
+    key_bar_shown: bool,
     pending_focus_palette: bool,
     /// Which titlebar menu is open.
     menu: Option<titlebar::MenuKind>,
+    /// The workspaces' tabs as last drawn.
+    tabs: titlebar::Tabs,
     /// The navigator's state for this run (its width and whether it docks are the layout's).
     nav: navigator::NavState,
     /// The status bar's own state: its readouts and the hosts popover.
@@ -497,11 +586,24 @@ fn reduced_motion() -> bool {
 impl WorkspaceView {
     /// An empty workspace, arranged as `saved` left it (the layout of the last run on this
     /// device), its tiles waiting for their workers.
-    pub fn new(theme: Theme, saved: Option<Saved>, cx: &Context<Self>) -> Self {
+    pub fn new(theme: Theme, saved: Option<Saved>, cx: &mut Context<Self>) -> Self {
         let layout = match saved.clone() {
             Some(saved) => Layout::restore(saved, LayoutConfig::default()),
             None => Layout::new(LayoutConfig::default()),
         };
+        // Whatever the workspace changes, its chrome may show; a terminal's own change (an
+        // echo) is not the workspace's, and leaves the chrome as it was drawn.
+        cx.observe_self(|this, cx| this.chrome.notify(cx)).detach();
+        let this = cx.weak_entity();
+        let keys = cx.intercept_keystrokes(move |event, window, cx| {
+            if event.keystroke.modifiers.platform {
+                return;
+            }
+            let until = this.upgrade().and_then(|this| this.read(cx).echo_awaited(window, cx));
+            if let Some(until) = until {
+                crate::icons::hold_steps(cx, until);
+            }
+        });
         Self {
             base_theme: theme.clone(),
             font_delta: 0.0,
@@ -522,6 +624,10 @@ impl WorkspaceView {
             file_focus: HashMap::new(),
             items_dirty: true,
             drawn_waiting: Vec::new(),
+            drawn_strip: slopty_client::layout::Strip::default(),
+            chrome: Chrome::new(cx),
+            running: HashMap::new(),
+            _keys: keys,
             titles: HashMap::new(),
             agents: HashMap::new(),
             server_agents: HashMap::new(),
@@ -547,8 +653,10 @@ impl WorkspaceView {
             palette_action: None,
             palette_extra: Vec::new(),
             hardware_keyboard: true,
+            key_bar_shown: false,
             pending_focus_palette: false,
             menu: None,
+            tabs: titlebar::Tabs::default(),
             nav: navigator::NavState::default(),
             bar: statusbar::Bar::default(),
             inbox: inbox::Inbox::default(),
@@ -741,6 +849,15 @@ impl WorkspaceView {
         self.layout.set_animate(on && !reduced_motion());
     }
 
+    /// Whether the app shows its key bar under the workspace. While it does, the status bar
+    /// steps aside, so the keys sit on the content rather than a row of readouts above them.
+    pub fn set_key_bar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if self.key_bar_shown != shown {
+            self.key_bar_shown = shown;
+            cx.notify();
+        }
+    }
+
     /// Whether a keyboard is attached, so the palette prints chords that can be pressed.
     pub const fn set_hardware_keyboard(&mut self, attached: bool) {
         self.hardware_keyboard = attached;
@@ -898,6 +1015,52 @@ impl WorkspaceView {
     pub const fn theme(&self) -> &Theme {
         &self.theme
     }
+
+    /// How long a key typed now waits for its echo, at most: the round trip to the focused
+    /// terminal's worker and a refresh. `None` unless a terminal here has the keyboard.
+    fn echo_awaited(&self, window: &Window, cx: &App) -> Option<Instant> {
+        let terminal = self.active_terminal()?;
+        if !terminal.read(cx).focus_handle(cx).is_focused(window) {
+            return None;
+        }
+        let rtt = self.focused().and_then(|t| self.rtt(t.worker)).unwrap_or_default();
+        cx.background_executor().now().checked_add(rtt.saturating_add(ECHO_SLACK))
+    }
+
+    /// Draw one region of the chrome, for its view.
+    fn render_region(
+        &mut self,
+        region: Region,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        match region {
+            Region::Navigator => self.render_navigator_region(window, cx),
+            Region::Titlebar => self.render_titlebar(window, cx),
+            Region::Statusbar => self.render_statusbar(window, cx),
+        }
+    }
+
+    /// How many times each region of the chrome has drawn: the navigator, the title bar, the
+    /// status bar.
+    #[cfg(test)]
+    fn chrome_renders(&self, cx: &App) -> [usize; 3] {
+        let chrome = &self.chrome;
+        [&chrome.navigator, &chrome.titlebar, &chrome.statusbar].map(|v| v.read(cx).renders)
+    }
+
+    /// A shell's running command, as its terminal now has it, against what its navigator row
+    /// last said: a change (a command started or ended) draws the navigator again. Everything
+    /// else a terminal changes is its own.
+    fn terminal_changed(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        let Some(view) = self.terminals.get(&session) else { return };
+        let now = view.read(cx).state().running_command();
+        let was = self.running.get(&session).and_then(Option::as_deref);
+        if now != was {
+            self.running.insert(session, now.map(str::to_owned));
+            App::notify(cx, self.chrome.navigator.entity_id());
+        }
+    }
 }
 
 impl WorkspaceView {
@@ -1019,13 +1182,14 @@ impl gpui::Render for WorkspaceView {
         // frame draws: the bar's column dots and the strip agree, and none is worked out twice.
         let frame = self.frame_at_clock(window);
         self.drawn_waiting = self.needs_you();
+        if self.drawn_strip != frame.strip {
+            self.drawn_strip.clone_from(&frame.strip);
+        }
         // First: a docked navigator narrows the title bar and the strip.
-        if self.navigator_visible(self.navigator_mode(window)) {
+        self.place_navigator(window);
+        if self.nav.drawn.is_some() {
             self.ensure_navigator_filter(window, cx);
         }
-        let navigator = self.render_navigator(window, cx);
-        let titlebar = self.render_titlebar(&frame.strip, window, cx);
-        let statusbar = self.render_statusbar(window, cx);
         let strip = self.render_strip(&frame, window, cx);
         let toast = self.render_toast(cx);
         let menu = self.render_menu(window, cx);
@@ -1086,7 +1250,7 @@ impl gpui::Render for WorkspaceView {
             }))
             .on_action(cx.listener(Self::toggle_navigator))
             .child(Self::measure_width(cx))
-            .child(Self::render_frame(navigator, titlebar, strip, toast, statusbar))
+            .child(self.render_frame(strip, toast, window, cx))
             .children(menu)
             .when_some(picker, gpui::ParentElement::child)
             .when_some(palette, gpui::ParentElement::child)
@@ -1130,29 +1294,57 @@ impl WorkspaceView {
     }
 
     /// The frame: the navigator the window's full height on the left, docked beside the rest
-    /// or laid over it, and the title bar, the strip and the status bar stacked to its right.
+    /// or laid over it (or the rail in its place), and the title bar, the strip and the status
+    /// bar stacked to its right. The chrome's regions are their own views, drawn cached at the
+    /// sizes laid out here.
     fn render_frame(
-        navigator: Option<(navigator::Mode, gpui::AnyElement)>,
-        titlebar: gpui::AnyElement,
+        &self,
         strip: gpui::AnyElement,
         toast: Option<gpui::AnyElement>,
-        statusbar: Option<gpui::AnyElement>,
+        window: &Window,
+        cx: &Context<Self>,
     ) -> gpui::AnyElement {
-        use gpui::{IntoElement as _, ParentElement as _, Styled as _};
-        let (docked, over) = match navigator {
-            Some((navigator::Mode::Docked, el)) => (Some(el), None),
-            Some((_, el)) => (None, Some(el)),
-            None => (None, None),
+        use gpui::{IntoElement as _, ParentElement as _, Styled as _, px};
+        let safe = window.insets().effective();
+        let titlebar = self.chrome.titlebar.clone().cached(
+            StyleRefinement::default()
+                .w_full()
+                .flex_none()
+                .h(px(titlebar_height(&self.theme)) + safe.top),
+        );
+        let statusbar = (!self.workers.is_empty() && !self.key_bar_shown).then(|| {
+            self.chrome.statusbar.clone().cached(
+                StyleRefinement::default().w_full().flex_none().h(px(statusbar::STATUSBAR_H)),
+            )
+        });
+        let navigator = self.chrome.navigator.clone();
+        let column = |width: Pixels| StyleRefinement::default().flex_none().h_full().w(width);
+        let (docked, rail, over, handle) = match self.nav.drawn {
+            Some(navigator::Mode::Docked) => {
+                let width = px(self.navigator_width());
+                let handle = Self::render_handle(width, cx);
+                (Some(navigator.cached(column(width))), None, None, Some(handle))
+            }
+            Some(mode) => {
+                (None, None, Some(self.navigator_over(mode, navigator, window, cx)), None)
+            }
+            None if self.nav.rail => {
+                (None, Some(navigator.cached(column(px(navigator::RAIL_W)))), None, None)
+            }
+            None => (None, None, None, None),
         };
-        let middle = gpui::div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .flex()
-            .flex_col()
-            .child(strip)
-            .children(toast);
+        let middle =
+            gpui::div().relative().flex_1().min_h_0().w_full().flex().children(rail).child(
+                gpui::div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(strip)
+                    .children(toast),
+            );
         gpui::div()
             .relative()
             .flex_1()
@@ -1172,8 +1364,61 @@ impl WorkspaceView {
                     .child(middle)
                     .children(statusbar),
             )
+            .children(handle)
             .children(over)
             .into_any_element()
+    }
+
+    /// The navigator laid over the frame in `mode`, on the scrim, which a click closes it by.
+    fn navigator_over(
+        &self,
+        mode: navigator::Mode,
+        panel: Entity<ChromeView>,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        use gpui::{
+            InteractiveElement as _, IntoElement as _, MouseButton, ParentElement as _,
+            Styled as _, px,
+        };
+        let safe = window.insets().effective();
+        let width = px(self.navigator_panel_width(mode, window)) + safe.left;
+        let panel = panel.cached(StyleRefinement::default().h_full().w(width));
+        let handle = (mode == navigator::Mode::Overlay).then(|| Self::render_handle(width, cx));
+        let away = gpui::div()
+            .id("navigator-away")
+            .debug_selector(|| "navigator-away".to_owned())
+            .absolute()
+            .inset_0()
+            .bg(crate::kit::scrim(&self.theme))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _w, cx| {
+                    this.nav.open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                gpui::div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+                    .child(panel),
+            )
+            .children(handle);
+        match mode {
+            // A phone's workspace ends above the home indicator's band (and the key bar, when
+            // it shows), which the app draws below it. The drawer is drawn after everything and
+            // unclipped, down to the window's bottom edge, so it and its scrim cover the band;
+            // a phone's workspace starts at the window's top.
+            navigator::Mode::Drawer => {
+                gpui::deferred(away.bottom_auto().h(window.viewport_size().height))
+                    .into_any_element()
+            }
+            navigator::Mode::Docked | navigator::Mode::Overlay => away.into_any_element(),
+        }
     }
 }
 

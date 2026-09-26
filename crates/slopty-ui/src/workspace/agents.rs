@@ -262,6 +262,39 @@ impl WorkspaceView {
         shown.into_iter().map(|(_, w)| w).chain(unshown).collect()
     }
 
+    /// Sessions whose agent is at its turn, in the order of [`Self::needs_you`]: those with a
+    /// tile in reading order, then those only the server reported.
+    pub(super) fn working(&self) -> Vec<Waiting> {
+        let at_work = |session: SessionId| {
+            self.agent_state(session).and_then(Status::of_agent) == Some(Status::Working)
+        };
+        let mut shown: Vec<(Option<slopty_client::layout::Pos>, Waiting)> = self
+            .items()
+            .filter_map(|(worker, i)| match i.kind {
+                ItemKind::Terminal { session } if at_work(session) => {
+                    Some(Waiting { worker, tile: Some(TileRef { worker, item: i.id }), session })
+                }
+                _ => None,
+            })
+            .map(|w| (w.tile.and_then(|t| self.layout.position(t)), w))
+            .collect();
+        shown.sort_by_key(|(pos, w)| {
+            (pos.map(|p| (p.workspace, p.column, p.tile)), w.tile.map(|t| t.item))
+        });
+        let mut unshown: Vec<Waiting> = self
+            .server_agents
+            .iter()
+            .filter(|(session, _)| at_work(**session) && self.tile_of_session(**session).is_none())
+            .map(|(session, (worker, _))| Waiting {
+                worker: *worker,
+                tile: None,
+                session: *session,
+            })
+            .collect();
+        unshown.sort_by_key(|w| (w.worker, w.session));
+        shown.into_iter().map(|(_, w)| w).chain(unshown).collect()
+    }
+
     /// What is known about a session's agent: the worker's own word while its link is up,
     /// else the server's.
     pub(super) fn agent_state(&self, session: SessionId) -> Option<&AgentEvent> {

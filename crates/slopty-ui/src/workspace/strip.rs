@@ -22,9 +22,10 @@ use slopty_proto::items::ItemKind;
 use slopty_theme::{Typography, alpha};
 
 use super::WorkspaceView;
-use super::tile::{Chrome, HEADER_H};
+use super::tile::Chrome;
 use crate::colors::{hsla, hsla_alpha};
-use crate::icons::{IconName, IconSize};
+use crate::icons::IconName;
+use crate::kit::{self, ButtonKind};
 
 /// How far a header press travels before it is a move rather than a click.
 const DRAG_SLOP: f32 = 4.0;
@@ -33,8 +34,8 @@ const DRAG_SLOP: f32 = 4.0;
 const PINCH_STEP: f32 = 0.15;
 
 /// The resize handle's width, centred on the divider it drags so either side of the line
-/// takes the press.
-const HANDLE_W: f32 = 6.0;
+/// takes the press: 12 pt round the hairline, which a pointer finds without hunting.
+const HANDLE_W: f32 = 12.0;
 
 /// One hairline: the divider a tile draws inside its right edge, and the accent line a
 /// handle lays over it.
@@ -42,6 +43,19 @@ const HAIRLINE: f32 = 1.0;
 
 /// The line that marks where a drop opens a new column or workspace.
 const DROP_LINE: f32 = 2.0;
+
+/// One mark of a drop hint: `rect` filled with `ink`, square and frameless.
+fn hint(selector: &'static str, rect: Rect, ink: gpui::Hsla) -> gpui::AnyElement {
+    div()
+        .debug_selector(move || selector.to_owned())
+        .absolute()
+        .left(px(rect.x))
+        .top(px(rect.y))
+        .w(px(rect.w))
+        .h(px(rect.h))
+        .bg(ink)
+        .into_any_element()
+}
 
 /// The group every resize handle belongs to, so its line lights while the pointer is on it.
 const HANDLE_GROUP: &str = "column-divider";
@@ -112,6 +126,11 @@ impl WorkspaceView {
     }
 
     fn begin_resize(&mut self, column: usize, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+        if ev.click_count == 2 {
+            self.reset_column_width(column, cx);
+            cx.stop_propagation();
+            return;
+        }
         self.tick();
         let before = self.column_sizes();
         if self.layout.resize_begin(column) {
@@ -119,6 +138,18 @@ impl WorkspaceView {
             cx.notify();
         }
         cx.stop_propagation();
+    }
+
+    /// The divider right of `column` double-clicked: the column goes back to the width a new
+    /// column opens at, and the remote windows in it follow.
+    fn reset_column_width(&mut self, column: usize, cx: &mut Context<Self>) {
+        self.tick();
+        let before = self.column_sizes();
+        if self.layout.reset_column_width(column) {
+            self.resize_remote_windows(&before, cx);
+            self.layout_touched(cx);
+            cx.notify();
+        }
     }
 
     fn local(&self, p: Point<Pixels>) -> (f32, f32) {
@@ -180,9 +211,9 @@ impl WorkspaceView {
 
     /// Where a scroll event lands: the tile under it and whether it is on the body (not the
     /// header).
-    fn under(&self, p: Point<Pixels>) -> Option<(TileRef, bool)> {
+    pub(super) fn under(&self, p: Point<Pixels>) -> Option<(TileRef, bool)> {
         self.placed.iter().rev().find(|(_, b)| b.contains(&p)).map(|(tile, b)| {
-            let body = p.y > b.origin.y + px(HEADER_H * self.drawn_zoom);
+            let body = p.y > b.origin.y + px(self.theme.density.header * self.drawn_zoom);
             (*tile, body)
         })
     }
@@ -372,68 +403,91 @@ impl WorkspaceView {
         }
     }
 
-    /// Where a drop would land: an accent line on the divider a new column or workspace would
-    /// open, or a faint accent wash over the column it would join. Neither has a corner or a
-    /// frame, since the panes they mark have none.
-    fn drop_hint(&self, frame: &Frame) -> Option<gpui::AnyElement> {
-        let Some(Drag::Move { moving: true, target: Some(target), .. }) = &self.drag else {
-            return None;
+    /// Where a drop would land, and how much room it takes there. A new column is an accent
+    /// line on the divider it would open, over a faint accent wash as wide as the column the
+    /// tile brings; joining a column washes the share of it the tile would take (the lower
+    /// half of a column of one); a new workspace is a line in the band between two. Nothing
+    /// has a corner or a frame, since the panes they mark have none.
+    fn drop_hint(&self, frame: &Frame) -> Vec<gpui::AnyElement> {
+        let Some(Drag::Move { tile: dragged, moving: true, target: Some(target), .. }) = &self.drag
+        else {
+            return Vec::new();
         };
-        let column = |ws: usize, col: usize| -> Option<Rect> {
-            let rects: Vec<Rect> = frame
+        let dragged = frame.tiles.iter().find(|p| p.tile == *dragged);
+        let shown = |ws: usize, col: usize| {
+            frame
                 .tiles
                 .iter()
-                .filter(|p| p.pos.workspace == ws && p.pos.column == col && !p.hidden)
-                .map(|p| p.rect)
-                .collect();
+                .filter(move |p| p.pos.workspace == ws && p.pos.column == col && !p.hidden)
+        };
+        let column = |ws: usize, col: usize| -> Option<Rect> {
+            let rects: Vec<Rect> = shown(ws, col).map(|p| p.rect).collect();
             let first = rects.first()?;
             let (x, y) = (first.x, rects.iter().map(|r| r.y).fold(f32::MAX, f32::min));
             let bottom = rects.iter().map(Rect::bottom).fold(f32::MIN, f32::max);
             Some(Rect { x, y, w: first.w, h: bottom - y })
         };
         let row = |ix: usize| frame.workspaces.iter().find(|(i, _)| *i == ix).map(|(_, r)| *r);
-        let accent = self.theme.surfaces.accent;
-        let (rect, ink) = match *target {
-            DropTarget::IntoColumn { workspace, column: col, .. } => {
-                (column(workspace, col)?, hsla_alpha(accent, alpha::FAINT))
+        let accent = self.theme.surfaces.accent_fill;
+        let (wash, line) = match *target {
+            DropTarget::IntoColumn { workspace, column: col, index } => {
+                let Some(r) = column(workspace, col) else { return Vec::new() };
+                // A tabbed column takes it as one more tab: the whole of it. A stacked one
+                // makes room for one more share, where it goes in.
+                let tabbed = shown(workspace, col).any(|p| p.tabs.is_some());
+                let own = dragged.filter(|d| d.pos.workspace == workspace && d.pos.column == col);
+                let others =
+                    shown(workspace, col).count().saturating_sub(usize::from(own.is_some()));
+                let index = match own {
+                    Some(d) if d.pos.tile < index => index.saturating_sub(1),
+                    _ => index,
+                };
+                #[expect(clippy::cast_precision_loss, reason = "a column holds a few tiles")]
+                let (share, at) = ((others.saturating_add(1)) as f32, index as f32);
+                let slot = if tabbed {
+                    r
+                } else {
+                    Rect { y: (r.h / share).mul_add(at, r.y), h: r.h / share, ..r }
+                };
+                (Some(slot), None)
             }
             DropTarget::NewColumn { workspace, index } => {
-                // The line straddles the divider the new column opens.
-                let line =
-                    |x: f32, r: Rect| Rect { x: x - DROP_LINE / 2.0, y: r.y, w: DROP_LINE, h: r.h };
+                // The line straddles the divider the new column opens; the wash runs right of
+                // it as wide as the tile's column, which travels with it.
                 let before = index.checked_sub(1).and_then(|i| column(workspace, i));
-                match (column(workspace, index), before) {
-                    (Some(r), _) => (line(r.x, r), hsla(accent)),
-                    (None, Some(r)) => (line(r.right(), r), hsla(accent)),
+                let (x, r) = match (column(workspace, index), before) {
+                    (Some(r), _) => (r.x, r),
+                    (None, Some(r)) => (r.right(), r),
                     // An empty workspace: the whole of it is the new column.
-                    (None, None) => (row(workspace)?, hsla_alpha(accent, alpha::FAINT)),
-                }
+                    (None, None) => {
+                        let Some(r) = row(workspace) else { return Vec::new() };
+                        return vec![hint("drop-wash", r, hsla_alpha(accent, alpha::FAINT))];
+                    }
+                };
+                let line = Rect { x: x - DROP_LINE / 2.0, y: r.y, w: DROP_LINE, h: r.h };
+                let width = dragged.map_or(r.w, |d| d.rect.w);
+                let limit = row(workspace).map_or(f32::MAX, |w| w.right());
+                let wash = Rect { x, y: r.y, w: width.min(limit - x).max(0.0), h: r.h };
+                (Some(wash), Some(line))
             }
             DropTarget::NewWorkspace { index } => {
                 // Midway down the free band between the workspace above and this one's name.
-                let r = row(index)?;
-                let above = index.checked_sub(1).and_then(row).map_or(0.0, |a| a.bottom());
-                let centre = f32::midpoint(above, r.y - self.theme.spacing.xl);
-                let rect = Rect { x: r.x, y: centre - DROP_LINE / 2.0, w: r.w, h: DROP_LINE };
-                (rect, hsla(accent))
+                let Some(r) = row(index) else { return Vec::new() };
+                let pad = self.theme.spacing.xs;
+                let above = index.checked_sub(1).and_then(row).map_or(0.0, |a| a.bottom() + pad);
+                let centre = f32::midpoint(above, r.y - pad - self.theme.spacing.xl);
+                (None, Some(Rect { x: r.x, y: centre - DROP_LINE / 2.0, w: r.w, h: DROP_LINE }))
             }
         };
-        Some(
-            div()
-                .debug_selector(|| "drop-hint".to_owned())
-                .absolute()
-                .left(px(rect.x))
-                .top(px(rect.y))
-                .w(px(rect.w))
-                .h(px(rect.h))
-                .bg(ink)
-                .into_any_element(),
-        )
+        let wash = wash.map(|r| hint("drop-wash", r, hsla_alpha(accent, alpha::FAINT)));
+        let line = line.map(|r| hint("drop-hint", r, hsla(accent)));
+        wash.into_iter().chain(line).collect()
     }
 
     /// A handle on the divider right of each column of the active workspace, straddling the
-    /// line: a drag resizes the column on its left. Its accent line lies over the divider while
-    /// the pointer is on it and while it is dragged.
+    /// line: a drag resizes the column on its left, a double-click puts it back at the width a
+    /// column opens at. Its accent line lies over the divider while the pointer is on it and
+    /// while it is dragged.
     fn resize_handles(&self, frame: &Frame, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
         if frame.overview > 0.0 {
             return Vec::new();
@@ -498,8 +552,9 @@ impl WorkspaceView {
     /// scrolled on, then the frame worked out once for the bar and the strip.
     pub(super) fn frame_at_clock(&mut self, window: &Window) -> Frame {
         self.tick();
-        // The overview's gaps hold the names drawn in them.
-        self.layout.set_overview_label(self.theme.spacing.xl);
+        // The overview's gaps hold the names drawn in them, and the blocks' margins either side.
+        let spacing = self.theme.spacing;
+        self.layout.set_overview_label(2.0_f32.mul_add(spacing.xs, spacing.xl));
         if let Some(Drag::Move { moving: true, .. }) = self.drag {
             // The pointer resting in an edge band keeps the strip scrolling.
             let (x, _) = self.local(window.mouse_position());
@@ -518,7 +573,7 @@ impl WorkspaceView {
     pub(super) fn render_strip(
         &mut self,
         frame: &Frame,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let zooming = frame.overview > 0.0 && frame.overview < 1.0;
@@ -554,110 +609,8 @@ impl WorkspaceView {
         self.drawn_focus = self.layout.focused();
         let closing: Vec<gpui::AnyElement> =
             frame.closing.iter().map(|c| self.render_closing(c.rect, c.alpha, c.scale)).collect();
-        let theme = &self.theme;
-        // In the overview each workspace is one flush block of its panes in a single hairline
-        // frame, laid just outside the block so no pane covers it, with its name above; an
-        // empty one (the one kept at the end for what comes next) is only its dashed outline,
-        // a place and not a blank slab, with a plus and its name inside to say what dropping
-        // there does. Nothing has a corner: the panes it holds have none.
-        let backdrops: Vec<gpui::AnyElement> = if frame.overview > 0.0 {
-            let workspaces = self.layout.workspaces();
-            let active = self.layout.active_workspace();
-            let s = &theme.surfaces;
-            let fade = frame.overview;
-            frame
-                .workspaces
-                .iter()
-                .flat_map(|(ix, r)| {
-                    let ix = *ix;
-                    let tiles: usize = workspaces
-                        .get(ix)
-                        .map_or(0, |ws| ws.columns().iter().map(|c| c.tiles().len()).sum());
-                    // The labels are chrome: drawn at the type scale whatever the zoom, so a
-                    // name stays readable however many workspaces the overview fits.
-                    if tiles == 0 {
-                        let muted = hsla_alpha(s.text_muted, fade);
-                        let zone = div()
-                            .debug_selector(move || format!("overview-block-{ix}"))
-                            .absolute()
-                            .left(px(r.x))
-                            .top(px(r.y))
-                            .w(px(r.w))
-                            .h(px(r.h))
-                            .border_1()
-                            .border_dashed()
-                            .border_color(hsla_alpha(s.text_muted, fade * alpha::TINT))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(theme.spacing.xs))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_size(px(theme.typography.small()))
-                            .font_family(theme.typography.ui_family.clone())
-                            .text_color(muted)
-                            .child(crate::icons::icon(
-                                theme,
-                                IconName::Plus,
-                                IconSize::Inline,
-                                muted,
-                            ))
-                            .child(
-                                div()
-                                    .debug_selector(move || format!("overview-name-{ix}"))
-                                    .child(NEW_WORKSPACE),
-                            );
-                        vec![zone.into_any_element()]
-                    } else {
-                        let ink = if ix == active { s.text } else { s.text_secondary };
-                        let count =
-                            if tiles == 1 { "1 tile".to_owned() } else { format!("{tiles} tiles") };
-                        let block = div()
-                            .debug_selector(move || format!("overview-block-{ix}"))
-                            .absolute()
-                            .left(px(r.x - HAIRLINE))
-                            .top(px(r.y - HAIRLINE))
-                            .w(px(2.0_f32.mul_add(HAIRLINE, r.w)))
-                            .h(px(2.0_f32.mul_add(HAIRLINE, r.h)))
-                            .border_1()
-                            .border_color(hsla_alpha(s.border, fade))
-                            .into_any_element();
-                        let label = div()
-                            .absolute()
-                            .left(px(r.x))
-                            .top(px(r.y - theme.spacing.xl))
-                            .w(px(r.w))
-                            .h(px(theme.spacing.xl))
-                            .flex()
-                            .items_center()
-                            .gap(px(theme.spacing.sm))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_size(px(theme.typography.small()))
-                            .font_family(theme.typography.ui_family.clone())
-                            .child(
-                                div()
-                                    .debug_selector(move || format!("overview-name-{ix}"))
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .font_weight(FontWeight(Typography::STRONG_WEIGHT))
-                                    .text_color(hsla_alpha(ink, fade))
-                                    .child(SharedString::from(self.workspace_name_at(ix))),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(hsla_alpha(s.text_muted, fade))
-                                    .child(SharedString::from(count)),
-                            );
-                        vec![block, label.into_any_element()]
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let backdrops =
+            if frame.overview > 0.0 { self.overview_blocks(frame, cx) } else { Vec::new() };
         let hint = self.drop_hint(frame);
         let handles = self.resize_handles(frame, cx);
         let entity = cx.entity();
@@ -700,30 +653,112 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// An empty workspace: a large muted mark and what this is, then the three ways to begin,
-    /// each with its key cap (a key cap teaches the chord where the chord is the way in), the
-    /// first the accented one, then the workers, each marked only where its link is not up. With
-    /// no worker there is nothing to open, and the page says where one comes from.
+    /// The overview's blocks, under the tiles: each workspace with tiles is one card holding
+    /// its panes flush, a base unit wider all round so its corners clear theirs, lifted by the
+    /// one elevation, with a 2 pt accent ring round the active one and its name above. The empty
+    /// workspace kept at the end is no slab bigger than the real ones: a ghost "New workspace"
+    /// button where the next name would go, on the last block's left edge.
+    fn overview_blocks(&self, frame: &Frame, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let pad = theme.spacing.xs;
+        let workspaces = self.layout.workspaces();
+        let active = self.layout.active_workspace();
+        let fade = frame.overview;
+        let mut left = None;
+        let mut out = Vec::new();
+        for (ix, r) in frame.workspaces.iter().map(|(ix, r)| (*ix, *r)) {
+            let tiles: usize = workspaces
+                .get(ix)
+                .map_or(0, |ws| ws.columns().iter().map(|c| c.tiles().len()).sum());
+            // The labels are chrome: drawn at the type scale whatever the zoom, so a name
+            // stays readable however many workspaces the overview fits.
+            let label_top = r.y - pad - theme.spacing.xl;
+            if tiles == 0 {
+                let button =
+                    kit::button(theme, "overview-new-workspace", NEW_WORKSPACE, ButtonKind::Ghost)
+                        .absolute()
+                        .left(px(left.unwrap_or(r.x) - pad))
+                        .top(px(label_top))
+                        .opacity(fade)
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            this.layout.set_overview(false);
+                            this.go_to_workspace(ix, cx);
+                        }));
+                out.push(button.into_any_element());
+                continue;
+            }
+            left = Some(r.x);
+            let block = kit::elevate(div(), theme)
+                .debug_selector(move || format!("overview-block-{ix}"))
+                .absolute()
+                .left(px(r.x - pad))
+                .top(px(r.y - pad))
+                .w(px(2.0_f32.mul_add(pad, r.w)))
+                .h(px(2.0_f32.mul_add(pad, r.h)))
+                .rounded(px(theme.radii.md))
+                .opacity(fade)
+                .when(ix == active, |el| el.border_2().border_color(hsla(s.accent)));
+            let ink = if ix == active { s.text } else { s.text_secondary };
+            let count = if tiles == 1 { "1 tile".to_owned() } else { format!("{tiles} tiles") };
+            let label = div()
+                .absolute()
+                .left(px(r.x))
+                .top(px(label_top))
+                .w(px(r.w))
+                .h(px(theme.spacing.xl))
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.sm))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(px(theme.typography.small()))
+                .font_family(theme.typography.ui_family.clone())
+                .child(
+                    div()
+                        .debug_selector(move || format!("overview-name-{ix}"))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .font_weight(FontWeight(Typography::STRONG_WEIGHT))
+                        .text_color(hsla_alpha(ink, fade))
+                        .child(SharedString::from(self.workspace_name_at(ix))),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(hsla_alpha(s.text_muted, fade))
+                        .child(SharedString::from(count)),
+                );
+            out.push(block.into_any_element());
+            out.push(label.into_any_element());
+        }
+        out
+    }
+
+    /// An empty workspace: what this is, then the three ways to begin, the first shown as the
+    /// palette shows the row Enter would run, each with its keys in the palette's plain muted
+    /// glyphs where there is a keyboard to press them on; then the workers, each marked only
+    /// where its link is not up. With no worker there is nothing to open, and the page says
+    /// where one comes from. One left edge for all of it, and no art.
     fn render_empty(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let muted = hsla(s.text_muted);
         let title = |text: &'static str| {
-            div()
-                .pt(px(spacing.sm))
+            kit::inset_x(div(), theme)
                 .pb(px(spacing.xs))
                 .text_size(px(theme.typography.title()))
                 .font_weight(FontWeight(Typography::STRONG_WEIGHT))
                 .text_color(hsla(s.text))
                 .child(text)
         };
-        let column = div().w(px(EMPTY_W)).flex().flex_col().items_center().gap(px(spacing.xs));
+        let column = div().w(px(EMPTY_W)).flex().flex_col();
         let column = if self.workers.is_empty() {
             column
-                .child(crate::icons::icon(theme, IconName::Server, IconSize::Large, muted))
                 .child(title(NO_WORKERS))
-                .child(div().text_color(muted).child(NO_WORKERS_NEXT))
+                .child(kit::inset_x(div(), theme).text_color(muted).child(NO_WORKERS_NEXT))
         } else {
             let [terminal, agent, window] = &*BEGIN_KEYS;
             let begin = div()
@@ -763,17 +798,12 @@ impl WorkspaceView {
                     Some((_, word)) => format!("{}, {word}", w.name),
                     None => w.name.clone(),
                 };
-                let row = div()
+                let row = kit::row(theme, kit::Row::One)
                     .id(("empty-worker", ix))
                     .debug_selector(move || format!("empty-worker-{ix}"))
                     .role(gpui::accesskit::Role::Button)
                     .aria_label(SharedString::from(label))
                     .w_full()
-                    .px(px(spacing.md))
-                    .py(px(spacing.xs))
-                    .flex()
-                    .items_center()
-                    .gap(px(spacing.sm))
                     .rounded(px(theme.radii.sm))
                     .cursor_pointer()
                     .hover(|st| st.bg(hsla(s.raised)))
@@ -801,26 +831,19 @@ impl WorkspaceView {
                     .on_click(cx.listener(move |this, _ev, _window, cx| this.go_to_worker(key, cx)))
                     .into_any_element()
             });
-            column
-                .child(crate::icons::icon(theme, IconName::LayoutGrid, IconSize::Large, muted))
-                .child(title(EMPTY_WORKSPACE))
-                .child(begin)
-                .child(
-                    div()
-                        .w_full()
-                        .pt(px(spacing.md))
-                        .flex()
-                        .flex_col()
-                        .child(
-                            crate::palette::section_heading(
-                                theme,
-                                "empty-workers".into(),
-                                "Workers",
-                            )
-                            .w_full(),
-                        )
-                        .children(workers),
-                )
+            column.child(title(EMPTY_WORKSPACE)).child(begin).child(
+                div()
+                    .w_full()
+                    .pt(px(spacing.md))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        kit::inset_x(kit::label(theme, "Workers"), theme)
+                            .debug_selector(|| "empty-workers".to_owned())
+                            .pb(px(spacing.xs)),
+                    )
+                    .children(workers),
+            )
         };
         // The strip is the content step with or without a tile on it: the empty workspace is
         // the page a tile would be, not a hole down to the bars' canvas.
@@ -837,8 +860,8 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// One way to begin: its icon, what it does and, with a keyboard to press it on, its key cap;
-    /// `primary` is the accented one.
+    /// One way to begin: its icon, what it does and, with a keyboard to press it on, its keys;
+    /// `primary` wears the palette's selected fill, the row Enter would run there.
     fn begin_row(
         &self,
         id: &'static str,
@@ -849,34 +872,37 @@ impl WorkspaceView {
     ) -> gpui::Stateful<gpui::Div> {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let spacing = theme.spacing;
-        let ink = if primary { s.accent } else { s.text };
-        let icon_ink = if primary { s.accent } else { s.text_muted };
-        let row = div()
+        let icon_ink = if primary { s.text } else { s.text_muted };
+        let row = kit::row(theme, kit::Row::One)
             .id(id)
             .debug_selector(move || id.to_owned())
             .role(gpui::accesskit::Role::Button)
             .aria_label(label)
             .w_full()
-            .px(px(spacing.md))
-            .py(px(spacing.xs))
-            .flex()
-            .items_center()
-            .gap(px(spacing.sm))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .hover(|st| st.bg(hsla(s.raised)))
+            .when(primary, |el| el.bg(hsla(s.overlay)))
+            .when(!primary, |el| el.hover(|st| st.bg(hsla(s.raised))))
             .active(|st| st.bg(hsla(s.overlay)))
             .child(crate::palette::icon_slot(theme, icon, hsla(icon_ink)))
-            .child(div().flex_1().text_color(hsla(ink)).child(label))
+            .child(div().flex_1().text_color(hsla(s.text)).child(label))
             // A chord is only worth printing where there are keys to press it on.
-            .when(self.hardware_keyboard, |el| el.child(crate::kit::key_cap(theme, keys.to_owned())));
+            .when(self.hardware_keyboard, |el| {
+                el.child(
+                    div()
+                        .debug_selector(move || format!("{id}-keys"))
+                        .flex_none()
+                        .text_size(px(theme.typography.small()))
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(crate::palette::drawn_keys(keys))),
+                )
+            });
         crate::a11y::tab_stop(row, s.accent)
     }
 }
 
-/// How wide the empty workspace's column stands: room for the longest way to begin and its key
-/// cap, narrow enough to read as one block in the middle of the strip.
+/// How wide the empty workspace's column stands: room for the longest way to begin and its
+/// keys, narrow enough to read as one block in the middle of the strip.
 const EMPTY_W: f32 = 320.0;
 
 /// What the empty workspace says.

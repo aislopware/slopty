@@ -1,6 +1,7 @@
 //! The notices in the strip's bottom-right corner: another client's pointing, a closed tile to
-//! take back, a word to this client. Each is one line with an icon and at most one action;
-//! they stay [`SAY_FOR`] and no more than [`SHOWN`] are up at once.
+//! take back, a word to this client. Each is one line, marked with what it is about when it is
+//! about something, with at most one action; they stay [`SAY_FOR`] and no more than [`SHOWN`]
+//! are up at once. They stack over every other layer, dialogs included.
 
 use std::time::Duration;
 
@@ -157,7 +158,7 @@ impl WorkspaceView {
         self.show_toast(ToastKind::Said(format!("Pointed the others at {title}")), cx);
     }
 
-    /// One notice: an icon for what it is about, its line, and its one action. The action is
+    /// One notice: a mark for what it is about, its line, and its one action. The action is
     /// the only accent: a notice is not a primary action, only a way to one.
     fn render_one(&self, shown: &Shown, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
@@ -187,7 +188,7 @@ impl WorkspaceView {
                         this.dismiss_pointed(tile);
                         this.focus_tile(tile, cx);
                     }));
-                ("pointed", IconName::MousePointer2, Some(go))
+                ("pointed", Some(IconName::MousePointer2), Some(go))
             }
             ToastKind::Closed { seq, .. } => {
                 let seq = *seq;
@@ -199,13 +200,14 @@ impl WorkspaceView {
                     .map_or(IconName::X, |c| super::tile::kind_icon(&c.item, false));
                 let undo = action("toast-undo", "Undo")
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.take_back(Some(seq), cx)));
-                ("closed", icon, Some(undo))
+                ("closed", Some(icon), Some(undo))
             }
-            ToastKind::Said(_) => ("said", IconName::Info, None),
+            // A word needs no mark: an info glyph on every notice says nothing the line does not.
+            ToastKind::Said(_) => ("said", None, None),
         };
         let line = SharedString::from(line);
         Some(
-            div()
+            crate::kit::elevate(div(), theme)
                 .id(("toast", shown.seq))
                 .debug_selector(move || part.to_owned())
                 .role(Role::Status)
@@ -216,18 +218,16 @@ impl WorkspaceView {
                 .flex()
                 .items_center()
                 .gap(px(theme.spacing.sm))
-                .pl(px(theme.spacing.md))
-                .pr(px(if action.is_some() { theme.spacing.xs } else { theme.spacing.md }))
+                .pl(px(theme.spacing.inset()))
+                .pr(px(if action.is_some() { theme.spacing.xs } else { theme.spacing.inset() }))
                 .py(px(theme.spacing.xs))
                 .rounded(px(theme.radii.md))
-                .bg(hsla(s.panel))
-                .border_1()
-                .border_color(hsla(s.border))
-                .shadow_sm()
                 .text_color(hsla(s.text))
                 .text_size(px(theme.typography.small()))
                 .font_family(theme.typography.ui_family.clone())
-                .child(crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary)))
+                .children(icon.map(|icon| {
+                    crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary))
+                }))
                 .child(
                     div()
                         .flex_1()
@@ -269,18 +269,20 @@ impl WorkspaceView {
         )
         .absolute()
         .inset_0();
+        let stack = div()
+            .absolute()
+            .bottom(px(theme.spacing.lg))
+            .right(px(theme.spacing.lg))
+            .max_w(px(TOAST_MAX_W))
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(theme.spacing.sm))
+            .children(notices)
+            .child(measure);
         Some(
-            div()
-                .absolute()
-                .bottom(px(theme.spacing.lg))
-                .right(px(theme.spacing.lg))
-                .max_w(px(TOAST_MAX_W))
-                .flex()
-                .flex_col()
-                .items_end()
-                .gap(px(theme.spacing.sm))
-                .children(notices)
-                .child(measure)
+            gpui::deferred(stack)
+                .with_priority(crate::palette::Layer::Toast.priority())
                 .into_any_element(),
         )
     }

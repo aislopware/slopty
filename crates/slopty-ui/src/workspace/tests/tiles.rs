@@ -241,9 +241,9 @@ fn the_header_leads_with_one_slot_for_the_kind_or_the_status(cx: &mut TestAppCon
     assert!((f32::from(rest.left() - header.left()) - inset).abs() < 0.5, "on the inset");
     assert!(marks(cx).iter().all(|m| m != "Failed"), "at rest: the kind");
     view.update_in(cx, |v, _w, cx| {
-        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
-        let rows = [("$ false", prompt(None)), ("$ ", prompt(Some(1)))];
-        v.term_event(shell, marked_frame(1, &rows, 1), cx);
+        // The failed command's own rows are off screen: only the header can say it.
+        let rows = [("$ ", SemanticMark::Prompt { exit: Some(1), input: Some(2) })];
+        v.term_event(shell, marked_frame(1, &rows, 0), cx);
     });
     assert!(marks(cx).iter().any(|m| m == "Failed"), "the mark takes the slot");
     assert_eq!(slot_at(cx), rest, "in the same square");
@@ -280,7 +280,7 @@ fn a_tile_that_needs_you_has_a_warn_bar_on_its_header(cx: &mut TestAppContext) {
     assert_eq!(bar.top(), header.top(), "along the top");
     assert_eq!(bar.size.width, header.size.width);
     assert!((f32::from(bar.size.height) - 2.0).abs() < 0.01, "2 pt");
-    let warn = gpui::Background::from(crate::colors::hsla(Theme::default().surfaces.warn));
+    let warn = gpui::Background::from(crate::colors::hsla(Theme::default().surfaces.warn_fill));
     assert!(quads_at(cx, bar).iter().any(|q| q.background == warn));
     assert!(cx.debug_bounds(selector("attention", other.item)).is_none(), "only on that one");
     let tile = cx.debug_bounds(selector("item", waiting.item)).expect("drawn");
@@ -312,9 +312,9 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
             },
             cx,
         );
-        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
-        let rows = [("$ false", prompt(None)), ("$ ", prompt(Some(1)))];
-        v.term_event(shell, marked_frame(1, &rows, 1), cx);
+        // The failed command's own rows are off screen: only the header can say it.
+        let rows = [("$ ", SemanticMark::Prompt { exit: Some(1), input: Some(2) })];
+        v.term_event(shell, marked_frame(1, &rows, 0), cx);
     });
     let drawn = marks(cx);
     assert!(drawn.iter().any(|m| m == "Needs you"), "the agent waits: {drawn:?}");

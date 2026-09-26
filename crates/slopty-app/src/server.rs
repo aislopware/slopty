@@ -21,8 +21,8 @@ use slopty_ui::workspace::WorkerStatus;
 use crate::workers::{WorkerSlot, worker_key};
 use crate::{Workspace, net};
 
-/// The titlebar's line while the server does not answer.
-pub const UNREACHABLE: &str = "server unreachable";
+/// The status bar's word while the server does not answer.
+pub const UNREACHABLE: &str = "Server unreachable";
 
 /// A worker the server says is away is still dialled this often: the server's view of it can
 /// be wrong (its path to the worker broken while this client's works).

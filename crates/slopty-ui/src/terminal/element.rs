@@ -125,8 +125,8 @@ pub struct Prepared {
     link: Hsla,
     /// The scrollbar's thumb over the grid's right edge, while the bar shows.
     scrollbar: Option<(Bounds<Pixels>, Hsla)>,
-    /// The failed blocks' rows as `(top, height)` bands: washed edge to edge, a bar at the
-    /// left edge.
+    /// The failed blocks' rows as `(top, height)` bands: washed from the left edge to the
+    /// grid's last column, a bar at the left edge.
     failed: Vec<(Pixels, Pixels)>,
     /// The failed blocks' wash and bar colours, and the bar's width.
     failed_look: FailedLook,
@@ -302,11 +302,12 @@ pub fn separator_color(theme: &Theme) -> Hsla {
     hsla_alpha(theme.terminal.fg, alpha::FAINT)
 }
 
-/// How a block whose command failed is drawn, as Warp does it: a bar of the error tone down
-/// the block's left edge and a faint wash of it over the whole block.
+/// How a block whose command failed is drawn, as Warp does it: a bar of the error fill down
+/// the block's left edge and a faint wash of it over the block, from the element's left edge
+/// to where the block separators end, so the band never runs past its rules.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FailedLook {
-    /// Over the block's rows, edge to edge.
+    /// Over the block's rows, from the left edge to the grid's last column.
     pub wash: Hsla,
     /// Down the element's left edge, in the inset beside the text.
     pub bar: Hsla,
@@ -319,8 +320,8 @@ impl FailedLook {
     #[must_use]
     pub fn new(theme: &Theme, zoom: f32) -> Self {
         Self {
-            wash: hsla_alpha(theme.surfaces.error, alpha::FAINT),
-            bar: hsla(theme.surfaces.error),
+            wash: hsla_alpha(theme.surfaces.error_fill, alpha::FAINT),
+            bar: hsla(theme.surfaces.error_fill),
             bar_width: px(theme.spacing.xxs * zoom),
         }
     }
@@ -1485,11 +1486,14 @@ impl Element for TerminalElement {
                     CursorShape::BlockHollow
                 };
                 let width = cell_width * f32::from(span);
-                (
-                    Bounds::new(point(x, y), size(width, line_height)),
-                    shape,
-                    hsla(palette.theme.cursor),
-                )
+                // An unfocused pane's hollow block is a place marker, not the caret: muted, so
+                // a background terminal does not draw the eye.
+                let color = if focused {
+                    hsla(palette.theme.cursor)
+                } else {
+                    hsla(theme.surfaces.text_muted)
+                };
+                (Bounds::new(point(x, y), size(width, line_height)), shape, color)
             });
             // A block hides its cell's text: that text is drawn over it in the cursor-text
             // colour, as ghostty does.
@@ -1638,7 +1642,10 @@ impl Element for TerminalElement {
             }
             let inside = bounds.contains(&event.position);
             let near = inside && near_scrollbar(&m, event.position);
-            view.update(cx, |view, cx| view.pointer_near_scrollbar(near, cx));
+            view.update(cx, |view, cx| {
+                view.pointer_moved();
+                view.pointer_near_scrollbar(near, cx);
+            });
             // Over the grid the hovered block follows the pointer. Where something covers the
             // grid it holds, so the block's own facts and the sticky header over it keep it.
             if !inside {
@@ -1659,8 +1666,13 @@ impl Element for TerminalElement {
         });
         window.paint_quad(fill(bounds, prepared.background));
         let look = prepared.failed_look;
+        // As wide as the separators reach: the inset the bar sits in, then the grid's columns.
+        let grid_right = m.origin.x + m.cell_width * f32::from(m.cols);
         for &(top, height) in &prepared.failed {
-            let band = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height));
+            let band = Bounds::new(
+                point(bounds.origin.x, top),
+                size(grid_right - bounds.origin.x, height),
+            );
             window.paint_quad(fill(band, look.wash));
             window
                 .paint_quad(fill(Bounds::new(band.origin, size(look.bar_width, height)), look.bar));

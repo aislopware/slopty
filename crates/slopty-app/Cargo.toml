@@ -50,4 +50,5 @@ tracing.workspace = true
 gpui_ios = { workspace = true, optional = true }
 
 [dev-dependencies]
+gpui = { workspace = true, features = [ "test-support" ] }
 tempfile.workspace = true

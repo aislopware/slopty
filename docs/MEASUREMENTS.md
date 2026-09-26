@@ -5585,3 +5585,64 @@ tenfold more than the 1–1.6 ms a tier-0 timer saves. What the lateness costs, 
 the worker's 8 ms output pace (echoes are exempt), noq's 2 ms ACK delay and its pacer, and the
 2 ms echo copies. A timer that must fire on time asks for less and yields through the last
 stretch, as `slopty-shape`'s relay now does; none on the keystroke path has needed it.
+
+## 2026-09-27 — loading placeholders after a grace
+
+What a round trip to the worker takes, from the entries above: the control stream's app round
+trip is 0.34–0.50 ms on loopback, 0.46–0.63 ms on the LAN and 0.63–1.13 ms over the tailnet IP
+(2026-09-24, "plaintext QUIC on noq against iroh"); the shaped tailnet profile the e2e runs
+through (`harness::TAILNET`, 4 ms each way plus up to 2 ms of jitter) is 8–12 ms. A small
+file's read on the worker is well under a millisecond beside that. A stream's first frame is
+another matter: about 250 ms of capture start and encoder warm-up (2026-09-04, "screen stream
+end to end").
+
+`screen::LOADING_GRACE` is 32 ms, two 60 Hz frames: the frame the answer lands in, plus a
+round trip of up to one frame budget, which covers the shaped profile's worst 12 ms. A read
+or an attach that answers in time draws its content into a blank body; a stream always takes
+longer, so "Opening … on …" shows after 32 ms, with the header's working mark from the start.
+
+The same change touched the terminal's prepaint (an unfocused cursor's colour) and paint (the
+failed wash's width, one product a frame). `dense_screen_cost` after it, release, mac-studio,
+load average about 13, one run:
+
+| scenario | p50 / p95 µs |
+| --- | --- |
+| unchanged | 441 / 481 |
+| a line a frame | 483 / 581 |
+| a screen a frame | 1 695 / 3 385 |
+| every cell on a background, unchanged | 637 / 783 |
+
+Every p50 is at or under the previous entry's range for the same scenario, so nothing was
+added per frame that the bench can see.
+
+```sh
+cargo test -p slopty-ui --release --lib dense_screen_cost -- --ignored --nocapture
+```
+
+Log: `target/logs/b3-dense.log`.
+
+## 2026-09-27 — an echo's frame beside the chrome
+
+The navigator, the title bar and the status bar became cached views of their own
+(`docs/decisions/ui.md`, "The chrome is three cached views"). One worker with 60 shells (a
+directory, a branch and a start each) and 60 notes, the navigator docked; 400 frames after
+20 of warm-up, each either a notify of the last shell's terminal alone (an echo) or of the
+workspace itself. One test build (the `dev` profile) per arm, Mac Studio, load average 9–13,
+other sessions building throughout. The baseline is the tree just before the change.
+
+| run | echo p50 | echo p95 | workspace p50 | workspace p95 |
+| --- | --- | --- | --- | --- |
+| before 1 | 2.19 ms | 2.97 ms | 2.26 ms | 2.98 ms |
+| before 2 | 2.41 ms | 2.83 ms | 2.29 ms | 2.69 ms |
+| before 3 | 2.27 ms | 2.76 ms | 2.23 ms | 2.63 ms |
+| after 1 | 0.44 ms | 0.51 ms | 1.82 ms | 2.21 ms |
+| after 2 | 0.44 ms | 0.49 ms | 1.86 ms | 2.22 ms |
+| after 3 | 0.45 ms | 0.55 ms | 1.86 ms | 2.17 ms |
+
+An echo's frame no longer draws the chrome: it costs a fifth of what it did, about 1.8 ms
+less at p50 in a debug build. The workspace's own frame still draws all three; other wave-2
+edits landed in the tree between the runs, so its change is not this one's number.
+
+```sh
+cargo test -p slopty-ui --lib measure_an_echo_frame_beside_the_chrome -- --ignored --nocapture
+```

@@ -43,7 +43,7 @@ impl WorkspaceView {
         self.workers.iter().map(|(key, w)| {
             let health = super::navigator::worker_health(&w.status);
             let detail = match health {
-                Some((_, word)) => word.to_owned(),
+                Some((_, word)) => palette::sentence_case(word),
                 None => w.rtt.map(super::navigator::rtt_label).unwrap_or_default(),
             };
             PaletteItem::worker(&w.name, &detail, *key).with_status(health.map(|(mark, _)| mark))
@@ -51,9 +51,8 @@ impl WorkspaceView {
     }
 
     /// Every line the palette offers: the sessions to go to (agents waiting on the human
-    /// first), the file cards and named tiles, the workers, the last few commands of the shell
-    /// a "run" would go to, then every action, then the app's own. The palette groups them
-    /// into its sections.
+    /// first), every other tile, the workers, the last few commands of the shell a "run" would
+    /// go to, then every action, then the app's own. The palette groups them into its sections.
     #[must_use]
     pub fn palette_lines(&self, cx: &Context<Self>) -> Vec<PaletteItem> {
         let mut items: Vec<PaletteItem> = self
@@ -65,7 +64,7 @@ impl WorkspaceView {
                 } else {
                     crate::icons::IconName::SquareTerminal
                 };
-                PaletteItem::session(&row.title, &row.status.unwrap_or_default(), row.session)
+                PaletteItem::session(&row.title, row.session)
                     .with_icon(icon)
                     .with_status(row.mark)
                     .on_worker(row.worker)
@@ -73,26 +72,16 @@ impl WorkspaceView {
                     .aged(row.age)
             })
             .collect();
-        // Every file card, and every other tile the human named: a name is a wish to find it
-        // again.
+        // Every other tile, by the title its header shows, as the navigator lists them: a
+        // tile the palette cannot find is one the human has to hunt for by eye.
         for tile in self.reading_order() {
             let Some(item) = self.item(tile) else { continue };
-            let line = match &item.kind {
-                ItemKind::Terminal { .. } => None,
-                ItemKind::File { .. } => Some(PaletteItem::item(
-                    &self.card_title(tile, item, cx),
-                    "file",
-                    kind_icon(item, false),
-                    item.id,
-                )),
-                ItemKind::Window { .. }
-                | ItemKind::Display { .. }
-                | ItemKind::Note { .. }
-                | ItemKind::Browser { .. } => item.name.as_deref().map(|name| {
-                    PaletteItem::item(name, kind_name(item), kind_icon(item, false), item.id)
-                }),
-            };
-            items.extend(line.map(|line| line.on_worker(self.worker_label(tile.worker))));
+            if matches!(item.kind, ItemKind::Terminal { .. }) {
+                continue;
+            }
+            let title = self.card_title(tile, item, cx);
+            let line = PaletteItem::item(&title, kind_name(item), kind_icon(item, false), item.id);
+            items.push(line.on_worker(self.worker_label(tile.worker)));
         }
         items.extend(self.worker_lines());
         // The shell a "run" would go to: its last few commands, to run again.
@@ -117,7 +106,11 @@ impl WorkspaceView {
         }
         let items = self.palette_lines(cx);
         let theme = self.theme.clone();
-        let palette = cx.new(|cx| CommandPalette::new(items, theme, window, cx));
+        let palette = cx.new(|cx| {
+            let mut p = CommandPalette::new(items, theme, window, cx);
+            p.set_brief(true);
+            p
+        });
         self.show_palette(palette, window, cx);
     }
 
@@ -158,6 +151,7 @@ impl WorkspaceView {
         let seed = self.active_cwd().map_or_else(|| "~/".to_owned(), |cwd| format!("{cwd}/"));
         let palette = cx.new(|cx| {
             let mut p = CommandPalette::new(items, theme, window, cx);
+            p.set_brief(true);
             p.seed(&seed, window, cx);
             p
         });
@@ -217,8 +211,15 @@ impl WorkspaceView {
     ) {
         self.palette_return = window.focused(cx);
         self.menu = None;
+        // The palette is where the human went next: a drawer or an overlaid navigator over the
+        // strip would only sit between it and what it goes to.
+        self.nav.open = false;
         let chords = self.hardware_keyboard;
-        palette.update(cx, |p, _| p.set_chords(chords));
+        let phone_below = self.layout.config().phone_below;
+        palette.update(cx, |p, _| {
+            p.set_chords(chords);
+            p.set_sheet_below(phone_below);
+        });
         cx.subscribe(&palette, |this, _palette, event, cx| {
             if let PaletteEvent::Changed(text) = event {
                 if this.find_needle.is_some() {
@@ -479,9 +480,7 @@ impl WorkspaceView {
     /// first, then other agents, then plain shells; ties in reading order.
     pub(super) fn session_rows(&self, cx: &Context<Self>) -> Vec<SessionRow> {
         // Wall clock, as the worker stamped the start: the summary may be relayed long after.
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let now_ms = super::inbox::wall_ms();
         let session_age = |started_ms: u64| {
             (started_ms > 0)
                 .then(|| std::time::Duration::from_millis(now_ms.saturating_sub(started_ms)))

@@ -14,7 +14,7 @@ use slopty_settings::{
     Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Loaded, OptionAsAlt, Settings,
     SettingsError,
 };
-use slopty_theme::{Rgb, TerminalPalette, Theme, Variant};
+use slopty_theme::{Density, Rgb, TerminalPalette, Theme, Variant};
 
 /// GPUI actions.
 pub mod actions {
@@ -84,6 +84,12 @@ pub const fn is_dark(appearance: WindowAppearance) -> bool {
     matches!(appearance, WindowAppearance::Dark | WindowAppearance::VibrantDark)
 }
 
+/// The chrome's density: a finger's 44 pt targets, or a pointer's compact rows.
+#[must_use]
+pub const fn density(touch: bool) -> Density {
+    if touch { Density::TOUCH } else { Density::COMPACT }
+}
+
 /// The theme `settings` asks for, given whether the window is dark (used by `system`).
 #[must_use]
 pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
@@ -108,6 +114,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
     colour_the_terminal(&mut theme.terminal, &settings.colors);
     theme.derive_chrome();
+    theme.density = density(crate::TOUCH);
     theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
     theme.behaviour.cursor_style = match settings.terminal.cursor_style {
         CursorStyle::Program => slopty_theme::CursorStyle::Program,
@@ -444,5 +451,15 @@ mod tests {
         assert_ne!(one, Stamp::of(&path));
         std::fs::remove_file(&path).unwrap();
         assert_eq!(Stamp::of(&path), missing);
+    }
+
+    /// A finger gets 44 pt targets and a pointer the compact rows; the Mac is always compact,
+    /// and the touch build only once the chrome follows the density.
+    #[test]
+    fn a_finger_gets_the_touch_density() {
+        assert_eq!(density(true), Density::TOUCH);
+        assert_eq!(density(false), Density::COMPACT);
+        assert_eq!(theme_for(&Settings::default(), true).density, density(crate::TOUCH));
+        assert_eq!(theme_for(&Settings::default(), false).density, density(crate::TOUCH));
     }
 }

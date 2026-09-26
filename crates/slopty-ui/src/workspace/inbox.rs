@@ -4,9 +4,10 @@
 //! Two views. *Unread* lists the agents waiting (*Needs you*) and the long commands that ended
 //! unwatched and are still badged on their headers (*Finished*); *All* keeps every command the
 //! inbox ever took, newest first, read or not. A row is two lines: the command or the agent's
-//! words, then its worker and directory. On the right an age, which swaps for a mark-read
-//! button under the pointer. Reading is the header's badge going: a row marked read, "Mark all
-//! read", or its tile looked at. The history holds the last [`LOG_MAX`] commands.
+//! words with its status word on the right, then its worker and directory with its age on the
+//! right, which swaps for a mark-read button under the pointer. Reading is the header's badge
+//! going: a row marked read, "Mark all read", or its tile looked at. The history holds the
+//! last [`LOG_MAX`] commands.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -26,8 +27,8 @@ use super::{Finished, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize, Status, icon, status_mark};
-use crate::kit::tabular;
-use crate::palette::{age_label, mono_family, section_heading};
+use crate::kit::{meta, tabular};
+use crate::palette::{age_label, mono_family, quiet_line, section_heading};
 
 /// The popover's width, in points.
 const INBOX_W: f32 = 360.0;
@@ -40,6 +41,10 @@ pub(super) const LOG_MAX: usize = 200;
 
 /// What the empty inbox says.
 pub(super) const ALL_CAUGHT_UP: &str = "You're all caught up";
+
+/// What an inbox that has never held anything adds: what lands in it.
+pub(super) const INBOX_HOLDS: &str =
+    "Agents that need you and long commands that finish while you look away land here.";
 
 /// The button that reads every unread row.
 pub(super) const MARK_ALL_READ: &str = "Mark all read";
@@ -71,7 +76,9 @@ struct Row {
     status: Status,
     /// The first line: the command or the agent's words.
     what: String,
-    /// The second line's words before the directory: the outcome, the worker.
+    /// The first line's right edge, in the status's tone: "Needs you", "Done", "Exit 1".
+    word: String,
+    /// The second line's words before the directory: how long it took, the tile, the worker.
     meta: String,
     cwd: Option<String>,
     age: Option<Duration>,
@@ -85,6 +92,13 @@ struct Row {
 enum Go {
     Waiting(super::agents::Waiting),
     Session(SessionId),
+}
+
+/// Now, in milliseconds since the Unix epoch: the clock a worker stamps its times with.
+pub(super) fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 impl WorkspaceView {
@@ -153,9 +167,9 @@ impl WorkspaceView {
 
     fn finished_row(&self, logged: &Logged, unread: bool, now: Instant) -> Row {
         let done = &logged.done;
-        let status = match done.exit {
-            Some(0) | None => Status::Done,
-            Some(_) => Status::Failed,
+        let (status, word) = match done.exit {
+            Some(0) | None => (Status::Done, Status::Done.label().to_owned()),
+            Some(code) => (Status::Failed, format!("Exit {code}")),
         };
         let command = done.command.lines().next().unwrap_or_default().trim();
         let what = if command.is_empty() { "Command".to_owned() } else { command.to_owned() };
@@ -174,7 +188,8 @@ impl WorkspaceView {
             id,
             status,
             what,
-            meta: join(&[&done.label(), worker]),
+            word,
+            meta: join(&[&crate::terminal::took_label(done.elapsed), worker]),
             cwd: logged.cwd.as_deref().map(super::tile::cwd_tail),
             age: Some(now.saturating_duration_since(logged.at)),
             unread,
@@ -182,23 +197,34 @@ impl WorkspaceView {
         }
     }
 
-    /// An agent waiting on the human: its words first, then its tile, worker and directory.
-    fn waiting_inbox_row(&self, waiting: super::agents::Waiting, cx: &gpui::App) -> Row {
+    /// An agent waiting on the human: its words first, then its tile, worker and directory,
+    /// and how long it has waited, from the worker's stamp so a reconnect keeps it.
+    fn waiting_inbox_row(
+        &self,
+        waiting: super::agents::Waiting,
+        now_ms: u64,
+        cx: &gpui::App,
+    ) -> Row {
         let session = waiting.session;
-        let what = self
-            .agent_state(session)
+        let agent = self.agent_state(session);
+        let what = agent
             .map(agent_status_text)
             .filter(|w| !w.is_empty())
-            .unwrap_or_else(|| "Needs you".to_owned());
+            .unwrap_or_else(|| Status::NeedsYou.label().to_owned());
         let title = waiting.tile.and_then(|t| Some(self.card_title(t, self.item(t)?, cx)));
         let worker = self.workers.get(&waiting.worker).map(|w| w.name.as_str()).unwrap_or_default();
+        let age = agent
+            .map(|a| a.since_ms)
+            .filter(|since| *since > 0)
+            .map(|since| Duration::from_millis(now_ms.saturating_sub(since)));
         Row {
             id: format!("inbox-waiting-{session}"),
             status: Status::NeedsYou,
             what,
+            word: Status::NeedsYou.label().to_owned(),
             meta: join(&[title.as_deref().unwrap_or_default(), worker]),
             cwd: self.summary(session).and_then(|s| s.cwd.as_deref()).map(super::tile::cwd_tail),
-            age: None,
+            age,
             unread: true,
             go: Go::Waiting(waiting),
         }
@@ -212,10 +238,10 @@ impl WorkspaceView {
 
     fn inbox_panel(&self, cx: &Context<Self>) -> gpui::Stateful<Div> {
         let theme = &self.theme;
-        let s = &theme.surfaces;
         let all = self.inbox.all;
+        let now_ms = wall_ms();
         let waiting: Vec<Row> =
-            self.drawn_waiting.iter().map(|w| self.waiting_inbox_row(*w, cx)).collect();
+            self.drawn_waiting.iter().map(|w| self.waiting_inbox_row(*w, now_ms, cx)).collect();
         let finished = self.finished_rows(all);
         let mut list: Vec<gpui::AnyElement> = Vec::new();
         if !waiting.is_empty() {
@@ -226,21 +252,27 @@ impl WorkspaceView {
             list.push(section(theme, "inbox-finished", "Finished").into_any_element());
             list.extend(finished.into_iter().map(|row| self.inbox_row(row, cx)));
         }
-        let empty = list.is_empty();
-        div()
+        let empty = list.is_empty().then(|| {
+            // Unread emptied by reading is a quiet line; an inbox that has never held anything
+            // says what it is for.
+            if self.inbox.log.is_empty() {
+                never_held(theme).into_any_element()
+            } else {
+                quiet_line(theme, "inbox-empty", ALL_CAUGHT_UP).into_any_element()
+            }
+        });
+        crate::kit::elevate(div(), theme)
             .id("inbox")
             .debug_selector(|| "inbox".to_owned())
             .role(Role::Dialog)
             .aria_label("Inbox")
             .occlude()
+            // A gap below the title bar's hairline, so the popover reads as lifted off it.
+            .mt(px(theme.spacing.xs))
             .w(px(INBOX_W))
             .flex()
             .flex_col()
             .rounded(px(theme.radii.md))
-            .bg(hsla(s.panel))
-            .border_1()
-            .border_color(hsla(s.border))
-            .shadow_sm()
             .overflow_hidden()
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
@@ -255,15 +287,17 @@ impl WorkspaceView {
                     .overflow_y_scroll()
                     .pb(px(theme.spacing.xs))
                     .children(list)
-                    .when(empty, |el| el.child(caught_up(theme))),
+                    .children(empty),
             )
     }
 
-    /// The head: the Unread and All views, and "Mark all read" while anything is unread.
+    /// The head: the Unread and All views, and "Mark all read" while anything is unread. Their
+    /// words sit on the edge grid; their fills a base unit in, as the rows' do.
     fn inbox_head(&self, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
+        let pad = spacing.inset() - spacing.xs;
         let all = self.inbox.all;
         let unread = self.inbox_count();
         let tab = |id: &'static str, label: &'static str, on: bool, count: Option<usize>| {
@@ -275,7 +309,7 @@ impl WorkspaceView {
                 .flex()
                 .items_center()
                 .gap(px(spacing.xs))
-                .px(px(spacing.sm))
+                .px(px(pad))
                 .py(px(spacing.xxs))
                 .rounded(px(theme.radii.sm))
                 .cursor_pointer()
@@ -299,7 +333,7 @@ impl WorkspaceView {
                 .role(Role::Button)
                 .aria_label(MARK_ALL_READ)
                 .flex_none()
-                .px(px(spacing.xs))
+                .px(px(pad))
                 .py(px(spacing.xxs))
                 .rounded(px(theme.radii.sm))
                 .cursor_pointer()
@@ -314,7 +348,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(spacing.xxs))
-            .px(px(spacing.sm))
+            .px(px(spacing.xs))
             .py(px(spacing.xs))
             .border_b_1()
             .border_color(hsla(s.border_subtle))
@@ -330,19 +364,23 @@ impl WorkspaceView {
             .children(mark_all)
     }
 
-    /// One two-line row: the status slot, the words and the age over the worker and the
-    /// directory. Clicked, it goes there and the inbox closes.
+    /// One two-line row: the status mark, then the words over the worker and the directory,
+    /// with the status word and the age down the right edge. Clicked, it goes there and the
+    /// inbox closes.
     fn inbox_row(&self, row: Row, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
+        let pad = spacing.inset() - spacing.xs;
         let group = SharedString::from(row.id.clone());
         let label = SharedString::from(join(&[
             &row.what,
+            &row.word,
             &row.meta,
             row.cwd.as_deref().unwrap_or_default(),
         ]));
         let ink = if row.unread { s.text } else { s.text_secondary };
+        let tone = if row.unread { row.status.tone(theme) } else { s.text_muted };
         let mark = status_mark(theme, Some(row.status), 1.0)
             .when(!row.unread, |el| el.opacity(alpha::STRONG));
         let unread_session = match row.go {
@@ -358,8 +396,8 @@ impl WorkspaceView {
                 .role(Role::Button)
                 .aria_label("Mark read")
                 .absolute()
-                .top_0()
-                .right_0()
+                .right(px(pad))
+                .bottom(px(spacing.xs))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -376,48 +414,79 @@ impl WorkspaceView {
             }))
         });
         let has_read = mark_read.is_some();
+        let (word_id, age_id) = (format!("{}-word", row.id), format!("{}-age", row.id));
         let age = row.age.map(|age| {
-            tabular(
-                div()
-                    .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .when(has_read, |el| el.group_hover(group.clone(), gpui::Styled::invisible)),
-            )
-            .child(SharedString::from(age_label(age)))
+            tabular(div())
+                .debug_selector(move || age_id)
+                .flex_none()
+                .when(has_read, |el| el.group_hover(group.clone(), gpui::Styled::invisible))
+                .child(SharedString::from(age_label(age)))
         });
         let go = row.go;
-        let second = div()
+        let first = div()
             .flex()
             .items_center()
             .min_w_0()
-            .gap(px(spacing.xs))
-            .text_size(px(theme.typography.small()))
-            .text_color(hsla(s.text_muted))
+            .gap(px(spacing.sm))
             .child(
-                div().flex_none().whitespace_nowrap().child(SharedString::from(row.meta.clone())),
-            )
-            .when(!row.meta.is_empty() && row.cwd.is_some(), |el| el.child("·"))
-            .children(row.cwd.map(|cwd| {
                 div()
+                    .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .font_family(mono_family(theme))
-                    .child(SharedString::from(cwd))
-            }));
+                    .text_color(hsla(ink))
+                    .child(SharedString::from(row.what)),
+            )
+            .child(
+                meta(div(), theme)
+                    .debug_selector(move || word_id)
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_color(hsla(tone))
+                    .child(SharedString::from(row.word)),
+            );
+        let second = meta(div(), theme)
+            .flex()
+            .items_center()
+            .min_w_0()
+            .gap(px(spacing.sm))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(spacing.xs))
+                    .child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(row.meta.clone())),
+                    )
+                    .when(!row.meta.is_empty() && row.cwd.is_some(), |el| el.child("·"))
+                    .children(row.cwd.map(|cwd| {
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .font_family(mono_family(theme))
+                            .child(SharedString::from(cwd))
+                    })),
+            )
+            .children(age);
         let el = div()
             .id(ElementId::Name(row.id.clone().into()))
-            .debug_selector({
-                let id = row.id.clone();
-                move || id
-            })
+            .debug_selector(move || row.id)
             .group(group)
             .role(Role::Button)
             .aria_label(label)
+            .relative()
             .flex_none()
+            // The fill a base unit in from the popover's edges; the mark on the edge grid.
             .mx(px(spacing.xs))
-            .px(px(spacing.xs))
+            .px(px(pad))
             .py(px(spacing.xs))
             .flex()
             .items_start()
@@ -433,29 +502,10 @@ impl WorkspaceView {
                     .flex()
                     .flex_col()
                     .gap(px(spacing.xxs))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(hsla(ink))
-                            .child(SharedString::from(row.what)),
-                    )
+                    .child(first)
                     .child(second),
             )
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .min_w(px(theme.typography.icon_large()))
-                    .h(px(theme.typography.icon_large()))
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .children(age)
-                    .children(mark_read),
-            );
+            .children(mark_read);
         tab_stop(el, s.accent)
             .on_click(cx.listener(move |this, _ev, _w, cx| {
                 this.menu = None;
@@ -478,22 +528,20 @@ fn section(theme: &Theme, selector: &'static str, text: &'static str) -> gpui::S
     section_heading(theme, selector.into(), text).debug_selector(move || selector.to_owned())
 }
 
-/// The empty inbox: a mark and one line.
-fn caught_up(theme: &Theme) -> gpui::Stateful<Div> {
+/// An inbox that has never held anything: the line, and what lands here, on the edge grid.
+fn never_held(theme: &Theme) -> gpui::Stateful<Div> {
     let s = &theme.surfaces;
-    div()
+    crate::kit::inset_x(div(), theme)
         .id("inbox-empty")
         .debug_selector(|| "inbox-empty".to_owned())
         .role(Role::Status)
         .aria_label(ALL_CAUGHT_UP)
         .flex()
         .flex_col()
-        .items_center()
-        .gap(px(theme.spacing.sm))
-        .py(px(theme.spacing.xl))
-        .text_color(hsla(s.text_muted))
-        .child(icon(theme, IconName::Inbox, IconSize::Large, hsla(s.text_muted)))
-        .child(ALL_CAUGHT_UP)
+        .gap(px(theme.spacing.xxs))
+        .py(px(theme.spacing.md))
+        .child(div().text_color(hsla(s.text_secondary)).child(ALL_CAUGHT_UP))
+        .child(meta(div(), theme).debug_selector(|| "inbox-holds".to_owned()).child(INBOX_HOLDS))
 }
 
 #[cfg(test)]
@@ -504,5 +552,28 @@ mod tests {
     fn a_line_joins_what_it_has() {
         assert_eq!(join(&["Done · 3.2 s", "studio"]), "Done · 3.2 s · studio");
         assert_eq!(join(&["", "studio", ""]), "studio");
+    }
+
+    /// The inbox's words and the status words down its right edge are chrome, so sentence
+    /// case, as `kit`'s `chrome_text_is_sentence_case` holds everywhere else.
+    #[test]
+    fn the_inbox_words_are_sentence_case() {
+        use crate::icons::Status;
+        let statuses = [
+            Status::Idle,
+            Status::Working,
+            Status::NeedsYou,
+            Status::Done,
+            Status::Failed,
+            Status::Away,
+        ];
+        let words = [ALL_CAUGHT_UP, INBOX_HOLDS, MARK_ALL_READ]
+            .into_iter()
+            .chain(statuses.map(Status::label));
+        for text in words {
+            let mut chars = text.chars();
+            assert!(chars.next().is_some_and(char::is_uppercase), "starts lowercase: {text:?}");
+            assert!(!chars.any(char::is_uppercase), "title case: {text:?}");
+        }
     }
 }

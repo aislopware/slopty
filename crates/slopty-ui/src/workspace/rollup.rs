@@ -1,8 +1,8 @@
 //! What a group of tiles adds up to where their own rows are out of sight: a folded worker in
-//! the navigator, a workspace's tab in the title bar. One mark in one fixed slot, the most
-//! urgent first: the warn mark and how many wait on the human, else the working mark, else
-//! the unseen dot. The slot keeps its width whether it holds a mark or nothing, so what sits
-//! beside it never moves.
+//! the navigator or on the rail, a workspace's tab in the title bar. One quiet mark, the most
+//! urgent first: a warn dot (and in the navigator how many wait on the human), else the
+//! working mark, else the unseen dot. The navigator's slot keeps its width whether it holds a
+//! mark or nothing, so what sits beside it never moves.
 //!
 //! Also the navigator's second line: the words it is made of and when its age starts.
 
@@ -16,7 +16,7 @@ use gpui::{
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
-use crate::icons::{Status, status_mark};
+use crate::icons::{Status, status_icon};
 
 /// What a group of tiles adds up to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -67,7 +67,7 @@ impl Rollup {
 /// What a rollup's slot shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Shown {
-    /// The warn mark, and the count beside it past one.
+    /// The warn dot, and the count beside it past one.
     NeedsYou(usize),
     /// The working mark.
     Working,
@@ -80,51 +80,48 @@ pub(super) fn slot_width(theme: &Theme) -> f32 {
     theme.typography.icon_large() + theme.spacing.md
 }
 
-/// The rollup's slot, `selector` naming it for tests, its content on its right edge.
-pub(super) fn rollup_slot(theme: &Theme, selector: String, rollup: Rollup) -> Div {
+/// A rollup's dot: 6 pt of a status fill, named for a screen reader. A group's summary is the
+/// quiet echo of its rows, never a second loud mark for the same event.
+fn dot(theme: &Theme, fill: slopty_theme::Rgb, label: &'static str) -> gpui::Stateful<Div> {
+    div()
+        .id("rollup-dot")
+        .role(Role::Image)
+        .aria_label(label)
+        .flex_none()
+        .size(px(theme.spacing.xs + theme.spacing.xxs))
+        .rounded_full()
+        .bg(hsla(fill))
+}
+
+/// The rollup's slot, `selector` naming it for tests, its content on its right edge. It keeps
+/// its width whether it holds a mark or nothing, so what sits beside it never moves. The
+/// `compact` slot (a workspace's tab, a worker on the rail) is a mark wide and leaves the count
+/// to the bell; the navigator's has room for the count.
+pub(super) fn rollup_slot(theme: &Theme, selector: String, rollup: Rollup, compact: bool) -> Div {
     let s = &theme.surfaces;
-    let shown = rollup.shown();
     let slot = div()
         .flex_none()
-        .w(px(slot_width(theme)))
+        .w(px(if compact { theme.typography.meta() } else { slot_width(theme) }))
         .flex()
         .items_center()
         .justify_end()
-        .gap(px(theme.spacing.xxs));
+        .gap(px(theme.spacing.xs));
+    let Some(shown) = rollup.shown() else { return slot };
+    let slot = slot.debug_selector(move || selector);
     match shown {
-        None => slot,
-        Some(Shown::NeedsYou(n)) => slot
-            .debug_selector(move || selector)
-            .children((n > 1).then(|| {
-                crate::kit::tabular(div())
+        Shown::NeedsYou(n) => slot
+            .children((n > 1 && !compact).then(|| {
+                crate::kit::tabular(crate::kit::meta(div(), theme))
                     .flex_none()
-                    .text_size(px(theme.typography.caption()))
-                    .text_color(hsla(s.warn))
                     .child(SharedString::from(n.to_string()))
             }))
-            .child(status_mark(theme, Some(Status::NeedsYou), 1.0)),
-        Some(Shown::Working) => slot.debug_selector(move || selector).child(status_mark(
-            theme,
-            Some(Status::Working),
-            1.0,
-        )),
-        Some(Shown::Unseen) => slot.debug_selector(move || selector).child(
-            div()
-                .flex_none()
-                .size(px(theme.typography.icon_large()))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .id("unseen")
-                        .role(Role::Image)
-                        .aria_label("Unseen")
-                        .size(px(theme.spacing.xs + theme.spacing.xxs))
-                        .rounded_full()
-                        .bg(hsla(s.accent)),
-                ),
+            .child(dot(theme, s.warn_fill, Status::NeedsYou.label())),
+        Shown::Working => slot.child(
+            div().id("rollup-working").role(Role::Image).aria_label(Status::Working.label()).child(
+                status_icon(theme, Status::Working, px(theme.typography.meta()), hsla(s.accent)),
+            ),
         ),
+        Shown::Unseen => slot.child(dot(theme, s.accent_fill, "Unseen")),
     }
 }
 

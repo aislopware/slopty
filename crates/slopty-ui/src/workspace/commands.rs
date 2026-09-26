@@ -235,7 +235,7 @@ impl WorkspaceView {
                 continue;
             }
             let (native_w, native_h) = view.size();
-            let header = super::tile::HEADER_H;
+            let header = self.theme.density.header;
             let scale = |native: u32, from: f32, to: f32| {
                 #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
                 let per_point = native as f32 / (from.max(1.0));

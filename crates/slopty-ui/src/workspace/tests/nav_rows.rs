@@ -70,13 +70,14 @@ fn the_filter_keeps_the_rows_that_match(cx: &mut TestAppContext) {
     assert_eq!(focused(&view, cx), Some(site), "↩ goes to the first tile listed");
 }
 
-/// A shell's row reads two lines: its title, then its directory, what its agent says, its
-/// branch and its age from the session's start. The second line sits under the title, and the
-/// age ends on the row's right.
+/// A shell's row reads two lines: its title, ended by its age from the session's start, then
+/// its directory, what its agent says and its branch. Once the agent waits on the human, the
+/// state takes the age's place in a word, and the row is washed.
 #[gpui::test]
-fn a_tile_row_reads_its_place_its_words_its_branch_and_its_age(cx: &mut TestAppContext) {
+fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
+    let other = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let session = SessionId::new();
     let started =
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis().saturating_sub(300_000);
@@ -96,20 +97,9 @@ fn a_tile_row_reads_its_place_its_words_its_branch_and_its_age(cx: &mut TestAppC
         };
         v.session_opened(key, summary, cx);
         let by = studio.me;
-        v.apply_sync(key, ItemSync::Delta { version: 1, by, op: ItemOp::Upsert(item) }, cx);
-        v.agent_event(blocked(session), cx);
+        v.apply_sync(key, ItemSync::Delta { version: 2, by, op: ItemOp::Upsert(item) }, cx);
     });
     cx.run_until_parked();
-    let words = agent_status_text(&blocked(session));
-    let lines = view.read_with(cx, WorkspaceView::navigator_lines);
-    assert_eq!(
-        lines,
-        [(
-            "shell".to_owned(),
-            format!("oss/slopty \u{2022} {words} \u{2022} main"),
-            Some("5m".into())
-        )]
-    );
     let id = tile.item.as_uuid();
     let (row, meta, age) = (
         cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row"),
@@ -117,8 +107,54 @@ fn a_tile_row_reads_its_place_its_words_its_branch_and_its_age(cx: &mut TestAppC
         cx.debug_bounds(leak(format!("nav-age-{id}"))).expect("the age"),
     );
     assert!(meta.top() > row.top() + (row.size.height / 3.0), "under the title: {meta:?} {row:?}");
-    assert!(age.right() <= row.right(), "{age:?} {row:?}");
-    assert!(meta.right() <= age.left(), "the age after the line: {age:?} {meta:?}");
+    assert!(age.bottom() <= meta.top(), "the age ends the first line: {age:?} {meta:?}");
+    assert!(age.right() <= row.right() && age.left() > row.center().x, "{age:?} {row:?}");
+
+    // Focus the other shell, so the waiting one's row is not the selected one.
+    click(cx, selector("nav-tile", other.item));
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
+    cx.run_until_parked();
+    let words = agent_status_text(&blocked(session));
+    let lines = view.read_with(cx, WorkspaceView::navigator_lines);
+    assert!(
+        lines.contains(&(
+            "shell".to_owned(),
+            format!("oss/slopty \u{2022} {words} \u{2022} main"),
+            Some("5m".into())
+        )),
+        "{lines:#?}"
+    );
+    assert!(cx.debug_bounds(leak(format!("nav-age-{id}"))).is_none(), "the state takes its place");
+    let word = cx.debug_bounds(leak(format!("nav-status-{id}"))).expect("the state's word");
+    let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
+    assert!(word.bottom() <= meta.top() + px(0.5), "on the first line: {word:?} {meta:?}");
+    assert!(word.right() <= row.right(), "{word:?} {row:?}");
+    let wash = gpui::Background::from(crate::colors::hsla_alpha(
+        Theme::default().surfaces.warn_fill,
+        slopty_theme::alpha::FAINT,
+    ));
+    let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row");
+    let washed = cx.update(|window, _| {
+        let scale = window.scale_factor();
+        let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
+        window.painted_quads().into_iter().any(|q| {
+            q.background == wash
+                && near(q.bounds.origin.y.0, row.origin.y)
+                && near(q.bounds.size.height.0, row.size.height)
+        })
+    });
+    assert!(washed, "a row waiting on the human is washed");
+}
+
+/// A note's row says how far its tasks got, not that it is a note.
+#[gpui::test]
+fn a_note_row_says_its_progress(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let text = "# Release\n- [x] tag\n- [ ] notes\n- [ ] ship\n".to_owned();
+    let _note = arrives(&view, cx, &studio, ItemKind::Note { text }, 1);
+    let lines = view.read_with(cx, WorkspaceView::navigator_lines);
+    assert!(lines.iter().any(|(_, meta, _)| meta == "1 of 3 done"), "{lines:#?}");
 }
 
 /// Folded, a worker's header shows what its tiles add up to in its slot: the warn mark while

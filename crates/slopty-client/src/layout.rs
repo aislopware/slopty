@@ -1023,6 +1023,11 @@ impl Workspace {
 
     /// The offset that shows column `idx`: niri's fit. A lone column fills the working width,
     /// so it rests flush with both edges.
+    ///
+    /// Unlike niri, the view never rests past the last column: where the fit would leave bare
+    /// canvas right of it (a column closed at the end, a window made wider), the view comes
+    /// back until the last column ends on the working area's right edge, or the first starts
+    /// on its left when every column fits.
     fn fit_offset(&self, g: &Geom, target_x: Option<f32>, idx: usize) -> f32 {
         let g = &self.geom(g);
         let Some(col) = self.columns.get(idx) else { return 0.0 };
@@ -1030,12 +1035,37 @@ impl Workspace {
             return 0.0;
         }
         let x = target_x.unwrap_or_else(|| self.target_view_pos(g));
-        compute_new_view_offset(
-            x + g.working_x(),
-            g.working_w(),
-            self.column_x(idx, g),
-            col.resolved_width(g),
-        ) - g.working_x()
+        let col_x = self.column_x(idx, g);
+        let offset =
+            compute_new_view_offset(x + g.working_x(), g.working_w(), col_x, col.resolved_width(g))
+                - g.working_x();
+        let strip_w = self.column_x(self.columns.len(), g);
+        let last_view_x = (strip_w - g.working_w()).max(0.0) - g.working_x();
+        offset.min(last_view_x - col_x)
+    }
+
+    /// Column `column` back to the width a column opens at: the double-click on its divider.
+    fn reset_width(&mut self, ctx: &Ctx, column: usize) -> bool {
+        let g = self.geom(&ctx.g);
+        let Some(col) = self.columns.get_mut(column) else { return false };
+        if col.fullscreen {
+            return false;
+        }
+        let old = col.resolved_width(&g);
+        col.width = ctx.new_width;
+        col.preset = match ctx.new_width {
+            ColumnWidth::Proportion(p) => ctx.presets.iter().position(|q| (q - p).abs() < 1e-4),
+            ColumnWidth::Fixed(_) => None,
+        };
+        col.full_width = false;
+        let new = col.resolved_width(&g);
+        self.resize = None;
+        // The camera holds still over the focused column, as a drag of the same divider does.
+        if column < self.active {
+            self.view.offset(-(new - old));
+        }
+        self.animate_view_to_column(ctx, None, self.active);
+        true
     }
 
     fn centred_offset(&self, g: &Geom, idx: usize) -> f32 {
@@ -1193,10 +1223,9 @@ impl Workspace {
         } else {
             self.activate_column(ctx, self.active.min(last));
         }
-        if last == 0 {
-            // Alone now, it fills the width: the view comes to rest on it wherever it was.
-            self.animate_view_to_column(ctx, None, 0);
-        }
+        // Alone now, a column fills the width and the view comes to rest on it wherever it
+        // was; with the last column gone, the view comes back from the canvas it left bare.
+        self.animate_view_to_column(ctx, None, self.active);
         Some(column)
     }
 
@@ -2995,6 +3024,13 @@ impl Layout {
         if let Some(ws) = self.workspaces.get_mut(self.active) {
             ws.resize_end(&ctx);
         }
+    }
+
+    /// Column `column` of the active workspace back to the width a new column opens at (the
+    /// divider right of it double-clicked). `false` for no such column, or a fullscreen one.
+    pub fn reset_column_width(&mut self, column: usize) -> bool {
+        let ctx = self.ctx();
+        self.workspaces.get_mut(self.active).is_some_and(|ws| ws.reset_width(&ctx, column))
     }
 
     // ----- rendering -------------------------------------------------------------------------

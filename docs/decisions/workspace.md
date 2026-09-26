@@ -324,3 +324,27 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     column kept its size. That is a resize per first split, not per frame.
   - Tests: client `a_lone_column_fills_the_width_and_keeps_its_own_for_a_neighbour`, and the
     width tests read the stored width (`stored_width_of`) where their column is alone.
+
+- ✅ **The view never rests past the last column** (2026-09-27, UI wave 2). niri lets the view
+  rest where the last fit left it, so closing the last column, or widening the window, left
+  bare canvas right of the strip (a 150 pt void beside the note golden). `fit_offset` now
+  clamps: the view comes back until the last column ends on the working area's right edge,
+  or the first starts on its left when every column fits. Closing any column re-fits the view
+  on the active one, not only when one column is left.
+  Test: client `the_view_never_rests_past_the_last_column`.
+
+- ✅ **A double-click on a column's divider resets its width** (2026-09-27, UI wave 2, the
+  study's column sash). The handle round the 1 pt divider is 12 pt, up from 6, so a pointer
+  finds it without hunting. A double-click puts the column on its left back at the width a
+  column opens at (`LayoutConfig::default_width`, its preset named again) and the focused
+  column holds still on screen, as a drag of the same divider keeps it. Remote windows in the
+  column are asked to follow, as after a drag.
+  Tests: client `a_reset_column_takes_the_opening_width_back`, ui
+  `a_double_click_on_a_divider_resets_its_column`.
+
+- ✅ **A drop hint says how much room, not only where** (2026-09-27, UI wave 2). A drop that
+  opens a column keeps its 2 pt line on the divider and adds a faint wash as wide as the
+  column the tile brings (a moved tile keeps its column's width). A drop into a stacked column
+  washes the share the tile would take, the lower half of a column of one; into a tabbed
+  column, all of it. Both are `accent_fill`, the accent as a mark.
+  Test: ui `the_drop_line_sits_on_the_divider_and_a_join_washes_its_share`.

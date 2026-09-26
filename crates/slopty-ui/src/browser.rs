@@ -566,7 +566,11 @@ fn texture(png: &[u8]) -> Option<Arc<RenderImage>> {
 }
 
 impl Render for BrowserView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Blank while a page that loads in time would fill it; past the grace, a word.
+        let waited = self.page.failed.is_none()
+            && self.snapshot.is_none()
+            && crate::screen::past_grace("browser-opening", window, cx);
         let theme = &self.theme;
         let s = &theme.surfaces;
         let id = *self.id.as_uuid();
@@ -597,7 +601,10 @@ impl Render for BrowserView {
             (None, Some(image)) => {
                 img(Arc::clone(image)).size_full().object_fit(ObjectFit::Cover).into_any_element()
             }
-            (None, None) => notice(format!("Opening {}…", short_url(&self.url))).into_any_element(),
+            (None, None) if waited => {
+                notice(format!("Opening {}…", short_url(&self.url))).into_any_element()
+            }
+            (None, None) => div().size_full().into_any_element(),
         };
         div()
             .id(SharedString::from(format!("browser-{id}")))
@@ -608,7 +615,8 @@ impl Render for BrowserView {
             .relative()
             .size_full()
             .overflow_hidden()
-            .bg(hsla(s.canvas))
+            // The tile's own body surface until the page draws over it.
+            .bg(hsla(theme.content()))
             .child(body)
             .child(measure)
     }

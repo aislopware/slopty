@@ -39,9 +39,10 @@ fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut T
     assert!(f32::from(toggle.left()) >= titlebar::LEADING_INSET, "past the traffic lights");
 }
 
-/// Each workspace with something in it is a tab, the active one too when empty. A tab is one
-/// width whatever it holds, switching tabs moves none, and "+" opens a new workspace. A tab's
-/// slot rolls up what its tiles want; its name carries no chord.
+/// Each workspace with something in it is a tab, the active one too when empty; a lone one is
+/// its name. A tab is as wide as its name, within its bounds, switching tabs moves none, and
+/// "+" opens a new workspace. A tab's slot rolls up what its tiles want; its name carries no
+/// chord.
 #[gpui::test]
 fn the_workspaces_are_tabs_in_the_title_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -56,7 +57,8 @@ fn the_workspaces_are_tabs_in_the_title_bar(cx: &mut TestAppContext) {
         cx.debug_bounds("ws-tab-0").expect("drawn"),
         cx.debug_bounds("ws-tab-1").expect("the active one has a tab while empty"),
     );
-    assert_eq!(zero.size, one.size, "one width");
+    let sized = |tab: Bounds<Pixels>| (64.0..=180.5).contains(&f32::from(tab.size.width));
+    assert!(sized(zero) && sized(one), "each sized to its name: {zero:?} {one:?}");
     click(cx, "ws-tab-0");
     assert_eq!(active(&view, cx), 0);
     assert!(cx.debug_bounds("ws-tab-1").is_none(), "left empty, it has no tab");

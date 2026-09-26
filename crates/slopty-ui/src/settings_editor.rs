@@ -6,6 +6,9 @@
 //! parses it and either writes it and applies it, or puts the parse error under the field and
 //! keeps the dialog open so the typo can be fixed. Escape or a click outside discards. On the
 //! Mac an "Open in editor" button keeps the old path to the default `.toml` editor.
+//!
+//! The dialog is as tall as the file (between [`MIN_ROWS`] and [`MAX_ROWS`] lines), not a
+//! fixed share of the window: two lines of TOML in a window-high box was mostly empty field.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -22,6 +25,21 @@ use crate::kit::ButtonKind;
 
 /// Key context of the dialog.
 pub const CTX: &str = "SettingsEditor";
+
+/// The fewest lines the field shows: room to add a table to a short file.
+pub const MIN_ROWS: u16 = 8;
+
+/// The most lines the field shows before it scrolls.
+pub const MAX_ROWS: u16 = 28;
+
+/// How many lines the field shows for `text`: its lines and one to type on, within
+/// [`MIN_ROWS`] and [`MAX_ROWS`].
+#[must_use]
+pub fn rows_for(text: &str) -> u16 {
+    u16::try_from(text.lines().count().saturating_add(1))
+        .unwrap_or(u16::MAX)
+        .clamp(MIN_ROWS, MAX_ROWS)
+}
 
 /// What the user asked of the editor.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +65,8 @@ pub struct SettingsEditor {
     external: bool,
     /// Why the last save was refused.
     error: Option<String>,
+    /// How many lines the field shows: [`rows_for`] the text, kept as it is typed.
+    rows: u16,
     theme: Theme,
     _subscription: Subscription,
 }
@@ -63,10 +83,13 @@ impl SettingsEditor {
     ) -> Self {
         let state = cx.new(|cx| TextareaState::new(window, cx).default_value(text.to_owned()));
         let subscription = cx.subscribe(&state, |this, _state, event, cx| match event {
-            // Typing past an error is the fix in progress; the line goes on the next save.
+            // Typing past an error is the fix in progress; the line goes on the next save. A
+            // line added or taken away grows or shrinks the dialog with the file.
             InputEvent::Change => {
-                if this.error.is_some() {
+                let rows = rows_for(&this.text(cx));
+                if this.error.is_some() || rows != this.rows {
                     this.error = None;
+                    this.rows = rows;
                     cx.notify();
                 }
             }
@@ -82,6 +105,7 @@ impl SettingsEditor {
             path: SharedString::from(path.to_owned()),
             external,
             error: None,
+            rows: rows_for(text),
             theme,
             _subscription: subscription,
         }
@@ -151,18 +175,21 @@ impl Render for SettingsEditor {
         // A button says what it does; the keys (Esc, ⌘↩) are the palette's to list.
         let button = |id, label, kind| crate::kit::button(&theme, id, label, kind);
         let error = self.error.clone().map(|error| {
-            div()
+            crate::kit::inset_x(div(), &theme)
                 .id("settings-error")
                 .debug_selector(|| "settings-error".to_owned())
                 .role(gpui::accesskit::Role::Alert)
                 .aria_label(error.clone())
-                .px(px(spacing.md))
                 .py(px(spacing.xs))
                 .text_size(px(theme.typography.small()))
-                .text_color(hsla(s.warn))
+                .text_color(hsla(s.error))
                 .child(SharedString::from(error))
         });
-        crate::kit::backdrop(&theme, window)
+        // The file's text at the document size and line: the field is as tall as its lines,
+        // and gives up height to a short window (a phone's keyboard), scrolling inside.
+        let line = theme.typography.mono_size * theme.typography.markdown_line_height;
+        let field = px(f32::from(self.rows) * line) + Size::Small.input_py() * 2.0;
+        let root = crate::kit::backdrop(&theme, window)
             .id("settings-backdrop")
             .key_context(CTX)
             .on_key_down(cx.listener(Self::key_down))
@@ -191,14 +218,12 @@ impl Render for SettingsEditor {
                     .debug_selector(|| "settings-editor".to_owned())
                     .role(gpui::accesskit::Role::Dialog)
                     .aria_label("Settings")
-                    // Tall enough to edit in, and not taller than the window.
-                    .h(gpui::relative(0.8))
                     .child(
-                        div()
+                        crate::kit::inset_x(div(), &theme)
+                            .flex_none()
                             .flex()
                             .items_baseline()
                             .gap(px(spacing.sm))
-                            .px(px(spacing.md))
                             .py(px(spacing.sm))
                             .border_b_1()
                             .border_color(hsla(s.border))
@@ -220,32 +245,33 @@ impl Render for SettingsEditor {
                     )
                     .child(
                         div()
-                            .flex_1()
-                            .min_h(px(0.0))
-                            // The text starts on the header's edge: the field pads itself by
-                            // its size's inset, and this makes up the rest of `spacing.md`.
-                            .px(px(spacing.md) - Size::Small.input_px())
+                            .flex_initial()
+                            .min_h_0()
+                            .h(field + px(spacing.sm * 2.0))
+                            // The text starts on the edge grid: the field pads itself by its
+                            // size's inset, and this makes up the rest.
+                            .px(px(spacing.inset()) - Size::Small.input_px())
                             .py(px(spacing.sm))
-                            .font_family(
-                                theme.typography.mono_families.first().cloned().unwrap_or_default(),
-                            )
+                            .font_family(crate::palette::mono_family(&theme))
                             .child(
                                 Textarea::new(&self.text)
                                     .small()
                                     .appearance(false)
                                     .bordered(false)
                                     .aria_label("settings.toml")
+                                    .text_size(px(theme.typography.mono_size))
+                                    .line_height(px(line))
                                     .h(gpui::relative(1.0)),
                             ),
                     )
                     .children(error)
                     .child(
-                        div()
+                        crate::kit::inset_x(div(), &theme)
+                            .flex_none()
                             .flex()
                             .items_center()
                             .justify_end()
                             .gap(px(spacing.xs))
-                            .px(px(spacing.md))
                             .py(px(spacing.sm))
                             .border_t_1()
                             .border_color(hsla(s.border))
@@ -268,7 +294,8 @@ impl Render for SettingsEditor {
                                     .on_click(cx.listener(|this, _ev, _w, cx| this.save(cx))),
                             ),
                     ),
-            )
+            );
+        gpui::deferred(root).with_priority(crate::palette::Layer::Dialog.priority())
     }
 }
 
@@ -356,5 +383,39 @@ mod tests {
             events.borrow().as_slice(),
             [SettingsEditorEvent::Dismiss, SettingsEditorEvent::Dismiss]
         );
+    }
+
+    /// The dialog is as tall as the file: a short one leaves room for a few lines to type,
+    /// each line typed grows it by one, and past [`MAX_ROWS`] it stops and the field scrolls.
+    #[gpui::test]
+    fn the_dialog_is_as_tall_as_the_file(cx: &mut TestAppContext) {
+        let (view, _events, cx) = editor(cx, "[theme]\nappearance = \"light\"\n", true);
+        let height = |cx: &mut VisualTestContext| {
+            f32::from(cx.debug_bounds("settings-editor").expect("the dialog").size.height)
+        };
+        let rows = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.rows);
+        let typography = Theme::default().typography;
+        let line = typography.mono_size * typography.markdown_line_height;
+        let short = height(cx);
+        assert_eq!(rows(cx), MIN_ROWS, "two lines get the fewest");
+        let viewport = cx.update(|window, _cx| f32::from(window.viewport_size().height));
+        assert!(short < viewport * 0.5, "not a share of the window: {short} of {viewport}");
+
+        for _ in 0..MIN_ROWS {
+            cx.simulate_keystrokes("enter");
+        }
+        cx.run_until_parked();
+        let grown = rows(cx);
+        assert!(grown > MIN_ROWS && grown < MAX_ROWS, "{grown}");
+        let taller = height(cx);
+        let expected = f32::from(grown.saturating_sub(MIN_ROWS)) * line;
+        assert!((taller - short - expected).abs() < 0.5, "{short} → {taller}, {expected}");
+
+        for _ in 0..MAX_ROWS {
+            cx.simulate_keystrokes("enter");
+        }
+        cx.run_until_parked();
+        assert_eq!(rows(cx), MAX_ROWS, "a long file stops at the most");
+        assert!(height(cx) <= viewport, "and fits the window");
     }
 }

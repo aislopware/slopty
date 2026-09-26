@@ -275,10 +275,16 @@ pub fn task_row(
                 .line_height(px(side))
                 .child("\u{2713}")
         });
+    // The box is drawn at the text's size, but a finger or a pointer gets the density's
+    // target round it: the pad spills into the gap and the margin, and moves nothing.
+    let pad = (theme.density.hit.mul_add(scale, -side) / 2.0).max(spacing.xs * scale);
+    let mut hit = div().id(ElementId::Name(format!("{text_id}-hit").into())).flex_none();
     if let Some(toggle) = toggle {
-        boxed = boxed
+        boxed = boxed.hover(move |st| st.bg(hsla_alpha(s.text, alpha::FAINT)));
+        hit = hit
+            .p(px(pad))
+            .m(px(-pad))
             .cursor_pointer()
-            .hover(move |st| st.bg(hsla_alpha(s.text, alpha::FAINT)))
             // The surface under it may take a press as "edit me": the box keeps its own.
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(move |_ev, window, cx| {
@@ -290,7 +296,7 @@ pub fn task_row(
         .flex()
         .items_start()
         .gap(px(spacing.xs * scale))
-        .child(boxed)
+        .child(hit.child(boxed))
         .child(
             div().flex_1().min_w(px(0.0)).child(
                 TextView::markdown(
@@ -342,7 +348,46 @@ pub fn style(theme: &Theme, mono: &str, scale: f32) -> TextViewStyle {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use gpui::{IntoElement, Modifiers, Render, point};
+
     use super::*;
+
+    /// A task box is drawn at the text's size, but a press a few points beside it still ticks
+    /// it: the target is the density's, not the glyph's.
+    #[gpui::test]
+    fn a_press_beside_the_box_still_ticks_it(cx: &mut gpui::TestAppContext) {
+        struct Row(Toggle);
+        impl Render for Row {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let task = Task { ix: 2, done: false, text: "ship".to_owned() };
+                let theme = Theme::default();
+                div().p(px(40.0)).child(task_row(
+                    "task".to_owned(),
+                    &task,
+                    &theme,
+                    "Menlo",
+                    1.0,
+                    Some(Rc::clone(&self.0)),
+                ))
+            }
+        }
+        cx.update(gpui_kit::init);
+        let ticked = Rc::new(Cell::new(None));
+        let sink = Rc::clone(&ticked);
+        let toggle: Toggle = Rc::new(move |ix, _window, _cx| sink.set(Some(ix)));
+        let (_row, cx) = cx.add_window_view(|_window, _cx| Row(toggle));
+        let at = cx.debug_bounds("task").expect("the box is drawn");
+        let beside = point(at.left() - px(4.0), at.center().y);
+        cx.simulate_click(beside, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(ticked.get(), Some(2));
+    }
 
     #[test]
     fn a_task_line_is_a_mark_a_box_and_its_text() {

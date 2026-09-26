@@ -255,6 +255,27 @@ impl NoteView {
 
 impl EventEmitter<NoteViewEvent> for NoteView {}
 
+/// The note's title and what follows it, when its first line is one.
+///
+/// A heading, or a line of prose that opens the note, is a title. A task, a list item, a quote,
+/// a table row or a fence opens the body instead, and the note has no title.
+#[must_use]
+pub fn split_title(text: &str) -> Option<(&str, &str)> {
+    let lead = text.len().saturating_sub(text.trim_start().len());
+    let rest = text.get(lead..)?;
+    let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
+    let line = line.trim_end();
+    let body = ["- ", "* ", "+ ", ">", "|", "```", "~~~"].iter().any(|m| line.starts_with(m))
+        || line
+            .split_once(". ")
+            .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    if body {
+        return None;
+    }
+    let title = line.trim_start_matches('#').trim();
+    (!title.is_empty()).then_some((title, after))
+}
+
 impl Focusable for NoteView {
     fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
         self.text.read(cx).focus_handle(cx)
@@ -270,6 +291,18 @@ impl Render for NoteView {
         let body = div().size_full().p(px(self.pad * self.zoom));
         if reading {
             let id = self.id.as_uuid();
+            // The first line, when it is a title, leads at the title size in the strong
+            // weight: the same size and weight as its items, it read as one more of them.
+            let (title, rest) =
+                split_title(&text).map_or((None, text.as_str()), |(t, r)| (Some(t), r));
+            let title = title.map(|title| {
+                div()
+                    .debug_selector(move || format!("note-title-{id}"))
+                    .text_size(px(self.theme.typography.title() * self.zoom))
+                    .font_weight(gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT))
+                    .text_color(crate::colors::hsla(self.theme.surfaces.text))
+                    .child(SharedString::from(title.to_owned()))
+            });
             body.id(SharedString::from(format!("note-read-{id}")))
                 .debug_selector(|| format!("note-read-{id}"))
                 // gpui-kit draws Markdown as styled text, which leaves nothing in the
@@ -292,9 +325,10 @@ impl Render for NoteView {
                 .flex()
                 .flex_col()
                 .gap(px(self.theme.spacing.xs * self.zoom))
+                .children(title)
                 // Fenced blocks are their own elements, with copy and run buttons: a note of
                 // commands is a runbook.
-                .children(crate::markdown::segments(&text).into_iter().enumerate().map(
+                .children(crate::markdown::segments(rest).into_iter().enumerate().map(
                     |(si, segment)| match segment {
                         crate::markdown::Segment::Prose(prose) => TextView::markdown(
                             SharedString::from(format!("note-md-{id}-{si}")),
@@ -353,6 +387,23 @@ impl Render for NoteView {
                         .h(gpui::relative(1.0)),
                 )
                 .into_any_element()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_title;
+
+    /// A heading or a line of prose opening a note is its title, blank lines before it
+    /// skipped; a note that opens on a task, a list, a quote or a fence has none.
+    #[test]
+    fn the_first_line_is_a_title_unless_it_opens_the_body() {
+        assert_eq!(split_title("Release\n\n- [x] build"), Some(("Release", "\n- [x] build")));
+        assert_eq!(split_title("\n  # Plan  \nmore"), Some(("Plan", "more")));
+        assert_eq!(split_title("Alone"), Some(("Alone", "")));
+        for body in ["- [ ] ship", "* item", "> quoted", "1. first", "```sh\nls\n```", "#", ""] {
+            assert_eq!(split_title(body), None, "{body:?}");
         }
     }
 }

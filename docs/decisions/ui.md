@@ -1953,3 +1953,219 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `elevation_and_density`; kit `a_floating_layer_wears_the_one_elevation`,
   `density_sizes_the_targets_not_the_icons`, `the_elevation_is_two_layers_of_the_shade`; app
   `a_custom_background_carries_the_chrome`.
+
+- ✅ **The palette lists where to go, then what was run last** (2026-09-27, UI wave 2 overlays).
+  The design review found the palette 3 pt off the status bar at 600 pt, an empty field that
+  listed every command, an icon on every command row, and a right edge that mixed an age, a
+  lowercase kind and a round trip.
+  - On a desktop it hangs a fifth of the way down the window and takes at most three fifths
+    of its height, under the list ceiling of 520 pt; it is shorter when it lists less.
+  - An empty field lists the tiles, the workers and five commands: the ones last run from
+    the palette (app-wide, newest first), then the first bound actions. Typing lists all of it.
+  - Commands carry no icon. The leading slot is for tiles and workers, and a status takes it.
+    A tile's right edge says its status word ("Working", "Needs you") while it is not idle,
+    in the status tone, else its age past a minute. A worker's says its state in sentence
+    case, else its round trip. The kind ("Note", "File") sits in the muted context column.
+  - Chords are plain `text_muted` glyphs, as in Zed. Key caps are for the foot's legend only.
+  - The Tiles section lists every tile the navigator lists, unnamed notes included, by the
+    title its header shows.
+  - On a phone (narrower than `phone_below`) the palette is a sheet from the top at the
+    window's width, down to the keyboard. A fade over the list's foot shows while rows run on
+    below, because a touch list has no scrollbar. Opening the palette puts the drawer or the
+    overlaid navigator away.
+  - Empty states come in tiers. A filter that leaves nothing is one quiet line on the edge
+    grid ("No command matches", the picker's "Nothing matches", an inbox emptied by reading).
+    A list with nothing to hold at all says why: the picker's "Nothing on the canvas…", and an
+    inbox that has never held anything names what lands there. None of them has an icon.
+  - An inbox row reads down its right edge. The status word ("Needs you", "Done", "Exit 101")
+    is on line one and the age on line two. A waiting agent's age is counted from the worker's
+    `since_ms`, so a reconnect keeps it. The popover stands `spacing.xs` clear of the title
+    bar.
+  Tests: palette `an_empty_field_lists_the_tiles_and_the_recent_commands`,
+  `the_right_edge_says_status_age_or_keys_and_the_kind_is_context`; workspace
+  `the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone`,
+  `the_icon_slot_keeps_every_title_on_one_edge`, `the_palette_finds_an_unnamed_note`,
+  `opening_the_palette_puts_the_phone_drawer_away`,
+  `an_inbox_row_says_its_status_and_age_down_the_right_edge`,
+  `an_empty_inbox_explains_itself_once`; picker
+  `the_picker_waits_for_the_listing_and_says_when_nothing_is_left`.
+
+- ✅ **One stacking order for what floats** (2026-09-27, UI wave 2 overlays). Each overlay
+  used to pick its own `deferred` priority, or none, so a toast could fall under a dialog and
+  a phone's drawer over the palette. `palette::Layer` names the order once: popover (the inbox,
+  a menu, the hosts) < submenu (a menu opened from one) < dialog (the palette, the pickers, the
+  settings) < toast. A panel that is part of the frame, such as the docked or drawn-out
+  navigator, paints at the default priority, under all of them. The palette, the picker, the
+  settings dialog and the toasts paint through it now; the title bar's menus and inbox, the
+  hosts popover and a block's menu move to it with their owners' files.
+  Test: palette `the_layers_stack_popover_submenu_dialog_toast`.
+
+- ✅ **Settings open in a dialog as tall as the file** (2026-09-27, UI wave 2 overlays). The
+  settings golden showed a 640 × 440 modal, 80 % empty, around two lines of TOML. There were
+  two ways out: open `settings.toml` as a file tile, as Zed opens `settings.json`, or size the
+  dialog to its content. A file tile reads and writes through a worker, but the settings file
+  lives on the client, and on the phone there is no worker-side copy to open. So the dialog
+  stays, and it now fits the file. The field is as tall as the file's lines plus one, from 8
+  to 28 lines at the document line height (`mono_size` × `markdown_line_height`). It grows
+  and shrinks as lines are typed, and gives up height to a short window or a phone's keyboard,
+  scrolling inside. The Mac keeps "Open in editor".
+  Test: settings_editor `the_dialog_is_as_tall_as_the_file`.
+
+- ✅ **The first run sits a third down the height; the add-worker dialog floats** (2026-09-27,
+  UI wave 2 app shell). The first-run block was pushed down by a 28 % top pad, and a
+  percentage pad resolves against the width, so it sat at 42 % on the Mac and 12 % on a
+  phone. Two spacers growing 1 : 2 now place it a third of the way down the height it has,
+  inside the safe area, which on a phone includes the keyboard. The 16 pt mark over the
+  heading read as a stray glyph and was decoration, so it is gone. Each blurb fits one line
+  of a 402 pt phone. On touch the field ends in a Paste, since the phone has no ⌘V, and the
+  primary action spans the panel. Over the workspace the panel is a dialog like the others:
+  `kit::elevate`d on `kit::backdrop` (scrim, near the top, under the safe area), closed by
+  Cancel, Esc or a click outside it.
+  Tests: app `the_first_run_sits_a_third_down_on_every_device`,
+  `the_dialog_closes_on_esc_or_a_click_outside`.
+
+- ✅ **The key bar's caps hold their edges and keep their widths** (2026-09-27, UI wave 2 app
+  shell). The caps were `raised` on `canvas`, a contrast of about 1.03, so they had no
+  edges. They also grew to share an iPad's width, which made 100 pt "|" keys. They now sit on
+  `elevated` under the `border` hairline, both bars (terminal and remote window) on `canvas`.
+  The bar is a finger's 44 pt (`Density::TOUCH.hit`) whatever the chrome's density, since it
+  only exists on glass. A symbol's cap is square and a word's is a small step wider each side,
+  never grown: the terminal's row fits the narrowest iPad and scrolls on a phone. An end with
+  keys past it fades into the bar, read from the row's scroll state after layout.
+  Tests: app `the_key_caps_keep_their_width`, `the_key_row_fades_where_keys_run_past_the_edge`.
+
+- ✅ **Touch density on iOS** (2026-09-27, UI wave 2 app shell). `settings::theme_for` sets
+  `theme.density` from `settings::density(touch)`, touch being the iOS build: 44 pt rows,
+  headers, title bar and icon-button targets round the same icons. It waited until every tile
+  header, row and the strip's hit test read the density instead of a 28 pt constant, so a
+  44 pt header could not misplace a body. The status bar steps aside while the key bar shows.
+  Tests: app `a_finger_gets_the_touch_density`, `the_header_and_its_hit_test_follow_the_density`,
+  `the_phone_title_bar_fits_its_touch_targets`, `the_status_bar_steps_aside_for_the_key_bar`.
+
+- ✅ **The overview is shapes on lifted cards** (2026-09-27, UI wave 2 tiles). The dashed "New
+  workspace" slab was bigger than the real workspace above it and the panes' text was 4 pt
+  mush. Each workspace with tiles is now one card: `kit::elevate` a base unit wider than its
+  panes all round (so the md radius clears their square corners), and a 2 pt accent ring
+  round the active one. The gap above a workspace holds the name plus both cards' margins.
+  The trailing empty workspace is a compact ghost "New workspace" button where the next name
+  would go, on the last card's left edge; it opens that workspace. Below zoom 0.5 a tile is
+  its header and body surfaces only. The body's surface is laid over its view rather than the
+  view dropped, so the keyboard stays in the focused terminal or editor through the overview.
+  Tests: ui `the_overview_lifts_each_workspace_and_offers_a_new_one`,
+  `a_small_overview_draws_tiles_as_shapes`.
+
+- ✅ **A body waiting on its worker stays blank for a grace** (2026-09-27, UI wave 2, the
+  study's item 7). "Opening…", "Reading…", "Attaching…", a page's "Opening …" and a stream's
+  "Waiting for the first frame…" painted at once, so an answer a frame later flashed a word.
+  They now show only after `screen::LOADING_GRACE`, 32 ms: two 60 Hz frames, the frame the
+  answer lands in plus a round trip of up to one frame budget (numbers in MEASUREMENTS.md,
+  "loading placeholders after a grace"). Each waiting body keeps its first-drawn instant as
+  element state and a timer draws it again when the grace ends. A lasting state ("Sleeping",
+  "Paused off screen") shows at once. A remote window says what opens where ("Opening Safari
+  on e2e-worker…") on the body's own surface, not the canvas, and its header slot turns the
+  working mark while it opens.
+  Tests: ui `a_remote_window_waits_blank_then_says_what_is_opening`, file
+  `reading_shows_only_after_the_grace`.
+
+- ✅ **A failure is marked where it is seen** (2026-09-27, UI wave 2 tiles). A failed block
+  carried four red marks: the wash, a bar, a lighter chip over the wash, and the tile's
+  header slot. The wash and the bar are now `error_fill` and stop where the block separators
+  end (the inset plus the grid's columns), not at the element's edge. The hovered block's
+  facts sit on the band itself, with no chip. The header slot keeps the kind while the newest
+  failure's rows are in view (`TerminalView::failure_in_view`) and turns Failed once they
+  scroll away. An unfocused pane's hollow cursor is `text_muted`, a place marker, not the
+  cursor colour. Warp-style room above and below a block needs a grid answer; it stays a
+  design question.
+  Tests: terminal `a_failed_blocks_facts_sit_on_its_band_without_a_chip`,
+  `the_newest_failure_is_in_view_while_its_block_is`, `an_unfocused_cursor_is_a_muted_hollow_block`,
+  `cmd_up_and_down_walk_the_prompts_and_separators_follow` (the wash's reach); ui
+  `a_failure_the_grid_shows_leaves_the_header_slot_alone`.
+
+- ✅ **Tile details: editor bar, unsaved dot, tabs, ports, page buttons, empty workspace, note
+  title** (2026-09-27, UI wave 2 tiles). The file's conflict bar starts on the header's inset
+  after a warn mark, with "Reload" as a small secondary button and "Overwrite", the way that
+  loses the disk's text, as the quieter ghost. The unsaved dot follows the title. A tabbed
+  column's tabs take their titles' widths between 120 and 200 pt. A forwarded port is one
+  pill whose number opens a tile and whose arrow opens the browser. A page's back and reload
+  are bare icon buttons like fullscreen and close. A page or remote picture keeps the
+  header's hairline when focused, since its surface is another program's. The empty
+  workspace is one left edge: heading, the three ways to begin with the first on the
+  palette's selected fill, keys in the palette's plain muted glyphs, then the workers; no
+  hero glyph. A note's opening line, when it is a heading or prose, leads at `title()` in the
+  strong weight. The header, the body laid out under it, the strip's hit test and the
+  window-follow arithmetic all read `theme.density.header`; the fixed `HEADER_H` is gone, so
+  the touch density moves them together.
+  Tests: ui `the_unsaved_dot_follows_the_title`, `the_header_and_its_hit_test_follow_the_density`, note
+  `the_first_line_is_a_title_unless_it_opens_the_body`, and the existing tab, port and empty
+  workspace tests.
+  Open: the editor's gutter still paints gpui-kit's `editor_background()`, which falls back
+  to `c.background = panel`, and the 6 px after the numbers is gpui-kit's
+  `LINE_NUMBER_RIGHT_MARGIN`. Both need kit or fork changes, not tile code.
+
+- ✅ **The chrome is three cached views, and an echo draws none of them** (2026-09-27, UI
+  wave 2 frame chrome). A terminal's notify dirties its ancestors, so every echo ran the
+  workspace's render: the navigator's rows, the title bar and the status bar with the strip.
+  The navigator, the title bar and the status bar are now views of their own (`ChromeView`),
+  placed by the frame with `Entity::cached` at the size it lays out, and drawing the
+  workspace's region when they draw. They are notified by what feeds them: any change of the
+  workspace's own (`observe_self`), a shell's running command changing or a command finishing
+  (the navigator's rows), and their own clocks (a turn's time, an age, the frame time). An
+  echo frame fell from 2.2–2.4 ms to 0.44 ms p50 in the headless bench (`docs/MEASUREMENTS.md`).
+  The same change holds the working mark: a key typed into a focused shell holds the spin
+  clock's steps for the round trip to its worker plus a 60 Hz refresh, and the terminal's next
+  change (the echo's frame) lets them go, so a step never takes the frame the echo needed.
+  Tests: workspace `an_echo_leaves_the_chrome_as_it_was_drawn`,
+  `a_command_that_starts_draws_the_navigator_alone`,
+  `a_typed_key_holds_the_working_marks_for_its_echo`; icons
+  `a_held_step_waits_for_the_echo_or_the_end_of_the_hold`.
+
+- ✅ **A navigator row says its state or its age on line one, and the rest on line two**
+  (2026-09-27, UI wave 2 frame chrome). The review found a lone "~ … now", "Note" as a second
+  line, a count and a round trip side by side on each worker, two strong lines stacked under
+  "Workers", and a filter that read as a label.
+  - Line one ends in the tile's state as a word in its tone ("Needs you", "Working", "Done",
+    "Failed"), else the unseen dot, else its age from a minute on. The leading slot keeps the
+    kind: one mark per row, and the state reads down the right edge. Line two is all meta
+    text: directory, agent words or last command, branch; a note's task progress or next line.
+  - A row waiting on the human is washed in `warn_fill` at `alpha::FAINT`.
+  - A worker's header drops the tile count (its rows are the count) and names its round trip
+    only from 20 ms, where typing starts to feel remote; the hosts popover always has it.
+  - *Working* lists agents at their turn under a heading with the working mark and a count:
+    four rows, then "Show N more". Each ticks its turn's time from the worker's `since_ms`
+    once a second, by the navigator's own clock, only while one is at work.
+  - The workers' heading shows only under another section. The filter is a raised field.
+  - Hidden where it would dock, the navigator leaves a 40 pt rail: one server glyph per
+    worker with its rollup dot, which flies to that worker. Monochrome.
+  - The handle is 12 pt centred on the 1 pt edge, drawn over the strip; a double-click puts
+    the width back at 248. Laid over the frame, the panel is elevated on `kit::scrim`.
+  Tests: workspace `a_tile_row_reads_its_age_or_its_state_then_its_place`,
+  `a_note_row_says_its_progress`, `a_slow_round_trip_shows_on_the_right_edge_and_holds_still`,
+  `working_lists_the_agents_at_their_turn_and_ticks_their_time`,
+  `the_rail_keeps_the_workers_in_view_when_the_navigator_hides`,
+  `the_handle_straddles_the_edge_and_a_double_click_resets_it`; navigator
+  `an_age_shows_past_a_minute_and_ticks_at_its_next_unit`, `a_turn_ticks_in_whole_seconds`.
+
+- ✅ **Workspace tabs are sized to their names and the active one joins the content**
+  (2026-09-27, UI wave 2 frame chrome). Tabs were fixed 148 pt `overlay` pills beside a second
+  "+" and column dots that showed with every column in view. A tab is now 64–180 pt wide by
+  its name, every tab the same box down over the bar's edge so switching moves none; the active
+  one fills it with the content colour and breaks the edge. Where each tab would get 176 pt
+  it grows a meta line ("3 tiles · 2 workers"). A lone workspace is its name in the strong
+  weight. A tab that goes folds its width away over 160 ms, at once under Reduce Motion or with
+  moves off. The dots show only while a column is out of view and never under the laid-over
+  navigator. The right "+" is gone (the palette, ⌘T and the navigator's "+" open things), and
+  the rollup is a dot of its fill, the bell's badge the one count. The menus and the inbox
+  paint at `Layer::Popover`, under the bell or "…".
+  Tests: workspace `a_lone_workspace_is_its_name_and_tabs_say_what_they_hold`,
+  `a_closing_tab_folds_away_unless_motion_is_reduced`,
+  `the_column_dots_show_only_what_is_out_of_view`, `the_workspaces_are_tabs_in_the_title_bar`.
+
+- ✅ **The status bar's left slot says where the human is** (2026-09-27, UI wave 2 frame
+  chrome). The server's state left the title bar, where "• server unreachable" read as a tab.
+  The left slot now reads the server's state first while it does not answer (the crossed-out
+  server in `warn_fill`, "Server unreachable"), then worker › directory › branch of the
+  focused tile, its steps a quiet chevron apart, with no icon but a down worker's. Readouts
+  are meta text in sentence case ("RTT 4.2 ms", "Frame 1.1 ms"), and a state is a small dot
+  of its fill beside `text_secondary` words, so the tile and the bell keep the loud marks.
+  Tests: workspace `the_servers_word_leads_the_status_bar`,
+  `the_status_bar_reads_the_focused_tile_and_its_link`.

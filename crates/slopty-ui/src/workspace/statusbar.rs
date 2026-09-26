@@ -1,14 +1,18 @@
 //! The bar along the bottom: where the focused tile runs, and how things are going.
 //!
-//! On the left, the focused tile's worker behind a server mark, its directory in mono (inside
-//! a repository, the repository's name and the path within it), and the branch checked out
-//! there. On the right, the ports forwarded here (which list them when clicked), the uploads in
-//! flight, what is wrong with the focused worker's link when something is (a link that is up
-//! says nothing), the round trip to it, the count of workers with a dot only when one of them
-//! is not up (which opens the hosts popover: each worker's link, connect and forget), and the
-//! agents at work and waiting, which jumps to the next one waiting when clicked. The frame
-//! time shows only with the stream stats (⌘⇧I). Each readout is lowercase, a number rather
-//! than chrome, its figures tabular. A phone keeps the worker, the round trip and the agents.
+//! On the left, where the human is: the server's state while it does not answer, then the
+//! focused tile's worker (crossed out while it is away), its directory in mono (inside a
+//! repository, the repository's name and the path within it) and the branch checked out there,
+//! read as one path. On the right, the ports forwarded here (which list them when clicked), the
+//! uploads in flight, what is wrong with the focused worker's link when something is (a link
+//! that is up says nothing), the round trip to it, the count of workers with a dot only when one
+//! of them is not up (which opens the hosts popover: each worker's link, connect and forget),
+//! and the agents at work and waiting, which jumps to the next one waiting when clicked. The
+//! frame time shows only with the stream stats (⌘⇧I). Each readout is meta text, its figures
+//! tabular, and a state is a small dot of its fill beside quiet words: the tile and the bell
+//! carry the loud marks. A phone keeps the worker, the round trip and the agents.
+//!
+//! It is a view of its own, drawn cached: an echo in a terminal does not draw it again.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -17,7 +21,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, Div, ElementId, InteractiveElement as _, IntoElement as _, MouseButton,
-    ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Task,
     Window, div, px,
 };
 use slopty_client::layout::WorkerKey;
@@ -29,11 +33,11 @@ use super::{MenuRun, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
-use crate::kit::tabular;
+use crate::kit::{self, meta, tabular};
 use crate::palette::{mono_family, section_heading};
 
 /// The bar's height.
-const STATUSBAR_H: f32 = 26.0;
+pub(super) const STATUSBAR_H: f32 = 26.0;
 
 /// The hosts popover's width, in points.
 const HOSTS_W: f32 = 300.0;
@@ -71,6 +75,8 @@ pub(super) struct Bar {
     hosts: HashMap<WorkerKey, HostActions>,
     /// The popover's way to add a worker, as the app says.
     add: Option<MenuRun>,
+    /// Draws the bar again when the frame time's readout is due, while the stats show.
+    tick: Option<Task<()>>,
 }
 
 impl std::fmt::Debug for Bar {
@@ -189,7 +195,7 @@ impl WorkspaceView {
         if !fresh {
             let text = crate::frames::stats(cx)
                 .filter(|s| s.frames > 0)
-                .map(|s| format!("frame {:.1} ms", s.draw_p50.as_secs_f64() * 1e3).into());
+                .map(|s| format!("Frame {:.1} ms", s.draw_p50.as_secs_f64() * 1e3).into());
             self.bar.frame_text = Some((now, text));
         }
         self.bar.frame_text.as_ref().and_then(|(_, text)| text.clone())
@@ -200,29 +206,48 @@ impl WorkspaceView {
         &mut self,
         window: &Window,
         cx: &Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> gpui::AnyElement {
         if self.workers.is_empty() {
-            return None;
+            return gpui::Empty.into_any_element();
         }
         let phone = matches!(self.nav.drawn, Some(Mode::Drawer))
             || self.width(window) < self.layout.config().phone_below;
-        let frame = (self.show_stats && !phone).then(|| self.frame_readout(cx)).flatten();
+        let stats = self.show_stats && !phone;
+        let frame = stats.then(|| self.frame_readout(cx)).flatten();
+        self.bar.tick = stats.then(|| {
+            let bar = self.chrome.statusbar.downgrade();
+            cx.spawn(async move |_this, cx| {
+                cx.background_executor().timer(FRAME_READOUT_EVERY).await;
+                let _gone = bar.update(cx, |_, cx| cx.notify());
+            })
+        });
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let safe = window.insets().effective();
         let muted = hsla(s.text_muted);
 
+        let server = self.server_status.clone().map(|text| {
+            let text = SharedString::from(sentence(&text));
+            readout("server-status", text.clone())
+                .flex()
+                .items_center()
+                .gap(px(spacing.xs))
+                .text_color(hsla(s.text_secondary))
+                .child(icon(theme, IconName::ServerOff, IconSize::Inline, hsla(s.warn_fill)))
+                .child(text)
+        });
         let worker = self.status_worker();
         let link = worker.and_then(|k| self.workers.get(&k));
         let name = link.map(|w| {
-            let mark = if w.status.is_up() { IconName::Server } else { IconName::ServerOff };
+            let away = (!w.status.is_up())
+                .then(|| icon(theme, IconName::ServerOff, IconSize::Inline, hsla(s.warn_fill)));
             readout("status-worker", SharedString::from(w.name.clone()))
                 .flex()
                 .items_center()
                 .gap(px(spacing.xs))
                 .text_color(hsla(s.text_secondary))
-                .child(icon(theme, mark, IconSize::Inline, muted))
+                .children(away)
                 .child(SharedString::from(w.name.clone()))
         });
         let focused_item = (!phone).then(|| self.focused().and_then(|t| self.item(t))).flatten();
@@ -247,12 +272,24 @@ impl WorkspaceView {
             let branch = SharedString::from(branch);
             readout("status-branch", branch.clone())
                 .aria_label(SharedString::from(format!("branch {branch}")))
-                .flex()
-                .items_center()
-                .gap(px(spacing.xxs))
-                .child(icon(theme, IconName::GitBranch, IconSize::Inline, muted))
                 .child(branch)
         });
+        // Worker › directory › branch: one path, its steps a quiet chevron apart.
+        let step = || div().flex_none().text_color(muted).child("\u{203a}");
+        let mut place_parts: Vec<gpui::AnyElement> = Vec::new();
+        for part in [
+            name.map(gpui::IntoElement::into_any_element),
+            cwd.map(gpui::IntoElement::into_any_element),
+            branch.map(gpui::IntoElement::into_any_element),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !place_parts.is_empty() {
+                place_parts.push(step().into_any_element());
+            }
+            place_parts.push(part);
+        }
         let left = div()
             .flex_1()
             .min_w_0()
@@ -260,9 +297,16 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(spacing.md))
-            .children(name)
-            .children(cwd)
-            .children(branch);
+            .children(server)
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .gap(px(spacing.xs))
+                    .children(place_parts),
+            );
 
         let ports = (!phone).then(|| self.forwarded_count()).filter(|n| *n > 0).map(|n| {
             let text = SharedString::from(counted(n, "port", "ports"));
@@ -286,34 +330,23 @@ impl WorkspaceView {
                 .child(tabular(div()).child(text))
         });
         let rtt = link.and_then(|w| w.rtt.filter(|_| w.status.is_up())).map(|rtt| {
-            let text = SharedString::from(format!("rtt {}", rtt_label(rtt)));
+            let text = SharedString::from(format!("RTT {}", rtt_label(rtt)));
             tabular(readout("status-rtt", text.clone())).child(text)
         });
-        // The link says something only when it is not up.
+        // The link says something only when it is not up: a word in its tone, the mark being
+        // on the left.
         let health = link.and_then(|w| worker_health(&w.status)).map(|(mark, word)| {
-            let tone = hsla(mark.tone(theme));
-            readout("status-link", word.into())
-                .flex()
-                .items_center()
-                .gap(px(spacing.xs))
-                .text_color(tone)
-                .child(status_icon(theme, mark, px(theme.typography.icon()), tone))
-                .child(word)
+            let word = SharedString::from(sentence(word));
+            readout("status-link", word.clone()).text_color(hsla(mark.tone(theme))).child(word)
         });
         let frame = frame.map(|text| tabular(readout("status-frame", text.clone())).child(text));
         let workers = (!phone).then(|| self.workers_button(cx));
         let (working, waiting) = (self.working_count(), self.drawn_waiting.len());
         let agents = (working > 0 || waiting > 0).then(|| {
             let text: SharedString = agent_summary(working, waiting).into();
-            let tone = if waiting > 0 { s.warn } else { s.text_secondary };
+            let fill = if waiting > 0 { s.warn_fill } else { s.accent_fill };
             let pill = button("status-agents", text.clone(), theme)
-                .text_color(hsla(tone))
-                .child(status_icon(
-                    theme,
-                    if waiting > 0 { Status::NeedsYou } else { Status::Working },
-                    px(theme.typography.icon()),
-                    hsla(tone),
-                ))
+                .child(state_dot(theme, fill))
                 .child(tabular(div()).child(text));
             tab_stop(pill, s.accent).on_click(cx.listener(|this, _ev, window, cx| {
                 this.next_attention(&super::actions::NextAttention, window, cx);
@@ -332,32 +365,22 @@ impl WorkspaceView {
             .children(workers)
             .children(agents);
         let hosts = (self.bar.hosts_open && !phone).then(|| self.render_hosts(window, cx));
-        Some(
-            div()
-                .id("statusbar")
-                .debug_selector(|| "statusbar".to_owned())
-                .role(Role::Group)
-                .aria_label("Status")
-                .flex_none()
-                .h(px(STATUSBAR_H))
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(spacing.md))
-                .pl(px(spacing.md) + safe.left)
-                .pr(px(spacing.md) + safe.right)
-                .bg(hsla(s.canvas))
-                .border_t_1()
-                .border_color(hsla(s.border))
-                .font_family(theme.typography.ui_family.clone())
-                .text_size(px(theme.typography.small()))
-                .text_color(muted)
-                .child(left)
-                .child(right)
-                .children(hosts)
-                .when(phone, |el| el.gap(px(spacing.sm)))
-                .into_any_element(),
-        )
+        let bar = div()
+            .id("statusbar")
+            .debug_selector(|| "statusbar".to_owned())
+            .role(Role::Group)
+            .aria_label("Status")
+            .size_full()
+            .flex()
+            .items_center()
+            .gap(px(if phone { spacing.sm } else { spacing.md }))
+            .pl(px(spacing.inset()) + safe.left)
+            .pr(px(spacing.inset()) + safe.right)
+            .bg(hsla(s.canvas))
+            .border_t_1()
+            .border_color(hsla(s.border))
+            .font_family(theme.typography.ui_family.clone());
+        meta(bar, theme).child(left).child(right).children(hosts).into_any_element()
     }
 
     /// "N workers", with a dot in the worst link's tone when any is not up; opens the hosts.
@@ -382,7 +405,7 @@ impl WorkspaceView {
                 .flex_none()
                 .size(px(theme.spacing.xs + theme.spacing.xxs))
                 .rounded_full()
-                .bg(hsla(mark.tone(theme)))
+                .bg(hsla(state_fill(theme, *mark)))
         });
         let el = button("status-workers", label.into(), theme)
             .children(dot)
@@ -433,7 +456,7 @@ impl WorkspaceView {
                 cx.defer_in(window, move |_this, window, cx| run(window, cx));
             }))
         });
-        let panel = div()
+        let panel = kit::elevate(div(), theme)
             .id("hosts")
             .debug_selector(|| "hosts".to_owned())
             .role(Role::Dialog)
@@ -447,10 +470,6 @@ impl WorkspaceView {
             .flex_col()
             .pb(px(spacing.xs))
             .rounded(px(theme.radii.md))
-            .bg(hsla(s.panel))
-            .border_1()
-            .border_color(hsla(s.border))
-            .shadow_sm()
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
@@ -475,9 +494,10 @@ impl WorkspaceView {
                             cx.notify();
                         }),
                     )
-                    .child(crate::kit::fade_in(panel, "hosts-fade", cx)),
+                    .child(kit::fade_in(panel, "hosts-fade", cx)),
             ),
         )
+        .with_priority(crate::palette::Layer::Popover.priority())
         .into_any_element()
     }
 
@@ -552,7 +572,7 @@ impl WorkspaceView {
             .role(Role::Button)
             .aria_label(label)
             .flex_none()
-            .h(px(super::navigator::ROW_H))
+            .h(px(kit::Row::One.height(theme)))
             .mx(px(spacing.xs))
             .px(px(spacing.xs))
             .flex()
@@ -589,6 +609,30 @@ impl WorkspaceView {
             }))
             .into_any_element()
     }
+}
+
+/// `text` in sentence case: the app and the link words come lowercase.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+}
+
+/// The fill a state's dot wears: the brighter hue meant for marks, where its tone is meant
+/// for text.
+const fn state_fill(theme: &Theme, status: Status) -> slopty_theme::Rgb {
+    let s = &theme.surfaces;
+    match status {
+        Status::Idle => s.text_muted,
+        Status::Working => s.accent_fill,
+        Status::NeedsYou | Status::Away => s.warn_fill,
+        Status::Done => s.success_fill,
+        Status::Failed => s.error_fill,
+    }
+}
+
+/// A small dot of a state's fill beside a readout's words.
+fn state_dot(theme: &Theme, fill: slopty_theme::Rgb) -> Div {
+    div().flex_none().size(px(theme.spacing.xs + theme.spacing.xxs)).rounded_full().bg(hsla(fill))
 }
 
 /// A readout: a status the screen reader reads as `text`, on one line.
@@ -630,6 +674,8 @@ mod tests {
         assert_eq!(transfers_label(2, 0, 0), "2 uploads · 0%");
         assert_eq!(counted(1, "port", "ports"), "1 port");
         assert_eq!(counted(3, "worker", "workers"), "3 workers");
+        assert_eq!(sentence("server unreachable"), "Server unreachable");
+        assert_eq!(sentence(""), "");
     }
 
     /// Inside a repository the bar names it and the path within; elsewhere, the tail.

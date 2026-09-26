@@ -1,30 +1,35 @@
 //! The bar across the top, from the navigator's right edge to the window's (from past the
 //! traffic lights when the navigator is hidden): the navigator's toggle, the workspaces as
-//! tabs with "+" after them, the active workspace's column dots, and, quietly, any worker that
-//! is down on the left; the inbox's bell, "+" and "…" on the right. Nothing else: every other
-//! action is a key, the palette, or a tile's own header, and the readouts live in the status
-//! bar.
+//! tabs with "+" after them, and the active workspace's column dots while some column is out of
+//! view; the inbox's bell and "…" on the right. Nothing else: every other action is a key, the
+//! palette, or a tile's own header, and the readouts (the server's state among them) live in
+//! the status bar.
 //!
-//! A tab is a fixed width, giving way evenly only when the bar runs out of room, so switching
-//! workspaces, renaming one or a mark appearing moves nothing. Each ends in a fixed slot for
-//! what its tiles add up to (the rollup): the warn mark and a count, the working mark, or the
-//! unseen dot. The dots follow the tabs, in one place whichever tab is active.
+//! A tab is as wide as its name, from 64 to 180 pt. The active one stands on the content's
+//! colour with the bar's edge broken under it, so it joins what it shows, as an editor's tab
+//! does; the rest are quiet words. Where the bar has room each tab grows to two lines, its name
+//! over what it holds. A single workspace is no tab at all, only its name in the strong weight.
+//! Each ends in what its tiles add up to (the rollup), a dot at most. A tab that closes folds
+//! its width away so its neighbours slide into its place, at once under Reduce Motion.
+//!
+//! It is a view of its own, drawn cached: an echo in a terminal does not draw it again.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Div, InteractiveElement as _, IntoElement as _, MouseButton,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px,
+    Animation, AnimationExt as _, AppContext as _, Context, InteractiveElement as _,
+    IntoElement as _, MouseButton, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, ease_out_quint, px,
 };
 use slopty_client::layout::{Column, Strip, Tile, WorkerKey};
 use slopty_theme::{Typography, alpha};
 
-use super::actions::{
-    AddWindow, NewAgent, NewNote, NewTerminal, OpenFile, OpenPalette, ToggleNavigator, ToggleStats,
-};
+use super::actions::{OpenPalette, ToggleNavigator, ToggleStats};
 use super::navigator::Mode;
 use super::rollup::{Rollup, rollup_slot};
 use super::strip::NEW_WORKSPACE;
@@ -34,8 +39,15 @@ use crate::colors::{hsla, hsla_alpha};
 use crate::icons::IconName;
 use crate::kit;
 
-/// The bar's height, under the safe area.
+/// The bar's height under the safe area, with a pointer.
 pub const TITLEBAR_H: f32 = 38.0;
+
+/// The bar's height under `theme`'s density: a finger's target and a hairline's room round
+/// it at least, so its buttons fit it on touch.
+#[must_use]
+pub const fn titlebar_height(theme: &slopty_theme::Theme) -> f32 {
+    TITLEBAR_H.max(2.0_f32.mul_add(theme.spacing.xxs, theme.density.hit))
+}
 
 /// Room for the traffic lights at the left of the bar, or of the navigator when it shows.
 #[cfg(target_os = "macos")]
@@ -43,9 +55,15 @@ pub(super) const LEADING_INSET: f32 = 78.0;
 #[cfg(not(target_os = "macos"))]
 pub(super) const LEADING_INSET: f32 = 12.0;
 
-/// A workspace tab's width, and the least it gives way to when the bar runs out of room.
-const TAB_W: f32 = 148.0;
+/// A workspace tab's width: as wide as its name, within these.
 const TAB_MIN_W: f32 = 64.0;
+const TAB_MAX_W: f32 = 180.0;
+
+/// The least width of a tab of two lines: below it the tab keeps one.
+const TAB_WIDE_W: f32 = 176.0;
+
+/// How long a closing tab takes to fold its width away.
+const TAB_SETTLE: Duration = Duration::from_millis(160);
 
 /// Keyboard hints where there is a keyboard with a ⌘ key.
 const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
@@ -58,19 +76,50 @@ const DOTS_AT_FULL_SIZE: usize = 12;
 /// Which of the bar's menus is open.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum MenuKind {
-    /// "+": what can be opened.
-    Add,
     /// "…": everything else, the app's entries included.
     More,
     /// The bell: what needs the human and what finished.
     Inbox,
 }
 
+/// The tabs as last drawn, so a tab that goes can fold away where it was.
+#[derive(Default)]
+pub(super) struct Tabs {
+    /// Each tab drawn, by its workspace's id: its name.
+    drawn: Vec<(u64, String)>,
+    /// Each tab's width as laid out, by its workspace's id.
+    widths: Rc<RefCell<HashMap<u64, f32>>>,
+    /// Tabs folding away: the workspace's id, its name and width, where it stood, since when.
+    closing: Vec<(u64, String, f32, usize, Instant)>,
+}
+
+impl std::fmt::Debug for Tabs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tabs").field("drawn", &self.drawn.len()).finish_non_exhaustive()
+    }
+}
+
+/// Whether every column of `strip` is in its view, so the dots would say nothing.
+pub(super) fn all_in_view(strip: &Strip) -> bool {
+    let (view_x, view_w) = strip.view;
+    strip.columns.iter().all(|(x, w)| *x >= view_x - 1.0 && x + w <= view_x + view_w + 1.0)
+}
+
 impl WorkspaceView {
-    /// Whether `key`'s round trip is on screen: the status bar shows the focused tile's
-    /// worker's, and the navigator every worker's.
-    pub(super) fn rtt_shown(&self, key: WorkerKey) -> bool {
-        self.nav.drawn.is_some() || self.status_worker() == Some(key)
+    /// Whether `key`'s round trip, going from `was` to `now`, is on screen: the status bar
+    /// shows the focused tile's worker's, the hosts popover every worker's, and the navigator
+    /// those slow enough to name.
+    pub(super) fn rtt_shown(
+        &self,
+        key: WorkerKey,
+        was: Option<Duration>,
+        now: Option<Duration>,
+    ) -> bool {
+        let slow =
+            |rtt: Option<Duration>| rtt.is_some_and(|rtt| rtt >= super::navigator::RTT_SHOWN_FROM);
+        self.status_worker() == Some(key)
+            || self.hosts_open()
+            || (self.nav.drawn.is_some() && (slow(was) || slow(now)))
     }
 
     /// The active workspace's name: the one given, else its place.
@@ -101,19 +150,23 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// What workspace `ix`'s tiles add up to, and how many there are.
-    pub(super) fn workspace_rollup(&self, ix: usize, cx: &gpui::App) -> (Rollup, usize) {
+    /// What workspace `ix`'s tiles add up to, how many there are, and on how many workers.
+    pub(super) fn workspace_rollup(&self, ix: usize, cx: &gpui::App) -> (Rollup, usize, usize) {
         let mut rollup = Rollup::default();
         let mut count = 0_usize;
-        let Some(ws) = self.layout.workspaces().get(ix) else { return (rollup, count) };
+        let mut workers: Vec<WorkerKey> = Vec::new();
+        let Some(ws) = self.layout.workspaces().get(ix) else { return (rollup, count, 0) };
         for tile in ws.columns().iter().flat_map(Column::tiles).map(Tile::tile) {
             count = count.saturating_add(1);
+            if !workers.contains(&tile.worker) {
+                workers.push(tile.worker);
+            }
             if let Some(item) = self.item(tile) {
                 let (mark, unseen) = self.tile_marks(tile, item, cx);
                 rollup.add(mark, unseen);
             }
         }
-        (rollup, count)
+        (rollup, count, workers.len())
     }
 
     fn toggle_menu(&mut self, which: MenuKind, cx: &mut Context<Self>) {
@@ -123,16 +176,12 @@ impl WorkspaceView {
 
     /// The bar. `safe_top` is the notch's inset on a phone, zero on a Mac.
     pub(super) fn render_titlebar(
-        &self,
-        strip: &Strip,
+        &mut self,
         window: &Window,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let spacing = theme.spacing;
+        let spacing = self.theme.spacing;
         let safe = window.insets().effective();
-        let small = theme.typography.small();
         // Nothing to open, no column to mark and no one to point at before the first worker:
         // the bar keeps only "…", where settings and the ways to add one live.
         let has_workers = !self.workers.is_empty();
@@ -141,9 +190,15 @@ impl WorkspaceView {
         let docked = self.nav.drawn == Some(Mode::Docked);
         let leading = if docked { spacing.sm } else { LEADING_INSET + f32::from(safe.left) };
         let trailing = spacing.md + f32::from(safe.right);
+        let bar_w = self.width(window)
+            - if docked { self.navigator_width() } else { 0.0 }
+            - leading
+            - trailing;
+        let tabs = has_workers.then(|| self.render_workspace_tabs(bar_w, cx));
+        let theme = &self.theme;
+        let s = &theme.surfaces;
 
-        // Left: the navigator's toggle, the workspaces, the columns of the one in view, and
-        // which workers are not there with the human.
+        // Left: the navigator's toggle, the workspaces and the columns of the one in view.
         let toggle = has_workers.then(|| {
             let hint_theme = Rc::new(theme.clone());
             kit::icon_button(theme, "navigator-toggle", IconName::PanelLeft, "Navigator")
@@ -158,7 +213,6 @@ impl WorkspaceView {
                     this.toggle_navigator(&ToggleNavigator, window, cx);
                 }))
         });
-        let tabs = has_workers.then(|| self.render_workspace_tabs(cx));
         let new_workspace = has_workers.then(|| {
             kit::icon_button(theme, "new-workspace", IconName::Plus, NEW_WORKSPACE).on_click(
                 cx.listener(|this, _ev, _w, cx| {
@@ -168,51 +222,14 @@ impl WorkspaceView {
                 }),
             )
         });
-        let dots = self.render_indicator(strip, cx);
-        let down: Vec<gpui::AnyElement> = self
-            .workers
-            .iter()
-            .filter(|(_, w)| !w.status.is_up())
-            .map(|(key, w)| {
-                let key = *key;
-                div()
-                    .id(SharedString::from(format!("down-{key}")))
-                    .debug_selector(move || format!("down-{key}"))
-                    .role(Role::Status)
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(spacing.xs))
-                    .text_size(px(small))
-                    .text_color(hsla(s.text_muted))
-                    .aria_label(SharedString::from(format!("{}, {}", w.name, w.status.text())))
-                    .child(div().size(px(spacing.xs)).rounded_full().bg(hsla(s.warn)))
-                    .child(SharedString::from(format!("{} {}", w.name, w.status.text())))
-                    .into_any_element()
-            })
-            .collect();
-        let server = self.server_status.clone().map(|text| {
-            div()
-                .id("server-status")
-                .debug_selector(|| "server-status".to_owned())
-                .role(Role::Status)
-                .aria_label(text.clone())
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(spacing.xs))
-                .text_size(px(small))
-                .text_color(hsla(s.text_muted))
-                .child(div().size(px(spacing.xs)).rounded_full().bg(hsla(s.warn)))
-                .child(text)
-        });
+        let dots = self.render_indicator(cx);
 
-        // Right: the inbox, "+" and "…". Who needs you is counted on the bell and named in the
+        // Right: the inbox and "…". Who needs you is counted on the bell and named in the
         // status bar, which also goes to them.
         let total = self.drawn_waiting.len();
         let unread = total.saturating_add(self.finished.len());
         let bell = has_workers.then(|| {
-            let tone = if total > 0 { s.warn } else { s.accent };
+            let fill = if total > 0 { s.warn_fill } else { s.accent_fill };
             let badge = (unread > 0).then(|| {
                 let count = SharedString::from(unread.to_string());
                 let side = theme.typography.caption() + spacing.xs;
@@ -231,8 +248,8 @@ impl WorkspaceView {
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(hsla(tone))
-                    .text_color(hsla(s.accent_fg))
+                    .bg(hsla(fill))
+                    .text_color(hsla(s.fill_fg))
                     .text_size(px(theme.typography.caption()))
                     .child(count)
             });
@@ -241,28 +258,16 @@ impl WorkspaceView {
                 .children(badge)
                 .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_menu(MenuKind::Inbox, cx)))
         });
-        let add = has_workers.then(|| {
-            kit::icon_button(theme, "add", IconName::Plus, "Open")
-                .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_menu(MenuKind::Add, cx)))
-        });
         let more = kit::icon_button(theme, "more", IconName::Ellipsis, "More")
             .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_menu(MenuKind::More, cx)));
-        let buttons = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(spacing.xxs))
-            .children(bell)
-            .children(add)
-            .child(more);
+        let buttons =
+            div().flex_none().flex().items_center().gap(px(spacing.xxs)).children(bell).child(more);
         div()
             .id("titlebar")
             .debug_selector(|| "titlebar".to_owned())
             .relative()
-            .h(px(TITLEBAR_H) + safe.top)
+            .size_full()
             .pt(safe.top)
-            .w_full()
-            .flex_none()
             .flex()
             .items_center()
             .gap(px(spacing.md))
@@ -276,78 +281,45 @@ impl WorkspaceView {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .h_full()
                     .flex()
                     .items_center()
                     .gap(px(spacing.sm))
                     .children(toggle)
                     .children(tabs)
                     .children(new_workspace)
-                    .children(dots)
-                    .when_some(server, gpui::ParentElement::child)
-                    .children(down),
+                    .children(dots),
             )
             .child(buttons)
             .into_any_element()
     }
 
-    /// A tab per workspace worth one: its name and, in a fixed slot at its end, what its tiles
-    /// add up to. The active tab sits on `overlay` in the strong weight.
-    fn render_workspace_tabs(&self, cx: &Context<Self>) -> gpui::Stateful<Div> {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let spacing = theme.spacing;
+    /// The workspaces: a tab each where there are several, the name alone where there is one.
+    fn render_workspace_tabs(&mut self, bar_w: f32, cx: &Context<Self>) -> gpui::AnyElement {
         let active = self.layout.active_workspace();
-        let height = 2.0_f32.mul_add(spacing.xs, theme.typography.icon_large());
-        let tabs: Vec<gpui::AnyElement> = self
-            .tabbed_workspaces()
-            .into_iter()
-            .map(|ix| {
-                let name = self.workspace_name_at(ix);
-                let (rollup, count) = self.workspace_rollup(ix, cx);
-                let noun = if count == 1 { "tile" } else { "tiles" };
-                let label = match rollup.words() {
-                    Some(words) => format!("{name}, {count} {noun}, {words}"),
-                    None => format!("{name}, {count} {noun}"),
-                };
-                let selected = ix == active;
-                let weight =
-                    if selected { Typography::STRONG_WEIGHT } else { gpui::FontWeight::NORMAL.0 };
-                let tab = div()
-                    .id(("ws-tab", ix))
-                    .debug_selector(move || format!("ws-tab-{ix}"))
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(label))
-                    .flex_shrink(1.0)
-                    .w(px(TAB_W))
-                    .min_w(px(TAB_MIN_W))
-                    .h(px(height))
-                    .pl(px(spacing.sm))
-                    .pr(px(spacing.xs))
-                    .flex()
-                    .items_center()
-                    .gap(px(spacing.xs))
-                    .rounded(px(theme.radii.sm))
-                    .cursor_pointer()
-                    .when(selected, |el| el.bg(hsla(s.overlay)))
-                    .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.raised))))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(theme.typography.ui_size))
-                            .font_weight(gpui::FontWeight(weight))
-                            .text_color(hsla(if selected { s.text } else { s.text_secondary }))
-                            .child(SharedString::from(name)),
-                    )
-                    .child(rollup_slot(theme, format!("ws-rollup-{ix}"), rollup))
-                    .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)));
-                tab_stop(tab, s.accent).into_any_element()
+        let tabbed = self.tabbed_workspaces();
+        let ids: Vec<(u64, String)> = tabbed
+            .iter()
+            .filter_map(|ix| {
+                let ws = self.layout.workspaces().get(*ix)?;
+                Some((ws.id(), self.workspace_name_at(*ix)))
             })
             .collect();
+        self.fold_closed_tabs(&ids, cx);
+        // Room for two lines when each tab would get the wide width, past the toggle, "+",
+        // the dots and the buttons on the right.
+        let reserve = kit::icon_button_side(&self.theme).mul_add(5.0, self.theme.spacing.xl * 2.0);
+        #[expect(clippy::cast_precision_loss, reason = "a handful of tabs")]
+        let wide = bar_w - reserve >= TAB_WIDE_W * tabbed.len() as f32;
+        if let [only] = tabbed.as_slice() {
+            return self.render_lone_workspace(*only, wide, cx);
+        }
+        let mut tabs: Vec<gpui::AnyElement> =
+            tabbed.iter().map(|ix| self.render_tab(*ix, *ix == active, wide, cx)).collect();
+        for (id, name, width, at, _) in &self.tabs.closing {
+            let ghost = self.render_closing_tab(*id, name, *width);
+            tabs.insert((*at).min(tabs.len()), ghost);
+        }
         div()
             .id("ws-tabs")
             .debug_selector(|| "ws-tabs".to_owned())
@@ -355,24 +327,214 @@ impl WorkspaceView {
             .aria_label("Workspaces")
             .flex_shrink(1.0)
             .min_w_0()
+            .h_full()
+            .overflow_hidden()
+            .flex()
+            .items_end()
+            .gap(px(self.theme.spacing.xxs))
+            .children(tabs)
+            .into_any_element()
+    }
+
+    /// Note which tabs went since the last drawing: each folds away where it stood, unless
+    /// motion is reduced (or moves are off, as under the self-test). Those done folding, or
+    /// back, are forgotten.
+    fn fold_closed_tabs(&mut self, ids: &[(u64, String)], cx: &gpui::App) {
+        // The fold runs on the wall clock, as GPUI's animations do.
+        let now = Instant::now();
+        self.tabs.closing.retain(|(id, .., since)| {
+            now.saturating_duration_since(*since) < TAB_SETTLE
+                && !ids.iter().any(|(kept, _)| kept == id)
+        });
+        if self.animate && kit::motion(cx) {
+            let widths = self.tabs.widths.borrow();
+            for (at, (id, name)) in self.tabs.drawn.iter().enumerate() {
+                if ids.iter().any(|(kept, _)| kept == id) {
+                    continue;
+                }
+                let width = widths.get(id).copied().unwrap_or(TAB_MIN_W);
+                self.tabs.closing.push((*id, name.clone(), width, at, now));
+            }
+        }
+        self.tabs.drawn = ids.to_vec();
+        let closing = &self.tabs.closing;
+        self.tabs.widths.borrow_mut().retain(|id, _| {
+            ids.iter().any(|(kept, _)| kept == id) || closing.iter().any(|(gone, ..)| gone == id)
+        });
+    }
+
+    /// A tab that went, folding its width away over [`TAB_SETTLE`].
+    fn render_closing_tab(&self, id: u64, name: &str, width: f32) -> gpui::AnyElement {
+        let theme = &self.theme;
+        div()
+            .id(("ws-tab-closing", id))
+            .debug_selector(move || format!("ws-tab-closing-{id}"))
+            .flex_none()
+            .h_full()
+            .w(px(width))
             .overflow_hidden()
             .flex()
             .items_center()
-            .gap(px(spacing.xxs))
-            .children(tabs)
+            .px(px(theme.spacing.sm))
+            .whitespace_nowrap()
+            .text_size(px(theme.typography.ui_size))
+            .text_color(hsla(theme.surfaces.text_secondary))
+            .child(SharedString::from(name.to_owned()))
+            .with_animation(
+                ("ws-tab-closing", id),
+                Animation::new(TAB_SETTLE).with_easing(ease_out_quint()),
+                move |el, delta| el.w(px(width * (1.0 - delta))).opacity(1.0 - delta),
+            )
+            .into_any_element()
+    }
+
+    /// What a workspace's tab says to a screen reader, and its meta line: how many tiles it
+    /// holds and on how many workers.
+    fn tab_words(&self, ix: usize, cx: &gpui::App) -> (SharedString, SharedString, Rollup) {
+        let name = self.workspace_name_at(ix);
+        let (rollup, count, workers) = self.workspace_rollup(ix, cx);
+        let noun = if count == 1 { "tile" } else { "tiles" };
+        let label = match rollup.words() {
+            Some(words) => format!("{name}, {count} {noun}, {words}"),
+            None => format!("{name}, {count} {noun}"),
+        };
+        let meta = match workers {
+            0 | 1 => format!("{count} {noun}"),
+            n => format!("{count} {noun} \u{b7} {n} workers"),
+        };
+        (label.into(), meta.into(), rollup)
+    }
+
+    /// One workspace's tab: its name (over its meta line when `wide`) and its rollup.
+    fn render_tab(
+        &self,
+        ix: usize,
+        selected: bool,
+        wide: bool,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let spacing = theme.spacing;
+        let name = SharedString::from(self.workspace_name_at(ix));
+        let (label, meta, rollup) = self.tab_words(ix, cx);
+        let id = self.layout.workspaces().get(ix).map_or(0, slopty_client::layout::Workspace::id);
+        let widths = Rc::clone(&self.tabs.widths);
+        let measure = canvas(
+            move |bounds, _window, _cx| {
+                widths.borrow_mut().insert(id, f32::from(bounds.size.width));
+            },
+            |_bounds, (), _window, _cx| {},
+        )
+        .absolute()
+        .inset_0();
+        let size = if wide { theme.typography.small() } else { theme.typography.ui_size };
+        let words = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(size))
+                    .text_color(hsla(if selected { s.text } else { s.text_secondary }))
+                    .child(name),
+            )
+            .when(wide, |words| {
+                words.child(
+                    kit::meta(div(), theme)
+                        .debug_selector(move || format!("ws-tab-meta-{ix}"))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(meta),
+                )
+            });
+        let tab = div()
+            .id(("ws-tab", ix))
+            .debug_selector(move || format!("ws-tab-{ix}"))
+            .role(Role::Tab)
+            .aria_label(label)
+            .relative()
+            .flex_shrink(1.0)
+            .min_w(px(if wide { TAB_WIDE_W } else { TAB_MIN_W }))
+            .max_w(px(TAB_MAX_W))
+            // Down over the bar's edge, every tab the same box so switching moves none; the
+            // active one fills it and breaks the edge: it joins the content.
+            .h(px(titlebar_height(theme) - spacing.xs + 1.0))
+            .mb(px(-1.0))
+            .pl(px(spacing.sm))
+            .pr(px(spacing.xs))
+            .flex()
+            .items_center()
+            .gap(px(spacing.xs))
+            .rounded_t(px(theme.radii.sm))
+            .border_t_1()
+            .border_l_1()
+            .border_r_1()
+            .cursor_pointer()
+            .when(selected, |el| el.bg(hsla(theme.content())).border_color(hsla(s.border)))
+            .when(!selected, |el| {
+                el.border_color(gpui::transparent_black()).hover(move |el| el.bg(hsla(s.raised)))
+            })
+            .child(measure)
+            .child(words)
+            .child(rollup_slot(theme, format!("ws-rollup-{ix}"), rollup, true))
+            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)));
+        tab_stop(tab, s.accent).into_any_element()
+    }
+
+    /// The one workspace there is: its name in the strong weight (what it holds after it, in
+    /// meta, where there is room) and its rollup; nothing to switch between, so no tab.
+    fn render_lone_workspace(&self, ix: usize, wide: bool, cx: &gpui::App) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (label, meta, rollup) = self.tab_words(ix, cx);
+        div()
+            .id(("ws-tab", ix))
+            .debug_selector(move || format!("ws-tab-{ix}"))
+            .role(Role::Heading)
+            .aria_label(label)
+            .flex_shrink(1.0)
+            .min_w_0()
+            .max_w(px(TAB_MAX_W))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(theme.typography.ui_size))
+                    .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
+                    .text_color(hsla(s.text))
+                    .child(SharedString::from(self.workspace_name_at(ix))),
+            )
+            .when(wide, |el| el.child(kit::meta(div(), theme).flex_none().child(meta)))
+            .child(rollup_slot(theme, format!("ws-rollup-{ix}"), rollup, true))
+            .into_any_element()
     }
 
     /// One dot per column of the active workspace: the focused column's in the text colour,
     /// those in view a step quieter, the rest faint; a click on one goes to that column.
-    /// Nothing for a workspace of one column, where there is nowhere to go.
+    /// Nothing where there is nowhere to go: a workspace of one column, every column in view,
+    /// or the navigator laid over the bar.
     ///
     /// Dots, not a scaled map of the strip: a track with the view bracketed and the active
     /// column filled read as a progress bar, the loudest thing in the bar saying the least.
-    fn render_indicator(&self, strip: &Strip, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_indicator(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
+        let strip = &self.drawn_strip;
         let count = strip.columns.len();
-        if count < 2 {
+        let covered = matches!(self.nav.drawn, Some(Mode::Overlay | Mode::Drawer));
+        if count < 2 || covered || all_in_view(strip) {
             return None;
         }
         let (view_x, view_w) = strip.view;
@@ -460,13 +622,6 @@ impl WorkspaceView {
         };
         let entries: Vec<MenuEntry> = match which {
             MenuKind::Inbox => Vec::new(),
-            MenuKind::Add => vec![
-                action("Shell", &NewTerminal, |this, w, cx| this.new_terminal(&NewTerminal, w, cx)),
-                action("Agent", &NewAgent, |this, w, cx| this.new_agent(&NewAgent, w, cx)),
-                action("Note", &NewNote, |this, w, cx| this.new_note(&NewNote, w, cx)),
-                action("Window", &AddWindow, |this, w, cx| this.add_window(&AddWindow, w, cx)),
-                action("File", &OpenFile, |this, w, cx| this.open_file_palette(&OpenFile, w, cx)),
-            ],
             MenuKind::More => {
                 let mut entries = vec![
                     action("Command palette", &OpenPalette, |this, w, cx| {
@@ -491,7 +646,7 @@ impl WorkspaceView {
             .map(|(i, entry)| {
                 let run = Rc::clone(&entry.run);
                 let entity = entity.clone();
-                let row = div()
+                let row = kit::row(theme, kit::Row::One)
                     .id(("menu-row", i))
                     .debug_selector({
                         let label = entry.label.clone();
@@ -499,11 +654,7 @@ impl WorkspaceView {
                     })
                     .role(Role::MenuItem)
                     .aria_label(entry.label.clone())
-                    .flex()
-                    .items_center()
                     .gap(px(spacing.md))
-                    .px(px(spacing.md))
-                    .py(px(spacing.xs))
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.raised)))
                     .child(
@@ -533,41 +684,46 @@ impl WorkspaceView {
                     .into_any_element()
             })
             .collect();
+        // Under its button, a base unit below the bar (the inbox keeps that gap itself): the
+        // bell sits one button and a gap in from "…".
+        let (anchor, gap) = match which {
+            MenuKind::Inbox => (kit::icon_button_side(theme) + spacing.xxs, 0.0),
+            MenuKind::More => (0.0, spacing.xs),
+        };
         let panel = if which == MenuKind::Inbox {
             self.render_inbox(cx)
         } else {
             self.menu_panel(rows, cx)
         };
-        // A click anywhere else closes it.
-        Some(
-            div()
-                .id("menu-away")
-                .absolute()
-                .inset_0()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _ev, _w, cx| {
-                        this.menu = None;
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(TITLEBAR_H) + safe.top)
-                        .right(px(spacing.md) + safe.right)
-                        .child(panel),
-                )
-                .into_any_element(),
-        )
+        // A click anywhere else closes it. A popover, it paints over the frame and the
+        // navigator laid over it, under a dialog.
+        let away = div()
+            .id("menu-away")
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _w, cx| {
+                    this.menu = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(titlebar_height(theme) + gap) + safe.top)
+                    .right(px(spacing.md + anchor) + safe.right)
+                    .child(panel),
+            );
+        let layer = crate::palette::Layer::Popover.priority();
+        Some(gpui::deferred(away).with_priority(layer).into_any_element())
     }
 
-    /// The "+" or "…" menu's panel around its rows.
+    /// The "…" menu's panel around its rows.
     fn menu_panel(&self, rows: Vec<gpui::AnyElement>, _cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
-        let s = &theme.surfaces;
         let spacing = theme.spacing;
-        div()
+        kit::elevate(div(), theme)
             .id("menu")
             .debug_selector(|| "menu".to_owned())
             .role(Role::Menu)
@@ -577,10 +733,6 @@ impl WorkspaceView {
             .flex_col()
             .py(px(spacing.xs))
             .rounded(px(theme.radii.md))
-            .bg(hsla(s.panel))
-            .border_1()
-            .border_color(hsla(s.border))
-            .shadow_sm()
             .font_family(theme.typography.ui_family.clone())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .children(rows)

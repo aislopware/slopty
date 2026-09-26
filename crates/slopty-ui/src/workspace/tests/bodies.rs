@@ -1,0 +1,159 @@
+//! Tile bodies and their neighbours in the headless workspace: what a body says while it waits
+//! on its worker, where a file's unsaved dot sits, the header slot beside a failure the grid
+//! shows, and the column divider's double-click.
+
+use gpui::{Bounds, MouseButton, MouseDownEvent, MouseUpEvent};
+
+use super::*;
+use crate::icons::Status;
+use crate::screen::LOADING_GRACE;
+
+/// Within a point: bounds are laid out in floats.
+#[track_caller]
+fn near(a: f32, b: f32) {
+    assert!((a - b).abs() < 0.5, "{a} vs {b}");
+}
+
+fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+    cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"))
+}
+
+/// The accessibility tree of the next frame.
+fn tree(cx: &mut VisualTestContext) -> Vec<crate::a11y::Node> {
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    cx.run_until_parked();
+    cx.update(|window, _cx| crate::a11y::tree(window))
+}
+
+/// A remote window whose stream has not opened keeps a blank body for the loading grace, so a
+/// fast answer never flashes a word; past it the body says what is opening and on which
+/// worker. Its header slot turns the working mark the whole time.
+#[gpui::test]
+fn a_remote_window_waits_blank_then_says_what_is_opening(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let tile = arrives(&view, cx, &fake, ItemKind::Window { window: slopty_core::WindowId(7) }, 1);
+    let waiting = selector("waiting", tile.item);
+    assert!(cx.debug_bounds(waiting).is_none(), "blank within the grace");
+    let status =
+        view.read_with(cx, |v, cx| v.item(tile).and_then(|item| v.tile_status(tile, item, cx)));
+    assert_eq!(status, Some(Status::Working), "the header slot turns");
+
+    cx.executor().advance_clock(LOADING_GRACE);
+    cx.run_until_parked();
+    let text = bounds(cx, waiting);
+    let body = bounds(cx, selector("item", tile.item));
+    near(f32::from(text.center().x), f32::from(body.center().x));
+    let said = tree(cx)
+        .into_iter()
+        .any(|n| n.role == "Status" && n.label.as_deref() == Some("Opening Window 7 on studio…"));
+    assert!(said, "past the grace it says what opens where");
+}
+
+/// A file with an unsaved edit carries its dot right after its title, a base unit on, not at
+/// the far end of the header.
+#[gpui::test]
+fn the_unsaved_dot_follows_the_title(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let path = "/w/notes.md";
+    let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
+    let text = slopty_proto::file::FileRead::Text {
+        text: "# Notes".to_owned(),
+        more_lines: 0,
+        size: 8,
+        modified_ms: 1_000,
+        final_newline: true,
+    };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.file_read(key, path, &text, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_input("x");
+    cx.run_until_parked();
+    let name = bounds(cx, selector("name", tile.item));
+    let dot = bounds(cx, selector("unsaved", tile.item));
+    near(f32::from(dot.left() - name.right()), Theme::default().spacing.sm);
+}
+
+/// A shell whose last command failed leaves the failure to the grid while the grid shows it,
+/// washed and barred: the header slot keeps the kind. With the failed rows off screen the
+/// slot says it.
+#[gpui::test]
+fn a_failure_the_grid_shows_leaves_the_header_slot_alone(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let (shown, away) = (SessionId::new(), SessionId::new());
+    let shown_tile = opens(&view, cx, &fake, shown, fake.me, 1);
+    let away_tile = opens(&view, cx, &fake, away, fake.me, 2);
+    let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+    view.update_in(cx, |v, _w, cx| {
+        let rows = [("$ false", prompt(None)), ("$ ", prompt(Some(1)))];
+        v.term_event(shown, marked_frame(1, &rows, 1), cx);
+        v.term_event(away, marked_frame(1, &[("$ ", prompt(Some(1)))], 0), cx);
+    });
+    cx.run_until_parked();
+    let status = |cx: &mut VisualTestContext, tile: TileRef| {
+        view.read_with(cx, |v, cx| v.item(tile).and_then(|i| v.tile_status(tile, i, cx)))
+    };
+    assert_eq!(status(cx, shown_tile), None, "the grid shows `false` failing");
+    assert_eq!(status(cx, away_tile), Some(Status::Failed), "its rows are off screen");
+}
+
+/// A double-click on the divider right of a column puts that column back at the width a new
+/// column opens at, after a drag had made it wider.
+#[gpui::test]
+fn a_double_click_on_a_divider_resets_its_column(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let [(_, first), ..] = three_shells(&view, cx, &fake);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    cx.run_until_parked();
+    let opened = f32::from(bounds(cx, selector("item", first.item)).size.width);
+    let grab = bounds(cx, "divider-0").center();
+    cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::default());
+    let to = point(grab.x + px(80.0), grab.y);
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    near(f32::from(bounds(cx, selector("item", first.item)).size.width), opened + 80.0);
+
+    let at = bounds(cx, "divider-0").center();
+    for click_count in [1, 2] {
+        let (button, modifiers) = (MouseButton::Left, Modifiers::default());
+        let first_mouse = false;
+        cx.simulate_event(MouseDownEvent {
+            button,
+            position: at,
+            modifiers,
+            click_count,
+            first_mouse,
+        });
+        cx.simulate_event(MouseUpEvent { button, position: at, modifiers, click_count });
+    }
+    cx.run_until_parked();
+    near(f32::from(bounds(cx, selector("item", first.item)).size.width), opened);
+}
+
+/// Under the touch density a tile's header is a finger's 44 pt, its body starts under it, and
+/// the strip's hit test puts the header's edge in the same place.
+#[gpui::test]
+fn the_header_and_its_hit_test_follow_the_density(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let theme = Theme { density: slopty_theme::Density::TOUCH, ..Theme::default() };
+    view.update(cx, |v, cx| v.set_theme(theme, cx));
+    let fake = connect(&view, cx, 1, "studio");
+    let tile = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    let header = bounds(cx, selector("title", tile.item));
+    near(f32::from(header.size.height), 44.0);
+    let grid = bounds(cx, "terminal");
+    near(f32::from(grid.top()), f32::from(header.bottom()));
+    let item = bounds(cx, selector("item", tile.item));
+    near(f32::from(grid.size.height), f32::from(item.size.height) - 44.0);
+    let x = header.center().x;
+    let at = |y: Pixels| view.read_with(cx, |v, _| v.under(point(x, y)));
+    assert_eq!(at(header.bottom() - px(1.0)), Some((tile, false)), "still the header");
+    assert_eq!(at(header.bottom() + px(1.0)), Some((tile, true)), "the body");
+}

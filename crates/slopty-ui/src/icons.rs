@@ -277,6 +277,11 @@ pub fn until_next_step(since: Duration) -> Duration {
 /// timer for the next one. When it fires the named views are notified and draw again, and those
 /// still showing a mark name themselves anew. A view that stops painting one, because the work
 /// ended or it scrolled away, is not woken again, and nothing turns while nothing shows.
+///
+/// While a typed key waits for its echo ([`hold_steps`]) a step that falls due wakes nobody: it
+/// waits for the next frame drawn for another reason, the echo's ([`release_steps`]), or for the
+/// hold's end, whichever comes first. A frame drawn for the step alone just before the echo
+/// would hold the echo's frame back a whole refresh.
 struct SpinClock {
     /// The executor's clock when the first mark was drawn; the test executor's is simulated.
     epoch: Instant,
@@ -284,8 +289,23 @@ struct SpinClock {
     reduce_motion: bool,
     /// The views that painted a turning mark since the last step.
     wake: Vec<EntityId>,
-    /// A timer is out for the next step.
-    armed: bool,
+    /// The timer that is out, if one is, and its number: a timer whose number is not the
+    /// latest was let go and does nothing when it fires.
+    armed: Option<Timer>,
+    timers: u64,
+    /// Steps wake nobody until then: a key waits for its echo.
+    hold_until: Option<Instant>,
+    /// A step fell due during the hold and waits to be drawn.
+    held: bool,
+}
+
+/// What an armed timer is for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Timer {
+    /// The next step's start.
+    Step,
+    /// The end of a hold, with a step waiting.
+    HoldEnd,
 }
 
 impl Global for SpinClock {}
@@ -298,11 +318,86 @@ impl SpinClock {
                 epoch: cx.background_executor().now(),
                 reduce_motion: system_reduce_motion(),
                 wake: Vec::new(),
-                armed: false,
+                armed: None,
+                timers: 0,
+                hold_until: None,
+                held: false,
             };
             cx.set_global(clock);
         }
         cx.global_mut::<Self>()
+    }
+
+    /// Set a timer of `kind` to fire after `wait`.
+    fn arm(cx: &mut App, kind: Timer, wait: Duration) {
+        let clock = Self::get(cx);
+        clock.armed = Some(kind);
+        clock.timers = clock.timers.wrapping_add(1);
+        let number = clock.timers;
+        let timer = cx.background_executor().timer(wait);
+        cx.spawn(async move |cx| {
+            timer.await;
+            cx.update(|cx| {
+                if Self::get(cx).timers == number {
+                    Self::fire(cx, kind);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A timer fired: a step fell due, or a hold with a step waiting ran out.
+    fn fire(cx: &mut App, kind: Timer) {
+        let now = cx.background_executor().now();
+        let clock = Self::get(cx);
+        clock.armed = None;
+        match kind {
+            Timer::Step => {
+                if let Some(until) = clock.hold_until.filter(|until| now < *until) {
+                    clock.held = true;
+                    Self::arm(cx, Timer::HoldEnd, until.saturating_duration_since(now));
+                    return;
+                }
+                clock.hold_until = None;
+                Self::wake(cx);
+            }
+            Timer::HoldEnd => {
+                clock.held = false;
+                clock.hold_until = None;
+                Self::wake(cx);
+            }
+        }
+    }
+
+    /// Wake every view that painted a mark since the last step.
+    fn wake(cx: &mut App) {
+        for view in std::mem::take(&mut Self::get(cx).wake) {
+            cx.notify(view);
+        }
+    }
+}
+
+/// A typed key waits for its echo, at most until `until`: steps of the working mark that fall
+/// due meanwhile wait for the echo's frame (or `until`), rather than draw a frame of their own.
+pub fn hold_steps(cx: &mut App, until: Instant) {
+    let clock = SpinClock::get(cx);
+    clock.hold_until = Some(clock.hold_until.map_or(until, |held| held.max(until)));
+}
+
+/// Until when the working marks' steps are held for a typed key's echo, if they are.
+#[cfg(test)]
+pub(crate) fn steps_held_until(cx: &mut App) -> Option<Instant> {
+    SpinClock::get(cx).hold_until
+}
+
+/// A frame is coming anyway (a terminal changed): a step that waited on the hold rides it.
+pub fn release_steps(cx: &mut App) {
+    let clock = SpinClock::get(cx);
+    if clock.hold_until.take().is_some() && std::mem::take(&mut clock.held) {
+        // The hold's timer is let go; the marks that paint in this frame set the next step's.
+        clock.armed = None;
+        clock.timers = clock.timers.wrapping_add(1);
+        SpinClock::wake(cx);
     }
 }
 
@@ -403,23 +498,11 @@ impl Element for Spinner {
         if !clock.wake.contains(&view) {
             clock.wake.push(view);
         }
-        if clock.armed {
+        if clock.armed.is_some() {
             return;
         }
-        clock.armed = true;
         let wait = until_next_step(now.saturating_duration_since(clock.epoch));
-        let timer = cx.background_executor().timer(wait);
-        cx.spawn(async move |cx| {
-            timer.await;
-            cx.update(|cx| {
-                let clock = SpinClock::get(cx);
-                clock.armed = false;
-                for view in std::mem::take(&mut clock.wake) {
-                    cx.notify(view);
-                }
-            });
-        })
-        .detach();
+        SpinClock::arm(cx, Timer::Step, wait);
     }
 }
 
@@ -558,6 +641,53 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(renders_in_a_second(&view, cx), 0, "Reduce Motion: it stands still");
+    }
+
+    /// Renders of `view` while the executor's clock runs `for`, a refresh at a time.
+    fn renders_over(
+        view: &gpui::Entity<Turning>,
+        cx: &gpui::VisualTestContext,
+        span: Duration,
+    ) -> usize {
+        let before = view.read_with(cx, |v, _| v.renders);
+        let refresh = Duration::from_nanos(8_333_333);
+        let mut ran = Duration::ZERO;
+        while ran < span {
+            cx.executor().advance_clock(refresh);
+            cx.run_until_parked();
+            ran = ran.saturating_add(refresh);
+        }
+        view.read_with(cx, |v, _| v.renders).saturating_sub(before)
+    }
+
+    /// While a key waits for its echo, a step that falls due wakes nobody: it waits for the
+    /// echo's frame, or for the hold's end, and then the steps go on as before.
+    #[gpui::test]
+    fn a_held_step_waits_for_the_echo_or_the_end_of_the_hold(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| Turning { shown: true, renders: 0 });
+        cx.run_until_parked();
+        let now =
+            |cx: &mut gpui::VisualTestContext| cx.update(|_w, cx| cx.background_executor().now());
+        let hold = SPIN_STEP.saturating_mul(4);
+        let until = now(cx).checked_add(hold).expect("a hold in range");
+        cx.update(|_w, cx| hold_steps(cx, until));
+        assert_eq!(renders_over(&view, cx, SPIN_STEP.saturating_mul(2)), 0, "held");
+        cx.update(|_w, cx| release_steps(cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.renders), 2, "the echo's frame carries it");
+        let turning = renders_over(&view, cx, Duration::from_secs(1));
+        assert!((11..=13).contains(&turning), "{turning} steps after the release");
+
+        let until = now(cx).checked_add(hold).expect("a hold in range");
+        cx.update(|_w, cx| hold_steps(cx, until));
+        let held = renders_over(&view, cx, hold.saturating_sub(Duration::from_millis(10)));
+        assert_eq!(held, 0, "no echo came: nothing before the hold ends");
+        let after = renders_over(&view, cx, SPIN_STEP);
+        assert!((1..=2).contains(&after), "the hold's end draws the step: {after}");
+        cx.update(|_w, cx| release_steps(cx));
+        cx.run_until_parked();
+        let turning = renders_over(&view, cx, Duration::from_secs(1));
+        assert!((11..=13).contains(&turning), "{turning} steps once it ran out");
     }
 
     #[test]

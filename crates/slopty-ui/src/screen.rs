@@ -366,6 +366,41 @@ pub const fn waiting_text(source: SourceState) -> &'static str {
     }
 }
 
+/// How long a body waits on its worker before it says it is waiting: "Opening…",
+/// "Reading…", "Attaching…".
+///
+/// Two frames at 60 Hz: the frame the answer lands in, plus a round trip of up to one frame
+/// budget. The tailnet's median round trip is about 1 ms and the shaped tailnet profile's worst
+/// is 12 ms (`docs/MEASUREMENTS.md`, "loading placeholders after a grace"), so a file read or an
+/// attach that answers in time shows its content in place of a blank body, never a word that
+/// flashes and goes.
+pub const LOADING_GRACE: Duration = Duration::from_millis(32);
+
+/// When a waiting body was first drawn, kept as its element's state.
+struct Waiting(Instant);
+
+/// Whether the waiting body keyed by `key` has been drawn for [`LOADING_GRACE`] or longer.
+///
+/// The first draw starts the clock and a timer that draws the view again when it runs out, so
+/// the words come in on their own. The clock is dropped with the element: a body that got its
+/// content and later waits again starts a new grace.
+pub fn past_grace(
+    key: impl Into<gpui::ElementId>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> bool {
+    let since = window.use_keyed_state(key, cx, |_window, cx| {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LOADING_GRACE).await;
+            let _gone = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+        Waiting(cx.background_executor().now())
+    });
+    let since = since.read(cx).0;
+    cx.background_executor().now().saturating_duration_since(since) >= LOADING_GRACE
+}
+
 /// How often the overlay's rates are recomputed.
 const HUD_PERIOD: Duration = Duration::from_millis(1000);
 
@@ -1401,8 +1436,12 @@ impl Render for ScreenView {
         .absolute()
         .inset_0();
 
+        let waited = self.latest.is_none() && past_grace("screen-waiting", window, cx);
         let picture = self.latest.as_ref().map_or_else(
             || {
+                if !waited {
+                    return div().size_full().into_any_element();
+                }
                 let text = waiting_text(self.source);
                 div()
                     // A status, not a picture: it is the only thing a screen reader can be told
@@ -1449,7 +1488,9 @@ impl Render for ScreenView {
             .relative()
             .size_full()
             .overflow_hidden()
-            .bg(hsla(self.theme.surfaces.canvas))
+            // The tile's body surface: a picture of another aspect sits on the page it would
+            // be, not in a grey well.
+            .bg(hsla(self.theme.content()))
             .cursor(local_pointer(self.latest.is_some()))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))

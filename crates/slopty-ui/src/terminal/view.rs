@@ -340,6 +340,8 @@ pub struct TerminalView {
     marked: Option<String>,
     /// The next key (or typed character) gets Control: the phone key bar's ⌃ toggle.
     sticky_control: bool,
+    /// A key hid the pointer ("hide the pointer while typing") and it has not moved since.
+    pointer_hidden: bool,
     /// The next tap opens the link under it, as ⌘-click does: the phone key bar's ⌘ toggle.
     sticky_command: bool,
     /// Text selected with the mouse.
@@ -510,6 +512,7 @@ impl TerminalView {
             latency: latency::KeyLatency::default(),
             marked: None,
             sticky_control: false,
+            pointer_hidden: false,
             sticky_command: false,
             block_menu: None,
             command_started: None,
@@ -925,10 +928,7 @@ impl TerminalView {
                 .px(px(spacing.sm))
                 .py(px(spacing.xs))
                 .rounded(px(radii.sm))
-                .bg(hsla(s.panel))
-                .border_1()
-                .border_color(hsla(s.border))
-                .shadow_sm()
+                .map(|el| crate::kit::elevate(el, theme))
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text))
                 .font_family(theme.typography.ui_family.clone())
@@ -959,9 +959,7 @@ impl TerminalView {
                 .px(px(spacing.sm))
                 .py(px(spacing.xs))
                 .rounded(px(radii.xs))
-                .bg(hsla(s.panel))
-                .border_1()
-                .border_color(hsla(s.border))
+                .map(|el| crate::kit::elevate(el, theme))
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .font_family(theme.typography.ui_family.clone())
@@ -1410,8 +1408,10 @@ impl TerminalView {
         };
         let failed = block.exit.is_some_and(|code| code != 0).then(|| {
             let look = FailedLook::new(theme, self.zoom);
+            // As far as the grid's wash reaches: the inset, then the columns.
+            let wash_w = inset + metrics.cell_width * f32::from(metrics.cols);
             [
-                div().absolute().inset_0().bg(look.wash),
+                div().absolute().top_0().bottom_0().left_0().w(wash_w).bg(look.wash),
                 div().absolute().top_0().bottom_0().left_0().w(look.bar_width).bg(look.bar),
             ]
         });
@@ -1452,6 +1452,25 @@ impl TerminalView {
                 .children(right)
                 .into_any_element(),
         )
+    }
+
+    /// Whether the newest finished command failed and its block shows in the grid, washed and
+    /// barred: the tile's header then leaves the failure to the grid rather than mark it twice.
+    /// Two prompt lookups, so a frame can ask it of every tile.
+    #[must_use]
+    pub fn failure_in_view(&self) -> bool {
+        let state = &self.state;
+        if state.modes().contains(TermModes::ALT_SCREEN) {
+            return false;
+        }
+        let Some(newest) = state.prompt_before(LineIndex(u64::MAX)) else { return false };
+        if state.line(newest).and_then(|l| l.mark.exit()).is_none_or(|code| code == 0) {
+            return false;
+        }
+        let Some(start) = state.prompt_before(newest) else { return false };
+        let top = state.index_at_row(0);
+        let bottom = state.index_at_row(state.size().rows.saturating_sub(1));
+        start <= bottom && newest > top
     }
 
     /// What the block typed at `prompt` says about itself, in order, each in its tone: its
@@ -1538,8 +1557,12 @@ impl TerminalView {
         let rows = prompt.0.saturating_sub(self.state.index_at_row(0).0);
         let row = u16::try_from(rows).unwrap_or(u16::MAX).min(m.rows.saturating_sub(1));
         let inset = px(theme.spacing.inset() * self.zoom);
+        // Over a failed block's wash the facts sit on the band itself: a chip of its own there
+        // would be a lighter patch cut out of the one mark that says the command failed.
+        let on_band = self.state.block_exit(prompt).is_some_and(|code| code != 0);
         Some(
             div()
+                .debug_selector(|| "block-chip".to_owned())
                 .absolute()
                 .top(inset + m.line_height * f32::from(row))
                 .right(inset)
@@ -1549,9 +1572,9 @@ impl TerminalView {
                 .occlude()
                 .pr(px(theme.spacing.xxs))
                 .rounded(px(theme.radii.xs))
-                .border_1()
-                .border_color(hsla(s.border_subtle))
-                .bg(hsla(s.raised))
+                .when(!on_band, |el| {
+                    el.border_1().border_color(hsla(s.border_subtle)).bg(hsla(s.raised))
+                })
                 .child(self.render_block_facts(prompt, cx))
                 .into_any_element(),
         )
@@ -1575,10 +1598,7 @@ impl TerminalView {
             .min_w(px(160.0))
             .p(px(spacing.xs))
             .rounded(px(theme.radii.sm))
-            .border_1()
-            .border_color(hsla(s.border))
-            .bg(hsla(s.panel))
-            .shadow_sm()
+            .map(|el| crate::kit::elevate(el, theme))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text))
             .on_mouse_down_out(cx.listener(|this, _ev, _window, cx| {
@@ -1607,7 +1627,7 @@ impl TerminalView {
         deferred(
             anchored().position(menu.at).snap_to_window_with_margin(px(spacing.sm)).child(list),
         )
-        .with_priority(1)
+        .with_priority(crate::palette::Layer::Submenu.priority())
         .into_any_element()
     }
 
@@ -2235,10 +2255,7 @@ impl TerminalView {
             .px(px(theme.spacing.md * k))
             .py(px(theme.spacing.xs * k))
             .rounded(px(theme.radii.md * k))
-            .border_1()
-            .border_color(hsla(s.border))
-            .bg(hsla(s.panel))
-            .shadow_sm()
+            .map(|el| crate::kit::elevate(el, theme))
             .text_size(px(theme.typography.small() * k))
             .font_family(theme.typography.ui_family.clone())
             .text_color(hsla(s.text_secondary))
@@ -2573,10 +2590,13 @@ impl TerminalView {
         let deselected = self.selection.take().is_some();
         let unblinked = !self.blink_on;
         self.pin_blink();
-        if self.theme.behaviour.hide_pointer_while_typing {
-            slopty_platform::hide_pointer_until_moved();
-        }
         let shown = self.type_key(event.keystroke.clone(), event.is_held, cx);
+        // After the key is on its way: the AppKit call costs the echo nothing there, and a
+        // pointer already hidden by the last key is not hidden again.
+        if self.theme.behaviour.hide_pointer_while_typing && !self.pointer_hidden {
+            slopty_platform::hide_pointer_until_moved();
+            self.pointer_hidden = true;
+        }
         cx.stop_propagation();
         if deselected || unblinked || shown {
             cx.notify();
@@ -2827,6 +2847,17 @@ impl TerminalView {
         }
         let hover = self.metrics.and_then(|m| m.cell_at(event.position));
         self.set_pointer(hover, event.modifiers, cx);
+    }
+
+    /// The pointer moved somewhere in the window, which shows it again: the next key hides it.
+    pub(super) const fn pointer_moved(&mut self) {
+        self.pointer_hidden = false;
+    }
+
+    /// Whether a key hid the pointer and it has not moved since.
+    #[must_use]
+    pub const fn pointer_hidden(&self) -> bool {
+        self.pointer_hidden
     }
 
     /// The pointer came near the grid's right edge, or left it: the scrollbar shows while it
@@ -3262,11 +3293,9 @@ impl TerminalView {
             .px(px(spacing.sm))
             .py(px(spacing.xs))
             .rounded(px(radii.sm))
-            .bg(hsla(s.panel))
-            .border_1()
-            // The focus ring: accent while the field has the caret, a hairline otherwise.
-            .border_color(hsla(if focused { s.accent } else { s.border }))
-            .shadow_sm()
+            .map(|el| crate::kit::elevate(el, theme))
+            // The focus ring: accent while the field has the caret, the hairline otherwise.
+            .when(focused, |el| el.border_color(hsla(s.accent)))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text))
             .font_family(self.theme.typography.ui_family.clone())
@@ -3741,8 +3770,8 @@ mod tests {
     }
 
     /// The view rows a failed block covers, as `(first row, rows)`: the error bar down the
-    /// element's left edge and the wash across its width, read from the scene. Each bar must
-    /// have its wash.
+    /// element's left edge and the wash from there to the grid's last column, where the block
+    /// separators end, read from the scene. Each bar must have its wash.
     fn failed_bands(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> Vec<(u16, u16)> {
         let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
         let (metrics, zoom) =
@@ -3764,7 +3793,9 @@ mod tests {
             }
             let color = q.background.as_solid();
             let bar = near(q.bounds.size.width, look.bar_width) && color == Some(look.bar);
-            let wash = near(q.bounds.size.width, bounds.size.width) && color == Some(look.wash);
+            let reach = metrics.origin.x + metrics.cell_width * f32::from(metrics.cols);
+            let wash =
+                near(q.bounds.size.width, reach - bounds.origin.x) && color == Some(look.wash);
             if !(bar || wash) {
                 continue;
             }
@@ -3790,8 +3821,8 @@ mod tests {
         let rule = separator_color(&theme);
         assert_eq!(rule, hsla_alpha(theme.terminal.fg, alpha::FAINT));
         let look = FailedLook::new(&theme, 1.0);
-        assert_eq!(look.bar, hsla(theme.surfaces.error));
-        assert_eq!(look.wash, hsla_alpha(theme.surfaces.error, alpha::FAINT));
+        assert_eq!(look.bar, hsla(theme.surfaces.error_fill));
+        assert_eq!(look.wash, hsla_alpha(theme.surfaces.error_fill, alpha::FAINT));
         assert_eq!(look.bar_width, px(theme.spacing.xxs), "a 2 pt bar");
 
         assert_eq!(top_line(&view, cx), LineIndex(6), "following output");
@@ -4521,6 +4552,115 @@ mod tests {
         // The line being typed at is no block yet.
         over_row(cx, 2.0);
         assert_eq!(hovered(cx), None, "the open prompt");
+    }
+
+    /// The quads the last frame painted exactly over `at`.
+    fn quads_over(cx: &mut VisualTestContext, at: Bounds<Pixels>) -> Vec<gpui::Quad> {
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let same = |scaled: gpui::ScaledPixels, logical: Pixels| {
+            f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
+        };
+        quads
+            .into_iter()
+            .filter(|q| {
+                same(q.bounds.origin.x, at.origin.x)
+                    && same(q.bounds.origin.y, at.origin.y)
+                    && same(q.bounds.size.width, at.size.width)
+                    && same(q.bounds.size.height, at.size.height)
+            })
+            .collect()
+    }
+
+    /// A hovered block's facts sit on a chip of the raised fill, except over a failed block,
+    /// where they sit on the band itself: a lighter patch there would cut into the one mark
+    /// that says the command failed.
+    #[gpui::test]
+    fn a_failed_blocks_facts_sit_on_its_band_without_a_chip(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        let raised = hsla(Theme::default().surfaces.raised);
+        let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let chip_fill = |cx: &mut VisualTestContext, row: f32| {
+            let at = m.origin + point(m.cell_width * 1.5, m.line_height * (row + 0.5));
+            cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+            cx.run_until_parked();
+            let chip = cx.debug_bounds("block-chip").expect("the facts are drawn");
+            quads_over(cx, chip).iter().any(|q| q.background.as_solid() == Some(raised))
+        };
+        cx.simulate_keystrokes("cmd-up cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(3), "`$ false`, `$ seq 2`, `1`");
+        assert!(!chip_fill(cx, 0.0), "`false` failed: its facts sit on the wash");
+        assert!(chip_fill(cx, 1.0), "`seq 2` succeeded: its facts are on a chip");
+    }
+
+    /// The newest failure shows in the grid while its block is in view: at the live bottom,
+    /// and not once the view scrolls above it. A success is never one.
+    #[gpui::test]
+    fn the_newest_failure_is_in_view_while_its_block_is(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        let in_view = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.failure_in_view());
+        assert!(!in_view(cx), "the newest command, `seq 2`, succeeded");
+        view.update_in(cx, |view, _window, cx| {
+            let failed = SemanticMark::Prompt { exit: Some(1), input: Some(2) };
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 2,
+                    full: false,
+                    epoch: 0,
+                    cols: 10,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(6),
+                    total_lines: 9,
+                    input_ack: 0,
+                    images: Vec::new(),
+                    updates: vec![RowUpdate { row: 2, line: marked("$ ", failed) }],
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(in_view(cx), "`seq 2` failed and its output is on screen");
+        cx.simulate_keystrokes("cmd-up cmd-up cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(0));
+        assert!(!in_view(cx), "scrolled above it: only the header can say so");
+    }
+
+    /// Unfocused, the cursor is a hollow block in the muted text tone, not the cursor colour:
+    /// a background pane's caret is a place marker and does not draw the eye.
+    #[gpui::test]
+    fn an_unfocused_cursor_is_a_muted_hollow_block(cx: &mut TestAppContext) {
+        let (_view, _rx, cx) = terminal(cx);
+        let theme = Theme::default();
+        let outlined = |cx: &mut VisualTestContext, ink: gpui::Hsla| {
+            let quads = cx.update(|window, _| window.painted_quads());
+            quads.iter().any(|q| q.border_widths.top.0 > 0.0 && q.border_color == ink)
+        };
+        let muted = hsla(theme.surfaces.text_muted);
+        assert!(!outlined(cx, muted), "focused: the program's cursor, not a muted outline");
+        cx.update(Window::blur);
+        cx.run_until_parked();
+        assert!(outlined(cx, muted), "unfocused: a muted hollow block");
+        assert!(!outlined(cx, hsla(theme.terminal.cursor)), "never the cursor colour");
+    }
+
+    /// A key hides the pointer once it is sent, and the next keys leave it be until the
+    /// pointer moves, which shows it and lets the next key hide it again.
+    #[gpui::test]
+    fn a_key_hides_the_pointer_once_until_it_moves(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let hidden = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.pointer_hidden());
+        assert!(!hidden(cx));
+        cx.simulate_keystrokes("a");
+        assert!(hidden(cx), "the key hid it");
+        cx.simulate_mouse_move(point(px(20.0), px(20.0)), None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(!hidden(cx), "a move shows it");
+        cx.simulate_keystrokes("b");
+        assert!(hidden(cx), "and the next key hides it again");
     }
 
     /// A right click on a block's row opens its menu: the typed command and the output to

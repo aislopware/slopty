@@ -41,12 +41,17 @@ fn accent() -> gpui::Hsla {
     crate::colors::hsla(Theme::default().surfaces.accent)
 }
 
+/// The accent as a mark: what a drop hint is drawn in.
+fn mark() -> gpui::Hsla {
+    crate::colors::hsla(Theme::default().surfaces.accent_fill)
+}
+
 /// Whether the last frame filled `at` with `ink`.
 fn filled(cx: &mut VisualTestContext, at: Bounds<Pixels>, ink: gpui::Hsla) -> bool {
     quads_at(cx, at).iter().any(|q| q.background.as_solid() == Some(ink))
 }
 
-/// The handle between two columns straddles their divider: a 6 pt target centred on the line,
+/// The handle between two columns straddles their divider: a 12 pt target centred on the line,
 /// whose accent line lies over the divider under the pointer and while dragged. Dragging it
 /// widens the column on its left by what the pointer travelled, and the next column still
 /// starts where it ends.
@@ -62,7 +67,7 @@ fn the_handle_straddles_the_divider_and_resizes_the_column(cx: &mut TestAppConte
     near(f32::from(left.right()), f32::from(right.left()));
 
     let handle = bounds(cx, "divider-0");
-    near(f32::from(handle.size.width), 6.0);
+    near(f32::from(handle.size.width), 12.0);
     near(f32::from(handle.center().x), f32::from(left.right()));
     near(f32::from(handle.top()), f32::from(left.top()));
     near(f32::from(handle.size.height), f32::from(left.size.height));
@@ -92,10 +97,11 @@ fn the_handle_straddles_the_divider_and_resizes_the_column(cx: &mut TestAppConte
 }
 
 /// A header dragged near a column's edge draws a 2 pt accent line centred on the divider the
-/// new column would open; over the middle of a column it washes that column faintly, with no
-/// corner and no frame.
+/// new column would open, over a faint wash as wide as the column the tile brings; over the
+/// middle of a column of one it washes the half the tile would take, with no corner and no
+/// frame.
 #[gpui::test]
-fn the_drop_line_sits_on_the_divider_and_a_join_washes_the_column(cx: &mut TestAppContext) {
+fn the_drop_line_sits_on_the_divider_and_a_join_washes_its_share(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(_, first), (_, second), _] = three_shells(&view, cx, &fake);
@@ -118,13 +124,22 @@ fn the_drop_line_sits_on_the_divider_and_a_join_washes_the_column(cx: &mut TestA
     near(f32::from(line.center().x), f32::from(column.left()));
     near(f32::from(line.top()), f32::from(column.top()));
     near(f32::from(line.size.height), f32::from(column.size.height));
-    assert!(filled(cx, line, accent()), "the line is the accent");
+    assert!(filled(cx, line, mark()), "the line is the accent's mark");
+    let room = bounds(cx, "drop-wash");
+    let own = bounds(cx, selector("item", first.item));
+    near(f32::from(room.left()), f32::from(column.left()));
+    near(f32::from(room.size.width), f32::from(own.size.width));
+    near(f32::from(room.size.height), f32::from(column.size.height));
 
     cx.simulate_mouse_move(column.center(), Some(MouseButton::Left), Modifiers::default());
     cx.run_until_parked();
-    let wash = bounds(cx, "drop-hint");
-    assert_eq!(wash, column, "the wash covers the column it joins");
-    let faint = accent().opacity(slopty_theme::alpha::FAINT);
+    assert!(cx.debug_bounds("drop-hint").is_none(), "joining draws no line");
+    let wash = bounds(cx, "drop-wash");
+    near(f32::from(wash.left()), f32::from(column.left()));
+    near(f32::from(wash.size.width), f32::from(column.size.width));
+    near(f32::from(wash.top()), f32::from(column.center().y));
+    near(f32::from(wash.bottom()), f32::from(column.bottom()));
+    let faint = mark().opacity(slopty_theme::alpha::FAINT);
     let quads = quads_at(cx, wash);
     let quad = quads.iter().find(|q| q.background.as_solid() == Some(faint)).expect("a wash");
     assert!(square(quad), "no corner: {quad:?}");
@@ -134,42 +149,94 @@ fn the_drop_line_sits_on_the_divider_and_a_join_washes_the_column(cx: &mut TestA
     cx.run_until_parked();
 }
 
-/// In the overview a workspace is one block of panes in a single square hairline frame, the
-/// place for a new one a square dashed outline, and nothing the size of a pane has a corner.
+/// In the overview a workspace with tiles is one lifted card round its panes: the elevated
+/// surface a base unit wider all round, rounded (lifted by `kit::elevate`), and a 2 pt accent
+/// ring round the active one only. The place for a new workspace is a ghost button on
+/// the last card's left edge, no taller than a row, and a click on it opens that workspace.
 #[gpui::test]
-fn the_overview_draws_no_rounded_quads(cx: &mut TestAppContext) {
+fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shells = three_shells(&view, cx, &fake);
+    // The focused tile goes down into a workspace of its own: two with tiles, then the empty.
+    cx.simulate_keystrokes("cmd-alt-shift-down");
     cx.simulate_keystrokes("cmd-alt-o");
     cx.run_until_parked();
+    let theme = Theme::default();
+    let pad = theme.spacing.xs;
 
-    let block = bounds(cx, "overview-block-0");
-    let frames = quads_at(cx, block);
-    let frame = frames.iter().find(|q| q.border_widths.top.0 > 0.0).expect("a frame");
-    assert!(square(frame), "{frame:?}");
-    assert_eq!(frame.border_style, gpui::BorderStyle::Solid);
-    let zone = bounds(cx, "overview-block-1");
-    let zone = quads_at(cx, zone);
-    let zone = zone.iter().find(|q| q.border_widths.top.0 > 0.0).expect("a dashed outline");
-    assert!(square(zone), "{zone:?}");
-    assert_eq!(zone.border_style, gpui::BorderStyle::Dashed);
+    let card = |cx: &mut VisualTestContext, ix: usize| {
+        let at = cx.debug_bounds(Box::leak(format!("overview-block-{ix}").into_boxed_str()));
+        let at = at.unwrap_or_else(|| panic!("block {ix} is drawn"));
+        let quads = quads_at(cx, at);
+        let quad = quads
+            .into_iter()
+            .find(|q| q.background.as_solid() == Some(crate::colors::hsla(theme.surfaces.elevated)))
+            .unwrap_or_else(|| panic!("block {ix} is on the elevated surface"));
+        (at, quad)
+    };
+    let (first, first_quad) = card(cx, 0);
+    let (second, second_quad) = card(cx, 1);
+    for quad in [&first_quad, &second_quad] {
+        assert!(!square(quad), "rounded: {quad:?}");
+    }
+    let scale = cx.update(|window, _| window.scale_factor());
+    let ringed = |cx: &mut VisualTestContext, at: Bounds<Pixels>| {
+        quads_at(cx, at).iter().any(|q| {
+            q.border_color == accent()
+                && 2.0_f32.mul_add(-scale, q.border_widths.top.0).abs() < 0.01
+        })
+    };
+    let active = view.read_with(cx, |v, _| v.layout.active_workspace());
+    assert_eq!(active, 1, "the tile moved down and the focus with it");
+    assert!(ringed(cx, second), "a 2 pt accent ring round the active one");
+    assert!(!ringed(cx, first), "and only that one");
 
-    // Anything as large as the smallest pane drawn is square.
     let pane = shells
         .iter()
         .filter_map(|(_, tile)| cx.debug_bounds(selector("item", tile.item)))
-        .map(|b| f32::from(b.size.width).min(f32::from(b.size.height)))
-        .fold(f32::MAX, f32::min);
-    assert!(pane < f32::MAX, "the panes are drawn");
-    let scale = cx.update(|window, _| window.scale_factor());
-    let quads = cx.update(|window, _| window.painted_quads());
-    let rounded: Vec<_> = quads
+        .find(|b| first.contains(&b.center()))
+        .expect("a pane in the first card");
+    near(f32::from(pane.left() - first.left()), pad);
+
+    let new = bounds(cx, "overview-new-workspace");
+    near(f32::from(new.left()), f32::from(second.left()));
+    assert!(new.top() >= second.bottom() - px(0.5), "under the last card");
+    assert!(f32::from(new.size.height) < f32::from(second.size.height) / 2.0, "compact");
+    cx.simulate_click(new.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.layout.overview_open()), "the overview closes");
+    let (active, count) =
+        view.read_with(cx, |v, _| (v.layout.active_workspace(), v.layout.workspaces().len()));
+    assert_eq!(Some(active), count.checked_sub(1), "on the empty workspace");
+}
+
+/// Below half size a tile in the overview is its header and body surfaces only: no title, and
+/// its body's own surface over the grid, which stays under it with the keyboard. At rest the
+/// text is back.
+#[gpui::test]
+fn a_small_overview_draws_tiles_as_shapes(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let shells = three_shells(&view, cx, &fake);
+    let first = shells[0].1;
+    let name = selector("name", first.item);
+    assert!(cx.debug_bounds(name).is_some(), "at rest the title is drawn");
+    cx.simulate_keystrokes("cmd-alt-o");
+    cx.run_until_parked();
+    let zoom = view.read_with(cx, |v, _| v.drawn_zoom);
+    assert!(zoom < tile::SHAPES_BELOW, "three columns zoom under half: {zoom}");
+    assert!(cx.debug_bounds(selector("item", first.item)).is_some(), "the tile is there");
+    assert!(cx.debug_bounds(name).is_none(), "its title is not");
+    let grid = cx.debug_bounds("terminal").expect("the grids stay, keeping the keyboard");
+    let covers: Vec<Bounds<Pixels>> = shells
         .iter()
-        .filter(|q| q.bounds.size.width.0.min(q.bounds.size.height.0) >= pane * scale - 0.5)
-        .filter(|q| !square(q))
+        .map(|(_, t)| cx.debug_bounds(selector("shapes", t.item)).expect("each under its surface"))
         .collect();
-    assert!(rounded.is_empty(), "rounded blocks in the overview: {rounded:#?}");
+    assert!(covers.iter().any(|c| c.contains(&grid.center())), "{covers:?} over {grid:?}");
+    cx.simulate_keystrokes("cmd-alt-o");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("shapes", first.item)).is_none(), "at rest, the text");
 }
 
 /// A worker whose link is up is only its name in the empty workspace's list: no word and no

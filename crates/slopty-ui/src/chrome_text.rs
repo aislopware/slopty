@@ -32,13 +32,15 @@ pub struct ChromeText {
     k: f32,
     zooming: bool,
     fill: bool,
+    /// Where a filled label gives way: its start rather than its end.
+    from_start: bool,
 }
 
 impl ChromeText {
     /// `text` at `base × k` points, in the font and colour of the enclosing text style.
     #[must_use]
     pub fn new(text: impl Into<SharedString>, base: Pixels, k: f32) -> Self {
-        Self { text: text.into(), base, k, zooming: false, fill: false }
+        Self { text: text.into(), base, k, zooming: false, fill: false, from_start: false }
     }
 
     /// The zoom is in motion: paint from a raster on the size ladder, stretched.
@@ -53,6 +55,15 @@ impl ChromeText {
     #[must_use]
     pub const fn fill(mut self) -> Self {
         self.fill = true;
+        self
+    }
+
+    /// [`Self::fill`], but the text gives way at its start, behind a leading ellipsis: a path
+    /// keeps the directory it ends in (`…/drop-here`).
+    #[must_use]
+    pub const fn fill_from_start(mut self) -> Self {
+        self.fill = true;
+        self.from_start = true;
         self
     }
 }
@@ -114,7 +125,8 @@ impl std::fmt::Debug for Shaped {
     }
 }
 
-/// Where the text is cut for the ellipsis: glyphs kept, and the shaped x the ellipsis starts at.
+/// Where the text is cut for the ellipsis. At its end: the glyphs kept, and the shaped x the
+/// ellipsis starts at. At its start: the first glyph kept, and its shaped x.
 #[derive(Debug, Clone, Copy)]
 pub struct Cut {
     keep: usize,
@@ -142,13 +154,8 @@ fn boundaries(line: &ShapedLine) -> Vec<Pixels> {
 const SUBPIXEL: Pixels = px(0.5);
 
 /// The cut that fits `text` and the ellipsis into `available`, or `None` when the whole text
-/// fits. Positions are in shaped (base) units; `k` scales them to the painted size.
-fn cut(shaped: &Shaped, k: f32, available: Pixels) -> Option<Cut> {
-    cut_at(&boundaries(&shaped.line), shaped.line.width, shaped.ellipsis.width, k, available)
-}
-
-/// `cut` over the numbers alone: the glyph boundaries `xs`, the line's `width`, and the
-/// `ellipsis` width, all in shaped units.
+/// fits: over the glyph boundaries `xs`, the line's `width` and the `ellipsis` width, all in
+/// shaped (base) units; `k` scales them to the painted size.
 fn cut_at(
     xs: &[Pixels],
     width: Pixels,
@@ -161,6 +168,24 @@ fn cut_at(
     }
     let ellipsis = ellipsis * k;
     let keep = xs.iter().rposition(|x| *x * k + ellipsis <= available).unwrap_or(0);
+    xs.get(keep).map(|at| Cut { keep, at: *at })
+}
+
+/// The cut that fits the end of `text` behind a leading ellipsis into `available`, or `None`
+/// when the whole text fits; [`cut_at`]'s numbers, cut from the other end.
+fn cut_start_at(
+    xs: &[Pixels],
+    width: Pixels,
+    ellipsis: Pixels,
+    k: f32,
+    available: Pixels,
+) -> Option<Cut> {
+    if width * k <= available + SUBPIXEL {
+        return None;
+    }
+    let ellipsis = ellipsis * k;
+    let last = xs.len().saturating_sub(1);
+    let keep = xs.iter().position(|x| (width - *x) * k + ellipsis <= available).unwrap_or(last);
     xs.get(keep).map(|at| Cut { keep, at: *at })
 }
 
@@ -203,40 +228,42 @@ fn paint_glyph(
     }
 }
 
-/// Where each of `layout`'s first `keep` glyphs lands at `place`. The x advances by the shaped
-/// deltas times `k` and the y is the baseline plus the glyph's own vertical offset times `k`
+/// Where each of `layout`'s glyphs from `from` up to `keep` lands at `place`. The x advances by the
+/// shaped deltas times `k` and the y is the baseline plus the glyph's own vertical offset times `k`
 /// (a combining mark, a vertically positioned glyph), as GPUI's own line paint places them, so
 /// at `k = 1` every glyph lands where the text element would put it.
 fn glyph_origins(
     layout: &LineLayout,
     place: Place,
+    from: usize,
     keep: Option<usize>,
 ) -> Vec<(&ShapedRun, &ShapedGlyph, Point<Pixels>)> {
     let mut x = place.x;
     let mut prev = px(0.0);
     let mut out = Vec::new();
-    for run in &layout.runs {
-        for glyph in &run.glyphs {
-            if keep.is_some_and(|keep| out.len() >= keep) {
-                return out;
-            }
-            x += (glyph.position.x - prev) * place.k;
-            prev = glyph.position.x;
+    let glyphs = layout.runs.iter().flat_map(|run| run.glyphs.iter().map(move |g| (run, g)));
+    for (index, (run, glyph)) in glyphs.enumerate() {
+        if keep.is_some_and(|keep| index >= keep) {
+            break;
+        }
+        x += (glyph.position.x - prev) * place.k;
+        prev = glyph.position.x;
+        if index >= from {
             out.push((run, glyph, point(x, place.baseline + glyph.position.y * place.k)));
         }
     }
     out
 }
 
-/// Paint `line`'s glyphs at `place`, stopping after `keep` glyphs.
+/// Paint `line`'s glyphs at `place`, from glyph `from` and stopping after `keep` glyphs.
 fn paint_line(
     window: &mut Window,
     line: &ShapedLine,
     place: Place,
-    keep: Option<usize>,
+    (from, keep): (usize, Option<usize>),
     paint: Paint,
 ) {
-    for (run, glyph, at) in glyph_origins(line.layout(), place, keep) {
+    for (run, glyph, at) in glyph_origins(line.layout(), place, from, keep) {
         paint_glyph(window, at, run, glyph, paint);
     }
 }
@@ -332,7 +359,11 @@ impl Element for ChromeText {
         _window: &mut Window,
         _cx: &mut App,
     ) -> Option<Cut> {
-        self.fill.then(|| cut(&request_layout.shaped, self.k, bounds.size.width)).flatten()
+        let shaped = &request_layout.shaped;
+        let (line, ellipsis) = (&shaped.line, shaped.ellipsis.width);
+        let give = if self.from_start { cut_start_at } else { cut_at };
+        self.fill
+            .then(|| give(&boundaries(line), line.width, ellipsis, self.k, bounds.size.width))?
     }
 
     fn paint(
@@ -355,11 +386,28 @@ impl Element for ChromeText {
         let cut = *prepaint;
         let shaped = Rc::clone(&request_layout.shaped);
         window.paint_layer(bounds, |window| {
-            let place = Place { x: bounds.origin.x, baseline, k };
-            paint_line(window, &shaped.line, place, cut.map(|c| c.keep), paint);
-            if let Some(cut) = cut {
-                let place = Place { x: bounds.origin.x + cut.at * k, baseline, k };
-                paint_line(window, &shaped.ellipsis, place, None, paint);
+            let origin = bounds.origin.x;
+            match cut {
+                Some(cut) if self.from_start => {
+                    let dots = Place { x: origin, baseline, k };
+                    paint_line(window, &shaped.ellipsis, dots, (0, None), paint);
+                    let x = origin + shaped.ellipsis.width * k - cut.at * k;
+                    paint_line(
+                        window,
+                        &shaped.line,
+                        Place { x, baseline, k },
+                        (cut.keep, None),
+                        paint,
+                    );
+                }
+                cut => {
+                    let place = Place { x: origin, baseline, k };
+                    paint_line(window, &shaped.line, place, (0, cut.map(|c| c.keep)), paint);
+                    if let Some(cut) = cut {
+                        let place = Place { x: origin + cut.at * k, baseline, k };
+                        paint_line(window, &shaped.ellipsis, place, (0, None), paint);
+                    }
+                }
             }
         });
     }
@@ -404,13 +452,16 @@ mod tests {
         let layout = layout();
         let at_rest = Place { x: px(100.0), baseline: px(50.0), k: 1.0 };
         let origins: Vec<Point<Pixels>> =
-            glyph_origins(&layout, at_rest, None).into_iter().map(|(_, _, at)| at).collect();
+            glyph_origins(&layout, at_rest, 0, None).into_iter().map(|(_, _, at)| at).collect();
         assert_eq!(origins, [point(px(100.0), px(50.0)), point(px(110.0), px(52.0))]);
         let zoomed = Place { x: px(100.0), baseline: px(50.0), k: 2.0 };
         let origins: Vec<Point<Pixels>> =
-            glyph_origins(&layout, zoomed, None).into_iter().map(|(_, _, at)| at).collect();
+            glyph_origins(&layout, zoomed, 0, None).into_iter().map(|(_, _, at)| at).collect();
         assert_eq!(origins, [point(px(100.0), px(50.0)), point(px(120.0), px(54.0))]);
-        assert_eq!(glyph_origins(&layout, zoomed, Some(1)).len(), 1, "cut after one glyph");
+        assert_eq!(glyph_origins(&layout, zoomed, 0, Some(1)).len(), 1, "cut after one glyph");
+        let tail: Vec<Point<Pixels>> =
+            glyph_origins(&layout, zoomed, 1, None).into_iter().map(|(_, _, at)| at).collect();
+        assert_eq!(tail, [point(px(120.0), px(54.0))], "from the second glyph, where it was");
     }
 
     /// "shell", shaped at 26.27 and handed a 26 pt box: the numbers the canvas actually had.
@@ -433,6 +484,16 @@ mod tests {
         let cut = cut_at(&xs, width, px(8.0), 1.0, px(20.0)).expect("six pixels over is a cut");
         assert_eq!(cut.at, px(12.0), "the last boundary leaving room for the ellipsis");
         assert_eq!(cut.keep, 2);
+    }
+
+    /// Cut from the start, the label keeps its end: the first boundary whose tail and a leading
+    /// ellipsis fit ("…ll" of "shell" in 20 pt), and nothing when it all fits.
+    #[test]
+    fn a_label_cut_from_the_start_keeps_its_end() {
+        let (xs, width) = shell();
+        let cut = cut_start_at(&xs, width, px(8.0), 1.0, px(20.0)).expect("six pixels over");
+        assert_eq!((cut.keep, cut.at), (3, px(18.0)));
+        assert!(cut_start_at(&xs, width, px(8.0), 1.0, px(26.0)).is_none(), "it fits");
     }
 
     /// Zoom scales the text but not the box, so the tolerance must not grow with it.

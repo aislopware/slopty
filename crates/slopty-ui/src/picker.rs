@@ -20,8 +20,8 @@ use slopty_theme::Theme;
 
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
-use crate::icons::{self, IconName, IconSize, Status};
-use crate::palette::{icon_slot, section_heading, status_slot};
+use crate::icons::{IconName, Status};
+use crate::palette::{icon_slot, quiet_line, section_heading, status_slot};
 
 /// What the field says before anything is typed.
 pub(crate) const FILTER_PLACEHOLDER: &str = "Type to filter";
@@ -117,6 +117,15 @@ struct Row {
     section: Section,
     line: Line,
     on_pick: PickerEvent,
+}
+
+/// A one-line row of an overlay's list at the density's height: its fill a base unit in from
+/// the dialog's edges, its text on the edge grid, as the palette's rows sit.
+fn list_row(theme: &Theme) -> gpui::Div {
+    let spacing = theme.spacing;
+    crate::kit::row(theme, crate::kit::Row::One)
+        .mx(px(spacing.xs))
+        .px(px(spacing.inset() - spacing.xs))
 }
 
 /// Whether `text` holds every word of `query`, in any order and any case; an empty query
@@ -383,17 +392,11 @@ impl WindowPicker {
         let (raised, overlay) = (s.raised, s.overlay);
         let label =
             if secondary.is_empty() { primary.clone() } else { format!("{primary}, {secondary}") };
-        let row = div()
+        let row = list_row(theme)
             .id(id)
             .debug_selector(move || format!("picker-{}-{}", id.0, id.1))
             .role(gpui::accesskit::Role::Button)
             .aria_label(SharedString::from(label))
-            .w_full()
-            .px(px(theme.spacing.md))
-            .py(px(theme.spacing.sm))
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.sm))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .when(chosen, |el| el.bg(hsla(overlay)))
@@ -410,8 +413,9 @@ impl WindowPicker {
                     .text_color(hsla(s.text))
                     .child(SharedString::from(primary)),
             )
+            // Where it is, as the palette's context column says it: meta text, muted.
             .child(
-                div()
+                crate::kit::meta(div(), theme)
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
@@ -421,28 +425,25 @@ impl WindowPicker {
                     .child(SharedString::from(secondary)),
             )
             .children(worker.map(|worker| {
-                div().flex_none().text_color(hsla(s.text_muted)).child(SharedString::from(worker))
+                crate::kit::meta(div(), theme).flex_none().child(SharedString::from(worker))
             }));
         tab_stop(row, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
             cx.emit(on_pick.clone());
         }))
     }
 
-    /// Where the worker's windows will be, until its listing arrives: not a row to pick.
-    fn loading_row(&self) -> impl IntoElement {
+    /// Where the worker's windows will be, until its listing arrives: not a row to pick. Blank
+    /// for [`crate::screen::LOADING_GRACE`], so a listing that answers in time never flashes it.
+    fn loading_row(&self, window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
         let theme = &self.theme;
+        let row =
+            list_row(theme).id("picker-loading").debug_selector(|| "picker-loading".to_owned());
+        if !crate::screen::past_grace("picker-loading-grace", window, cx) {
+            return row;
+        }
         let muted = hsla(theme.surfaces.text_muted);
-        div()
-            .id("picker-loading")
-            .debug_selector(|| "picker-loading".to_owned())
-            .role(gpui::accesskit::Role::Status)
+        row.role(gpui::accesskit::Role::Status)
             .aria_label(LOADING_WINDOWS)
-            .w_full()
-            .px(px(theme.spacing.md))
-            .py(px(theme.spacing.sm))
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.sm))
             .text_color(muted)
             .child(icon_slot(theme, IconName::LoaderCircle, muted))
             .child(LOADING_WINDOWS)
@@ -459,30 +460,24 @@ impl WindowPicker {
             .debug_selector(|| name.to_owned())
     }
 
-    /// Nothing to list: a muted icon over what is missing, in the middle of the list.
-    fn empty_state(&self) -> impl IntoElement {
+    /// Nothing to list. A query that narrows to nothing is one quiet line; a worker and a
+    /// canvas with nothing at all to offer say so in the list's middle, in words alone.
+    fn empty_state(&self) -> gpui::AnyElement {
         let theme = &self.theme;
-        let muted = hsla(theme.surfaces.text_muted);
-        let (icon, text) = if self.query.is_empty() {
-            (IconName::AppWindow, NOTHING_TO_JUMP_TO)
-        } else {
-            (IconName::Search, NOTHING_MATCHES)
-        };
-        div()
+        if !self.query.is_empty() {
+            return quiet_line(theme, "picker-empty", NOTHING_MATCHES).into_any_element();
+        }
+        crate::kit::inset_x(div(), theme)
             .id("picker-empty")
             .debug_selector(|| "picker-empty".to_owned())
             .role(gpui::accesskit::Role::Status)
-            .aria_label(text)
-            .w_full()
+            .aria_label(NOTHING_TO_JUMP_TO)
             .py(px(theme.spacing.xl))
-            .px(px(theme.spacing.md))
             .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(theme.spacing.sm))
-            .text_color(muted)
-            .child(icons::icon(theme, icon, IconSize::Large, muted))
-            .child(text)
+            .justify_center()
+            .text_color(hsla(theme.surfaces.text_secondary))
+            .child(NOTHING_TO_JUMP_TO)
+            .into_any_element()
     }
 }
 
@@ -518,7 +513,7 @@ impl Render for WindowPicker {
             if grouped && section != Some(Section::Windows) {
                 rows.push(self.heading(Section::Windows).into_any_element());
             }
-            rows.push(self.loading_row().into_any_element());
+            rows.push(self.loading_row(window, cx).into_any_element());
         }
         let empty = rows.is_empty();
         let title = "Jump to a session, or add a window from the worker";
@@ -545,11 +540,9 @@ impl Render for WindowPicker {
                     .debug_selector(|| "picker".to_owned())
                     .role(gpui::accesskit::Role::Dialog)
                     .aria_label(title)
-                    // The title, the field and the rows' text share one left edge: the list's
-                    // inset plus a row's.
+                    // The title, the field and the rows' text share the one edge grid.
                     .child(
-                        div()
-                            .px(px(theme.spacing.lg))
+                        crate::kit::inset_x(div(), &theme)
                             .py(px(theme.spacing.sm))
                             .border_b_1()
                             .border_color(hsla(theme.surfaces.border))
@@ -558,8 +551,7 @@ impl Render for WindowPicker {
                             .child(title),
                     )
                     .children(self.input.as_ref().map(|input| {
-                        div()
-                            .px(px(theme.spacing.lg))
+                        crate::kit::inset_x(div(), &theme)
                             .py(px(theme.spacing.sm))
                             .border_b_1()
                             .border_color(hsla(theme.surfaces.border))
@@ -572,12 +564,13 @@ impl Render for WindowPicker {
                             .track_scroll(&self.scroll)
                             .flex_1()
                             .overflow_y_scroll()
-                            .p(px(theme.spacing.xs))
+                            .py(px(theme.spacing.xs))
                             .children(rows)
                             .when(empty, |el| el.child(self.empty_state())),
                     ),
             );
-        crate::kit::fade_in(root, "picker-fade", cx)
+        gpui::deferred(crate::kit::fade_in(root, "picker-fade", cx))
+            .with_priority(crate::palette::Layer::Dialog.priority())
     }
 }
 
@@ -780,6 +773,9 @@ mod tests {
             WindowPicker::loading(vec![shell("zsh")], Theme::default(), cx)
         });
         cx.update(|window, _cx| window.set_a11y_active(true));
+        assert_eq!(outline(cx), ["Heading Sessions", "Heading Windows"], "blank for the grace");
+        cx.executor().advance_clock(crate::screen::LOADING_GRACE);
+        cx.run_until_parked();
         let loading = format!("Status {LOADING_WINDOWS}");
         assert_eq!(outline(cx), ["Heading Sessions", "Heading Windows", loading.as_str()]);
         assert!(cx.debug_bounds("picker-session-0").is_some(), "the sessions are there at once");

@@ -20,21 +20,20 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    WeakEntity, Window, WindowOptions, div, px,
+    MouseButton, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowOptions, div, px,
 };
 use gpui_kit::component::Root;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 pub use settings::actions::OpenSettings;
 use slopty_client::LinkEvent;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WorkerId};
 use slopty_proto::WorkerMsg;
 use slopty_settings::{Loaded, Settings};
-use slopty_theme::{Theme, Typography};
+use slopty_theme::{Density, Spacing, Theme, Typography};
 use slopty_ui::a11y::{key_name, tab_stop};
 use slopty_ui::colors::hsla;
-use slopty_ui::icons::{IconName, IconSize, icon};
 use slopty_ui::kit::{self, ButtonKind};
 use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
@@ -46,16 +45,20 @@ use slopty_ui::workspace::{
 pub use workers::actions::{AddWorker, ConnectServer, DisconnectServer};
 use workers::{Hearing, Tick, WorkerSlot};
 
-/// A row of keys the soft keyboard lacks (Esc, Tab, Control, arrows, shell symbols).
-const KEY_BAR: bool = cfg!(target_os = "ios");
+/// A finger drives this build: the key bar the soft keyboard lacks (Esc, Tab, Control, arrows,
+/// shell symbols), a Paste where the Mac has ⌘V, full-width primary actions.
+pub(crate) const TOUCH: bool = cfg!(target_os = "ios");
 
 /// The key bar is for a touch platform typing on glass: a hardware keyboard has every key on
 /// it, so the row hides while one is attached and comes back when it is unplugged.
 const fn key_bar_visible(touch_platform: bool, hardware_keyboard: bool) -> bool {
     touch_platform && !hardware_keyboard
 }
-/// Key bar height in points.
-const KEY_BAR_H: f32 = 40.0;
+/// The key bar's height: a finger's target, whatever density the rest of the chrome is at,
+/// since the bar is only ever on glass.
+const KEY_BAR_H: f32 = Density::TOUCH.hit;
+/// Half a point: a scroll offset this close to an end is at it.
+const AT_END: f32 = 0.5;
 /// The add-worker panel's width: a line of help and an address field, not a document.
 const ADD_PANEL_W: f32 = 400.0;
 
@@ -93,10 +96,26 @@ const BAR_KEYS: [(&str, &str, Option<&str>); 12] = [
 ];
 /// Where the arrows end in [`BAR_KEYS`]: the clipboard key follows them.
 const ARROWS_END: usize = 7;
-/// A key cap's width before a wide screen shares out its spare room: a symbol's, and a
-/// word's. Below these a finger misses; on a phone the row scrolls instead of crowding.
-const KEY_W: f32 = 36.0;
-const KEY_WORD_W: f32 = 52.0;
+
+/// A key cap's height: the bar's, a base unit clear of its edges.
+fn cap_side(spacing: Spacing) -> f32 {
+    2.0_f32.mul_add(-spacing.xs, KEY_BAR_H)
+}
+
+/// A key cap's width: square for a symbol, a word's a small step wider each side. Fixed, never
+/// grown: an iPad's spare width stays spare rather than stretching "|" to 100 pt, and a phone's
+/// row scrolls rather than crowds.
+fn cap_width(label: &str, spacing: Spacing) -> f32 {
+    let side = cap_side(spacing);
+    if label.chars().count() > 1 { 2.0_f32.mul_add(spacing.sm, side) } else { side }
+}
+
+/// Which ends of the key row fade, as `(leading, trailing)`: the leading one once the row is
+/// scrolled off its start, the trailing one while keys remain past the edge. `scrolled` is how
+/// far the row is scrolled in and `max` how far it can be (zero when it fits).
+fn key_bar_fades(scrolled: f32, max: f32) -> (bool, bool) {
+    (scrolled > AT_END, scrolled < max - AT_END)
+}
 /// The key bar over a remote window: ⌘ joins ⌃ (an IDE lives on chords), the shell
 /// punctuation goes.
 const SCREEN_BAR_KEYS: [(&str, &str, Option<&str>); 9] = [
@@ -173,9 +192,67 @@ pub struct Workspace {
     /// this size at the window's top left. A UIKit window cannot be resized from inside the
     /// app, and the layout only needs the size it is given to be the size it lays out in.
     split_view: Option<gpui::Size<gpui::Pixels>>,
+    /// Where the key row is scrolled to, and how far it can go (from its last layout).
+    key_bar_scroll: ScrollHandle,
+    /// The key row's fades as last drawn, `(leading, trailing)` ([`key_bar_fades`]).
+    key_bar_fades: (bool, bool),
 }
 
 impl Workspace {
+    /// The shell round `view`: no worker yet, the default theme until the settings are applied.
+    /// `settings_seen` is the file's stamp from before it was read, so an edit in between is
+    /// still seen; `directory_cache` feeds the cache's one writer ([`server::write_cache`]).
+    fn new(
+        view: Entity<WorkspaceView>,
+        runtime: tokio::runtime::Handle,
+        settings_path: std::path::PathBuf,
+        settings_seen: settings::Seen,
+        directory_cache: tokio::sync::watch::Sender<server::Cache>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let events = cx.subscribe(&view, |ws: &mut Self, _view, event, cx| match event {
+            WorkspaceEvent::NeedsYou(n) => slopty_platform::set_badge(*n),
+            WorkspaceEvent::Attention(_session) => {
+                slopty_platform::attention();
+                slopty_platform::bounce();
+            }
+            // A bell while the human is elsewhere is an alert; in front of the window the
+            // view's own flash is enough.
+            WorkspaceEvent::Bell(_session) => {
+                if settings::bell_alerts(&ws.settings, cx.active_window().is_some()) {
+                    slopty_platform::attention();
+                    slopty_platform::bounce();
+                }
+            }
+        });
+        // The key bar follows the focused tile: a workspace change re-renders the shell,
+        // which is a key bar and the overlays.
+        let changes = cx.observe(&view, |_ws, _view, cx| cx.notify());
+        Self {
+            workers: Vec::new(),
+            directory: slopty_client::directory::Directory::default(),
+            server: None,
+            server_generation: 0,
+            directory_cache,
+            view,
+            hardware_keyboard: hardware_keyboard_attached(),
+            theme: Theme::default(),
+            settings: Settings::default(),
+            window_dark: true,
+            subscriptions: vec![events, changes],
+            adding: None,
+            runtime,
+            window: None,
+            settings_path,
+            settings_seen,
+            settings_editor: None,
+            pending_focus_editor: false,
+            split_view: None,
+            key_bar_scroll: ScrollHandle::new(),
+            key_bar_fades: (false, false),
+        }
+    }
+
     /// ⌘, / "Settings…" / the palette: the file's text (the commented defaults when there is
     /// none) in the in-app editor. A second ask while it is open just refocuses it.
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -253,13 +330,13 @@ impl Workspace {
         }
         if let Some(error) = &loaded.error {
             tracing::error!(%error, "settings ignored");
-            self.show_notice(format!("settings: {error}"), cx);
+            self.show_notice(format!("Settings: {error}"), cx);
         } else if let Some(first) = loaded.warnings.first() {
             let more = loaded.warnings.len().saturating_sub(1);
             let text = if more == 0 {
-                format!("settings: {first}")
+                format!("Settings: {first}")
             } else {
-                format!("settings: {first} (+{more} more)")
+                format!("Settings: {first} (+{more} more)")
             };
             self.show_notice(text, cx);
         }
@@ -345,7 +422,7 @@ impl Workspace {
     /// left the panel returns.
     fn forget_worker(&mut self, id: WorkerId, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(e) = net::forget_worker(id) {
-            self.show_notice(format!("forget worker: {e:#}"), cx);
+            self.show_notice(format!("Could not forget the worker: {e:#}"), cx);
             return;
         }
         if self.directory.get(id).is_some() {
@@ -771,7 +848,7 @@ impl Workspace {
             return;
         }
         if let Err(e) = self.save_server(None) {
-            self.show_notice(format!("settings: {e}"), cx);
+            self.show_notice(format!("Settings: {e}"), cx);
             return;
         }
         self.set_server(None, None, cx);
@@ -790,10 +867,10 @@ impl Workspace {
     }
 
     /// The way in: a heading, one line on what it is, the address, one primary action, and the
-    /// other way in as a quiet link. On the first run it stands alone on the canvas under a
-    /// large muted mark; later ("Add a worker…", "Connect to a server…") it is a dialog over the
-    /// workspace with a Cancel. The phone gets a Paste, since it has no ⌘V; the Mac's field
-    /// takes ⌘V.
+    /// other way in as a quiet link. On the first run it stands alone on the canvas, a third of
+    /// the way down; later ("Add a worker…", "Connect to a server…") it is a dialog over the
+    /// workspace, closed by Cancel, Esc or a click outside it. On touch the field ends in a
+    /// Paste, since the phone has no ⌘V, and the primary action is a thumb's full width.
     fn add_worker_panel(
         &self,
         adding: &Adding,
@@ -804,18 +881,17 @@ impl Workspace {
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
         let button = |id, text, kind| kit::button(theme, id, text, kind);
-        let (mark, title, blurb, field, go, other, other_mode) = match adding.mode {
+        // Each blurb fits one line of a 402 pt phone.
+        let (title, blurb, field, go, other, other_mode) = match adding.mode {
             Panel::Server => (
-                IconName::Server,
                 "Connect to a server",
-                "Slopty finds your workers through a server on your tailnet or VPN.",
+                "A server on your tailnet or VPN lists your workers.",
                 "Server address",
                 "Connect",
                 "Add a worker by address instead",
                 Panel::Worker,
             ),
             Panel::Worker => (
-                IconName::Monitor,
                 "Add a worker",
                 "A Mac running the Slopty worker, on your tailnet or VPN.",
                 "Worker address",
@@ -835,9 +911,37 @@ impl Workspace {
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.show_add_worker(other_mode, window, cx);
             }));
+        let go = button("add", go, ButtonKind::Primary)
+            .when(TOUCH, gpui::Styled::w_full)
+            .on_click(cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)));
+        let cancel = (!welcome).then(|| {
+            button("cancel-add", "Cancel", ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)))
+        });
+        let paste = TOUCH.then(|| {
+            button("paste-address", "Paste", ButtonKind::Link)
+                .on_click(cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)))
+        });
+        let address = Input::new(&adding.address).aria_label(field).when_some(paste, Input::suffix);
+        // The Mac: the action and Cancel on one row, the other way in under them. Touch: the
+        // action alone across the panel, then the other way in beside Cancel.
+        let actions = if TOUCH {
+            div().flex().flex_col().gap(px(spacing.md)).child(go).child(
+                div().flex().items_center().child(switch).child(div().flex_1()).children(cancel),
+            )
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(spacing.md))
+                .child(div().flex().items_center().child(go).child(div().flex_1()).children(cancel))
+                .child(div().flex().child(switch))
+        };
         let panel = div()
             .id("add-worker")
+            .debug_selector(|| "add-worker".to_owned())
             .occlude()
+            .flex_none()
             .flex()
             .flex_col()
             .gap(px(spacing.md))
@@ -845,24 +949,14 @@ impl Workspace {
             .max_w_full()
             .font_family(theme.typography.ui_family.clone())
             .when(!welcome, |el| {
-                el.p(px(spacing.xl))
+                kit::elevate(el, theme)
+                    .p(px(spacing.xl))
                     .rounded(px(radii.md))
-                    .bg(hsla(s.panel))
-                    .border_1()
-                    .border_color(hsla(s.border))
-                    .shadow_sm()
-            })
-            // The first run is an empty state: a large muted mark over the heading. Over the
-            // workspace the dialog's frame already says what it is.
-            .when(welcome, |el| {
-                el.child(
-                    div().debug_selector(|| "welcome-mark".to_owned()).flex().child(icon(
-                        theme,
-                        mark,
-                        IconSize::Large,
-                        hsla(s.text_muted),
-                    )),
-                )
+                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                    .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                        this.cancel_add_worker(window, cx);
+                        cx.stop_propagation();
+                    }))
             })
             .child(
                 div()
@@ -890,7 +984,7 @@ impl Workspace {
                             .child(blurb),
                     ),
             )
-            .child(Input::new(&adding.address).aria_label(field))
+            .child(address)
             .when_some(status, |el, (text, tone)| {
                 el.child(
                     div()
@@ -902,66 +996,118 @@ impl Workspace {
                         .child(SharedString::from(text)),
                 )
             })
-            .child(
-                div()
-                    .flex()
-                    .gap(px(spacing.sm))
-                    .items_center()
-                    .child(
-                        button("add", go, ButtonKind::Primary).on_click(
-                            cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)),
-                        ),
-                    )
-                    .when(KEY_BAR, |row| {
-                        row.child(button("paste-address", "Paste", ButtonKind::Secondary).on_click(
-                            cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)),
-                        ))
-                    })
-                    .child(div().flex_1())
-                    .when(!welcome, |row| {
-                        row.child(button("cancel-add", "Cancel", ButtonKind::Ghost).on_click(
-                            cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)),
-                        ))
-                    }),
-            )
-            .child(div().flex().child(switch));
+            .child(actions);
         if welcome {
-            // Not a dialog over an app that does nothing yet: the page itself, the content a
-            // third of the way down where the eye starts.
+            // Not a dialog over an app that does nothing yet: the page itself, its block a third
+            // of the way down the height it has, where the eye starts. Spacers rather than a
+            // percentage pad, which would resolve against the width. The safe area includes a
+            // phone's keyboard, so the block rises with it.
+            let safe = window.insets().effective();
             div()
                 .id("welcome")
                 .size_full()
                 .flex()
                 .flex_col()
                 .items_center()
-                .pt(gpui::relative(0.28))
+                .pt(safe.top)
+                .pb(safe.bottom)
                 .px(px(spacing.lg))
                 .bg(hsla(s.canvas))
+                .child(div().flex_grow(1.0))
                 .child(panel)
+                .child(div().flex_grow(2.0))
                 .into_any_element()
         } else {
             kit::backdrop(theme, window)
                 .id("add-worker-backdrop")
-                .flex()
-                .items_center()
-                .justify_center()
-                .p(px(theme.spacing.lg))
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _ev, window, cx| {
+                        this.cancel_add_worker(window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
                 .child(panel)
                 .into_any_element()
         }
     }
 
     /// Esc, Tab, sticky Control, arrows and the shell symbols a phone keyboard hides; shown
-    /// above the keyboard inset while a terminal is active.
-    fn key_bar(&self, target: &KeyTarget, cx: &Context<Self>) -> gpui::AnyElement {
-        match target {
+    /// above the keyboard inset while a terminal or a remote window is active. The bar is chrome
+    /// on `canvas` under a hairline; its row scrolls where it overflows, and an end with keys
+    /// past it fades out.
+    fn key_bar(
+        &mut self,
+        target: &KeyTarget,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let row = match target {
             KeyTarget::Terminal(terminal) => self.terminal_key_bar(terminal, cx),
             KeyTarget::Screen(screen) => self.screen_key_bar(screen, cx),
-        }
+        };
+        // The offset is the one this frame scrolled to; the extent is the last layout's, so a
+        // bar just shown, turned or resized is looked at again once it is laid out.
+        let (leading, trailing) = self.measured_fades();
+        self.key_bar_fades = (leading, trailing);
+        cx.on_next_frame(window, |this, _window, cx| {
+            if this.measured_fades() != this.key_bar_fades {
+                cx.notify();
+            }
+        });
+        let s = &self.theme.surfaces;
+        let solid = hsla(s.canvas);
+        let fade = |toward: f32| {
+            div().absolute().top_0().bottom_0().w(px(self.theme.spacing.xl)).bg(
+                gpui::linear_gradient(
+                    toward,
+                    gpui::linear_color_stop(gpui::Hsla { a: 0.0, ..solid }, 0.0),
+                    gpui::linear_color_stop(solid, 1.0),
+                ),
+            )
+        };
+        div()
+            .relative()
+            .w_full()
+            .bg(solid)
+            .border_t_1()
+            .border_color(hsla(s.border))
+            .child(row)
+            .when(leading, |el| {
+                el.child(fade(270.0).left_0().debug_selector(|| "key-bar-fade-leading".to_owned()))
+            })
+            .when(trailing, |el| {
+                el.child(fade(90.0).right_0().debug_selector(|| "key-bar-fade-trailing".to_owned()))
+            })
+            .into_any_element()
     }
 
-    /// A key cap of the bar: `raised` on the `panel` bar, `overlay` while pressed, the accent
-    /// with its foreground when `lit` (armed or toggled on).
+    /// [`key_bar_fades`] for the key row as it is scrolled now.
+    fn measured_fades(&self) -> (bool, bool) {
+        let scrolled = -f32::from(self.key_bar_scroll.offset().x);
+        key_bar_fades(scrolled, f32::from(self.key_bar_scroll.max_offset().x))
+    }
+
+    /// The key bar's row, before its keys: one line that scrolls sideways.
+    fn key_row(&self) -> gpui::Stateful<gpui::Div> {
+        let spacing = self.theme.spacing;
+        div()
+            .id("key-bar")
+            .h(px(KEY_BAR_H))
+            .w_full()
+            .flex()
+            .items_center()
+            .overflow_x_scroll()
+            .track_scroll(&self.key_bar_scroll)
+            .px(px(spacing.xs))
+            .gap(px(spacing.xs))
+            .font_family(self.theme.typography.ui_family.clone())
+    }
+
+    /// A key cap of the bar: `elevated` under the `border` hairline so it holds its edges on
+    /// the `canvas` bar in both variants, `overlay` while pressed, the accent with its
+    /// foreground when `lit` (armed or toggled on).
     fn key_cap(
         &self,
         id: String,
@@ -970,23 +1116,22 @@ impl Workspace {
         text_size: f32,
     ) -> gpui::Stateful<gpui::Div> {
         let s = &self.theme.surfaces;
+        let spacing = self.theme.spacing;
         let pressed = if lit { s.accent } else { s.overlay };
-        let basis = if label.chars().count() > 1 { KEY_WORD_W } else { KEY_W };
-        // Every cap grows by the same share of any room left over, so a tablet's row fills
-        // its width while a phone's keeps these widths and scrolls.
         div()
             .id(SharedString::from(id))
-            .flex_grow(1.0)
-            .flex_shrink_0()
-            .flex_basis(px(basis))
-            .h(px(KEY_BAR_H - self.theme.spacing.sm))
+            .flex_none()
+            .w(px(cap_width(label, spacing)))
+            .h(px(cap_side(spacing)))
             .flex()
             .items_center()
             .justify_center()
             .rounded(px(self.theme.radii.sm))
+            .border_1()
+            .border_color(hsla(if lit { s.accent } else { s.border }))
             .text_size(px(text_size))
             .text_color(hsla(if lit { s.accent_fg } else { s.text }))
-            .bg(hsla(if lit { s.accent } else { s.raised }))
+            .bg(hsla(if lit { s.accent } else { s.elevated }))
             .active(move |el| el.bg(hsla(pressed)))
     }
 
@@ -1014,22 +1159,9 @@ impl Workspace {
 
     /// The bar over a remote window: chords and arrows, copy and paste through the worker.
     fn screen_key_bar(&self, screen: &Entity<ScreenView>, cx: &Context<Self>) -> gpui::AnyElement {
-        let s = &self.theme.surfaces;
         let view = screen.read(cx);
         let (control, command) = (view.sticky(Sticky::Control), view.sticky(Sticky::Command));
-        let mut bar = div()
-            .id("key-bar")
-            .h(px(KEY_BAR_H))
-            .w_full()
-            .flex()
-            .items_center()
-            .overflow_x_scroll()
-            .px(px(self.theme.spacing.xs))
-            .gap(px(self.theme.spacing.xs))
-            .bg(hsla(s.panel))
-            .border_t_1()
-            .border_color(hsla(s.border))
-            .font_family(self.theme.typography.ui_family.clone());
+        let mut bar = self.key_row();
         for (label, key, typed) in SCREEN_BAR_KEYS {
             let sticky = match key {
                 "" => Some(Sticky::Control),
@@ -1077,19 +1209,7 @@ impl Workspace {
         let armed = terminal.read(cx).sticky_control();
         let armed_command = terminal.read(cx).sticky_command();
         let has_selection = terminal.read(cx).selection().is_some();
-        let bar = div()
-            .id("key-bar")
-            .h(px(KEY_BAR_H))
-            .w_full()
-            .flex()
-            .items_center()
-            .overflow_x_scroll()
-            .px(px(self.theme.spacing.xs))
-            .gap(px(self.theme.spacing.xs))
-            .bg(hsla(s.canvas))
-            .border_t_1()
-            .border_color(hsla(s.border))
-            .font_family(self.theme.typography.ui_family.clone());
+        let bar = self.key_row();
         let ui = self.theme.typography.ui_size;
         let small = self.theme.typography.small();
         let mut keys: Vec<gpui::AnyElement> = Vec::with_capacity(BAR_KEYS.len().saturating_add(2));
@@ -1192,14 +1312,14 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The frame's draw starts here; the probe element at the end of the tree closes it.
         slopty_ui::frames::begin(cx);
-        let surfaces = &self.theme.surfaces;
         // Notch / Dynamic Island, home indicator and the soft keyboard on iOS; zero on macOS.
         // The workspace keeps the top and the sides clear itself.
         let insets = window.insets().effective();
-        let key_bar = key_bar_visible(KEY_BAR, self.hardware_keyboard)
+        let key_bar = key_bar_visible(TOUCH, self.hardware_keyboard)
             .then(|| self.view.read(cx).active_key_target())
             .flatten()
-            .map(|target| self.key_bar(&target, cx));
+            .map(|target| self.key_bar(&target, window, cx));
+        let surfaces = self.theme.surfaces;
         if std::mem::take(&mut self.pending_focus_editor)
             && let Some(editor) = self.settings_editor.clone()
         {
@@ -1210,7 +1330,11 @@ impl Render for Workspace {
         // A page in a browser tile is a native view over everything GPUI draws: it hides
         // under the app's own dialogs as it does under the workspace's.
         let covered = welcome || settings_editor.is_some() || self.adding.is_some();
-        self.view.update(cx, |v, cx| v.set_covered(covered, cx));
+        self.view.update(cx, |v, cx| {
+            v.set_covered(covered, cx);
+            // The key bar takes the status bar's row above the keyboard.
+            v.set_key_bar_shown(key_bar.is_some(), cx);
+        });
         let adding = self.adding.as_ref().map(|adding| self.add_worker_panel(adding, window, cx));
         let root = match self.split_view {
             Some(size) => div().w(size.width).h(size.height),
@@ -1235,7 +1359,7 @@ impl Render for Workspace {
             .when(!welcome, |el| {
                 el.child(div().flex_1().w_full().min_h_0().child(self.view.clone()))
                     .when_some(key_bar, |el, bar| {
-                        el.child(div().w_full().px(insets.left).child(bar))
+                        el.child(div().w_full().pl(insets.left).pr(insets.right).child(bar))
                     })
                     // The home indicator's band continues the bar above it: the key bar and the
                     // status bar are both chrome on `canvas`.
@@ -1408,49 +1532,10 @@ pub fn open_workspace(
         view.set_animation(false);
         view
     });
-    let workspace = cx.new(|cx| {
-        let events = cx.subscribe(&view, |ws: &mut Workspace, _view, event, cx| match event {
-            WorkspaceEvent::NeedsYou(n) => slopty_platform::set_badge(*n),
-            WorkspaceEvent::Attention(_session) => {
-                slopty_platform::attention();
-                slopty_platform::bounce();
-            }
-            // A bell while the human is elsewhere is an alert; in front of the window the
-            // view's own flash is enough.
-            WorkspaceEvent::Bell(_session) => {
-                if settings::bell_alerts(&ws.settings, cx.active_window().is_some()) {
-                    slopty_platform::attention();
-                    slopty_platform::bounce();
-                }
-            }
-        });
-        // The key bar follows the focused tile: a workspace change re-renders the shell,
-        // which is a key bar and the overlays.
-        let changes = cx.observe(&view, |_ws, _view, cx| cx.notify());
-        let (directory_cache, cache_writes) = tokio::sync::watch::channel(server::Cache::Remove);
-        handle.spawn(server::write_cache(server::cache_path(), cache_writes));
-        Workspace {
-            workers: Vec::new(),
-            directory: slopty_client::directory::Directory::default(),
-            server: None,
-            server_generation: 0,
-            directory_cache,
-            view: view.clone(),
-            hardware_keyboard: hardware_keyboard_attached(),
-            theme: Theme::default(),
-            settings: Settings::default(),
-            window_dark: true,
-            subscriptions: vec![events, changes],
-            adding: None,
-            runtime: handle,
-            window: None,
-            settings_path,
-            settings_seen,
-            settings_editor: None,
-            pending_focus_editor: false,
-            split_view: None,
-        }
-    });
+    let (directory_cache, cache_writes) = tokio::sync::watch::channel(server::Cache::Remove);
+    handle.spawn(server::write_cache(server::cache_path(), cache_writes));
+    let workspace = cx
+        .new(|cx| Workspace::new(view, handle, settings_path, settings_seen, directory_cache, cx));
     let root_view = workspace.clone();
     // Terminals and remote desktops stay at full rate while another app has the keyboard: a
     // second display is watched while typing elsewhere.
@@ -1593,7 +1678,9 @@ fn open_settings_file(cx: &App) {
 
 #[cfg(test)]
 mod tests {
-    use super::key_bar_visible;
+    use gpui::{TestAppContext, VisualTestContext, point, size};
+
+    use super::*;
 
     #[test]
     fn the_key_bar_is_for_glass_without_a_keyboard() {
@@ -1601,5 +1688,117 @@ mod tests {
         assert!(!key_bar_visible(true, true));
         assert!(!key_bar_visible(false, false));
         assert!(!key_bar_visible(false, true));
+    }
+
+    /// A key row that fits has no fade; one that runs past the edge fades where keys remain,
+    /// the leading end once it is scrolled off the start.
+    #[test]
+    fn the_key_row_fades_where_keys_run_past_the_edge() {
+        assert_eq!(key_bar_fades(0.0, 0.0), (false, false), "a row that fits");
+        assert_eq!(key_bar_fades(0.0, 180.0), (false, true), "at the start, more to come");
+        assert_eq!(key_bar_fades(90.0, 180.0), (true, true), "keys past both ends");
+        assert_eq!(key_bar_fades(179.8, 180.0), (true, false), "at the end");
+    }
+
+    /// The caps keep their widths: the terminal's row runs past a 402 pt phone, so it scrolls,
+    /// and fits the narrowest iPad (744 pt) with room to spare rather than stretching to it.
+    #[test]
+    fn the_key_caps_keep_their_width() {
+        let spacing = Theme::default().spacing;
+        let labels = BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Paste", "Find"]);
+        let (count, caps) = labels
+            .fold((0.0_f32, 0.0_f32), |(n, w), label| (n + 1.0, w + cap_width(label, spacing)));
+        let row = 2.0_f32.mul_add(spacing.xs, (count - 1.0).mul_add(spacing.xs, caps));
+        assert!(row > 402.0 && row < 744.0, "{row}");
+        assert!((cap_width("|", spacing) - cap_side(spacing)).abs() < f32::EPSILON, "square");
+        assert!(cap_side(spacing) < KEY_BAR_H, "a cap sits inside its bar");
+    }
+
+    /// The shell in a headless window with the add-worker panel up, `worker` ones known so
+    /// it is a dialog over the workspace, else the first run. The runtime and the directory
+    /// hold what the shell's tasks and settings file need for the test's length.
+    fn shell<'a>(
+        cx: &'a mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        dir: &tempfile::TempDir,
+        worker: bool,
+    ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys(app_key_bindings());
+        });
+        let path = dir.path().join("settings.toml");
+        let (cache, _writes) = tokio::sync::watch::channel(server::Cache::Remove);
+        let handle = runtime.handle().clone();
+        let view = cx.new(|cx| {
+            let mut view = WorkspaceView::new(Theme::default(), None, cx);
+            view.set_animation(false);
+            view
+        });
+        let seen = settings::Seen::of(&path);
+        let ws = cx.new(|cx| {
+            let mut ws = Workspace::new(view, handle, path, seen, cache, cx);
+            if worker {
+                ws.workers.push(WorkerSlot::new(WorkerId::new(), "studio".to_owned(), true));
+            }
+            ws
+        });
+        let root = ws.clone();
+        let (_root, cx) = cx.add_window_view(move |window, cx| Root::new(root, window, cx));
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
+        });
+        cx.run_until_parked();
+        (ws, cx)
+    }
+
+    /// The first run's block sits a third of the way down the height on every device, which a
+    /// percentage pad (resolved against the width) did not: 42 % on the Mac, 12 % on a phone.
+    #[gpui::test]
+    fn the_first_run_sits_a_third_down_on_every_device(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        assert!(ws.read_with(cx, |ws, _| ws.welcome()));
+        for (w, h) in [(900.0, 600.0), (1280.0, 800.0), (1024.0, 1366.0), (402.0, 874.0)] {
+            cx.simulate_resize(size(px(w), px(h)));
+            cx.run_until_parked();
+            let panel = cx.debug_bounds("add-worker").expect("the panel is drawn");
+            let above = f32::from(panel.top());
+            let below = h - f32::from(panel.bottom());
+            assert!(
+                2.0_f32.mul_add(-above, below).abs() < 1.0,
+                "{w}×{h}: {above} above, {below} below"
+            );
+        }
+    }
+
+    /// Over the workspace the panel is a dialog: Esc closes it, and so does a click outside
+    /// it, while a click inside it does not.
+    #[gpui::test]
+    fn the_dialog_closes_on_esc_or_a_click_outside(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.simulate_resize(size(px(900.0), px(600.0)));
+        cx.run_until_parked();
+        assert!(ws.read_with(cx, |ws, _| ws.adding.is_some() && !ws.welcome()));
+        cx.simulate_keystrokes("escape");
+        assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "Esc closes it");
+
+        let reopen = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
+            });
+            cx.run_until_parked();
+            cx.debug_bounds("add-worker").expect("the dialog is drawn")
+        };
+        let panel = reopen(cx);
+        let inside = point(panel.left() + px(2.0), panel.top() + px(2.0));
+        cx.simulate_click(inside, gpui::Modifiers::none());
+        assert!(ws.read_with(cx, |ws, _| ws.adding.is_some()), "a click inside keeps it");
+        let outside = point(panel.left(), panel.bottom() + px(20.0));
+        cx.simulate_click(outside, gpui::Modifiers::none());
+        assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "a click outside closes it");
     }
 }

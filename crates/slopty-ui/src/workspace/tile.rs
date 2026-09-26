@@ -15,6 +15,7 @@ use slopty_core::SessionId;
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentSource;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
+use slopty_proto::screen::SourceState;
 use slopty_proto::terminal::{SessionState, TermRequest};
 use slopty_theme::{Theme, alpha};
 
@@ -28,8 +29,9 @@ use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize, Status};
 use crate::kit;
 
-/// A tile's header height, in points at zoom 1.
-pub(super) const HEADER_H: f32 = 28.0;
+/// Below this zoom the overview draws a tile as its header and body surfaces only: text a few
+/// points high is mush, and the shapes are what tell tiles apart there.
+pub(super) const SHAPES_BELOW: f32 = 0.5;
 
 /// The divider between neighbouring tiles: one hairline, whatever the zoom.
 const HAIRLINE: f32 = 1.0;
@@ -53,6 +55,10 @@ const TAB_GROUP: &str = "tab";
 /// The widest a tab grows in a tabbed column's tab row, in points at zoom 1: past it the tabs
 /// read as one long bar rather than as tabs.
 const TAB_MAX: f32 = 200.0;
+
+/// The narrowest a tab is, in points at zoom 1: a four-letter title still makes a tab a
+/// pointer can find, not a sliver.
+const TAB_MIN: f32 = 120.0;
 
 /// The group a header's window controls (fullscreen, close) hover with: they show while the
 /// pointer is on the header itself, not anywhere over the body.
@@ -98,7 +104,7 @@ pub const PAUSED: &str = "Paused off screen";
 /// A stream or a page on its way.
 pub const OPENING: &str = "Opening…";
 /// A file card waiting for its text.
-pub const READING: &str = "Reading…";
+pub const READING: &str = crate::file::READING;
 /// A note whose editor is not made yet.
 pub const NOTE: &str = "Note";
 
@@ -111,6 +117,15 @@ pub const NOTE_TITLE_CHARS: usize = 40;
 pub(super) struct Chrome {
     pub k: f32,
     pub zooming: bool,
+}
+
+/// What a body with nothing to show yet says, and when.
+enum Wait {
+    /// A state that lasts (asleep, let go off screen): said at once.
+    Lasting(SharedString),
+    /// A wait the worker is about to end (opening, reading, attaching): said only past the
+    /// loading grace.
+    Loading(SharedString),
 }
 
 /// What surrounds a tile on the strip.
@@ -315,7 +330,7 @@ impl WorkspaceView {
         &self,
         placed: &Placed,
         chrome: Chrome,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let tile = placed.tile;
@@ -473,6 +488,54 @@ impl WorkspaceView {
             _ => None,
         };
         let ink = if focused { s.text } else { s.text_muted };
+        let heading = SharedString::from(if kind == title {
+            title.clone()
+        } else {
+            format!("{kind} {title}")
+        });
+        // Focus is told by the header: the focused one is its body's surface in primary text,
+        // with nothing between them, so the tile reads as one piece; the others step down to
+        // the panel, muted, with a quiet hairline over their bodies. A page or a remote picture
+        // is another program's surface, never quite the content's, so its header keeps the
+        // hairline focused too. A tabbed column's header is its tab row, whose tabs draw their
+        // own edges.
+        let foreign = matches!(
+            item.kind,
+            ItemKind::Browser { .. } | ItemKind::Window { .. } | ItemKind::Display { .. }
+        );
+        let header = div()
+            .id("title")
+            .debug_selector(move || format!("title-{}", id.as_uuid()))
+            .group(HEADER_GROUP)
+            .role(Role::Heading)
+            .aria_label(heading)
+            .relative()
+            .h(px(theme.density.header * k))
+            .w_full()
+            .flex_none()
+            .flex()
+            .text_size(px(theme.typography.ui_size * k))
+            .text_color(hsla(ink))
+            .font_family(theme.typography.ui_family.clone())
+            .cursor_grab()
+            .map(|el| if focused { el.bg(hsla(theme.content())) } else { el.bg(hsla(s.panel)) })
+            .when(!focused || foreign, |el| el.border_b_1().border_color(hsla(s.border_subtle)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                    // The second click of a double-click names the tile; the first began a
+                    // move that its mouse-up ended.
+                    if ev.click_count == 2 {
+                        this.start_rename(tile, window, cx);
+                    } else {
+                        this.begin_move(tile, ev, cx);
+                    }
+                    cx.stop_propagation();
+                }),
+            );
+        if k < SHAPES_BELOW {
+            return header.into_any_element();
+        }
         let badge = agent.map(|(session, a)| self.agent_badge(tile, session, a, chrome, cx));
         let unwatched = match &item.kind {
             ItemKind::Terminal { session } => self.finished.get(session).map(|f| (*session, f)),
@@ -490,7 +553,7 @@ impl WorkspaceView {
                 .flex_none()
                 .size(px((theme.spacing.xs + theme.spacing.xxs) * k))
                 .rounded_full()
-                .bg(hsla(s.accent))
+                .bg(hsla(s.accent_fill))
                 .into_any_element()
         });
         // An agent the worker had to guess at: offer the hooks that would make it precise.
@@ -516,7 +579,7 @@ impl WorkspaceView {
                 .bottom_0()
                 .h(px(PROGRESS * k))
                 .w(gpui::relative(upload.fraction()))
-                .bg(hsla(s.accent));
+                .bg(hsla(s.accent_fill));
             let pill = tab_stop(kit::tabular(pill), s.accent)
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_upload(xfer, cx)))
                 .into_any_element();
@@ -550,6 +613,8 @@ impl WorkspaceView {
             }),
             _ => None,
         };
+        // A directory keeps the folder it ends in; an address keeps its host.
+        let path = matches!(item.kind, ItemKind::Terminal { .. });
         let place = place.map(|text| {
             let mut place = div();
             // Gives way long before the title does: a narrow tile keeps its name whole and
@@ -566,9 +631,12 @@ impl WorkspaceView {
                 .font_family(crate::palette::mono_family(theme))
                 .text_color(hsla(s.text_muted))
                 .child(
-                    ChromeText::new(text, px(theme.typography.small()), k)
-                        .fill()
-                        .zooming(chrome.zooming),
+                    if path {
+                        ChromeText::new(text, px(theme.typography.small()), k).fill_from_start()
+                    } else {
+                        ChromeText::new(text, px(theme.typography.small()), k).fill()
+                    }
+                    .zooming(chrome.zooming),
                 )
         });
         // The worker's name, where more than one could be meant: quiet text after a server
@@ -613,11 +681,6 @@ impl WorkspaceView {
                 .rounded_full()
                 .bg(hsla(s.text_secondary))
         });
-        let heading = SharedString::from(if kind == title {
-            title.clone()
-        } else {
-            format!("{kind} {title}")
-        });
         // One that needs the human says so along its top.
         let attention = agent.is_some_and(|(_, a)| needs_human(a)).then(|| {
             div()
@@ -627,41 +690,9 @@ impl WorkspaceView {
                 .left_0()
                 .right_0()
                 .h(px(ATTENTION_BAR * k))
-                .bg(hsla(s.warn))
+                .bg(hsla(s.warn_fill))
         });
         let tabbed = placed.tabs.is_some();
-        // Focus is told by the header: the focused one is its body's surface in primary text,
-        // with nothing between them, so the tile reads as one piece; the others step down to
-        // the panel, muted, with a quiet hairline over their bodies. A tabbed column's header
-        // is its tab row, whose tabs draw their own edges.
-        let header = div()
-            .id("title")
-            .debug_selector(move || format!("title-{}", id.as_uuid()))
-            .group(HEADER_GROUP)
-            .role(Role::Heading)
-            .aria_label(heading)
-            .relative()
-            .h(px(HEADER_H * k))
-            .w_full()
-            .flex_none()
-            .flex()
-            .text_size(px(theme.typography.ui_size * k))
-            .text_color(hsla(ink))
-            .font_family(theme.typography.ui_family.clone())
-            .cursor_grab()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                    // The second click of a double-click names the tile; the first began a
-                    // move that its mouse-up ended.
-                    if ev.click_count == 2 {
-                        this.start_rename(tile, window, cx);
-                    } else {
-                        this.begin_move(tile, ev, cx);
-                    }
-                    cx.stop_propagation();
-                }),
-            );
         let header = if tabbed {
             let tabs = self.render_tabs(placed, chrome, cx);
             // What the tabs leave is the bar's, hairline and all; the tile's controls end it.
@@ -680,12 +711,14 @@ impl WorkspaceView {
                 .when_some(hooks, gpui::ParentElement::child)
                 .child(actions)
                 .child(strip);
-            header.bg(hsla(s.panel)).child(tabs).child(rest)
+            header.bg(hsla(s.panel)).border_b_0().child(tabs).child(rest)
         } else {
             let lead = self.leading_slot(tile, item, ink, k, cx);
             let name = self.header_name(tile, id, title, chrome);
             // The title and its place share what the right side leaves, the place giving way
             // first.
+            // The unsaved dot follows the title it qualifies, as an editor's tab has it, not
+            // the far end of the bar.
             let names = div()
                 .flex_1()
                 .min_w_0()
@@ -693,16 +726,14 @@ impl WorkspaceView {
                 .items_center()
                 .gap(px(theme.spacing.sm * k))
                 .child(name)
+                .when_some(unsaved, gpui::ParentElement::child)
                 .children(place);
             header
                 .items_center()
                 .px(px(theme.spacing.inset() * k))
                 .gap(px(theme.spacing.sm * k))
-                .map(|el| if focused { el.bg(hsla(theme.content())) } else { el.bg(hsla(s.panel)) })
-                .when(!focused, |el| el.border_b_1().border_color(hsla(s.border_subtle)))
                 .child(lead)
                 .child(names)
-                .when_some(unsaved, gpui::ParentElement::child)
                 .when_some(worker, gpui::ParentElement::child)
                 .children(ports)
                 .when_some(upload, gpui::ParentElement::child)
@@ -825,8 +856,10 @@ impl WorkspaceView {
                     .role(Role::Tab)
                     .aria_label(SharedString::from(self.card_title(tab, item, cx)))
                     .aria_selected(shown)
-                    .flex_1()
-                    .min_w_0()
+                    // As wide as its title, between the two bounds; tabs that do not fit give
+                    // way alike down to the narrower one.
+                    .flex_initial()
+                    .min_w(px(TAB_MIN * k))
                     .max_w(px(TAB_MAX * k))
                     .h_full()
                     .flex()
@@ -857,12 +890,12 @@ impl WorkspaceView {
                         }),
                     )
                     .child(slot)
-                    .child(div().flex_1().min_w_0().overflow_hidden().child(name))
+                    .child(div().flex_auto().min_w_0().overflow_hidden().child(name))
                     .child(close),
             )
         });
-        // The tabs and the bar after them grow alike, a tab no wider than `TAB_MAX`, so a few
-        // tabs keep their titles whole and the bar's hairline runs on from the last.
+        // The tabs take their titles' widths and the bar after them the rest, so a few tabs
+        // keep their titles whole and the bar's hairline runs on from the last.
         div()
             .flex_1()
             .min_w_0()
@@ -874,7 +907,8 @@ impl WorkspaceView {
     }
 
     /// How the tile is doing, in the one status vocabulary: its agent's state; else, out of
-    /// reach; else a shell's last command, failed or finished unwatched.
+    /// reach; else a remote picture on its way; else a shell's last command, failed or finished
+    /// unwatched.
     pub(super) fn tile_status(&self, tile: TileRef, item: &Item, cx: &App) -> Option<Status> {
         let session = match item.kind {
             ItemKind::Terminal { session } => Some(session),
@@ -885,6 +919,9 @@ impl WorkspaceView {
         }
         if self.workers.get(&tile.worker).is_none_or(|w| w.link.is_none()) {
             return Some(Status::Away);
+        }
+        if self.opening(item, cx) {
+            return Some(Status::Working);
         }
         let session = session?;
         let failed = |exit: i64| if exit == 0 { Status::Done } else { Status::Failed };
@@ -902,11 +939,28 @@ impl WorkspaceView {
         }
         let prompt = state.prompt_before(slopty_grid::LineIndex(u64::MAX))?;
         let exit = state.line(prompt)?.mark.exit()?;
-        (exit != 0).then_some(Status::Failed)
+        // A failure the grid is showing, washed and barred, is not marked a second time here.
+        let shown = self.terminals.get(&session).is_some_and(|v| v.read(cx).failure_in_view());
+        (exit != 0 && !shown).then_some(Status::Failed)
     }
 
-    /// The ports a shell listens on, served here: the number opens the page in a tile, the
-    /// arrow beside it in the default browser.
+    /// Whether a remote window or display is on its way: asked for and not yet drawn, while
+    /// its worker is up. Neither asleep nor let go off screen, which wait on nothing.
+    fn opening(&self, item: &Item, cx: &App) -> bool {
+        if !matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. }) {
+            return false;
+        }
+        match self.screens.get(&item.id) {
+            Some(view) => {
+                let view = view.read(cx);
+                view.frames() == 0 && view.source_state() == SourceState::Live
+            }
+            None => !item.sleeping && !self.parked.contains(&item.id),
+        }
+    }
+
+    /// The ports a shell listens on, served here, each one pill of the header's form: the
+    /// number opens the page in a tile, the arrow at its end in the default browser.
     fn port_pills(
         &self,
         tile: TileRef,
@@ -927,12 +981,39 @@ impl WorkspaceView {
                     _ => format!("{number}"),
                 };
                 let tone = theme.surfaces.text_secondary;
-                let in_tile = pill(format!("port-{number}"), id, label, tone, theme, chrome)
-                    .role(Role::Link)
-                    .aria_label(SharedString::from(format!("Open port {number} in a tile")));
-                let out = pill(format!("port-out-{number}"), id, "\u{2197}", tone, theme, chrome)
-                    .role(Role::Link)
-                    .aria_label(SharedString::from(format!("Open port {number} in the browser")));
+                let k = chrome.k;
+                // The two ends share the pill's one fill and corner; each deepens alone under
+                // the pointer.
+                let part = |part: String, label: SharedString, name: String| {
+                    let selector = format!("{part}-{}", id.as_uuid());
+                    div()
+                        .id(SharedString::from(part))
+                        .debug_selector(move || selector)
+                        .role(Role::Link)
+                        .aria_label(SharedString::from(name))
+                        .flex_none()
+                        .py(px(theme.spacing.xxs * k))
+                        .cursor_pointer()
+                        .hover(move |el| el.bg(hsla_alpha(tone, alpha::FAINT)))
+                        .child(
+                            ChromeText::new(label, px(theme.typography.small()), k)
+                                .zooming(chrome.zooming),
+                        )
+                };
+                let in_tile = part(
+                    format!("port-{number}"),
+                    label.into(),
+                    format!("Open port {number} in a tile"),
+                )
+                .pl(px(theme.spacing.sm * k))
+                .pr(px(theme.spacing.xs * k));
+                let out = part(
+                    format!("port-out-{number}"),
+                    "\u{2197}".into(),
+                    format!("Open port {number} in the browser"),
+                )
+                .pl(px(theme.spacing.xs * k))
+                .pr(px(theme.spacing.sm * k));
                 let url = forward.worker_url();
                 let worker = tile.worker;
                 let forward = forward.clone();
@@ -941,7 +1022,11 @@ impl WorkspaceView {
                 kit::tabular(div())
                     .flex()
                     .flex_none()
-                    .gap(px(theme.spacing.xxs * chrome.k))
+                    .rounded(px(theme.radii.xs * k))
+                    .overflow_hidden()
+                    .bg(hsla_alpha(tone, alpha::FAINT))
+                    .text_size(px(theme.typography.small() * k))
+                    .text_color(hsla(tone))
                     .font_family(crate::palette::mono_family(theme))
                     .child(tab_stop(in_tile, theme.surfaces.accent).on_click(cx.listener(
                         move |this, _ev, _w, cx| this.open_browser(Some(worker), &url, cx),
@@ -1009,27 +1094,36 @@ impl WorkspaceView {
                     );
                 }
             }
+            // A page's way back and its reload are the header's bare icon buttons, as
+            // fullscreen and close are: nothing in the bar has a fill until the pointer is on it.
             ItemKind::Browser { .. } => {
                 if let Some(view) = self.browsers.get(&id).cloned() {
-                    let tone = theme.surfaces.text_secondary;
+                    let uuid = id.as_uuid();
+                    let k = chrome.k;
                     if view.read(cx).page().can_go_back {
-                        let back = pill("back", id, "\u{2190}", tone, theme, chrome)
-                            .role(Role::Button)
-                            .aria_label("Back");
                         let target = view.clone();
                         actions.push(
-                            tab_stop(back, theme.surfaces.accent)
-                                .on_click(move |_ev, _w, cx| target.update(cx, BrowserView::back))
-                                .into_any_element(),
+                            kit::icon_button_at(
+                                theme,
+                                format!("back-{uuid}"),
+                                IconName::ArrowLeft,
+                                "Back",
+                                k,
+                            )
+                            .on_click(move |_ev, _w, cx| target.update(cx, BrowserView::back))
+                            .into_any_element(),
                         );
                     }
-                    let reload = pill("reload", id, "\u{21bb}", tone, theme, chrome)
-                        .role(Role::Button)
-                        .aria_label("Reload");
                     actions.push(
-                        tab_stop(reload, theme.surfaces.accent)
-                            .on_click(move |_ev, _w, cx| view.update(cx, BrowserView::reload))
-                            .into_any_element(),
+                        kit::icon_button_at(
+                            theme,
+                            format!("reload-{uuid}"),
+                            IconName::RotateCw,
+                            "Reload",
+                            k,
+                        )
+                        .on_click(move |_ev, _w, cx| view.update(cx, BrowserView::reload))
+                        .into_any_element(),
                     );
                 }
             }
@@ -1215,10 +1309,7 @@ impl WorkspaceView {
             } * k))
             .py(px(theme.spacing.xs * k))
             .rounded(px(theme.radii.md * k))
-            .border_1()
-            .border_color(hsla(s.border))
-            .bg(hsla(s.panel))
-            .shadow_sm()
+            .map(|el| kit::elevate(el, theme))
             .text_size(px(theme.typography.small() * k))
             .font_family(theme.typography.ui_family.clone())
             .text_color(hsla(s.text_secondary))
@@ -1309,16 +1400,31 @@ impl WorkspaceView {
         placed: &Placed,
         item: &Item,
         chrome: Chrome,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let state = self.body_state(placed.tile, item);
+        let bare = chrome.k < SHAPES_BELOW;
+        let state = self.body_state(placed.tile, item).filter(|_| !bare);
         let content = self.render_content(placed, item, chrome, window, cx);
-        let Some(pill) =
-            state.map(|state| self.render_state_pill(placed.tile, item, &state, chrome, cx))
-        else {
+        let pill = state.map(|state| self.render_state_pill(placed.tile, item, &state, chrome, cx));
+        // Text a few points high is mush: the overview's small zoom lays the body's own surface
+        // over it. The view stays under it, so the keyboard stays where it was.
+        let id = item.id;
+        let cover = (bare
+            && matches!(
+                item.kind,
+                ItemKind::Terminal { .. } | ItemKind::Note { .. } | ItemKind::File { .. }
+            ))
+        .then(|| {
+            div()
+                .debug_selector(move || format!("shapes-{}", id.as_uuid()))
+                .absolute()
+                .inset_0()
+                .bg(hsla(self.theme.terminal.bg))
+        });
+        if pill.is_none() && cover.is_none() {
             return content;
-        };
+        }
         div()
             .flex_1()
             .min_h_0()
@@ -1327,8 +1433,58 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             .child(content)
-            .child(pill)
+            .children(cover)
+            .children(pill)
             .into_any_element()
+    }
+
+    /// A body with nothing to show yet, saying why in one muted line: at once for a state
+    /// that lasts (asleep, let go off screen), and only past [`crate::screen::LOADING_GRACE`]
+    /// for one the worker is about to end (opening, reading, attaching), so a fast answer
+    /// never flashes a word. Blank in the overview's shapes-only zoom.
+    fn waiting_body(
+        &self,
+        item: &Item,
+        wait: Wait,
+        k: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let id = item.id;
+        let (text, loading) = match wait {
+            Wait::Lasting(text) => (text, false),
+            Wait::Loading(text) => (text, true),
+        };
+        let grace = SharedString::from(format!("grace-{}", id.as_uuid()));
+        let shown = k >= SHAPES_BELOW && (!loading || crate::screen::past_grace(grace, window, cx));
+        div()
+            .id(SharedString::from(format!("waiting-{}", id.as_uuid())))
+            .flex_1()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(shown, |el| {
+                el.debug_selector(move || format!("waiting-{}", id.as_uuid()))
+                    .role(Role::Status)
+                    .aria_label(text.clone())
+                    .text_size(px(theme.typography.small() * k))
+                    .text_color(hsla(theme.surfaces.text_muted))
+                    .font_family(theme.typography.ui_family.clone())
+                    .child(text)
+            })
+            .into_any_element()
+    }
+
+    /// What a remote window or display says while its stream opens: what is opening, and on
+    /// which worker.
+    fn opening_text(&self, tile: TileRef, item: &Item, cx: &App) -> SharedString {
+        let what = self.derived_title(item, cx);
+        match self.workers.get(&tile.worker) {
+            Some(worker) => format!("Opening {what} on {}…", worker.name).into(),
+            None => format!("Opening {what}…").into(),
+        }
     }
 
     /// What the body shows under any state pill: the view, or an empty well where the pill
@@ -1339,14 +1495,14 @@ impl WorkspaceView {
         placed: &Placed,
         item: &Item,
         chrome: Chrome,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let k = chrome.k;
         let worker_up = self.workers.get(&placed.tile.worker).is_some_and(|w| w.link.is_some());
         let rest_w = (placed.target.w * k).max(1.0);
-        let rest_h = ((placed.target.h - HEADER_H) * k).max(1.0);
+        let rest_h = ((placed.target.h - theme.density.header) * k).max(1.0);
         let fixed = |el: gpui::AnyElement| {
             div()
                 .flex_1()
@@ -1356,34 +1512,8 @@ impl WorkspaceView {
                 .child(div().absolute().top_0().left_0().w(px(rest_w)).h(px(rest_h)).child(el))
                 .into_any_element()
         };
-        let muted_line = |text: SharedString| {
-            div()
-                .flex_1()
-                .w_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(theme.typography.small() * k))
-                .text_color(hsla(theme.surfaces.text_muted))
-                .font_family(theme.typography.ui_family.clone())
-                .child(text)
-                .into_any_element()
-        };
-        // A remote picture that has not arrived waits in a well of the canvas colour, so it
-        // reads as a screen still to come and not as an empty shell.
-        let picture_wait = |text: SharedString| {
-            div()
-                .flex_1()
-                .w_full()
-                .flex()
-                .bg(hsla(theme.surfaces.canvas))
-                .child(muted_line(text))
-                .into_any_element()
-        };
         // The state pill says what is wrong; the body under it stays empty.
         let well = || div().flex_1().w_full().into_any_element();
-        let picture_well =
-            || div().flex_1().w_full().bg(hsla(theme.surfaces.canvas)).into_any_element();
         match &item.kind {
             ItemKind::Terminal { session } => match self.terminals.get(session) {
                 Some(view) => {
@@ -1403,7 +1533,9 @@ impl WorkspaceView {
                     fixed(body)
                 }
                 None if !worker_up => well(),
-                None if self.summary(*session).is_some() => muted_line(ATTACHING.into()),
+                None if self.summary(*session).is_some() => {
+                    self.waiting_body(item, Wait::Loading(ATTACHING.into()), k, window, cx)
+                }
                 None => well(),
             },
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
@@ -1420,10 +1552,17 @@ impl WorkspaceView {
                         };
                         div().flex_1().w_full().overflow_hidden().child(body).into_any_element()
                     }
-                    None if !worker_up => picture_well(),
-                    None if item.sleeping => picture_wait(SLEEPING.into()),
-                    None if self.parked.contains(&item.id) => picture_wait(PAUSED.into()),
-                    None => picture_wait(OPENING.into()),
+                    None if !worker_up => well(),
+                    None if item.sleeping => {
+                        self.waiting_body(item, Wait::Lasting(SLEEPING.into()), k, window, cx)
+                    }
+                    None if self.parked.contains(&item.id) => {
+                        self.waiting_body(item, Wait::Lasting(PAUSED.into()), k, window, cx)
+                    }
+                    None => {
+                        let text = self.opening_text(placed.tile, item, cx);
+                        self.waiting_body(item, Wait::Loading(text), k, window, cx)
+                    }
                 }
             }
             ItemKind::Note { .. } => match self.notes.get(&item.id) {
@@ -1448,7 +1587,7 @@ impl WorkspaceView {
                         .child(body)
                         .into_any_element()
                 }
-                None => muted_line(NOTE.into()),
+                None => self.waiting_body(item, Wait::Loading(NOTE.into()), k, window, cx),
             },
             ItemKind::Browser { .. } => match self.browsers.get(&item.id) {
                 Some(view) => {
@@ -1461,7 +1600,7 @@ impl WorkspaceView {
                         .child(view.clone())
                         .into_any_element()
                 }
-                None => muted_line(OPENING.into()),
+                None => self.waiting_body(item, Wait::Loading(OPENING.into()), k, window, cx),
             },
             ItemKind::File { .. } => match self.files.get(&item.id) {
                 Some(view) => {
@@ -1483,7 +1622,7 @@ impl WorkspaceView {
                         .into_any_element()
                 }
                 None if !worker_up => well(),
-                None => muted_line(READING.into()),
+                None => self.waiting_body(item, Wait::Loading(READING.into()), k, window, cx),
             },
         }
     }

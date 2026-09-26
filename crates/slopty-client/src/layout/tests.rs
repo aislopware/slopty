@@ -271,10 +271,11 @@ fn closing_after_the_focus_moved_takes_the_next_column_in_place() {
     let mut l = columns(3);
     l.focus_column_left();
     l.focus_column_right();
-    // The memory is gone: the right neighbour, or the last one, takes the focus.
+    // The memory is gone: the right neighbour, or the last one, takes the focus. The view
+    // comes back so the last column ends on the right edge, not beside bare canvas.
     l.remove(t(3));
     assert_eq!(l.focused(), Some(t(2)));
-    near(view_pos(&l), 640.0);
+    near(view_pos(&l), 0.0);
     l.focus_column_first();
     l.remove(t(1));
     assert_eq!(l.focused(), Some(t(2)), "the column that slid into its place");
@@ -1681,4 +1682,42 @@ fn every_action_is_safe_on_an_empty_layout() {
     l.set_clock(MS(10_000));
     assert_eq!(l.workspaces().len(), 1);
     assert!(l.frame().tiles.is_empty());
+}
+
+/// A divider double-clicked puts its column back at the width a column opens at, its preset
+/// named again, and the focused column right of it holds still on screen.
+#[test]
+fn a_reset_column_takes_the_opening_width_back() {
+    let mut l = columns(3);
+    assert!(l.resize_begin(0));
+    l.resize_update(-200.0);
+    l.resize_end();
+    near(width_of(&l, t(1)), 440.0);
+    let focused = rect(&l, t(3)).x;
+    assert!(l.reset_column_width(0));
+    near(width_of(&l, t(1)), 640.0);
+    let column = &l.workspaces()[l.active_workspace()].columns()[0];
+    let default = l.config().default_width;
+    assert_eq!(column.preset(), l.config().presets.iter().position(|p| (p - default).abs() < 1e-4));
+    near(rect(&l, t(3)).x, focused);
+    assert!(!l.reset_column_width(9), "no such column");
+}
+
+/// The view never rests past the last column: a window made wider keeps the last column on
+/// its right edge, and closing the last column brings the view back so the one before ends
+/// there.
+#[test]
+fn the_view_never_rests_past_the_last_column() {
+    let mut l = columns(3);
+    let strip_right = |l: &Layout| rect(l, t(3)).right();
+    near(strip_right(&l), 1280.0);
+    l.set_viewport(2000.0, 800.0);
+    near(strip_right(&l), 2000.0);
+    l.set_viewport(1280.0, 800.0);
+    l.focus_column_first();
+    l.focus_column_last();
+    l.open(t(4), Placement::Local);
+    l.focus_column_left();
+    l.remove(t(4));
+    near(strip_right(&l), 1280.0);
 }

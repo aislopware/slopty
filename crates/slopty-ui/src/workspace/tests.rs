@@ -462,8 +462,9 @@ fn two_workers_share_one_layout(cx: &mut TestAppContext) {
     assert_eq!(pa.workspace, pc.workspace, "local opens go where the human is");
 }
 
-/// A worker that drops keeps its tiles, which say it is away; the titlebar names it, and only
-/// it. When it comes back, a tile whose item is gone from its snapshot leaves, the others stay.
+/// A worker that drops keeps its tiles, which say it is away; the navigator says so on its
+/// header, and only its. When it comes back, a tile whose item is gone from its snapshot
+/// leaves, the others stay.
 #[gpui::test]
 fn a_lost_worker_keeps_its_tiles_until_its_snapshot_says_otherwise(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -474,9 +475,11 @@ fn a_lost_worker_keeps_its_tiles_until_its_snapshot_says_otherwise(cx: &mut Test
     let _theirs = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
-    let studio_down = "down-00000000000000000000000000000001";
-    let laptop_down = "down-00000000000000000000000000000002";
-    assert!(cx.debug_bounds(studio_down).is_none(), "nobody is down");
+    let labels = |cx: &mut VisualTestContext| {
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        tree.into_iter().filter_map(|n| n.label).collect::<Vec<_>>()
+    };
+    assert!(!labels(cx).iter().any(|l| l.ends_with(", reconnecting")), "nobody is down");
 
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| {
@@ -486,13 +489,9 @@ fn a_lost_worker_keeps_its_tiles_until_its_snapshot_says_otherwise(cx: &mut Test
     view.read_with(cx, |v, _| {
         assert!(v.layout().contains(kept) && v.layout().contains(gone), "the tiles stay");
     });
-    assert!(cx.debug_bounds(studio_down).is_some(), "the titlebar names the worker that is down");
-    assert!(cx.debug_bounds(laptop_down).is_none(), "and not the one that is up");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(
-        tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("studio, lost"))),
-        "{tree:#?}"
-    );
+    let names = labels(cx);
+    assert!(names.iter().any(|l| l == "studio, reconnecting"), "the one down says so: {names:#?}");
+    assert!(names.iter().any(|l| l == "laptop"), "and not the one that is up: {names:#?}");
 
     // Back, with only `kept` in its registry.
     let (tx, _rx) = mpsc::channel(64);
@@ -946,6 +945,10 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("palette").is_some(), "the palette is up");
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
+    // The empty field lists a few commands; typing reaches the rest.
+    cx.simulate_keystrokes("m a x");
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Maximize column ⇧⌘↩"))), "{tree:#?}");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
@@ -1223,10 +1226,10 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
     assert_eq!(view.read_with(cx, |v, _| v.needs_you_count()), 0, "a gone worker's agents go");
 }
 
-/// A worker the server says is away reads so in the titlebar, and the server's own line
-/// shows only while it does not answer.
+/// A worker the server says is away reads so in the navigator, and the server's own word leads
+/// the status bar, in sentence case, only while it does not answer.
 #[gpui::test]
-fn the_servers_word_shows_quietly_in_the_titlebar(cx: &mut TestAppContext) {
+fn the_servers_word_leads_the_status_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
@@ -1241,7 +1244,14 @@ fn the_servers_word_shows_quietly_in_the_titlebar(cx: &mut TestAppContext) {
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     let labels: Vec<&str> = tree.iter().filter_map(|n| n.label.as_deref()).collect();
     assert!(labels.contains(&"studio, unreachable"), "{labels:#?}");
-    assert!(labels.contains(&"server unreachable"), "{labels:#?}");
+    assert!(labels.contains(&"Server unreachable"), "{labels:#?}");
+    let (server, bar) = (
+        cx.debug_bounds("server-status").expect("drawn"),
+        cx.debug_bounds("statusbar").expect("drawn"),
+    );
+    assert!(bar.contains(&server.center()), "in the status bar: {server:?} {bar:?}");
+    let worker = cx.debug_bounds("status-worker").expect("drawn");
+    assert!(server.right() <= worker.left(), "first, on the left: {server:?} {worker:?}");
 
     view.update_in(cx, |v, _w, cx| v.set_server_status(None, cx));
     cx.run_until_parked();
@@ -1299,11 +1309,13 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
 
 mod away;
 mod bars;
+mod bodies;
 mod cwd;
 mod frame;
 mod measure;
 mod nav_list;
 mod nav_rows;
+mod overlays;
 mod palette;
 mod remote;
 mod strip_marks;
@@ -1329,3 +1341,5 @@ fn a_new_workers_shell_opens_beside_without_taking_the_focus(cx: &mut TestAppCon
     let next = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 2);
     assert_eq!(focused(&view, cx), Some(next), "a shell the human opens takes the focus");
 }
+
+mod chrome;

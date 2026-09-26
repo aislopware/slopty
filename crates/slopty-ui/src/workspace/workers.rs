@@ -98,6 +98,7 @@ impl WorkspaceView {
         self.reset_remote(key, &sessions, cx);
         for session in &sessions {
             self.terminals.remove(session);
+            self.running.remove(session);
             self.agents.remove(session);
         }
         for item in &items {
@@ -197,7 +198,7 @@ impl WorkspaceView {
         let Some(w) = self.workers.get_mut(&key) else { return };
         let label = super::navigator::rtt_label;
         let changed = w.rtt.map(label) != rtt.map(label);
-        w.rtt = rtt;
+        let was = std::mem::replace(&mut w.rtt, rtt);
         let sessions: Vec<SessionId> = w.sessions.keys().copied().collect();
         let items: Vec<ItemId> = w.doc.items().map(|i| i.id).collect();
         for session in sessions {
@@ -210,8 +211,8 @@ impl WorkspaceView {
                 view.update(cx, |v, _| v.set_rtt(rtt));
             }
         }
-        // The status bar and the navigator show it: repaint only when what they print moved.
-        if changed && self.rtt_shown(key) {
+        // The bars and the navigator show it: repaint only when what they print moved.
+        if changed && self.rtt_shown(key, was, rtt) {
             cx.notify();
         }
     }
@@ -465,6 +466,7 @@ impl WorkspaceView {
                 self.send_session(session, ClientMsg::Term { session, req: TermRequest::Detach });
             }
             self.terminals.remove(&session);
+            self.running.remove(&session);
         }
         self.reconcile_screens();
         self.update_run_targets(cx);
@@ -504,6 +506,8 @@ impl WorkspaceView {
             TerminalViewEvent::CommandFinished { command, exit, elapsed } => {
                 let done = Finished { command: command.clone(), exit: *exit, elapsed: *elapsed };
                 this.command_finished(sid, done, cx);
+                // The row's last command and the tile's state changed with the new prompt.
+                this.chrome.notify(cx);
             }
             TerminalViewEvent::NoteBlock(text) => this.note_beside(sid, text.clone(), cx),
             TerminalViewEvent::ViewFile { path, line } => {
@@ -519,6 +523,13 @@ impl WorkspaceView {
             TerminalViewEvent::PasteFiles(files) => {
                 this.paste_files_in_shell(sid, files.clone(), cx);
             }
+        })
+        .detach();
+        // Every change of the terminal's: a frame is coming for it, which a working mark's step
+        // held for a typed key's echo rides; and the navigator hears of a command started.
+        cx.observe(&view, move |this, _view, cx| {
+            crate::icons::release_steps(cx);
+            this.terminal_changed(sid, cx);
         })
         .detach();
         w.send(ClientMsg::Term { session, req: TermRequest::Attach { size } });

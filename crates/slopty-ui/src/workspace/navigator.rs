@@ -2,39 +2,48 @@
 //!
 //! It runs from the window's top edge to its bottom, and its top row is the title bar's
 //! height: the traffic lights sit in it on a Mac, then a field that filters every row below.
-//! Two sections follow. *Needs you* appears only while an agent waits on the human.
-//! *Workers* has a header per worker, disclosing its tiles. A header names the worker in the
-//! strong weight after a server icon (crossed out while the worker is away), then on its right
-//! edge how many tiles it has and its round trip, or a word for what is wrong, led by what its
-//! tiles add up to while it is folded. The pointer brings out the chevron and "+" (a new shell
-//! on that worker) in the readouts' place. Its tiles come in order of attention: what needs the
-//! human, then what finished unseen, then what is working, then the rest, each class in
-//! reading order. Each tile is two lines: a fixed leading slot (its kind at rest, its status
-//! mark otherwise) and its title, then its directory (its worker's name where it has none),
-//! what its agent says or its last command, its branch and its age, muted. A row flies the camera
-//! to what it names. Workspaces are the title bar's tabs, not a section here.
+//! Up to three sections follow. *Needs you* appears only while an agent waits on the human,
+//! *Working* only while one is at its turn (its heading turns the working mark and counts
+//! them, its rows tick their turn's time once a second), and then the workers, whose heading
+//! is left out when it would be the only one. Each worker has a header disclosing its tiles:
+//! its name in the strong weight after a server icon (crossed out while the worker is away),
+//! then on its right edge a word for what is wrong with its link, else its round trip when that
+//! is slow enough to matter, led by what its tiles add up to while it is folded. The pointer
+//! brings out the chevron and "+" (a new shell on that worker) in the readouts' place. Its
+//! tiles come in order of attention: what needs the human, then what finished unseen, then what
+//! is working, then the rest, each class in reading order. Each tile is two lines: its kind and
+//! its title, ended by its state in a word ("Needs you", "Working", "Done", "Failed"), else
+//! the unseen dot, else its age past a minute; then, muted, its directory (its worker's name
+//! where it has none), what its agent says or its last command and its branch, or a note's
+//! progress. A row waiting on the human is washed in the warn fill. A row flies the camera to
+//! what it names. Workspaces are the title bar's tabs, not a section here.
 //!
 //! On a window wide enough it docks beside the rest of the frame, 248 pt by default, dragged
-//! from 200 to 400 by the handle on its right edge; ⌘B shows or hides it, and both are kept
-//! with the device's layout. On an iPad it opens over the frame, and on a phone it slides in
-//! as a drawer over a scrim, down through the home indicator's band; either closes once a row
-//! is chosen.
+//! from 200 to 400 by a 12 pt handle centred on its right edge, which a double-click puts back
+//! at 248; ⌘B shows or hides it, and both are kept with the device's layout. Hidden there, a
+//! 40 pt rail keeps one server glyph per worker, with what its tiles add up to, so what wants
+//! the human stays on screen. On an iPad it opens over the frame and a scrim, and on a phone it
+//! slides in as a drawer over the scrim, down through the home indicator's band; either closes
+//! once a row is chosen.
 //!
-//! The rows are a virtual list: every frame works out what each row says, but only the rows in
-//! view, and a couple of rows' height past either edge, are laid out and drawn. A focused tile
-//! whose row is out of view scrolls into it.
+//! It is a view of its own, drawn cached: an echo in a terminal does not draw it again, only a
+//! change to the workspace or its own clock does (`WorkspaceView::render_frame`).
+//!
+//! The rows are a virtual list: each drawing works out what every row says, but only the rows
+//! in view, and a couple of rows' height past either edge, are laid out and drawn. A focused
+//! tile whose row is out of view scrolls into it.
 
 use std::collections::HashSet;
 use std::mem::discriminant;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _, IntoElement as _,
     ListAlignment, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    canvas, deferred, div, list, px,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    Window, canvas, div, list, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
@@ -45,29 +54,35 @@ use slopty_theme::{Theme, Typography, alpha};
 use super::actions::ToggleNavigator;
 use super::agents::{Waiting, agent_status_text};
 use super::rollup::{Rollup, age_at, meta_line, rollup_slot};
-use super::tile::{cwd_tail, kind_icon};
-use super::titlebar::{LEADING_INSET, TITLEBAR_H};
+use super::tile::{cwd_tail, kind_icon, note_progress};
+use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
-use crate::icons::{IconName, IconSize, Status, icon, status_mark};
-
-/// A one-line row's height, in points: a worker's header, a row of *Needs you*.
-pub(super) const ROW_H: f32 = 28.0;
-
-/// A tile's row: its title over its muted second line.
-const TILE_ROW_H: f32 = 40.0;
+use crate::icons::{IconName, IconSize, Status, icon, status_icon, status_mark};
+use crate::kit::{self, meta, tabular};
 
 /// The two lines' height, as a multiple of their type size: tighter than a paragraph's, so
 /// the pair reads as one row.
 const TILE_LINE: f32 = 1.3;
 
-/// The handle's width, along the inside of the navigator's right edge.
-const HANDLE_W: f32 = 6.0;
+/// The handle's hit area, centred on the navigator's 1 pt edge: easy to find with a pointer
+/// without a visible grip.
+pub(super) const HANDLE_W: f32 = 12.0;
+
+/// The rail's width, where the navigator is hidden: one glyph per worker.
+pub(super) const RAIL_W: f32 = 40.0;
+
+/// How many rows *Working* lists before "Show N more".
+const WORKING_SHOWN: usize = 4;
+
+/// A round trip the navigator names: above it typing starts to feel remote, below it the
+/// number is noise beside every worker. The hosts popover and the status bar give it always.
+pub(super) const RTT_SHOWN_FROM: Duration = Duration::from_millis(20);
 
 /// How far past each edge of the view the list lays rows out, in points, so a scroll does not
-/// show a row arriving.
-const OVERDRAW: f32 = TILE_ROW_H * 2.0;
+/// show a row arriving: two rows of two lines.
+const OVERDRAW: f32 = 80.0;
 
 /// How the navigator sits in the window.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -106,10 +121,16 @@ pub(super) struct NavState {
     pub resize: Option<(f32, f32)>,
     /// How it sat in the last frame drawn, and whether it showed.
     pub drawn: Option<Mode>,
+    /// The rail shows in its place: docked where it would dock, but hidden.
+    pub rail: bool,
+    /// *Working* lists every agent at work, not only the first few.
+    pub working_all: bool,
     /// The filter over its rows.
     pub filter: Filter,
     /// Its rows, as the list lays them out.
     pub list: NavList,
+    /// Draws it again when a label it shows changes with the clock (a turn's time, an age).
+    pub tick: Option<Task<()>>,
 }
 
 /// The navigator's rows and the virtual list that shows them.
@@ -204,6 +225,7 @@ impl std::fmt::Debug for NavState {
             .field("open", &self.open)
             .field("folded", &self.folded)
             .field("drawn", &self.drawn)
+            .field("rail", &self.rail)
             .field("query", &self.filter.query)
             .finish_non_exhaustive()
     }
@@ -211,7 +233,7 @@ impl std::fmt::Debug for NavState {
 
 /// A round trip as the navigator and the status bar print it: tenths under 10 ms, whole
 /// milliseconds above, so a jittery link does not repaint the chrome on every sample.
-pub(super) fn rtt_label(rtt: std::time::Duration) -> String {
+pub(super) fn rtt_label(rtt: Duration) -> String {
     let ms = rtt.as_secs_f64() * 1e3;
     if ms < 10.0 { format!("{ms:.1} ms") } else { format!("{ms:.0} ms") }
 }
@@ -242,9 +264,67 @@ pub(super) const fn attention(status: Option<Status>, unseen: bool) -> u8 {
     }
 }
 
+/// The state a tile's row names in a word at the end of its first line: what is happening
+/// or just happened there. At rest, or out of reach (its worker's header says so), nothing.
+pub(super) const fn status_word(status: Option<Status>) -> Option<Status> {
+    match status {
+        Some(s @ (Status::NeedsYou | Status::Working | Status::Done | Status::Failed)) => Some(s),
+        Some(Status::Idle | Status::Away) | None => None,
+    }
+}
+
+/// A tile's age as its row prints it: nothing under a minute, where every new tile would read
+/// "now", then the one unit that matters.
+pub(super) fn age_shown(age: Duration) -> Option<String> {
+    (age >= Duration::from_secs(60)).then(|| crate::palette::age_label(age))
+}
+
+/// A turn's time as *Working* ticks it: whole seconds, then minutes and seconds, then hours
+/// and minutes, in tabular figures.
+pub(super) fn turn_label(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    match secs {
+        0..60 => format!("{secs} s"),
+        60..3_600 => format!("{} m {:02} s", secs / 60, secs % 60),
+        _ => format!("{} h {:02} m", secs / 3_600, (secs % 3_600) / 60),
+    }
+}
+
+/// How long until an age's label next changes: the next whole unit of [`age_shown`].
+pub(super) fn until_age_changes(age: Duration) -> Duration {
+    let secs = age.as_secs();
+    let unit: u64 = match secs {
+        0..3_600 => 60,
+        3_600..86_400 => 3_600,
+        _ => 86_400,
+    };
+    Duration::from_secs(unit.saturating_sub(secs.checked_rem(unit).unwrap_or(0)))
+}
+
+/// A note's second line: its progress when it has tasks, else its first line after the
+/// title, else what it is.
+pub(super) fn note_meta(text: &str) -> String {
+    if let Some((done, total)) = note_progress(text) {
+        return format!("{done} of {total} done");
+    }
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .nth(1)
+        .map(|l| l.trim_start_matches(['#', '-', '*', '>', ' ']).trim().to_owned())
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| "Note".to_owned())
+}
+
 /// Whether `query` (already lowercase) is in any of `hay`; an empty query is in everything.
 pub(super) fn matches(query: &str, hay: &[&str]) -> bool {
     query.is_empty() || hay.iter().any(|h| h.to_lowercase().contains(query))
+}
+
+/// The wall clock in Unix milliseconds, as the workers stamp an agent's change.
+fn now_ms() -> u64 {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    u64::try_from(now.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The unseen dot: something ended there while the human was elsewhere. It sits centred in a
@@ -260,16 +340,18 @@ pub(super) fn unseen_dot(theme: &Theme, selector: String, shown: bool) -> Div {
                     .debug_selector(move || selector)
                     .size(px(dot))
                     .rounded_full()
-                    .bg(hsla(s.accent)),
+                    .bg(hsla(s.accent_fill)),
             )
         },
     )
 }
 
-/// One row of a list in the frame: the navigator's and the inbox's. A tab stop named `label`;
-/// the pointer washes it `raised`, and the selected row sits on `overlay`.
+/// One row of the navigator's list: its density's height, on the one edge grid (the wash sits
+/// a base unit in from the panel's edges), a tab stop named `label`. The pointer washes it
+/// `raised`, and the selected row sits on `overlay`.
 pub(super) fn row(
     theme: &Theme,
+    lines: kit::Row,
     id: impl Into<ElementId>,
     selector: String,
     label: SharedString,
@@ -283,9 +365,9 @@ pub(super) fn row(
         .role(Role::Button)
         .aria_label(label)
         .flex_none()
-        .h(px(ROW_H))
+        .h(px(lines.height(theme)))
         .mx(px(spacing.xs))
-        .px(px(spacing.xs))
+        .px(px(spacing.inset() - spacing.xs))
         .flex()
         .items_center()
         .gap(px(spacing.xs))
@@ -309,24 +391,10 @@ pub(super) fn title(text: impl Into<SharedString>, color: gpui::Hsla) -> Div {
         .child(text.into())
 }
 
-/// Muted caption type on the right of a row, in tabular figures: a count or a round trip that
-/// changes does not move what is beside it.
-pub(super) fn caption(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    crate::kit::tabular(div())
-        .flex_none()
-        .whitespace_nowrap()
-        .text_size(px(theme.typography.caption()))
-        .text_color(hsla(theme.surfaces.text_muted))
-        .child(text.into())
-}
-
-/// A section's heading, as every list in the frame heads its sections.
-fn heading(theme: &Theme, selector: &'static str, text: &'static str) -> Stateful<Div> {
-    crate::palette::section_heading(theme, selector.into(), text)
-        // On the rows' leading edge, where their icons start.
-        .px(px(theme.spacing.sm))
-        .debug_selector(move || selector.to_owned())
-        .flex_none()
+/// Meta text on the right of a row's line, in tabular figures: an age, a turn's time or a
+/// round trip that changes does not move what is beside it.
+pub(super) fn readout(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    tabular(meta(div(), theme)).flex_none().whitespace_nowrap().child(text.into())
 }
 
 /// A square of the leading slot's side around `child`, so every row's title starts on one edge.
@@ -340,6 +408,12 @@ fn lead_slot(theme: &Theme, child: impl gpui::IntoElement) -> Div {
         .child(child)
 }
 
+/// The height of a row's first and second lines.
+fn line_heights(theme: &Theme) -> (f32, f32) {
+    let typo = &theme.typography;
+    (typo.ui_size * TILE_LINE, typo.meta() * TILE_LINE)
+}
+
 /// A tile as its row shows it.
 #[derive(Clone)]
 struct NavTile {
@@ -350,25 +424,40 @@ struct NavTile {
     title: String,
     meta: String,
     age: Option<String>,
+    /// When the age's label next changes.
+    age_changes: Option<Duration>,
 }
 
 /// A worker's block as the navigator lists it.
 struct NavWorker {
-    key: WorkerKey,
-    /// Every tile it has in the layout, whatever the filter shows.
-    count: usize,
-    rollup: Rollup,
+    header: NavHeader,
     tiles: Vec<NavTile>,
 }
 
 /// A worker's header as its row shows it.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct NavHeader {
     key: WorkerKey,
-    /// Every tile it has in the layout, whatever the filter shows.
-    count: usize,
+    name: String,
+    health: Option<(Status, &'static str)>,
+    /// Its round trip, when it is slow enough to name.
+    rtt: Option<String>,
+    linked: bool,
     rollup: Rollup,
     folded: bool,
+}
+
+/// An agent in *Needs you* or *Working*: what it is, what it says, where, and since when.
+#[derive(Clone)]
+struct NavAgent {
+    at: Waiting,
+    status: Status,
+    title: String,
+    words: String,
+    /// Its worker and directory.
+    place: String,
+    /// When its status last changed, on the worker's clock (Unix milliseconds); zero unknown.
+    since_ms: u64,
 }
 
 /// One row of the navigator's list.
@@ -377,8 +466,12 @@ enum NavRow {
     Heading {
         selector: &'static str,
         text: &'static str,
+        /// How many rows the section holds, beside the working mark.
+        working: Option<usize>,
     },
-    Waiting(Waiting),
+    Agent(NavAgent),
+    /// *Working* holds this many more than it shows.
+    More(usize),
     Worker(NavHeader),
     Tile(NavTile),
     /// The filter left nothing.
@@ -422,10 +515,34 @@ impl WorkspaceView {
             }
     }
 
+    /// Work out how the navigator sits this frame: shown in which mode, the rail in its place,
+    /// or nothing. Everything else in the frame reads it, so it comes first.
+    pub(super) fn place_navigator(&mut self, window: &Window) {
+        let mode = self.navigator_mode(window);
+        let visible = self.navigator_visible(mode);
+        self.nav.drawn = visible.then_some(mode);
+        self.nav.rail = !visible && mode == Mode::Docked && !self.workers.is_empty();
+        if !visible {
+            self.nav.resize = None;
+            self.nav.tick = None;
+        }
+    }
+
     /// The navigator's width, in points.
     #[must_use]
     pub const fn navigator_width(&self) -> f32 {
         self.layout.navigator().width
+    }
+
+    /// The panel's width in `mode`: a phone's drawer leaves a margin of the strip showing.
+    pub(super) fn navigator_panel_width(&self, mode: Mode, window: &Window) -> f32 {
+        match mode {
+            Mode::Drawer => {
+                let room = self.theme.spacing.xl.mul_add(-2.0, self.width(window));
+                self.navigator_width().min(room)
+            }
+            Mode::Docked | Mode::Overlay => self.navigator_width(),
+        }
     }
 
     /// What the navigator's filter holds.
@@ -451,8 +568,8 @@ impl WorkspaceView {
         self.focus_tile(tile, cx);
     }
 
-    /// Go to an agent waiting on the human: its tile, or, with none here, a new one on its
-    /// worker (the same as ⌘⇧A does for it).
+    /// Go to an agent waiting on the human or at work: its tile, or, with none here, a new one
+    /// on its worker (the same as ⌘⇧A does for one waiting).
     pub(super) fn go_to_waiting(&mut self, waiting: Waiting, cx: &mut Context<Self>) {
         self.tick();
         self.navigated();
@@ -491,6 +608,15 @@ impl WorkspaceView {
         }
     }
 
+    /// A double-click on the handle: the width it had before it was ever dragged.
+    fn reset_navigator_width(&mut self, cx: &mut Context<Self>) {
+        let nav = self.layout.navigator();
+        self.nav.resize = None;
+        self.layout.set_navigator(Navigator { width: Navigator::DEFAULT_WIDTH, ..nav });
+        self.layout_touched(cx);
+        cx.notify();
+    }
+
     /// Whether a coding agent runs in `item`'s terminal.
     pub(super) fn runs_agent(&self, item: &Item) -> bool {
         let ItemKind::Terminal { session } = item.kind else { return false };
@@ -513,17 +639,31 @@ impl WorkspaceView {
         (mark, unwatched && !matches!(mark, Some(Status::Working | Status::NeedsYou)))
     }
 
+    /// What `worker`'s tiles add up to.
+    pub(super) fn worker_rollup(&self, worker: WorkerKey, cx: &gpui::App) -> Rollup {
+        let mut rollup = Rollup::default();
+        let Some(w) = self.workers.get(&worker) else { return rollup };
+        for item in w.doc.items() {
+            let tile = TileRef { worker, item: item.id };
+            if self.layout.contains(tile) {
+                let (mark, unseen) = self.tile_marks(tile, item, cx);
+                rollup.add(mark, unseen);
+            }
+        }
+        rollup
+    }
+
     /// What a tile's second line says, and its age: a shell's directory, its agent's words
-    /// or its last command, its branch; a page's address; a file's directory; else its kind.
-    /// A shell or a file with no directory names its worker in the directory's place, so the
-    /// line never reads as a lone age.
+    /// or its last command, its branch; a page's address; a file's directory; a note's
+    /// progress; else its kind. A shell or a file with no directory names its worker in the
+    /// directory's place, so the line never reads as nothing.
     fn tile_meta(
         &self,
         item: &Item,
         worker: &str,
         now: SystemTime,
         cx: &gpui::App,
-    ) -> (String, Option<String>) {
+    ) -> (String, Option<Duration>) {
         match &item.kind {
             ItemKind::Terminal { session } => {
                 let summary = self.summary(*session);
@@ -537,9 +677,7 @@ impl WorkspaceView {
                 let branch = summary.and_then(|s| s.branch.as_deref());
                 let meta =
                     meta_line([Some(place), agent.as_deref().or(command.as_deref()), branch]);
-                let age =
-                    summary.and_then(|s| age_at(s.started_ms, now)).map(crate::palette::age_label);
-                (meta, age)
+                (meta, summary.and_then(|s| age_at(s.started_ms, now)))
             }
             ItemKind::Browser { url } => (crate::browser::short_url(url).to_owned(), None),
             ItemKind::File { .. } => {
@@ -547,7 +685,7 @@ impl WorkspaceView {
             }
             ItemKind::Window { .. } => ("Window".to_owned(), None),
             ItemKind::Display { .. } => ("Display".to_owned(), None),
-            ItemKind::Note { .. } => ("Note".to_owned(), None),
+            ItemKind::Note { text } => (note_meta(text), None),
         }
     }
 
@@ -574,11 +712,9 @@ impl WorkspaceView {
             let key = *key;
             let named = matches(&query, &[&w.name]);
             let mut rollup = Rollup::default();
-            let mut count = 0_usize;
             let mut tiles: Vec<(u8, NavTile)> = Vec::new();
             for &tile in order.iter().filter(|t| t.worker == key) {
                 let Some(item) = w.doc.get(tile.item) else { continue };
-                count = count.saturating_add(1);
                 let (mark, unseen) = self.tile_marks(tile, item, cx);
                 rollup.add(mark, unseen);
                 let title = self.card_title(tile, item, cx);
@@ -587,7 +723,16 @@ impl WorkspaceView {
                     continue;
                 }
                 let kind = kind_icon(item, self.runs_agent(item));
-                let row = NavTile { tile, kind, mark, unseen, title, meta, age };
+                let row = NavTile {
+                    tile,
+                    kind,
+                    mark,
+                    unseen,
+                    title,
+                    meta,
+                    age: age.and_then(age_shown),
+                    age_changes: age.map(until_age_changes),
+                };
                 tiles.push((attention(mark, unseen), row));
             }
             if !named && tiles.is_empty() {
@@ -596,9 +741,36 @@ impl WorkspaceView {
             // Stable: within a class the tiles keep their reading order.
             tiles.sort_by_key(|(class, _)| *class);
             let tiles = tiles.into_iter().map(|(_, t)| t).collect();
-            out.push(NavWorker { key, count, rollup, tiles });
+            let health = worker_health(&w.status);
+            let rtt = w.rtt.filter(|rtt| health.is_none() && *rtt >= RTT_SHOWN_FROM).map(rtt_label);
+            let folded = query.is_empty() && self.nav.folded.contains(&key);
+            let header = NavHeader {
+                key,
+                name: w.name.clone(),
+                health,
+                rtt,
+                linked: w.link.is_some(),
+                rollup,
+                folded,
+            };
+            out.push(NavWorker { header, tiles });
         }
         out
+    }
+
+    /// An agent's row data: what its tile is called (else what the agent says), its words,
+    /// and its worker and directory.
+    fn nav_agent(&self, at: Waiting, status: Status, cx: &gpui::App) -> NavAgent {
+        let agent = self.agent_state(at.session);
+        let words = agent.map(agent_status_text).unwrap_or_default();
+        let title = at
+            .tile
+            .and_then(|t| Some(self.card_title(t, self.item(t)?, cx)))
+            .unwrap_or_else(|| if words.is_empty() { "Agent".to_owned() } else { words.clone() });
+        let cwd = self.summary(at.session).and_then(|s| s.cwd.as_deref()).map(cwd_tail);
+        let worker = self.worker_name(at.worker);
+        let place = meta_line([Some(worker.as_str()), cwd.as_deref()]);
+        NavAgent { at, status, title, words, place, since_ms: agent.map_or(0, |a| a.since_ms) }
     }
 
     /// The filter's field, made once there is a window to make it in. ↩ in it goes to the
@@ -634,30 +806,29 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The navigator's panel as `mode` places it; `None` while it is hidden.
-    pub(super) fn render_navigator(
+    /// The navigator's region of the frame as [`Self::place_navigator`] placed it: the panel,
+    /// the rail, or nothing.
+    pub(super) fn render_navigator_region(
         &mut self,
         window: &Window,
         cx: &Context<Self>,
-    ) -> Option<(Mode, gpui::AnyElement)> {
-        let mode = self.navigator_mode(window);
-        let visible = self.navigator_visible(mode);
-        self.nav.drawn = visible.then_some(mode);
-        if !visible {
-            self.nav.resize = None;
-            return None;
+    ) -> gpui::AnyElement {
+        match self.nav.drawn {
+            Some(mode) => self.navigator_panel(mode, window, cx),
+            None if self.nav.rail => self.navigator_rail(cx),
+            None => gpui::Empty.into_any_element(),
         }
-        Some((mode, self.navigator_panel(mode, window, cx)))
     }
 
     /// The top row, the title bar's height: room for the traffic lights on a Mac, then the
-    /// filter.
+    /// filter's field, a raised rounded well a base unit in from the panel's edge.
     fn navigator_header(&self, window: &Window, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
+        let spacing = theme.spacing;
         let safe = window.insets().effective();
-        let leading = if cfg!(target_os = "macos") { LEADING_INSET } else { theme.spacing.sm };
-        let field = self.nav.filter.input.as_ref().map(|input| {
+        let leading = if cfg!(target_os = "macos") { LEADING_INSET } else { spacing.sm };
+        let input = self.nav.filter.input.as_ref().map(|input| {
             div()
                 .debug_selector(|| "nav-filter".to_owned())
                 .flex_1()
@@ -666,53 +837,96 @@ impl WorkspaceView {
                 .child(Input::new(input).appearance(false).px_0().aria_label("Filter"))
         });
         let clear = (!self.nav.filter.query.is_empty()).then(|| {
-            crate::kit::icon_button(theme, "nav-filter-clear", IconName::X, "Clear filter")
+            let el = div()
+                .id("nav-filter-clear")
+                .debug_selector(|| "nav-filter-clear".to_owned())
+                .role(Role::Button)
+                .aria_label("Clear filter")
+                .flex_none()
+                .size(px(theme.typography.icon_large()))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme.radii.xs))
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.overlay)))
+                .child(icon(theme, IconName::X, IconSize::Inline, hsla(s.text_muted)))
                 .on_click(
                     cx.listener(|this, _ev, window, cx| this.clear_navigator_filter(window, cx)),
-                )
+                );
+            tab_stop(el, s.accent)
         });
-        div()
-            .flex_none()
-            .h(px(TITLEBAR_H) + safe.top)
-            .pt(safe.top)
-            .pl(px(leading))
-            .pr(px(theme.spacing.xs))
+        let field = div()
+            .id("nav-filter-field")
+            .flex_1()
+            .min_w_0()
+            .h(px(2.0_f32.mul_add(spacing.xs, theme.typography.icon_large())))
+            .px(px(spacing.xs))
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xs))
+            .gap(px(spacing.xs))
+            .rounded(px(theme.radii.sm))
+            .bg(hsla(s.raised))
+            .child(icon(theme, IconName::Search, IconSize::Inline, hsla(s.text_muted)))
+            .children(input)
+            .children(clear);
+        div()
+            .flex_none()
+            .h(px(titlebar_height(theme)) + safe.top)
+            .pt(safe.top)
+            .pl(px(leading))
+            .pr(px(spacing.sm))
+            .flex()
+            .items_center()
             .border_b_1()
             .border_color(hsla(s.border))
-            .child(lead_slot(
-                theme,
-                icon(theme, IconName::Search, IconSize::Inline, hsla(s.text_muted)),
-            ))
-            .children(field)
-            .children(clear)
+            .child(field)
     }
 
-    /// Every row the list holds this frame: *Needs you* while an agent waits, then each
-    /// worker's header and, unless it is folded, its tiles. While the filter holds something,
-    /// a fold hides nothing.
+    /// Every row the list holds this frame: *Needs you* while an agent waits, *Working* while
+    /// one is at its turn, then each worker's header and, unless it is folded, its tiles. The
+    /// workers' own heading shows only under another section. While the filter holds
+    /// something, a fold hides nothing.
     fn nav_rows(&self, cx: &gpui::App) -> Vec<NavRow> {
         let query = self.nav.filter.query.trim().to_lowercase();
         let mut rows = Vec::new();
-        let waiting = self.drawn_waiting.iter().filter(|w| {
-            query.is_empty()
-                || matches(&query, &[&self.waiting_what(**w, cx), &self.worker_name(w.worker)])
-        });
-        let waiting: Vec<NavRow> = waiting.copied().map(NavRow::Waiting).collect();
+        let agents = |list: &[Waiting], status: Status| -> Vec<NavAgent> {
+            list.iter()
+                .map(|at| self.nav_agent(*at, status, cx))
+                .filter(|a| matches(&query, &[&a.title, &a.words, &a.place]))
+                .collect()
+        };
+        let waiting = agents(&self.drawn_waiting, Status::NeedsYou);
         if !waiting.is_empty() {
-            rows.push(NavRow::Heading { selector: "nav-needs-you", text: "Needs you" });
-            rows.extend(waiting);
+            rows.push(NavRow::Heading {
+                selector: "nav-needs-you",
+                text: "Needs you",
+                working: None,
+            });
+            rows.extend(waiting.into_iter().map(NavRow::Agent));
+        }
+        let working = agents(&self.working(), Status::Working);
+        if !working.is_empty() {
+            let count = working.len();
+            rows.push(NavRow::Heading {
+                selector: "nav-working",
+                text: "Working",
+                working: Some(count),
+            });
+            let shown = if self.nav.working_all { count } else { WORKING_SHOWN };
+            rows.extend(working.into_iter().take(shown).map(NavRow::Agent));
+            if count > shown {
+                rows.push(NavRow::More(count.saturating_sub(shown)));
+            }
         }
         let listing = self.nav_listing(cx);
-        if !listing.is_empty() {
-            rows.push(NavRow::Heading { selector: "nav-workers", text: "Workers" });
+        if !listing.is_empty() && !rows.is_empty() {
+            rows.push(NavRow::Heading { selector: "nav-workers", text: "Workers", working: None });
         }
         for worker in listing {
-            let folded = query.is_empty() && self.nav.folded.contains(&worker.key);
-            let NavWorker { key, count, rollup, tiles } = worker;
-            rows.push(NavRow::Worker(NavHeader { key, count, rollup, folded }));
+            let NavWorker { header, tiles } = worker;
+            let folded = header.folded;
+            rows.push(NavRow::Worker(header));
             if !folded {
                 rows.extend(tiles.into_iter().map(NavRow::Tile));
             }
@@ -721,6 +935,34 @@ impl WorkspaceView {
             rows.push(NavRow::Nothing);
         }
         rows
+    }
+
+    /// Draw the navigator again when the soonest label it shows changes: a turn's time every
+    /// second while *Working* ticks, else an age at its next minute (or hour).
+    fn schedule_navigator_tick(&mut self, cx: &Context<Self>) {
+        let rows = &self.nav.list.rows;
+        let live = rows.iter().any(
+            |r| matches!(r, NavRow::Agent(a) if a.status == Status::Working && a.since_ms > 0),
+        );
+        let now = now_ms();
+        let waited = rows.iter().filter_map(|r| match r {
+            NavRow::Agent(a) if a.since_ms > 0 => {
+                Some(until_age_changes(Duration::from_millis(now.saturating_sub(a.since_ms))))
+            }
+            _ => None,
+        });
+        let aged = rows.iter().filter_map(|r| match r {
+            NavRow::Tile(t) => t.age_changes,
+            _ => None,
+        });
+        let next = if live { Some(Duration::from_secs(1)) } else { waited.chain(aged).min() };
+        self.nav.tick = next.map(|wait| {
+            let navigator = self.chrome.navigator.downgrade();
+            cx.spawn(async move |_this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _gone = navigator.update(cx, |_, cx| cx.notify());
+            })
+        });
     }
 
     /// Row `ix` of the list, drawn only while it is in view or measured. The list lays a row
@@ -732,15 +974,15 @@ impl WorkspaceView {
     fn nav_row_content(&self, ix: usize, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         match self.nav.list.rows.get(ix) {
-            Some(NavRow::Heading { selector, text }) => {
-                heading(theme, selector, text).into_any_element()
+            Some(NavRow::Heading { selector, text, working }) => {
+                heading(theme, selector, text, *working).into_any_element()
             }
-            Some(NavRow::Waiting(waiting)) => self.waiting_row("nav", *waiting, cx),
-            Some(NavRow::Worker(header)) => self.worker_header(*header, cx),
+            Some(NavRow::Agent(agent)) => self.agent_row(agent, cx),
+            Some(NavRow::More(hidden)) => self.more_row(*hidden, cx),
+            Some(NavRow::Worker(header)) => self.worker_header(header, cx),
             Some(NavRow::Tile(tile)) => self.tile_row(tile, self.nav.list.selected, cx),
-            Some(NavRow::Nothing) => div()
+            Some(NavRow::Nothing) => kit::inset_x(div(), theme)
                 .debug_selector(|| "nav-nothing".to_owned())
-                .px(px(theme.spacing.md))
                 .py(px(theme.spacing.md))
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(theme.surfaces.text_muted))
@@ -750,7 +992,8 @@ impl WorkspaceView {
         }
     }
 
-    /// The panel itself, docked or laid over the frame.
+    /// The panel itself, docked or laid over the frame. The frame places it and sizes it
+    /// (`WorkspaceView::render_frame`); this fills that box.
     fn navigator_panel(
         &mut self,
         mode: Mode,
@@ -761,16 +1004,10 @@ impl WorkspaceView {
         self.nav.list.set_rows(rows);
         self.nav.list.selected = self.focused();
         self.nav.list.reveal_selected(window);
+        self.schedule_navigator_tick(cx);
         let theme = &self.theme;
         let s = theme.surfaces;
         let safe = window.insets().effective();
-        let width = match mode {
-            Mode::Drawer => {
-                let room = theme.spacing.xl.mul_add(-2.0, self.width(window));
-                self.navigator_width().min(room)
-            }
-            Mode::Docked | Mode::Overlay => self.navigator_width(),
-        };
         let rows = list(
             self.nav.list.state.clone(),
             cx.processor(|this, ix: usize, _window, cx| this.nav_row(ix, cx)),
@@ -778,18 +1015,14 @@ impl WorkspaceView {
         .flex_1()
         .min_h_0()
         .pb(px(theme.spacing.md));
-        let handle = (mode != Mode::Drawer).then(|| Self::render_handle(cx));
-        let panel = div()
+        div()
             .id("navigator")
             .debug_selector(|| "navigator".to_owned())
             .role(Role::Navigation)
             .aria_label("Navigator")
             .occlude()
-            .relative()
-            .flex_none()
-            .h_full()
-            .w(px(width) + if mode == Mode::Docked { px(0.0) } else { safe.left })
-            .pl(safe.left)
+            .size_full()
+            .pl(if mode == Mode::Docked { px(0.0) } else { safe.left })
             // The drawer runs through the home indicator's band; its rows stop above it.
             .when(mode == Mode::Drawer, |panel| panel.pb(safe.bottom))
             .flex()
@@ -798,7 +1031,8 @@ impl WorkspaceView {
             .border_r_1()
             .border_color(hsla(s.border))
             .font_family(theme.typography.ui_family.clone())
-            .when(mode != Mode::Docked, gpui::Styled::shadow_sm)
+            // Over the frame it floats, as every floating layer does.
+            .when(mode != Mode::Docked, |panel| kit::elevate(panel, theme))
             // Esc in the filter empties it and hands the keyboard back.
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                 if !this.nav.filter.query.is_empty() {
@@ -808,53 +1042,85 @@ impl WorkspaceView {
             }))
             .child(self.navigator_header(window, cx))
             .child(rows)
-            .children(handle);
-        if mode == Mode::Docked {
-            return panel.into_any_element();
-        }
-        let scrim = if mode == Mode::Drawer {
-            hsla_alpha(s.canvas, alpha::SCRIM)
-        } else {
-            gpui::transparent_black()
-        };
-        let away = div()
-            .id("navigator-away")
-            .debug_selector(|| "navigator-away".to_owned())
-            .absolute()
-            .inset_0()
-            .bg(scrim)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    this.nav.open = false;
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-                    .child(panel),
-            );
-        match mode {
-            // A phone's workspace ends above the home indicator's band (and the key bar, when
-            // it shows), which the app draws below it. The drawer is drawn after everything and
-            // unclipped, down to the window's bottom edge, so it and its scrim cover the band;
-            // a phone's workspace starts at the window's top.
-            Mode::Drawer => {
-                deferred(away.bottom_auto().h(window.viewport_size().height)).into_any_element()
-            }
-            Mode::Docked | Mode::Overlay => away.into_any_element(),
-        }
+            .into_any_element()
     }
 
-    /// The strip of the right edge the pointer drags, and the listeners that follow the
-    /// pointer wherever it goes once the handle is pressed. They are there in every frame the
-    /// handle is, so the first move after the press is followed without waiting for a frame.
-    fn render_handle(cx: &Context<Self>) -> gpui::AnyElement {
+    /// Where the navigator is hidden but would dock: a column of one server glyph per worker,
+    /// each with what its tiles add up to under it. A click flies to the worker.
+    fn navigator_rail(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let spacing = theme.spacing;
+        let side = kit::icon_button_side(theme);
+        let buttons: Vec<gpui::AnyElement> = self
+            .workers
+            .iter()
+            .map(|(key, w)| {
+                let key = *key;
+                let rollup = self.worker_rollup(key, cx);
+                let health = worker_health(&w.status);
+                let label = [Some(w.name.clone()), health.map(|(_, word)| word.to_owned())]
+                    .into_iter()
+                    .flatten()
+                    .chain(rollup.words())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let (glyph, ink) = match health {
+                    Some((Status::Away, _)) => (IconName::ServerOff, s.warn_fill),
+                    _ => (IconName::Server, s.text_secondary),
+                };
+                let badge = rollup_slot(theme, format!("nav-rail-rollup-{key}"), rollup, true)
+                    .absolute()
+                    .right_0()
+                    .bottom_0();
+                let el = div()
+                    .id(ElementId::Name(format!("nav-rail-{key}").into()))
+                    .debug_selector(move || format!("nav-rail-{key}"))
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(label))
+                    .relative()
+                    .flex_none()
+                    .size(px(side))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(theme.radii.sm))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.raised)))
+                    .child(icon(theme, glyph, IconSize::Inline, hsla(ink)))
+                    .child(badge)
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.tick();
+                        this.navigated();
+                        this.go_to_worker(key, cx);
+                    }));
+                tab_stop(el, s.accent).into_any_element()
+            })
+            .collect();
+        div()
+            .id("nav-rail")
+            .debug_selector(|| "nav-rail".to_owned())
+            .role(Role::Navigation)
+            .aria_label("Workers")
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(spacing.sm))
+            .gap(px(spacing.xs))
+            .bg(hsla(s.panel))
+            .border_r_1()
+            .border_color(hsla(s.border))
+            .children(buttons)
+            .into_any_element()
+    }
+
+    /// The handle on the navigator's edge, `x` its centre in the frame: a 12 pt strip around
+    /// the 1 pt edge, drawn over the strip so its outer half takes the pointer too. Pressed, it
+    /// drags the width; double-clicked, it puts the width back. The listeners that follow the
+    /// pointer are there in every frame the handle is, so the first move after the press is
+    /// followed without waiting for a frame.
+    pub(super) fn render_handle(x: gpui::Pixels, cx: &Context<Self>) -> gpui::AnyElement {
         let entity = cx.entity().downgrade();
         let follow = canvas(
             |_bounds, _window, _cx| (),
@@ -890,14 +1156,18 @@ impl WorkspaceView {
             .absolute()
             .top_0()
             .bottom_0()
-            .right_0()
+            .left(x - px(HANDLE_W / 2.0))
             .w(px(HANDLE_W))
             .cursor_col_resize()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &gpui::MouseDownEvent, _w, cx| {
-                    this.nav.resize = Some((f32::from(ev.position.x), this.navigator_width()));
                     cx.stop_propagation();
+                    if ev.click_count >= 2 {
+                        this.reset_navigator_width(cx);
+                        return;
+                    }
+                    this.nav.resize = Some((f32::from(ev.position.x), this.navigator_width()));
                     cx.notify();
                 }),
             )
@@ -906,79 +1176,129 @@ impl WorkspaceView {
     }
 
     /// `key`'s name, or nothing for a worker no longer known.
-    fn worker_name(&self, key: WorkerKey) -> String {
+    pub(super) fn worker_name(&self, key: WorkerKey) -> String {
         self.workers.get(&key).map(|w| w.name.clone()).unwrap_or_default()
     }
 
-    /// What waits, in a row of *Needs you*: its tile's title, else its agent's words.
-    fn waiting_what(&self, waiting: Waiting, cx: &gpui::App) -> String {
-        waiting
-            .tile
-            .and_then(|t| Some(self.card_title(t, self.item(t)?, cx)))
-            .or_else(|| self.agent_state(waiting.session).map(agent_status_text))
-            .unwrap_or_else(|| "Agent".to_owned())
-    }
-
-    /// A row of *Needs you*: the mark, what waits, and on which worker.
-    pub(super) fn waiting_row(
-        &self,
-        prefix: &str,
-        waiting: Waiting,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
+    /// A row of *Needs you* or *Working*: what it is and how long it has waited or worked,
+    /// then what the agent says in its status's tone, its worker and its directory.
+    fn agent_row(&self, agent: &NavAgent, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let what = self.waiting_what(waiting, cx);
-        let worker = self.worker_name(waiting.worker);
-        let session = waiting.session;
-        let label = SharedString::from(format!("{what}, needs you on {worker}"));
+        let (first, second) = line_heights(theme);
+        let session = agent.at.session;
+        let prefix = if agent.status == Status::NeedsYou { "nav-waiting" } else { "nav-working" };
+        let label = [agent.title.as_str(), agent.words.as_str(), agent.status.label()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let time = (agent.since_ms > 0)
+            .then(|| Duration::from_millis(now_ms().saturating_sub(agent.since_ms)))
+            .and_then(|elapsed| match agent.status {
+                Status::Working => Some(turn_label(elapsed)),
+                _ => age_shown(elapsed),
+            })
+            .map(|text| {
+                readout(theme, text).debug_selector(move || format!("{prefix}-time-{session}"))
+            });
+        let line1 = div()
+            .h(px(first))
+            .line_height(px(first))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .child(title(agent.title.clone(), hsla(s.text)))
+            .children(time);
+        let words = (!agent.words.is_empty()).then(|| {
+            div().flex_none().text_color(hsla(agent.status.tone(theme))).child(agent.words.clone())
+        });
+        let line2 = meta(div(), theme)
+            .h(px(second))
+            .line_height(px(second))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .children(words)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(agent.place.clone()),
+            );
+        let waiting = agent.at;
         row(
             theme,
-            ElementId::Name(format!("{prefix}-waiting-{session}").into()),
-            format!("{prefix}-waiting-{session}"),
-            label,
+            kit::Row::Two,
+            ElementId::Name(format!("{prefix}-{session}").into()),
+            format!("{prefix}-{session}"),
+            label.into(),
             false,
         )
-        .child(status_mark(theme, Some(Status::NeedsYou), 1.0))
-        .child(title(what, hsla(s.text)))
-        .child(caption(theme, worker))
+        .items_start()
+        .pt(px(theme.spacing.xs))
+        .child(lead_slot(theme, icon(theme, IconName::Bot, IconSize::Inline, hsla(s.text_muted))))
+        .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
         .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_waiting(waiting, cx)))
         .into_any_element()
     }
 
-    /// A worker's header: the server icon (crossed out, in warn, while it is away), the name,
-    /// then on the right edge its count of tiles and its round trip or what is wrong, led by
-    /// what a folded worker's tiles add up to. Under the pointer the chevron and "+" take the
-    /// readouts' place; nothing moves when either shows.
-    fn worker_header(&self, worker: NavHeader, cx: &Context<Self>) -> gpui::AnyElement {
+    /// "Show N more" under the first few of *Working*.
+    fn more_row(&self, hidden: usize, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let text = SharedString::from(format!("Show {hidden} more"));
+        row(
+            theme,
+            kit::Row::One,
+            "nav-working-more",
+            "nav-working-more".to_owned(),
+            text.clone(),
+            false,
+        )
+        .text_size(px(theme.typography.small()))
+        .text_color(hsla(theme.surfaces.text_secondary))
+        .child(lead_slot(theme, div()))
+        .child(tabular(div()).child(text))
+        .on_click(cx.listener(|this, _ev, _w, cx| {
+            this.nav.working_all = true;
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// A worker's header: the server icon (crossed out, in the warn fill, while it is away),
+    /// the name, then on the right edge what is wrong with its link or its round trip when it
+    /// is slow, led by what a folded worker's tiles add up to. Under the pointer the chevron
+    /// and "+" take the readouts' place; nothing moves when either shows.
+    fn worker_header(&self, worker: &NavHeader, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let NavHeader { key, folded, .. } = worker;
-        let Some(w) = self.workers.get(&key) else { return div().into_any_element() };
-        let health = worker_health(&w.status);
-        let rtt = w.rtt.filter(|_| health.is_none()).map(rtt_label);
+        let key = worker.key;
+        let folded = worker.folded;
         let label = SharedString::from(format!(
             "{}{}{}",
-            w.name,
-            health.map(|(_, word)| format!(", {word}")).unwrap_or_default(),
+            worker.name,
+            worker.health.map(|(_, word)| format!(", {word}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
-        let lead = match health {
-            None => lead_slot(
-                theme,
-                icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted)),
-            ),
-            Some((Status::Away, _)) => lead_slot(
-                theme,
-                div().id("away").role(Role::Image).aria_label(Status::Away.label()).child(icon(
+        let lead =
+            match worker.health {
+                None => lead_slot(
                     theme,
-                    IconName::ServerOff,
-                    IconSize::Inline,
-                    hsla(s.warn),
-                )),
-            ),
-            Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark), 1.0)),
-        };
+                    icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted)),
+                ),
+                Some((Status::Away, _)) => lead_slot(
+                    theme,
+                    div().id("away").role(Role::Image).aria_label(Status::Away.label()).child(
+                        icon(theme, IconName::ServerOff, IconSize::Inline, hsla(s.warn_fill)),
+                    ),
+                ),
+                Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark), 1.0)),
+            };
         let name = div()
             .flex_1()
             .min_w_0()
@@ -987,15 +1307,11 @@ impl WorkspaceView {
             .text_ellipsis()
             .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
             .text_color(hsla(s.text))
-            .child(w.name.clone());
-        let count = (worker.count > 0).then(|| {
-            caption(theme, worker.count.to_string())
-                .debug_selector(move || format!("nav-count-{key}"))
-        });
+            .child(SharedString::from(worker.name.clone()));
         let group = SharedString::from(format!("nav-worker-group-{key}"));
-        // At rest: the readouts on the row's right edge, where the tiles' ages end, and before
-        // them what a folded worker's tiles add up to. They grow leftwards, so a rollup coming
-        // or going moves neither the count nor the round trip.
+        // At rest: the readouts on the row's right edge, where the tiles' words end, and
+        // before them what a folded worker's tiles add up to. They grow leftwards, so a rollup
+        // coming or going moves nothing after it.
         let rollup = folded.then_some(worker.rollup).filter(|r| r.shown().is_some());
         let rest = div()
             .flex()
@@ -1003,20 +1319,25 @@ impl WorkspaceView {
             .justify_end()
             .gap(px(theme.spacing.xs))
             .group_hover(group.clone(), gpui::Styled::invisible)
-            .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r)))
-            .children(count)
-            .children(health.map(|(_, word)| caption(theme, word)))
-            .children(
-                rtt.map(|rtt| caption(theme, rtt).debug_selector(move || format!("nav-rtt-{key}"))),
-            );
+            .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r, false)))
+            .children(worker.health.map(|(_, word)| readout(theme, word)))
+            .children(worker.rtt.clone().map(|rtt| {
+                tabular(div())
+                    .debug_selector(move || format!("nav-rtt-{key}"))
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_size(px(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .child(rtt)
+            }));
         let chevron = if folded { IconName::ChevronRight } else { IconName::ChevronDown };
         let side = theme.typography.icon_large();
-        let add = w.link.is_some().then(|| {
+        let add = worker.linked.then(|| {
             let el = div()
                 .id(SharedString::from(format!("nav-new-shell-{key}")))
                 .debug_selector(move || format!("nav-new-shell-{key}"))
                 .role(Role::Button)
-                .aria_label(SharedString::from(format!("New shell on {}", w.name)))
+                .aria_label(SharedString::from(format!("New shell on {}", worker.name)))
                 .flex_none()
                 .size(px(side))
                 .flex()
@@ -1060,6 +1381,7 @@ impl WorkspaceView {
             .child(hover);
         row(
             theme,
+            kit::Row::One,
             ElementId::Name(format!("nav-worker-{key}").into()),
             format!("nav-worker-{key}"),
             label,
@@ -1078,8 +1400,9 @@ impl WorkspaceView {
         .into_any_element()
     }
 
-    /// A tile's row: the leading slot (its kind at rest, its status otherwise), the title and
-    /// the unseen dot's slot, then the muted second line and the age.
+    /// A tile's row: its kind, its title and at the end of that line its state in a word (or
+    /// the unseen dot, or its age), then the muted second line. Waiting on the human, the row
+    /// is washed in the warn fill.
     fn tile_row(
         &self,
         t: &NavTile,
@@ -1088,7 +1411,6 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let typo = &theme.typography;
         let selected = focused == Some(t.tile);
         let label =
             [Some(t.title.as_str()), t.mark.map(Status::label), t.unseen.then_some("unseen")]
@@ -1098,11 +1420,33 @@ impl WorkspaceView {
                 .join(", ");
         let ink = if selected { s.text } else { s.text_secondary };
         let id = t.tile.item.as_uuid();
-        // An idle tile is at rest: it shows what it is, not that nothing is happening.
-        let mark = t.mark.filter(|m| *m != Status::Idle);
-        let lead = crate::palette::status_slot(theme, t.kind, mark, hsla(s.text_muted), 1.0);
-        let first = typo.ui_size * TILE_LINE;
-        let second = typo.small() * TILE_LINE;
+        let (first, second) = line_heights(theme);
+        let lead = crate::palette::status_slot(theme, t.kind, None, hsla(s.text_muted), 1.0);
+        // One mark at the line's end: the state while there is one (it says unseen too, as
+        // "Done" and "Failed" are), else the unseen dot, else the age.
+        let end = match status_word(t.mark) {
+            Some(word) => {
+                let selector =
+                    if t.unseen { format!("nav-unseen-{id}") } else { format!("nav-status-{id}") };
+                Some(
+                    meta(div(), theme)
+                        .debug_selector(move || selector)
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_color(hsla(word.tone(theme)))
+                        .child(word.label())
+                        .into_any_element(),
+                )
+            }
+            None if t.unseen => {
+                Some(unseen_dot(theme, format!("nav-unseen-{id}"), true).into_any_element())
+            }
+            None => t.age.clone().map(|age| {
+                readout(theme, age)
+                    .debug_selector(move || format!("nav-age-{id}"))
+                    .into_any_element()
+            }),
+        };
         let line1 = div()
             .h(px(first))
             .line_height(px(first))
@@ -1110,44 +1454,30 @@ impl WorkspaceView {
             .items_center()
             .gap(px(theme.spacing.xs))
             .child(title(t.title.clone(), hsla(ink)))
-            .child(unseen_dot(theme, format!("nav-unseen-{id}"), t.unseen));
-        let line2 = div()
+            .children(end);
+        let line2 = meta(div(), theme)
+            .debug_selector(move || format!("nav-meta-{id}"))
             .h(px(second))
             .line_height(px(second))
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs))
-            .text_size(px(typo.small()))
-            .text_color(hsla(s.text_muted))
-            .child(
-                div()
-                    .debug_selector(move || format!("nav-meta-{id}"))
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(t.meta.clone()),
-            )
-            .children(t.age.clone().map(|age| {
-                crate::kit::tabular(div())
-                    .debug_selector(move || format!("nav-age-{id}"))
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .child(age)
-            }));
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(t.meta.clone());
         let tile = t.tile;
+        let wash = t.mark == Some(Status::NeedsYou) && !selected;
         row(
             theme,
+            kit::Row::Two,
             ElementId::Name(format!("nav-tile-{id}").into()),
             format!("nav-tile-{id}"),
             label.into(),
             selected,
         )
-        .h(px(TILE_ROW_H))
         .items_start()
         .pt(px(theme.spacing.xs))
-        .pl(px(theme.spacing.xl))
+        // Under the worker's name: past its icon and the gap after it.
+        .pl(px(theme.spacing.inset() + theme.typography.icon_large()))
+        .when(wash, |row| row.bg(hsla_alpha(s.warn_fill, alpha::FAINT)))
         .child(div().h(px(first)).flex().items_center().child(lead))
         .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
         .when(self.nav.list.autoscroll == Some(tile), |row| {
@@ -1160,6 +1490,33 @@ impl WorkspaceView {
         .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_tile(tile, cx)))
         .into_any_element()
     }
+}
+
+/// A section's heading, as every list in the frame heads its sections: the quiet label, and
+/// for *Working* the working mark and how many are at work.
+fn heading(
+    theme: &Theme,
+    selector: &'static str,
+    text: &'static str,
+    working: Option<usize>,
+) -> Stateful<Div> {
+    let s = &theme.surfaces;
+    let mark = working.map(|_| {
+        div()
+            .id("working-mark")
+            .flex_none()
+            .role(Role::Image)
+            .aria_label(Status::Working.label())
+            .child(status_icon(theme, Status::Working, px(theme.typography.meta()), hsla(s.accent)))
+    });
+    let count = working.map(|n| readout(theme, n.to_string()));
+    crate::palette::section_heading(theme, selector.into(), text)
+        .debug_selector(move || selector.to_owned())
+        .flex()
+        .items_center()
+        .gap(px(theme.spacing.xs))
+        .children(mark)
+        .children(count)
 }
 
 /// The least the worker header's trailing part takes: the chevron and "+" side by side.
@@ -1184,8 +1541,58 @@ impl WorkspaceView {
         self.nav.list.rows.iter().filter_map(tile).collect()
     }
 
+    /// The sessions *Working* lists, in its order.
+    pub(super) fn navigator_working(&self) -> Vec<slopty_core::SessionId> {
+        let working = |r: &NavRow| match r {
+            NavRow::Agent(a) if a.status == Status::Working => Some(a.at.session),
+            _ => None,
+        };
+        self.nav.list.rows.iter().filter_map(working).collect()
+    }
+
     /// Where the list showed its rows in the last frame drawn.
     pub(super) fn navigator_list_bounds(&self) -> gpui::Bounds<gpui::Pixels> {
         self.nav.list.state.viewport_bounds()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An age shows from a minute, and the tick comes when its label would change.
+    #[test]
+    fn an_age_shows_past_a_minute_and_ticks_at_its_next_unit() {
+        assert_eq!(age_shown(Duration::from_secs(59)), None);
+        assert_eq!(age_shown(Duration::from_secs(300)).as_deref(), Some("5m"));
+        assert_eq!(until_age_changes(Duration::from_secs(59)), Duration::from_secs(1));
+        assert_eq!(until_age_changes(Duration::from_secs(61)), Duration::from_secs(59));
+        assert_eq!(until_age_changes(Duration::from_secs(3_700)), Duration::from_secs(3_500));
+    }
+
+    /// A turn's time reads in whole seconds, then minutes and seconds, then hours.
+    #[test]
+    fn a_turn_ticks_in_whole_seconds() {
+        assert_eq!(turn_label(Duration::from_millis(9_999)), "9 s");
+        assert_eq!(turn_label(Duration::from_secs(64)), "1 m 04 s");
+        assert_eq!(turn_label(Duration::from_mins(62)), "1 h 02 m");
+    }
+
+    /// A note's second line is its progress, else its next line, else its kind.
+    #[test]
+    fn a_notes_second_line_says_how_far_it_got() {
+        assert_eq!(note_meta("# Release\n- [x] tag\n- [ ] notes\n- [ ] ship\n"), "1 of 3 done");
+        assert_eq!(note_meta("Groceries\n- milk\n"), "milk");
+        assert_eq!(note_meta("Just a title\n"), "Note");
+    }
+
+    /// Only a state worth a word gets one: at rest or out of reach, the row says nothing.
+    #[test]
+    fn a_row_names_a_state_that_is_happening() {
+        assert_eq!(status_word(Some(Status::NeedsYou)), Some(Status::NeedsYou));
+        assert_eq!(status_word(Some(Status::Failed)), Some(Status::Failed));
+        assert_eq!(status_word(Some(Status::Idle)), None);
+        assert_eq!(status_word(Some(Status::Away)), None);
+        assert_eq!(status_word(None), None);
     }
 }

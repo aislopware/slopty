@@ -25,11 +25,98 @@ pub(crate) const NO_COMMAND_MATCHES: &str = "No command matches";
 /// The keys the palette's foot names, each with what it does.
 pub(crate) const LEGEND: [(&str, &str); 3] = [("↩", "open"), ("esc", "close"), ("↑↓", "move")];
 
+/// How many commands an empty field lists: the ones run last, then the first of the rest.
+pub const RECENT_COMMANDS: usize = 5;
+
+/// Where the palette's top sits on a desktop, as a share of the window's height from its top.
+const ANCHOR: f32 = 0.2;
+
+/// The most of the window's height the palette takes on a desktop, under its ceiling.
+const SHARE: f32 = 0.6;
+
+/// Where every floating layer stacks, bottom to top, painted through
+/// `gpui::deferred(..).with_priority(layer.priority())`.
+///
+/// Named once, so a notice cannot fall under a dialog, nor a menu opened from a popover under
+/// the popover, nor the phone's drawer over the palette. A panel that is part of the frame (the
+/// docked or drawn-out navigator) is drawn at the default priority, under all of them.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Layer {
+    /// Anchored to what opened it and dismissed by a click away: the inbox, a menu, the hosts.
+    Popover,
+    /// Opened from a popover or a row inside one: a block's menu.
+    Submenu,
+    /// Modal over the window and its scrim: the palette, the picker, the settings.
+    Dialog,
+    /// A notice: it is seen whatever else is up.
+    Toast,
+}
+
+impl Layer {
+    /// Its paint priority for `gpui::deferred`: a higher one paints over a lower one.
+    #[must_use]
+    pub const fn priority(self) -> usize {
+        match self {
+            Self::Popover => 1,
+            Self::Submenu => 2,
+            Self::Dialog => 3,
+            Self::Toast => 4,
+        }
+    }
+}
+
+/// The commands last run from the palette, newest first, app-wide as an editor's command
+/// history is: what an empty field lists before the rest.
+#[derive(Default, Debug)]
+struct RecentCommands(Vec<String>);
+
+impl gpui::Global for RecentCommands {}
+
+/// The labels of the commands last run from the palette, newest first.
+#[must_use]
+pub fn recent_commands(cx: &App) -> Vec<String> {
+    cx.try_global::<RecentCommands>().map(|r| r.0.clone()).unwrap_or_default()
+}
+
+fn remember_command(label: &str, cx: &mut App) {
+    let recent = &mut cx.default_global::<RecentCommands>().0;
+    recent.retain(|l| l != label);
+    recent.insert(0, label.to_owned());
+    recent.truncate(RECENT_COMMANDS);
+}
+
+/// `word` with its first letter upper-cased: a kind as chrome prints it (`note` → `Note`).
+#[must_use]
+pub fn sentence_case(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+/// A list's empty state when a filter leaves nothing: one quiet line on the rows' edge.
+///
+/// The fuller treatment is for a list with nothing to hold at all; a query that narrows to
+/// nothing is a moment, and a heading or an icon for it would outweigh the list it replaced.
+pub(crate) fn quiet_line(
+    theme: &Theme,
+    id: &'static str,
+    text: &'static str,
+) -> gpui::Stateful<gpui::Div> {
+    crate::kit::inset_x(div(), theme)
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .role(gpui::accesskit::Role::Status)
+        .aria_label(text)
+        .py(px(theme.spacing.sm))
+        .text_size(px(theme.typography.small()))
+        .text_color(hsla(theme.surfaces.text_muted))
+        .child(text)
+}
+
 /// The palette's foot: its keys in key caps, small and muted, read as one line.
 fn legend(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let s = &theme.surfaces;
     let said = LEGEND.map(|(key, what)| format!("{key} {what}")).join(" · ");
-    div()
+    crate::kit::inset_x(div(), theme)
         .id("palette-legend")
         .debug_selector(|| "palette-legend".to_owned())
         .role(gpui::accesskit::Role::Label)
@@ -38,7 +125,6 @@ fn legend(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .flex()
         .items_center()
         .gap(px(theme.spacing.md))
-        .px(px(theme.spacing.lg))
         .py(px(theme.spacing.xs))
         .border_t_1()
         .border_color(hsla(s.border))
@@ -202,26 +288,31 @@ impl Section {
 
 /// One line of the palette: a name, and what ↩ does.
 ///
-/// Around them: where it is (its worker and directory), what the right side says (the keys
-/// that do the same, or a session's status), how old it is, the kind icon and the section it
-/// is listed under.
+/// Around them: where it is (its worker, directory and kind), what the right edge says (the
+/// keys that do the same, a tile's status or age, a readout), the kind icon of a line that
+/// goes somewhere, and the section it is listed under.
+#[derive(Clone, Debug)]
 pub struct PaletteItem {
     /// What the line says (`New note`, `shell`): a tile or a worker by its name alone, since
     /// the section it sits in already says that choosing it goes there.
     pub label: String,
-    /// The right side, muted: the shortcut (`⌘⇧N`) or a session's status; empty for none.
+    /// The right edge: an action's keys (`⌘⇧N`), or a readout (`3 hits`, a worker's round trip
+    /// or what is wrong with it); empty for none. A tile's status and age are its own fields.
     pub keys: String,
     /// What runs.
     pub run: PaletteRun,
-    /// The kind icon in the line's leading slot.
-    pub icon: IconName,
-    /// How the tile or worker is doing: its mark takes the leading slot from the kind icon;
-    /// `None` leaves the kind icon there.
+    /// The kind icon in the leading slot of a line that goes somewhere (a tile, a worker). A
+    /// command has none: an icon on every command is decoration, not information.
+    pub icon: Option<IconName>,
+    /// How the tile or worker is doing: its mark takes the leading slot from the kind icon, and
+    /// a tile's word takes the right edge while it is not idle.
     pub status: Option<Status>,
     /// The worker the tile is on, named only when more than one is known.
     pub worker: Option<String>,
     /// Where the tile is: its directory, as the headers print it.
     pub cwd: Option<String>,
+    /// What the tile is (`File`, `Note`), after where it is.
+    pub kind: Option<String>,
     /// How long the tile's session has run.
     pub age: Option<std::time::Duration>,
     /// The group it is listed under.
@@ -233,10 +324,21 @@ impl PaletteItem {
         label: String,
         keys: String,
         run: PaletteRun,
-        icon: IconName,
+        icon: Option<IconName>,
         section: Section,
     ) -> Self {
-        Self { label, keys, run, icon, status: None, worker: None, cwd: None, age: None, section }
+        Self {
+            label,
+            keys,
+            run,
+            icon,
+            status: None,
+            worker: None,
+            cwd: None,
+            kind: None,
+            age: None,
+            section,
+        }
     }
 
     /// Whether its right-hand text is a key chord (an action's binding), not a readout.
@@ -245,62 +347,62 @@ impl PaletteItem {
         matches!(self.run, PaletteRun::Action(_))
     }
 
-    /// An item for `action`, its keys read from `bindings` (the first binding for it), its icon
-    /// from the action's name.
+    /// An item for `action`, its keys read from `bindings` (the first binding for it).
     #[must_use]
     pub fn new(label: &str, action: Box<dyn Action>, bindings: &[KeyBinding]) -> Self {
         let keys = keys_for(action.as_ref(), bindings);
-        let icon = action_icon(action.name());
-        Self::line(label.to_owned(), keys, PaletteRun::Action(action), icon, Section::Commands)
+        Self::line(label.to_owned(), keys, PaletteRun::Action(action), None, Section::Commands)
     }
 
-    /// A line that goes to a session in the workspace: its title, its status on the right.
+    /// A line that goes to a session in the workspace, by its title.
     #[must_use]
-    pub fn session(title: &str, status: &str, session: SessionId) -> Self {
+    pub fn session(title: &str, session: SessionId) -> Self {
         Self::line(
             title.to_owned(),
-            status.to_owned(),
+            String::new(),
             PaletteRun::Session(session),
-            IconName::SquareTerminal,
+            Some(IconName::SquareTerminal),
             Section::Tiles,
         )
     }
 
-    /// A worker by its name, whether it is reachable on the right.
+    /// A worker by its name, `detail` (its round trip, or what is wrong) on the right.
     #[must_use]
-    pub fn worker(name: &str, status: &str, worker: slopty_client::layout::WorkerKey) -> Self {
+    pub fn worker(name: &str, detail: &str, worker: slopty_client::layout::WorkerKey) -> Self {
         Self::line(
             name.to_owned(),
-            status.to_owned(),
+            detail.to_owned(),
             PaletteRun::Worker(worker),
-            IconName::Server,
+            Some(IconName::Server),
             Section::Workers,
         )
     }
 
-    /// An item in the workspace by its title, `what` ("file") on the right.
+    /// An item in the workspace by its title, `kind` ("File") after where it is.
     #[must_use]
-    pub fn item(title: &str, what: &str, icon: IconName, item: slopty_core::ItemId) -> Self {
+    pub fn item(title: &str, kind: &str, icon: IconName, item: slopty_core::ItemId) -> Self {
         let run = PaletteRun::Item(item);
-        Self::line(title.to_owned(), what.to_owned(), run, icon, Section::Tiles)
+        let mut line = Self::line(title.to_owned(), String::new(), run, Some(icon), Section::Tiles);
+        line.kind = Some(sentence_case(kind));
+        line
     }
 
     /// A line that opens `url` in the browser, `detail` on the right.
     #[must_use]
     pub fn url(label: &str, detail: &str, url: &str) -> Self {
         let run = PaletteRun::OpenUrl(url.to_owned());
-        Self::line(label.to_owned(), detail.to_owned(), run, IconName::Link, Section::Commands)
+        Self::line(label.to_owned(), detail.to_owned(), run, None, Section::Commands)
     }
 
     /// A line that opens `url` in a browser tile, `detail` on the right.
     #[must_use]
     pub fn in_tile(label: &str, detail: &str, url: &str) -> Self {
         let run = PaletteRun::OpenInTile(url.to_owned());
-        Self::line(label.to_owned(), detail.to_owned(), run, IconName::Globe, Section::Commands)
+        Self::line(label.to_owned(), detail.to_owned(), run, None, Section::Commands)
     }
 
     /// `Rerun <command>` for a command the active shell ran (a multi-line command shows its
-    /// first line and `…`), "shell" on the right.
+    /// first line and `…`).
     #[must_use]
     pub fn rerun(command: &str, session: SessionId) -> Self {
         let first = command.lines().next().unwrap_or_default();
@@ -310,21 +412,15 @@ impl PaletteItem {
             format!("Rerun {first}")
         };
         let run = PaletteRun::Rerun { session, command: command.to_owned() };
-        Self::line(label, "shell".to_owned(), run, IconName::RotateCw, Section::Commands)
+        Self::line(label, String::new(), run, None, Section::Commands)
     }
 
-    /// `Open <relative>` for a file the worker found under `root`, `file` on the right.
+    /// `Open <relative>` for a file the worker found under `root`.
     #[must_use]
     pub fn found_file(root: &str, relative: &str) -> Self {
         let path = format!("{}/{relative}", root.trim_end_matches('/'));
         let run = PaletteRun::OpenFile { path, line: None };
-        Self::line(
-            format!("Open {relative}"),
-            "file".to_owned(),
-            run,
-            IconName::File,
-            Section::Files,
-        )
+        Self::line(format!("Open {relative}"), String::new(), run, None, Section::Files)
     }
 
     /// A directory the worker found under `root`: a shell and a conversation in it.
@@ -357,42 +453,35 @@ impl PaletteItem {
             | PaletteRun::OpenUrl(_)
             | PaletteRun::OpenInTile(_) => IconName::Search,
         };
-        Self::line(title.to_owned(), keys, run, icon, Section::Tiles)
+        Self::line(title.to_owned(), keys, run, Some(icon), Section::Tiles)
     }
 
-    /// `Open <path>` for a path typed into the field, `line N` or `file` on the right.
+    /// `Open <path>` for a path typed into the field, `line N` on the right when it names one.
     #[must_use]
     pub fn open_file(path: &str, line: Option<u32>) -> Self {
-        let keys = line.map_or_else(|| "file".to_owned(), |n| format!("line {n}"));
+        let keys = line.map(|n| format!("line {n}")).unwrap_or_default();
         let run = PaletteRun::OpenFile { path: path.to_owned(), line };
-        Self::line(format!("Open {path}"), keys, run, IconName::FileText, Section::Files)
+        Self::line(format!("Open {path}"), keys, run, None, Section::Files)
     }
 
-    /// `New terminal in <dir>` for a directory typed into the field, `shell` on the right.
+    /// `New terminal in <dir>` for a directory typed into the field.
     #[must_use]
     pub fn open_shell(cwd: &str) -> Self {
         let run = PaletteRun::OpenShell { cwd: cwd.to_owned() };
-        let label = format!("New terminal in {cwd}");
-        Self::line(label, "shell".to_owned(), run, IconName::SquareTerminal, Section::Files)
+        Self::line(format!("New terminal in {cwd}"), String::new(), run, None, Section::Files)
     }
 
-    /// `New agent in <dir>` for a directory typed into the field, `agent` on the right.
+    /// `New agent in <dir>` for a directory typed into the field.
     #[must_use]
     pub fn open_agent(cwd: &str) -> Self {
         let run = PaletteRun::OpenAgent { cwd: cwd.to_owned() };
-        Self::line(
-            format!("New agent in {cwd}"),
-            "agent".to_owned(),
-            run,
-            IconName::Bot,
-            Section::Files,
-        )
+        Self::line(format!("New agent in {cwd}"), String::new(), run, None, Section::Files)
     }
 
     /// The same line with another kind icon.
     #[must_use]
     pub const fn with_icon(mut self, icon: IconName) -> Self {
-        self.icon = icon;
+        self.icon = Some(icon);
         self
     }
 
@@ -424,15 +513,34 @@ impl PaletteItem {
         self
     }
 
-    /// Where the line is, as its muted second column says it: the worker, then the directory.
+    /// Where the line is, as its muted second column says it: the worker, the directory, then
+    /// what the tile is.
     #[must_use]
     pub fn context(&self) -> String {
-        [self.worker.as_deref(), self.cwd.as_deref()]
+        [self.worker.as_deref(), self.cwd.as_deref(), self.kind.as_deref()]
             .into_iter()
             .flatten()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(" · ")
+    }
+
+    /// What the right edge says, and the status whose tone it takes (`None`: muted).
+    ///
+    /// A tile says its status word while it is not idle, so a scan down the right edge reads
+    /// what is working, done or waiting; otherwise how long it has run, once that is past a
+    /// minute ("now" on every fresh tile is noise). Anything else says its keys or readout.
+    #[must_use]
+    pub fn trailing(&self) -> Option<(String, Option<Status>)> {
+        if self.section == Section::Tiles
+            && let Some(status) = self.status.filter(|s| *s != Status::Idle)
+        {
+            return Some((status.label().to_owned(), Some(status)));
+        }
+        if !self.keys.is_empty() {
+            return Some((self.keys.clone(), self.status));
+        }
+        self.age.filter(|age| age.as_secs() >= 60).map(|age| (age_label(age), None))
     }
 
     /// The same line, listed under `section`.
@@ -442,12 +550,12 @@ impl PaletteItem {
         self
     }
 
-    /// The line as a screen reader reads it: the label, the worker and directory, then the
-    /// keys.
+    /// The line as a screen reader reads it: the label, where it is, then the right edge.
     #[must_use]
     pub fn a11y_label(&self) -> String {
         let context = self.context();
-        [self.label.as_str(), context.as_str(), self.keys.as_str()]
+        let trailing = self.trailing().map(|(text, _)| text).unwrap_or_default();
+        [self.label.as_str(), context.as_str(), trailing.as_str()]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
@@ -455,87 +563,30 @@ impl PaletteItem {
     }
 }
 
-impl Clone for PaletteItem {
-    fn clone(&self) -> Self {
-        Self {
-            label: self.label.clone(),
-            keys: self.keys.clone(),
-            run: self.run.clone(),
-            icon: self.icon,
-            status: self.status,
-            worker: self.worker.clone(),
-            cwd: self.cwd.clone(),
-            age: self.age,
-            section: self.section,
-        }
-    }
-}
-
-impl std::fmt::Debug for PaletteItem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PaletteItem")
-            .field("label", &self.label)
-            .field("keys", &self.keys)
-            .field("run", &self.run)
-            .field("icon", &self.icon)
-            .field("status", &self.status)
-            .field("worker", &self.worker)
-            .field("cwd", &self.cwd)
-            .field("age", &self.age)
-            .field("section", &self.section)
-            .finish()
-    }
-}
-
-/// The kind icon for an action's line, from its name (`workspace::NewTerminal`).
+/// What an empty field lists: every tile and worker, and [`RECENT_COMMANDS`] commands, the
+/// ones in `recent` (newest first) and then the first actions in their order.
 ///
-/// A generic command mark for an action with no kind of its own. Keyed on the name, so the
-/// action list and the app's own lines stay a list of labels and actions.
+/// Going to a tile is what the palette is opened for most; the whole command list is one
+/// keystroke away, and scrolling past fifty commands to reach it was the wall GR #5 named.
 #[must_use]
-pub fn action_icon(name: &str) -> IconName {
-    let short = name.rsplit("::").next().unwrap_or(name);
-    match short {
-        "NewTerminal" => IconName::SquareTerminal,
-        "NewAgent" => IconName::Bot,
-        "NewNote" | "NoteLastBlock" => IconName::StickyNote,
-        "AddWindow" => IconName::AppWindow,
-        "OpenFile" => IconName::FolderOpen,
-        "SaveFile" => IconName::Save,
-        "OpenUrl" => IconName::Globe,
-        "CloseItem" => IconName::X,
-        "UndoClose" => IconName::Undo2,
-        "NextAttention" => IconName::CircleAlert,
-        "ToggleMute" => IconName::Volume2,
-        "ToggleStats" => IconName::Activity,
-        "ToggleNavigator" => IconName::PanelLeft,
-        "RenameItem" => IconName::Pencil,
-        "PointOthers" => IconName::Cast,
-        "FindEverywhere" | "Find" => IconName::Search,
-        "ListWorkers" | "ConnectServer" => IconName::Server,
-        "DisconnectServer" => IconName::Unplug,
-        "AddWorker" => IconName::Plus,
-        "ListPorts" => IconName::Cable,
-        "OpenSettings" => IconName::Settings,
-        "FocusColumnLeft" | "FocusColumnFirst" | "FocusColumn" => IconName::ArrowLeft,
-        "FocusColumnRight" | "FocusColumnLast" => IconName::ArrowRight,
-        "FocusUp" => IconName::ArrowUp,
-        "FocusDown" => IconName::ArrowDown,
-        "MoveColumnLeft" | "MoveColumnRight" | "ConsumeOrExpelLeft" | "ConsumeOrExpelRight" => {
-            IconName::MoveHorizontal
+pub fn brief<'a>(items: Vec<&'a PaletteItem>, recent: &[String]) -> Vec<&'a PaletteItem> {
+    let (commands, mut out): (Vec<&PaletteItem>, Vec<&PaletteItem>) =
+        items.into_iter().partition(|item| item.section == Section::Commands);
+    let mut chosen: Vec<&PaletteItem> = recent
+        .iter()
+        .filter_map(|label| commands.iter().copied().find(|item| &item.label == label))
+        .collect();
+    for item in commands.iter().copied().filter(|item| item.is_chord()) {
+        if chosen.len() >= RECENT_COMMANDS {
+            break;
         }
-        "MoveUp" | "MoveDown" => IconName::MoveVertical,
-        "CycleWidth" | "CycleWidthBack" | "NarrowColumn" | "WidenColumn" | "CenterColumn"
-        | "ToggleTabbed" => IconName::Columns2,
-        "MaximizeColumn" | "FullscreenTile" => IconName::Maximize2,
-        "ToggleOverview" => IconName::LayoutGrid,
-        "FontLarger" | "FontSmaller" | "FontReset" => IconName::Type,
-        "PrevPrompt" => IconName::ChevronUp,
-        "NextPrompt" => IconName::ChevronDown,
-        "CopyLastOutput" => IconName::Copy,
-        "RerunLast" => IconName::RotateCw,
-        "ClearScreen" => IconName::Eraser,
-        _ => IconName::Command,
+        if !chosen.iter().any(|c| std::ptr::eq(*c, item)) {
+            chosen.push(item);
+        }
     }
+    chosen.truncate(RECENT_COMMANDS);
+    out.extend(chosen);
+    out
 }
 
 /// `items` in the order they are shown and stepped through: grouped by section, the order
@@ -554,24 +605,20 @@ pub fn in_sections(items: Vec<&PaletteItem>, path_first: bool) -> Vec<&PaletteIt
     items
 }
 
-/// A small, strong, muted heading over a group of rows: the palette's sections, the pickers',
-/// the empty workspace's workers. A heading, not a row, to a screen reader.
+/// The quiet label over a group of rows ([`crate::kit::label`]) on the one edge grid: the
+/// palette's sections, the pickers', the inbox's, the empty workspace's workers. A heading, not
+/// a row, to a screen reader.
 pub(crate) fn section_heading(
     theme: &Theme,
     id: ElementId,
     text: &'static str,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
+    crate::kit::inset_x(crate::kit::label(theme, text), theme)
         .id(id)
         .role(gpui::accesskit::Role::Heading)
         .aria_label(text)
-        .px(px(theme.spacing.md))
         .pt(px(theme.spacing.sm))
         .pb(px(theme.spacing.xxs))
-        .text_size(px(theme.typography.small()))
-        .font_weight(gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT))
-        .text_color(hsla(theme.surfaces.text_muted))
-        .child(text)
 }
 
 /// The fixed square a row's kind icon sits in, so every title starts on one edge.
@@ -807,6 +854,14 @@ pub struct CommandPalette {
     /// Whether key chords are worth printing: not on a touch device with no keyboard, where
     /// no chord can be pressed.
     chords: bool,
+    /// An empty field lists the tiles, the workers and a few commands ([`brief`]), not every
+    /// line: the workspace's own palette. A list of workers, ports or hits shows all of it.
+    brief: bool,
+    /// A window narrower than this (a phone's) gets the palette as a sheet from the top.
+    sheet_below: f32,
+    /// The sheet's list runs on past its foot: a fade there says so, since a touch list shows
+    /// no scrollbar.
+    more_below: bool,
     theme: Theme,
     _events: Subscription,
 }
@@ -886,9 +941,22 @@ impl CommandPalette {
             reveal: false,
             finding,
             chords: true,
+            brief: false,
+            sheet_below: 0.0,
+            more_below: false,
             theme,
             _events: events,
         }
+    }
+
+    /// List only the tiles, the workers and a few commands while the field is empty.
+    pub const fn set_brief(&mut self, brief: bool) {
+        self.brief = brief;
+    }
+
+    /// Show as a sheet from the top in a window narrower than `width`.
+    pub const fn set_sheet_below(&mut self, width: f32) {
+        self.sheet_below = width;
     }
 
     /// Print the actions' key chords and the key legend, or, with no keyboard to press them
@@ -933,10 +1001,19 @@ impl CommandPalette {
     /// typed into it (`Open <path>`, or a shell and a conversation in a directory) first, then
     /// the tiles, the workers and the commands the text matches, then the files the worker
     /// found for it.
+    ///
+    /// A brief palette with nothing typed lists only the tiles, the workers and the commands
+    /// [`brief`] picks.
     #[must_use]
     pub fn matches(&self, cx: &App) -> Vec<&PaletteItem> {
+        let query = self.input.read(cx).value();
         let mut out: Vec<&PaletteItem> = self.path_items.iter().collect();
-        out.extend(filter(&self.input.read(cx).value(), &self.items));
+        let kept = filter(&query, &self.items);
+        if self.brief && query.trim().is_empty() {
+            out.extend(brief(kept, &recent_commands(cx)));
+        } else {
+            out.extend(kept);
+        }
         out.extend(&self.found);
         in_sections(out, !self.path_items.is_empty())
     }
@@ -949,10 +1026,24 @@ impl CommandPalette {
     fn run(&self, cx: &mut Context<Self>) {
         let matches = self.matches(cx);
         let at = self.selected(matches.len());
-        if let Some(item) = matches.get(at) {
-            let run = item.run.clone();
-            cx.emit(PaletteEvent::Run(run));
+        if let Some(item) = matches.get(at).map(|item| (*item).clone()) {
+            Self::choose(&item, cx);
         }
+    }
+
+    /// `item` was chosen: a command joins the recent ones, and it runs.
+    fn choose(item: &PaletteItem, cx: &mut Context<Self>) {
+        if item.section == Section::Commands {
+            remember_command(&item.label, cx);
+        }
+        cx.emit(PaletteEvent::Run(item.run.clone()));
+    }
+
+    /// Whether the list, as last laid out, runs on below what it shows: more than its own
+    /// padding under the last row is still to come.
+    fn runs_on(&self) -> bool {
+        let left = self.scroll.max_offset().y + self.scroll.offset().y;
+        left > px(self.theme.spacing.xs + 0.5)
     }
 
     fn step(&mut self, delta: i64, cx: &mut Context<Self>) {
@@ -975,30 +1066,58 @@ impl CommandPalette {
     ) -> impl IntoElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let run = item.run.clone();
+        let spacing = theme.spacing;
         let (raised, overlay) = (s.raised, s.overlay);
         let icon_ink = if chosen { s.text } else { s.text_muted };
-        div()
+        let trailing = item.trailing().filter(|_| self.chords || !item.is_chord());
+        let places =
+            [(item.worker.clone(), false), (item.cwd.clone(), true), (item.kind.clone(), false)];
+        let mut context = crate::kit::meta(div(), theme)
+            .debug_selector(move || format!("palette-context-{ix}"))
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(spacing.xs))
+            .overflow_hidden()
+            .whitespace_nowrap();
+        for (n, (text, path)) in
+            places.into_iter().filter_map(|(text, path)| Some((text?, path))).enumerate()
+        {
+            if n > 0 {
+                context = context.child("·");
+            }
+            context = context.child(
+                div()
+                    .when(path, |el| {
+                        el.min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .font_family(mono_family(theme))
+                    })
+                    .when(!path, gpui::Styled::flex_none)
+                    .child(SharedString::from(text)),
+            );
+        }
+        let chosen_item = item.clone();
+        crate::kit::row(theme, crate::kit::Row::One)
             .id(ElementId::NamedInteger("palette-item".into(), u64::try_from(ix).unwrap_or(0)))
             .debug_selector(move || format!("palette-item-{ix}"))
             .role(gpui::accesskit::Role::ListBoxOption)
             .aria_label(SharedString::from(item.a11y_label()))
-            .w_full()
-            .px(px(theme.spacing.md))
-            .py(px(theme.spacing.xs))
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.sm))
+            // The fill sits a base unit in from the dialog's edges; the text on the edge grid.
+            .mx(px(spacing.xs))
+            .px(px(spacing.inset() - spacing.xs))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .when(chosen, |el| el.bg(hsla(overlay)))
             .when(!chosen, |el| el.hover(move |st| st.bg(hsla(raised))))
             .active(move |st| st.bg(hsla(overlay)))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |_this, _ev, _window, cx| {
-                cx.emit(PaletteEvent::Run(run.clone()));
-            }))
-            .child(status_slot(theme, item.icon, item.status, hsla(icon_ink), 1.0))
+            .on_click(cx.listener(move |_this, _ev, _window, cx| Self::choose(&chosen_item, cx)))
+            .children(
+                item.icon.map(|icon| status_slot(theme, icon, item.status, hsla(icon_ink), 1.0)),
+            )
             .child(
                 div()
                     .debug_selector(move || format!("palette-title-{ix}"))
@@ -1010,52 +1129,24 @@ impl CommandPalette {
                     .text_color(hsla(s.text))
                     .child(SharedString::from(item.label.clone())),
             )
-            .child(
-                div()
-                    .debug_selector(move || format!("palette-context-{ix}"))
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xs))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .children(
-                        item.worker
-                            .clone()
-                            .map(|worker| div().flex_none().child(SharedString::from(worker))),
-                    )
-                    .when(item.worker.is_some() && item.cwd.is_some(), |el| el.child("·"))
-                    .children(item.cwd.clone().map(|cwd| {
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .font_family(mono_family(theme))
-                            .child(SharedString::from(cwd))
-                    })),
-            )
-            .when(!item.keys.is_empty() && (self.chords || !item.is_chord()), |el| {
-                el.child(
+            .child(context)
+            .children(trailing.map(|(text, tone)| {
+                if item.is_chord() {
+                    // Keys as plain muted glyphs, as Zed's palette prints them; key caps are
+                    // the foot's alone.
                     div()
                         .debug_selector(move || format!("palette-keys-{ix}"))
                         .flex_none()
+                        .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
-                        .child(SharedString::from(drawn_keys(&item.keys))),
-                )
-            })
-            .children(item.age.map(|age| {
-                crate::kit::tabular(div())
-                    .debug_selector(move || format!("palette-age-{ix}"))
-                    .flex_none()
-                    .min_w(px(theme.spacing.xl))
-                    .flex()
-                    .justify_end()
-                    .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(age_label(age)))
+                        .child(SharedString::from(drawn_keys(&text)))
+                } else {
+                    crate::kit::meta(crate::kit::tabular(div()), theme)
+                        .debug_selector(move || format!("palette-trailing-{ix}"))
+                        .flex_none()
+                        .when_some(tone, |el, tone| el.text_color(hsla(tone.tone(theme))))
+                        .child(SharedString::from(text))
+                }
             }))
     }
 }
@@ -1090,8 +1181,62 @@ impl Render for CommandPalette {
             }
             rows.push(self.row(ix, item, ix == chosen, cx).into_any_element());
         }
-        let empty = rows.is_empty();
-        let root = crate::kit::backdrop(&theme, window)
+        // A find with nothing typed yet has nothing to report: the field says what it is for.
+        let waiting = self.finding && self.input.read(cx).value().trim().is_empty();
+        let nothing = rows.is_empty() && !waiting;
+
+        let viewport = window.viewport_size();
+        let height = f32::from(viewport.height);
+        let sheet = f32::from(viewport.width) < self.sheet_below;
+        let safe_top = window.insets().effective().top;
+        let backdrop = crate::kit::backdrop(&theme, window);
+        let backdrop = if sheet {
+            backdrop.px_0().pt(safe_top)
+        } else {
+            backdrop.pt(px(height * ANCHOR) + safe_top)
+        };
+        let dialog = crate::kit::dialog(&theme, crate::kit::Overlay::List);
+        let dialog = if sheet {
+            // A sheet from the top: the window's width, down to the keyboard.
+            dialog
+                .max_w_full()
+                .max_h_full()
+                .flex_1()
+                .mb_0()
+                .border_t_0()
+                .border_x_0()
+                .rounded_t(px(0.0))
+        } else {
+            let ceiling = crate::kit::Overlay::List.bounds().1;
+            dialog.max_h(px(ceiling.min(height * SHARE)))
+        };
+        // A touch list has no scrollbar: a fade over its foot says there is more below. The
+        // scroll's extent is the last layout's, so the frame after this one checks it again (a
+        // list just opened, or narrowed by a query) and draws once more only if it changed.
+        self.more_below = sheet && self.runs_on();
+        if sheet {
+            cx.on_next_frame(window, |this, _window, cx| {
+                if this.runs_on() != this.more_below {
+                    cx.notify();
+                }
+            });
+        }
+        let fade = self.more_below.then(|| {
+            let solid = hsla(s.elevated);
+            div()
+                .debug_selector(|| "palette-more".to_owned())
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(px(theme.density.row))
+                .bg(gpui::linear_gradient(
+                    180.0,
+                    gpui::linear_color_stop(gpui::Hsla { a: 0.0, ..solid }, 0.0),
+                    gpui::linear_color_stop(solid, 1.0),
+                ))
+        });
+        let root = backdrop
             .id("palette-backdrop")
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
             .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))
@@ -1106,16 +1251,14 @@ impl Render for CommandPalette {
                 }),
             )
             .child(
-                crate::kit::dialog(&theme, crate::kit::Overlay::List)
+                dialog
                     .id("palette")
                     .debug_selector(|| "palette".to_owned())
                     .role(gpui::accesskit::Role::Dialog)
                     .aria_label("Commands")
                     .child(
-                        // The typed text starts on the rows' text: the list's inset plus a
-                        // row's.
-                        div()
-                            .px(px(theme.spacing.lg))
+                        // The typed text starts on the rows' text: the edge grid.
+                        crate::kit::inset_x(div(), &theme)
                             .py(px(theme.spacing.sm))
                             .border_b_1()
                             .border_color(hsla(s.border))
@@ -1128,33 +1271,43 @@ impl Render for CommandPalette {
                     )
                     .child(
                         div()
-                            .id("palette-list")
-                            .debug_selector(|| "palette-list".to_owned())
-                            .track_scroll(&self.scroll)
-                            .role(gpui::accesskit::Role::ListBox)
-                            .aria_label("Commands")
+                            .relative()
                             .flex_1()
-                            .overflow_y_scroll()
-                            .p(px(theme.spacing.xs))
-                            .children(rows)
-                            .when(empty, |el| {
-                                el.child(
-                                    div()
-                                        .p(px(theme.spacing.md))
-                                        .text_color(hsla(s.text_muted))
-                                        .child(NO_COMMAND_MATCHES),
-                                )
-                            }),
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .id("palette-list")
+                                    .debug_selector(|| "palette-list".to_owned())
+                                    .track_scroll(&self.scroll)
+                                    .role(gpui::accesskit::Role::ListBox)
+                                    .aria_label("Commands")
+                                    .flex_1()
+                                    .overflow_y_scroll()
+                                    .py(px(theme.spacing.xs))
+                                    .children(rows)
+                                    .when(nothing, |el| {
+                                        el.child(quiet_line(
+                                            &theme,
+                                            "palette-empty",
+                                            NO_COMMAND_MATCHES,
+                                        ))
+                                    }),
+                            )
+                            .children(fade),
                     )
                     .when(self.chords, |el| el.child(legend(&theme))),
             );
-        crate::kit::fade_in(root, "palette-fade", cx)
+        gpui::deferred(crate::kit::fade_in(root, "palette-fade", cx))
+            .with_priority(Layer::Dialog.priority())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::Keystroke;
+    use slopty_core::ItemId;
 
     use super::*;
 
@@ -1193,29 +1346,30 @@ mod tests {
         assert_eq!(q(""), None);
 
         // A directory, spelled from the root or home with a slash at the end, offers a
-        // shell and a conversation there; anything else is a file.
+        // shell and a conversation there; anything else is a file. The label says what the
+        // line opens, so only a line number is left for the right edge.
         let labels = |s: &str| {
-            path_items(s).iter().map(|i| format!("{} {}", i.label, i.keys)).collect::<Vec<_>>()
+            path_items(s)
+                .iter()
+                .map(|i| format!("{} {}", i.label, i.keys).trim_end().to_owned())
+                .collect::<Vec<_>>()
         };
-        assert_eq!(
-            labels("~/proj/"),
-            ["New terminal in ~/proj shell", "New agent in ~/proj agent"]
-        );
-        assert_eq!(labels("/"), ["New terminal in / shell", "New agent in / agent"]);
+        assert_eq!(labels("~/proj/"), ["New terminal in ~/proj", "New agent in ~/proj"]);
+        assert_eq!(labels("/"), ["New terminal in /", "New agent in /"]);
         assert!(
             matches!(&path_items("/srv/a/")[0].run, PaletteRun::OpenShell { cwd } if cwd == "/srv/a")
         );
         assert!(
             matches!(&path_items("/srv/a/")[1].run, PaletteRun::OpenAgent { cwd } if cwd == "/srv/a")
         );
-        assert_eq!(labels("~/proj"), ["Open ~/proj file"], "no slash at the end: a file");
-        assert_eq!(labels("src/"), ["Open src/ file"], "relative: no shell to spell it from");
-        assert_eq!(labels("./x/"), ["Open ./x/ file"]);
+        assert_eq!(labels("~/proj"), ["Open ~/proj"], "no slash at the end: a file");
+        assert_eq!(labels("src/"), ["Open src/"], "relative: no shell to spell it from");
+        assert_eq!(labels("./x/"), ["Open ./x/"]);
         assert_eq!(labels("/w/a.rs:3"), ["Open /w/a.rs line 3"]);
         assert!(labels("note").is_empty());
         let item = PaletteItem::open_file("/w/lib.rs", Some(3));
         assert_eq!((item.label.as_str(), item.keys.as_str()), ("Open /w/lib.rs", "line 3"));
-        assert_eq!(PaletteItem::open_file("/w", None).keys, "file");
+        assert_eq!(PaletteItem::open_file("/w", None).keys, "");
 
         // What is asked of the worker's files: a word, not a rooted path, not one letter.
         assert_eq!(files_query("main"), Some("main"));
@@ -1226,10 +1380,7 @@ mod tests {
         assert_eq!(files_query("./x"), None);
         assert_eq!(files_query("go to"), None);
         let [shell, agent] = PaletteItem::found_dir("~", "docs/manual/");
-        assert_eq!(
-            (shell.label.as_str(), shell.keys.as_str()),
-            ("New terminal in docs/manual", "shell")
-        );
+        assert_eq!(shell.label, "New terminal in docs/manual");
         assert!(matches!(&shell.run, PaletteRun::OpenShell { cwd } if cwd == "~/docs/manual"));
         assert_eq!(agent.label, "New agent in docs/manual");
         assert!(matches!(&agent.run, PaletteRun::OpenAgent { cwd } if cwd == "~/docs/manual"));
@@ -1269,9 +1420,9 @@ mod tests {
             PaletteItem::new("New note", Box::new(MoveUp), &[]),
             PaletteItem::found_file("~", "notes.md"),
             PaletteItem::worker("studio", "connected", worker),
-            PaletteItem::session("zsh", "", SessionId::new()),
+            PaletteItem::session("zsh", SessionId::new()),
             PaletteItem::new("Zoom in", Box::new(MoveDown), &[]),
-            PaletteItem::session("claude", "working", SessionId::new()),
+            PaletteItem::session("claude", SessionId::new()),
         ];
         let order = |path_first: bool| {
             in_sections(items.iter().collect(), path_first)
@@ -1289,37 +1440,91 @@ mod tests {
         assert!(path_items("https://example.com").iter().all(|i| i.section == Section::Files));
     }
 
+    /// An empty field lists every tile and worker and five commands: the ones run last, newest
+    /// first, and then the first actions in their order. A readout line (a rerun, a port) only
+    /// shows once it has been run from here.
+    #[test]
+    fn an_empty_field_lists_the_tiles_and_the_recent_commands() {
+        let worker = slopty_client::layout::WorkerKey::new(1);
+        let action = |label: &str| PaletteItem::new(label, Box::new(MoveUp), &[]);
+        let mut items = vec![
+            PaletteItem::session("zsh", SessionId::new()),
+            PaletteItem::worker("studio", "", worker),
+            PaletteItem::rerun("cargo test", SessionId::new()),
+        ];
+        items.extend(["A", "B", "C", "D", "E", "F", "G"].map(action));
+        let shown = |recent: &[&str]| {
+            let recent: Vec<String> = recent.iter().map(|l| (*l).to_owned()).collect();
+            brief(items.iter().collect(), &recent)
+                .iter()
+                .map(|i| i.label.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&[]), ["zsh", "studio", "A", "B", "C", "D", "E"]);
+        assert_eq!(
+            shown(&["G", "Rerun cargo test", "Gone"]),
+            ["zsh", "studio", "G", "Rerun cargo test", "A", "B", "C"],
+            "the recent first, a line no longer offered skipped"
+        );
+    }
+
+    /// A line that goes somewhere carries its kind in the leading slot; a command carries
+    /// none. The right edge says a tile's status while it is not idle, else its age past a
+    /// minute, and a command's keys; the kind is read after where the tile is.
+    #[test]
+    fn the_right_edge_says_status_age_or_keys_and_the_kind_is_context() {
+        let minutes = |n: u64| Some(std::time::Duration::from_secs(n * 60));
+        let tile = PaletteItem::session("claude", SessionId::new()).aged(minutes(12));
+        assert_eq!(tile.trailing(), Some(("12m".to_owned(), None)));
+        let working = tile.clone().with_status(Some(Status::Working));
+        assert_eq!(working.trailing(), Some(("Working".to_owned(), Some(Status::Working))));
+        let idle = tile.with_status(Some(Status::Idle));
+        assert_eq!(idle.trailing(), Some(("12m".to_owned(), None)), "idle: the age");
+        let fresh = PaletteItem::session("zsh", SessionId::new()).aged(minutes(0));
+        assert_eq!(fresh.trailing(), None, "no age under a minute");
+        let note = PaletteItem::item("Release", "note", IconName::StickyNote, ItemId::new())
+            .on_worker(Some("studio".to_owned()));
+        assert_eq!(note.context(), "studio · Note");
+        assert_eq!(note.trailing(), None);
+        let command = PaletteItem::new("New note", Box::new(MoveUp), &[]);
+        assert_eq!(command.icon, None, "no icon on a command");
+        assert!(note.icon.is_some() && working.icon.is_some());
+        let away =
+            PaletteItem::worker("studio", "unreachable", slopty_client::layout::WorkerKey::new(1))
+                .with_status(Some(Status::Away));
+        assert_eq!(away.trailing(), Some(("unreachable".to_owned(), Some(Status::Away))));
+        assert_eq!(working.a11y_label(), "claude Working");
+    }
+
+    /// The layers stack in the one order: a popover, a menu from it, a dialog, a notice.
+    #[test]
+    fn the_layers_stack_popover_submenu_dialog_toast() {
+        let order = [Layer::Popover, Layer::Submenu, Layer::Dialog, Layer::Toast];
+        assert!(order.windows(2).all(|w| w[0].priority() < w[1].priority()), "{order:?}");
+        assert!(Layer::Popover.priority() > 0, "over a panel drawn at the default");
+    }
+
     /// Every icon a line can carry is one the app loads: an icon missing from the assets draws
     /// as nothing, and the slot would sit empty.
     #[test]
     fn every_line_icon_is_embedded() {
         use gpui::AssetSource as _;
 
-        let mut names: Vec<IconName> =
-            crate::workspace::actions::palette_items().iter().map(|item| item.icon).collect();
-        for app in ["OpenSettings", "ConnectServer", "DisconnectServer", "AddWorker"] {
-            names.push(action_icon(app));
-        }
-        let [shell, agent] = PaletteItem::found_dir("~", "src/");
-        names.extend([shell.icon, agent.icon]);
-        names.extend(path_items("/w/a.rs").iter().map(|i| i.icon));
-        names.extend(path_items("https://example.com").iter().map(|i| i.icon));
         let session = SessionId::new();
-        names.extend(
-            [
-                PaletteRun::FindIn { session, needle: String::new() },
-                PaletteRun::FindInFile { item: slopty_core::ItemId::new(), needle: String::new() },
-                PaletteRun::Item(slopty_core::ItemId::new()),
-            ]
-            .map(|run| PaletteItem::hits("x", 1, run).icon),
-        );
-        names.push(PaletteItem::rerun("ls", session).icon);
-        names.push(PaletteItem::worker("w", "", slopty_client::layout::WorkerKey::new(1)).icon);
-        names.push(PaletteItem::url("u", "", "http://x").icon);
+        let mut names: Vec<IconName> = [
+            PaletteRun::FindIn { session, needle: String::new() },
+            PaletteRun::FindInFile { item: ItemId::new(), needle: String::new() },
+            PaletteRun::Item(ItemId::new()),
+        ]
+        .map(|run| PaletteItem::hits("x", 1, run).icon)
+        .into_iter()
+        .flatten()
+        .collect();
+        names.extend(PaletteItem::session("zsh", session).icon);
+        names.extend(PaletteItem::worker("w", "", slopty_client::layout::WorkerKey::new(1)).icon);
         for name in names {
             let bytes = icons::Assets.load(&name.path()).ok().flatten();
             assert!(bytes.is_some(), "{name:?} is not embedded");
         }
-        assert_ne!(action_icon("workspace::NewTerminal"), action_icon("workspace::Nothing"));
     }
 }

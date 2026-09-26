@@ -491,6 +491,11 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     // Focus is one accent hairline. gpui-kit's ring is a second, wider halo painted outside
     // the field's border, and the first-run field wore both.
     kit.focus_ring = false;
+    // The editor's gutter would take the input background (the panel), a grey band beside a
+    // body on the content surface; it belongs to the body.
+    let mut highlight = (*kit.highlight_theme).clone();
+    highlight.style.editor_gutter_background = Some(hsla(theme.content()));
+    kit.highlight_theme = Arc::new(highlight);
     KitTheme::sync_base(cx);
     // `sync_base` reinstalls the Markdown defaults, so the code colouring goes on after it.
     TextViewDefaults::global(cx)
@@ -640,21 +645,6 @@ mod tests {
             .map(|call| format!("`{call}px(N)`"))
     }
 
-    /// Files that still lift a floating layer by hand (`shadow_sm` on `panel` or `raised`)
-    /// rather than through [`elevate`]: UI wave 2 phase B moves each onto it and drops it
-    /// from this list. A file not on it cannot start.
-    const OWN_ELEVATION: [&str; 9] = [
-        "slopty-app/src/lib.rs",
-        "slopty-ui/src/file.rs",
-        "slopty-ui/src/terminal/view.rs",
-        "slopty-ui/src/workspace/inbox.rs",
-        "slopty-ui/src/workspace/navigator.rs",
-        "slopty-ui/src/workspace/statusbar.rs",
-        "slopty-ui/src/workspace/tile.rs",
-        "slopty-ui/src/workspace/titlebar.rs",
-        "slopty-ui/src/workspace/toast.rs",
-    ];
-
     /// A floating layer lifted by hand: a shadow of its own, or a scrim that is not the
     /// elevation's.
     fn own_elevation(line: &str) -> Option<&'static str> {
@@ -689,8 +679,7 @@ mod tests {
         let mut wrong = Vec::new();
         for dir in ["slopty-ui/src", "slopty-app/src"] {
             for (file, line_no, line) in chrome_lines(dir) {
-                let waived = file.ends_with("slopty-ui/src/kit.rs")
-                    || OWN_ELEVATION.iter().any(|pending| file.ends_with(pending));
+                let waived = file.ends_with("slopty-ui/src/kit.rs");
                 if let Some(why) = own_elevation(&line).filter(|_| !waived) {
                     wrong.push(format!("{file}:{line_no}: {why}"));
                 }
