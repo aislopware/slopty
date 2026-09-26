@@ -128,8 +128,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   MEASUREMENTS.md "font truth" for the moved pixels.
 
 - ✅ **PTY custody in a tiny separate daemon** (`slopty-ptyd`), masters handed to the worker by
-  `SCM_RIGHTS` (`nix` `sendmsg`/`recvmsg`; `sendfd` dropped — one fewer dependency, and macOS
-  has no `MSG_CMSG_CLOEXEC` so CLOEXEC is set by hand either way). ptyd drains the master into a
+  `SCM_RIGHTS` (rustix `sendmsg`/`recvmsg`, which hand back owned descriptors; `sendfd` and
+  later `nix` dropped, since rustix already covered the rest, and macOS has no
+  `MSG_CMSG_CLOEXEC` so CLOEXEC is set by hand either way). ptyd drains the master into a
   bounded ring (4 MiB default) while detached. Verified 2026-09-04 by an end-to-end test
   (`apps/slopty-ptyd/tests/roundtrip.rs`): spawn → detached backlog → attach → connection loss →
   resume → reattach → exit status. macOS detail: `TIOCSWINSZ` on a fresh master fails with

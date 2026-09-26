@@ -13,7 +13,6 @@ workspace = true
 [dependencies]
 bytes.workspace = true
 libc.workspace = true
-nix.workspace = true
 rustix.workspace = true
 postcard.workspace = true
 serde.workspace = true

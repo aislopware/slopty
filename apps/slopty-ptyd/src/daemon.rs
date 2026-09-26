@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result};
-use nix::sys::signal::Signal;
 use parking_lot::Mutex;
+use rustix::process::Signal;
 use slopty_core::SessionId;
 use slopty_proto::codec;
 use slopty_pty::fdpass;
@@ -90,7 +90,7 @@ pub async fn run(socket: &Path, backlog_bytes: usize, shell_dir: &Path) -> Resul
     tracing::info!("shutting down: hanging up every session");
     let sessions: Vec<Arc<Session>> = state.sessions.lock().values().cloned().collect();
     for s in sessions {
-        let _ignored = s.signal(Signal::SIGHUP);
+        let _ignored = s.signal(Signal::HUP);
     }
     let _ignored = std::fs::remove_file(socket);
     Ok(())
@@ -285,12 +285,12 @@ impl Connection {
                 };
                 self.attached.remove(&id);
                 if session.exited.lock().is_none() {
-                    let _hup = session.signal(Signal::SIGHUP);
+                    let _hup = session.signal(Signal::HUP);
                     let s = Arc::clone(&session);
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                         if s.exited.lock().is_none() {
-                            let _kill = s.signal(Signal::SIGKILL);
+                            let _kill = s.signal(Signal::KILL);
                         }
                     });
                 }

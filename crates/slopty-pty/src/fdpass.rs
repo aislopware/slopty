@@ -7,10 +7,14 @@
 
 use std::collections::VecDeque;
 use std::io::{IoSlice, IoSliceMut};
-use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd};
+use std::mem::MaybeUninit;
+use std::os::fd::{BorrowedFd, OwnedFd};
 
 use bytes::BytesMut;
-use nix::sys::socket::{ControlMessage, ControlMessageOwned, MsgFlags, UnixAddr, recvmsg, sendmsg};
+use rustix::net::{
+    RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
+    SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
+};
 use serde::de::DeserializeOwned;
 use slopty_proto::codec::{self, CodecError};
 use tokio::io::Interest;
@@ -27,19 +31,16 @@ pub async fn send(
     let mut sent = 0_usize;
     while sent < frame.len() {
         let rest = frame.get(sent..).unwrap_or_default();
-        let fds = fd.filter(|_| sent == 0).map(|f| [f.as_raw_fd()]);
-        let cmsg: Vec<ControlMessage<'_>> =
-            fds.iter().map(|f| ControlMessage::ScmRights(f)).collect();
+        let fds = fd.filter(|_| sent == 0).map(|f| [f]);
         let n = stream
             .async_io(Interest::WRITABLE, || {
-                sendmsg::<UnixAddr>(
-                    stream.as_raw_fd(),
-                    &[IoSlice::new(rest)],
-                    &cmsg,
-                    MsgFlags::empty(),
-                    None,
-                )
-                .map_err(std::io::Error::from)
+                let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+                let mut cmsg = SendAncillaryBuffer::new(&mut space);
+                if let Some(fds) = &fds {
+                    cmsg.push(SendAncillaryMessage::ScmRights(fds));
+                }
+                sendmsg(stream, &[IoSlice::new(rest)], &mut cmsg, SendFlags::empty())
+                    .map_err(std::io::Error::from)
             })
             .await
             .map_err(|e| PtyError::os("sendmsg", e))?;
@@ -107,24 +108,18 @@ impl Inbox {
     /// Receive once, appending to the buffered bytes and descriptors. Returns bytes read; 0 means
     /// EOF.
     pub async fn recv(&mut self, stream: &UnixStream) -> Result<usize, PtyError> {
-        let mut cmsg_buf = nix::cmsg_space!([std::os::fd::RawFd; 4]);
         let scratch = &mut self.scratch;
         let (n, received) = stream
             .async_io(Interest::READABLE, || {
+                let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
+                let mut cmsg = RecvAncillaryBuffer::new(&mut space);
                 let mut iov = [IoSliceMut::new(scratch)];
-                let msg = recvmsg::<UnixAddr>(
-                    stream.as_raw_fd(),
-                    &mut iov,
-                    Some(&mut cmsg_buf),
-                    MsgFlags::empty(),
-                )
-                .map_err(std::io::Error::from)?;
-                let mut got = Vec::new();
-                if let Ok(cmsgs) = msg.cmsgs() {
-                    for c in cmsgs {
-                        if let ControlMessageOwned::ScmRights(list) = c {
-                            got.extend(list);
-                        }
+                let msg = recvmsg(stream, &mut iov, &mut cmsg, RecvFlags::empty())
+                    .map_err(std::io::Error::from)?;
+                let mut got: Vec<OwnedFd> = Vec::new();
+                for message in cmsg.drain() {
+                    if let RecvAncillaryMessage::ScmRights(fds) = message {
+                        got.extend(fds);
                     }
                 }
                 Ok((msg.bytes, got))
@@ -132,10 +127,7 @@ impl Inbox {
             .await
             .map_err(|e| PtyError::os("recvmsg", e))?;
         self.buf.extend_from_slice(self.scratch.get(..n).unwrap_or_default());
-        for raw in received {
-            // SAFETY: the kernel just created this descriptor for us via SCM_RIGHTS; nothing
-            // else owns it.
-            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        for fd in received {
             // macOS has no MSG_CMSG_CLOEXEC; close the race window by hand.
             rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)
                 .map_err(|e| PtyError::os("fcntl", e))?;

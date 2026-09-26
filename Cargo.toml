@@ -118,16 +118,6 @@ rustix = { version = "1.1.5", features = [
     "system",
 ] }
 libc = "0.2.189"
-nix = { version = "0.31.3", features = [
-    "term",
-    "user",
-    "process",
-    "signal",
-    "fs",
-    "poll",
-    "socket",
-    "uio",
-] }
 
 # networking: n0's noq (a quinn fork) standalone, with Slopty's null crypto provider
 # (docs/decisions/transport.md). No TLS, so no ring/rustls; `fast-apple-datapath` (private

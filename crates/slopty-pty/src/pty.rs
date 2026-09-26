@@ -304,12 +304,33 @@ fn login_shell() -> String {
     if let Some(shell) = std::env::var("SHELL").ok().filter(|s| !s.is_empty()) {
         return shell;
     }
-    nix::unistd::User::from_uid(nix::unistd::getuid())
-        .ok()
-        .flatten()
-        .map(|user| user.shell.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_owned())
+    account_shell().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".to_owned())
+}
+
+/// This user's shell in the passwd database.
+fn account_shell() -> Option<String> {
+    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();
+    // A passwd entry fits in 4 KiB (`_SC_GETPW_R_SIZE_MAX`); a longer one is no entry here.
+    let mut buf = [libc::c_char::default(); 4096];
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    let uid = rustix::process::getuid().as_raw();
+    // SAFETY: `getpwuid_r` writes only `pwd`, `buf` (for its given length) and `found`: the entry
+    // into `pwd` with its strings inside `buf`, and `found` set to `pwd` on success or to null
+    // when the uid has no entry.
+    let rc = unsafe {
+        libc::getpwuid_r(uid, pwd.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &raw mut found)
+    };
+    if rc != 0 || found.is_null() {
+        return None;
+    }
+    // SAFETY: success filled `pwd`; its `pw_shell` is null or a NUL-terminated string in `buf`,
+    // which lives to the end of this function.
+    let shell = unsafe { pwd.assume_init_ref() }.pw_shell;
+    if shell.is_null() {
+        return None;
+    }
+    // SAFETY: as above, a NUL-terminated string in `buf`.
+    unsafe { std::ffi::CStr::from_ptr(shell) }.to_str().ok().map(str::to_owned)
 }
 
 /// Whether `program` is an executable file on this process's `PATH`.

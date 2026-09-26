@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
+use rustix::process::{Pid, Signal};
 use slopty_core::SessionId;
 use slopty_proto::terminal::TermSize;
 use slopty_pty::protocol::SessionInfo;
@@ -206,11 +207,12 @@ impl Session {
     }
 
     /// Send a signal to the child's process group (the child is its own session leader).
-    pub fn signal(&self, signal: nix::sys::signal::Signal) -> Result<(), std::io::Error> {
-        let pid =
-            i32::try_from(self.pid).map_err(|_overflow| std::io::Error::other("pid overflow"))?;
-        nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), signal)
-            .map_err(std::io::Error::from)
+    pub fn signal(&self, signal: Signal) -> Result<(), std::io::Error> {
+        let pid = i32::try_from(self.pid)
+            .ok()
+            .and_then(Pid::from_raw)
+            .ok_or_else(|| std::io::Error::other("not a process id"))?;
+        rustix::process::kill_process_group(pid, signal).map_err(std::io::Error::from)
     }
 }
 
