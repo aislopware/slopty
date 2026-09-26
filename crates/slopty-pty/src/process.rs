@@ -216,6 +216,24 @@ mod imp {
             assert_eq!(info.cwd.as_deref(), Some(std::env::current_dir().expect("cwd").as_path()));
             assert!(info.started.is_some_and(|at| at < SystemTime::now()), "{info:?}");
         }
+
+        /// What one description costs, the calls a session's probe makes every agent tick
+        /// (MEASUREMENTS, "describing a terminal's foreground process").
+        #[test]
+        #[ignore = "a measurement; run with --run-ignored only --no-capture"]
+        fn describing_a_process_costs() {
+            let pid = i32::try_from(std::process::id()).expect("pid fits");
+            let mut took: Vec<Duration> = std::iter::repeat_with(|| {
+                let at = std::time::Instant::now();
+                std::hint::black_box(describe(pid));
+                at.elapsed()
+            })
+            .take(2_000)
+            .collect();
+            took.sort_unstable();
+            let at = |q: usize| took[took.len() * q / 100];
+            println!("describe: p50 {:?} p99 {:?} max {:?}", at(50), at(99), took[took.len() - 1]);
+        }
     }
 }
 
