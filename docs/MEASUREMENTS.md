@@ -5359,6 +5359,32 @@ through `on_thread_start`, and the main thread) takes the worker's share of a lo
 what it is on a quiet machine. The client needs the same, which this run shows from the other
 side.
 
+The client side, the same day: one release worker (classed) and ptyd from one build, and two
+builds of the CLI, `before` unclassed and `after` with `slopty_platform::user_interactive_thread`
+on its main thread, every runtime thread (`on_thread_start`) and its stdin thread. Four
+interleaved pairs, each under a fresh 25 s all-core `USER_INITIATED` spin at load average
+100–150, 150 keys a run through `slopty bench echo`. Per pair, a throwaway `run.sh` started a
+fresh worker on port 45631, the spin, then the bench from each build:
+
+```sh
+# before/ and after/ hold each build's `slopty`; before/ also the worker and ptyd
+cargo test -p slopty-worker --test load --no-run
+SLOPTY_LOAD_SECS=25 target/debug/deps/load-<hash> --ignored --exact spin::every_core_at_user_initiated &
+RUST_LOG="warn,slopty_cli=trace,slopty_client::link=trace" SLOPTY_DATA_DIR=$R/c \
+  $R/$arm/slopty bench echo --worker 127.0.0.1:45631 --count 150
+```
+
+| pair | unclassed p50 / p90 / max | user-interactive p50 / p90 / max |
+| --- | --- | --- |
+| 1 | 0.9 / 170.8 / 1 497 ms | 0.6 / 21.3 / 44.8 ms |
+| 2 | 9.6 / 186.3 / 1 098 ms | 1.0 / 21.4 / 38.2 ms |
+| 3 | 0.5 / 165.7 / 1 130 ms | 0.7 / 20.1 / 32.3 ms |
+| 4 | 0.5 / 270.1 / 1 110 ms | 1.2 / 23.4 / 57.6 ms |
+
+The whole loaded echo's p90 falls eightfold and the second-long maxima go. What is left, about
+20 ms at p90, is the spin sharing the P-cores with every user-interactive thread on the machine.
+The app's and the iOS app's runtimes, and the worker's input threads, take the same class.
+
 ## 2026-09-26 — a dense screen's frame: UTF-8 checks, background runs and the font per run
 
 `terminal::view::tests::dense_screen_cost` (headless GPUI, release, mac-studio) draws a 200 × 60

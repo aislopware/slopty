@@ -22,6 +22,8 @@ dispatch2.workspace = true
 parking_lot.workspace = true
 # Whether the run that left a drop's landing behind is still alive (`file_drop::sweep`).
 rustix.workspace = true
+# A thread's QoS class (`user_interactive_thread`): pthread/qos.h, which rustix does not wrap.
+libc.workspace = true
 objc2-foundation = { workspace = true, features = [
     "NSURL",
     "NSURLRequest",

@@ -15,7 +15,12 @@ use gpui::WindowOptions;
 pub extern "C" fn slopty_ios_run() {
     init_logging();
     slopty_platform::playback_audio_session();
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    // The link's writer, the session pumps and noq's drivers carry every keystroke and echo.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(slopty_platform::user_interactive_thread)
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(e) => {
             tracing::error!(error = %e, "tokio runtime");

@@ -12,7 +12,10 @@ use bytes::Bytes;
 use slopty_core::{ClientId, StreamId};
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput};
-use slopty_worker::screen::{Refused, ScreenStream, StreamControl, StreamEvent};
+use slopty_worker::platform::{Native, Platform};
+use slopty_worker::screen::{
+    Rebuild, Refused, ScreenError, ScreenStream, StreamControl, StreamEvent,
+};
 use tokio::sync::mpsc;
 
 use crate::Daemon;
@@ -126,28 +129,38 @@ pub async fn run(
     // The probe runs beside the commands, not ahead of them: input for this window never waits
     // on the window server either.
     let mut probing: Option<tokio::task::JoinHandle<slopty_worker::screen::Probe>> = None;
+    // A resize's new encoder, built beside the commands for the same reason: input never waits
+    // on VideoToolbox. The geometry is not probed again until it is in.
+    let mut rebuilding: Option<Rebuild<Native>> = None;
     let by_client = loop {
         tokio::select! {
             command = commands.recv() => match command {
                 None => break false,
                 Some(Command::Close) => break true,
+                Some(command @ Command::SetQuality(_)) => {
+                    // A quality asked for after the resize applies on top of it, not under it.
+                    if let Some(mut rebuild) = rebuilding.take() {
+                        let built = rebuild.built().await;
+                        rebuilt(&mut stream, rebuild, built, &out).await;
+                    }
+                    apply(&mut stream, client, command).await;
+                }
                 Some(command) => apply(&mut stream, client, command).await,
             },
             probe = async { probing.as_mut()?.await.ok() }, if probing.is_some() => {
                 probing = None;
                 let Some(probe) = probe else { continue };
-                let mut events = Vec::new();
-                match stream.check_geometry(&probe).await {
-                    Ok(Some(event)) => events.push(event),
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!(%client, stream = %id, error = %e, "geometry"),
-                }
-                events.extend(stream.check_source());
-                for event in events {
+                rebuilding = stream.check_geometry(&probe);
+                if let Some(event) = stream.check_source() {
                     let _sent = out.send(WorkerMsg::Screen(event)).await;
                 }
             }
-            _ = geometry.tick(), if probing.is_none() => {
+            built = async { Some(rebuilding.as_mut()?.built().await) }, if rebuilding.is_some() => {
+                if let (Some(rebuild), Some(built)) = (rebuilding.take(), built) {
+                    rebuilt(&mut stream, rebuild, built, &out).await;
+                }
+            }
+            _ = geometry.tick(), if probing.is_none() && rebuilding.is_none() => {
                 probing = Some(tokio::task::spawn_blocking(stream.prober()));
             }
         }
@@ -173,6 +186,23 @@ pub async fn run(
         let _sent = out.send(WorkerMsg::Screen(event)).await;
     }
     let _told = told.send(Told::Gone(id));
+}
+
+/// Put in the encoder a resize built and tell the client the stream's new size; a build that
+/// failed leaves the stream at its old size, and the next ticks see the new one again.
+async fn rebuilt(
+    stream: &mut ScreenStream,
+    rebuild: Rebuild<Native>,
+    built: Result<<Native as Platform>::Video, ScreenError>,
+    out: &mpsc::Sender<WorkerMsg>,
+) {
+    match built {
+        Ok(encoder) => {
+            let event = stream.finish_rebuild(rebuild, encoder);
+            let _sent = out.send(WorkerMsg::Screen(event)).await;
+        }
+        Err(e) => tracing::warn!(stream = %stream.id(), error = %e, "geometry: encoder rebuild"),
+    }
 }
 
 async fn apply(stream: &mut ScreenStream, client: ClientId, command: Command) {

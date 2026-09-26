@@ -1280,11 +1280,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   11–569 ms with its threads unclassed, against p90 0.2–0.5 ms and p99 0.7–11 ms at
   `QOS_CLASS_USER_INTERACTIVE`. The key's leg into the worker fell from p90 2.7–4.1 to
   0.4–0.8 ms. The process's `LatencyCritical` activity keeps timers sharp but classes no
-  thread. So `slopty_worker::qos::user_interactive` classes every session actor's thread and,
-  through `on_thread_start`, every thread of the worker daemon's runtime (the connections' loops,
-  noq's drivers) and its main thread. The runtime's blocking pool goes with it, which is
-  short file work. ptyd is left alone: it only takes the tap and is off the keystroke path.
-  The video lanes were user-interactive dispatch queues already. Still owed: the app's
-  runtime (the link writer, the pumps, noq's drivers), where the same trace shows an unclassed
-  client holding a key for hundreds of milliseconds under the spin. The helper belongs in
-  `slopty-platform`, which the app reaches and the worker does not yet.
+  thread. So `slopty_platform::user_interactive_thread` classes every session actor's thread,
+  each remote window's input thread and, through `on_thread_start`, every thread of the worker
+  daemon's runtime (the connections' loops, noq's drivers) and its main thread. The runtime's
+  blocking pool goes with it, which is short file work. ptyd is left alone: it only takes the
+  tap and is off the keystroke path. The video lanes were user-interactive dispatch queues
+  already. The clients take the same class on every runtime thread (the macOS and iOS apps: the
+  link writer, the pumps, noq's drivers; the CLI, plus its stdin thread): under the same spin the
+  CLI's whole echo went from p90 166–270 ms and maxima over a second to p90 20–23 ms and maxima
+  under 60 ms.

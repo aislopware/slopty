@@ -144,6 +144,15 @@ mod crop_path {
     use slopty_worker::screen::{ScreenStream, StreamEvent, WindowPath};
     use tokio::sync::mpsc;
 
+    /// One geometry tick as the stream's task runs it, a resize's rebuild waited for in line.
+    async fn geometry_tick(stream: &mut ScreenStream) {
+        let probe = tokio::task::spawn_blocking(stream.prober()).await.unwrap();
+        if let Some(mut rebuild) = stream.check_geometry(&probe) {
+            let encoder = rebuild.built().await.unwrap();
+            let _geometry = stream.finish_rebuild(rebuild, encoder);
+        }
+    }
+
     /// A window served as a crop of its display that closes must end the stream the way the
     /// window filter does (`on_stop`, which the connection turns into `Closed`), not keep
     /// streaming the desktop where the window was.
@@ -197,19 +206,13 @@ mod crop_path {
                 );
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let _event = stream
-                .check_geometry(&tokio::task::spawn_blocking(stream.prober()).await.unwrap())
-                .await
-                .unwrap();
+            geometry_tick(&mut stream).await;
         }
 
         window.kill();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let reason = loop {
-            let _event = stream
-                .check_geometry(&tokio::task::spawn_blocking(stream.prober()).await.unwrap())
-                .await
-                .unwrap();
+            geometry_tick(&mut stream).await;
             if let Ok(Some(reason)) =
                 tokio::time::timeout(Duration::from_millis(100), stopped_rx.recv()).await
             {
@@ -224,10 +227,7 @@ mod crop_path {
         assert!(reason.contains("window closed"), "{reason}");
         assert!(!slopty_capture::window_on_screen(id), "the window is gone");
         // Once: further ticks stay quiet.
-        let _event = stream
-            .check_geometry(&tokio::task::spawn_blocking(stream.prober()).await.unwrap())
-            .await
-            .unwrap();
+        geometry_tick(&mut stream).await;
         tokio::time::timeout(Duration::from_millis(200), stopped_rx.recv()).await.unwrap_err();
         stream.close().await;
     }

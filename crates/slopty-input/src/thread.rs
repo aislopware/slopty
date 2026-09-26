@@ -126,6 +126,8 @@ impl InputThread {
         let started =
             std::thread::Builder::new().name("slopty-input".to_owned()).spawn(move || {
                 let _end = end;
+                // Every click and key into a remote window is posted from here.
+                slopty_platform::user_interactive_thread();
                 serve(target, scale, backend, watch, &queue);
             });
         if let Err(e) = started {

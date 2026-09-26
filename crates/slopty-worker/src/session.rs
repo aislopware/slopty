@@ -495,7 +495,7 @@ pub fn spawn(start: SessionStart) -> Result<SessionHandle, WorkerError> {
     thread::Builder::new()
         .name(format!("session-{id}"))
         .spawn(move || {
-            crate::qos::user_interactive();
+            slopty_platform::user_interactive_thread();
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {

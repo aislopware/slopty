@@ -1954,15 +1954,56 @@ async fn build_encoder<P: Platform>(
     shared: &Weak<Shared<P>>,
     config: EncoderConfig,
 ) -> Result<P::Video, ScreenError> {
+    start_encoder(shared, config)
+        .await
+        .map_err(|_cancelled| ScreenError::Closed)?
+        .map_err(Into::into)
+}
+
+/// [`build_encoder`] without waiting for it: the build runs on the blocking pool from here on.
+fn start_encoder<P: Platform>(
+    shared: &Weak<Shared<P>>,
+    config: EncoderConfig,
+) -> JoinHandle<Result<P::Video, CodecError>> {
     let weak = Weak::clone(shared);
-    let build = move || {
+    tokio::task::spawn_blocking(move || {
         P::Video::new(config, move |packet| {
             if let Some(shared) = weak.upgrade() {
                 shared.on_packet(&packet);
             }
         })
-    };
-    Ok(tokio::task::spawn_blocking(build).await.map_err(|_cancelled| ScreenError::Closed)??)
+    })
+}
+
+/// A new encoder session being built for the size a window settled on.
+///
+/// [`Pipeline::check_geometry`] starts it, and the stream's task waits for [`Self::built`]
+/// beside its commands, so input for the window is not held behind the 3.5–42 ms of a
+/// VideoToolbox session (MEASUREMENTS.md, "encoder sessions off the runtime").
+/// [`Pipeline::finish_rebuild`] puts it in; until then the stream goes on at its old size.
+pub struct Rebuild<P: Platform> {
+    encoder: JoinHandle<Result<P::Video, CodecError>>,
+    native: (u32, u32),
+    desired: CaptureConfig,
+    config: EncoderConfig,
+}
+
+impl<P: Platform> std::fmt::Debug for Rebuild<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Rebuild").field("native", &self.native).finish_non_exhaustive()
+    }
+}
+
+impl<P: Platform> Rebuild<P> {
+    /// The new session once it is built. Cancel-safe: a dropped call leaves the build running
+    /// for the next one. Not to be called again once it has answered.
+    ///
+    /// # Errors
+    ///
+    /// When VideoToolbox refuses the session, or the build was cancelled.
+    pub async fn built(&mut self) -> Result<P::Video, ScreenError> {
+        (&mut self.encoder).await.map_err(|_cancelled| ScreenError::Closed)?.map_err(Into::into)
+    }
 }
 
 /// Drop a replaced encoder session on the blocking pool ([`Shared::install`]).
@@ -2599,14 +2640,15 @@ impl<P: Platform> Pipeline<P> {
     ///
     /// The probe's bounds are also what the input sink maps the pointer through from here on,
     /// so input never reads them in front of an event.
-    pub async fn check_geometry(
-        &mut self,
-        probe: &Probe,
-    ) -> Result<Option<ScreenEvent>, ScreenError> {
+    ///
+    /// A size change comes back as the [`Rebuild`] it started: the encoder is built off the
+    /// runtime, and the caller waits for it without holding anything else up, then hands it to
+    /// [`Self::finish_rebuild`]. No probe is to be checked meanwhile.
+    pub fn check_geometry(&mut self, probe: &Probe) -> Option<Rebuild<P>> {
         self.injector.set_bounds(probe.bounds, probe.at);
         let Some(rect) = probe.bounds else {
             self.window_gone();
-            return Ok(None);
+            return None;
         };
         self.settle();
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
@@ -2617,18 +2659,33 @@ impl<P: Platform> Pipeline<P> {
         }
         let Some(native) = self.resize.observe(native, self.native) else {
             self.apply_desired();
-            return Ok(None);
+            return None;
         };
         tracing::info!(stream = %self.id, from = ?self.native, to = ?native, "target resized");
-        self.native = native;
         let (capture_config, encoder_config) = configs(native, &self.quality, self.refresh_hz);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
-        self.reconfigure(desired, encoder_config).await?;
-        Ok(Some(ScreenEvent::Geometry {
+        Some(self.start_rebuild(native, desired, encoder_config))
+    }
+
+    /// Put in the encoder `rebuild` built ([`Rebuild::built`]) and ask the capture for its size:
+    /// the `Geometry` to tell the client.
+    pub fn finish_rebuild(&mut self, rebuild: Rebuild<P>, encoder: P::Video) -> ScreenEvent {
+        self.install_rebuild(rebuild, encoder);
+        ScreenEvent::Geometry {
             stream: self.id,
             width: self.desired.width,
             height: self.desired.height,
-        }))
+        }
+    }
+
+    fn start_rebuild(
+        &self,
+        native: (u32, u32),
+        desired: CaptureConfig,
+        config: EncoderConfig,
+    ) -> Rebuild<P> {
+        let encoder = start_encoder(&Arc::downgrade(&self.shared), config);
+        Rebuild { encoder, native, desired, config }
     }
 
     /// The window-server reads [`Self::check_geometry`] decides from, as a call to make off the
@@ -2824,8 +2881,15 @@ impl<P: Platform> Pipeline<P> {
         desired: CaptureConfig,
         encoder_config: EncoderConfig,
     ) -> Result<(), ScreenError> {
-        let weak = Arc::downgrade(&self.shared);
-        let encoder = build_encoder(&weak, encoder_config).await?;
+        let mut rebuild = self.start_rebuild(self.native, desired, encoder_config);
+        let encoder = rebuild.built().await?;
+        self.install_rebuild(rebuild, encoder);
+        Ok(())
+    }
+
+    fn install_rebuild(&mut self, rebuild: Rebuild<P>, encoder: P::Video) {
+        let Rebuild { encoder: _answered, native, desired, config: encoder_config } = rebuild;
+        self.native = native;
         retire(self.shared.install(encoder));
         let target = {
             let mut rate = self.shared.rate.lock();
@@ -2844,7 +2908,6 @@ impl<P: Platform> Pipeline<P> {
         self.desired = desired;
         self.encoder_config = encoder_config;
         self.apply_desired();
-        Ok(())
     }
 
     /// Stream pixels per native pixel of the target: the quality's scale as the stream was last
@@ -4406,6 +4469,70 @@ mod tests {
             "the new session starts on the rebuild's keyframe"
         );
         assert!(!shared.pending.lock().keyframe, "and no second one is pending");
+    }
+
+    /// A platform whose next encoder session takes as long as the test says: its build takes the
+    /// receiver in [`SLOW_BUILDS`] and waits for one message on it.
+    enum Slow {}
+
+    impl Platform for Slow {
+        type Audio = slopty_codec::Opus;
+        type Capture = slopty_capture::ScreenCaptureKit;
+        type Input = slopty_input::CgEvents;
+        type Video = SlowBuild;
+    }
+
+    static SLOW_BUILDS: Mutex<Option<std::sync::mpsc::Receiver<()>>> = Mutex::new(None);
+
+    struct SlowBuild;
+
+    impl slopty_codec::VideoEncoder for SlowBuild {
+        type Image = slopty_codec::PixelBuffer;
+
+        fn new(
+            _config: EncoderConfig,
+            _sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, CodecError> {
+            let release = SLOW_BUILDS.lock().take();
+            let _released = release.as_ref().map(std::sync::mpsc::Receiver::recv);
+            Ok(Self)
+        }
+
+        fn encode(&self, _: &Self::Image, _: u64, _: &FrameOptions) -> Result<(), CodecError> {
+            Ok(())
+        }
+
+        fn set_bitrate(&self, _bps: u32) -> Result<(), CodecError> {
+            Ok(())
+        }
+
+        fn set_frame_rate(&self, _fps: u16) -> Result<(), CodecError> {
+            Ok(())
+        }
+    }
+
+    /// A resize's encoder is built off the stream's task: starting it answers at once however
+    /// long VideoToolbox takes, a wait for it that is given up leaves the build running, and the
+    /// next wait gets the session. The stream's task relies on all three to keep taking input
+    /// while it waits (`apps/slopty-worker/src/screens.rs`).
+    #[tokio::test]
+    async fn a_rebuild_starts_at_once_and_survives_a_dropped_wait() {
+        let (release, builds) = std::sync::mpsc::channel();
+        *SLOW_BUILDS.lock() = Some(builds);
+        let sink: Arc<dyn DatagramSink> = Wire::new();
+        let shared = Arc::new(Shared::<Slow>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let (capture, config) = configs((1280, 800), &Quality::default(), None);
+        let started = Instant::now();
+        let encoder = start_encoder(&Arc::downgrade(&shared), config);
+        let mut rebuild =
+            Rebuild::<Slow> { encoder, native: (1280, 800), desired: capture, config };
+        assert!(started.elapsed() < Duration::from_millis(50), "{:?}", started.elapsed());
+
+        let waited = tokio::time::timeout(Duration::from_millis(100), rebuild.built()).await;
+        assert!(waited.is_err(), "built while the session was still being made");
+        release.send(()).unwrap();
+        let built = tokio::time::timeout(Duration::from_secs(5), rebuild.built()).await.unwrap();
+        built.unwrap();
     }
 
     /// A datagram the transport refused never left, so it says nothing of how fast the link

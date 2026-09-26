@@ -217,6 +217,8 @@ fn read_on_a_thread(
 ) -> std::io::Result<tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>> {
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     std::thread::Builder::new().name("slopty-stdin".to_owned()).spawn(move || {
+        // Every key typed into an attach is read here.
+        slopty_platform::user_interactive_thread();
         let mut buf = vec![0_u8; 4096];
         loop {
             let chunk = match input.read(&mut buf) {

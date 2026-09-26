@@ -1067,9 +1067,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   change that is more than a bitrate, and when its window is resized. The swap also
   invalidated the old session there, which waits for its callbacks. Each held the thread for
   3.5 to 4.3 ms at the median, 42 ms at worst, and everything queued behind it waited too. Both
-  now run on the blocking pool (`build_encoder`, `retire`), so `set_quality` and
-  `check_geometry` are async, and the thread is held for 2 to 3 µs (MEASUREMENTS, "encoder
-  sessions off the runtime").
+  now run on the blocking pool (`build_encoder`, `retire`), so `set_quality` is async, and the
+  thread is held for 2 to 3 µs (MEASUREMENTS, "encoder sessions off the runtime").
+  The thread was free, but the stream's own task still awaited a resize's build, so the
+  window's input waited those 3.5 to 42 ms behind it. `check_geometry` now only starts the
+  build and hands back a `Rebuild`. The task waits for it in its `select!` beside its commands,
+  and `finish_rebuild` puts it in. The stream goes on at its old size until then, and no
+  geometry is probed while a build is out. A `SetQuality` that arrives meanwhile waits for the
+  rebuild, so it applies on top of the new size. Test:
+  `a_rebuild_starts_at_once_and_survives_a_dropped_wait`.
 
 - ✅ **The capture follows the display's beat, and the cadence gate keeps the rung's schedule**
   (2026-09-26). This machine's panel runs at 75 Hz. With `minimumFrameInterval` at 1/60 its

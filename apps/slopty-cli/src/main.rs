@@ -179,8 +179,19 @@ enum BenchCmd {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<ExitCode> {
+fn main() -> Result<ExitCode> {
+    // `attach` and the benches carry keys and echoes through every runtime thread; unclassed,
+    // a loaded Mac held one for hundreds of milliseconds (MEASUREMENTS.md, "the keystroke path
+    // under an all-core spin").
+    slopty_platform::user_interactive_thread();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(slopty_platform::user_interactive_thread)
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<ExitCode> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

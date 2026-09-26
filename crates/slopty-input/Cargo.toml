@@ -23,6 +23,8 @@ objc2-foundation = { workspace = true, features = [ "NSURL" ] }
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
 parking_lot.workspace = true
+# The input thread's QoS class (`thread`).
+slopty-platform.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

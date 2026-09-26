@@ -256,10 +256,10 @@ fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) 
 fn main() -> Result<()> {
     // The connections' loops and noq's drivers carry every keystroke and echo: they run at the
     // class of work a person waits on, as the session threads do.
-    slopty_worker::qos::user_interactive();
+    slopty_platform::user_interactive_thread();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .on_thread_start(slopty_worker::qos::user_interactive)
+        .on_thread_start(slopty_platform::user_interactive_thread)
         .build()
         .context("start the runtime")?
         .block_on(run())

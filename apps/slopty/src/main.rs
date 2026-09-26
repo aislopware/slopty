@@ -117,7 +117,11 @@ fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    // The link's writer, the session pumps and noq's drivers carry every keystroke and echo.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(slopty_platform::user_interactive_thread)
+        .build()?;
     let handle = runtime.handle().clone();
     // Held for the whole run: App Nap would otherwise throttle the link's heartbeats while the
     // window is covered and the direct path would be abandoned.

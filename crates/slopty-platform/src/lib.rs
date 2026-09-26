@@ -79,6 +79,27 @@ impl Drop for Activity {
     }
 }
 
+/// Put the calling thread in `QOS_CLASS_USER_INTERACTIVE`, the class of the work a person is
+/// waiting on, for the threads a keystroke, its echo or a remote window's input crosses.
+///
+/// A thread nobody classed runs below a build's user-initiated threads, and an [`Activity`]
+/// classes no thread: under an all-core spin at `USER_INITIATED`, the worker's share of an echo
+/// went from p90 5–6 ms unclassed to 0.2–0.5 ms classed, and the CLI's whole echo from p90
+/// 166–270 ms to 20–23 ms (MEASUREMENTS.md, "the keystroke path under an all-core spin").
+/// Never called on a thread that is already realtime (audio) or on the main thread of an app,
+/// which the system runs user-interactive already.
+pub fn user_interactive_thread() {
+    // SAFETY: `pthread_set_qos_class_self_np` (pthread/qos.h) changes only the calling thread's
+    // own class, and a relative priority of 0 is within every class's range
+    // (`QOS_MIN_RELATIVE_PRIORITY` is -15).
+    let refused = unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+    };
+    if refused != 0 {
+        tracing::warn!(error = refused, "user-interactive QoS refused");
+    }
+}
+
 /// Get the human's attention: the user's alert sound on macOS, a haptic on iOS.
 ///
 /// Fire-and-forget; the system sound server plays asynchronously. On iOS the Taptic
@@ -363,6 +384,33 @@ mod tests {
         assert_eq!(READS.load(Ordering::Relaxed), 1);
         assert!(!kept.get(at(6_000), fresh, read), "a second on, read again");
         assert_eq!(READS.load(Ordering::Relaxed), 2);
+    }
+
+    /// A thread that asks is user-interactive afterwards, and one that did not keeps the class
+    /// it was spawned with.
+    #[test]
+    fn a_thread_asks_for_user_interactive() {
+        fn class() -> libc::qos_class_t {
+            let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+            let mut relative = 0;
+            // SAFETY: `pthread_self` (pthread.h) has no preconditions.
+            let me = unsafe { libc::pthread_self() };
+            // SAFETY: `pthread_get_qos_class_np` (pthread/qos.h) writes its two out-parameters
+            // for a live thread; `me` is the calling thread and both pointers are to locals.
+            let failed =
+                unsafe { libc::pthread_get_qos_class_np(me, &raw mut class, &raw mut relative) };
+            assert_eq!(failed, 0);
+            class
+        }
+        let (before, after) = std::thread::spawn(|| {
+            let before = class();
+            super::user_interactive_thread();
+            (before, class())
+        })
+        .join()
+        .unwrap();
+        assert!(!matches!(before, libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE), "{before:?}");
+        assert!(matches!(after, libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE), "{after:?}");
     }
 
     /// What one read of the system setting costs against one read of the kept answer; prints
