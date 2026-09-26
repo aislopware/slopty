@@ -48,3 +48,13 @@ max-threads = 1
 filter = '(package(slopty-codec) & test(player_starts_and_drains)) | (package(slopty-client) & test(audio_waits_for_the_player))'
 test-group = 'coreaudio'
 slow-timeout = { period = "60s", terminate-after = 3, grace-period = "5s" }
+
+# Each VideoToolbox session revalidates the test binary's signature through syspolicyd on this
+# volume (mounted noowners), so codec tests started all at once queue behind each other past the
+# timeout; one alone takes seconds. Two at a time keeps the hardware sessions from piling up.
+[test-groups.videotoolbox]
+max-threads = 2
+
+[[profile.default.overrides]]
+filter = 'package(slopty-codec) & !test(player_starts_and_drains)'
+test-group = 'videotoolbox'

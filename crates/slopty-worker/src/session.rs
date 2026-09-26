@@ -495,6 +495,7 @@ pub fn spawn(start: SessionStart) -> Result<SessionHandle, WorkerError> {
     thread::Builder::new()
         .name(format!("session-{id}"))
         .spawn(move || {
+            crate::qos::user_interactive();
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {
@@ -745,6 +746,12 @@ struct Actor {
     size_untold: Option<TermSize>,
     /// When the next checkpoint is due (`CHECKPOINT_AFTER` past the last output).
     checkpoint_due: Option<tokio::time::Instant>,
+    /// Enough was tapped for a checkpoint that cannot wait for a quiet spell: taken once the
+    /// read that tapped it has been framed.
+    checkpoint_owed: bool,
+    /// When a viewer's input last reached the PTY: a quiet-spell checkpoint waits
+    /// [`CHECKPOINT_AFTER_INPUT`] past it.
+    typed_at: Option<tokio::time::Instant>,
     /// Where the output stands in VT syntax, so a quiet-spell checkpoint never cuts a sequence.
     boundary: Boundary,
     /// What waiters watch.
@@ -764,6 +771,11 @@ const HINT_EVERY: Duration = Duration::from_secs(1);
 /// A checkpoint follows this much quiet after output. Shorter means a crashed worker loses less
 /// of what a fresh one cannot replay from the ring; longer means fewer formatter runs.
 const CHECKPOINT_AFTER: Duration = Duration::from_millis(500);
+/// A quiet-spell checkpoint also waits this long after a viewer's input. The formatter runs on
+/// the actor's thread, a few milliseconds per 10k lines of history (13–19 ms for a full one), and
+/// a key typed while it runs waits for it with its echo and frame (MEASUREMENTS.md, "a key after
+/// a pause and the checkpoint"). Someone typing pauses for less than this between keys.
+const CHECKPOINT_AFTER_INPUT: Duration = Duration::from_secs(2);
 /// A checkpoint is also taken once this many bytes were tapped since the last one, so ptyd's
 /// ring (4 MiB by default) never overflows under a flood and the replay stays bounded.
 const CHECKPOINT_EVERY_BYTES: usize = 1 << 20;
@@ -863,6 +875,8 @@ impl Actor {
             tap_lost: false,
             size_untold: None,
             checkpoint_due: None,
+            checkpoint_owed: false,
+            typed_at: None,
             boundary: Boundary::default(),
             activity,
             port_hints: start.port_hints,
@@ -966,7 +980,7 @@ impl Actor {
         // frame (MEASUREMENTS.md, "the keystroke path, stage by stage"). The timer is for the
         // flood, where the next frame is owed later.
         let due = frame_due_after(now, self.last_frame);
-        if due <= now || self.burst.spend(now) {
+        if due <= now || self.echo_frame(now) {
             self.frame_due = None;
             self.flush_frame();
         } else if self.frame_due.is_none() {
@@ -978,6 +992,7 @@ impl Actor {
         if std::mem::take(&mut self.place_due) {
             self.resolve_place();
         }
+        self.checkpoint_if_owed();
     }
 
     /// The shell reported its directory (OSC 7, at every prompt with the integration) or a
@@ -1020,7 +1035,19 @@ impl Actor {
         }
     }
 
-    /// A viewer's frame was done with: build what is owed now, or when the pace allows.
+    /// Whether output read at `now` is framed ahead of the pace as a viewer's echo. With no
+    /// viewer that has room, the flush only marks the diff owed, so nothing is spent: the burst
+    /// is kept for [`Self::frame_room`], which frames the echo once room returns.
+    fn echo_frame(&mut self, now: tokio::time::Instant) -> bool {
+        if self.viewers.iter().any(|v| !v.stale && v.takes_frame()) {
+            self.burst.spend(now)
+        } else {
+            self.burst.open(now)
+        }
+    }
+
+    /// A viewer's frame was done with: build what is owed now, or when the pace allows. A diff
+    /// owed while input is being answered goes at once, as it would have when it was read.
     fn frame_room(&mut self) {
         let wanted = self.viewers.iter().any(|v| v.takes_frame() && (v.stale || self.owed));
         if !wanted {
@@ -1028,7 +1055,7 @@ impl Actor {
         }
         let now = tokio::time::Instant::now();
         let due = frame_due_after(now, self.last_frame);
-        if due <= now {
+        if due <= now || (self.owed && self.burst.spend(now)) {
             self.frame_due = None;
             self.flush_frame();
         } else if self.frame_due.is_none() {
@@ -1077,11 +1104,20 @@ impl Actor {
             }
         }
         if self.tap_lost || self.tapped_since_checkpoint >= CHECKPOINT_EVERY_BYTES {
-            // Right here rather than through the timer: the select prefers the master, and a
-            // flood that keeps it readable would starve a timer indefinitely.
-            self.checkpoint(true);
+            // Taken by the caller once this read is framed ([`Self::checkpoint_if_owed`]),
+            // rather than through the timer: the select prefers the master, and a flood that
+            // keeps it readable would starve a timer indefinitely.
+            self.checkpoint_owed = true;
         } else {
             self.checkpoint_after_quiet();
+        }
+    }
+
+    /// The checkpoint [`Self::tap_output`] found due, after the frame of the read that made it
+    /// due: the formatter takes milliseconds, and an echo in that read would wait for it.
+    fn checkpoint_if_owed(&mut self) {
+        if std::mem::take(&mut self.checkpoint_owed) {
+            self.checkpoint(true);
         }
     }
 
@@ -1093,9 +1129,15 @@ impl Actor {
     /// Hand ptyd the engine's whole state, so a worker that replaces this one starts from it.
     /// Unless `force`d, a checkpoint waits while the output stands inside an escape sequence
     /// or a character: it replaces the bytes before it, and the rest of that sequence would
-    /// print as text after a restart.
+    /// print as text after a restart. It also waits while someone is typing
+    /// ([`CHECKPOINT_AFTER_INPUT`]), whose keys would wait for the formatter.
     fn checkpoint(&mut self, force: bool) {
         if !self.dirty_since_checkpoint {
+            return;
+        }
+        let typing = self.typed_at.and_then(|at| at.checked_add(CHECKPOINT_AFTER_INPUT));
+        if !force && let Some(until) = typing.filter(|&until| tokio::time::Instant::now() < until) {
+            self.checkpoint_due = Some(until);
             return;
         }
         // A state the queue has no room for would be formatted for nothing; while the ring has
@@ -1114,10 +1156,17 @@ impl Actor {
             state.extend_from_slice(t.as_bytes());
             state.extend_from_slice(b"\x1b\\");
         }
+        let formatting = tokio::time::Instant::now();
         if let Err(e) = self.engine.checkpoint(&mut state) {
             tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
             return;
         }
+        tracing::debug!(
+            session = %self.id,
+            bytes = state.len(),
+            format_us = formatting.elapsed().as_micros(),
+            "checkpoint formatted"
+        );
         if state.len() > CHECKPOINT_MAX_BYTES {
             // ptyd would refuse the frame; keep the ring instead (it holds the output since
             // the last checkpoint that did fit) and try again at the next quiet spell.
@@ -1237,7 +1286,9 @@ impl Actor {
             done = true;
         }
         if typed {
-            self.burst.arm(tokio::time::Instant::now());
+            let now = tokio::time::Instant::now();
+            self.burst.arm(now);
+            self.typed_at = Some(now);
         }
         if done {
             let now = tokio::time::Instant::now();
@@ -1782,6 +1833,7 @@ impl Actor {
                 self.engine.write(ERASE_SCROLLBACK);
                 self.tap_output(ERASE_SCROLLBACK);
                 self.after_output();
+                self.checkpoint_if_owed();
                 bytes = vec![0x0c];
                 Ok(())
             }

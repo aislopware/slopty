@@ -19,6 +19,7 @@ pub mod manager;
 pub mod orchestrate;
 pub mod platform;
 pub mod ports;
+pub mod qos;
 pub mod repo;
 pub mod screen;
 pub mod session;

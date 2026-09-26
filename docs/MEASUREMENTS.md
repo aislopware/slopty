@@ -5121,6 +5121,34 @@ for set in "-p slopty-proto" "-p slopty-proto -p slopty-net" "-p slopty-net" "-p
 done
 ```
 
+## 2026-09-26 — an echo owed for want of room, framed when room returns
+
+mac-studio, the test profile (optimised), while other sessions built (load average 120–160). A
+viewer's connection holds both frames in flight (the echoes of two keys, each framed as it was
+read), a third key is typed, and 2 ms later the connection is done with one frame. The echo read
+meanwhile was owed, because the viewer had no room. The number is the wait from the freed
+place to the frame that acknowledges the third key, 12 rounds a run.
+
+```sh
+cargo nextest run -p slopty-worker --test session_actor \
+  -E 'test(an_echo_owed_for_want_of_room_goes_when_room_returns)' --no-capture
+```
+
+| | p50 | p90 | max |
+| --- | --- | --- | --- |
+| before, run 1 | 4.74 | 7.75 | 10.53 ms |
+| before, run 2 | 6.48 | 7.12 | 7.77 ms |
+| before, run 3 | 5.76 | 6.49 | 8.48 ms |
+| after, run 1 | **0.08** | 0.13 | 0.16 ms |
+| after, run 2 | 0.11 | 0.41 | 2.10 ms |
+| after, run 3 | 0.07 | 0.09 | 0.15 ms |
+
+Before, `frame_room` built the owed diff only on the 8 ms pace, counted from the frame that had
+just gone, and the timer added tokio's millisecond rounding. The input exemption
+(`EchoBurst`) applied only to output as it was read. Now the room a frame gives back spends
+the same budget, and the read that found no room keeps its frame of the budget instead of
+spending it on a flush that could not send (`Actor::echo_frame`).
+
 ## 2026-09-26 — capture on a 75 Hz display, data before parity, the reassembler's tick, UDP drops
 
 mac-studio (M1 Max), main display 1920×1080 at **75 Hz** (`system_profiler SPDisplaysDataType`
@@ -5246,3 +5274,88 @@ timer other than tokio's. The measurement test stays for the next attempt.
 same with 5 % injected loss (`SLOPTY_DROP_PERMILLE=50`, refreshes and retransmissions), the
 counter did not move: 0 drops each. A 1080p keyframe (≤ ~300 KB) fits the 768 KiB default many
 times over, so `SO_RCVBUF` stays as it is until a larger picture shows drops.
+
+## 2026-09-26 — a key after a pause and the checkpoint
+
+mac-studio, the test profile (optimised, libghostty-vt ReleaseFast), while other sessions built
+(load average 90–250). The session actor formats its whole terminal for ptyd (the checkpoint)
+500 ms after the last output, on its own thread. A `cat` session holds a full default history
+(50 000 coloured lines, as `checkpoint_cost` writes them, at 100 × 30; a 3.65 MB state). Ten
+keys are typed, each 500–504 ms after the previous echo arrived, which is when that echo's
+quiet-spell checkpoint comes due.
+
+```sh
+cargo nextest run -p slopty-worker --test session_actor \
+  -E 'test(a_key_after_a_pause_does_not_wait_for_the_checkpoint)' --no-capture
+```
+
+| | key → acking frame p50 | p90 | max | checkpoints while typing |
+| --- | --- | --- | --- | --- |
+| before, run 1 | 13.42 | 17.10 | 19.09 ms | 9 |
+| before, run 2 | 15.18 | 16.07 | 17.85 ms | 9 |
+| after, run 1 | 0.93 | 5.10 | 12.57 ms | 0 |
+| after, run 2 | 0.27 | 2.09 | 16.37 ms | 0 |
+| after, run 3 | **0.20** | 0.74 | 3.00 ms | 0 |
+
+Before, each key waited for the formatter: 13–19 ms on a full history, about five times the
+2026-09-06 figure for 10k lines. After, the quiet-spell checkpoint waits two seconds past a
+viewer's last input as well, so none runs while someone types, and the key waits for nothing.
+The after-runs shared the machine with four other actor tests and with other sessions' builds,
+and their tails are that. The checkpoint forced every 1 MiB of output now runs after the frame
+of the read that made it due, not before it.
+
+Not done: formatting only what changed since the last checkpoint. History rows do not change
+once scrolled off, so each run could be sub-millisecond, but that is a change to
+`slopty-engine`'s formatter.
+
+## 2026-09-26 — the keystroke path under an all-core spin
+
+mac-studio (10 cores), release daemons on a private port, data dir and sockets, `slopty bench
+echo` from this Mac over loopback, 150 bytes into `/bin/cat` a run. Load: every core spun at
+`QOS_CLASS_USER_INITIATED` (the class a build's threads ask for) by `tests/load.rs`, on top of
+other sessions' builds (load average 110 before the spin, 270–300 by the end). The worker arm was
+chosen per run by a temporary `SLOPTY_QOS=off` in `slopty_worker::qos::user_interactive`, since
+removed. The bench client (`slopty`, the CLI) is unclassed in both arms. The stages come from
+the trace on both sides (as in "the keystroke path, stage by stage"): each `control send` is
+matched to the worker's next `term input received`, that to its next `frame sent`, and that to
+the client's next `frame received`.
+
+```sh
+cargo build --release -p slopty-ptyd -p slopty-workerd -p slopty-cli
+cargo test -p slopty-worker --test load --no-run      # the spinner's binary
+R=/tmp/slopty-qos; export SLOPTY_NO_SHELL_INTEGRATION=1
+SLOPTY_DATA_DIR=$R/ptyd target/release/slopty-ptyd --socket $R/ptyd.sock &
+# per run: a fresh worker, the spinner for 18 s, then the bench
+RUST_LOG="info,slopty_worker::session=trace,slopty_worker::conn=trace" \
+  SLOPTY_DATA_DIR=$R/w SLOPTY_DROP_DIR=$R/drop target/release/slopty-worker \
+  --ptyd-socket $R/ptyd.sock --ctl-socket $R/worker.sock --data-dir $R/w \
+  --port 45613 --bind 127.0.0.1 --pasteboard slopty-qos-bench > $R/worker.log 2>&1 &
+SLOPTY_LOAD_SECS=18 target/debug/deps/load-<hash> --ignored --exact spin::every_core_at_user_initiated &
+RUST_LOG="warn,slopty=trace,slopty_cli=trace,slopty_client::link=trace" SLOPTY_DATA_DIR=$R/c \
+  target/release/slopty bench echo --worker 127.0.0.1:45613 --count 150 2> $R/bench.log
+```
+
+Inside the worker, `term input received` → `frame sent` (the connection's task, the session
+thread and back), ms, four interleaved pairs of runs:
+
+| run | unclassed p50 / p90 / p99 / max | user-interactive p50 / p90 / p99 / max |
+| --- | --- | --- |
+| 1 | 0.64 / 5.06 / 11.1 / 13.1 | **0.14 / 0.19 / 0.67 / 3.6** |
+| 2 | 0.53 / 5.49 / 20.4 / 54.3 | 0.15 / 0.36 / 3.78 / 25.3 |
+| 3 | 0.44 / 6.43 / 569 / 603 | 0.14 / 0.37 / 9.16 / 32.6 |
+| 4 | 0.37 / 5.09 / 212 / 533 | 0.14 / 0.47 / 11.2 / 20.5 |
+
+Client `control send` → worker `term input received` (the key's packet, the worker's noq driver
+and the connection's loop): p90 2.7–4.1 ms unclassed, 0.37–0.76 ms classed. Worker → client did
+not change, and could not: its receiving half is the unclassed CLI. So the bench's own totals
+still carry the client's tail. Without the trace, the same comparison read p50 1.2–1.7 against
+0.8–0.9 ms loaded and 1.0–1.3 against 0.6–0.7 ms before the spin. The loaded maxima of 0.7–1.4 s
+in both arms are the CLI: in the worst sample the key waited 446 ms in the client before it was
+sent, and the echo 827 ms between the client's link and the bench task, while the worker
+turned it round in 0.1 ms.
+
+So user-interactive QoS on the session threads and the worker's runtime (every runtime thread,
+through `on_thread_start`, and the main thread) takes the worker's share of a loaded echo back to
+what it is on a quiet machine. The client needs the same, which this run shows from the other
+side.
+

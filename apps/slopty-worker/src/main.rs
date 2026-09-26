@@ -253,8 +253,19 @@ fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) 
     });
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // The connections' loops and noq's drivers carry every keystroke and echo: they run at the
+    // class of work a person waits on, as the session threads do.
+    slopty_worker::qos::user_interactive();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(slopty_worker::qos::user_interactive)
+        .build()
+        .context("start the runtime")?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

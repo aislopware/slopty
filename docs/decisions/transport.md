@@ -142,7 +142,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Driving note: cliclick `kp:return` never reaches the app (osascript `keystroke return` does).
 
 - ❌ **Machine load alone does not flap the path** (2026-09-06; the harness was deleted
-  2026-09-24 with iroh: a single-path connection has no relay to flap to), closing the 2026-09-04
+  2026-09-24 with iroh: a single-path connection has no relay to flap to; amended 2026-09-26
+  by **The keystroke path's threads are user-interactive**, which sets the QoS this entry
+  declined on the strength of the echo's tail, not of path flaps), closing the 2026-09-04
   investigation of one connection that went direct → relay-only for 43 s → direct while the
   machine was compiling. iroh's `BiasedRttPathSelector` always prefers a live direct path, so
   the direct path had to have been *closed* (noq abandon reasons `TimedOut` = 15 s path idle
@@ -1269,3 +1271,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `streams::read_uni`, as the worker already did. Test:
   `a_stream_waiting_on_its_header_does_not_hold_up_the_next` (`slopty-client`), where a stream
   with half a header stays open while a session stream opened after it is delivered.
+
+- ✅ **The keystroke path's threads are user-interactive** (2026-09-26, MEASUREMENTS "the
+  keystroke path under an all-core spin"), amending **Machine load alone does not flap the
+  path**. That ruling declined `pthread_set_qos_class_self_np` because load did not flap the
+  path; it never looked at the echo. Under an all-core `USER_INITIATED` spin (what a build asks
+  for) the worker's own share of an echo, input received to frame sent, was p90 5–6 ms and p99
+  11–569 ms with its threads unclassed, against p90 0.2–0.5 ms and p99 0.7–11 ms at
+  `QOS_CLASS_USER_INTERACTIVE`. The key's leg into the worker fell from p90 2.7–4.1 to
+  0.4–0.8 ms. The process's `LatencyCritical` activity keeps timers sharp but classes no
+  thread. So `slopty_worker::qos::user_interactive` classes every session actor's thread and,
+  through `on_thread_start`, every thread of the worker daemon's runtime (the connections' loops,
+  noq's drivers) and its main thread. The runtime's blocking pool goes with it, which is
+  short file work. ptyd is left alone: it only takes the tap and is off the keystroke path.
+  The video lanes were user-interactive dispatch queues already. Still owed: the app's
+  runtime (the link writer, the pumps, noq's drivers), where the same trace shows an unclassed
+  client holding a key for hundreds of milliseconds under the spin. The helper belongs in
+  `slopty-platform`, which the app reaches and the worker does not yet.

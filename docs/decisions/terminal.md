@@ -1656,3 +1656,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   or a checkout therefore reaches the navigator and the status bar without a new summary.
   Tests: `events_are_kept_and_re_emitted_as_effects` (client),
   `a_cwd_with_a_new_branch_updates_the_summary` (headless workspace).
+
+- ✅ **An echo owed for want of room goes as soon as room returns** (2026-09-26). The input
+  exemption (`EchoBurst`) let an echo past the 8 ms pace only as it was read. An echo read
+  while its viewer had both frames in flight, or its unconfirmed bytes used up, was owed, and
+  `frame_room` then held it to the pace counted from the last frame: 5–6 ms p50 and up to
+  10 ms, on exactly the slow links where frames wait for room (typing into a TUI beside an
+  agent's output). Now `frame_room` spends the burst on an owed diff as the read does, and a
+  read that finds no viewer with room keeps its budget for then (`Actor::echo_frame`). The
+  owed echo goes 0.1 ms after the room (MEASUREMENTS, "an echo owed for want of room"). A flood
+  stays paced: the budget is still two frames per input. Test:
+  `an_echo_owed_for_want_of_room_goes_when_room_returns` (actor).
+
+- ✅ **The checkpoint waits while someone types, and a forced one follows the frame**
+  (2026-09-26). The actor formats the whole terminal for ptyd 500 ms after the last output,
+  on its own thread. On a full 50 000-line history that is 13–19 ms, and a key typed after a
+  half-second pause landed in it, its write, echo and frame waiting behind the formatter
+  (MEASUREMENTS, "a key after a pause and the checkpoint"). The quiet-spell checkpoint now also
+  waits `CHECKPOINT_AFTER_INPUT` (2 s) past a viewer's last input, so none runs while someone
+  types: the keys went from 13–15 ms p50 to 0.2–0.9 ms. A crashed worker loses at most those two
+  seconds more of what ptyd's ring does not hold. The checkpoint forced every 1 MiB, which a
+  flood still needs, runs after the frame of the read that made it due
+  (`Actor::checkpoint_if_owed`). Formatting only what changed since the last checkpoint would
+  make each run sub-millisecond, and needs the formatter in `slopty-engine`; it is left open.
+  Test: `a_key_after_a_pause_does_not_wait_for_the_checkpoint` (actor).
