@@ -1,11 +1,11 @@
 //! Design tokens. Toolkit-agnostic: plain numbers and RGB so `slopty-ui` (GPUI) and any other
 //! consumer read the same values.
 //!
-//! Visual direction: Warp-like. A neutral surface ladder, one accent, hairlines rather than
-//! shadows, a 4/8 pt spacing scale, status colour only where it carries meaning, the terminal
-//! mono for terminal surfaces and the system sans for chrome. The table and the rules are the
-//! "Design tokens" ruling in `docs/DECISIONS.md`; chrome draws from these tokens and nothing
-//! else.
+//! Visual direction: Warp-like. A neutral surface ladder derived from the terminal's
+//! background, one accent, hairlines and one elevation for what floats, a 4/8 pt spacing scale,
+//! status colour only where it carries meaning, the terminal mono for terminal surfaces and the
+//! system sans for chrome. The rulings are in `docs/decisions/ui.md` ("Design tokens" and "The
+//! chrome is derived from the content"); chrome draws from these tokens and nothing else.
 
 #![forbid(unsafe_code)]
 
@@ -354,7 +354,14 @@ impl Typography {
         (self.ui_size - 3.0).max(6.0)
     }
 
-    /// Secondary chrome: bar labels, pills, folds, tool summaries (base − 1).
+    /// Meta text: a row's second line, a bar's readouts, a status word (base − 2). It sits
+    /// between `small()` and `caption()` so a two-line row reads as a title over its facts.
+    #[must_use]
+    pub fn meta(&self) -> f32 {
+        (self.ui_size - 2.0).max(6.0)
+    }
+
+    /// Secondary chrome: bar labels, pills, folds, tool summaries, section labels (base − 1).
     #[must_use]
     pub fn small(&self) -> f32 {
         (self.ui_size - 1.0).max(7.0)
@@ -438,8 +445,10 @@ pub struct Spacing {
 }
 
 impl Spacing {
-    /// How far in a tile's content starts: its header, a terminal's grid, a note's and a
-    /// file's text, so they share one edge, clear of the dividers between flush panes.
+    /// The one edge grid: how far in from its region's edge every leading edge starts. A
+    /// tile's header, a terminal's grid, a note's and a file's text, the navigator's rows, the
+    /// palette's, the inbox's and the status bar's all start here, so they share one edge,
+    /// clear of the dividers between flush panes.
     #[must_use]
     pub const fn inset(&self) -> f32 {
         self.md
@@ -470,22 +479,38 @@ pub mod alpha {
     pub const VEIL: f32 = 0.9;
 }
 
-/// Surface colours for chrome (not the terminal grid): a four-step ladder, two hairlines,
-/// three text levels, the accent and what sits on it, and three status tones.
+/// WCAG AA for body text: the least contrast chrome text has on any surface it lands on.
+const AA: f32 = 4.5;
+
+/// How far apart two text levels stay: each reads at least a quarter again the contrast of the
+/// level under it, on the surface where both read worst. Past it, muted and secondary text
+/// would be two names for one grey.
+const LEVEL: f32 = 1.25;
+
+/// Surface colours for chrome (not the terminal grid), derived from the content they frame.
 ///
-/// The window reads in three steps of elevation, lighter as they rise in both variants: the
-/// bars on `canvas`, the navigator on `panel`, and tile headers and bodies on the content
-/// step, [`Theme::content`], the terminal's own background. `raised` and `overlay` are the
-/// hover and pressed states above whichever of them they sit on.
+/// The window reads in steps of elevation, lighter as they rise in both variants: the bars on
+/// `canvas`, the navigator on `panel`, tile headers and bodies on the content step
+/// ([`Theme::content`], the terminal's own background), and what floats over them (the
+/// palette, menus, dialogs, popovers, hints) on `elevated`. `raised` and `overlay` are the
+/// hover and the selected or pressed fills above whichever of them they sit on.
+///
+/// Nothing here is picked by hand: [`Surfaces::derive`] computes the fills and hairlines from
+/// the content and the chrome's text at fixed steps, and lifts each text tone until it clears
+/// WCAG AA on every surface it can land on. A terminal background set in the settings moves
+/// the whole chrome with it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Surfaces {
-    /// Step 0: the window, the title bar and the status bar.
+    /// The lowest step: the window, the title bar and the status bar.
     pub canvas: Rgb,
-    /// Step 1: the navigator, unfocused tile headers, popovers, the composer.
+    /// One step up: the navigator, unfocused tile headers, the composer.
     pub panel: Rgb,
-    /// Step 2: key caps, inputs, hovered rows.
+    /// Above the content: the palette, menus, dialogs, popovers and hints, anything that
+    /// floats. It wears [`Elevation::shadow`] and the `border` hairline.
+    pub elevated: Rgb,
+    /// Hovered rows and buttons, key caps, inputs.
     pub raised: Rgb,
-    /// Step 3: pressed rows, pill fills, the HUD.
+    /// Selected and pressed rows, pill fills, the HUD.
     pub overlay: Rgb,
     /// The hairlines that divide regions: between panes, under a bar, round a popover.
     pub border: Rgb,
@@ -496,60 +521,295 @@ pub struct Surfaces {
     pub text: Rgb,
     /// Labels, tool summaries, counts.
     pub text_secondary: Rgb,
-    /// Hints, timestamps, folds, inactive titles.
+    /// Hints, timestamps, folds, inactive titles, second lines.
     pub text_muted: Rgb,
     /// Focus ring, active border, the primary action, links.
     pub accent: Rgb,
     /// Text on an accent fill.
     pub accent_fg: Rgb,
-    /// Connected, agent done.
+    /// Connected, agent done: as text.
     pub success: Rgb,
-    /// Agent waiting, "N need you", muted, reconnecting.
+    /// Agent waiting, "N need you", muted, reconnecting: as text.
     pub warn: Rgb,
-    /// A failed result or command, a pairing error.
+    /// A failed result or command, a pairing error: as text.
     pub error: Rgb,
+    /// The accent as a mark: an unseen dot, a busy bar, a drop wash.
+    pub accent_fill: Rgb,
+    /// Success as a mark: a dot, a bar, a badge, a wash.
+    pub success_fill: Rgb,
+    /// Warn as a mark: the attention bar, the bell's badge, a dot, a wash. Amber in both
+    /// variants, where the `warn` text tone is a dark ochre in the light one.
+    pub warn_fill: Rgb,
+    /// Error as a mark: a failed block's wash, a dot, a badge.
+    pub error_fill: Rgb,
+    /// Text on any of the four fills: a badge's count.
+    pub fill_fg: Rgb,
+}
+
+/// What a ladder step is mixed toward from the content.
+#[derive(Clone, Copy, Debug)]
+enum Toward {
+    /// The chrome's text.
+    Ink,
+    /// Black.
+    Black,
+    /// White.
+    White,
+}
+
+/// A step of the ladder: `share` (0 to 1) of the way from the content toward something.
+#[derive(Clone, Copy, Debug)]
+struct Step {
+    toward: Toward,
+    share: f32,
+}
+
+const fn ink(share: f32) -> Step {
+    Step { toward: Toward::Ink, share }
+}
+
+/// The inputs of one variant: its steps, its tones before they are lifted, and its fills.
+#[derive(Clone, Copy, Debug)]
+struct Tones {
+    canvas: Step,
+    panel: Step,
+    elevated: Step,
+    raised: Step,
+    overlay: Step,
+    border: Step,
+    border_subtle: Step,
+    /// Where text moves when it has to read better: the pole away from the surfaces.
+    pole: Rgb,
+    text: Rgb,
+    text_secondary: Rgb,
+    text_muted: Rgb,
+    accent: Rgb,
+    accent_fg: Rgb,
+    success: Rgb,
+    warn: Rgb,
+    error: Rgb,
+    accent_fill: Rgb,
+    success_fill: Rgb,
+    warn_fill: Rgb,
+    error_fill: Rgb,
+    fill_fg: Rgb,
+}
+
+/// Dark: the bars and the navigator sink toward black, everything above the content climbs
+/// toward the text.
+#[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
+const DARK_TONES: Tones = Tones {
+    canvas: Step { toward: Toward::Black, share: 0.66 },
+    panel: Step { toward: Toward::Black, share: 0.32 },
+    elevated: ink(0.035),
+    raised: ink(0.05),
+    border_subtle: ink(0.06),
+    overlay: ink(0.09),
+    border: ink(0.11),
+    pole: Rgb::hex(0xffffff),
+    text: Rgb::hex(0xe6e6e6),
+    text_secondary: Rgb::hex(0xb4b9c3),
+    text_muted: Rgb::hex(0x8b919c),
+    accent: Rgb::hex(0x8ab4f8),
+    accent_fg: Rgb::hex(0x0a0b0e),
+    success: Rgb::hex(0x98c379),
+    warn: Rgb::hex(0xe5c07b),
+    error: Rgb::hex(0xf06c75),
+    accent_fill: Rgb::hex(0x6aa1ff),
+    success_fill: Rgb::hex(0x34c759),
+    warn_fill: Rgb::hex(0xf5b83d),
+    error_fill: Rgb::hex(0xf0555f),
+    fill_fg: Rgb::hex(0x0a0b0e),
+};
+
+/// Light: every step below the content darkens toward the text; what floats goes to white.
+#[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
+const LIGHT_TONES: Tones = Tones {
+    canvas: ink(0.08),
+    panel: ink(0.035),
+    elevated: Step { toward: Toward::White, share: 0.6 },
+    raised: ink(0.10),
+    border_subtle: ink(0.11),
+    overlay: ink(0.13),
+    border: ink(0.21),
+    pole: Rgb::hex(0x000000),
+    text: Rgb::hex(0x1d1d1f),
+    text_secondary: Rgb::hex(0x4b4f58),
+    text_muted: Rgb::hex(0x66666b),
+    accent: Rgb::hex(0x2a63c4),
+    accent_fg: Rgb::hex(0xffffff),
+    success: Rgb::hex(0x187633),
+    warn: Rgb::hex(0x8b5d00),
+    error: Rgb::hex(0xc7212c),
+    accent_fill: Rgb::hex(0x3b82f6),
+    success_fill: Rgb::hex(0x2da44e),
+    warn_fill: Rgb::hex(0xf0a000),
+    error_fill: Rgb::hex(0xef4b52),
+    fill_fg: Rgb::hex(0x0a0b0e),
+};
+
+/// The least contrast `fg` has on any of `surfaces`.
+fn worst(fg: Rgb, surfaces: &[Rgb]) -> f32 {
+    surfaces.iter().map(|&bg| fg.contrast(bg)).fold(f32::INFINITY, f32::min)
+}
+
+/// `fg`, moved toward `pole` only as far as it takes to read `least` on every one of
+/// `surfaces`, so its hue survives: the pole itself when even that is not enough.
+fn lift(fg: Rgb, surfaces: &[Rgb], pole: Rgb, least: f32) -> Rgb {
+    if worst(fg, surfaces) >= least {
+        return fg;
+    }
+    if worst(pole, surfaces) <= least {
+        return pole;
+    }
+    // Contrast grows with the mix toward the pole: bisect for the least mix that reads.
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..14 {
+        let mid = f32::midpoint(lo, hi);
+        if worst(fg.mix(pole, mid), surfaces) >= least {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    fg.mix(pole, hi)
 }
 
 impl Surfaces {
-    /// Dark.
-    #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
+    /// The chrome for `content`, the terminal's background: dark tones on a dark one, light on
+    /// a light one.
+    ///
+    /// The fills and hairlines are `content` mixed toward the chrome's text (or toward black
+    /// or white) at the fixed steps of the variant, so they keep the content's tint. Text
+    /// tones then move toward black or white until each clears WCAG AA on all six surfaces
+    /// text lands on, and each text level keeps a quarter again the contrast of the one under
+    /// it. For the default backgrounds that moves a tone three steps of a channel at most.
+    ///
+    /// A background from black up to a relative luminance of 0.05, or from 0.6 up to white,
+    /// gets chrome that clears AA with three distinct text levels. A mid grey between them
+    /// cannot: no text colour reads 4.5:1 on both it and a step above it. There the tones
+    /// go as far as black or white do.
+    #[must_use]
+    pub fn derive(content: Rgb) -> Self {
+        let t = if content.is_light() { LIGHT_TONES } else { DARK_TONES };
+        let at = |step: Step| {
+            let toward = match step.toward {
+                Toward::Ink => t.text,
+                Toward::Black => Rgb::hex(0),
+                Toward::White => Rgb::hex(0xff_ffff),
+            };
+            content.mix(toward, step.share)
+        };
+        let (canvas, panel, elevated) = (at(t.canvas), at(t.panel), at(t.elevated));
+        let (raised, overlay) = (at(t.raised), at(t.overlay));
+        let under = [canvas, panel, content, elevated, raised, overlay];
+        let text_muted = lift(t.text_muted, &under, t.pole, AA);
+        let text_secondary =
+            lift(t.text_secondary, &under, t.pole, AA.max(worst(text_muted, &under) * LEVEL));
+        let text = lift(t.text, &under, t.pole, AA.max(worst(text_secondary, &under) * LEVEL));
+        Self {
+            canvas,
+            panel,
+            elevated,
+            raised,
+            overlay,
+            border: at(t.border),
+            border_subtle: at(t.border_subtle),
+            text,
+            text_secondary,
+            text_muted,
+            accent: lift(t.accent, &under, t.pole, AA),
+            accent_fg: t.accent_fg,
+            success: lift(t.success, &under, t.pole, AA),
+            warn: lift(t.warn, &under, t.pole, AA),
+            error: lift(t.error, &under, t.pole, AA),
+            accent_fill: t.accent_fill,
+            success_fill: t.success_fill,
+            warn_fill: t.warn_fill,
+            error_fill: t.error_fill,
+            fill_fg: t.fill_fg,
+        }
+    }
+}
+
+/// One layer of a shadow, in points: black at `alpha`, `y` down, blurred over `blur`.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Shadow {
+    /// How far down it falls.
+    pub y: f32,
+    /// How far it blurs.
+    pub blur: f32,
+    /// Its opacity.
+    pub alpha: f32,
+}
+
+/// The one elevation: what lifts a floating surface off the chrome, and what dims the window
+/// under a modal.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Elevation {
+    /// The colour of the shadow and of the scrim.
+    pub shade: Rgb,
+    /// How much the scrim under a modal dims the window.
+    pub scrim: f32,
+    /// The shadow under an `elevated` surface: a tight contact layer, then a soft one.
+    pub shadow: [Shadow; 2],
+}
+
+impl Elevation {
+    /// Dark: shadows strong enough to read on near-black, and a deep scrim.
     pub const DARK: Self = Self {
-        canvas: Rgb::hex(0x08090b),
-        panel: Rgb::hex(0x0f1115),
-        raised: Rgb::hex(0x1e2127),
-        overlay: Rgb::hex(0x272a31),
-        border: Rgb::hex(0x2a2d34),
-        border_subtle: Rgb::hex(0x1f2127),
-        text: Rgb::hex(0xe6e6e6),
-        text_secondary: Rgb::hex(0xb4b9c3),
-        text_muted: Rgb::hex(0x8b919c),
-        accent: Rgb::hex(0x8ab4f8),
-        accent_fg: Rgb::hex(0x0a0b0e),
-        success: Rgb::hex(0x98c379),
-        warn: Rgb::hex(0xe5c07b),
-        error: Rgb::hex(0xf06c75),
+        shade: Rgb::hex(0),
+        scrim: alpha::SCRIM,
+        shadow: [
+            Shadow { y: 1.0, blur: 2.0, alpha: 0.4 },
+            Shadow { y: 4.0, blur: 12.0, alpha: 0.5 },
+        ],
     };
-    /// Light.
-    #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
+    /// Light: a soft shadow and a light scrim, since white panels read on their own.
     pub const LIGHT: Self = Self {
-        canvas: Rgb::hex(0xebedf0),
-        panel: Rgb::hex(0xf6f7f9),
-        raised: Rgb::hex(0xe8eaee),
-        overlay: Rgb::hex(0xe2e5ea),
-        border: Rgb::hex(0xcfd3d9),
-        border_subtle: Rgb::hex(0xe4e6ea),
-        text: Rgb::hex(0x1d1d1f),
-        text_secondary: Rgb::hex(0x4b4f58),
-        // Darkened 2026-09-15 so every one of these clears WCAG AA on the darkest chrome
-        // surface, not just on white: at their previous values `accent` read 3.83 and `warn`
-        // 3.93 against `overlay`, and all five are text (`chrome_text_clears_wcag_aa`).
-        text_muted: Rgb::hex(0x66666b),
-        accent: Rgb::hex(0x2a63c4),
-        accent_fg: Rgb::hex(0xffffff),
-        success: Rgb::hex(0x187633),
-        warn: Rgb::hex(0x8b5d00),
-        error: Rgb::hex(0xc7212c),
+        shade: Rgb::hex(0),
+        scrim: alpha::TINT,
+        shadow: [
+            Shadow { y: 1.0, blur: 2.0, alpha: 0.06 },
+            Shadow { y: 4.0, blur: 12.0, alpha: 0.12 },
+        ],
     };
+
+    /// The elevation for chrome over `content`.
+    #[must_use]
+    pub const fn of(content: Rgb) -> Self {
+        if content.is_light() { Self::LIGHT } else { Self::DARK }
+    }
+}
+
+/// How roomy the chrome is: row and header heights and the least side of anything tapped.
+///
+/// Two sets, one per input: a pointer is precise enough for a 24 pt target, a finger needs
+/// the 44 pt Apple's HIG asks for. Visual sizes (icons, type) are the same in both; only the
+/// hit area and the rows round it grow.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Density {
+    /// A one-line row: a worker's header, a palette or menu row, a row of *Needs you*.
+    pub row: f32,
+    /// A row of two lines: a title over its meta line.
+    pub row_two_line: f32,
+    /// A tile's header.
+    pub header: f32,
+    /// The least side of anything tapped or clicked: an icon button, a key cap, a close box.
+    pub hit: f32,
+}
+
+impl Density {
+    /// A pointer: the Mac.
+    pub const COMPACT: Self = Self { row: 28.0, row_two_line: 40.0, header: 28.0, hit: 24.0 };
+    /// A finger: the iPhone and the iPad.
+    pub const TOUCH: Self = Self { row: 44.0, row_two_line: 56.0, header: 44.0, hit: 44.0 };
+}
+
+impl Default for Density {
+    fn default() -> Self {
+        Self::COMPACT
+    }
 }
 
 /// Dark or light.
@@ -698,8 +958,12 @@ pub struct Theme {
     pub terminal: TerminalPalette,
     /// Terminal behaviour.
     pub behaviour: Behaviour,
-    /// Chrome colours.
+    /// Chrome colours, derived from the terminal's background.
     pub surfaces: Surfaces,
+    /// The shadow of what floats and the scrim under a modal.
+    pub elevation: Elevation,
+    /// How roomy the chrome is for the input at hand.
+    pub density: Density,
     /// Type.
     pub typography: Typography,
     /// Corner radii.
@@ -718,18 +982,27 @@ impl Theme {
     /// The theme for `variant` with default typography.
     #[must_use]
     pub fn new(variant: Variant) -> Self {
-        let (terminal, surfaces) = match variant {
-            Variant::Dark => (TerminalPalette::DARK, Surfaces::DARK),
-            Variant::Light => (TerminalPalette::LIGHT, Surfaces::LIGHT),
+        let terminal = match variant {
+            Variant::Dark => TerminalPalette::DARK,
+            Variant::Light => TerminalPalette::LIGHT,
         };
         Self {
             terminal,
             behaviour: Behaviour::default(),
-            surfaces,
+            surfaces: Surfaces::derive(terminal.bg),
+            elevation: Elevation::of(terminal.bg),
+            density: Density::default(),
             typography: Typography::default(),
             radii: Radii::default(),
             spacing: Spacing::default(),
         }
+    }
+
+    /// Derive the chrome again from the terminal's background, after something changed it
+    /// (a `[colors]` background in the settings).
+    pub fn derive_chrome(&mut self) {
+        self.surfaces = Surfaces::derive(self.terminal.bg);
+        self.elevation = Elevation::of(self.terminal.bg);
     }
 
     /// The content step of the surface order: what tile headers and bodies sit on. It is the
@@ -740,10 +1013,11 @@ impl Theme {
         self.terminal.bg
     }
 
-    /// Which variant the colours are (by the terminal background).
+    /// Which variant the colours are: light when the terminal's background reads as light,
+    /// whatever the settings made it.
     #[must_use]
-    pub fn variant(&self) -> Variant {
-        if self.terminal.bg == TerminalPalette::LIGHT.bg { Variant::Light } else { Variant::Dark }
+    pub const fn variant(&self) -> Variant {
+        if self.terminal.bg.is_light() { Variant::Light } else { Variant::Dark }
     }
 }
 
@@ -769,26 +1043,21 @@ mod tests {
         assert_eq!(Theme::default().variant(), Variant::Dark);
         let light = Theme::new(Variant::Light);
         assert_eq!(light.variant(), Variant::Light);
-        assert_eq!(light.surfaces, Surfaces::LIGHT);
+        assert_eq!(light.surfaces, Surfaces::derive(TerminalPalette::LIGHT.bg));
+        assert_eq!(light.elevation, Elevation::LIGHT);
         assert_eq!(light.typography, Typography::default());
         assert_ne!(light.terminal.palette(0), light.terminal.bg, "ANSI black is visible on white");
     }
 
     #[test]
-    fn the_ladder_climbs_and_the_scale_follows_the_base() {
-        // Dark: each step lighter than the last; light: each step darker.
+    fn the_text_levels_climb_and_the_scale_follows_the_base() {
         let luma = |c: Rgb| u32::from(c.r) + u32::from(c.g) + u32::from(c.b);
-        let dark = Surfaces::DARK;
-        assert!(luma(dark.canvas) < luma(dark.panel) && luma(dark.panel) < luma(dark.raised));
-        assert!(luma(dark.raised) < luma(dark.overlay));
+        let dark = Theme::new(Variant::Dark).surfaces;
         assert!(
             luma(dark.text_muted) < luma(dark.text_secondary)
                 && luma(dark.text_secondary) < luma(dark.text)
         );
-        let light = Surfaces::LIGHT;
-        assert!(
-            luma(light.canvas) > luma(light.raised) && luma(light.raised) > luma(light.overlay)
-        );
+        let light = Theme::new(Variant::Light).surfaces;
         assert!(
             luma(light.text_muted) > luma(light.text_secondary)
                 && luma(light.text_secondary) > luma(light.text)
@@ -799,9 +1068,16 @@ mod tests {
         assert!(r.xs < r.sm && r.sm < r.md);
 
         let mut t = Typography::default();
-        assert_eq!((t.caption(), t.small(), t.title(), t.display()), (10.0, 12.0, 15.0, 20.0));
+        assert_eq!(
+            (t.caption(), t.meta(), t.small(), t.title(), t.display()),
+            (10.0, 11.0, 12.0, 15.0, 20.0)
+        );
         t.ui_size = 8.0;
-        assert_eq!((t.caption(), t.small(), t.title()), (6.0, 7.0, 10.0), "clamped at the floor");
+        assert_eq!(
+            (t.caption(), t.meta(), t.small(), t.title()),
+            (6.0, 6.0, 7.0, 10.0),
+            "clamped at the floor"
+        );
         let s = Spacing::default();
         assert!(s.xxs < s.xs && s.xs < s.sm && s.sm < s.md && s.md < s.lg && s.lg < s.xl);
     }
@@ -925,48 +1201,257 @@ mod tests {
         );
     }
 
-    /// Every chrome colour that is drawn as text reads on every chrome surface it can land on.
+    /// Terminal backgrounds the chrome is derived for, with a name for the messages: the two
+    /// defaults, popular schemes, and the ends of the supported range (a relative luminance of
+    /// 0.05 at most in dark, 0.6 at least in light).
+    const BACKGROUNDS: [(&str, u32); 13] = [
+        ("black", 0x00_0000),
+        ("default dark", 0x16_181d),
+        ("catppuccin mocha", 0x1e_1e2e),
+        ("dracula", 0x28_2a36),
+        ("solarized dark", 0x00_2b36),
+        ("nord", 0x2e_3440),
+        ("dark end", 0x3f_3f3f),
+        ("default light", 0xff_ffff),
+        ("one light", 0xfa_fafa),
+        ("solarized light", 0xfd_f6e3),
+        ("gruvbox light", 0xfb_f1c7),
+        ("catppuccin latte", 0xef_f1f5),
+        ("light end", 0xcc_cccc),
+    ];
+
+    /// The surfaces chrome text can land on.
+    fn under_text(s: &Surfaces, content: Rgb) -> [(&'static str, Rgb); 6] {
+        [
+            ("canvas", s.canvas),
+            ("panel", s.panel),
+            ("content", content),
+            ("elevated", s.elevated),
+            ("raised", s.raised),
+            ("overlay", s.overlay),
+        ]
+    }
+
+    /// The chrome text colours, with their names.
+    fn inks(s: &Surfaces) -> [(&'static str, Rgb); 7] {
+        [
+            ("text", s.text),
+            ("text_secondary", s.text_secondary),
+            ("text_muted", s.text_muted),
+            ("success", s.success),
+            ("warn", s.warn),
+            ("error", s.error),
+            ("accent", s.accent),
+        ]
+    }
+
+    /// The ends of the range are where they are said to be.
+    #[test]
+    fn the_range_ends_sit_where_the_docs_put_them() {
+        let dark_end = Rgb::hex(0x3f_3f3f).luminance();
+        let light_end = Rgb::hex(0xcc_cccc).luminance();
+        assert!((0.045..=0.05).contains(&dark_end), "{dark_end}");
+        assert!((0.6..=0.61).contains(&light_end), "{light_end}");
+    }
+
+    /// Every chrome colour that is drawn as text reads on every chrome surface it can land on,
+    /// for every background in the supported range, and the three text levels stay apart.
     ///
     /// The terminal grid has `minimum_contrast` to lift a cell whose colours the program chose;
     /// chrome has nothing of the kind, because these colours are ours and the fix is to pick
-    /// better ones. WCAG AA for body text is 4.5:1, and the pairs are checked against all four
-    /// surfaces rather than against the one they usually sit on: a status label follows its card,
-    /// and the card can be on any of them.
+    /// better ones. WCAG AA for body text is 4.5:1, and the pairs are checked against all six
+    /// surfaces rather than against the one they usually sit on: a status label follows its
+    /// card, and the card can be on any of them.
     ///
-    /// `warn` and `accent` on `overlay` read 3.93 and 3.83 in the light variant before this test
-    /// existed. The dark variant already passed.
+    /// Derived at the steps without the lift, dark `text_muted` read 4.48 on `overlay` and
+    /// light `accent`, `error`, `success` and `text_muted` about 4.40.
     #[test]
     fn chrome_text_clears_wcag_aa() {
-        const AA: f32 = 4.5;
-        for (name, s) in [("dark", Surfaces::DARK), ("light", Surfaces::LIGHT)] {
-            let content =
-                if name == "dark" { TerminalPalette::DARK } else { TerminalPalette::LIGHT };
-            let surfaces = [
-                ("canvas", s.canvas),
-                ("panel", s.panel),
-                ("content", content.bg),
-                ("raised", s.raised),
-                ("overlay", s.overlay),
-            ];
-            let inks = [
-                ("text", s.text),
-                ("text_secondary", s.text_secondary),
-                ("text_muted", s.text_muted),
-                ("success", s.success),
-                ("warn", s.warn),
-                ("error", s.error),
-                ("accent", s.accent),
-            ];
-            for (ink, fg) in inks {
-                for (surface, bg) in surfaces {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            let s = Surfaces::derive(content);
+            let under = under_text(&s, content);
+            for (ink, fg) in inks(&s) {
+                for (surface, bg) in under {
                     let ratio = fg.contrast(bg);
                     assert!(ratio >= AA, "{name}: {ink} on {surface} is {ratio:.2}, under {AA}");
                 }
             }
+            let surfaces = under.map(|(_, c)| c);
+            let (muted, secondary, text) = (
+                worst(s.text_muted, &surfaces),
+                worst(s.text_secondary, &surfaces),
+                worst(s.text, &surfaces),
+            );
+            assert!(
+                secondary >= muted * LEVEL,
+                "{name}: secondary {secondary:.2}, muted {muted:.2}"
+            );
+            assert!(text >= secondary * LEVEL, "{name}: text {text:.2}, secondary {secondary:.2}");
             // The accent is also a surface of its own, with its own foreground on it.
             let on_accent = s.accent_fg.contrast(s.accent);
             assert!(on_accent >= AA, "{name}: accent_fg on accent is {on_accent:.2}");
         }
+    }
+
+    /// The default themes keep the tones they were designed with: the lift is a guard for
+    /// other backgrounds, not a second design. At most one step of rounding moves.
+    #[test]
+    fn the_default_tones_are_lifted_by_a_rounding_step_at_most() {
+        for (content, tones) in
+            [(TerminalPalette::DARK.bg, DARK_TONES), (TerminalPalette::LIGHT.bg, LIGHT_TONES)]
+        {
+            let s = Surfaces::derive(content);
+            for (name, derived, designed) in [
+                ("text", s.text, tones.text),
+                ("text_secondary", s.text_secondary, tones.text_secondary),
+                ("text_muted", s.text_muted, tones.text_muted),
+                ("accent", s.accent, tones.accent),
+                ("success", s.success, tones.success),
+                ("warn", s.warn, tones.warn),
+                ("error", s.error, tones.error),
+            ] {
+                let moved = [
+                    derived.r.abs_diff(designed.r),
+                    derived.g.abs_diff(designed.g),
+                    derived.b.abs_diff(designed.b),
+                ];
+                assert!(moved.iter().all(|&d| d <= 4), "{name}: {designed:?} became {derived:?}");
+            }
+        }
+    }
+
+    /// A mid grey is outside the range, and this is why: the chrome's own text cannot clear AA
+    /// on it and a step above it at once. The derivation still returns a theme, with the text
+    /// as far out as white or black take it.
+    #[test]
+    fn a_mid_grey_background_cannot_clear_aa() {
+        let content = Rgb::hex(0x77_7777);
+        let s = Surfaces::derive(content);
+        let surfaces = under_text(&s, content).map(|(_, c)| c);
+        assert!(worst(s.text, &surfaces) < AA, "{:?}", s.text);
+        assert_eq!(s.text, DARK_TONES.pole, "as far as it goes");
+    }
+
+    /// The ladder climbs in order for every supported background: in dark each fill above the
+    /// content is lighter than the last, in light each step below the content darker, what
+    /// floats is never below the content, and the loud hairline is louder than the quiet one
+    /// on every surface a hairline is drawn on.
+    /// On pure black the bars cannot sink below the content and stay level with it.
+    #[test]
+    fn the_ladder_is_monotonic() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            let s = Surfaces::derive(content);
+            let l = Rgb::luminance;
+            let c = l(content);
+            assert!(
+                l(s.canvas) <= l(s.panel) && l(s.panel) <= c,
+                "{name}: bars, navigator, content"
+            );
+            assert!(l(s.elevated) >= c, "{name}: what floats is not below the content");
+            if content.is_light() {
+                assert!(l(s.raised) < l(s.canvas), "{name}: hover shows on the bars");
+                assert!(l(s.overlay) < l(s.raised), "{name}: selected past hover");
+                assert!(l(s.border) < l(s.border_subtle), "{name}: hairlines");
+            } else {
+                assert!(c < l(s.elevated), "{name}: what floats is above the content");
+                assert!(l(s.elevated) < l(s.raised), "{name}: hover shows on what floats");
+                assert!(l(s.raised) < l(s.overlay), "{name}: selected past hover");
+                assert!(l(s.border_subtle) < l(s.border), "{name}: hairlines");
+            }
+            // A hairline is never drawn across a selected fill, so `overlay` is left out.
+            for (surface, under) in under_text(&s, content).into_iter().take(5) {
+                let (loud, quiet) = (s.border.contrast(under), s.border_subtle.contrast(under));
+                assert!(quiet < loud, "{name}: the subtle hairline is quieter on {surface}");
+            }
+        }
+    }
+
+    /// The chrome follows the terminal's background: a light scheme set in the settings
+    /// makes light chrome in its own tint, whatever the appearance asked for.
+    #[test]
+    fn the_chrome_follows_the_terminals_background() {
+        let mut theme = Theme::new(Variant::Dark);
+        theme.terminal.bg = Rgb::hex(0xfd_f6e3);
+        assert_eq!(theme.variant(), Variant::Light, "the variant is the background's");
+        theme.derive_chrome();
+        assert_eq!(theme.surfaces, Surfaces::derive(theme.content()));
+        assert_eq!(theme.elevation, Elevation::LIGHT);
+        let canvas = theme.surfaces.canvas;
+        assert!(canvas.r > canvas.b, "the cream survives in the bars: {canvas:?}");
+    }
+
+    /// A fill is a mark, seen by its hue: saturated and mid-light, so the light warn reads
+    /// amber, not the brown of its text tone. A badge's count reads on every fill, and in dark
+    /// every fill stands 3:1 off every surface (WCAG's non-text contrast).
+    #[test]
+    fn status_fills_read_as_their_hue() {
+        /// Saturation and lightness, HSL, 0 to 1.
+        fn sl(colour: Rgb) -> (f32, f32) {
+            let channels = [colour.r, colour.g, colour.b].map(|v| f32::from(v) / 255.0);
+            let max = channels.into_iter().fold(0.0, f32::max);
+            let min = channels.into_iter().fold(1.0, f32::min);
+            let lightness = f32::midpoint(max, min);
+            let chroma = max - min;
+            let saturation = if chroma == 0.0 {
+                0.0
+            } else {
+                chroma / (1.0 - 2.0_f32.mul_add(lightness, -1.0).abs())
+            };
+            (saturation, lightness)
+        }
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let fills = [
+                ("accent_fill", s.accent_fill),
+                ("success_fill", s.success_fill),
+                ("warn_fill", s.warn_fill),
+                ("error_fill", s.error_fill),
+            ];
+            for (name, fill) in fills {
+                let (sat, light) = sl(fill);
+                assert!(sat >= 0.5, "{variant:?}: {name} is greyed ({sat:.2})");
+                assert!((0.4..=0.75).contains(&light), "{variant:?}: {name} lightness {light:.2}");
+                let ink = s.fill_fg.contrast(fill);
+                assert!(ink >= AA, "{variant:?}: a count on {name} is {ink:.2}");
+                if variant == Variant::Dark {
+                    for (surface, under) in under_text(&s, theme.content()) {
+                        let seen = fill.contrast(under);
+                        assert!(seen >= 3.0, "{variant:?}: {name} on {surface} is {seen:.2}");
+                    }
+                }
+            }
+            let (_, fill) = sl(s.warn_fill);
+            let (_, text) = sl(s.warn);
+            if variant == Variant::Light {
+                assert!(fill > text + 0.15, "the light warn fill is amber, its text ochre");
+            }
+        }
+    }
+
+    /// What floats reads above what it covers in both variants: a step up from the content in
+    /// dark and white in light, with a shadow dark enough to see on near-black. A finger gets
+    /// Apple's 44 pt, a pointer rows no taller than they were.
+    #[test]
+    fn elevation_and_density() {
+        let dark = Theme::new(Variant::Dark);
+        let step = dark.surfaces.elevated.contrast(dark.content());
+        assert!(step >= 1.05, "dark: elevated is {step:.3} over the content");
+        let light = Theme::new(Variant::Light);
+        assert_eq!(light.surfaces.elevated, Rgb::hex(0xff_ffff), "light: what floats is white");
+        for (theme, least) in [(&dark, 0.4), (&light, 0.1)] {
+            let [contact, soft] = theme.elevation.shadow;
+            assert!(contact.blur < soft.blur && contact.y < soft.y, "a tight layer, then a soft");
+            assert!(soft.alpha >= least, "{:?}: the shadow shows", theme.variant());
+        }
+        const { assert!(Elevation::DARK.scrim > Elevation::LIGHT.scrim, "dark dims deeper") };
+        let (compact, touch) = (Density::COMPACT, Density::TOUCH);
+        assert!(touch.hit >= 44.0 && touch.row >= 44.0 && touch.header >= 44.0);
+        assert!(compact.row < touch.row && compact.row_two_line < touch.row_two_line);
+        assert!(compact.row < compact.row_two_line && touch.row < touch.row_two_line);
+        assert_eq!(Theme::default().density, compact, "the Mac is the default");
     }
 
     #[test]

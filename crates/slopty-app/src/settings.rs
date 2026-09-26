@@ -107,6 +107,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     theme.typography.ligatures = settings.font.ligatures;
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
     colour_the_terminal(&mut theme.terminal, &settings.colors);
+    theme.derive_chrome();
     theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
     theme.behaviour.cursor_style = match settings.terminal.cursor_style {
         CursorStyle::Program => slopty_theme::CursorStyle::Program,
@@ -303,6 +304,19 @@ mod tests {
         );
         let light = theme_for(&s, false).terminal;
         assert_eq!(light.fg, Rgb::hex(0x00c0_caf5), "both appearances");
+    }
+
+    /// A background set in `[colors]` carries the chrome with it: the surfaces are derived
+    /// from it, and a light one makes a light theme under a dark appearance.
+    #[test]
+    fn a_custom_background_carries_the_chrome() {
+        let mut s = Settings::default();
+        s.colors.background = Color(Some([0x28, 0x2a, 0x36]));
+        let t = theme_for(&s, true);
+        assert_eq!(t.surfaces, slopty_theme::Surfaces::derive(Rgb::hex(0x0028_2a36)));
+        assert_ne!(t.surfaces, theme_for(&Settings::default(), true).surfaces);
+        s.colors.background = Color(Some([0xfd, 0xf6, 0xe3]));
+        assert_eq!(theme_for(&s, true).variant(), Variant::Light, "the background decides");
     }
 
     /// The editor opens on the file, or the commented defaults; a text that does not parse

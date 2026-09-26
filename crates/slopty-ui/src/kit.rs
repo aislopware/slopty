@@ -11,9 +11,9 @@ use std::sync::{Arc, LazyLock};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, App, Context, Div, FontFeatures, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, div, ease_out_quint, px,
+    Animation, AnimationExt as _, App, BoxShadow, Context, Div, FontFeatures, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, div, ease_out_quint, point, px,
 };
 use gpui_kit::base::text::TextViewDefaults;
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
@@ -98,7 +98,45 @@ impl Overlay {
     }
 }
 
-/// The backdrop an overlay sits on: the canvas dimmed, the dialog near the top.
+/// The one elevation's shadow, as GPUI draws it: a tight contact layer and a soft one, from
+/// [`slopty_theme::Elevation::shadow`].
+#[must_use]
+pub fn elevation(theme: &Theme) -> Vec<BoxShadow> {
+    let e = &theme.elevation;
+    e.shadow
+        .iter()
+        .map(|layer| BoxShadow {
+            color: hsla_alpha(e.shade, layer.alpha),
+            offset: point(px(0.0), px(layer.y)),
+            blur_radius: px(layer.blur),
+            spread_radius: px(0.0),
+            inset: false,
+        })
+        .collect()
+}
+
+/// `el` lifted off the chrome: the `elevated` surface, the `border` hairline and the shadow.
+///
+/// Everything that floats wears it: a dialog, the palette, a menu, a popover, a hint, a find
+/// bar, a pill over a body. The caller keeps its own radius.
+///
+/// A floating layer on `panel` sat below the content it covered (darker in dark, grey on white
+/// in light), so it read as a hole, not a sheet.
+#[must_use]
+pub fn elevate<E: Styled>(el: E, theme: &Theme) -> E {
+    el.bg(hsla(theme.surfaces.elevated))
+        .border_1()
+        .border_color(hsla(theme.surfaces.border))
+        .shadow(elevation(theme))
+}
+
+/// The scrim under a modal: the window dimmed by the elevation's shade.
+#[must_use]
+pub fn scrim(theme: &Theme) -> Hsla {
+    hsla_alpha(theme.elevation.shade, theme.elevation.scrim)
+}
+
+/// The backdrop an overlay sits on: the window under the [`scrim`], the dialog near the top.
 ///
 /// Near the top so a phone's keyboard, which rises from the bottom, covers fewer of its rows;
 /// under the window's safe area, so a phone's status bar and Dynamic Island never sit on it.
@@ -117,11 +155,10 @@ pub fn backdrop(theme: &Theme, window: &Window) -> Div {
         .items_center()
         .px(px(theme.spacing.md))
         .pt(px(theme.spacing.xl * 2.0) + safe.top)
-        .bg(hsla_alpha(theme.surfaces.canvas, alpha::SCRIM))
+        .bg(scrim(theme))
 }
 
-/// The shell every overlay wears: one radius, one hairline border, one elevation, the UI
-/// font.
+/// The shell every overlay wears: one radius, [`elevate`]d, the UI font.
 ///
 /// `min_w_0` so an unwrapped title cannot hold the box wider than a phone, and `min_h_0` so it
 /// gives up height to what is under the [`backdrop`] (a phone's keyboard and key bar) rather
@@ -131,8 +168,7 @@ pub fn backdrop(theme: &Theme, window: &Window) -> Div {
 #[must_use]
 pub fn dialog(theme: &Theme, size: Overlay) -> Div {
     let (w, h) = size.bounds();
-    let s = &theme.surfaces;
-    div()
+    elevate(div(), theme)
         .w_full()
         .min_w_0()
         .max_w(px(w))
@@ -142,13 +178,9 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
         .flex()
         .flex_col()
         .rounded(px(theme.radii.md))
-        .border_1()
-        .border_color(hsla(s.border))
-        .bg(hsla(s.panel))
-        .shadow_sm()
         .text_size(px(theme.typography.ui_size))
         .font_family(theme.typography.ui_family.clone())
-        .text_color(hsla(s.text))
+        .text_color(hsla(theme.surfaces.text))
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
 }
 
@@ -222,10 +254,74 @@ pub fn button(
 }
 
 /// The side of an [`icon_button`] at zoom 1: the large icon size and a small pad round it.
+///
+/// It is never under the density's hit target, so a finger gets 44 pt round the same icon.
 /// A strip that holds icon buttons in turn with something else sizes itself from it.
 #[must_use]
 pub fn icon_button_side(theme: &Theme) -> f32 {
-    2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large())
+    2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large()).max(theme.density.hit)
+}
+
+/// How many lines a list row holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Row {
+    /// A title alone: a worker's header, a palette or menu row, a row of *Needs you*.
+    One,
+    /// A title over its meta line: a tile in the navigator, an inbox entry.
+    Two,
+}
+
+impl Row {
+    /// The row's height under the theme's density.
+    #[must_use]
+    pub const fn height(self, theme: &Theme) -> f32 {
+        match self {
+            Self::One => theme.density.row,
+            Self::Two => theme.density.row_two_line,
+        }
+    }
+}
+
+/// A list row: its density's height, on the edge grid ([`inset_x`]), its parts centred.
+///
+/// Its parts sit a base unit apart. The navigator, the palette, the inbox and the menus draw
+/// their rows from it, so one density switch moves them all.
+#[must_use]
+pub fn row(theme: &Theme, lines: Row) -> Div {
+    inset_x(div(), theme)
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(theme.spacing.sm))
+        .h(px(lines.height(theme)))
+}
+
+/// `el` padded in to the one edge grid on both sides: [`slopty_theme::Spacing::inset`]. A
+/// panel's rows, a header, the palette, the inbox and the status bar all start there.
+#[must_use]
+pub fn inset_x<E: Styled>(el: E, theme: &Theme) -> E {
+    el.px(px(theme.spacing.inset()))
+}
+
+/// `el` set as meta text: a row's second line, a bar's readout, a status word. The meta size
+/// in `text_muted`; a status word then takes its tone's colour over it.
+#[must_use]
+pub fn meta<E: Styled>(el: E, theme: &Theme) -> E {
+    el.text_size(px(theme.typography.meta())).text_color(hsla(theme.surfaces.text_muted))
+}
+
+/// A section's label: quiet, so the rows under it lead.
+///
+/// `small()` in `text_muted`, the regular weight, never upper case. The strong weight stays for
+/// one thing per region; a semibold heading over a semibold name was two strong lines stacked.
+#[must_use]
+pub fn label(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    div()
+        .flex_none()
+        .text_size(px(theme.typography.small()))
+        .font_weight(FontWeight::NORMAL)
+        .text_color(hsla(theme.surfaces.text_muted))
+        .child(text.into())
 }
 
 /// A square button around one icon: a bar's actions, a tile's close and split.
@@ -324,17 +420,13 @@ impl Render for Hint {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let hint = div()
+        let hint = elevate(div(), theme)
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
             .px(px(theme.spacing.sm))
             .py(px(theme.spacing.xxs))
             .rounded(px(theme.radii.sm))
-            .border_1()
-            .border_color(hsla(s.border))
-            .bg(hsla(s.raised))
-            .shadow_sm()
             .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
             .child(div().text_color(hsla(s.text)).child(self.what.clone()))
@@ -373,7 +465,7 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.link = hsla(s.accent);
     c.link_hover = hsla(s.accent);
     c.link_active = hsla(s.accent);
-    c.popover = hsla(s.panel);
+    c.popover = hsla(s.elevated);
     c.popover_foreground = hsla(s.text);
     // The surface order: bars on the canvas, side panels on the panel, content above both.
     c.title_bar = hsla(s.canvas);
@@ -481,6 +573,7 @@ mod tests {
                 assert_eq!(kit.colors.sidebar, hsla(theme.surfaces.panel));
                 assert_eq!(kit.colors.tab_active, hsla(theme.content()));
                 assert_eq!(kit.colors.table_row_border, hsla(theme.surfaces.border_subtle));
+                assert_eq!(kit.colors.popover, hsla(theme.surfaces.elevated), "popovers float");
                 assert!(!kit.focus_ring, "a focused field is one hairline, not a halo");
                 assert!(
                     TextViewDefaults::global(cx).has_code_block_highlighter(),
@@ -545,6 +638,93 @@ mod tests {
                 })
             })
             .map(|call| format!("`{call}px(N)`"))
+    }
+
+    /// Files that still lift a floating layer by hand (`shadow_sm` on `panel` or `raised`)
+    /// rather than through [`elevate`]: UI wave 2 phase B moves each onto it and drops it
+    /// from this list. A file not on it cannot start.
+    const OWN_ELEVATION: [&str; 9] = [
+        "slopty-app/src/lib.rs",
+        "slopty-ui/src/file.rs",
+        "slopty-ui/src/terminal/view.rs",
+        "slopty-ui/src/workspace/inbox.rs",
+        "slopty-ui/src/workspace/navigator.rs",
+        "slopty-ui/src/workspace/statusbar.rs",
+        "slopty-ui/src/workspace/tile.rs",
+        "slopty-ui/src/workspace/titlebar.rs",
+        "slopty-ui/src/workspace/toast.rs",
+    ];
+
+    /// A floating layer lifted by hand: a shadow of its own, or a scrim that is not the
+    /// elevation's.
+    fn own_elevation(line: &str) -> Option<&'static str> {
+        if line.trim_start().starts_with("//") {
+            return None;
+        }
+        let named = [".shadow_", "::shadow_"]
+            .iter()
+            .any(|call| line.split(call).skip(1).any(|rest| !rest.starts_with("none")));
+        if named || line.contains(".shadow(") {
+            return Some("a shadow of its own, not `kit::elevate`");
+        }
+        line.contains("alpha::SCRIM").then_some("a scrim of its own, not `kit::scrim`")
+    }
+
+    #[test]
+    fn the_elevation_check_knows_a_lift_from_a_token() {
+        assert!(own_elevation(".bg(hsla(s.panel)).shadow_sm()").is_some());
+        assert!(own_elevation(".shadow(vec![shadow])").is_some());
+        assert!(own_elevation(".bg(hsla_alpha(s.canvas, alpha::SCRIM))").is_some());
+        assert!(own_elevation("kit::elevate(div(), theme).rounded(px(r))").is_none());
+        assert!(own_elevation(".bg(kit::scrim(theme))").is_none());
+        assert!(own_elevation(".when(floats, gpui::Styled::shadow_sm)").is_some());
+        assert!(own_elevation(".shadow_none()").is_none(), "taking a shadow off is fine");
+        assert!(own_elevation("/// no `.shadow_sm()` here").is_none(), "a comment");
+    }
+
+    /// What floats wears the one elevation: [`elevate`] and [`scrim`] are the only places a
+    /// shadow or a modal's dim is chosen, so an overlay cannot sit below the content again.
+    #[test]
+    fn a_floating_layer_wears_the_one_elevation() {
+        let mut wrong = Vec::new();
+        for dir in ["slopty-ui/src", "slopty-app/src"] {
+            for (file, line_no, line) in chrome_lines(dir) {
+                let waived = file.ends_with("slopty-ui/src/kit.rs")
+                    || OWN_ELEVATION.iter().any(|pending| file.ends_with(pending));
+                if let Some(why) = own_elevation(&line).filter(|_| !waived) {
+                    wrong.push(format!("{file}:{line_no}: {why}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Under the touch density an icon button is a finger's 44 pt round the same icon, and the
+    /// rows grow with it; under the compact one nothing moved from the sizes it replaced.
+    #[test]
+    fn density_sizes_the_targets_not_the_icons() {
+        let mut theme = Theme::default();
+        assert!((icon_button_side(&theme) - 24.0).abs() < f32::EPSILON, "compact: 16 + 2 × 4");
+        assert!((Row::One.height(&theme) - 28.0).abs() < f32::EPSILON);
+        assert!((Row::Two.height(&theme) - 40.0).abs() < f32::EPSILON);
+        theme.density = slopty_theme::Density::TOUCH;
+        assert!(icon_button_side(&theme) >= 44.0, "touch: a finger's target");
+        assert!(Row::One.height(&theme) >= 44.0 && Row::Two.height(&theme) > 44.0);
+        assert!(theme.typography.icon() < icon_button_side(&theme), "the icon stays its size");
+    }
+
+    /// The elevation reaches GPUI as the theme says: two layers, falling down, the soft one
+    /// wider, both in the shade.
+    #[test]
+    fn the_elevation_is_two_layers_of_the_shade() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let layers = elevation(&theme);
+            assert_eq!(layers.len(), 2);
+            assert!(layers.iter().all(|l| l.offset.y > px(0.0) && !l.inset));
+            assert!(layers.first().map(|l| l.blur_radius) < layers.last().map(|l| l.blur_radius));
+            assert!((scrim(&theme).a - theme.elevation.scrim).abs() < f32::EPSILON);
+        }
     }
 
     /// The ruling in `docs/decisions/ui.md`, as a check rather than a paragraph: chrome takes
@@ -626,6 +806,8 @@ mod tests {
         "title(\"",
     ];
     const DRAWN_AFTER_ID: [&str; 5] = ["pill(", "button(", "heading(", "key_cap(", "bar_key("];
+    /// The helpers whose first argument is the theme draw the first literal after it.
+    const DRAWN_AFTER_THEME: [&str; 1] = ["kit::label("];
 
     /// A literal drawn as chrome text that starts lowercase: `"take"` on a pill, `"opening…"`
     /// in a body. Sentence case is checked on the text drawn, not only on the names a screen
@@ -652,7 +834,10 @@ mod tests {
                 .map(|(_, rest)| literals(rest).into_iter().skip(1).collect::<Vec<_>>())
                 .unwrap_or_default()
         });
-        drawn.chain(after_id).find(lower)
+        let after_theme = DRAWN_AFTER_THEME.iter().filter_map(|call| {
+            line.split_once(call).and_then(|(_, rest)| literals(rest).into_iter().next())
+        });
+        drawn.chain(after_id).chain(after_theme).find(lower)
     }
 
     /// Chrome text is drawn in sentence case, as the constants above are written.
@@ -678,6 +863,8 @@ mod tests {
         assert!(lowercase_label(r#"button(copy_id, "Copy code", "Copy")"#).is_none());
         assert!(lowercase_label(r#"kit::button(theme, "new-shell", "New shell", kind)"#).is_none());
         assert!(lowercase_label(r#".aria_label("mute")"#).is_some());
+        assert!(lowercase_label(r#"kit::label(theme, "workers")"#).is_some());
+        assert!(lowercase_label(r#"kit::label(theme, "Workers")"#).is_none());
         assert!(lowercase_label(r#".key_cap("key-find".to_owned(), "find", on, small)"#).is_some());
         assert!(
             lowercase_label(r#"self.bar_key(format!("skey-{label}"), label, lit, f)"#).is_none()

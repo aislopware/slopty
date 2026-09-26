@@ -1885,3 +1885,71 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Tests (`workspace/tests/nav_list.rs`): `the_navigator_draws_only_the_rows_in_view`,
   `the_focused_tiles_row_scrolls_into_view`, `a_shell_with_no_directory_names_its_worker`,
   `the_phone_drawer_runs_through_the_home_indicator_band`.
+
+- ✅ **The chrome is derived from the content, and what floats is elevated** (2026-09-27, UI
+  wave 2 foundation). The design review of the goldens found overlays painted on `panel`, which
+  sits below the content in both variants, so the palette, menus and the inbox read as holes. It
+  found warn used as a fill, a brown bar and badge in light, and touch builds with 24 pt targets.
+  The monocode study found the ladder hand-picked, so a terminal background set in the settings
+  left every grey around it unrelated. This entry replaces the value table of "Three surfaces in
+  order"; its order and its 1.05 step stand.
+  - **Ladder.** `Surfaces::derive(content)` computes the chrome from the terminal's background.
+    Fills and hairlines are the content mixed toward the chrome's text at fixed shares; dark
+    sinks the bars and the navigator toward black, light darkens them toward the text and
+    lifts what floats toward white. The variant is the background's (`Rgb::is_light`), not the
+    appearance's, and `settings::theme_for` derives again after `[colors]`.
+
+    | Step | Dark share | Dark | Light share | Light |
+    |---|---|---|---|---|
+    | `canvas` | 66 % to black | `07080A` | 8 % to text | `EDEDED` |
+    | `panel` | 32 % to black | `0F1014` | 3.5 % to text | `F7F7F7` |
+    | content | | `16181D` | | `FFFFFF` |
+    | `elevated` (new) | 3.5 % to text | `1D1F24` | 60 % to white | `FFFFFF` |
+    | `raised` | 5 % | `202227` | 10 % | `E8E8E9` |
+    | `border_subtle` | 6 % | `222429` | 11 % | `E6E6E6` |
+    | `overlay` | 9 % | `292B2F` | 13 % | `E2E2E2` |
+    | `border` | 11 % | `2D2F33` | 21 % | `D0D0D0` |
+
+    Mixing from white loses the light theme's cool tint; a tinted background keeps its own
+    (solarized light's cream survives in its bars).
+  - **Text is lifted until it reads.** At these steps dark `text_muted` read 4.48 on `overlay`
+    and light `accent`, `error`, `success` and `text_muted` about 4.40. Each text tone now moves
+    toward white (dark) or black (light) only as far as WCAG AA on all six surfaces text lands
+    on (canvas, panel, content, elevated, raised, overlay), and each text level keeps 1.25 times
+    the worst-case contrast of the one under it, so muted and secondary never merge. The
+    defaults move at most three steps a channel; the tightest pairs are 4.53 dark
+    (`text_muted`) and 4.50 light (`error`), both on `overlay`.
+  - **Supported range.** A background from black to a relative luminance of 0.05, or from 0.6
+    to white, clears AA with three distinct levels: black, Catppuccin, Dracula, Solarized, Nord
+    and a `3F3F3F` grey in dark; One Light, Solarized, Gruvbox, Catppuccin Latte and a `CCCCCC`
+    grey in light. A mid grey cannot: no text colour reads 4.5:1 on it and a step above it at
+    once, so the tones stop at white or black.
+  - **Elevation.** Everything that floats goes through `kit::elevate`: the `elevated` surface,
+    the `border` hairline and the one shadow of `Elevation`, a 1 pt contact layer (blur 2) and a
+    4 pt soft one (blur 12), black at 0.4 and 0.5 in dark and 0.06 and 0.12 in light.
+    `kit::scrim` dims under a modal, black at `alpha::SCRIM` in dark and `alpha::TINT` in light.
+    gpui-kit's popover colour is `elevated`. A lint-as-test in `kit.rs` fails on a shadow or a
+    scrim chosen anywhere else; the files that still lift by hand are listed there until wave 2
+    phase B moves them.
+  - **Fills.** `warn`, `success`, `error` and `accent` stay text tones. Bars, badges, dots and
+    washes take `warn_fill`, `success_fill`, `error_fill` and `accent_fill`, with `fill_fg` for a
+    count on them: dark `F5B83D`, `34C759`, `F0555F`, `6AA1FF`; light `F0A000`, `2DA44E`,
+    `EF4B52`, `3B82F6`. Each is saturated and mid-light, so the light warn is amber where its
+    text tone is ochre. A count reads on each at 5.35 or better, and in dark each stands 3:1 off
+    every surface. Light amber on white is 2.16: it is seen by its hue, and it never carries
+    words alone.
+  - **Density.** `Density::COMPACT` (rows 28 and 40, headers 28, targets 24) and
+    `Density::TOUCH` (44, 56, 44, 44, Apple's minimum) live on the theme. `kit::row`,
+    `kit::Row::height` and `kit::icon_button_side` read it; the icon stays its size and only the
+    target grows. The Mac default leaves every size as it was.
+  - **Type and edge.** `Typography::meta()` (base − 2, 11 pt) is the step for second lines, bar
+    readouts and status words (`kit::meta`). `kit::label` is the quiet section label: `small()`,
+    `text_muted`, regular weight, never upper case. `Spacing::inset()` (12 pt) is the one edge
+    grid for every panel's leading edge (`kit::inset_x`).
+
+  Tests: theme `chrome_text_clears_wcag_aa`, `the_ladder_is_monotonic`,
+  `a_mid_grey_background_cannot_clear_aa`, `the_default_tones_are_lifted_by_a_rounding_step_at_most`,
+  `the_chrome_follows_the_terminals_background`, `status_fills_read_as_their_hue`,
+  `elevation_and_density`; kit `a_floating_layer_wears_the_one_elevation`,
+  `density_sizes_the_targets_not_the_icons`, `the_elevation_is_two_layers_of_the_shade`; app
+  `a_custom_background_carries_the_chrome`.
