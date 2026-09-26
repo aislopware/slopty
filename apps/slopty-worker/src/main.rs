@@ -313,7 +313,7 @@ async fn run() -> Result<()> {
         let wake = Arc::clone(&wake);
         move |live| wake.lock().streams(live)
     });
-    let listener_api = listener.admission().local_api().cloned();
+    let paths = tailnet::Paths::spawn(listener.admission().clone());
     let daemon = Daemon {
         worker,
         listener,
@@ -336,7 +336,7 @@ async fn run() -> Result<()> {
         listen,
         screens,
         wake,
-        paths: tailnet::Paths::spawn(listener_api),
+        paths,
     };
     let transfers = Arc::clone(&daemon.transfers);
     tokio::task::spawn_blocking(move || {

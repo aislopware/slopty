@@ -524,7 +524,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       under the app capability `github.com/aislopware/slopty` (`{"roles":["client","agent",
       "worker"]}`), which Headscale 0.29 passes through verbatim;
     - an address no node has, a node with no role, or a daemon that fails is refused.
-    - Where no daemon this process can read runs, a tailnet address is let in by address.
+    - Where no daemon this process can read runs, no tailnet address gets in (fail closed,
+      amended the same day after an audit): with the wire unencrypted, an address alone is
+      what a host on the LAN could forge, and whois is the only gate. A plain VPN lists its
+      range in `[worker] allow`. The daemon is looked up when a tailnet peer calls, again
+      every 5 s while none is found, and again at once when it stops answering, so a worker
+      launchd starts at login ahead of Tailscale, or an App Store extension back on a new port
+      and token, needs no restart. Test: `tailscale_is_looked_up_again_when_missing_or_failing`.
       The machine's owner is read from status at most once a minute.
   - **The LAN is no longer a default.** RFC 1918, ULA and link-local ranges were let in by
     address; with Tailscale as the network they are only what `[worker] allow` lists.
@@ -555,7 +561,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - Deferred: a disco ping to warm a path before the first stream. The connection the app
       opens at launch already starts disco.
   - **Doctor.** `slopty worker doctor` names this Mac's node and address, or says Tailscale is
-    down, or that the daemon can read none and admits tailnet addresses by address alone.
+    down, or that the daemon can read none and so admits no tailnet peer.
   - **Open.** Tailscale on Linux drops CGNAT-sourced packets that arrive off the tunnel; no such
     filter was found for darwin, and macOS is a weak-host stack. A host on the same LAN could
     send packets with a tailnet source address, and with no encryption on the wire only the

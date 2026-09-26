@@ -42,7 +42,7 @@ pub struct Health {
     /// Address ranges whose peers it admits by address, besides loopback and the tailnet.
     pub allow: Vec<String>,
     /// This machine's Tailscale as the daemon reads it; `None` when it can read none, and a
-    /// tailnet address is then let in by address alone.
+    /// tailnet peer then gets in.
     pub tailscale: Option<Tailscale>,
     /// Clients connected right now.
     pub clients: usize,

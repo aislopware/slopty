@@ -147,10 +147,9 @@ fn doctor_report(h: &slopty_worker::ctl::Health) -> String {
         Some(t) => {
             format!("{} Tailscale is {}: no tailnet peer reaches this worker", mark(false), t.state)
         }
-        None => format!(
-            "{} no Tailscale this daemon can read: a tailnet address is let in by address alone",
-            mark(false)
-        ),
+        None => {
+            format!("{} no Tailscale this daemon can read: no tailnet peer gets in", mark(false))
+        }
     };
     let ranges = if h.allow.is_empty() {
         "admits loopback and the tailnet".to_owned()

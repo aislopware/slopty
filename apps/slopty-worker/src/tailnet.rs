@@ -8,9 +8,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use slopty_net::admission::Admission;
 use slopty_proto::WorkerMsg;
 use slopty_proto::tailnet::LinkPath;
-use slopty_tailnet::{LocalApi, Path, Status};
+use slopty_tailnet::{Path, Status};
 use tokio::sync::{mpsc, watch};
 
 /// How often the status is read while a client listens: a path moves from DERP to direct
@@ -20,34 +21,30 @@ const POLL: Duration = Duration::from_secs(2);
 /// The daemon's latest status, for every client's path.
 #[derive(Clone, Debug)]
 pub struct Paths {
-    status: Option<Arc<watch::Sender<Option<Arc<Status>>>>>,
+    status: Arc<watch::Sender<Option<Arc<Status>>>>,
 }
 
 impl Paths {
-    /// Read the status through `api` while any client listens; without one, no client is
-    /// told a path.
-    pub fn spawn(api: Option<LocalApi>) -> Self {
-        let status = api.map(|api| {
-            let status = Arc::new(watch::Sender::new(None));
-            tokio::spawn(poll(api, Arc::clone(&status)));
-            status
-        });
+    /// Read the status through the Tailscale `admission` asks while any client listens; while
+    /// there is none, no client is told a path.
+    pub fn spawn(admission: Admission) -> Self {
+        let status = Arc::new(watch::Sender::new(None));
+        tokio::spawn(poll(admission, Arc::clone(&status)));
         Self { status }
     }
 
     /// Tell the client at `remote` its path through `out`, each time it changes, until the
     /// client goes. A client that is not on the tailnet is told nothing.
     pub async fn report(&self, remote: SocketAddr, out: mpsc::Sender<WorkerMsg>) {
-        let Some(status) = &self.status else { return };
         let ip = remote.ip().to_canonical();
         if !slopty_net::admission::on_tailnet(ip) {
             return;
         }
-        report(status.subscribe(), ip, out).await;
+        report(self.status.subscribe(), ip, out).await;
     }
 }
 
-async fn poll(api: LocalApi, status: Arc<watch::Sender<Option<Arc<Status>>>>) -> ! {
+async fn poll(admission: Admission, status: Arc<watch::Sender<Option<Arc<Status>>>>) -> ! {
     let mut every = tokio::time::interval(POLL);
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -55,6 +52,7 @@ async fn poll(api: LocalApi, status: Arc<watch::Sender<Option<Arc<Status>>>>) ->
         if status.receiver_count() == 0 {
             continue;
         }
+        let Some(api) = admission.local_api() else { continue };
         match api.status().await {
             Ok(read) => {
                 status.send_replace(Some(Arc::new(read)));

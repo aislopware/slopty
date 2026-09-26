@@ -29,12 +29,12 @@ const LINK_QUEUE: usize = 256;
 
 /// Serve every link `listener` accepts until its endpoint closes.
 pub async fn serve(listener: ServerListener, hub: Hub) {
-    let tailscale = listener.admission().local_api().cloned();
     while let Some(link) = listener.accept().await {
-        let (hub, tailscale) = (hub.clone(), tailscale.clone());
+        let (hub, admission) = (hub.clone(), listener.admission().clone());
         tokio::spawn(async move {
             match link.role.clone() {
                 Role::Worker(registration) => {
+                    let tailscale = admission.local_api();
                     worker(hub, link, *registration, tailscale.as_ref()).await;
                 }
                 Role::Client { name, .. } | Role::Agent { name } => client(hub, link, name).await,

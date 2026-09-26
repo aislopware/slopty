@@ -83,7 +83,7 @@ async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
             post_events: slopty_input::can_post(),
             listen: daemon.listen.to_string(),
             allow: daemon.listener.admission().ranges().iter().map(ToString::to_string).collect(),
-            tailscale: tailscale(daemon.listener.admission().local_api()).await,
+            tailscale: tailscale(daemon.listener.admission().local_api().as_ref()).await,
             clients: daemon.wake.lock().counts().0,
             sessions: daemon.worker.session_count(),
             uptime_secs: daemon.started_at.elapsed().as_secs(),

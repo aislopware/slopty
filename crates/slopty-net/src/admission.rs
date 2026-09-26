@@ -126,15 +126,44 @@ pub enum Verdict {
 #[derive(Clone, Debug)]
 pub struct Admission {
     allow: Vec<Cidr>,
-    tailnet: Option<Tailnet>,
+    tailnet: Tailnet,
 }
 
 /// The local Tailscale, and the user this node belongs to as it last said.
 #[derive(Clone, Debug)]
 struct Tailnet {
-    api: LocalApi,
+    source: Source,
     owner: Arc<Mutex<Option<Owner>>>,
 }
+
+/// Where the local Tailscale's `LocalAPI` comes from.
+#[derive(Clone, Debug)]
+enum Source {
+    /// Given once: a test's stand-in, or none.
+    Fixed(Option<LocalApi>),
+    /// This machine's, looked up when first needed, again while none is found, and again
+    /// after it fails. A daemon started at login ahead of Tailscale, or an App Store extension
+    /// that restarted on a new port and token, is found without a restart.
+    Machine(Arc<Machine>),
+}
+
+/// How this machine's `LocalAPI` is found, and the last finding.
+#[derive(Debug)]
+struct Machine {
+    find: fn() -> Option<LocalApi>,
+    relook: Duration,
+    lookup: Mutex<Lookup>,
+}
+
+/// The last lookup of this machine's `LocalAPI`.
+#[derive(Debug, Default)]
+struct Lookup {
+    api: Option<LocalApi>,
+    looked: Option<Instant>,
+}
+
+/// How long a lookup that found no Tailscale stands before the next check looks again.
+const RELOOK: Duration = Duration::from_secs(5);
 
 /// The user the local node belongs to, `None` when it is tagged, and when that was read.
 #[derive(Clone, Copy, Debug)]
@@ -144,31 +173,31 @@ struct Owner {
 }
 
 impl Admission {
-    /// Loopback, the ranges in `allow`, and the tailnet through this machine's Tailscale when
-    /// one is running that this process can read.
+    /// Loopback, the ranges in `allow`, and the tailnet through this machine's Tailscale,
+    /// looked up when a tailnet peer first calls.
     #[must_use]
     pub fn new(allow: Vec<Cidr>) -> Self {
-        Self::with_tailnet(allow, LocalApi::find())
+        Self::finding(allow, LocalApi::find, RELOOK)
     }
 
-    /// Loopback, `allow`, and the tailnet through `api`; without one, a tailnet address is let
-    /// in by address.
+    /// [`Self::new`] with `find` in place of looking at this machine, looked up again at most
+    /// every `relook` while it finds none.
+    fn finding(allow: Vec<Cidr>, find: fn() -> Option<LocalApi>, relook: Duration) -> Self {
+        let machine = Machine { find, relook, lookup: Mutex::default() };
+        Self { allow, tailnet: Tailnet::new(Source::Machine(Arc::new(machine))) }
+    }
+
+    /// Loopback, `allow`, and the tailnet through `api`; without one, no tailnet peer.
     #[must_use]
     pub fn with_tailnet(allow: Vec<Cidr>, api: Option<LocalApi>) -> Self {
-        let tailnet = api.map(|api| Tailnet { api, owner: Arc::default() });
-        Self { allow, tailnet }
+        Self { allow, tailnet: Tailnet::new(Source::Fixed(api)) }
     }
 
-    /// Whether the tailnet's peers are checked through Tailscale, not only by address.
+    /// The local Tailscale this admission asks, when one is running that this process can
+    /// read.
     #[must_use]
-    pub const fn asks_the_tailnet(&self) -> bool {
-        self.tailnet.is_some()
-    }
-
-    /// The local Tailscale this admission asks, if any.
-    #[must_use]
-    pub fn local_api(&self) -> Option<&LocalApi> {
-        self.tailnet.as_ref().map(|t| &t.api)
+    pub fn local_api(&self) -> Option<LocalApi> {
+        self.tailnet.api()
     }
 
     /// The ranges let in by address besides loopback and the tailnet.
@@ -177,7 +206,9 @@ impl Admission {
         &self.allow
     }
 
-    /// Whether the peer at `peer` may connect, and as what.
+    /// Whether the peer at `peer` may connect, and as what. A tailnet address is let in only
+    /// as Tailscale vouches for it: with the wire unencrypted, an address alone is what a host
+    /// on the same LAN could forge.
     pub async fn check(&self, peer: SocketAddr) -> Verdict {
         let ip = peer.ip().to_canonical();
         if ip.is_loopback() || self.allow.iter().any(|c| c.contains(ip)) {
@@ -186,10 +217,7 @@ impl Admission {
         if !on_tailnet(ip) {
             return Verdict::Refuse("outside the tailnet and the allowed ranges");
         }
-        match &self.tailnet {
-            Some(tailnet) => tailnet.check(SocketAddr::new(ip, peer.port())).await,
-            None => Verdict::Admit(Grant::ALL),
-        }
+        self.tailnet.check(SocketAddr::new(ip, peer.port())).await
     }
 }
 
@@ -206,10 +234,50 @@ pub fn on_tailnet(ip: IpAddr) -> bool {
 }
 
 impl Tailnet {
+    fn new(source: Source) -> Self {
+        Self { source, owner: Arc::default() }
+    }
+
+    fn api(&self) -> Option<LocalApi> {
+        match &self.source {
+            Source::Fixed(api) => api.clone(),
+            Source::Machine(machine) => {
+                let mut lookup = machine.lookup.lock();
+                let due = lookup.looked.is_none_or(|at| at.elapsed() >= machine.relook);
+                if lookup.api.is_none() && due {
+                    lookup.api = (machine.find)();
+                    lookup.looked = Some(Instant::now());
+                }
+                lookup.api.clone()
+            }
+        }
+    }
+
+    /// The daemon did not answer as found: the next [`Self::api`] looks it up again.
+    fn lost(&self) {
+        if let Source::Machine(machine) = &self.source {
+            *machine.lookup.lock() = Lookup::default();
+        }
+    }
+
     async fn check(&self, peer: SocketAddr) -> Verdict {
-        match self.api.whois(peer).await {
+        let Some(mut api) = self.api() else {
+            return Verdict::Refuse("no Tailscale this process can read to say who is calling");
+        };
+        let mut who = api.whois(peer).await;
+        if let Err(e) = &who
+            && matches!(self.source, Source::Machine(_))
+        {
+            tracing::info!(error = %e, "tailscale did not answer; looking it up again");
+            self.lost();
+            if let Some(again) = self.api() {
+                who = again.whois(peer).await;
+                api = again;
+            }
+        }
+        match who {
             Ok(Some(who)) => {
-                let grant = Grant::of(&who, self.owner().await);
+                let grant = Grant::of(&who, self.owner(&api).await);
                 if grant.any() {
                     Verdict::Admit(grant)
                 } else {
@@ -227,14 +295,14 @@ impl Tailnet {
 
     /// The user this node belongs to, `None` when it is tagged (a tagged node belongs to
     /// nobody). Read at most once a minute; a daemon that does not answer keeps the last word.
-    async fn owner(&self) -> Option<i64> {
+    async fn owner(&self, api: &LocalApi) -> Option<i64> {
         let known = *self.owner.lock();
         if let Some(known) = known
             && known.read.elapsed() < OWNER_TTL
         {
             return known.user;
         }
-        match self.api.status().await {
+        match api.status().await {
             Ok(status) => {
                 let user = status.me.filter(|me| me.tags.is_empty()).map(|me| me.user);
                 *self.owner.lock() = Some(Owner { read: Instant::now(), user });
@@ -262,32 +330,23 @@ mod tests {
         SocketAddr::new(ip(s), 5000)
     }
 
-    /// With no Tailscale to ask, loopback and the tailnet get in by address, a listed range
-    /// gets in, and a LAN or public address does not: the LAN is no longer a default.
+    /// With no Tailscale to ask, loopback and a listed range get in and nothing else does: not
+    /// the tailnet by its address alone, and not the LAN.
     #[tokio::test]
-    async fn without_a_daemon_the_tailnet_is_let_in_by_address_and_the_lan_is_not() {
+    async fn without_a_daemon_only_loopback_and_the_listed_ranges_get_in() {
         let a = Admission::with_tailnet(vec!["10.0.0.0/8".parse().unwrap()], None);
-        for yes in [
-            "127.0.0.1",
-            "::1",
-            "::ffff:127.0.0.1",
-            "100.64.0.3",
-            "100.127.255.254",
-            "::ffff:100.101.102.103",
-            "fd7a:115c:a1e0:ab12::1",
-            "10.1.2.3",
-        ] {
+        for yes in ["127.0.0.1", "::1", "::ffff:127.0.0.1", "10.1.2.3"] {
             assert_eq!(a.check(at(yes)).await, Verdict::Admit(Grant::ALL), "{yes}");
         }
         for no in [
+            "100.64.0.3",
+            "::ffff:100.101.102.103",
+            "fd7a:115c:a1e0:ab12::1",
             "192.168.1.9",
             "172.16.0.1",
             "fd00::1",
             "fe80::1",
             "8.8.8.8",
-            "100.63.255.255",
-            "100.128.0.0",
-            "::ffff:8.8.8.8",
             "0.0.0.0",
             "::",
         ] {
@@ -332,7 +391,6 @@ mod tests {
     #[tokio::test]
     async fn the_tailnet_says_who_is_calling_and_what_they_may_do() {
         let a = Admission::with_tailnet(Vec::new(), Some(daemon().await));
-        assert!(a.asks_the_tailnet());
         assert_eq!(
             a.check(at("100.64.0.4")).await,
             Verdict::Admit(Grant::ALL),
@@ -346,6 +404,38 @@ mod tests {
         assert!(matches!(a.check(at("100.64.9.9")).await, Verdict::Refuse(_)), "no such node");
         assert!(matches!(a.check(at("100.64.0.7")).await, Verdict::Refuse(_)), "daemon failed");
         assert_eq!(a.check(at("127.0.0.1")).await, Verdict::Admit(Grant::ALL));
+    }
+
+    /// This machine's Tailscale is looked up when a tailnet peer calls, not only at start:
+    /// none found refuses, a daemon that comes up later is found on a later call, and one that
+    /// stops answering (an App Store extension back on a new port and token) is looked up
+    /// again within the same call.
+    #[tokio::test]
+    async fn tailscale_is_looked_up_again_when_missing_or_failing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static STAGE: AtomicUsize = AtomicUsize::new(0);
+        static FOUND: Mutex<Vec<LocalApi>> = Mutex::new(Vec::new());
+        fn find() -> Option<LocalApi> {
+            let stage = STAGE.load(Ordering::SeqCst);
+            FOUND.lock().get(stage.checked_sub(1)?).cloned()
+        }
+        let (stale, _) =
+            slopty_tailnet::fake::daemon(|_| (401, "bad token".to_owned())).await.unwrap();
+        let fresh = daemon().await;
+        FOUND.lock().extend([stale, fresh]);
+        let a = Admission::finding(Vec::new(), find, Duration::ZERO);
+        assert!(matches!(a.check(at("100.64.0.4")).await, Verdict::Refuse(_)), "none running");
+        STAGE.store(1, Ordering::SeqCst);
+        assert!(a.local_api().is_some(), "found once it runs");
+        STAGE.store(2, Ordering::SeqCst);
+        assert_eq!(
+            a.check(at("100.64.0.4")).await,
+            Verdict::Admit(Grant::ALL),
+            "the stale daemon failed, and the fresh one answered in the same call"
+        );
+        assert_eq!(a.check(at("127.0.0.1")).await, Verdict::Admit(Grant::ALL));
+        assert!(on_tailnet(ip("100.127.255.254")) && !on_tailnet(ip("100.128.0.0")));
+        assert!(on_tailnet(ip("::ffff:100.64.0.1")) && !on_tailnet(ip("100.63.255.255")));
     }
 
     #[test]

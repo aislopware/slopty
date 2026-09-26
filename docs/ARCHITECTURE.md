@@ -34,9 +34,10 @@ plain UDP (n0's `noq`, standalone) with a null crypto provider: every worker is 
 Tailscale, WireGuard or a VPN, which encrypts and authenticates already, so Slopty adds no
 TLS, no endpoint keys, no relays and no pairing. A worker is named by `host[:port]` (a
 `MagicDNS` name, a LAN name or an IP; port 45550 by default) and identified by the `WorkerId`
-in its `HelloAck`; it admits a connection by source address alone — loopback, the tailnet
-(`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), private LANs, or the `[worker] allow` ranges of its
-`settings.toml` — once per connection, before any handshake state exists.
+in its `HelloAck`. It admits a connection once, before any handshake state exists: loopback and the
+`[worker] allow` ranges of its `settings.toml` by address, and a tailnet address
+(`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) only as the machine's Tailscale vouches for it through
+`whois` and the tailnet's grants (`slopty_net::admission`, `slopty-tailnet`).
 
 | Path | QUIC primitive | Payload |
 |---|---|---|
