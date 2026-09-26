@@ -2169,3 +2169,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   of its fill beside `text_secondary` words, so the tile and the bell keep the loud marks.
   Tests: workspace `the_servers_word_leads_the_status_bar`,
   `the_status_bar_reads_the_focused_tile_and_its_link`.
+
+- ✅ **A waiting agent is marked once on its tile** (2026-09-27, golden review). Amends
+  **Attention is said once per place**. The tile still showed it twice: a 2 pt warn bar along
+  the header's top and the pill in the header. The pill always comes with a waiting agent, is
+  the button to its prompt, and sits beside the status slot's warn mark, so the bar is gone.
+  The bell's badge and the status bar's count remain the one global count each. Likewise a
+  command that finished unwatched: its slot's mark says done or failed in its tone and the
+  unseen dot says it went unwatched, so the "Done · 6.0 s" readout beside them is quiet
+  `text_secondary` text, still the button to the shell, not a third tinted pill. Test:
+  `a_tile_that_needs_you_says_so_once_in_its_header`.

@@ -249,16 +249,15 @@ fn the_header_leads_with_one_slot_for_the_kind_or_the_status(cx: &mut TestAppCon
     assert_eq!(slot_at(cx), rest, "in the same square");
 }
 
-/// A tile whose agent waits on the human carries a warn bar along the top of its header, and
-/// no outline.
+/// A tile whose agent waits on the human says so once: the pill in its header, a button to
+/// the prompt, in the warn tone. No bar along the top and no outline repeat it.
 #[gpui::test]
-fn a_tile_that_needs_you_has_a_warn_bar_on_its_header(cx: &mut TestAppContext) {
+fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let agent = SessionId::new();
     let waiting = opens(&view, cx, &fake, agent, fake.me, 1);
     let other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
-    assert!(cx.debug_bounds(selector("attention", waiting.item)).is_none(), "not yet");
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(
             AgentEvent {
@@ -275,14 +274,11 @@ fn a_tile_that_needs_you_has_a_warn_bar_on_its_header(cx: &mut TestAppContext) {
         );
     });
     cx.run_until_parked();
-    let bar = cx.debug_bounds(selector("attention", waiting.item)).expect("the bar");
+    let pill = cx.debug_bounds(selector("agent", waiting.item)).expect("the pill");
     let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
-    assert_eq!(bar.top(), header.top(), "along the top");
-    assert_eq!(bar.size.width, header.size.width);
-    assert!((f32::from(bar.size.height) - 2.0).abs() < 0.01, "2 pt");
-    let warn = gpui::Background::from(crate::colors::hsla(Theme::default().surfaces.warn_fill));
-    assert!(quads_at(cx, bar).iter().any(|q| q.background == warn));
-    assert!(cx.debug_bounds(selector("attention", other.item)).is_none(), "only on that one");
+    assert!(pill.top() >= header.top() && pill.bottom() <= header.bottom(), "in the header");
+    assert!(cx.debug_bounds(selector("attention", waiting.item)).is_none(), "no bar");
+    assert!(cx.debug_bounds(selector("agent", other.item)).is_none(), "only on that one");
     let tile = cx.debug_bounds(selector("item", waiting.item)).expect("drawn");
     assert!(quads_at(cx, tile).iter().all(|q| q.border_widths.left.0 == 0.0), "no outline");
 }

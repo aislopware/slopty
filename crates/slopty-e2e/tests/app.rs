@@ -99,8 +99,9 @@ mod tests {
         // What a screen reader gets: the tile's heading, the grid as a terminal whose value is
         // the cursor row, the titlebar's buttons, all inside the window.
         assert!(
-            dump.a11y_node("Heading", None).is_some_and(|n| {
-                n.label.as_deref().is_some_and(|l| l.starts_with("terminal "))
+            dump.a11y.iter().any(|n| {
+                n.role == "Heading"
+                    && n.label.as_deref().is_some_and(|l| l.starts_with("terminal "))
             }),
             "{:#?}",
             dump.a11y
@@ -108,7 +109,13 @@ mod tests {
         let grid = dump.a11y_node("Terminal", None).unwrap_or_else(|| panic!("{:#?}", dump.a11y));
         assert!(grid.value.as_deref().is_some_and(|v| !v.is_empty()), "cursor row: {grid:?}");
         assert!(grid.bounds[2] > 100.0 && grid.bounds[3] > 100.0, "{grid:?}");
-        for label in ["Open", "More", "Workspace 1, 1 tile", "New workspace"] {
+        // A lone workspace is its name, not a tab to press.
+        assert!(
+            dump.a11y_node("Heading", Some("Workspace 1, 1 tile")).is_some(),
+            "{:#?}",
+            dump.a11y
+        );
+        for label in ["Navigator", "New workspace", "Inbox", "More"] {
             assert!(dump.a11y_node("Button", Some(label)).is_some(), "{label}: {:#?}", dump.a11y);
         }
 
@@ -839,7 +846,7 @@ mod tests {
     }
 
     fn server_unreachable(d: &slopty_e2e::Dump) -> bool {
-        d.a11y_node("Status", Some("server unreachable")).is_some()
+        d.a11y_node("Status", Some("Server unreachable")).is_some()
     }
 
     /// The app finds its worker through the server, opens a terminal on it directly, keeps

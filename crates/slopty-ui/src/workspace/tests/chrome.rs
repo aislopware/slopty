@@ -295,12 +295,26 @@ fn a_lone_workspace_is_its_name_and_tabs_say_what_they_hold(cx: &mut TestAppCont
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _shells = three_shells(&view, cx, &studio);
+    let remote = connect(&view, cx, 2, "remote");
+    let _far = opens(&view, cx, &remote, SessionId::new(), remote.me, 1);
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("Heading", Some("Workspace 1, 3 tiles"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("Heading", Some("Workspace 1, 4 tiles"))), "{tree:#?}");
     assert!(cx.debug_bounds("add").is_none(), "one \"+\", for a workspace");
+    // The name is whole beside what the workspace holds: a lone name is not held to a tab's
+    // width.
+    let name = cx.debug_bounds("ws-name-0").expect("the name");
+    let whole = cx.update(|window, _cx| {
+        let mut style = window.text_style();
+        style.font_weight = gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT);
+        let text = "Workspace 1";
+        let run = style.to_run(text.len());
+        let size = px(Theme::default().typography.ui_size);
+        window.text_system().shape_line(text.into(), size, &[run], None).width
+    });
+    assert!(name.size.width + px(0.5) >= whole, "{name:?}, whole {whole:?}");
 
     click_at(cx, "new-workspace");
     assert!(cx.debug_bounds("ws-tab-1").is_some(), "two tabs");

@@ -303,3 +303,29 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
         docked.0, docked.1, hidden.0, hidden.1
     );
 }
+
+/// A tile's two lines sit in the middle of its row at either density: at the touch height the
+/// row grows round them, not under them.
+#[gpui::test]
+fn a_rows_two_lines_sit_in_its_middle(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let id = tile.item.as_uuid();
+    for (density, height) in
+        [(slopty_theme::Density::COMPACT, 40.0), (slopty_theme::Density::TOUCH, 56.0)]
+    {
+        let theme = Theme { density, ..Theme::default() };
+        view.update(cx, |v, cx| v.set_theme(theme, cx));
+        cx.run_until_parked();
+        let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row");
+        let lines = cx.debug_bounds(leak(format!("nav-lines-{id}"))).expect("the lines");
+        assert!((f32::from(row.size.height) - height).abs() < 0.5, "{density:?}: {row:?}");
+        let (above, below) = (lines.top() - row.top(), row.bottom() - lines.bottom());
+        // Within the pixel the layout rounds to.
+        assert!(
+            f32::from(above - below).abs() <= 1.0,
+            "{density:?}: {above:?} over, {below:?} under"
+        );
+    }
+}

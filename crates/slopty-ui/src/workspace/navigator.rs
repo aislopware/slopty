@@ -1473,13 +1473,23 @@ impl WorkspaceView {
             label.into(),
             selected,
         )
-        .items_start()
-        .pt(px(theme.spacing.xs))
+        // The two lines sit in the middle of the row at either density, the kind beside the
+        // first.
+        .items_center()
         // Under the worker's name: past its icon and the gap after it.
         .pl(px(theme.spacing.inset() + theme.typography.icon_large()))
         .when(wash, |row| row.bg(hsla_alpha(s.warn_fill, alpha::FAINT)))
-        .child(div().h(px(first)).flex().items_center().child(lead))
-        .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
+        .child(
+            div()
+                .debug_selector(move || format!("nav-lines-{id}"))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_start()
+                .gap(px(theme.spacing.xs))
+                .child(div().h(px(first)).flex().items_center().child(lead))
+                .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2)),
+        )
         .when(self.nav.list.autoscroll == Some(tile), |row| {
             row.child(
                 canvas(|bounds, window, _cx| window.request_autoscroll(bounds), |_, (), _, _| {})

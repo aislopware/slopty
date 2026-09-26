@@ -521,11 +521,9 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let k = chrome.k;
-        let tone = match done.exit {
-            Some(0) | None => Status::Done,
-            Some(_) => Status::Failed,
-        }
-        .tone(theme);
+        // The status slot beside it already says done or failed in its tone, and the unseen
+        // dot that it went unwatched: this is only the readout, quiet, still a button to it.
+        let quiet = theme.surfaces.text_secondary;
         let label = done.label();
         let item = tile.item;
         let pill = div()
@@ -538,11 +536,10 @@ impl WorkspaceView {
             .px(px(theme.spacing.sm * k))
             .py(px(theme.spacing.xxs * k))
             .rounded(px(theme.radii.xs * k))
-            .bg(hsla_alpha(tone, alpha::FAINT))
             .text_size(px(theme.typography.small() * k))
-            .text_color(hsla(tone))
+            .text_color(hsla(quiet))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT)))
+            .hover(move |el| el.bg(hsla_alpha(quiet, alpha::FAINT)))
             .child(
                 ChromeText::new(label, px(theme.typography.small()), k)
                     .fill()

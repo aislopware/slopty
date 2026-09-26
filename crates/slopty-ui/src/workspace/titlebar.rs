@@ -499,15 +499,18 @@ impl WorkspaceView {
             .debug_selector(move || format!("ws-tab-{ix}"))
             .role(Role::Heading)
             .aria_label(label)
+            // The name is held to a tab's widest, not the name and what it holds together: the
+            // meta beside it must not squeeze it.
             .flex_shrink(1.0)
             .min_w_0()
-            .max_w(px(TAB_MAX_W))
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
             .child(
                 div()
+                    .debug_selector(move || format!("ws-name-{ix}"))
                     .min_w_0()
+                    .max_w(px(TAB_MAX_W))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()

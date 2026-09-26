@@ -20,7 +20,6 @@ use slopty_proto::terminal::{SessionState, TermRequest};
 use slopty_theme::{Theme, alpha};
 
 use super::actions::{CloseItem, FullscreenTile};
-use super::agents::needs_human;
 use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::browser::BrowserView;
@@ -35,9 +34,6 @@ pub(super) const SHAPES_BELOW: f32 = 0.5;
 
 /// The divider between neighbouring tiles: one hairline, whatever the zoom.
 const HAIRLINE: f32 = 1.0;
-
-/// The bar along the top of the header of a tile that needs the human, in points at zoom 1.
-const ATTENTION_BAR: f32 = 2.0;
 
 /// The widest a page's address gets beside its title, in points at zoom 1: the title is what
 /// tells tiles apart, the address only says where.
@@ -681,17 +677,6 @@ impl WorkspaceView {
                 .rounded_full()
                 .bg(hsla(s.text_secondary))
         });
-        // One that needs the human says so along its top.
-        let attention = agent.is_some_and(|(_, a)| needs_human(a)).then(|| {
-            div()
-                .debug_selector(move || format!("attention-{}", id.as_uuid()))
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .h(px(ATTENTION_BAR * k))
-                .bg(hsla(s.warn_fill))
-        });
         let tabbed = placed.tabs.is_some();
         let header = if tabbed {
             let tabs = self.render_tabs(placed, chrome, cx);
@@ -741,10 +726,7 @@ impl WorkspaceView {
                 .child(actions)
                 .child(strip)
         };
-        header
-            .when_some(progress, gpui::ParentElement::child)
-            .when_some(attention, gpui::ParentElement::child)
-            .into_any_element()
+        header.when_some(progress, gpui::ParentElement::child).into_any_element()
     }
 
     /// The header's leading slot: the kind's icon at rest and the status mark once there is

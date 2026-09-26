@@ -304,7 +304,8 @@ fn the_column_dots_keep_clear_of_the_toggle_and_the_tabs(cx: &mut TestAppContext
     assert!(tab.right() <= new.left(), "{tab:?} {new:?}");
     assert!(new.right() <= dots.left(), "the dots cover +: {new:?} {dots:?}");
     assert!(dots.right() <= bell.left(), "the dots cover the bell: {dots:?} {bell:?}");
-    assert!(f32::from(tab.size.width) <= 180.5, "cut at a tab's widest: {tab:?}");
+    let name = bounds(cx, "ws-name-0");
+    assert!(f32::from(name.size.width) <= 180.5, "cut at a tab's widest: {name:?}");
 }
 
 /// The dots show only where there is somewhere to go: not while every column is in view, and
