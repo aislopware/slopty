@@ -5359,3 +5359,52 @@ through `on_thread_start`, and the main thread) takes the worker's share of a lo
 what it is on a quiet machine. The client needs the same, which this run shows from the other
 side.
 
+## 2026-09-26 — a dense screen's frame: UTF-8 checks, background runs and the font per run
+
+`terminal::view::tests::dense_screen_cost` (headless GPUI, release, mac-studio) draws a 200 × 60
+screen of dense coloured text: every word in one of the ANSI colours or a true colour, a third of
+them bold, a fifth on a background. Each sample is a frame applied and drawn, 600 after 60 of
+warm-up, four ways: the screen redrawn unchanged, scrolled by one line a frame, replaced whole
+every frame (1 800 new words a frame, past the word cache's budget), and a second screen with
+every cell on a background (a full-screen program's theme) redrawn unchanged. Headless GPUI
+shapes with a no-op text system and rasterises nothing, so these are the element's and GPUI's
+per-frame work, not CoreText's.
+
+A `sample` of the unchanged screen put 37 % of the draw in the element's prepaint, and 14 % of
+it in `core::str::from_utf8`: `CellText::as_str` validates the cell's bytes on every call, and
+the prepaint called it three times a cell a frame (the blank test that splits words, the sprite
+test and the word's hash key). A full screen of new text spent a further fifth building a
+`Font` per style run (copying the family, allocating features and fallbacks). Changes, each
+measured against the build before it:
+
+1. Blank and sprite tests read the cell's bytes (a sprite is three or four bytes of UTF-8, so
+   ASCII never reaches `as_str`), and a word's key hashes an ASCII cell by its byte and any
+   other by `CellText`'s own content hash.
+2. The four faces (regular, bold, italic, both) are built once a frame and cloned into runs.
+3. A run of cells on one background resolves and converts its colour once, not per cell.
+
+p50 in µs; each cell is the range over interleaved runs of the builds side by side (four runs
+for 1 and 2, at load average 15 to 30; five for 3, at 50 to 100). The tails moved with the
+load on the machine, not with the build.
+
+| scenario | before | after 1 | after 1 + 2 | after 1 + 2 + 3 |
+| --- | --- | --- | --- | --- |
+| unchanged | 585–604 | 458–475 | 456–472 | 473–491 |
+| a line a frame | 635–655 | 500–527 | 493–518 | 519–548 |
+| a screen a frame | 2 194–2 264 | 2 056–2 152 | 1 776–1 834 | 1 812–1 917 |
+| every cell on a background, unchanged | | | 724–778 | 670–729 |
+
+The last column ran later and under more load than the others; its own comparison is the row it
+changes, against the column before in the same interleaved runs. Together: an unchanged dense
+screen and a flood cost about a fifth less a frame, a screen of new text about a fifth less, and
+a screen painted edge to edge another 7 %. What is left of the unchanged frame is about half
+GPUI's per glyph (`TextSystem::raster_bounds`, a lock and a map lookup per glyph, and the
+bounds tree), and half the element's walk over the cells and words.
+
+```sh
+cargo test -p slopty-ui --release --lib dense_screen_cost -- --ignored --nocapture
+# attribution: run the binary it builds by hand and `sample <pid> 6 1` while it draws
+```
+
+Logs: `/tmp/dense-ab2.log` (before, 1, 1 + 2), `/tmp/dense-ab3.log` (3 against 1 + 2),
+`/tmp/sample-dense-u.txt`, `/tmp/sample-dense-r.txt`.

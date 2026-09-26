@@ -255,14 +255,16 @@ impl Workspace {
                     self.drop_slot(id, cx);
                 }
             }
-            Change::Event(Event::Agent { worker, event }) => {
-                let key = worker_key(worker);
-                self.view.update(cx, |v, cx| v.server_agent_event(key, event, cx));
-            }
-            Change::Event(Event::SessionClosed { session, .. }) => {
-                self.view.update(cx, |v, cx| v.server_session_closed(session, cx));
-            }
-            Change::Event(Event::SessionOpened { .. }) => {}
+            Change::Event(event) => match *event {
+                Event::Agent { worker, event } => {
+                    let key = worker_key(worker);
+                    self.view.update(cx, |v, cx| v.server_agent_event(key, event, cx));
+                }
+                Event::SessionClosed { session, .. } => {
+                    self.view.update(cx, |v, cx| v.server_session_closed(session, cx));
+                }
+                Event::SessionOpened { .. } => {}
+            },
         }
     }
 

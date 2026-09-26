@@ -1004,10 +1004,12 @@ pub(crate) mod tests {
                 detail: None,
                 attention: false,
                 source,
+                since_ms: 0,
             })
         };
-        let agent =
-            |status, source| Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source });
+        let agent = |status, source| {
+            Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source, since_ms: 0 })
+        };
         let listed = async || {
             let Outcome::Terminals(list) = hub.dispatch(Verb::ListTerminals { worker: None }).await
             else {
@@ -1071,6 +1073,7 @@ pub(crate) mod tests {
             detail: None,
             attention: false,
             source: AgentSource::Hook,
+            since_ms: 0,
         })
     }
 

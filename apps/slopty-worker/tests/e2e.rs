@@ -3927,13 +3927,17 @@ mod tests {
         let payload = r#"{"hook_event_name":"UserPromptSubmit","prompt":"fix the build"}"#;
         let hook = CtlRequest::Hook { session, payload: payload.to_owned() };
         assert!(matches!(ctl(&sock, &hook).await, CtlReply::Ok { .. }));
+        let agent = agent_of(&sock).await.flatten().expect("the hook gave the shell an agent");
+        let since_ms = agent.since_ms;
+        assert!(since_ms > 0, "stamped when the turn began");
         assert_eq!(
-            agent_of(&sock).await,
-            Some(Some(SessionAgent {
+            agent,
+            SessionAgent {
                 kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Working,
                 source: AgentSource::Hook,
-            }))
+                since_ms,
+            }
         );
         let close = ClientMsg::Term { session, req: TermRequest::Close };
         worker.tx.send(&close).await.unwrap();

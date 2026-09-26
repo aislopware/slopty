@@ -269,6 +269,7 @@ fn a_tile_that_needs_you_has_a_warn_bar_on_its_header(cx: &mut TestAppContext) {
                 detail: None,
                 attention: false,
                 source: AgentSource::Hook,
+                since_ms: 0,
             },
             cx,
         );
@@ -307,6 +308,7 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
                 detail: None,
                 attention: false,
                 source: AgentSource::Hook,
+                since_ms: 0,
             },
             cx,
         );
@@ -563,6 +565,7 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
                 detail: None,
                 attention: false,
                 source: AgentSource::Hook,
+                since_ms: 0,
             },
             cx,
         );

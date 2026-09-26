@@ -104,15 +104,23 @@ pub struct TerminalPalette {
     pub bold_is_bright: bool,
 }
 
+/// The dark terminal background: the content step of the chrome's surface order, which tile
+/// headers and bodies share.
+#[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
+const DARK_BG: Rgb = Rgb::hex(0x16181d);
+/// The light terminal background.
+#[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
+const LIGHT_BG: Rgb = Rgb::hex(0xffffff);
+
 impl TerminalPalette {
     /// The default dark palette.
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const DARK: Self = Self {
         fg: Rgb::hex(0xe6e6e6),
-        // The content step of the chrome's surface order: tile headers and bodies share it.
-        bg: Rgb::hex(0x16181d),
+        bg: DARK_BG,
         cursor: Rgb::hex(0x8ab4f8),
-        cursor_text: Rgb::hex(0x0e0f12),
+        // A block cursor cuts its cell out of the background, as ghostty draws it.
+        cursor_text: DARK_BG,
         selection: Rgb::hex(0x2b3a55),
         search_match: Rgb::hex(0x4a4020),
         search_current: Rgb::hex(0x8c6a1f),
@@ -141,9 +149,9 @@ impl TerminalPalette {
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const LIGHT: Self = Self {
         fg: Rgb::hex(0x1f2328),
-        bg: Rgb::hex(0xffffff),
+        bg: LIGHT_BG,
         cursor: Rgb::hex(0x2f6fdb),
-        cursor_text: Rgb::hex(0xffffff),
+        cursor_text: LIGHT_BG,
         selection: Rgb::hex(0xc9ddfb),
         search_match: Rgb::hex(0xffe9a8),
         search_current: Rgb::hex(0xf5b942),
@@ -854,6 +862,10 @@ mod tests {
         assert_eq!(colors.resolve(Color::Default, false), rgb(1, 2, 3));
         assert_eq!(colors.resolve(Color::Default, true), theme.bg, "not set: the theme's");
         assert_eq!(colors.theme.cursor, rgb(9, 9, 9));
+        for theme in [TerminalPalette::DARK, TerminalPalette::LIGHT] {
+            assert_eq!(theme.cursor_text, theme.bg, "a block cursor cuts out the background");
+            assert!(theme.cursor_text.contrast(theme.cursor) >= 4.5, "and reads on it");
+        }
         assert_eq!(colors.theme.cursor_text, rgb(255, 255, 255), "text reads on a dark cursor");
         let white = ColorOverrides { cursor: Some([255; 3]), ..ColorOverrides::default() };
         assert_eq!(Colors::new(&theme, &white).theme.cursor_text, rgb(0, 0, 0));

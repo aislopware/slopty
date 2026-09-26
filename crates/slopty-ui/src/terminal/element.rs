@@ -642,19 +642,45 @@ fn segment_hash(base: u64, cells: &[Cell], blink_off: bool) -> u64 {
     base.hash(&mut h);
     (blink_off && blinks(cells)).hash(&mut h);
     for cell in cells {
-        cell.text.as_str().hash(&mut h);
+        // By content, without the UTF-8 check `as_str` makes; an ASCII cell by its one byte.
+        match cell.text.as_ascii() {
+            Some(byte) => byte.hash(&mut h),
+            None => cell.text.hash(&mut h),
+        }
         cell.style.hash(&mut h);
         (cell.width as u8).hash(&mut h);
     }
     h.finish()
 }
 
-/// What a word's colours depend on besides its cells: the font family (and whether its
-/// ligatures shape), the palette and the blink clock's phase.
+/// The four faces of the terminal font (regular, bold, italic, bold italic), built once per
+/// frame: building a [`Font`] copies the family and allocates its features and fallbacks, and a
+/// screen of new text asks for one per style run.
+struct Faces([Font; 4]);
+
+impl Faces {
+    fn new(family: &str, ligatures: bool) -> Self {
+        let face = |bold, italic| fonts::terminal_font(family, bold, italic, ligatures);
+        Self([face(false, false), face(true, false), face(false, true), face(true, true)])
+    }
+
+    /// The face `style` is drawn in.
+    const fn get(&self, style: &CellStyle) -> &Font {
+        let [regular, bold, italic, bold_italic] = &self.0;
+        match (style.flags.contains(StyleFlags::BOLD), style.flags.contains(StyleFlags::ITALIC)) {
+            (false, false) => regular,
+            (true, false) => bold,
+            (false, true) => italic,
+            (true, true) => bold_italic,
+        }
+    }
+}
+
+/// What a word's colours depend on besides its cells: the font's faces, the palette and the
+/// blink clock's phase.
 #[derive(Clone, Copy)]
 struct Look<'a> {
-    family: &'a str,
-    ligatures: bool,
+    faces: &'a Faces,
     palette: &'a Colors,
     blink_off: bool,
 }
@@ -668,15 +694,20 @@ fn blinks(cells: &[Cell]) -> bool {
 /// underline or strikethrough is a [`Decoration`], both drawn from the cells, not from the
 /// shaped word). Rows are split into words at these.
 fn plain_space(cell: &Cell) -> bool {
-    cell.width == CellWidth::Narrow && matches!(cell.text.as_str(), "" | " ")
+    // Bytes, not `as_str`: that validates UTF-8 on every call, and this runs per cell per frame.
+    cell.width == CellWidth::Narrow && (cell.text.is_empty() || cell.text.as_ascii() == Some(b' '))
 }
 
 /// A cell drawn from geometry rather than shaped: box drawing, blocks, Braille, Powerline.
 /// It ends a word like a space does, so the font never sees it.
 fn drawn_here(cell: &Cell) -> Option<char> {
-    (cell.width == CellWidth::Narrow && sprite::is_sprite(cell.text.as_str()))
-        .then(|| cell.text.as_str().chars().next())
-        .flatten()
+    // Every sprite character is three or four bytes of UTF-8: text of any other length (all
+    // of ASCII) is rejected without reading it as a `str`.
+    if cell.width != CellWidth::Narrow || !(3..=4).contains(&cell.text.len()) {
+        return None;
+    }
+    let text = cell.text.as_str();
+    sprite::is_sprite(text).then(|| text.chars().next()).flatten()
 }
 
 /// A cell shaped on its own: a digit. Counters, timestamps and sizes make most of a streaming
@@ -894,15 +925,6 @@ fn place(
     glyphs
 }
 
-fn mono_font(family: &str, ligatures: bool, style: &CellStyle) -> Font {
-    fonts::terminal_font(
-        family,
-        style.flags.contains(StyleFlags::BOLD),
-        style.flags.contains(StyleFlags::ITALIC),
-        ligatures,
-    )
-}
-
 /// The shape a focused cursor is drawn in: the program's (DECSCUSR), unless the theme fixes
 /// one (ghostty's `cursor-style`).
 const fn cursor_shape_for(style: slopty_theme::CursorStyle, program: CursorShape) -> CursorShape {
@@ -953,7 +975,7 @@ fn underline_color(style: &CellStyle, palette: &Colors, text: Hsla) -> Hsla {
 fn text_run(len: usize, style: &CellStyle, look: Look<'_>, contrast: &mut Contrast) -> TextRun {
     TextRun {
         len,
-        font: mono_font(look.family, look.ligatures, style),
+        font: look.faces.get(style).clone(),
         color: cell_color(style, look.palette, look.blink_off, contrast),
         background_color: None,
         underline: None,
@@ -1212,7 +1234,8 @@ impl Element for TerminalElement {
                 let alpha = if held { alpha::PRESSED } else { alpha::TINT };
                 (hsla_alpha(palette.theme.fg, alpha * shown), state.history_len(), view_offset)
             });
-            let look = |blink_off| Look { family: &family, ligatures, palette, blink_off };
+            let faces = Faces::new(&family, ligatures);
+            let look = |blink_off| Look { faces: &faces, palette, blink_off };
 
             cache.words.begin(WORD_BUDGET);
             let base = hash_base(base_size, base_cell_width, &family, ligatures, palette);
@@ -1283,13 +1306,26 @@ impl Element for TerminalElement {
                 let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
                 let mut decorations: Vec<Decoration> = Vec::new();
                 let mut sprites: Vec<SpriteCell> = Vec::new();
+                // The last background resolved: a run of one colour converts it once.
+                let mut last_bg: Option<(slopty_grid::Color, bool, Hsla)> = None;
                 for (col, cell) in cells.iter().enumerate() {
                     let col = u16::try_from(col).unwrap_or(u16::MAX);
                     let inverse = cell.style.flags.contains(StyleFlags::INVERSE);
                     let bg = if inverse { cell.style.fg } else { cell.style.bg };
                     let is_default_bg = !inverse && matches!(bg, slopty_grid::Color::Default);
                     if !is_default_bg {
-                        let color = hsla(palette.resolve(bg, !inverse));
+                        let color = match last_bg {
+                            Some((slot, was_inverse, color))
+                                if slot == bg && was_inverse == inverse =>
+                            {
+                                color
+                            }
+                            _ => {
+                                let color = hsla(palette.resolve(bg, !inverse));
+                                last_bg = Some((bg, inverse, color));
+                                color
+                            }
+                        };
                         if let Some((_start, end, c)) = quads.last_mut()
                             && *end == col
                             && *c == color
@@ -2321,12 +2357,8 @@ mod tests {
             ];
             let word = cx.update(|window, _| {
                 let colors = Colors::from(&Theme::default().terminal);
-                let look = Look {
-                    family: fonts::MONO_FAMILY,
-                    ligatures: true,
-                    palette: &colors,
-                    blink_off: false,
-                };
+                let faces = Faces::new(fonts::MONO_FAMILY, true);
+                let look = Look { faces: &faces, palette: &colors, blink_off: false };
                 shape_cells(
                     window.text_system(),
                     &cells,

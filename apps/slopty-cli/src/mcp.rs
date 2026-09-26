@@ -236,6 +236,7 @@ mod tests {
             detail: Some("Waiting for permission: Bash".to_owned()),
             attention: true,
             source: AgentSource::Hook,
+            since_ms: 0,
         }
     }
 

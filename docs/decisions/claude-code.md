@@ -976,3 +976,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `install_collapses_duplicate_relays`,
   `a_large_tool_payload_is_forwarded_as_the_fields_the_daemon_reads`,
   `the_socket_is_the_data_dirs_when_its_daemon_is_installed`, `the_data_dir_is_global`.
+
+- ✅ **An agent's status carries when its phase began** (2026-09-27, so a client can show how
+  long a turn has run, as monocode's live list does). `AgentEvent.since_ms` and
+  `SessionAgent.since_ms` are the worker's clock in ms since the epoch, 0 with no agent. The
+  stamp moves only when the status enters a new phase (none, idle, busy, blocked, done): a tool
+  call inside a turn keeps it. `slopty_agent::Tracker::enter` is the one place it is set, and the
+  worker's replayed table and the server's resync both carry it, so a client that joins or
+  reconnects reads the same start. The wire goldens moved (`worker_agent_hook`,
+  `worker_agent_process`, `worker_session_opened`). Test:
+  `the_status_is_stamped_when_its_phase_changes`.

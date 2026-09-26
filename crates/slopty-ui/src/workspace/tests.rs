@@ -1090,6 +1090,7 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
                 detail: None,
                 attention: true,
                 source: AgentSource::Hook,
+                since_ms: 0,
             },
             cx,
         );
@@ -1114,7 +1115,7 @@ fn the_summaries_seed_the_agents_before_any_event(cx: &mut TestAppContext) {
     let key = WorkerKey::new(7);
     let (waiting, working) = (SessionId::new(), SessionId::new());
     let with = |session, status, source| SessionSummary {
-        agent: Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source }),
+        agent: Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source, since_ms: 0 }),
         ..summary(session, None)
     };
     let permission = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() });
@@ -1170,6 +1171,7 @@ fn blocked(session: SessionId) -> AgentEvent {
         detail: None,
         attention: true,
         source: AgentSource::Hook,
+        since_ms: 0,
     }
 }
 

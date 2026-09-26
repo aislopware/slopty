@@ -70,6 +70,7 @@ mod tests {
             kind: AgentKind::ClaudeCode,
             status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
             source: AgentSource::Hook,
+            since_ms: 0,
         }
     }
 

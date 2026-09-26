@@ -999,7 +999,8 @@ mod tests {
         let with_agent = |mut summary: SessionSummary, status: AgentStatus| {
             let source =
                 if blocked(&status).is_some() { AgentSource::Hook } else { AgentSource::Title };
-            summary.agent = Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source });
+            summary.agent =
+                Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source, since_ms: 0 });
             summary
         };
         let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
@@ -1090,6 +1091,7 @@ mod tests {
             kind: AgentKind::ClaudeCode,
             status: AgentStatus::Blocked(BlockReason::Question),
             source: AgentSource::Hook,
+            since_ms: 0,
         };
         let json = serde_json::to_value(agent(Some(&blocked))).unwrap();
         assert_eq!(

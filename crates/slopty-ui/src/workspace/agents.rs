@@ -120,7 +120,8 @@ impl WorkspaceView {
     ) {
         let mut seeded = false;
         for summary in sessions {
-            let Some(SessionAgent { kind, status, source }) = summary.agent.clone() else {
+            let Some(SessionAgent { kind, status, source, since_ms }) = summary.agent.clone()
+            else {
                 continue;
             };
             if status == AgentStatus::None || self.agents.contains_key(&summary.id) {
@@ -140,6 +141,7 @@ impl WorkspaceView {
                     detail: None,
                     attention: false,
                     source,
+                    since_ms,
                 },
             );
             seeded = true;

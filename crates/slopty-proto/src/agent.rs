@@ -78,6 +78,11 @@ pub struct SessionAgent {
     /// Where the status came from; anything short of [`AgentSource::Hook`] means the hooks are
     /// not installed (or have not spoken yet).
     pub source: AgentSource,
+    /// When the status last entered its phase, in milliseconds since the Unix epoch by the
+    /// worker's clock: busy (working or a tool), blocked, done or idle. A tool call inside a
+    /// turn keeps the stamp, so a client reads how long the turn has run, and since the
+    /// worker's table carries it, a client that reconnects reads the same. `0` with no agent.
+    pub since_ms: u64,
 }
 
 /// Worker → client.
@@ -97,10 +102,20 @@ pub struct AgentEvent {
     pub attention: bool,
     /// Where the status came from.
     pub source: AgentSource,
+    /// When the status last entered its phase, in milliseconds since the Unix epoch by the
+    /// worker's clock: busy (working or a tool), blocked, done or idle. A tool call inside a
+    /// turn keeps the stamp, so a client reads how long the turn has run, and since the
+    /// worker's table carries it, a client that reconnects reads the same. `0` with no agent.
+    pub since_ms: u64,
 }
 
 impl From<&AgentEvent> for SessionAgent {
     fn from(event: &AgentEvent) -> Self {
-        Self { kind: event.kind, status: event.status.clone(), source: event.source }
+        Self {
+            kind: event.kind,
+            status: event.status.clone(),
+            source: event.source,
+            since_ms: event.since_ms,
+        }
     }
 }

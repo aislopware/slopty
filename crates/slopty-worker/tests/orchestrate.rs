@@ -37,7 +37,12 @@ mod orchestrate {
     impl Agents for Table {
         fn status(&self, _session: SessionId) -> Option<SessionAgent> {
             let status = self.0.lock().clone()?;
-            Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source: AgentSource::Hook })
+            Some(SessionAgent {
+                kind: AgentKind::ClaudeCode,
+                status,
+                source: AgentSource::Hook,
+                since_ms: 0,
+            })
         }
 
         fn forget(&self, _session: SessionId) {}
@@ -52,6 +57,7 @@ mod orchestrate {
             detail: None,
             attention: true,
             source: AgentSource::Hook,
+            since_ms: 0,
         })
     }
 

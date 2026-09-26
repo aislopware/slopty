@@ -59,8 +59,9 @@ pub enum Change {
     Moved(WorkerId),
     /// A worker a full directory no longer lists.
     Unlisted(WorkerId),
-    /// Something happened on a worker.
-    Event(Event),
+    /// Something happened on a worker, boxed: an agent's event is over 200 bytes, the other
+    /// changes under 20.
+    Event(Box<Event>),
 }
 
 /// Whether to dial a worker now, and where.
@@ -149,7 +150,7 @@ impl Directory {
                 changes
             }
             FromServer::Worker(info) => self.upsert(info),
-            FromServer::Event(event) => vec![Change::Event(event)],
+            FromServer::Event(event) => vec![Change::Event(Box::new(event))],
             FromServer::Welcome { .. }
             | FromServer::Refused(_)
             | FromServer::Request { .. }
@@ -366,7 +367,10 @@ mod tests {
         let worker = WorkerId::new();
         let session = slopty_core::SessionId::new();
         let event = Event::SessionClosed { worker, session };
-        assert_eq!(linked().apply(FromServer::Event(event.clone())), vec![Change::Event(event)]);
+        assert_eq!(
+            linked().apply(FromServer::Event(event.clone())),
+            vec![Change::Event(Box::new(event))]
+        );
     }
 
     #[test]

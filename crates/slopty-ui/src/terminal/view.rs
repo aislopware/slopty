@@ -6877,6 +6877,140 @@ mod tests {
         );
     }
 
+    /// `count` rows of dense coloured text `cols` wide, from `seed`: what `ls --color`, a
+    /// syntax-coloured diff or `htop` fill a screen with. Every word takes one of the sixteen
+    /// ANSI colours or a true colour, every third is bold, and every fifth sits on a background
+    /// of its own, so a row carries a dozen style runs and several background runs. `painted`
+    /// puts every other word on a true-colour background too, as a full-screen program's colour
+    /// scheme (`vim` with a theme) paints every cell.
+    fn dense_rows(seed: u32, count: usize, cols: u16, painted: bool) -> Vec<Line> {
+        use slopty_grid::{Color, StyleFlags};
+        let text = prose(seed, count, usize::from(cols));
+        text.iter()
+            .enumerate()
+            .map(|(row, text)| {
+                let mut cells = Vec::with_capacity(usize::from(cols));
+                for (word, piece) in text.split_inclusive(' ').enumerate() {
+                    let k = row.wrapping_mul(31).wrapping_add(word);
+                    let low = |n: usize| u8::try_from(n % 256).unwrap_or(0);
+                    let fg = if k % 4 == 0 {
+                        Color::Rgb(low(k.wrapping_mul(37)), low(k.wrapping_mul(71)), 200)
+                    } else {
+                        Color::Palette(low((k % 15).wrapping_add(1)))
+                    };
+                    let bg = if k % 5 == 0 {
+                        Color::Palette(low((k % 7).wrapping_add(1)))
+                    } else if painted {
+                        Color::Rgb(30, 30, 46)
+                    } else {
+                        Color::Default
+                    };
+                    let flags = if k % 3 == 0 { StyleFlags::BOLD } else { StyleFlags::empty() };
+                    let style = Style { fg, bg, flags, ..Style::DEFAULT };
+                    cells.extend(piece.chars().map(|c| Cell::narrow(c, style)));
+                }
+                cells.resize(usize::from(cols), Cell::BLANK);
+                cells.truncate(usize::from(cols));
+                Line { cells, ..Line::from_text("", cols, Style::DEFAULT) }
+            })
+            .collect()
+    }
+
+    /// What a full 200 × 60 screen of dense coloured text costs a frame, four ways: redrawn
+    /// unchanged (a blink, a hover, a neighbour's frame), scrolled by a line a frame (a
+    /// flood following output), replaced whole every frame (`cat` of a large file), and
+    /// redrawn unchanged with every cell on a background (a full-screen program's theme). Each
+    /// sample is the frame applied and drawn. Prints the numbers MEASUREMENTS records; run by
+    /// hand, in release:
+    /// `cargo test -p slopty-ui --release --lib dense_screen_cost -- --ignored --nocapture`.
+    #[gpui::test]
+    #[ignore = "measurement, run by hand"]
+    fn dense_screen_cost(cx: &mut TestAppContext) {
+        const COLS: u16 = 200;
+        const ROWS: u16 = 60;
+        const FRAMES: usize = 600;
+        const WARM: usize = 60;
+        let rows = usize::from(ROWS);
+        let (tx, _rx) = mpsc::channel(1 << 16);
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let size = TermSize { cols: COLS, rows: ROWS, ..TermSize::default() };
+            let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(2000.0), px(1400.0)));
+        cx.run_until_parked();
+        let pool = dense_rows(0x2545_f491, 4_000, COLS, false);
+        let painted = dense_rows(0x9e37_79b9, rows, COLS, true);
+        let frame = |seq: u64, first: usize, changed: std::ops::Range<usize>, pool: &[Line]| {
+            let updates = changed
+                .map(|row| RowUpdate {
+                    row: u16::try_from(row).unwrap(),
+                    line: pool[first.wrapping_add(row).checked_rem(pool.len()).unwrap()].clone(),
+                })
+                .collect();
+            TermEvent::Frame(Frame {
+                seq,
+                full: seq == 1,
+                epoch: 0,
+                cols: COLS,
+                rows: ROWS,
+                cursor: Cursor::default(),
+                modes: TermModes::empty(),
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(u64::try_from(first).unwrap()),
+                total_lines: u64::try_from(first.saturating_add(rows)).unwrap(),
+                input_ack: 0,
+                images: Vec::new(),
+                updates,
+            })
+        };
+        let mut seq = 0_u64;
+        let mut first = 0_usize;
+        let draw = |event: Option<TermEvent>, cx: &mut VisualTestContext| {
+            let started = Instant::now();
+            view.update_in(cx, |view, _window, cx| match event {
+                Some(event) => view.apply(event, cx),
+                None => cx.notify(),
+            });
+            cx.run_until_parked();
+            started.elapsed()
+        };
+        let mut next = |scroll: usize, whole: bool| {
+            seq = seq.saturating_add(1);
+            first = first.saturating_add(scroll);
+            let changed = if whole { 0..rows } else { rows.saturating_sub(scroll.max(1))..rows };
+            frame(seq, first, changed, &pool)
+        };
+        draw(Some(next(0, true)), cx);
+        let renders = view.read_with(cx, |v, _| v.renders());
+        let run = |make: &mut dyn FnMut() -> Option<TermEvent>, cx: &mut VisualTestContext| {
+            let mut samples: Vec<Duration> = std::iter::repeat_with(|| draw(make(), cx))
+                .take(WARM + FRAMES)
+                .skip(WARM)
+                .collect();
+            samples.sort_unstable();
+            let at = |q: usize| samples[(samples.len().saturating_sub(1)).saturating_mul(q) / 100];
+            format!("{:?} / {:?} / {:?} / {:?}", at(50), at(95), at(99), at(100))
+        };
+        let unchanged = run(&mut || None, cx);
+        let flood = run(&mut || Some(next(1, false)), cx);
+        let replaced = run(&mut || Some(next(rows, true)), cx);
+        let (seq, first) = (seq.saturating_add(1), first.saturating_add(rows));
+        draw(Some(frame(seq, first, 0..rows, &painted)), cx);
+        let backed = run(&mut || None, cx);
+        let drawn = view.read_with(cx, |v, _| v.renders()).saturating_sub(renders);
+        assert!(usize::try_from(drawn).is_ok_and(|d| d >= 4 * (WARM + FRAMES)), "every frame drew");
+        let shaped = cx.update(|_window, cx| crate::terminal::element::shaped_words(cx));
+        println!(
+            "MEASURE dense screen {COLS} × {ROWS}, frame applied and drawn (p50 / p95 / p99 / \
+             max, {FRAMES} frames each): unchanged {unchanged} · a line a frame {flood} · a \
+             screen a frame {replaced} · every cell on a background, unchanged {backed} · \
+             words shaped {shaped}"
+        );
+    }
+
     /// Every message the worker received that types or clears, oldest first, as one word each.
     fn drain_words(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<String> {
         let mut out = Vec::new();

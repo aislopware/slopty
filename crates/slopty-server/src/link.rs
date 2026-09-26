@@ -245,7 +245,7 @@ impl Told {
             msgs.push(FromServer::Event(Event::SessionOpened { worker, summary }));
             if let Some(agent) = agent {
                 agents.insert((worker, session));
-                let event = quiet(session, agent.kind, agent.status, agent.source);
+                let event = quiet(session, agent.kind, agent.status, agent.source, agent.since_ms);
                 msgs.push(FromServer::Event(Event::Agent { worker, event }));
             }
         }
@@ -254,7 +254,7 @@ impl Told {
                 continue;
             }
             msgs.push(FromServer::Event(if open.contains(&(worker, session)) {
-                Event::Agent { worker, event: quiet(session, kind, AgentStatus::None, source) }
+                Event::Agent { worker, event: quiet(session, kind, AgentStatus::None, source, 0) }
             } else {
                 Event::SessionClosed { worker, session }
             }));
@@ -268,6 +268,7 @@ const fn quiet(
     kind: AgentKind,
     status: AgentStatus,
     source: AgentSource,
+    since_ms: u64,
 ) -> AgentEvent {
     AgentEvent {
         session,
@@ -277,6 +278,7 @@ const fn quiet(
         detail: None,
         attention: false,
         source,
+        since_ms,
     }
 }
 
@@ -297,7 +299,7 @@ mod tests {
     use crate::hub::tests::{registration, summary};
 
     fn report(session: SessionId, status: AgentStatus) -> ToServer {
-        ToServer::Agent(quiet(session, AgentKind::ClaudeCode, status, AgentSource::Hook))
+        ToServer::Agent(quiet(session, AgentKind::ClaudeCode, status, AgentSource::Hook, 0))
     }
 
     /// What a client shows of the agents the server reports, as the app keeps it: the status

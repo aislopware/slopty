@@ -84,6 +84,7 @@ mod tests {
             kind: AgentKind::ClaudeCode,
             status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
             source: AgentSource::Hook,
+            since_ms: 0,
         }
     }
 
@@ -386,6 +387,7 @@ mod tests {
             detail: Some("Which branch?".to_owned()),
             attention: true,
             source: AgentSource::Hook,
+            since_ms: 0,
         };
         let pushed = FromServer::Event(Event::Agent { worker: studio(), event });
         fake.push.send(Some(pushed)).unwrap();

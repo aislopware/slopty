@@ -261,6 +261,27 @@ pub struct Tracker {
     /// Calls waiting on the human (a permission, a question) by `tool_use_id`: the agent
     /// fires calls in batches, so a result from beside one of these does not release it.
     blocks: BTreeSet<String>,
+    /// When the status entered its [`phase`] (Unix ms), what [`AgentEvent::since_ms`] says.
+    since_ms: u64,
+}
+
+/// The part of a status an elapsed time runs across: a tool call inside a turn is still the
+/// turn, and a second question while blocked is still the wait.
+const fn phase(status: &AgentStatus) -> u8 {
+    match status {
+        AgentStatus::None => 0,
+        AgentStatus::Idle => 1,
+        AgentStatus::Working | AgentStatus::Tool { .. } => 2,
+        AgentStatus::Blocked(_) => 3,
+        AgentStatus::Done => 4,
+    }
+}
+
+/// Now, in milliseconds since the Unix epoch; a clock set before 1970 reads as the epoch.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 impl Default for Tracker {
@@ -277,6 +298,7 @@ impl Default for Tracker {
             absent: 0,
             process: None,
             blocks: BTreeSet::new(),
+            since_ms: 0,
         }
     }
 }
@@ -305,7 +327,16 @@ impl Tracker {
             detail: self.detail.clone(),
             attention: false,
             source: self.source,
+            since_ms: self.since_ms,
         }
+    }
+
+    /// Take `status`, stamping the time when it starts a new phase.
+    fn enter(&mut self, status: AgentStatus) {
+        if phase(&status) != phase(&self.status) {
+            self.since_ms = if status == AgentStatus::None { 0 } else { now_ms() };
+        }
+        self.status = status;
     }
 
     /// Apply one hook; the resulting event when the visible state changed.
@@ -340,7 +371,7 @@ impl Tracker {
         if status == self.status && detail == self.detail && self.source == AgentSource::Hook {
             return None;
         }
-        self.status = status;
+        self.enter(status);
         self.detail = detail;
         self.source = AgentSource::Hook;
         if self.status == AgentStatus::None {
@@ -447,7 +478,7 @@ impl Tracker {
         // for the first time is usually a conversation that ended hours ago.
         let attention = status == AgentStatus::Done
             && matches!(self.status, AgentStatus::Working | AgentStatus::Tool { .. });
-        self.status = status;
+        self.enter(status);
         self.detail = detail;
         self.source = source;
         Some(AgentEvent { attention, ..self.event(session) })
@@ -807,6 +838,36 @@ mod tests {
     /// and posts its own hooks: they are dropped while the agent is busy, so its start does
     /// not clear the tool and its stop does not mint a "finished". A new session id is taken
     /// once the agent is at rest (a restart), or at once when the human started it.
+    /// The stamp moves when the status starts a new phase and holds across a tool call inside a
+    /// turn, and the event a joining client is sent carries it: the elapsed time survives a
+    /// reconnect. Stamps are backdated by hand so a change is visible without waiting.
+    #[test]
+    fn the_status_is_stamped_when_its_phase_changes() {
+        const EARLIER: u64 = 1_000;
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        assert_eq!(t.event(sid).since_ms, 0, "no agent, no stamp");
+        let before = now_ms();
+        let prompt = hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"go"}"#);
+        let e = t.apply(sid, &prompt).expect("working");
+        assert!(e.since_ms >= before, "stamped from the clock: {}", e.since_ms);
+        t.since_ms = EARLIER;
+        let tool = hook(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        );
+        let e = t.apply(sid, &tool).expect("tool");
+        assert_eq!(e.since_ms, EARLIER, "a tool call is still the turn");
+        let post = hook(r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#);
+        assert_eq!(t.apply(sid, &post).expect("working").since_ms, EARLIER);
+        let e = t.apply(sid, &hook(r#"{"hook_event_name":"Stop"}"#)).expect("done");
+        assert!(e.since_ms >= before, "done is a new phase");
+        assert_eq!(t.event(sid).since_ms, e.since_ms, "a joining client reads the same stamp");
+        let agent = slopty_proto::agent::SessionAgent::from(&t.event(sid));
+        assert_eq!(agent.since_ms, e.since_ms, "and so does a summary");
+        let e = t.apply(sid, &hook(r#"{"hook_event_name":"SessionEnd"}"#)).expect("gone");
+        assert_eq!(e.since_ms, 0, "an ended agent has no stamp");
+    }
+
     #[test]
     fn a_nested_run_does_not_take_over_a_busy_agent() {
         let sid = SessionId::new();

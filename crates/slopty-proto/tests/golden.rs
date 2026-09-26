@@ -221,6 +221,7 @@ mod golden {
                 detail: Some("$ cargo test".to_owned()),
                 attention: true,
                 source: AgentSource::Hook,
+                since_ms: 1_790_000_060_000,
             }),
         );
         // The same session attributed without hooks: the pill is the same, the source is not.
@@ -234,6 +235,7 @@ mod golden {
                 detail: None,
                 attention: false,
                 source: AgentSource::Process,
+                since_ms: 1_790_000_060_000,
             }),
         );
         snap("client_install_hooks", &ClientMsg::InstallHooks);
@@ -270,6 +272,7 @@ mod golden {
                     kind: slopty_proto::agent::AgentKind::ClaudeCode,
                     status: slopty_proto::agent::AgentStatus::Working,
                     source: slopty_proto::agent::AgentSource::Hook,
+                    since_ms: 1_790_000_060_000,
                 }),
             }),
         );
