@@ -18,6 +18,7 @@ rmcp = { workspace = true, features = [ "transport-streamable-http-server" ] }
 serde_json.workspace = true
 slopty-core.workspace = true
 slopty-net.workspace = true
+slopty-tailnet.workspace = true
 slopty-proto.workspace = true
 slopty-tools.workspace = true
 socket2.workspace = true
@@ -26,5 +27,6 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+slopty-tailnet = { workspace = true, features = [ "fake" ] }
 tempfile.workspace = true
 tokio = { workspace = true, features = [ "test-util" ] }

@@ -1,4 +1,4 @@
-# Decisions — Topology: one server, many workers, many clients
+# Decisions — Topology: one server, many workers, many s
 
 See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
@@ -79,9 +79,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **Admission without crypto** (2026-09-24). Every listener (worker and server) accepts a
   connection only from loopback, Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48) or private LAN
   ranges, checked once per connection.
-  - ⏸ Tailscale roles are a later refinement: the server can read the peer's node and custom
-    app-capability grants (`slopty.dev/cap/role: worker|client|agent`) through LocalAPI WhoIs.
-    This is deferred because it does not carry over to a plain VPN.
+  - Superseded in part 2026-09-26 by **Tailscale is the network, and its LocalAPI says who is
+    calling**: the tailnet is checked through whois and grants, and the LAN is no longer a
+    default.
 
 - ✅ **Workers go cross-platform behind traits in the worker crate; wire types are already
   neutral** (2026-09-24). Keys travel as W3C `KeyboardEvent.code`, display ids are opaque
@@ -499,3 +499,71 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   changes becomes one write of the latest. Disconnecting from the server removes the file
   through the same task, so a write still running cannot bring the file back. Test:
   `a_burst_of_directory_changes_leaves_the_last_one_cached_and_a_removal_removes_it`.
+
+- ✅ **Tailscale is the network, and its LocalAPI says who is calling** (2026-09-26, at the user's
+  request to build on Tailscale and compatible control servers such as Headscale and slopscale
+  rather than reinvent a mesh). The research, with sources, is `.research/tailscale-2026-09-26.md`.
+  - **Use the installed daemon; embed nothing.** Slopty reads the Tailscale already running on the
+    machine through its LocalAPI (`slopty-tailnet`, hyper over loopback TCP or the daemon's unix
+    socket). All three macOS installs are found without a shell-out: the App Store extension's
+    port and token from the name of the file it holds open (read through libproc,
+    `slopty_platform::proc_files`, as `lsof` would), the standalone app's `ipnport` and
+    `sameuserproof-<port>`, and `tailscaled`'s socket. The token never reaches a log.
+    - Rejected for now: embedding a node. libtailscale adds 21 MB and a Go runtime and hands
+      out stream socketpairs that QUIC datagrams cannot ride; tsnet's userspace netstack
+      uploads at a fraction of the kernel path; tailscale-rs 0.6 has no iOS, no peer relays
+      and no app capabilities. Revisit tailscale-rs when it has iOS and app capabilities.
+    - Rejected: `tailscale-localapi` 0.6, which covers status, cert and whois without
+      `CapMap`.
+  - **Admission asks whois; roles come from grants.** This replaces the source-address ruling
+    above and in `workers.md` for the tailnet. Loopback and the `[worker] allow` ranges (a plain
+    VPN) are let in as anything, by address. A tailnet address is looked up with
+    `whois?addr=ip:port` on the connection's own task, before the handshake:
+    - a node of the user this machine belongs to gets every role;
+    - any other node, another user's or a tagged one, gets the roles a tailnet grant gives it
+      under the app capability `github.com/aislopware/slopty` (`{"roles":["client","agent",
+      "worker"]}`), which Headscale 0.29 passes through verbatim;
+    - an address no node has, a node with no role, or a daemon that fails is refused.
+    - Where no daemon this process can read runs, a tailnet address is let in by address.
+      The machine's owner is read from status at most once a minute.
+  - **The LAN is no longer a default.** RFC 1918, ULA and link-local ranges were let in by
+    address; with Tailscale as the network they are only what `[worker] allow` lists.
+  - **Refusal in the role.** A worker closes a connection whose node lacks the client or agent
+    role with `NOT_GRANTED`. The server answers a hello whose role is not granted with
+    `Refusal::NotGranted`, and a refused worker keeps redialling, since a policy change can
+    grant it. The MCP endpoint wants the agent role.
+  - **Finding the server.** With no `--server`, `$SLOPTY_SERVER` or `[client] server`, the CLI
+    tries every online node the status lists with a bare QUIC handshake on the server port, all
+    at once, within 1.5 s (`slopty_net::discover`). A node tagged `tag:slopty-server` comes
+    first, then this machine, then the rest; phones are skipped. The handshake registers
+    nothing, and the port and the lease ALPN are what mark a server.
+    - Rejected: `MagicDNS` SRV/TXT records (control pushes A/AAAA only), Tailscale Services
+      (TCP only, tagged hosts, missing in Headscale), and control-plane APIs, which differ per
+      control server.
+    - A worker still joins only the server it is told, since joining is a trust decision.
+  - **A worker on the server's machine.** It dials over loopback, and the server used to
+    publish it at `127.0.0.1`, which no other machine can dial. The server now publishes it at
+    the machine's tailnet IPv4 when Tailscale gives one.
+  - **Paths.** The worker reads status every 2 s while any tailnet client is connected (one
+    reader for all of them) and tells each client how its packets travel: direct, peer relay,
+    or DERP with the region (`WorkerMsg::Path`, sent on each change). DERP is TCP through a
+    relay and the slow path, so a client can say so rather than leave a slow stream
+    unexplained.
+    - Deferred: a disco ping to warm a path before the first stream. The connection the app
+      opens at launch already starts disco.
+  - **Doctor.** `slopty worker doctor` names this Mac's node and address, or says Tailscale is
+    down, or that the daemon can read none and admits tailnet addresses by address alone.
+  - **Open.** Tailscale on Linux drops CGNAT-sourced packets that arrive off the tunnel; no such
+    filter was found for darwin, and macOS is a weak-host stack. A host on the same LAN could
+    send packets with a tailnet source address, and with no encryption on the wire only the
+    unpredictability of the QUIC handshake stands in its way.
+  - Tests: `slopty_tailnet` (the three locations, status paths, whois, grants, the LocalAPI
+    against a fake daemon, and `this_machine_is_its_own_users_node` against the real one),
+    `slopty_net::admission`'s `the_tailnet_says_who_is_calling_and_what_they_may_do` and
+    `without_a_daemon_the_tailnet_is_let_in_by_address_and_the_lan_is_not`,
+    `slopty_platform::proc_files`, `slopty_net::discover`'s
+    `the_tagged_server_is_tried_first_and_phones_never` and
+    `a_listening_server_answers_and_a_closed_port_does_not`, the server's
+    `a_worker_on_the_servers_machine_is_published_at_its_tailnet_address`, the worker's
+    `a_client_hears_its_path_when_it_changes_and_only_then`, and the CLI's
+    `doctor_report_names_the_binary_and_flags_missing_permissions`.

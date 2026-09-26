@@ -17,6 +17,7 @@ mod paths;
 mod ports;
 mod screens;
 mod server;
+pub mod tailnet;
 mod tunnel;
 mod xfer;
 
@@ -90,13 +91,13 @@ struct Args {
     drop_dir: Option<PathBuf>,
 }
 
-/// Who may connect: the `[worker] allow` ranges of `settings.toml` in `data_dir`, else the
-/// defaults. A range that does not parse is logged and skipped; a list with none left falls
-/// back to the defaults, which are private networks only.
+/// Who may connect: loopback, the tailnet as this machine's Tailscale vouches for it, and the
+/// `[worker] allow` ranges of `settings.toml` in `data_dir` by address. A range that does not
+/// parse is logged and skipped.
 fn admission(data_dir: &std::path::Path) -> Admission {
     let loaded = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir));
     if let Some(e) = &loaded.error {
-        tracing::warn!(error = %e, "settings.toml ignored; admitting the default ranges");
+        tracing::warn!(error = %e, "settings.toml ignored; admitting no extra ranges");
     }
     let allow = loaded
         .settings
@@ -147,6 +148,8 @@ pub struct Daemon {
     /// Sleep policy: awake while a client is attached, display on while a stream is live.
     pub wake:
         Arc<parking_lot::Mutex<slopty_worker::wake::Wake<Box<dyn slopty_worker::wake::Holds>>>>,
+    /// How each client's packets travel, from this machine's Tailscale.
+    pub paths: tailnet::Paths,
 }
 
 impl Daemon {
@@ -310,6 +313,7 @@ async fn run() -> Result<()> {
         let wake = Arc::clone(&wake);
         move |live| wake.lock().streams(live)
     });
+    let listener_api = listener.admission().local_api().cloned();
     let daemon = Daemon {
         worker,
         listener,
@@ -332,6 +336,7 @@ async fn run() -> Result<()> {
         listen,
         screens,
         wake,
+        paths: tailnet::Paths::spawn(listener_api),
     };
     let transfers = Arc::clone(&daemon.transfers);
     tokio::task::spawn_blocking(move || {
@@ -473,23 +478,16 @@ async fn run() -> Result<()> {
 mod tests {
     use super::admission;
 
+    /// The ranges come from the settings, a range that does not parse is skipped, and with
+    /// none listed no LAN is let in by address: only loopback and the tailnet.
     #[test]
     fn the_allow_list_comes_from_settings_and_a_bad_range_is_skipped() {
-        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let none = admission(dir.path());
-        assert!(none.admits(ip("192.168.1.9")) && none.admits(ip("100.64.0.1")), "defaults");
-        assert!(!none.admits(ip("8.8.8.8")));
-
+        assert!(admission(dir.path()).ranges().is_empty(), "no LAN by default");
         let settings = "[worker]\nallow = [\"10.0.0.0/8\", \"bogus\"]\n";
         std::fs::write(dir.path().join("settings.toml"), settings).unwrap();
         let listed = admission(dir.path());
-        assert!(listed.admits(ip("10.1.2.3")));
-        assert!(!listed.admits(ip("192.168.1.9")), "the list replaces the defaults");
-        assert!(listed.admits(ip("::1")), "loopback always");
-
-        std::fs::write(dir.path().join("settings.toml"), "[worker]\nallow = [\"bogus\"]\n")
-            .unwrap();
-        assert_eq!(admission(dir.path()), none, "nothing usable left: the defaults, not everyone");
+        let ranges: Vec<String> = listed.ranges().iter().map(ToString::to_string).collect();
+        assert_eq!(ranges, ["10.0.0.0/8"]);
     }
 }

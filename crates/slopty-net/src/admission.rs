@@ -1,13 +1,26 @@
-//! Which peers a worker lets in: decided once per incoming connection, by source address.
+//! Which peers a listener lets in, and in what role: decided once per incoming connection.
 //!
-//! With no encryption and no pairing, the network is the boundary: a worker answers loopback,
-//! its tailnet and the private LAN it sits on, and nothing else. A peer outside those ranges
-//! is refused before the handshake, so it costs one packet and no state.
+//! With no encryption and no pairing, the tailnet is the boundary, and Tailscale says who is on
+//! the other end. A peer is let in when it is:
+//!
+//! * on loopback, as anything;
+//! * in a range the settings list (`[worker] allow`, for a plain VPN), as anything, since an
+//!   address is all such a network says;
+//! * a node of the tailnet the local Tailscale vouches for: the user's own machines as anything,
+//!   another user's or a tagged node in the roles a tailnet grant gives it
+//!   (`slopty_tailnet::policy`). Where no Tailscale this process can read is running, a tailnet
+//!   address is let in by address, as before there was a daemon to ask.
+//!
+//! Anything else is refused before the handshake, so it costs one packet and no state.
 
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use slopty_tailnet::{Grant, LocalApi};
 
 use crate::NetError;
 
@@ -94,70 +107,168 @@ impl From<Cidr> for String {
     }
 }
 
-/// The ranges admitted when the worker settings name none: private networks only.
-pub const DEFAULT_ALLOW: &[&str] = &[
-    // Tailscale: its CGNAT block and its IPv6 ULA prefix.
-    "100.64.0.0/10",
-    "fd7a:115c:a1e0::/48",
-    // RFC 1918 LANs.
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    // Unique local IPv6 (other VPNs, some LANs).
-    "fc00::/7",
-    // Link-local, both families.
-    "169.254.0.0/16",
-    "fe80::/10",
-];
+/// Tailscale's addresses: its CGNAT block and its IPv6 ULA prefix.
+pub const TAILNET: &[&str] = &["100.64.0.0/10", "fd7a:115c:a1e0::/48"];
 
-/// Who may connect: loopback always, then the configured ranges.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// How long the local node's owner is taken as read before it is asked again.
+const OWNER_TTL: Duration = Duration::from_secs(60);
+
+/// What the check decided of a peer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Verdict {
+    /// Let in, in the roles the grant gives.
+    Admit(Grant),
+    /// Refused, and why, for the log.
+    Refuse(&'static str),
+}
+
+/// Who may connect: loopback always, the listed ranges, and the tailnet by its word.
+#[derive(Clone, Debug)]
 pub struct Admission {
     allow: Vec<Cidr>,
+    tailnet: Option<Tailnet>,
+}
+
+/// The local Tailscale, and the user this node belongs to as it last said.
+#[derive(Clone, Debug)]
+struct Tailnet {
+    api: LocalApi,
+    owner: Arc<Mutex<Option<Owner>>>,
+}
+
+/// The user the local node belongs to, `None` when it is tagged, and when that was read.
+#[derive(Clone, Copy, Debug)]
+struct Owner {
+    read: Instant,
+    user: Option<i64>,
 }
 
 impl Admission {
-    /// Loopback plus `allow`; an empty `allow` means [`DEFAULT_ALLOW`]. A list replaces the
-    /// defaults rather than adding to them, so it can narrow as well as widen.
+    /// Loopback, the ranges in `allow`, and the tailnet through this machine's Tailscale when
+    /// one is running that this process can read.
     #[must_use]
     pub fn new(allow: Vec<Cidr>) -> Self {
-        if allow.is_empty() { Self::default() } else { Self { allow } }
+        Self::with_tailnet(allow, LocalApi::find())
     }
 
-    /// Whether a peer at `ip` may connect.
+    /// Loopback, `allow`, and the tailnet through `api`; without one, a tailnet address is let
+    /// in by address.
     #[must_use]
-    pub fn admits(&self, ip: IpAddr) -> bool {
-        ip.to_canonical().is_loopback() || self.allow.iter().any(|c| c.contains(ip))
+    pub fn with_tailnet(allow: Vec<Cidr>, api: Option<LocalApi>) -> Self {
+        let tailnet = api.map(|api| Tailnet { api, owner: Arc::default() });
+        Self { allow, tailnet }
     }
 
-    /// The ranges besides loopback.
+    /// Whether the tailnet's peers are checked through Tailscale, not only by address.
+    #[must_use]
+    pub const fn asks_the_tailnet(&self) -> bool {
+        self.tailnet.is_some()
+    }
+
+    /// The local Tailscale this admission asks, if any.
+    #[must_use]
+    pub fn local_api(&self) -> Option<&LocalApi> {
+        self.tailnet.as_ref().map(|t| &t.api)
+    }
+
+    /// The ranges let in by address besides loopback and the tailnet.
     #[must_use]
     pub fn ranges(&self) -> &[Cidr] {
         &self.allow
+    }
+
+    /// Whether the peer at `peer` may connect, and as what.
+    pub async fn check(&self, peer: SocketAddr) -> Verdict {
+        let ip = peer.ip().to_canonical();
+        if ip.is_loopback() || self.allow.iter().any(|c| c.contains(ip)) {
+            return Verdict::Admit(Grant::ALL);
+        }
+        if !on_tailnet(ip) {
+            return Verdict::Refuse("outside the tailnet and the allowed ranges");
+        }
+        match &self.tailnet {
+            Some(tailnet) => tailnet.check(SocketAddr::new(ip, peer.port())).await,
+            None => Verdict::Admit(Grant::ALL),
+        }
     }
 }
 
 impl Default for Admission {
     fn default() -> Self {
-        Self { allow: DEFAULT_ALLOW.iter().filter_map(|c| c.parse().ok()).collect() }
+        Self::new(Vec::new())
+    }
+}
+
+/// Whether `ip` is one of Tailscale's addresses.
+#[must_use]
+pub fn on_tailnet(ip: IpAddr) -> bool {
+    TAILNET.iter().filter_map(|c| c.parse::<Cidr>().ok()).any(|c| c.contains(ip))
+}
+
+impl Tailnet {
+    async fn check(&self, peer: SocketAddr) -> Verdict {
+        match self.api.whois(peer).await {
+            Ok(Some(who)) => {
+                let grant = Grant::of(&who, self.owner().await);
+                if grant.any() {
+                    Verdict::Admit(grant)
+                } else {
+                    tracing::info!(%peer, node = %who.node.name, user = %who.user_profile.login_name, "the tailnet grants no role");
+                    Verdict::Refuse("the tailnet grants it no role here")
+                }
+            }
+            Ok(None) => Verdict::Refuse("no node of the tailnet has this address"),
+            Err(e) => {
+                tracing::warn!(%peer, error = %e, "tailscale could not say who is calling");
+                Verdict::Refuse("tailscale could not say who is calling")
+            }
+        }
+    }
+
+    /// The user this node belongs to, `None` when it is tagged (a tagged node belongs to
+    /// nobody). Read at most once a minute; a daemon that does not answer keeps the last word.
+    async fn owner(&self) -> Option<i64> {
+        let known = *self.owner.lock();
+        if let Some(known) = known
+            && known.read.elapsed() < OWNER_TTL
+        {
+            return known.user;
+        }
+        match self.api.status().await {
+            Ok(status) => {
+                let user = status.me.filter(|me| me.tags.is_empty()).map(|me| me.user);
+                *self.owner.lock() = Some(Owner { read: Instant::now(), user });
+                user
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "tailscale did not say who owns this node");
+                known.and_then(|known| known.user)
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use slopty_tailnet::Role;
+
     use super::*;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
     }
 
-    #[test]
-    fn the_defaults_let_in_loopback_the_tailnet_and_the_lan_only() {
-        let a = Admission::default();
-        assert_eq!(a.ranges().len(), DEFAULT_ALLOW.len(), "every default parses");
+    fn at(s: &str) -> SocketAddr {
+        SocketAddr::new(ip(s), 5000)
+    }
+
+    /// With no Tailscale to ask, loopback and the tailnet get in by address, a listed range
+    /// gets in, and a LAN or public address does not: the LAN is no longer a default.
+    #[tokio::test]
+    async fn without_a_daemon_the_tailnet_is_let_in_by_address_and_the_lan_is_not() {
+        let a = Admission::with_tailnet(vec!["10.0.0.0/8".parse().unwrap()], None);
         for yes in [
             "127.0.0.1",
-            "127.9.9.9",
             "::1",
             "::ffff:127.0.0.1",
             "100.64.0.3",
@@ -165,41 +276,76 @@ mod tests {
             "::ffff:100.101.102.103",
             "fd7a:115c:a1e0:ab12::1",
             "10.1.2.3",
-            "172.16.0.1",
-            "172.31.255.255",
-            "192.168.100.240",
-            "::ffff:192.168.1.1",
-            "fd00::1",
-            "fe80::1",
-            "169.254.3.4",
         ] {
-            assert!(a.admits(ip(yes)), "{yes} is private and should be admitted");
+            assert_eq!(a.check(at(yes)).await, Verdict::Admit(Grant::ALL), "{yes}");
         }
         for no in [
+            "192.168.1.9",
+            "172.16.0.1",
+            "fd00::1",
+            "fe80::1",
             "8.8.8.8",
             "100.63.255.255",
             "100.128.0.0",
-            "172.32.0.1",
-            "192.169.0.1",
-            "2001:4860:4860::8888",
             "::ffff:8.8.8.8",
             "0.0.0.0",
             "::",
         ] {
-            assert!(!a.admits(ip(no)), "{no} is public and should be refused");
+            assert!(matches!(a.check(at(no)).await, Verdict::Refuse(_)), "{no}");
         }
     }
 
-    #[test]
-    fn an_allow_list_replaces_the_defaults_but_never_loopback() {
-        let a =
-            Admission::new(vec!["100.64.0.3".parse().unwrap(), "2001:db8::/32".parse().unwrap()]);
-        assert!(a.admits(ip("100.64.0.3")));
-        assert!(!a.admits(ip("100.64.0.4")), "narrowed to one tailnet peer");
-        assert!(!a.admits(ip("192.168.1.1")), "the LAN default is gone");
-        assert!(a.admits(ip("2001:db8:1::5")), "widened to a public range");
-        assert!(a.admits(ip("127.0.0.1")) && a.admits(ip("::1")), "loopback always");
-        assert_eq!(Admission::new(Vec::new()), Admission::default());
+    /// A `LocalAPI` answering from a table: the node's own status, and a whois per caller.
+    async fn daemon() -> LocalApi {
+        const STATUS: &str = r#"{"BackendState":"Running","Self":{"ID":"n1","HostName":"mac",
+            "DNSName":"mac.ts.net.","OS":"macOS","TailscaleIPs":["100.64.0.3"],"UserID":2}}"#;
+        fn whois(user: i64, tags: &str, caps: &str) -> String {
+            format!(
+                r#"{{"Node":{{"Name":"n.ts.net.","User":{user},"Tags":{tags}}},
+                "UserProfile":{{"ID":{user},"LoginName":"u{user}"}},"CapMap":{caps}}}"#
+            )
+        }
+        let (api, _seen) = slopty_tailnet::fake::daemon(|q| {
+            if q.ends_with("/status") {
+                (200, STATUS.to_owned())
+            } else if q.contains("100.64.0.4") {
+                (200, whois(2, "null", "null"))
+            } else if q.contains("100.64.0.5") {
+                (200, whois(7, "null", "null"))
+            } else if q.contains("100.64.0.6") {
+                let caps = r#"{"github.com/aislopware/slopty":[{"roles":["agent"]}]}"#;
+                (200, whois(9, r#"["tag:ci"]"#, caps))
+            } else if q.contains("100.64.0.7") {
+                (500, "stuck".to_owned())
+            } else {
+                (404, "no match".to_owned())
+            }
+        })
+        .await
+        .unwrap();
+        api
+    }
+
+    /// Through the daemon: the owner's other machine gets every role, another user's machine
+    /// none, a tagged node what its grant names, an address no node has nothing, and a daemon
+    /// that fails refuses rather than lets in. Loopback never asks.
+    #[tokio::test]
+    async fn the_tailnet_says_who_is_calling_and_what_they_may_do() {
+        let a = Admission::with_tailnet(Vec::new(), Some(daemon().await));
+        assert!(a.asks_the_tailnet());
+        assert_eq!(
+            a.check(at("100.64.0.4")).await,
+            Verdict::Admit(Grant::ALL),
+            "the owner's laptop"
+        );
+        assert!(matches!(a.check(at("100.64.0.5")).await, Verdict::Refuse(_)), "another user");
+        let Verdict::Admit(ci) = a.check(at("100.64.0.6")).await else {
+            panic!("the granted node")
+        };
+        assert!(ci.allows(Role::Agent) && !ci.allows(Role::Client));
+        assert!(matches!(a.check(at("100.64.9.9")).await, Verdict::Refuse(_)), "no such node");
+        assert!(matches!(a.check(at("100.64.0.7")).await, Verdict::Refuse(_)), "daemon failed");
+        assert_eq!(a.check(at("127.0.0.1")).await, Verdict::Admit(Grant::ALL));
     }
 
     #[test]

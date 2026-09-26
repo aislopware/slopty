@@ -1,7 +1,8 @@
-//! The accept side both listeners share: refuse a peer outside the admitted ranges at its first
-//! packet, and greet the rest each on a task of its own, so a peer that connects and says nothing
-//! holds up nobody behind it. A greeting is the QUIC handshake, the control stream the peer
-//! opens, and its first message, which must be its hello.
+//! The accept side both listeners share: each incoming peer on a task of its own, so a peer
+//! that connects and says nothing, or a slow word from Tailscale, holds up nobody behind it.
+//! A peer [`Admission`] refuses gets its refusal at its first packet; the rest are greeted. A
+//! greeting is the QUIC handshake, the control stream the peer opens, and its first message,
+//! which must be its hello.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -9,10 +10,11 @@ use std::time::Duration;
 use noq::{Connection, Endpoint};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use slopty_tailnet::Grant;
 use tokio::sync::mpsc;
 
 use crate::NetError;
-use crate::admission::Admission;
+use crate::admission::{Admission, Verdict};
 use crate::framed::{FramedRecv, FramedSend};
 use crate::worker::close_code;
 
@@ -28,6 +30,7 @@ pub struct Greeted<S, R, H> {
     pub conn: Connection,
     pub remote: SocketAddr,
     pub hello: H,
+    pub grant: Grant,
     pub tx: FramedSend<S>,
     pub rx: FramedRecv<R>,
 }
@@ -64,14 +67,17 @@ async fn admit<S, R, H>(
 {
     while let Some(incoming) = endpoint.accept().await {
         let peer = crate::endpoint::canonical(incoming.remote_address());
-        if !admission.admits(peer.ip()) {
-            tracing::info!(%peer, "refused: outside the admitted ranges");
-            incoming.refuse();
-            continue;
-        }
-        let greeted = greeted.clone();
+        let (admission, greeted) = (admission.clone(), greeted.clone());
         tokio::spawn(async move {
-            match greet(incoming, hello).await {
+            let grant = match admission.check(peer).await {
+                Verdict::Admit(grant) => grant,
+                Verdict::Refuse(why) => {
+                    tracing::info!(%peer, why, "{who} refused");
+                    incoming.refuse();
+                    return;
+                }
+            };
+            match greet(incoming, hello, grant).await {
                 Ok(peer) => {
                     let _sent = greeted.send(peer).await;
                 }
@@ -85,6 +91,7 @@ async fn admit<S, R, H>(
 async fn greet<S, R, H>(
     incoming: noq::Incoming,
     hello: fn(R) -> Option<H>,
+    grant: Grant,
 ) -> Result<Greeted<S, R, H>, NetError>
 where
     S: Serialize,
@@ -105,5 +112,5 @@ where
         conn.close(close_code::PROTOCOL.into(), b"hello first");
         return Err(NetError::Protocol("first message must be Hello"));
     };
-    Ok(Greeted { conn, remote, hello, tx, rx })
+    Ok(Greeted { conn, remote, hello, grant, tx, rx })
 }

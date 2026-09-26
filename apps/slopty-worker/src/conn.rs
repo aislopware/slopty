@@ -189,7 +189,7 @@ pub async fn serve(daemon: Daemon, client: AcceptedClient) {
 
 /// Serve one connection until it ends; `Ok` carries why it ended.
 async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, NetError> {
-    let AcceptedClient { conn, hello, mut tx, mut rx, .. } = client;
+    let AcceptedClient { conn, hello, mut tx, mut rx, remote: client_remote, .. } = client;
 
     let (out, mut out_rx) = mpsc::channel::<WorkerMsg>(CONTROL_DEPTH);
     let writer: JoinHandle<Result<(), NetError>> = tokio::spawn(async move {
@@ -241,6 +241,10 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         clips_tx,
     ));
     tasks.spawn(crate::tunnel::accept(conn.clone(), hello.client));
+    tasks.spawn({
+        let (paths, remote, out) = (daemon.paths.clone(), client_remote, out.clone());
+        async move { paths.report(remote, out).await }
+    });
     let (watch_files, watched) = watch::channel(Vec::new());
     tasks.spawn(crate::files::watch(hello.client, out.clone(), watched));
     let (told, mut told_rx) = mpsc::unbounded_channel();

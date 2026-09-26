@@ -23,7 +23,7 @@ use rmcp::service::{MaybeSendFuture, RequestContext};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, RoleServer, ServerHandler};
-use slopty_net::admission::Admission;
+use slopty_net::admission::{Admission, Verdict};
 use slopty_proto::codec::MAX_FRAME_BYTES;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
@@ -113,12 +113,20 @@ pub async fn serve(listener: TcpListener, admission: Admission, hub: Hub) {
             }
         };
         let peer = slopty_net::endpoint::canonical(peer);
-        if !admission.admits(peer.ip()) {
-            tracing::info!(%peer, "mcp refused: outside the admitted ranges");
-            continue;
-        }
-        let service = service.clone();
+        let (service, admission) = (service.clone(), admission.clone());
         connections.spawn(async move {
+            // An agent's surface: the tailnet must grant the node the agent role.
+            match admission.check(peer).await {
+                Verdict::Admit(grant) if grant.allows(slopty_tailnet::Role::Agent) => {}
+                Verdict::Admit(_) => {
+                    tracing::info!(%peer, "mcp refused: the tailnet grants no agent role");
+                    return;
+                }
+                Verdict::Refuse(why) => {
+                    tracing::info!(%peer, why, "mcp refused");
+                    return;
+                }
+            }
             let serve = service_fn(move |request| {
                 let service = service.clone();
                 async move { Ok::<_, Infallible>(service.handle(request).await) }

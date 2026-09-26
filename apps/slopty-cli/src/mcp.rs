@@ -37,7 +37,8 @@ Register Slopty with Claude Code:
 
   claude mcp add slopty -- slopty mcp
 
-The server is --server, else $SLOPTY_SERVER, else `server` under [client] in settings.toml. \
+The server is --server, else $SLOPTY_SERVER, else `server` under [client] in settings.toml, \
+else the first that answers on the tailnet. \
 To pin one: claude mcp add slopty -- slopty mcp --server studio";
 
 /// The protocol revision this shim speaks; older ones are still negotiated for clients that
@@ -46,8 +47,8 @@ const REVISION: ProtocolVersion = ProtocolVersion::V_2026_07_28;
 
 /// Serve MCP on stdio until the client hangs up.
 pub async fn run(server: Option<&str>, data_dir: &Path) -> Result<()> {
-    let address = link::locate(server, data_dir)?;
     let endpoint = bind_client()?;
+    let address = link::locate(server, data_dir, &endpoint).await?;
     let role = Role::Agent { name: format!("slopty mcp @ {}", crate::client::machine_name()) };
     let (link, events) = Link::persistent(endpoint.clone(), address, role);
     let running = Slopty { link }

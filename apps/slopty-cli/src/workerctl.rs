@@ -137,10 +137,31 @@ fn doctor_report(h: &slopty_worker::ctl::Health) -> String {
         "  → System Settings ▸ Privacy & Security ▸ Accessibility: add the daemon binary above"
             .to_owned()
     };
+    let tailscale = match &h.tailscale {
+        Some(t) if t.state == "Running" => format!(
+            "{} Tailscale: {} ({}); its nodes are let in as its grants say",
+            mark(true),
+            t.node,
+            t.ip
+        ),
+        Some(t) => {
+            format!("{} Tailscale is {}: no tailnet peer reaches this worker", mark(false), t.state)
+        }
+        None => format!(
+            "{} no Tailscale this daemon can read: a tailnet address is let in by address alone",
+            mark(false)
+        ),
+    };
+    let ranges = if h.allow.is_empty() {
+        "admits loopback and the tailnet".to_owned()
+    } else {
+        format!("admits loopback, the tailnet, and by address {}", h.allow.join(", "))
+    };
     let lines = [
         format!("slopty-worker {}  ({})", h.version, h.exe),
         format!("up {} s · listening on {}", h.uptime_secs, h.listen),
-        format!("admits loopback, {}", h.allow.join(", ")),
+        ranges,
+        tailscale,
         format!("{} Screen Recording{screen}", mark(h.screen_recording)),
         format!("{} Accessibility (remote-window input){post}", mark(h.post_events)),
         format!("{} clients connected, {} sessions", h.clients, h.sessions),
@@ -175,7 +196,12 @@ mod tests {
             screen_recording: true,
             post_events: false,
             listen: "[::]:45550".to_owned(),
-            allow: vec!["100.64.0.0/10".to_owned(), "10.0.0.0/8".to_owned()],
+            allow: vec!["10.0.0.0/8".to_owned()],
+            tailscale: Some(slopty_worker::ctl::Tailscale {
+                state: "Running".to_owned(),
+                node: "studio.tail1234.ts.net".to_owned(),
+                ip: "100.64.0.3".to_owned(),
+            }),
             clients: 2,
             sessions: 3,
             uptime_secs: 61,
@@ -186,6 +212,21 @@ mod tests {
         assert!(report.contains("✘ Accessibility"));
         assert!(report.contains("2 clients connected, 3 sessions"));
         assert!(report.contains("listening on [::]:45550"), "{report}");
-        assert!(report.contains("admits loopback, 100.64.0.0/10, 10.0.0.0/8"), "{report}");
+        assert!(
+            report.contains("admits loopback, the tailnet, and by address 10.0.0.0/8"),
+            "{report}"
+        );
+        assert!(report.contains("✔ Tailscale: studio.tail1234.ts.net (100.64.0.3)"), "{report}");
+        let alone = slopty_worker::ctl::Health { allow: Vec::new(), tailscale: None, ..h.clone() };
+        let report = doctor_report(&alone);
+        assert!(report.contains("admits loopback and the tailnet\n"), "{report}");
+        assert!(report.contains("✘ no Tailscale this daemon can read"), "{report}");
+        let stopped = slopty_worker::ctl::Tailscale {
+            state: "Stopped".to_owned(),
+            node: String::new(),
+            ip: String::new(),
+        };
+        let report = doctor_report(&slopty_worker::ctl::Health { tailscale: Some(stopped), ..h });
+        assert!(report.contains("✘ Tailscale is Stopped"), "{report}");
     }
 }

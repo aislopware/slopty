@@ -29,6 +29,7 @@ pub mod admission;
 pub mod client;
 pub mod congestion;
 pub mod crypto;
+pub mod discover;
 pub mod echo;
 pub mod endpoint;
 pub mod framed;

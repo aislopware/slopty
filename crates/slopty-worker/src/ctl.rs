@@ -39,14 +39,28 @@ pub struct Health {
     pub post_events: bool,
     /// Where it listens (`[::]:45550` is every interface, both families).
     pub listen: String,
-    /// Address ranges whose peers it admits, besides loopback.
+    /// Address ranges whose peers it admits by address, besides loopback and the tailnet.
     pub allow: Vec<String>,
+    /// This machine's Tailscale as the daemon reads it; `None` when it can read none, and a
+    /// tailnet address is then let in by address alone.
+    pub tailscale: Option<Tailscale>,
     /// Clients connected right now.
     pub clients: usize,
     /// Sessions the worker runs, exited ones kept for their last screen included.
     pub sessions: usize,
     /// Seconds since the daemon started.
     pub uptime_secs: u64,
+}
+
+/// This machine's node, as its Tailscale says.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Tailscale {
+    /// `Running` when up; `NeedsLogin`, `Stopped`, … otherwise, or why it did not answer.
+    pub state: String,
+    /// Its `MagicDNS` name, empty before login.
+    pub node: String,
+    /// Its tailnet IPv4 address, empty before login.
+    pub ip: String,
 }
 
 /// Daemon → CLI.

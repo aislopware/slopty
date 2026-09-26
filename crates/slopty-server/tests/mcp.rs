@@ -98,7 +98,7 @@ mod tests {
             quic: "127.0.0.1:0".parse().unwrap(),
             mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: dir.path().to_path_buf(),
-            admission: Admission::default(),
+            admission: Admission::with_tailnet(Vec::new(), None),
         })
         .await
         .unwrap();
@@ -204,7 +204,7 @@ mod tests {
             quic: "127.0.0.1:0".parse().unwrap(),
             mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: dir.path().to_path_buf(),
-            admission: Admission::default(),
+            admission: Admission::with_tailnet(Vec::new(), None),
         })
         .await
         .unwrap();
@@ -267,7 +267,7 @@ mod tests {
     async fn a_peer_outside_the_admitted_ranges_gets_no_answer() {
         let listener = slopty_server::mcp::bind("[::]:0".parse().unwrap()).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let admission = Admission::new(vec!["10.0.0.0/8".parse().unwrap()]);
+        let admission = Admission::with_tailnet(vec!["10.0.0.0/8".parse().unwrap()], None);
         let serving = tokio::spawn(slopty_server::mcp::serve(
             listener,
             admission,

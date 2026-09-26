@@ -66,7 +66,7 @@ mod tests {
             quic: "127.0.0.1:0".parse().unwrap(),
             mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: dir.to_path_buf(),
-            admission: Admission::default(),
+            admission: Admission::with_tailnet(Vec::new(), None),
         })
         .await
         .unwrap()

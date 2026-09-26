@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_net::redial::Redial;
 use slopty_net::server::{DialError, ServerLink, connect};
@@ -22,9 +22,26 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// Environment variable naming the server, between `--server` and the settings file.
 pub const SERVER_ENV: &str = "SLOPTY_SERVER";
 
-/// Where the server is: `--server`, else [`SERVER_ENV`], else `[client] server` in the
+/// Where the server is: [`configured`], else the first server that answers on the tailnet,
+/// dialled from `endpoint` (`slopty_net::discover`).
+pub async fn locate(flag: Option<&str>, data_dir: &Path, endpoint: &Endpoint) -> Result<HostAddr> {
+    if let Some(configured) = configured(flag, data_dir)? {
+        return Ok(configured);
+    }
+    if let Some(found) = on_the_tailnet(endpoint).await {
+        tracing::info!(server = %found.name, addr = %found.addr, "found the server on the tailnet");
+        return Ok(found.host_addr());
+    }
+    bail!(
+        "no server: none answered on the tailnet; pass --server host[:port], set {SERVER_ENV}, \
+         or set `server` under [client] in {}",
+        slopty_settings::path_in(data_dir).display()
+    )
+}
+
+/// The server a person named: `--server`, else [`SERVER_ENV`], else `[client] server` in the
 /// settings file. The port is [`SERVER_PORT`] unless the address names one.
-pub fn locate(flag: Option<&str>, data_dir: &Path) -> Result<HostAddr> {
+pub fn configured(flag: Option<&str>, data_dir: &Path) -> Result<Option<HostAddr>> {
     let env = std::env::var(SERVER_ENV).ok();
     let settings_path = slopty_settings::path_in(data_dir);
     let file = || {
@@ -34,13 +51,24 @@ pub fn locate(flag: Option<&str>, data_dir: &Path) -> Result<HostAddr> {
             None => Ok(loaded.settings.client.server),
         }
     };
-    choose(flag, env.as_deref(), file)?.with_context(|| {
-        format!(
-            "no server: pass --server host[:port], set {SERVER_ENV}, or set `server` under \
-             [client] in {}",
-            settings_path.display()
-        )
-    })
+    choose(flag, env.as_deref(), file)
+}
+
+/// The best server this machine's Tailscale can find, `None` without Tailscale or a server.
+async fn on_the_tailnet(endpoint: &Endpoint) -> Option<slopty_net::discover::Found> {
+    let api = slopty_tailnet::LocalApi::find()?;
+    let status = match api.status().await {
+        Ok(status) if status.running() => status,
+        Ok(status) => {
+            tracing::debug!(state = %status.backend_state, "tailscale is not up");
+            return None;
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "tailscale status");
+            return None;
+        }
+    };
+    slopty_net::discover::servers(endpoint, &status).await.into_iter().next()
 }
 
 /// The first of flag, environment and settings file that names a server. The file is read
@@ -263,21 +291,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = slopty_settings::path_in(dir.path());
         std::fs::write(&path, "[client]\nserver = \"studio:7\"\n").unwrap();
-        let found = locate(None, dir.path()).unwrap();
+        let found = configured(None, dir.path()).unwrap().unwrap();
         assert_eq!((found.host(), found.port()), ("studio", 7));
         std::fs::write(&path, "[client]\nserver = 7\n").unwrap();
-        locate(None, dir.path()).unwrap_err();
+        configured(None, dir.path()).unwrap_err();
     }
 
     #[test]
     fn a_server_address_takes_the_server_port_unless_it_names_one() {
         let dir = std::env::temp_dir();
-        let bare = locate(Some("studio"), &dir).unwrap();
+        let bare = configured(Some("studio"), &dir).unwrap().unwrap();
         assert_eq!((bare.host(), bare.port()), ("studio", SERVER_PORT));
-        let explicit = locate(Some("100.64.0.3:7"), &dir).unwrap();
+        let explicit = configured(Some("100.64.0.3:7"), &dir).unwrap().unwrap();
         assert_eq!(explicit.port(), 7, "an explicit port wins");
-        let v6 = locate(Some("fd7a:115c:a1e0::1"), &dir).unwrap();
+        let v6 = configured(Some("fd7a:115c:a1e0::1"), &dir).unwrap().unwrap();
         assert_eq!(v6.port(), SERVER_PORT);
-        locate(Some("not a worker"), &dir).unwrap_err();
+        configured(Some("not a worker"), &dir).unwrap_err();
     }
 }

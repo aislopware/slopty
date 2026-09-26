@@ -33,6 +33,7 @@ pub mod media;
 pub mod orchestration;
 pub mod screen;
 pub mod server;
+pub mod tailnet;
 pub mod terminal;
 pub mod transfer;
 
@@ -204,6 +205,9 @@ pub enum WorkerMsg {
         /// Listening ports.
         ports: Vec<orchestration::Port>,
     },
+    /// How this link's packets travel, once the worker's Tailscale has a path and again each
+    /// time it changes. Never sent over a link that is not on a tailnet.
+    Path(tailnet::LinkPath),
 }
 
 impl WorkerMsg {
@@ -226,6 +230,7 @@ impl WorkerMsg {
             Self::Clip(_) => "Clip",
             Self::Xfer(_) => "Xfer",
             Self::Ports { .. } => "Ports",
+            Self::Path(_) => "Path",
         }
     }
 }

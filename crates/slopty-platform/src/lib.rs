@@ -15,6 +15,8 @@
 pub mod drag;
 pub mod file_drop;
 pub mod pasteboard;
+#[cfg(target_os = "macos")]
+pub mod proc_files;
 pub mod web;
 
 use objc2::rc::Retained;

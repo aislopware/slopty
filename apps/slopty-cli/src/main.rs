@@ -38,7 +38,8 @@ struct Cli {
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     /// The server, `host[:port]` (default: `$SLOPTY_SERVER`, else `server` under `[client]` in
-    /// settings.toml). `worker install` saves it as the server this Mac registers with.
+    /// settings.toml, else the first that answers on the tailnet). `worker install` saves it as
+    /// the server this Mac registers with.
     #[arg(long, global = true)]
     server: Option<String>,
     /// Print the answer as JSON.

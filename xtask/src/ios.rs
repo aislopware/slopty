@@ -270,9 +270,7 @@ settings:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        NSLocalNetworkUsageDescription: Slopty finds your worker on the local network.
-        NSBonjourServices:
-          - _slopty._udp
+        NSLocalNetworkUsageDescription: Slopty connects to your workers on the local network.
         CADisableMinimumFrameDurationOnPhone: true
         UIApplicationSupportsIndirectInputEvents: true
     settings:

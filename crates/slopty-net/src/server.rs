@@ -43,7 +43,7 @@ pub struct AcceptedLink {
     pub conn: Connection,
     /// Where it connected from (IPv4 when it is one).
     pub remote: SocketAddr,
-    /// Who it says it is.
+    /// Who it says it is, which the tailnet grants it.
     pub role: Role,
     /// Server → dialer.
     pub tx: FramedSend<FromServer>,
@@ -81,10 +81,25 @@ impl ServerListener {
         &self.admission
     }
 
-    /// The next dialer that said `Hello`; `None` once the endpoint is closed.
+    /// The next dialer that said `Hello` in a role the tailnet grants it; `None` once the
+    /// endpoint is closed. A dialer asking for a role it was not granted hears
+    /// [`Refusal::NotGranted`] on a task of its own, so it holds up nobody behind it.
     pub async fn accept(&self) -> Option<AcceptedLink> {
-        let Greeted { conn, remote, hello, tx, rx } = self.greeted.lock().await.recv().await?;
-        Some(AcceptedLink { conn, remote, role: hello, tx, rx })
+        loop {
+            let Greeted { conn, remote, hello, grant, tx, rx } =
+                self.greeted.lock().await.recv().await?;
+            let link = AcceptedLink { conn, remote, role: hello, tx, rx };
+            let wanted = match &link.role {
+                Role::Worker(_) => slopty_tailnet::Role::Worker,
+                Role::Client { .. } => slopty_tailnet::Role::Client,
+                Role::Agent { .. } => slopty_tailnet::Role::Agent,
+            };
+            if grant.allows(wanted) {
+                return Some(link);
+            }
+            tracing::info!(%remote, ?wanted, "refused: the tailnet does not grant the role");
+            tokio::spawn(link.refuse(Refusal::NotGranted));
+        }
     }
 }
 

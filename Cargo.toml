@@ -40,6 +40,7 @@ slopty-agent = { path = "crates/slopty-agent" }
 slopty-settings = { path = "crates/slopty-settings" }
 slopty-server = { path = "crates/slopty-server" }
 slopty-tools = { path = "crates/slopty-tools" }
+slopty-tailnet = { path = "crates/slopty-tailnet" }
 slopty-e2e = { path = "crates/slopty-e2e", default-features = false }
 
 # core
@@ -65,9 +66,12 @@ uuid = { version = "1.26.1", features = [ "v4", "v7", "serde", "fast-rng" ] }
 rmcp = { version = "3.4.1", default-features = false, features = [ "server", "macros" ] }
 # The MCP tools' input schemas; the major rmcp builds on.
 schemars = { version = "1.2.2", features = [ "uuid1" ] }
-# The server's MCP listener: HTTP/1.1 connections served one task each, admitted by peer address.
+# The server's MCP listener (HTTP/1.1 connections served one task each, admitted by peer address)
+# and the LocalAPI client (`slopty_tailnet`), which adds `client`.
 hyper = { version = "1.11.1", features = [ "server", "http1" ] }
 hyper-util = { version = "0.1.20", features = [ "tokio" ] }
+# A response's whole body, for the LocalAPI client (`slopty_tailnet`).
+http-body-util = "0.1.5"
 camino = { version = "1.2.6", features = [ "serde1" ] }
 
 # serialization

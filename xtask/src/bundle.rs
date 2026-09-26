@@ -129,11 +129,7 @@ fn info_plist(version: &str) -> String {
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Slopty finds your worker on the local network.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_slopty._udp</string>
-	</array>
+	<string>Slopty connects to your workers on the local network.</string>
 </dict>
 </plist>
 "#

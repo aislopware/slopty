@@ -119,6 +119,11 @@ mod golden {
     fn ping_pong() {
         snap("client_ping", &ClientMsg::Ping { sent_at: MonoTime::from_nanos(1_000_000) });
         snap("worker_pong", &WorkerMsg::Pong { sent_at: MonoTime::from_nanos(1_000_000) });
+        snap("worker_path_direct", &WorkerMsg::Path(slopty_proto::tailnet::LinkPath::Direct));
+        snap(
+            "worker_path_derp",
+            &WorkerMsg::Path(slopty_proto::tailnet::LinkPath::Derp { region: "fra".to_owned() }),
+        );
     }
 
     #[test]
@@ -733,6 +738,10 @@ mod golden {
             },
         );
         let term = TermRef { worker, session: session() };
+        snap(
+            "server_refused_not_granted",
+            &FromServer::Refused(slopty_proto::server::Refusal::NotGranted),
+        );
         snap(
             "server_request",
             &FromServer::Request {

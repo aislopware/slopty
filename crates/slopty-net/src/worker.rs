@@ -6,6 +6,7 @@ use std::sync::Arc;
 use noq::{Connection, Endpoint};
 use slopty_proto::handshake::Hello;
 use slopty_proto::{ClientMsg, WorkerMsg};
+use slopty_tailnet::{Grant, Role};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::NetError;
@@ -19,6 +20,8 @@ pub mod close_code {
     pub const NORMAL: u32 = 0;
     /// Protocol error.
     pub const PROTOCOL: u32 = 2;
+    /// The tailnet grants the peer no role here.
+    pub const NOT_GRANTED: u32 = 3;
 }
 
 /// The worker's listening endpoint and who it lets in.
@@ -38,6 +41,8 @@ pub struct AcceptedClient {
     pub remote: SocketAddr,
     /// Its hello.
     pub hello: Hello,
+    /// What the tailnet lets it do.
+    pub grant: Grant,
     /// Control stream, worker → client.
     pub tx: FramedSend<WorkerMsg>,
     /// Control stream, client → worker.
@@ -74,9 +79,18 @@ impl WorkerListener {
         &self.admission
     }
 
-    /// The next client that said `Hello`; `None` once the endpoint is closed.
+    /// The next client that said `Hello`; `None` once the endpoint is closed. A node the
+    /// tailnet lets in only as a worker is closed here: it may register with a server, not
+    /// drive this worker.
     pub async fn accept(&self) -> Option<AcceptedClient> {
-        let Greeted { conn, remote, hello, tx, rx } = self.greeted.lock().await.recv().await?;
-        Some(AcceptedClient { conn, remote, hello, tx, rx })
+        loop {
+            let Greeted { conn, remote, hello, grant, tx, rx } =
+                self.greeted.lock().await.recv().await?;
+            if grant.allows(Role::Client) || grant.allows(Role::Agent) {
+                return Some(AcceptedClient { conn, remote, hello, grant, tx, rx });
+            }
+            tracing::info!(%remote, "refused: the tailnet grants it no client role");
+            conn.close(close_code::NOT_GRANTED.into(), b"not granted");
+        }
     }
 }

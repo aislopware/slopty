@@ -18,12 +18,15 @@ serde.workspace = true
 serde_json.workspace = true
 slopty-core.workspace = true
 slopty-proto.workspace = true
+# Who is calling, from the tailnet (`admission`).
+slopty-tailnet.workspace = true
+parking_lot.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-parking_lot.workspace = true
+slopty-tailnet = { workspace = true, features = [ "fake" ] }
 slopty-shape.workspace = true
 tempfile.workspace = true

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use slopty_agent::Hook;
 use slopty_proto::WorkerMsg;
-use slopty_worker::ctl::{CtlReply, CtlRequest, Health};
+use slopty_worker::ctl::{CtlReply, CtlRequest, Health, Tailscale};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -51,6 +51,23 @@ async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
     Ok(())
 }
 
+async fn tailscale(api: Option<&slopty_tailnet::LocalApi>) -> Option<Tailscale> {
+    Some(match api?.status().await {
+        Ok(status) => {
+            let me = status.me.as_ref();
+            Tailscale {
+                node: me.map(|n| n.name().to_owned()).unwrap_or_default(),
+                ip: me
+                    .and_then(slopty_tailnet::Node::ipv4)
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_default(),
+                state: status.backend_state,
+            }
+        }
+        Err(e) => Tailscale { state: e.to_string(), node: String::new(), ip: String::new() },
+    })
+}
+
 async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
     match req {
         CtlRequest::Status => CtlReply::Status {
@@ -66,6 +83,7 @@ async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
             post_events: slopty_input::can_post(),
             listen: daemon.listen.to_string(),
             allow: daemon.listener.admission().ranges().iter().map(ToString::to_string).collect(),
+            tailscale: tailscale(daemon.listener.admission().local_api()).await,
             clients: daemon.wake.lock().counts().0,
             sessions: daemon.worker.session_count(),
             uptime_secs: daemon.started_at.elapsed().as_secs(),

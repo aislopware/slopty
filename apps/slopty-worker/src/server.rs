@@ -79,6 +79,10 @@ pub async fn run(
             Err(Ended::Duplicate) => {
                 tracing::info!(server = %addr, "the server still holds our last link; retrying");
             }
+            // The tailnet policy may grant it later; the redials find out.
+            Err(Ended::NotGranted) => {
+                tracing::warn!(server = %addr, "the tailnet policy does not grant this machine the worker role");
+            }
             Err(Ended::Failed(e)) => {
                 tracing::info!(server = %addr, error = %e, "server link failed");
             }
@@ -91,6 +95,8 @@ pub async fn run(
 enum Ended {
     /// The server has this worker on another connection still.
     Duplicate,
+    /// The tailnet policy does not grant this machine the worker role.
+    NotGranted,
     /// Anything else.
     Failed(anyhow::Error),
 }
@@ -127,6 +133,7 @@ async fn session(
         {
             Ok(link) => link,
             Err(DialError::Refused(Refusal::DuplicateWorker)) => return Err(Ended::Duplicate),
+            Err(DialError::Refused(Refusal::NotGranted)) => return Err(Ended::NotGranted),
             Err(DialError::Net(e)) => return Err(e.into()),
         };
     let ServerLink { conn, remote, name, tx, mut rx } = link;

@@ -208,7 +208,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   iroh; manual entry is the one way in until the server exists. `HostStatus::NeedsPairing`, the
   pairing CLI (`slopty pair`, `slopty host ticket|paired|revoke`) and `trust.json` are deleted.
 
-- ✅ **Admission by source address, once per connection** (2026-09-24). With no keys, the network is
+- ✅ **Admission by source address, once per connection** (2026-09-24). Superseded in part
+  2026-09-26 by **Tailscale is the network, and its LocalAPI says who is calling** (`topology.md`):
+  the tailnet is checked through whois and grants, and the LAN ranges are no longer defaults. With no keys, the network is
   the boundary, so the worker lets in loopback always, and otherwise only the tailnet
   (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), RFC 1918 LANs, unique-local IPv6 (`fc00::/7`) and
   link-local (`slopty_net::admission`). The `[worker] allow` list in the worker's `settings.toml`

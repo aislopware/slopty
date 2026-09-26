@@ -217,6 +217,9 @@ pub enum FromServer {
 pub enum Refusal {
     /// A worker with this id is already connected from elsewhere.
     DuplicateWorker,
+    /// The tailnet grants this node no such role here: it belongs to another user, or is
+    /// tagged, and no grant names the role.
+    NotGranted,
 }
 
 /// Something that happened on a worker, fanned out to clients and agents.

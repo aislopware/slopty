@@ -7004,6 +7004,7 @@ dependencies = [
  "slopty-proto",
  "slopty-server",
  "slopty-settings",
+ "slopty-tailnet",
  "slopty-tools",
  "slopty-worker",
  "tempfile",
@@ -7174,6 +7175,7 @@ dependencies = [
  "slopty-core",
  "slopty-proto",
  "slopty-shape",
+ "slopty-tailnet",
  "socket2",
  "tempfile",
  "thiserror 2.0.21",
@@ -7279,6 +7281,7 @@ dependencies = [
  "slopty-core",
  "slopty-net",
  "slopty-proto",
+ "slopty-tailnet",
  "slopty-tools",
  "socket2",
  "tempfile",
@@ -7322,6 +7325,23 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "slopty-tailnet"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "slopty-platform",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -7436,6 +7456,7 @@ dependencies = [
  "slopty-proto",
  "slopty-settings",
  "slopty-shape",
+ "slopty-tailnet",
  "slopty-worker",
  "tempfile",
  "tokio",

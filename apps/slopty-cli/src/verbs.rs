@@ -313,9 +313,9 @@ impl UntilArgs {
 
 /// Connect to the server, run `cmd`, print its answer.
 pub async fn run(cmd: VerbCmd, server: Option<&str>, data_dir: &Path, json: bool) -> Result<()> {
-    let address = link::locate(server, data_dir)?;
-    let role = Role::Client { name: format!("slopty @ {}", crate::client::machine_name()) };
     let endpoint = bind_client()?;
+    let address = link::locate(server, data_dir, &endpoint).await?;
+    let role = Role::Client { name: format!("slopty @ {}", crate::client::machine_name()) };
     let result = match Link::connect(&endpoint, &address, role).await {
         Ok(link) => execute(cmd, &link, json).await,
         Err(e) => Err(e),
