@@ -156,7 +156,9 @@ fn main() -> Result<()> {
         // After `open_workspace`: the menu reads its shortcut labels from the keymap, which the
         // workspace fills in.
         cx.set_menus(menus());
-        cx.activate(true);
+        if !slopty_app::self_test() {
+            cx.activate(true);
+        }
     });
     Ok(())
 }

@@ -404,3 +404,19 @@ fn the_phone_title_bar_fits_its_touch_targets(cx: &mut TestAppContext) {
     assert!(f32::from(more.right()) <= 402.0, "nothing past the edge: {more:?}");
     assert!(toggle.right() <= bell.left(), "{toggle:?} {bell:?}");
 }
+
+/// The "…" button closes the menu it opened: the press outside the menu only dismisses, and
+/// does not reach the button under it to open the menu again.
+#[gpui::test]
+fn a_second_press_on_the_menu_button_closes_its_menu(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shells = three_shells(&view, cx, &studio);
+    let more = cx.debug_bounds("more").expect("… is drawn").center();
+    cx.simulate_click(more, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("menu").is_some(), "the first press opens the menu");
+    cx.simulate_click(more, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("menu").is_none(), "the second press closes it");
+}

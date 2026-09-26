@@ -38,6 +38,7 @@ filter = '''
 (package(slopty-worker) & (test(an_echo_beside_a_flood_is_not_held_to_the_frame_pace)
     | test(a_key_after_a_pause_does_not_wait_for_the_checkpoint)))
 | (package(slopty-workerd) & test(echo_is_not_held_behind_slow_requests))
+| (package(slopty-shape) & test(a_short_wait_ends_when_it_was_asked_to))
 '''
 threads-required = "num-test-threads"
 

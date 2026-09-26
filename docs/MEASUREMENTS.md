@@ -5566,7 +5566,9 @@ The relay itself held its delays late at first: on this Mac a tokio timer fires 
 its interval (timer coalescing by the process's latency tier, plus tokio's millisecond), so a
 configured 10 ms round trip read key → arrived 13.9 / 24.0 ms. Its `Timer` now asks for the
 wait less the lateness it has seen and yields through the last stretch: 10.7 / 14.9 ms
-(`a_short_round_trip_takes_what_the_link_says`, median under 12.5 ms at 5 ms each way).
+(`a_short_wait_ends_when_it_was_asked_to`: a 5 ms wait never early, its median overshoot
+under 1 ms; a round trip also carries loopback's own hops, which on 2026-09-26 evening cost 1 ms
+clear and 3–4 ms more after each hold, so the test reads the timer, not the trip).
 
 ## 2026-09-26 — timers fire late by the thread's latency tier
 

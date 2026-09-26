@@ -407,35 +407,25 @@ mod tests {
     }
 
     /// A short delay is held for itself, not for what the OS timer adds to it: on this Mac a
-    /// 5 ms sleep returns after 7.5, which made a 10 ms round trip take 15.
+    /// 5 ms sleep returns after 7.5, which made a 10 ms round trip through the relay take 15.
+    /// Read on the timer itself, since a round trip also carries loopback's own hops, which cost
+    /// the machine anywhere from a tenth of a millisecond to more than one after a wait.
     #[tokio::test]
-    async fn a_short_round_trip_takes_what_the_link_says() {
-        const PINGS: usize = 21;
-        let worker = end().await;
-        let client = end().await;
-        let link = Link { delay: Duration::from_millis(5), ..Link::CLEAR };
-        let relay =
-            Arc::new(Relay::bind(wildcard(), worker.local_addr().unwrap(), link, 1).await.unwrap());
-        let address = relay.addr().unwrap();
-        tokio::spawn({
-            let relay = Arc::clone(&relay);
-            async move { relay.run().await }
-        });
-
-        let mut buf = [0_u8; 16];
-        let mut trips = Vec::with_capacity(PINGS);
-        for _ping in 0..PINGS {
-            let sent = Instant::now();
-            client.send_to(b"key", address).await.unwrap();
-            let (_len, from) = worker.recv_from(&mut buf).await.unwrap();
-            worker.send_to(b"echo", from).await.unwrap();
-            let _echo = client.recv_from(&mut buf).await.unwrap();
-            trips.push(sent.elapsed());
+    async fn a_short_wait_ends_when_it_was_asked_to() {
+        const WAITS: usize = 21;
+        let due = Duration::from_millis(5);
+        let mut timer = Timer::new();
+        let mut over = Vec::with_capacity(WAITS);
+        for _wait in 0..WAITS {
+            let started = Instant::now();
+            timer.until(started, due).await;
+            let took = started.elapsed();
+            assert!(took >= due, "never early, took {took:?}");
+            over.push(took.saturating_sub(due));
         }
-        trips.sort_unstable();
-        let (least, median) = (trips[0], trips[PINGS / 2]);
-        assert!(least >= Duration::from_millis(10), "held for both delays, least {least:?}");
-        assert!(median < Duration::from_micros(12_500), "and no more, median {median:?}");
+        over.sort_unstable();
+        let median = over.get(WAITS / 2).copied().unwrap_or_default();
+        assert!(median < Duration::from_millis(1), "late by a median of {median:?}: {over:?}");
     }
 
     // Multi-threaded on purpose: this is where a task per packet would actually reorder, because

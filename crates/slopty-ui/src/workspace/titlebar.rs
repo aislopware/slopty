@@ -698,12 +698,14 @@ impl WorkspaceView {
         } else {
             self.menu_panel(rows, cx)
         };
-        // A click anywhere else closes it. A popover, it paints over the frame and the
-        // navigator laid over it, under a dialog.
+        // A click anywhere else closes it and goes no further, so a press on the button that
+        // opened it closes it rather than opening it again. A popover, it paints over the frame
+        // and the navigator laid over it, under a dialog.
         let away = div()
             .id("menu-away")
             .absolute()
             .inset_0()
+            .occlude()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _ev, _w, cx| {

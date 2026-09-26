@@ -1487,6 +1487,12 @@ fn layout_path() -> std::path::PathBuf {
     slopty_settings::data_dir().join("layout.json")
 }
 
+/// Whether this launch is `cargo xtask e2e`'s, driven over its socket.
+#[must_use]
+pub fn self_test() -> bool {
+    std::env::var_os(slopty_e2e::SOCKET_ENV).is_some()
+}
+
 /// Open the workspace window and start a link loop per added worker on `handle`'s runtime.
 /// Call once from inside the GPUI application callback, after `gpui_kit::init`.
 ///
@@ -1539,7 +1545,13 @@ pub fn open_workspace(
     let root_view = workspace.clone();
     // Terminals and remote desktops stay at full rate while another app has the keyboard: a
     // second display is watched while typing elsewhere.
-    let options = WindowOptions { inactive_frame_interval: None, ..options };
+    // The self-test's window comes up in front but takes no keyboard: its keys arrive over the
+    // socket, and the machine's keyboard belongs to whoever is using it.
+    let options = WindowOptions {
+        inactive_frame_interval: None,
+        focus: options.focus && !self_test(),
+        ..options
+    };
     let window = cx.open_window(options, move |window, cx| {
         // The theme follows the window's appearance while `theme.appearance = "system"`.
         let observed = root_view.clone();
