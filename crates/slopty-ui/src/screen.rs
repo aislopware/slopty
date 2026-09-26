@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use core_foundation::base::TCFType as _;
 use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::{
-    Autocapitalize, Bounds, Context, CursorStyle, ElementInputHandler, EntityInputHandler,
+    App, Autocapitalize, Bounds, Context, CursorStyle, ElementInputHandler, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
     KeyUpEvent, Keystroke, LongPressEvent, Modifiers, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder,
@@ -130,6 +130,15 @@ impl Pointer {
             image,
             size: size(px(f32::from(shape.w) / scale), px(f32::from(shape.h) / scale)),
             hot: point(px(f32::from(shape.hot_x) / scale), px(f32::from(shape.hot_y) / scale)),
+        }
+    }
+}
+
+impl Pointer {
+    /// Free the picture's texture: each cursor the worker shows is a new image.
+    fn drop_image(&self, cx: &mut App) {
+        if let Self::Image { image, .. } = self {
+            cx.drop_image(Arc::clone(image), None);
         }
     }
 }
@@ -384,11 +393,7 @@ struct Waiting(Instant);
 /// The first draw starts the clock and a timer that draws the view again when it runs out, so
 /// the words come in on their own. The clock is dropped with the element: a body that got its
 /// content and later waits again starts a new grace.
-pub fn past_grace(
-    key: impl Into<gpui::ElementId>,
-    window: &mut Window,
-    cx: &mut gpui::App,
-) -> bool {
+pub fn past_grace(key: impl Into<gpui::ElementId>, window: &mut Window, cx: &mut App) -> bool {
     let since = window.use_keyed_state(key, cx, |_window, cx| {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(LOADING_GRACE).await;
@@ -438,7 +443,7 @@ impl std::fmt::Debug for ScreenView {
 impl EventEmitter<ScreenViewEvent> for ScreenView {}
 
 impl Focusable for ScreenView {
-    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus.clone()
     }
 }
@@ -478,6 +483,8 @@ impl ScreenView {
         cx: &Context<Self>,
     ) -> Self {
         let Opened { stream, target, size, quality } = opened;
+        // A cursor picture's texture lives in every window's atlas until it is dropped from it.
+        cx.on_release(|view, cx| view.pointer.drop_image(cx)).detach();
         handle.set_muted(theme.behaviour.stream.muted);
         let mut frames = handle.frames();
         let mut cursor = handle.cursor();
@@ -633,7 +640,7 @@ impl ScreenView {
     /// The worker said which cursor it shows (`ScreenEvent::Cursor`): draw that picture at the
     /// pointer from now on, or the arrow again for `None`.
     pub fn set_cursor_shape(&mut self, shape: Option<CursorShape>, cx: &mut Context<Self>) {
-        self.pointer = Pointer::from_shape(shape);
+        std::mem::replace(&mut self.pointer, Pointer::from_shape(shape)).drop_image(cx);
         cx.notify();
     }
 
@@ -670,7 +677,7 @@ impl ScreenView {
     }
 
     /// Recompute the overlay's rates when a second has passed; returns the text to draw.
-    fn hud_text(&mut self, cx: &gpui::App) -> Option<String> {
+    fn hud_text(&mut self, cx: &App) -> Option<String> {
         let hud = self.hud.as_mut()?;
         let now = Instant::now();
         let elapsed = now.duration_since(hud.sampled_at);
@@ -1293,7 +1300,7 @@ struct Outbox {
 impl Outbox {
     /// An outbox into `out`, with the task that moves what waits into it as room frees. The
     /// task outlives the view until what the view left waiting (its `Close`, say) has gone.
-    fn new(out: mpsc::Sender<ClientMsg>, cx: &gpui::App) -> Self {
+    fn new(out: mpsc::Sender<ClientMsg>, cx: &App) -> Self {
         let waiting = Rc::default();
         let wake = Rc::new(Notify::new());
         cx.foreground_executor()
