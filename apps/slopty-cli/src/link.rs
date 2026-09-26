@@ -28,7 +28,7 @@ pub async fn locate(flag: Option<&str>, data_dir: &Path, endpoint: &Endpoint) ->
     if let Some(configured) = configured(flag, data_dir)? {
         return Ok(configured);
     }
-    if let Some(found) = on_the_tailnet(endpoint).await {
+    if let Some(found) = slopty_net::discover::find(endpoint).await {
         tracing::info!(server = %found.name, addr = %found.addr, "found the server on the tailnet");
         return Ok(found.host_addr());
     }
@@ -52,23 +52,6 @@ pub fn configured(flag: Option<&str>, data_dir: &Path) -> Result<Option<HostAddr
         }
     };
     choose(flag, env.as_deref(), file)
-}
-
-/// The best server this machine's Tailscale can find, `None` without Tailscale or a server.
-async fn on_the_tailnet(endpoint: &Endpoint) -> Option<slopty_net::discover::Found> {
-    let api = slopty_tailnet::LocalApi::find()?;
-    let status = match api.status().await {
-        Ok(status) if status.running() => status,
-        Ok(status) => {
-            tracing::debug!(state = %status.backend_state, "tailscale is not up");
-            return None;
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "tailscale status");
-            return None;
-        }
-    };
-    slopty_net::discover::servers(endpoint, &status).await.into_iter().next()
 }
 
 /// The first of flag, environment and settings file that names a server. The file is read

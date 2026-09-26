@@ -536,7 +536,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     tries every online node the status lists with a bare QUIC handshake on the server port, all
     at once, within 1.5 s (`slopty_net::discover`). A node tagged `tag:slopty-server` comes
     first, then this machine, then the rest; phones are skipped. The handshake registers
-    nothing, and the port and the lease ALPN are what mark a server.
+    nothing, and the port and the lease ALPN are what mark a server. The app's "Connect to a
+    server" panel, shown while no server is set, does the same and puts the first answer in the
+    empty address field, naming it ("Found studio.tail1234.ts.net on your tailnet"); connecting
+    stays a click. Test: `the_server_is_found_through_the_local_tailscale`.
     - Rejected: `MagicDNS` SRV/TXT records (control pushes A/AAAA only), Tailscale Services
       (TCP only, tagged hosts, missing in Headscale), and control-plane APIs, which differ per
       control server.

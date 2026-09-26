@@ -46,6 +46,12 @@ fn endpoint() -> Result<slopty_net::Endpoint, String> {
     Ok(ENDPOINT.get_or_init(|| bound).clone())
 }
 
+/// The first Slopty server this machine's Tailscale finds on the tailnet, for the first run
+/// to offer; `None` on iOS, where no app can read Tailscale.
+pub async fn find_server() -> Option<slopty_net::discover::Found> {
+    slopty_net::discover::find(&endpoint().ok()?).await
+}
+
 /// Which app this is, by platform, as workers and the server show it.
 #[cfg(target_os = "ios")]
 const NAME: &str = "Slopty for iPhone";

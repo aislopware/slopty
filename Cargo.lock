@@ -7004,7 +7004,6 @@ dependencies = [
  "slopty-proto",
  "slopty-server",
  "slopty-settings",
- "slopty-tailnet",
  "slopty-tools",
  "slopty-worker",
  "tempfile",

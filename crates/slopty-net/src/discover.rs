@@ -9,7 +9,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use slopty_tailnet::{Node, Status};
+use slopty_tailnet::{LocalApi, Node, Status};
 use tokio::task::JoinSet;
 
 use crate::endpoint::SERVER_PORT;
@@ -68,6 +68,27 @@ pub fn candidates(status: &Status, port: u16) -> Vec<Found> {
         .collect();
     ranked.sort_by_key(|(rank, _)| *rank);
     ranked.into_iter().map(|(_, found)| found).collect()
+}
+
+/// The best server this machine's Tailscale can find, dialled from `endpoint`; `None` without a
+/// Tailscale this process can read, while it is not up, or when no node answers.
+pub async fn find(endpoint: &Endpoint) -> Option<Found> {
+    find_through(LocalApi::find()?, endpoint, SERVER_PORT).await
+}
+
+async fn find_through(api: LocalApi, endpoint: &Endpoint, port: u16) -> Option<Found> {
+    let status = match api.status().await {
+        Ok(status) if status.running() => status,
+        Ok(status) => {
+            tracing::debug!(state = %status.backend_state, "tailscale is not up");
+            return None;
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "tailscale status");
+            return None;
+        }
+    };
+    answering(endpoint, candidates(&status, port)).await.into_iter().next()
 }
 
 /// The Slopty servers on the tailnet `status` describes, dialled from `endpoint`, best first.
@@ -140,6 +161,36 @@ mod tests {
         let want: Vec<(String, String)> =
             want.iter().map(|(n, ip)| ((*n).to_owned(), format!("{ip}:{SERVER_PORT}"))).collect();
         assert_eq!(names, want);
+    }
+
+    /// Through the daemon: a server listening where this node's status says is found; a
+    /// daemon that is not up, or a node with nothing listening, finds nothing.
+    #[tokio::test]
+    async fn the_server_is_found_through_the_local_tailscale() {
+        let listener = ServerListener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            Admission::with_tailnet(Vec::new(), None),
+        )
+        .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let endpoint = crate::endpoint::bind_lease("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (up, _) = slopty_tailnet::fake::daemon(|_| {
+            let me = r#"{"BackendState":"Running","Self":{"ID":"n1","HostName":"mac",
+                "DNSName":"mac.ts.net.","OS":"macOS","TailscaleIPs":["127.0.0.1"]}}"#;
+            (200, me.to_owned())
+        })
+        .await
+        .unwrap();
+        let found = find_through(up.clone(), &endpoint, port).await;
+        assert_eq!(found.map(|f| (f.name, f.addr.port())), Some(("mac.ts.net".to_owned(), port)));
+        let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        assert_eq!(find_through(up, &endpoint, closed.port()).await, None, "nothing listening");
+        let (down, _) = slopty_tailnet::fake::daemon(|_| {
+            (200, r#"{"BackendState":"Stopped","Self":null}"#.to_owned())
+        })
+        .await
+        .unwrap();
+        assert_eq!(find_through(down, &endpoint, port).await, None, "tailscale is down");
     }
 
     /// A listening server answers the probe; a port nobody listens on does not, and does not

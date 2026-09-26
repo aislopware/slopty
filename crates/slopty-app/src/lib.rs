@@ -150,6 +150,8 @@ struct Adding {
     busy: bool,
     /// Why the last attempt failed.
     error: Option<String>,
+    /// The server the tailnet offered, by name, once one answered.
+    found: Option<String>,
 }
 
 /// The window's root view.
@@ -727,8 +729,35 @@ impl Workspace {
             }
         }));
         address.update(cx, |input, cx| input.focus(window, cx));
-        self.adding = Some(Adding { mode, address, busy: false, error: None });
+        self.adding = Some(Adding { mode, address, busy: false, error: None, found: None });
+        if mode == Panel::Server && self.server.is_none() {
+            self.offer_tailnet_server(window, cx);
+        }
         cx.notify();
+    }
+
+    /// Look for a server on the tailnet and put the first that answers in the empty address
+    /// field, named in the blurb. Connecting stays the person's call.
+    fn offer_tailnet_server(&self, window: &Window, cx: &Context<Self>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
+            let _sent = tx.send(net::find_server().await);
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Some(found)) = rx.await else { return };
+            let _updated = this.update_in(cx, |ws, window, cx| {
+                let Some(adding) = &mut ws.adding else { return };
+                let empty = adding.address.read(cx).value().trim().is_empty();
+                if adding.mode != Panel::Server || adding.busy || !empty {
+                    return;
+                }
+                let at = found.addr.ip().to_string();
+                adding.address.update(cx, |input, cx| input.set_value(at, window, cx));
+                adding.found = Some(found.name);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Close the panel (only offered while there is somewhere else to be).
@@ -902,6 +931,12 @@ impl Workspace {
                 "Connect to a server instead",
                 Panel::Server,
             ),
+        };
+        let blurb = match (&adding.found, adding.mode) {
+            (Some(name), Panel::Server) => {
+                SharedString::from(format!("Found {name} on your tailnet."))
+            }
+            _ => SharedString::from(blurb),
         };
         let welcome = self.welcome();
         let status = match (&adding.error, adding.busy) {

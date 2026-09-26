@@ -29,7 +29,6 @@ slopty-core.workspace = true
 slopty-grid.workspace = true
 slopty-worker.workspace = true
 slopty-net.workspace = true
-slopty-tailnet.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true
 slopty-settings.workspace = true
