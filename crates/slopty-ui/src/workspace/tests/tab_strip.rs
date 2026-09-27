@@ -51,7 +51,7 @@ fn the_workspaces_are_tabs_in_the_title_bar(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("ws-tab-0").is_some());
     assert!(cx.debug_bounds("ws-tab-1").is_none(), "the empty workspace below has no tab");
 
-    click(cx, "new-workspace");
+    new_workspace_from_the_bar(cx);
     assert_eq!(active(&view, cx), 1, "+ goes to a new, empty workspace");
     let (zero, one) = (
         cx.debug_bounds("ws-tab-0").expect("drawn"),

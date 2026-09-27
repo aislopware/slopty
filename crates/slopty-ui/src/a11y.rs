@@ -74,6 +74,8 @@ pub struct Node {
     pub label: Option<String>,
     /// The value, if any (a terminal's cursor row, a text field's text).
     pub value: Option<String>,
+    /// What the node does, beyond its label, if said.
+    pub description: Option<String>,
     /// The node holds the keyboard focus.
     pub focused: bool,
     /// Window rect in points: x, y, w, h.
@@ -106,6 +108,7 @@ pub fn tree(window: &Window) -> Vec<Node> {
             role: format!("{:?}", node.role()),
             label: node.label().map(str::to_owned),
             value: node.value().map(str::to_owned),
+            description: node.description().map(str::to_owned),
             focused: id == update.focus,
             bounds,
         });

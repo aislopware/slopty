@@ -69,7 +69,12 @@ pub(crate) use tile::{
     ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, HOOKS, INSTALL_HOOKS, MUTE, MUTED, NOTE, OPENING,
     PAUSED, READING, RECONNECTING, SESSION_ENDED, SLEEPING, TAKE, TAKE_OVER, UNMUTE,
 };
-pub use tile::{NOTE_TITLE_CHARS, file_title, note_progress, note_title};
+pub use tile::{NOTE_TITLE_CHARS, UNTITLED_NOTE, file_title, note_progress, note_title};
+
+/// Chrome words the modules keep to themselves, for the sentence-case check: a waiting
+/// badge's description and what "+" is called.
+#[cfg(test)]
+pub(crate) const CHROME_WORDS: [&str; 2] = [agents::SHOW_PROMPT, titlebar::NEW];
 pub use titlebar::{TITLEBAR_H, titlebar_height};
 use tokio::sync::mpsc;
 
@@ -370,9 +375,13 @@ impl Finished {
 /// What a menu row does when clicked.
 pub type MenuRun = Rc<dyn Fn(&mut Window, &mut App)>;
 
-/// The sections of the titlebar's "…" menu, in their order, a hairline between each.
+/// The sections of the titlebar's menus, in their order, a hairline between each.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum MenuGroup {
+    /// "+": what a new tile can be.
+    Tiles,
+    /// "+": a new workspace.
+    Workspaces,
     /// Where to go and what to see: the palette, the overview, the stream stats.
     Navigation,
     /// The settings.

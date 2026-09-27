@@ -230,7 +230,7 @@ fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let names = labels(&view, cx);
     // The same place the header names: the last two directories, a home as `~`.
-    for readout in ["studio", "oss/slopty", "RTT 4.2 ms", "1 working"] {
+    for readout in ["studio", "oss/slopty", "Round trip 4.2 ms", "1 working"] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
     assert!(cx.debug_bounds("rtt").is_none(), "the round trip left the title bar");
@@ -298,7 +298,7 @@ fn the_column_dots_keep_clear_of_the_toggle_and_the_tabs(cx: &mut TestAppContext
         bounds(cx, "navigator"),
         bounds(cx, "navigator-toggle"),
         bounds(cx, "ws-tab-0"),
-        bounds(cx, "new-workspace"),
+        bounds(cx, "new-menu"),
         bounds(cx, "indicator"),
         bounds(cx, "bell"),
     );

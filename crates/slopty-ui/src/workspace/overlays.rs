@@ -11,7 +11,7 @@ use slopty_proto::terminal::TermRequest;
 
 use super::actions::{FindEverywhere, ListWorkers, OpenFile, OpenPalette};
 use super::agents::{agent_status_text, needs_human};
-use super::tile::{kind_icon, kind_name};
+use super::tile::kind_icon;
 use super::{AGENT_COMMAND, WorkspaceView};
 use crate::icons::Status;
 use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
@@ -80,7 +80,8 @@ impl WorkspaceView {
                 continue;
             }
             let title = self.card_title(tile, item, cx);
-            let line = PaletteItem::item(&title, kind_name(item), kind_icon(item, false), item.id);
+            let line = PaletteItem::item(&title, kind_icon(item, false), item.id)
+                .placed(self.tile_place(item, cx));
             items.push(line.on_worker(self.worker_label(tile.worker)));
         }
         items.extend(self.worker_lines());

@@ -322,7 +322,7 @@ fn a_lone_workspace_is_its_name_and_tabs_say_what_they_hold(cx: &mut TestAppCont
     });
     assert!(name.size.width + px(0.5) >= whole, "{name:?}, whole {whole:?}");
 
-    click_at(cx, "new-workspace");
+    new_workspace_from_the_bar(cx);
     assert!(cx.debug_bounds("ws-tab-1").is_some(), "two tabs");
     let meta = cx.debug_bounds("ws-tab-meta-0").expect("room for what it holds");
     let tab = cx.debug_bounds("ws-tab-0").expect("drawn");
@@ -347,7 +347,7 @@ fn a_closing_tab_folds_away_unless_motion_is_reduced(cx: &mut TestAppContext) {
     view.update(cx, |v, _| v.set_animation(true));
     // Open an empty workspace, then leave it: its tab goes.
     let leave_an_empty_one = |cx: &mut VisualTestContext| {
-        click_at(cx, "new-workspace");
+        new_workspace_from_the_bar(cx);
         let active = view.read_with(cx, |v, _| v.layout().active_workspace());
         let id = view.read_with(cx, |v, _| {
             v.layout().workspaces().get(active).map(slopty_client::layout::Workspace::id)
@@ -412,12 +412,15 @@ fn the_phone_title_bar_fits_its_touch_targets(cx: &mut TestAppContext) {
 }
 
 /// The "…" button closes the menu it opened: the press outside the menu only dismisses, and
-/// does not reach the button under it to open the menu again.
+/// does not reach the button under it to open the menu again. The keyboard goes back to the
+/// focused shell, not to the button that took it when pressed.
 #[gpui::test]
 fn a_second_press_on_the_menu_button_closes_its_menu(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _shells = three_shells(&view, cx, &studio);
+    let tile = focused(&view, cx).expect("a focused shell");
+    let session = view.read_with(cx, |v, _| session_of(v, tile));
     let more = cx.debug_bounds("more").expect("… is drawn").center();
     cx.simulate_click(more, Modifiers::none());
     cx.run_until_parked();
@@ -425,6 +428,62 @@ fn a_second_press_on_the_menu_button_closes_its_menu(cx: &mut TestAppContext) {
     cx.simulate_click(more, Modifiers::none());
     cx.run_until_parked();
     assert!(cx.debug_bounds("menu").is_none(), "the second press closes it");
+    assert!(terminal_focused(&view, cx, session), "the shell keeps the keyboard");
+}
+
+/// What held the keyboard a moment (the settings, a dialog) gives it back to the focused
+/// shell, not to the workspace around it, where the shell's cursor went hollow.
+#[gpui::test]
+fn the_keyboard_goes_back_to_the_focused_shell(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shells = three_shells(&view, cx, &studio);
+    let tile = focused(&view, cx).expect("a focused shell");
+    let session = view.read_with(cx, |v, _| session_of(v, tile));
+    view.update_in(cx, |v, window, cx| window.focus(&v.focus, cx));
+    assert!(!terminal_focused(&view, cx, session), "the workspace took it");
+    view.update_in(cx, |v, window, cx| v.return_keyboard(window, cx));
+    assert!(terminal_focused(&view, cx, session), "the shell has it back");
+}
+
+/// "+" is a menu of what to open, hung from its own left edge: the empty workspace's three ways
+/// to begin and a note, then a new workspace apart. A row runs what its keys run: New terminal
+/// asks the worker for a shell in the focused one's directory, as ⌘T does.
+#[gpui::test]
+fn plus_lists_what_to_open_and_runs_it_as_its_keys_do(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let _shell = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/tmp/work"));
+    studio.drain();
+    click_at(cx, "new-menu");
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let rows: Vec<String> = cx
+        .update(|window, _cx| crate::a11y::tree(window))
+        .into_iter()
+        .filter(|n| n.role == "MenuItem")
+        .filter_map(|n| n.label)
+        .collect();
+    assert_eq!(
+        rows,
+        ["New terminal", "New agent", "Add a window or display", "New note", "New workspace"]
+    );
+    assert!(cx.debug_bounds("menu-separator-4").is_some(), "a new workspace stands apart");
+    let (menu, plus) =
+        (cx.debug_bounds("menu").expect("the menu"), cx.debug_bounds("new-menu").expect("+"));
+    assert!((f32::from(menu.left() - plus.left())).abs() < 0.5, "{menu:?} under {plus:?}");
+
+    click_at(cx, "menu-New terminal");
+    assert!(cx.debug_bounds("menu").is_none(), "the menu goes");
+    let sent = studio.drain();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMsg::OpenSession(OpenSession { cwd: Some(cwd), .. })] if cwd == "/tmp/work"
+        ),
+        "{sent:?}"
+    );
 }
 
 /// The "…" menu reads in sections, a hairline between each: where to go, the settings, then

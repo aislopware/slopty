@@ -409,12 +409,13 @@ mod tests {
         );
         let bounds = da.item_for_session(&session).unwrap().bounds;
         assert!(
-            button_in(&db, "Allow Bash?", db.item_for_session(&session).unwrap().bounds).is_some()
+            button_in(&db, "Needs approval: Bash", db.item_for_session(&session).unwrap().bounds)
+                .is_some()
         );
 
         // The badge on A reveals A's terminal and does no more: the answer belongs to the TUI's own
         // prompt, so both clients go on counting one until the worker says otherwise.
-        let (x, y) = button_in(&da, "Allow Bash?", bounds).unwrap();
+        let (x, y) = button_in(&da, "Needs approval: Bash", bounds).unwrap();
         a.click(x, y).await.unwrap();
         let want = format!("terminal:{session}");
         let da = a.wait_for("A's terminal revealed", STEP, |d| d.focused == want).await.unwrap();

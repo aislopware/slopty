@@ -56,7 +56,7 @@ use slopty_theme::{Theme, Typography};
 use super::actions::ToggleNavigator;
 use super::agents::{Waiting, agent_status_text};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
-use super::tile::{cwd_tail, kind_icon, note_progress};
+use super::tile::{cwd_tail, kind_icon};
 use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
@@ -318,8 +318,8 @@ pub(super) fn until_age_changes(age: Duration) -> Duration {
 /// A note's second line: its progress when it has tasks, else its first line after the
 /// title, else nothing (its icon says it is a note).
 pub(super) fn note_meta(text: &str) -> String {
-    if let Some((done, total)) = note_progress(text) {
-        return format!("{done} of {total} done");
+    if let Some(done) = super::tile::note_done(text) {
+        return done;
     }
     text.lines()
         .map(str::trim)
@@ -710,9 +710,9 @@ impl WorkspaceView {
                 let meta = meta_line([doing.as_deref(), place.as_deref(), branch]);
                 (meta, summary.and_then(|s| age_at(s.started_ms, now)))
             }
-            ItemKind::Browser { url } => (crate::browser::short_url(url).to_owned(), None),
-            ItemKind::File { .. } => {
-                (self.cwd_of(item).map(|dir| cwd_tail(&dir)).unwrap_or_default(), None)
+            // The header's place; a page named by its address says nothing more.
+            ItemKind::Browser { .. } | ItemKind::File { .. } => {
+                (self.tile_place(item, cx).unwrap_or_default(), None)
             }
             ItemKind::Window { .. } | ItemKind::Display { .. } => (String::new(), None),
             ItemKind::Note { text } => (note_meta(text), None),

@@ -299,14 +299,18 @@ pub fn task_row(
         .gap(px(spacing.xs * scale))
         .child(hit.child(boxed))
         .child(
-            div().flex_1().min_w(px(0.0)).child(
-                TextView::markdown(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                // A ticked task is set back and struck through, as a done item is in a list app:
+                // what is left to do reads first.
+                .when(done, |el| el.opacity(alpha::STRONG).line_through())
+                .child(TextView::markdown(
                     ElementId::Name(text_id.into()),
                     SharedString::from(text.to_owned()),
                 )
                 .style(style(theme, mono, scale))
-                .selectable(false),
-            ),
+                .selectable(false)),
         )
         .into_any_element()
 }
@@ -388,6 +392,51 @@ mod tests {
         cx.simulate_click(beside, Modifiers::default());
         cx.run_until_parked();
         assert_eq!(ticked.get(), Some(2));
+    }
+
+    /// A ticked task's text is struck through and set back; an open one's is neither.
+    #[gpui::test]
+    fn a_done_task_is_struck_through_and_set_back(cx: &mut gpui::TestAppContext) {
+        struct Rows;
+        impl Render for Rows {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let theme = Theme::default();
+                let row = |ix, done| {
+                    let task = Task { ix, done, text: "ship the bundle".to_owned() };
+                    task_row(format!("task-{ix}"), &task, &theme, "Menlo", 1.0, None)
+                };
+                div().p(px(40.0)).w(px(400.0)).child(row(0, false)).child(row(1, true))
+            }
+        }
+        cx.update(gpui_kit::init);
+        let (_rows, cx) = cx.add_window_view(|_window, _cx| Rows);
+        cx.run_until_parked();
+        let (open, done) = (
+            cx.debug_bounds("task-0").expect("the open box"),
+            cx.debug_bounds("task-1").expect("the done box"),
+        );
+        let (scale, lines) =
+            cx.update(|window, _| (window.scale_factor(), window.painted_underlines()));
+        let on_row = |row: gpui::Bounds<gpui::Pixels>| {
+            lines
+                .iter()
+                .filter(|l| {
+                    let y = l.bounds.origin.y.0 / scale;
+                    y >= f32::from(row.top()) - 8.0 && y <= f32::from(row.bottom()) + 8.0
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(on_row(open).is_empty(), "an open task is not struck");
+        let struck = on_row(done);
+        assert!(!struck.is_empty(), "a done task is struck through: {lines:?}");
+        assert!(
+            struck.iter().all(|l| (l.color.a - alpha::STRONG).abs() < 0.05),
+            "and set back: {struck:?}"
+        );
     }
 
     #[test]

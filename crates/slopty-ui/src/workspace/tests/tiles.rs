@@ -55,7 +55,7 @@ fn a_header_is_its_title_then_its_context_in_the_ui_face(cx: &mut TestAppContext
     let tasks = "# Release\n- [x] tag\n- [ ] ship\n".to_owned();
     let release = arrives(&view, cx, &fake, ItemKind::Note { text: tasks }, 3);
     let nodes = tree(cx);
-    for label in ["src/slopty", "1/2", "src"] {
+    for label in ["src/slopty", "1 of 2 done", "src"] {
         assert!(nodes.iter().any(|n| n.is("Label", Some(label))), "{label}: {nodes:#?}");
     }
     assert!(!nodes.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains(" · "))));
@@ -291,6 +291,14 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     let pill = cx.debug_bounds(selector("agent", waiting.item)).expect("the pill");
     let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
     assert!(pill.top() >= header.top() && pill.bottom() <= header.bottom(), "in the header");
+    // A statement, not a question the click cannot answer; what the click does is said apart.
+    let nodes = tree(cx);
+    let badge = nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("Needs approval: Bash"))
+        .expect("the pill says what the agent waits for");
+    assert_eq!(badge.role, "Button");
+    assert_eq!(badge.description.as_deref(), Some(CHROME_WORDS[0]));
     assert!(cx.debug_bounds(selector("attention", waiting.item)).is_none(), "no bar");
     assert!(cx.debug_bounds(selector("agent", other.item)).is_none(), "only on that one");
     let tile = cx.debug_bounds(selector("item", waiting.item)).expect("drawn");

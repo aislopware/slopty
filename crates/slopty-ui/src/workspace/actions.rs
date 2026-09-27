@@ -7,6 +7,7 @@
 
 use gpui::{Action, KeyBinding, actions};
 
+use crate::icons::IconName;
 use crate::palette::PaletteItem;
 
 actions!(
@@ -196,57 +197,69 @@ pub fn palette_items() -> Vec<PaletteItem> {
     };
     let workspace = key_bindings();
     let terminal = crate::terminal::key_bindings();
-    let w = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &workspace);
-    let t = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &terminal);
+    let w = |label: &str, icon: IconName, action: Box<dyn Action>| {
+        PaletteItem::new(label, icon, action, &workspace)
+    };
+    let t = |label: &str, icon: IconName, action: Box<dyn Action>| {
+        PaletteItem::new(label, icon, action, &terminal)
+    };
     vec![
-        w("New terminal", Box::new(NewTerminal)),
-        w("New agent", Box::new(NewAgent)),
-        w("New note", Box::new(NewNote)),
-        w("Add a window or display", Box::new(AddWindow)),
-        w("Open a file", Box::new(OpenFile)),
-        w("Save file", Box::new(crate::file::SaveFile)),
-        w("Open URL…", Box::new(OpenUrl)),
-        w("Close tile", Box::new(CloseItem)),
-        w("Undo close", Box::new(UndoClose)),
-        w("Next agent that needs you", Box::new(NextAttention)),
-        w("Mute or unmute window", Box::new(ToggleMute)),
-        w("Stream stats", Box::new(ToggleStats)),
-        w("Show or hide the navigator", Box::new(ToggleNavigator)),
-        w("Name this tile", Box::new(RenameItem)),
-        w("Point other devices at this tile", Box::new(PointOthers)),
-        w("Find in every tile", Box::new(FindEverywhere)),
-        w("List workers", Box::new(ListWorkers)),
-        w("Forwarded ports", Box::new(ListPorts)),
-        w("Column to the left", Box::new(FocusColumnLeft)),
-        w("Column to the right", Box::new(FocusColumnRight)),
-        w("First column", Box::new(FocusColumn { index: 0 })),
-        w("Last column", Box::new(FocusColumnLast)),
-        w("Tile or workspace above", Box::new(FocusUp)),
-        w("Tile or workspace below", Box::new(FocusDown)),
-        w("Move column left", Box::new(MoveColumnLeft)),
-        w("Move column right", Box::new(MoveColumnRight)),
-        w("Move tile up", Box::new(MoveUp)),
-        w("Move tile down", Box::new(MoveDown)),
-        w("Into the column on the left", Box::new(ConsumeOrExpelLeft)),
-        w("Into the column on the right", Box::new(ConsumeOrExpelRight)),
-        w("Next column width", Box::new(CycleWidth)),
-        w("Previous column width", Box::new(CycleWidthBack)),
-        w("Narrower column", Box::new(NarrowColumn)),
-        w("Wider column", Box::new(WidenColumn)),
-        w("Maximize column", Box::new(MaximizeColumn)),
-        w("Fullscreen tile", Box::new(FullscreenTile)),
-        w("Center column", Box::new(CenterColumn)),
-        w("Tabbed column", Box::new(ToggleTabbed)),
-        w("Overview", Box::new(ToggleOverview)),
-        w("Larger text", Box::new(FontLarger)),
-        w("Smaller text", Box::new(FontSmaller)),
-        w("Default text size", Box::new(FontReset)),
-        t("Find in terminal or file", Box::new(Find)),
-        t("Previous prompt", Box::new(PrevPrompt)),
-        t("Next prompt", Box::new(NextPrompt)),
-        t("Copy last output", Box::new(CopyLastOutput)),
-        t("Rerun last command", Box::new(RerunLast)),
-        t("Keep last block as a note", Box::new(NoteLastBlock)),
-        t("Clear the screen and history", Box::new(ClearScreen)),
+        w("New terminal", IconName::SquareTerminal, Box::new(NewTerminal)),
+        w("New agent", IconName::Bot, Box::new(NewAgent)),
+        w("New note", IconName::StickyNote, Box::new(NewNote)),
+        w("Add a window or display", IconName::AppWindow, Box::new(AddWindow)),
+        w("Open a file", IconName::FileText, Box::new(OpenFile)),
+        w("Save file", IconName::Save, Box::new(crate::file::SaveFile)),
+        w("Open URL…", IconName::Globe, Box::new(OpenUrl)),
+        w("Close tile", IconName::X, Box::new(CloseItem)),
+        w("Undo close", IconName::Undo2, Box::new(UndoClose)),
+        w("Next agent that needs you", IconName::BellRing, Box::new(NextAttention)),
+        w("Mute or unmute window", IconName::VolumeX, Box::new(ToggleMute)),
+        w("Stream stats", IconName::Activity, Box::new(ToggleStats)),
+        w("Show or hide the navigator", IconName::PanelLeft, Box::new(ToggleNavigator)),
+        w("Name this tile", IconName::Pencil, Box::new(RenameItem)),
+        w("Point other devices at this tile", IconName::Cast, Box::new(PointOthers)),
+        w("Find in every tile", IconName::Search, Box::new(FindEverywhere)),
+        w("List workers", IconName::Server, Box::new(ListWorkers)),
+        w("Forwarded ports", IconName::Cable, Box::new(ListPorts)),
+        w("Column to the left", IconName::ArrowLeft, Box::new(FocusColumnLeft)),
+        w("Column to the right", IconName::ArrowRight, Box::new(FocusColumnRight)),
+        w("First column", IconName::ArrowLeftToLine, Box::new(FocusColumn { index: 0 })),
+        w("Last column", IconName::ArrowRightToLine, Box::new(FocusColumnLast)),
+        w("Tile or workspace above", IconName::ArrowUp, Box::new(FocusUp)),
+        w("Tile or workspace below", IconName::ArrowDown, Box::new(FocusDown)),
+        w("Move column left", IconName::MoveLeft, Box::new(MoveColumnLeft)),
+        w("Move column right", IconName::MoveRight, Box::new(MoveColumnRight)),
+        w("Move tile up", IconName::MoveUp, Box::new(MoveUp)),
+        w("Move tile down", IconName::MoveDown, Box::new(MoveDown)),
+        w(
+            "Into the column on the left",
+            IconName::BetweenHorizontalStart,
+            Box::new(ConsumeOrExpelLeft),
+        ),
+        w(
+            "Into the column on the right",
+            IconName::BetweenHorizontalEnd,
+            Box::new(ConsumeOrExpelRight),
+        ),
+        w("Next column width", IconName::ChevronsRight, Box::new(CycleWidth)),
+        w("Previous column width", IconName::ChevronsLeft, Box::new(CycleWidthBack)),
+        w("Narrower column", IconName::FoldHorizontal, Box::new(NarrowColumn)),
+        w("Wider column", IconName::UnfoldHorizontal, Box::new(WidenColumn)),
+        w("Maximize column", IconName::Maximize2, Box::new(MaximizeColumn)),
+        w("Fullscreen tile", IconName::Expand, Box::new(FullscreenTile)),
+        w("Center column", IconName::AlignCenterHorizontal, Box::new(CenterColumn)),
+        w("Tabbed column", IconName::PanelsTopLeft, Box::new(ToggleTabbed)),
+        w("Overview", IconName::LayoutGrid, Box::new(ToggleOverview)),
+        w("Larger text", IconName::AArrowUp, Box::new(FontLarger)),
+        w("Smaller text", IconName::AArrowDown, Box::new(FontSmaller)),
+        w("Default text size", IconName::Type, Box::new(FontReset)),
+        t("Find in terminal or file", IconName::Search, Box::new(Find)),
+        t("Previous prompt", IconName::ChevronUp, Box::new(PrevPrompt)),
+        t("Next prompt", IconName::ChevronDown, Box::new(NextPrompt)),
+        t("Copy last output", IconName::Copy, Box::new(CopyLastOutput)),
+        t("Rerun last command", IconName::RotateCw, Box::new(RerunLast)),
+        t("Keep last block as a note", IconName::NotebookPen, Box::new(NoteLastBlock)),
+        t("Clear the screen and history", IconName::Eraser, Box::new(ClearScreen)),
     ]
 }

@@ -151,8 +151,9 @@ fn the_drop_line_sits_on_the_divider_and_a_join_washes_its_share(cx: &mut TestAp
 
 /// In the overview a workspace with tiles is one lifted card round its panes: the elevated
 /// surface a base unit wider all round, rounded (lifted by `kit::elevate`), and a 2 pt accent
-/// ring round the active one only. The place for a new workspace is a ghost button on
-/// the last card's left edge, no taller than a row, and a click on it opens that workspace.
+/// ring round the active one only. The place for a new workspace is a card of the same size
+/// under the last, only its outline, and a click on it opens that workspace. No tile's header
+/// is a band of its own at that zoom: every header is the body's surface, with no hairline.
 #[gpui::test]
 fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -199,14 +200,26 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
         .expect("a pane in the first card");
     near(f32::from(pane.left() - first.left()), pad);
 
-    // One left edge: the panes in the card, the name over it, the ghost button's words.
+    // One left edge: the panes in the card, the name over it, the place for the next one.
     let new = bounds(cx, "overview-new-workspace");
     let name = bounds(cx, "overview-name-1");
     near(f32::from(name.left()), f32::from(second.left()) + pad);
-    let words = f32::from(new.left()) + crate::kit::button_text_inset(&theme);
-    near(words, f32::from(name.left()));
+    near(f32::from(new.left()), f32::from(second.left()));
     assert!(new.top() >= second.bottom() - px(0.5), "under the last card");
-    assert!(f32::from(new.size.height) < f32::from(second.size.height) / 2.0, "compact");
+    near(f32::from(new.size.height), f32::from(second.size.height));
+    let dashed = quads_at(cx, new).iter().any(|q| q.border_style == gpui::BorderStyle::Dashed);
+    assert!(dashed, "only its outline");
+    for (_, tile) in &shells {
+        let header = cx.debug_bounds(selector("title", tile.item)).expect("a header");
+        let quads = quads_at(cx, header);
+        let content = crate::colors::hsla(theme.content());
+        assert!(!quads.is_empty(), "the header paints");
+        assert!(
+            quads.iter().all(|q| q.background.as_solid() == Some(content)),
+            "the body's surface: {quads:?}"
+        );
+        assert!(quads.iter().all(|q| q.border_widths.bottom.0 == 0.0), "no hairline");
+    }
     cx.simulate_click(new.center(), Modifiers::default());
     cx.run_until_parked();
     assert!(!view.read_with(cx, |v, _| v.layout.overview_open()), "the overview closes");

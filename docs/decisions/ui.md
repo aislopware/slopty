@@ -2362,3 +2362,73 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `primary_foreground`, a ticked note box, a lit key cap, the terminal's accent buttons. Tests:
   the theme's fills test holds `accent_ink` on `accent_fill` and `fill_fg` on the rest to AA in
   both variants; `the_kit_theme_follows_the_tokens`.
+
+- ✅ **The design review wave: say, don't ask; one place; every row an icon** (2026-09-27, a
+  review of every golden against Warp, Zed and monocode).
+  - **A waiting agent's pill is a statement.** A permission request read "Allow Bash?", in
+    the warn tone, on a button: a click looked like an approval, yet the app never answers for
+    an agent. It now reads "Needs approval: Bash" (with the command when the hook gave one),
+    in the badge, the navigator's second line and the inbox alike. The button's accessible
+    description says what the click does ("Shows the prompt").
+  - **"+" is a menu of what to open.** It made a new workspace and nothing else, sitting right
+    after the workspace's name, where it read as "add to this". It now lists New terminal, New
+    agent, Add a window or display and New note, then a hairline, then New workspace. It hangs
+    from its own left edge, and each row runs the palette's action for it.
+  - **A workspace is named by where it works.** Until someone names it, its name is its first
+    shell's repository, else that shell's directory, else "Workspace N". The home directory
+    says nothing, so it keeps the number. The e2e stack's shells start in its private home, so
+    its goldens keep "Workspace 1".
+  - **The light panel is as far from the content as the dark one.** At `ink(0.035)` an
+    unfocused header was 2.8 L* from the focused one's white; dark's is 3.5. At `ink(0.05)` it
+    is 3.8, and the panel still clears the bars by 2.4 L* (dark 2.5). A contrast ratio could
+    not see this: both variants were 1.07:1.
+  - **One place per tile.** The header, the navigator's second line and the palette's context
+    come from `tile_place`: a note's progress is "1 of 3 done" everywhere (the header said
+    "1/3", the palette "Note"), a file its folder, a page its address when the title is not it.
+  - **Every palette line has an icon.** The earlier rule, no icon on a command, left an empty
+    slot that on a phone read as an indent under the section heading. `PaletteItem::new` now
+    takes the icon, so a command cannot be added without one.
+  - **The overview draws whole cards.** At the shapes zoom a header is the body's surface with
+    no hairline: a band on some tiles and not on the focused one read as cards half drawn. The
+    empty workspace at the end is a dashed card the size of a real one with "+ New workspace"
+    in it, niri's way of showing where the next one goes.
+  - **Notes.** A ticked task is struck through and set back to `alpha::STRONG`, so what is left
+    to do reads first. An empty note is "Untitled note". The old "note" broke sentence case,
+    and "New note" would have matched the command of that name in the palette.
+  - **Status bar.** With one worker its name is dropped from the place, unless its link is
+    down. The round trip is the figure alone ("4.2 ms"; a screen reader hears "Round trip").
+    It sits in a slot held at `999 ms` width from the link's first frame, so the first sample
+    moves nothing.
+  - **The keyboard comes back to the tile.** Closing the settings or the add-worker dialog
+    focused the workspace's own handle, not the shell, and left its cursor hollow in the dark
+    workspace golden. `WorkspaceView::return_keyboard` gives it to the focused tile's shell or
+    editor. The settings, the add-worker dialog and the title bar's menus all use it.
+  - **First run.** The page carries the app's mark over its heading. A server the tailnet found
+    is a row to press (its name, "On your tailnet" and its address) under the blurb, not words
+    in its place.
+  - **The settings are coloured, and so is what a project is made of.** syntect's own set has
+    no TOML, TypeScript, Dockerfile, Zig or Nix. The grammars are now bat's (`two-face`, on the
+    same pure-Rust regex engine), and the settings dialog's field is the file tile's code
+    editor with TOML's colours and line numbers, so a parse error's line is a glance away.
+  - Tests: agents' badge in `a_tile_that_needs_you_says_so_once_in_its_header`, chrome
+    `plus_lists_what_to_open_and_runs_it_as_its_keys_do`,
+    `the_keyboard_goes_back_to_the_focused_shell`, bars
+    `a_workspace_is_named_by_where_its_first_shell_is`,
+    `the_round_trip_lands_without_moving_the_bar`, theme
+    `the_steps_are_as_far_apart_in_light_as_in_dark`, overlays
+    `the_palette_finds_an_unnamed_note` (header, navigator and palette agree), palette
+    `every_line_icon_is_embedded` (every command's icon), strip_marks
+    `the_overview_lifts_each_workspace_and_offers_a_new_one`, markdown
+    `a_done_task_is_struck_through_and_set_back`, highlight
+    `toml_and_the_languages_syntect_lacks_are_coloured`, settings
+    `the_field_colours_the_file_as_toml`, app
+    `the_panel_names_its_host_and_the_server_the_tailnet_found`. The goldens are to be recorded
+    again with this change.
+
+- ✅ **Upstream sync of 2026-09-27: text paints its highlights under the glyphs** (2026-09-27).
+  zed rebased onto main `bda9c0bd43` (1 commit, fork head `6f8c0faf`); gpui-kit and
+  libghostty-rs were current. The commit fixes Markdown search highlights drawn over the text
+  and gives `TextLayout` `paint_background` and `paint_foreground`, so a caller can put its own
+  quads between a text's run backgrounds and its glyphs. Slopty draws nothing between the two:
+  notes and the file tile paint through gpui-kit, and the terminal paints its own cells. The
+  goldens were recorded again on it.

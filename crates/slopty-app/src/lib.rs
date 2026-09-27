@@ -191,8 +191,8 @@ struct Adding {
     busy: bool,
     /// Why the last attempt failed.
     error: Option<String>,
-    /// The server the tailnet offered, by name, once one answered.
-    found: Option<String>,
+    /// The server the tailnet offered, by name and address, once one answered.
+    found: Option<(String, String)>,
 }
 
 /// The window's root view.
@@ -345,13 +345,12 @@ impl Workspace {
         }
     }
 
-    /// Drop the editor and hand the keyboard back to the workspace.
+    /// Drop the editor and hand the keyboard back to the focused tile.
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_editor.take().is_none() {
             return;
         }
-        let handle = self.view.read(cx).focus_handle(cx);
-        window.focus(&handle, cx);
+        self.view.update(cx, |view, cx| view.return_keyboard(window, cx));
         cx.notify();
     }
 
@@ -783,8 +782,9 @@ impl Workspace {
         .detach();
     }
 
-    /// The tailnet found `found`: its address goes in the field and its name in the blurb,
-    /// unless the person has moved on (typed something, switched to a worker, or connected).
+    /// The tailnet found `found`: its address goes in the field and it is offered as a row to
+    /// connect to, unless the person has moved on (typed something, switched to a worker, or
+    /// connected).
     fn offer_found(
         &mut self,
         found: slopty_net::discover::Found,
@@ -797,8 +797,8 @@ impl Workspace {
             return;
         }
         let at = found.addr.ip().to_string();
-        adding.address.update(cx, |input, cx| input.set_value(at, window, cx));
-        adding.found = Some(found.name);
+        adding.address.update(cx, |input, cx| input.set_value(at.clone(), window, cx));
+        adding.found = Some((found.name, at));
         cx.notify();
     }
 
@@ -808,8 +808,7 @@ impl Workspace {
             return;
         }
         self.adding = None;
-        let handle = self.view.read(cx).focus_handle(cx);
-        window.focus(&handle, cx);
+        self.view.update(cx, |view, cx| view.return_keyboard(window, cx));
         cx.notify();
     }
 
@@ -974,30 +973,23 @@ impl Workspace {
                 Panel::Server,
             ),
         };
-        // A server the tailnet found is named in the blurb's place, the name in the text colour
-        // so it reads as the answer, with the address already in the field below it.
-        let blurb = match (&adding.found, adding.mode) {
-            (Some(name), Panel::Server) => {
-                let said = SharedString::from(format!("Found {name} on your tailnet"));
-                let at = "Found ".len();
-                let named =
-                    gpui::HighlightStyle { color: Some(hsla(s.text)), ..Default::default() };
-                div()
-                    .id("add-worker-found")
-                    .debug_selector(|| "add-worker-found".to_owned())
-                    .role(Role::Status)
-                    .aria_label(said.clone())
-                    .child(
-                        gpui::StyledText::new(said)
-                            .with_highlights([(at..at.saturating_add(name.len()), named)]),
-                    )
-            }
-            _ => div()
-                .id("add-worker-blurb")
-                .debug_selector(|| "add-worker-blurb".to_owned())
-                .child(blurb),
+        let blurb = div()
+            .id("add-worker-blurb")
+            .debug_selector(|| "add-worker-blurb".to_owned())
+            .child(blurb);
+        // A server the tailnet found is a row to press, as a nearby device is: its name, where
+        // it was found and its address, which is already in the field below.
+        let found = match (&adding.found, adding.mode) {
+            (Some((name, at)), Panel::Server) => Some(
+                found_row(theme, name, at)
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx))),
+            ),
+            _ => None,
         };
         let welcome = self.welcome();
+        // The first run is the app's front page: its mark over the heading, as a sign on the
+        // door. A dialog over the workspace needs none.
+        let brand = welcome.then(|| brand(theme));
         let status = match (&adding.error, adding.busy) {
             (Some(e), _) => Some((e.clone(), s.error)),
             (None, true) => Some(("Connecting…".to_owned(), s.text_muted)),
@@ -1055,6 +1047,7 @@ impl Workspace {
                         cx.stop_propagation();
                     }))
             })
+            .children(brand)
             .child(
                 div()
                     .flex()
@@ -1080,6 +1073,7 @@ impl Workspace {
                             .text_color(hsla(s.text_muted)),
                     ),
             )
+            .children(found)
             .child(address)
             .when_some(status, |el, (text, tone)| {
                 el.child(
@@ -1608,6 +1602,87 @@ fn frame_nominal() -> std::time::Duration {
         })
 }
 
+/// The app's name in the product's hand: its mark (a terminal glyph on the accent fill, the
+/// primary button's pair) beside the word.
+fn brand(theme: &Theme) -> impl IntoElement {
+    use slopty_ui::icons::{IconName, IconSize, icon};
+    let s = &theme.surfaces;
+    let side = theme.typography.title() + theme.spacing.sm;
+    div()
+        .id("app-brand")
+        .debug_selector(|| "app-brand".to_owned())
+        .role(Role::Image)
+        .aria_label(APP_NAME)
+        .flex()
+        .items_center()
+        .gap(px(theme.spacing.sm))
+        .child(
+            div()
+                .flex_none()
+                .size(px(side))
+                .rounded(px(theme.radii.sm))
+                .bg(hsla(s.accent_fill))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    icon(theme, IconName::SquareTerminal, IconSize::Inline, hsla(s.accent_ink))
+                        .size(px(theme.typography.icon())),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(theme.typography.ui_size))
+                .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
+                .text_color(hsla(s.text))
+                .child(APP_NAME),
+        )
+}
+
+/// What the app is called where it names itself.
+const APP_NAME: &str = "Slopty";
+
+/// A server the tailnet found, as a row to connect to: its name over where it was found.
+fn found_row(theme: &Theme, name: &str, at: &str) -> gpui::Stateful<gpui::Div> {
+    use slopty_ui::icons::{IconName, IconSize, icon};
+    let s = theme.surfaces;
+    let row = kit::row(theme, kit::Row::Two)
+        .id("add-worker-found")
+        .debug_selector(|| "add-worker-found".to_owned())
+        .role(Role::Button)
+        .aria_label(SharedString::from(format!("Connect to {name}")))
+        .rounded(px(theme.radii.sm))
+        .border_1()
+        .border_color(hsla(s.border_subtle))
+        .cursor_pointer()
+        .hover(move |el| el.bg(hsla(s.raised)))
+        .child(
+            icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted))
+                .size(px(theme.typography.icon())),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(theme.typography.ui_size))
+                        .text_color(hsla(s.text))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(SharedString::from(name.to_owned())),
+                )
+                .child(
+                    kit::meta(div(), theme)
+                        .child(SharedString::from(format!("On your tailnet \u{b7} {at}"))),
+                ),
+        );
+    tab_stop(row, s.accent)
+}
+
 /// The app's own bindings, outside any view's context.
 fn app_key_bindings() -> Vec<gpui::KeyBinding> {
     vec![
@@ -1618,15 +1693,17 @@ fn app_key_bindings() -> Vec<gpui::KeyBinding> {
 
 /// The app's lines for the command palette, after the workspace's.
 fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
+    use slopty_ui::icons::IconName;
+
     let bindings = app_key_bindings();
-    let item = |label: &str, action: Box<dyn gpui::Action>| {
-        slopty_ui::palette::PaletteItem::new(label, action, &bindings)
+    let item = |label: &str, icon: IconName, action: Box<dyn gpui::Action>| {
+        slopty_ui::palette::PaletteItem::new(label, icon, action, &bindings)
     };
     vec![
-        item("Open settings", Box::new(OpenSettings)),
-        item("Connect to a server", Box::new(ConnectServer)),
-        item("Disconnect from the server", Box::new(DisconnectServer)),
-        item("Add a worker", Box::new(AddWorker)),
+        item("Open settings", IconName::Settings, Box::new(OpenSettings)),
+        item("Connect to a server", IconName::Link, Box::new(ConnectServer)),
+        item("Disconnect from the server", IconName::Unplug, Box::new(DisconnectServer)),
+        item("Add a worker", IconName::Plus, Box::new(AddWorker)),
     ]
 }
 
@@ -1950,8 +2027,9 @@ mod tests {
     }
 
     /// Each panel's field gives an example of its own kind of host, and switching panels
-    /// switches it. A server the tailnet found is named where the blurb was, its address in
-    /// the field, unless the person has already typed one.
+    /// switches it. A server the tailnet found is a row to connect to under the blurb, its
+    /// address in the field, unless the person has already typed one. The first run carries
+    /// the app's mark over its heading.
     #[gpui::test]
     fn the_panel_names_its_host_and_the_server_the_tailnet_found(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -1980,8 +2058,11 @@ mod tests {
             ws.update(cx, |ws, cx| ws.offer_found(found("home-server"), window, cx));
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("add-worker-found").is_some(), "named where the blurb was");
-        assert!(cx.debug_bounds("add-worker-blurb").is_none());
+        let row = cx.debug_bounds("add-worker-found").expect("a row to connect to");
+        let field = cx.debug_bounds("add-worker-blurb").expect("the blurb stays");
+        assert!(field.bottom() <= row.top(), "under what the panel is for");
+        let brand = cx.debug_bounds("app-brand").expect("the first run carries the mark");
+        assert!(brand.bottom() <= field.top(), "over the heading");
         let typed = ws.read_with(cx, |ws, cx| {
             ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())
         });
@@ -1992,7 +2073,7 @@ mod tests {
             ws.update(cx, |ws, cx| ws.offer_found(found("other"), window, cx));
         });
         let named = ws.read_with(cx, |ws, _| ws.adding.as_ref().and_then(|a| a.found.clone()));
-        assert_eq!(named.as_deref(), Some("home-server"));
+        assert_eq!(named.map(|(name, _)| name).as_deref(), Some("home-server"));
     }
 
     /// Over the workspace the panel is a dialog: Esc closes it, and so does a click outside

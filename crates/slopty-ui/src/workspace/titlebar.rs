@@ -1,7 +1,8 @@
 //! The bar across the top, from the navigator's right edge to the window's (from past the
 //! traffic lights when the navigator is hidden): the navigator's toggle, the workspaces as
-//! tabs with "+" after them, and the active workspace's column dots while some column is out of
-//! view; the inbox's bell and "…" on the right. Nothing else: every other action is a key, the
+//! tabs with "+" after them (a menu of what to open: a terminal, an agent, a window, a note, or
+//! a workspace), and the active workspace's column dots while some column is out of view; the
+//! inbox's bell and "…" on the right. Nothing else: every other action is a key, the
 //! palette, or a tile's own header, and the readouts (the server's state among them) live in
 //! the status bar.
 //!
@@ -14,7 +15,7 @@
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -29,7 +30,9 @@ use gpui::{
 use slopty_client::layout::{Column, Strip, Tile, WorkerKey};
 use slopty_theme::{Typography, alpha};
 
-use super::actions::{OpenPalette, ToggleNavigator, ToggleStats};
+use super::actions::{
+    AddWindow, NewAgent, NewNote, NewTerminal, OpenPalette, ToggleNavigator, ToggleStats,
+};
 use super::navigator::Mode;
 use super::rollup::{Rollup, rollup_slot};
 use super::strip::NEW_WORKSPACE;
@@ -65,6 +68,9 @@ const TAB_WIDE_W: f32 = 176.0;
 /// How long a closing tab takes to fold its width away.
 const TAB_SETTLE: Duration = Duration::from_millis(160);
 
+/// What "+" is called: it opens a menu of things to open.
+pub(super) const NEW: &str = "New";
+
 /// Keyboard hints where there is a keyboard with a ⌘ key.
 const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
 
@@ -76,6 +82,8 @@ const DOTS_AT_FULL_SIZE: usize = 12;
 /// Which of the bar's menus is open.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum MenuKind {
+    /// "+": what to open.
+    New,
     /// "…": everything else, the app's entries included.
     More,
     /// The bell: what needs the human and what finished.
@@ -91,12 +99,26 @@ pub(super) struct Tabs {
     widths: Rc<RefCell<HashMap<u64, f32>>>,
     /// Tabs folding away: the workspace's id, its name and width, where it stood, since when.
     closing: Vec<(u64, String, f32, usize, Instant)>,
+    /// The left edge of "+" in the window as last laid out, where its menu hangs from.
+    new_at: Rc<Cell<f32>>,
 }
 
 impl std::fmt::Debug for Tabs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tabs").field("drawn", &self.drawn.len()).finish_non_exhaustive()
     }
+}
+
+/// A workspace's name from where a shell is: the repository's last component, else the
+/// directory's; none at the home directory, which says nothing.
+pub(super) fn place_name(cwd: &str, repo: Option<&str>) -> Option<String> {
+    let last = |path: &str| {
+        path.trim_end_matches('/').rsplit('/').next().filter(|n| !n.is_empty()).map(str::to_owned)
+    };
+    repo.and_then(last).or_else(|| {
+        let tail = super::tile::cwd_tail(cwd);
+        (!tail.starts_with('~') || tail.contains('/')).then(|| last(&tail)).flatten()
+    })
 }
 
 /// Whether every column of `strip` is in its view, so the dots would say nothing.
@@ -128,13 +150,25 @@ impl WorkspaceView {
         self.workspace_name_at(self.layout.active_workspace())
     }
 
-    /// Workspace `ix`'s name: the one given, else its place.
+    /// Workspace `ix`'s name: the one given, else where its first shell is (the repository,
+    /// else the directory), else its number. A number says nothing a tab's place does not.
     pub(super) fn workspace_name_at(&self, ix: usize) -> String {
-        self.layout
-            .workspaces()
-            .get(ix)
-            .and_then(|ws| ws.name().map(str::to_owned))
+        let ws = self.layout.workspaces().get(ix);
+        ws.and_then(|ws| ws.name().map(str::to_owned))
+            .or_else(|| ws.and_then(|ws| self.workspace_place(ws)))
             .unwrap_or_else(|| format!("Workspace {}", ix.saturating_add(1)))
+    }
+
+    /// Where the first shell of `ws` that has said so is: its repository's name, else its
+    /// directory's, unless that is the home directory.
+    fn workspace_place(&self, ws: &slopty_client::layout::Workspace) -> Option<String> {
+        ws.columns().iter().flat_map(Column::tiles).map(Tile::tile).find_map(|tile| {
+            let slopty_proto::items::ItemKind::Terminal { session } = self.item(tile)?.kind else {
+                return None;
+            };
+            let summary = self.summary(session)?;
+            place_name(summary.cwd.as_deref()?, summary.repo.as_deref())
+        })
     }
 
     /// The workspaces the bar has a tab for: those holding something or named, and the
@@ -169,8 +203,19 @@ impl WorkspaceView {
         (rollup, count, workers.len())
     }
 
-    fn toggle_menu(&mut self, which: MenuKind, cx: &mut Context<Self>) {
-        self.menu = if self.menu == Some(which) { None } else { Some(which) };
+    fn toggle_menu(&mut self, which: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu == Some(which) {
+            self.close_menu(window, cx);
+        } else {
+            self.menu = Some(which);
+            cx.notify();
+        }
+    }
+
+    /// Close the bar's menu and hand the keyboard back to the focused tile at once.
+    pub(super) fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.return_keyboard(window, cx);
         cx.notify();
     }
 
@@ -213,14 +258,21 @@ impl WorkspaceView {
                     this.toggle_navigator(&ToggleNavigator, window, cx);
                 }))
         });
-        let new_workspace = has_workers.then(|| {
-            kit::icon_button(theme, "new-workspace", IconName::Plus, NEW_WORKSPACE).on_click(
-                cx.listener(|this, _ev, _w, cx| {
-                    // The layout always keeps an empty workspace last.
-                    let last = this.layout.workspaces().len().saturating_sub(1);
-                    this.go_to_workspace(last, cx);
-                }),
+        let new = has_workers.then(|| {
+            let at = Rc::clone(&self.tabs.new_at);
+            let measure = canvas(
+                move |bounds, _window, _cx| at.set(f32::from(bounds.origin.x)),
+                |_bounds, (), _window, _cx| {},
             )
+            .absolute()
+            .inset_0();
+            kit::icon_button(theme, "new-menu", IconName::Plus, NEW)
+                .relative()
+                .aria_expanded(self.menu == Some(MenuKind::New))
+                .child(measure)
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.toggle_menu(MenuKind::New, window, cx);
+                }))
         });
         let dots = self.render_indicator(cx);
 
@@ -256,10 +308,15 @@ impl WorkspaceView {
             kit::icon_button(theme, "bell", IconName::Bell, "Inbox")
                 .relative()
                 .children(badge)
-                .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_menu(MenuKind::Inbox, cx)))
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.toggle_menu(MenuKind::Inbox, window, cx);
+                }))
         });
         let more = kit::icon_button(theme, "more", IconName::Ellipsis, "More")
-            .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_menu(MenuKind::More, cx)));
+            .aria_expanded(self.menu == Some(MenuKind::More))
+            .on_click(
+                cx.listener(|this, _ev, window, cx| this.toggle_menu(MenuKind::More, window, cx)),
+            );
         let buttons =
             div().flex_none().flex().items_center().gap(px(spacing.xxs)).children(bell).child(more);
         div()
@@ -287,7 +344,7 @@ impl WorkspaceView {
                     .gap(px(spacing.sm))
                     .children(toggle)
                     .children(tabs)
-                    .children(new_workspace)
+                    .children(new)
                     .children(dots),
             )
             .child(buttons)
@@ -608,24 +665,52 @@ impl WorkspaceView {
         let bindings = super::key_bindings();
         // The row's keys come from the binding table, spelled as the palette spells them; a
         // phone's menu shows none, as its bar shows no hints.
-        let action = |label: &'static str, bound: &dyn gpui::Action, run: Run| {
-            let entity = entity.clone();
-            let detail = if SHORTCUT_HINTS {
-                crate::palette::keys_for(bound, &bindings)
-            } else {
-                String::new()
+        let entry =
+            |group: MenuGroup, label: &'static str, bound: Option<&dyn gpui::Action>, run: Run| {
+                let entity = entity.clone();
+                let detail = match bound {
+                    Some(bound) if SHORTCUT_HINTS => crate::palette::keys_for(bound, &bindings),
+                    _ => String::new(),
+                };
+                MenuEntry {
+                    group,
+                    label: label.into(),
+                    detail: detail.into(),
+                    run: Rc::new(move |window, cx| {
+                        let _gone = entity.update(cx, |this, cx| run(this, window, cx));
+                    }),
+                }
             };
-            MenuEntry {
-                group: MenuGroup::Navigation,
-                label: label.into(),
-                detail: detail.into(),
-                run: Rc::new(move |window, cx| {
-                    let _gone = entity.update(cx, |this, cx| run(this, window, cx));
-                }),
-            }
+        let action = |label: &'static str, bound: &dyn gpui::Action, run: Run| {
+            entry(MenuGroup::Navigation, label, Some(bound), run)
         };
         let entries: Vec<MenuEntry> = match which {
             MenuKind::Inbox => Vec::new(),
+            // The palette's names for the same actions, which the rows run as the keys do.
+            MenuKind::New => vec![
+                entry(MenuGroup::Tiles, "New terminal", Some(&NewTerminal), |this, w, cx| {
+                    this.new_terminal(&NewTerminal, w, cx);
+                }),
+                entry(MenuGroup::Tiles, "New agent", Some(&NewAgent), |this, w, cx| {
+                    this.new_agent(&NewAgent, w, cx);
+                }),
+                entry(
+                    MenuGroup::Tiles,
+                    "Add a window or display",
+                    Some(&AddWindow),
+                    |this, w, cx| {
+                        this.add_window(&AddWindow, w, cx);
+                    },
+                ),
+                entry(MenuGroup::Tiles, "New note", Some(&NewNote), |this, w, cx| {
+                    this.new_note(&NewNote, w, cx);
+                }),
+                entry(MenuGroup::Workspaces, NEW_WORKSPACE, None, |this, _w, cx| {
+                    // The layout always keeps an empty workspace last.
+                    let last = this.layout.workspaces().len().saturating_sub(1);
+                    this.go_to_workspace(last, cx);
+                }),
+            ],
             MenuKind::More => {
                 let mut entries = vec![
                     action("Command palette", &OpenPalette, |this, w, cx| {
@@ -706,10 +791,7 @@ impl WorkspaceView {
                     .on_click(move |_ev, window, cx| {
                         // The menu closes first, so the entry runs with the focus back where
                         // it was.
-                        let _closed = entity.update(cx, |this, cx| {
-                            this.menu = None;
-                            cx.notify();
-                        });
+                        let _closed = entity.update(cx, |this, cx| this.close_menu(window, cx));
                         run(window, cx);
                     })
                     .into_any_element()
@@ -720,7 +802,7 @@ impl WorkspaceView {
         // rather than hung off its button a few points in.
         let gap = match which {
             MenuKind::Inbox => 0.0,
-            MenuKind::More => spacing.xs,
+            MenuKind::New | MenuKind::More => spacing.xs,
         };
         let panel = if which == MenuKind::Inbox {
             self.render_inbox(cx)
@@ -737,23 +819,26 @@ impl WorkspaceView {
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    this.menu = None;
-                    cx.notify();
-                }),
+                cx.listener(|this, _ev, window, cx| this.close_menu(window, cx)),
             )
             .child(
                 div()
                     .absolute()
                     .top(px(titlebar_height(theme) + gap) + safe.top)
-                    .right(px(spacing.inset()) + safe.right)
+                    // "+" hangs its menu from its own left edge, as a menu bar's menus do.
+                    .map(|el| match which {
+                        MenuKind::New => el.left(px(self.tabs.new_at.get())),
+                        MenuKind::Inbox | MenuKind::More => {
+                            el.right(px(spacing.inset()) + safe.right)
+                        }
+                    })
                     .child(panel),
             );
         let layer = crate::palette::Layer::Popover.priority();
         Some(gpui::deferred(away).with_priority(layer).into_any_element())
     }
 
-    /// The "…" menu's panel around its rows.
+    /// A menu's panel around its rows.
     fn menu_panel(&self, rows: Vec<gpui::AnyElement>, _cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let spacing = theme.spacing;

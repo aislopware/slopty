@@ -152,7 +152,7 @@ pub fn note_title(text: &str) -> String {
         })
         .find(|l| !l.is_empty());
     match line {
-        None => "note".to_owned(),
+        None => UNTITLED_NOTE.to_owned(),
         Some(line) if line.chars().count() > NOTE_TITLE_CHARS => {
             let cut: String = line.chars().take(NOTE_TITLE_CHARS).collect();
             format!("{}…", cut.trim_end())
@@ -160,6 +160,9 @@ pub fn note_title(text: &str) -> String {
         Some(line) => line.to_owned(),
     }
 }
+
+/// An empty note's title.
+pub const UNTITLED_NOTE: &str = "Untitled note";
 
 /// How many of a note's task lines are ticked, and how many there are; `None` without any.
 #[must_use]
@@ -270,6 +273,12 @@ pub(super) const fn kind_icon(item: &Item, agent: bool) -> IconName {
     }
 }
 
+/// A note's progress as every list says it: `1 of 3 done`.
+#[must_use]
+pub fn note_done(text: &str) -> Option<String> {
+    note_progress(text).map(|(done, total)| format!("{done} of {total} done"))
+}
+
 /// The word for what an item is: `terminal`, `window`, `display`, `note`, `file`, `browser`.
 pub(super) const fn kind_name(item: &Item) -> &'static str {
     match item.kind {
@@ -283,6 +292,25 @@ pub(super) const fn kind_name(item: &Item) -> &'static str {
 }
 
 impl WorkspaceView {
+    /// What a tile's title is placed by, the same in its header, its navigator row and its
+    /// palette line: where a shell is, the folder a file is in, a page's address when the
+    /// title is not it, how far a note's tasks got. A window or display has none.
+    pub(super) fn tile_place(&self, item: &Item, cx: &App) -> Option<String> {
+        match &item.kind {
+            ItemKind::Terminal { session } => {
+                self.summary(*session).and_then(|s| s.cwd.as_deref()).map(cwd_tail)
+            }
+            ItemKind::File { path } => file_dir(path),
+            ItemKind::Browser { .. } => self.browsers.get(&item.id).and_then(|v| {
+                let v = v.read(cx);
+                (item.name.is_some() || !v.page().title.trim().is_empty())
+                    .then(|| v.short_url().to_owned())
+            }),
+            ItemKind::Note { text } => note_done(text),
+            ItemKind::Window { .. } | ItemKind::Display { .. } => None,
+        }
+    }
+
     /// What a header says without a name: the shell's title, the window's, "Display N", a
     /// note's first line, a file's `name · parent`.
     pub(super) fn derived_title(&self, item: &Item, cx: &App) -> String {
@@ -496,6 +524,9 @@ impl WorkspaceView {
             item.kind,
             ItemKind::Browser { .. } | ItemKind::Window { .. } | ItemKind::Display { .. }
         );
+        // At the overview's small zoom the body's cover names the tile; a band on top of it in
+        // another step, and a hairline under only some of them, read as cards half drawn.
+        let shapes = k < SHAPES_BELOW;
         let header = div()
             .id("title")
             .debug_selector(move || format!("title-{}", id.as_uuid()))
@@ -511,8 +542,12 @@ impl WorkspaceView {
             .text_color(hsla(ink))
             .font_family(theme.typography.ui_family.clone())
             .cursor_grab()
-            .map(|el| if focused { el.bg(hsla(theme.content())) } else { el.bg(hsla(s.panel)) })
-            .when(!focused || foreign, |el| el.border_b_1().border_color(hsla(s.border_subtle)))
+            .map(|el| {
+                if focused || shapes { el.bg(hsla(theme.content())) } else { el.bg(hsla(s.panel)) }
+            })
+            .when(!shapes && (!focused || foreign), |el| {
+                el.border_b_1().border_color(hsla(s.border_subtle))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -526,7 +561,7 @@ impl WorkspaceView {
                     cx.stop_propagation();
                 }),
             );
-        if k < SHAPES_BELOW {
+        if shapes {
             return header.into_any_element();
         }
         let badge = agent.map(|(session, a)| self.agent_badge(tile, session, a, chrome, cx));
@@ -599,21 +634,7 @@ impl WorkspaceView {
         // The title's context: where a shell or a file is, a page's address when the title is
         // not it, how far a note's tasks got. Muted, in the UI face as every header's context
         // is, with no separator: the colour tells it from the title.
-        let place = match &item.kind {
-            ItemKind::Terminal { session } => {
-                self.summary(*session).and_then(|s| s.cwd.as_deref()).map(cwd_tail)
-            }
-            ItemKind::File { path } => file_dir(path),
-            ItemKind::Browser { .. } => self.browsers.get(&id).and_then(|v| {
-                let v = v.read(cx);
-                (item.name.is_some() || !v.page().title.trim().is_empty())
-                    .then(|| v.short_url().to_owned())
-            }),
-            ItemKind::Note { text } => {
-                note_progress(text).map(|(done, total)| format!("{done}/{total}"))
-            }
-            ItemKind::Window { .. } | ItemKind::Display { .. } => None,
-        };
+        let place = self.tile_place(item, cx);
         // A directory keeps the folder it ends in; an address keeps its host.
         let path = matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::File { .. });
         let place = place.map(|text| {

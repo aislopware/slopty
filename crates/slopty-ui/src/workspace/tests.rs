@@ -234,6 +234,15 @@ fn terminal_focused(
     })
 }
 
+/// "+" in the title bar, then its "New workspace" row.
+fn new_workspace_from_the_bar(cx: &mut VisualTestContext) {
+    for selector in ["new-menu", "menu-New workspace"] {
+        let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"));
+        cx.simulate_click(at.center(), Modifiers::default());
+        cx.run_until_parked();
+    }
+}
+
 fn focused(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> Option<TileRef> {
     view.read_with(cx, |v, _| v.focused())
 }
@@ -286,7 +295,7 @@ fn swipe(
 
 #[test]
 fn a_note_is_titled_by_its_first_line() {
-    assert_eq!(note_title(""), "note");
+    assert_eq!(note_title(""), "Untitled note");
     assert_eq!(note_title("\n\n  # Plan  \nmore"), "Plan");
     assert_eq!(note_title("- [ ] ship it\n- [x] test it"), "ship it", "progress is context");
     assert_eq!(note_progress("- [ ] ship it\n- [x] test it"), Some((1, 2)));

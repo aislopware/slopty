@@ -630,7 +630,9 @@ const DARK_TONES: Tones = Tones {
 #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
 const LIGHT_TONES: Tones = Tones {
     canvas: ink(0.08),
-    panel: ink(0.035),
+    // As far from the content in lightness as the dark panel is: at 0.035 an unfocused tile's
+    // header was all but the focused one's white.
+    panel: ink(0.05),
     elevated: Step { toward: Toward::White, share: 0.6 },
     raised: ink(0.10),
     border_subtle: ink(0.11),
@@ -1114,6 +1116,36 @@ mod tests {
             }
             let subtle = s.border_subtle.contrast(content);
             assert!(subtle >= STEP, "{variant:?}: the subtle hairline shows on content");
+        }
+    }
+
+    /// The steps read alike in both variants: light's are as far apart in perceived lightness
+    /// (CIE L*) as dark's, give or take half a unit. A contrast ratio alone passed a light
+    /// panel two thirds as far from its content, and a focused tile's header, on the content,
+    /// barely stood out from the others, on the panel.
+    #[test]
+    fn the_steps_are_as_far_apart_in_light_as_in_dark() {
+        let lightness = |c: Rgb| {
+            let y = c.luminance();
+            if y > 216.0 / 24_389.0 {
+                116.0_f32.mul_add(y.cbrt(), -16.0)
+            } else {
+                y * 24_389.0 / 27.0
+            }
+        };
+        let steps = |variant| {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let (content, panel, canvas) =
+                (lightness(theme.content()), lightness(s.panel), lightness(s.canvas));
+            [(content - panel).abs(), (panel - canvas).abs()]
+        };
+        let (dark, light) = (steps(Variant::Dark), steps(Variant::Light));
+        for (name, d, l) in
+            [("content to panel", dark[0], light[0]), ("panel to bars", dark[1], light[1])]
+        {
+            assert!((d - l).abs() <= 0.5, "{name}: dark {d:.2}, light {l:.2}");
+            assert!(d.min(l) >= 2.0, "{name} shows: dark {d:.2}, light {l:.2}");
         }
     }
 

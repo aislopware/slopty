@@ -79,10 +79,34 @@ fn finished(command: &str, exit: u8) -> Finished {
     Finished { command: command.to_owned(), exit: Some(exit), elapsed: Duration::from_secs(40) }
 }
 
-/// The left of the bar says where the focused shell is: its worker, the repository and the
-/// path within it, and the branch. The right counts the ports forwarded here, which list them;
-/// the workers go uncounted while every one is up, and the frame time waits for the stream
-/// stats.
+/// A workspace nobody named is named by where its first shell is: the repository, else the
+/// directory; its number only where neither says anything (the home directory, no shell yet).
+/// A name given wins.
+#[gpui::test]
+fn a_workspace_is_named_by_where_its_first_shell_is(cx: &mut TestAppContext) {
+    use crate::workspace::titlebar::place_name;
+    assert_eq!(place_name("/x/slopty/crates", Some("/x/slopty")).as_deref(), Some("slopty"));
+    assert_eq!(place_name("/Users/me/src/app", None).as_deref(), Some("app"));
+    assert_eq!(place_name("/Users/me", None), None, "home says nothing");
+    assert_eq!(place_name("/", None), None);
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "Workspace 1", "no shell yet");
+    shell_in_repo(&view, cx, &studio, "/x/slopty/crates", "/x/slopty", "main");
+    assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "slopty");
+    assert!(labels(&view, cx).iter().any(|l| l == "slopty, 1 tile"), "the bar says it");
+    view.update(cx, |v, cx| {
+        v.layout.set_workspace_name(0, Some("release".to_owned()));
+        cx.notify();
+    });
+    assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "release", "a given name wins");
+}
+
+/// The left of the bar says where the focused shell is: the repository and the path within
+/// it, and the branch; its worker only once there are two, or the one is down. The right counts the
+/// ports forwarded here, which list them; the workers go uncounted while every one is up, and the
+/// frame time waits for the stream stats.
 #[gpui::test]
 fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -97,9 +121,10 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, forwards, cx));
     cx.run_until_parked();
     let names = labels(&view, cx);
-    for readout in ["studio", "slopty/crates/ui", "branch main", "2 ports"] {
+    for readout in ["slopty/crates/ui", "branch main", "2 ports"] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
+    assert!(cx.debug_bounds("status-worker").is_none(), "one worker goes unnamed: {names:#?}");
     assert!(cx.debug_bounds("status-frame").is_none(), "no frame time without the stats");
     assert!(cx.debug_bounds("status-workers").is_none(), "a worker that is up says nothing");
 
@@ -109,6 +134,29 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
         palette.read(cx).matches(cx).len()
     });
     assert_eq!(lines, 4, "a tile and a browser line for each port");
+}
+
+/// The round trip's slot is held from the link's first frame, so the first sample, and a
+/// slower one, land without moving the rest of the bar; the figure says its unit, not "RTT".
+#[gpui::test]
+fn the_round_trip_lands_without_moving_the_bar(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    shell_in_repo(&view, cx, &studio, "/w/oss/slopty", "/w/oss/slopty", "main");
+    let right = |cx: &mut VisualTestContext| {
+        let at = cx.debug_bounds("status-right").expect("the bar's right");
+        (f32::from(at.left()), f32::from(at.size.width))
+    };
+    let before = right(cx);
+    assert!(cx.debug_bounds("status-rtt").is_none(), "nothing sampled yet");
+    for micros in [4_240, 123_000] {
+        let key = studio.key;
+        view.update_in(cx, |v, _w, cx| v.set_rtt(key, Some(Duration::from_micros(micros)), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("status-rtt").is_some(), "the figure shows");
+        assert_eq!(right(cx), before, "{micros} µs moved the bar");
+    }
+    assert!(labels(&view, cx).iter().any(|l| l == "Round trip 123 ms"));
 }
 
 /// "N workers" shows, with a dot, once a worker is not up, and opens the hosts popover: each worker

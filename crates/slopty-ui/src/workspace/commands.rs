@@ -62,6 +62,27 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Give the keyboard back to where the focused tile keeps it (its shell, its editor, else
+    /// the workspace), now: for whatever held it a moment (a menu, the settings, a dialog)
+    /// and is gone. Handing it to the workspace's own handle left a shell's cursor hollow.
+    pub fn return_keyboard(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let kind = self.focused().and_then(|tile| Some((tile, self.item(tile)?.kind.clone())));
+        match kind {
+            Some((_, ItemKind::Terminal { session }))
+                if let Some(view) = self.terminals.get(&session) =>
+            {
+                let handle = gpui::Focusable::focus_handle(view.read(cx), cx);
+                window.focus(&handle, cx);
+            }
+            Some((tile, ItemKind::File { .. }))
+                if let Some(view) = self.files.get(&tile.item).cloned() =>
+            {
+                view.update(cx, |v, cx| v.focus(window, cx));
+            }
+            _ => window.focus(&self.focus, cx),
+        }
+    }
+
     /// Remember that `session` was just focused, so a "run in shell" goes to the shell the
     /// human was last in rather than whichever opened last.
     fn touch_session(&mut self, session: SessionId) {

@@ -74,12 +74,13 @@ mod tests {
                     && d.item("terminal").is_some()
                     && d.focus.as_deref() == Some("terminal")
                     && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
+                    // The shell starts in the stack's private home, so the number stays.
+                    && d.workspace == "Workspace 1"
             })
             .await
             .unwrap();
         assert_eq!(dump.workers.len(), 1, "{dump:#?}");
         assert_eq!(dump.workers[0].name, "e2e-worker");
-        assert_eq!(dump.workspace, "Workspace 1", "{dump:#?}");
         // ptyd compiled ghostty's terminfo into the stack's own database while it came up, so
         // the shells it spawns can be told `TERM=xterm-ghostty` (the dump does not carry a
         // session's environment, and asking the shell would mean typing at it).
@@ -115,7 +116,7 @@ mod tests {
             "{:#?}",
             dump.a11y
         );
-        for label in ["Navigator", "New workspace", "Inbox", "More"] {
+        for label in ["Navigator", "New", "Inbox", "More"] {
             assert!(dump.a11y_node("Button", Some(label)).is_some(), "{label}: {:#?}", dump.a11y);
         }
 

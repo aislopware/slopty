@@ -445,14 +445,21 @@ async fn spawn_app(
 /// (`system`) would make each golden depend on System Settings on the day it runs.
 pub const APPEARANCE: &str = "light";
 
-/// Write a `settings.toml` into `app_dir` that pins [`APPEARANCE`], unless a test already
-/// put one there.
+/// Write a `settings.toml` into `app_dir` that pins [`APPEARANCE`] and a steady cursor, unless
+/// a test already put one there: a blinking cursor is in a golden or not by the 600 ms phase
+/// the frame lands in.
 fn pin_appearance(app_dir: &Path) -> Result<()> {
     let path = app_dir.join("settings.toml");
     if !path.exists() {
-        std::fs::write(&path, format!("[theme]\nappearance = \"{APPEARANCE}\"\n"))?;
+        std::fs::write(&path, pinned_settings(APPEARANCE))?;
     }
     Ok(())
+}
+
+/// The settings an app under test runs with, in `appearance`.
+#[must_use]
+pub fn pinned_settings(appearance: &str) -> String {
+    format!("[theme]\nappearance = \"{appearance}\"\n\n[terminal]\ncursor_blink = \"never\"\n")
 }
 
 /// Connect to `sock`, retrying for a few seconds: under heavy load the listener may not accept
@@ -842,7 +849,7 @@ impl Stack {
     /// When the file cannot be written.
     pub fn set_appearance(&self, appearance: &str) -> Result<()> {
         let path = self.path("app").join("settings.toml");
-        std::fs::write(&path, format!("[theme]\nappearance = \"{appearance}\"\n"))?;
+        std::fs::write(&path, pinned_settings(appearance))?;
         Ok(())
     }
 
@@ -1574,7 +1581,7 @@ impl ServerStack {
     /// When the file cannot be written.
     pub fn set_appearance(&self, appearance: &str) -> Result<()> {
         let path = self.path("app").join("settings.toml");
-        std::fs::write(&path, format!("[theme]\nappearance = \"{appearance}\"\n"))?;
+        std::fs::write(&path, pinned_settings(appearance))?;
         Ok(())
     }
 
@@ -1690,8 +1697,11 @@ impl ServerFleet {
         let server_dir = root.join("server");
         std::fs::create_dir_all(&server_dir)?;
         let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
+        // On loopback alone, as `far` is: a worker on every interface of this machine would be
+        // listed at its tailnet address when Tailscale runs here, and the run would depend on it.
+        let bind = [("SLOPTY_BIND", "127.0.0.1")];
         let near =
-            Worker::start(&root.join("near"), near, Some(server.address()), &log, &[]).await?;
+            Worker::start(&root.join("near"), near, Some(server.address()), &log, &bind).await?;
         let far = SecondWorker::launch_registered(far, link, &server).await?;
         let cli = root.join("cli");
         let started = tokio::time::Instant::now();

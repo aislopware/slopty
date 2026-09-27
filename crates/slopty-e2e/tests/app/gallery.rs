@@ -154,7 +154,7 @@ async fn a_workspace_of_columns_in_both_themes() {
         })
         .await
         .unwrap();
-    assert_eq!(dump.workspace, "Workspace 1");
+    assert_eq!(dump.workspace, "Workspace 1", "a shell at home leaves the number");
     golden(drv, &dir, "workspace").await;
 
     // A desktop-sized window leaves the strip its room, so the navigator docks beside it.
@@ -208,6 +208,8 @@ async fn a_workspace_of_columns_in_both_themes() {
     golden(drv, &dir, "more-menu").await;
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
     drv.wait_for("the menu closed", STEP, |d| d.a11y_node("Menu", None).is_none()).await.unwrap();
+    // Off "…", so the shot shows the bar at rest rather than the button under the pointer.
+    drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
 
     stack.set_appearance("dark").unwrap();
     let drv = &mut stack.driver;

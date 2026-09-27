@@ -287,7 +287,7 @@ fn cmd_o_shows_the_picker_while_the_worker_lists_its_windows(cx: &mut TestAppCon
 }
 
 /// The overview's names are chrome: the same size however far the overview zooms out to fit
-/// the workspaces, and so is the button for a new workspace.
+/// the workspaces, and so are the words on the place for a new workspace.
 #[gpui::test]
 fn the_overview_labels_keep_their_size_at_any_zoom(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -298,7 +298,7 @@ fn the_overview_labels_keep_their_size_at_any_zoom(cx: &mut TestAppContext) {
         cx.run_until_parked();
         let zoom = view.read_with(cx, |v, _| v.drawn_zoom);
         let name = cx.debug_bounds("overview-name-0").expect("the first workspace's name");
-        let new = cx.debug_bounds("overview-new-workspace").expect("the button for a new one");
+        let new = cx.debug_bounds("overview-new-workspace-words").expect("the new one's words");
         cx.simulate_keystrokes("cmd-alt-o");
         cx.run_until_parked();
         (zoom, f32::from(name.size.height), f32::from(new.size.height))

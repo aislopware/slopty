@@ -2,6 +2,7 @@
 //! when the human is away, and the count of the ones waiting on the human.
 
 use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, SystemNotification, Window, div, px,
@@ -56,6 +57,9 @@ pub(super) fn needs_human(agent: &AgentEvent) -> bool {
     matches!(&agent.status, AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt)
 }
 
+/// What a click on a waiting agent's badge does, as a screen reader says it.
+pub(super) const SHOW_PROMPT: &str = "Shows the prompt";
+
 /// One short line for an agent's state: the badge text, the picker's status column.
 #[must_use]
 pub fn agent_status_text(agent: &AgentEvent) -> String {
@@ -66,7 +70,7 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
         AgentStatus::Working => detail.unwrap_or("Working").to_owned(),
         AgentStatus::Tool { tool } => detail.unwrap_or(tool).to_owned(),
         AgentStatus::Blocked(BlockReason::Permission { tool }) => {
-            format!("Allow {}?", detail.unwrap_or(tool))
+            format!("Needs approval: {}", detail.unwrap_or(tool))
         }
         AgentStatus::Blocked(BlockReason::Question) => {
             detail.map_or_else(|| "Has a question".to_owned(), |d| format!("Asks: {d}"))
@@ -470,6 +474,8 @@ impl WorkspaceView {
             .debug_selector(move || format!("agent-{}", item.as_uuid()))
             .role(if waiting { Role::Button } else { Role::Status })
             .aria_label(SharedString::from(label.clone()))
+            // The answer belongs to the agent's own prompt; the click only goes there.
+            .when(waiting, |el| el.aria_description(SHOW_PROMPT))
             .flex()
             .items_center()
             .flex_none()

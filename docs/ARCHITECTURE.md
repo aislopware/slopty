@@ -37,7 +37,8 @@ TLS, no endpoint keys, no relays and no pairing. A worker is named by `host[:por
 in its `HelloAck`. It admits a connection once, before any handshake state exists: loopback and the
 `[worker] allow` ranges of its `settings.toml` by address, and a tailnet address
 (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) only as the machine's Tailscale vouches for it through
-`whois` and the tailnet's grants (`slopty_net::admission`, `slopty-tailnet`).
+`whois` and the tailnet's grants (`slopty_net::admission`, `slopty-tailnet`). The server
+admits the same way, with the `[server] allow` ranges.
 
 | Path | QUIC primitive | Payload |
 |---|---|---|
@@ -295,7 +296,10 @@ requirement the identifier rather than the hash and one approval enough for good
 
 **Worker link and orchestration.** With a server configured (`--server`, `SLOPTY_SERVER` or
 `[worker] server`), the worker registers with it (`apps/slopty-worker/src/server.rs`). It sends
-its capabilities (`slopty-worker::caps`) and its sessions, forwards session and agent events,
+its capabilities (`slopty-worker::caps`), where its listener is bound (the server lists it at
+that address, at the loopback address it dialed from when bound to loopback, or at the machine's
+tailnet address when it listens everywhere and dialed over loopback) and its sessions, forwards
+session and agent events,
 and redials with capped backoff when the link drops. Every `SessionSummary` carries the agent
 running in the session, its status and the signal that status came from (`SessionAgent`), read
 from the daemon's agent table (`Worker::summaries`),
@@ -649,8 +653,11 @@ off screen, and asks for frames only while something moves. Two-finger swipes dr
 swallowed), ⌘⌥ and the wheel step columns, a header drag moves a tile, the gap right of a
 column resizes it, a pinch opens the overview. The keys are niri's on ⌘⌥ (the table is in the
 decision), bound in `Workspace && !Screen`: a focused remote window gets them all, ⌃Tab is the
-way back. The titlebar is the workspace name and any worker that is down, a dot per column (none for one column),
-the round trip, the agents that need you, "+" and "…". ⌘W on any tile takes it off and offers it
+way back. The titlebar is the workspace name (the one given, else the first shell's repository
+or directory, else "Workspace N"), a dot per column (none for one column), "+" (a menu: new
+terminal, agent, window or display, note, then a new workspace), the bell and "…"; the status
+bar under the strip holds the readouts. A menu that closes hands the keyboard back to the
+focused tile (`WorkspaceView::return_keyboard`), as the settings and the add-worker dialog do. ⌘W on any tile takes it off and offers it
 back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the toast's "Undo" (toasts sit at the foot of the strip) put the
 item back as it was (`remember_closed`, `take_back`), else `forget_closed` lets go. An idle
 shell keeps its session and its attached view through the wait, so its rows come back
@@ -666,7 +673,9 @@ fenced blocks as a block element with "copy" and, given a shell, "run"
 without opening the editor (`NoteView::toggle_task`, committed at once), and a
 click on it puts the caret back in the editor; its title bar reads the first non-empty
 line (`workspace::note_title`, heading, list and task marks stripped, 40 chars, a checklist's
-ticks counted after it as `· 1/3`), "note" while empty.
+ticks counted after it as `1 of 3 done`, the same words the navigator and the palette use,
+through `tile_place`), "Untitled note" while empty. A ticked task is struck through and set
+back to `alpha::STRONG`.
 Any card takes a **name** (⌘E, or a double-click on its title bar; `Item.name`,
 protocol 37, worker-sanitised to 128 characters): document state every client shows in place
 of the derived title until it is cleared, and what the palette's "Go to" line says. A

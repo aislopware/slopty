@@ -105,6 +105,10 @@ fn transfers_label(count: usize, done: u64, total: u64) -> String {
     format!("{count} {noun} · {percent}%")
 }
 
+/// The round trip's slot, in ems of the bar's text: wide enough for `999 ms`, the most a link
+/// that is up shows, in tabular figures.
+const RTT_SLOT_EMS: f32 = 3.6;
+
 /// A count and its noun: `1 port`, `2 ports`.
 #[must_use]
 fn counted(count: usize, one: &str, many: &str) -> String {
@@ -233,7 +237,9 @@ impl WorkspaceView {
         });
         let worker = self.status_worker();
         let link = worker.and_then(|k| self.workers.get(&k));
-        let name = link.map(|w| {
+        // With one worker its name says nothing the window does not, until its link is down.
+        let lone = self.workers.len() == 1;
+        let name = link.filter(|w| !lone || !w.status.is_up()).map(|w| {
             let away = (!w.status.is_up()).then(|| {
                 state_dot(theme, s.warn_fill).debug_selector(|| "status-worker-away".to_owned())
             });
@@ -325,9 +331,23 @@ impl WorkspaceView {
                 .when(slow, |el| el.text_color(hsla(s.warn)))
                 .child(text)
         });
-        let rtt = link.and_then(|w| w.rtt.filter(|_| w.status.is_up())).map(|rtt| {
-            let text = SharedString::from(format!("RTT {}", rtt_label(rtt)));
-            tabular(readout("status-rtt", text.clone())).child(text)
+        // The round trip in its own slot, held from the link's first frame at the width of any
+        // figure it will show: the first sample lands without moving what is left of it. The
+        // figure alone; its unit says what it is, and a screen reader hears the words.
+        let rtt = link.filter(|w| w.status.is_up()).map(|w| {
+            let figure = w.rtt.map(|rtt| {
+                let text = SharedString::from(rtt_label(rtt));
+                tabular(readout("status-rtt", text.clone()))
+                    .aria_label(SharedString::from(format!("Round trip {text}")))
+                    .child(text)
+            });
+            div()
+                .debug_selector(|| "status-rtt-slot".to_owned())
+                .flex_none()
+                .flex()
+                .justify_end()
+                .min_w(px(theme.typography.small() * RTT_SLOT_EMS))
+                .children(figure)
         });
         // The link says something only when it is not up: a word in its tone, the mark being
         // on the left.
@@ -348,6 +368,7 @@ impl WorkspaceView {
                 .child(tabular(div()).child(text))
         });
         let right = div()
+            .debug_selector(|| "status-right".to_owned())
             .flex_none()
             .flex()
             .items_center()

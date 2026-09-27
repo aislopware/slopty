@@ -25,7 +25,7 @@ use super::WorkspaceView;
 use super::tile::Chrome;
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::IconName;
-use crate::kit::{self, ButtonKind};
+use crate::kit;
 
 /// How far a header press travels before it is a move rather than a click.
 const DRAG_SLOP: f32 = 4.0;
@@ -656,8 +656,8 @@ impl WorkspaceView {
     /// The overview's blocks, under the tiles: each workspace with tiles is one card holding
     /// its panes flush, a base unit wider all round so its corners clear theirs, lifted by the
     /// one elevation, with a 2 pt accent ring round the active one and its name above. The empty
-    /// workspace kept at the end is no slab bigger than the real ones: a ghost "New workspace"
-    /// button where the next name would go, on the last block's left edge.
+    /// workspace kept at the end is where the next one goes, as niri shows it: a card of the
+    /// same size, only its dashed outline and a "+ New workspace" in the middle, which opens it.
     fn overview_blocks(&self, frame: &Frame, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -675,18 +675,51 @@ impl WorkspaceView {
             // stays readable however many workspaces the overview fits.
             let label_top = r.y - pad - theme.spacing.xl;
             if tiles == 0 {
-                // Its words on the edge the names above and the panes in the cards start on.
-                let button =
-                    kit::button(theme, "overview-new-workspace", NEW_WORKSPACE, ButtonKind::Ghost)
-                        .absolute()
-                        .left(px(left.unwrap_or(r.x) - kit::button_text_inset(theme)))
-                        .top(px(label_top))
-                        .opacity(fade)
-                        .on_click(cx.listener(move |this, _ev, _w, cx| {
-                            this.layout.set_overview(false);
-                            this.go_to_workspace(ix, cx);
-                        }));
-                out.push(button.into_any_element());
+                let x = left.unwrap_or(r.x);
+                let muted = hsla(s.text_muted);
+                let ghost = div()
+                    .id("overview-new-workspace")
+                    .debug_selector(|| "overview-new-workspace".to_owned())
+                    .role(gpui::accesskit::Role::Button)
+                    .aria_label(NEW_WORKSPACE)
+                    .absolute()
+                    .left(px(x - pad))
+                    .top(px(r.y - pad))
+                    .w(px(2.0_f32.mul_add(pad, r.w)))
+                    .h(px(2.0_f32.mul_add(pad, r.h)))
+                    .rounded(px(theme.radii.md))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(hsla(s.border))
+                    .opacity(fade)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(theme.spacing.xs))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.raised)))
+                    .text_size(px(theme.typography.small()))
+                    .font_family(theme.typography.ui_family.clone())
+                    .text_color(muted)
+                    .child(
+                        crate::icons::icon(
+                            theme,
+                            IconName::Plus,
+                            crate::icons::IconSize::Inline,
+                            muted,
+                        )
+                        .size(px(theme.typography.icon())),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "overview-new-workspace-words".to_owned())
+                            .child(NEW_WORKSPACE),
+                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.layout.set_overview(false);
+                        this.go_to_workspace(ix, cx);
+                    }));
+                out.push(ghost.into_any_element());
                 continue;
             }
             left = Some(r.x);
