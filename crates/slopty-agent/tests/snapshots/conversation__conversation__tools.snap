@@ -1,0 +1,453 @@
+---
+source: crates/slopty-agent/tests/conversation.rs
+expression: "decode(\"tools\").snapshot()"
+---
+- id: Main
+  origin: ~
+  entries:
+    - id: 00000000-0000-4000-8000-000000000003
+      at_ms: 1790482568649
+      body:
+        Prompt:
+          text:
+            text: "Do these steps in order, using the named tools, then reply \"done\". 1) TaskCreate a task \"Survey files\" and a task \"Write notes\". 2) TaskUpdate \"Survey files\" to in_progress. 3) Glob \"*.rs\". 4) Grep for \"println\" with output mode content. 5) Bash: `printf 'one\\ntwo\\n'` with a description. 6) Bash: `ls missing-file` (it fails; that is expected). 7) Bash with run_in_background true: `sleep 1; echo bg-finished`. 8) Write notes.md containing two lines: \"# Notes\" and \"main.rs prints hello\". 9) Use the Agent tool (subagent_type general-purpose, description \"Count lines\", run_in_background false) to count the lines in main.rs with Read; tell it to reply with just the number. 10) TaskUpdate both tasks to completed."
+            lines: 1
+            chars: 715
+            full: ~
+          images: 0
+          command: ~
+    - id: "00000000-0000-4000-8000-000000000015:0"
+      at_ms: 1790482573134
+      body:
+        Thinking:
+          text: "The user is asking me to do a sequence of steps using various tools. Let me break this down:\n\n1. TaskCreate a task \"Survey files\" and a task \"Write notes\" - I need to use TaskCreate (need to fetch first since it's deferred)\n2. TaskUpdate \"Survey files\" to in_progress - TaskUpdate (deferred)\n3. Glob \"*.rs\" - use Glob tool\n4. Grep for \"println\" with output mode content - use Grep tool\n5. Bash: `printf 'one\\ntwo\\n'` with a description - use Bash tool\n6. Bash: `ls missing-file` (it fails; that is expected) - use Bash tool\n7. Bash with run_in_background true: `sleep 1; echo bg-finished` - use Bash tool\n8. Write notes.md containing two lines: \"# Notes\" and \"main.rs prints hello\" - use Write tool\n9. Use Agent tool with subagent_type general-purpose to count lines in main.rs - use Agent tool\n10. TaskUpdate both tasks to completed - TaskUpdate (deferred)\n\nFirst, I need to fetch the deferred tools using ToolSearch to get TaskCreate and TaskUpdate."
+          lines: 14
+          chars: 951
+          full: ~
+    - id: toolu_01
+      at_ms: 1790482573446
+      body:
+        Tool:
+          name: ToolSearch
+          detail:
+            Other:
+              input:
+                text: "{\"max_results\":5,\"query\":\"select:TaskCreate,TaskUpdate\"}"
+                lines: 1
+                chars: 56
+                full: ~
+          result:
+            status: Ok
+            text:
+              text: ""
+              lines: 0
+              chars: 0
+              full: ~
+            at_ms: 1790482573495
+    - id: "00000000-0000-4000-8000-000000000021:0"
+      at_ms: 1790482577266
+      body:
+        Thinking:
+          text: "Good, the tools are loaded. Now I need to proceed with the steps in order:\n\n1) TaskCreate a task \"Survey files\" and a task \"Write notes\"\n2) TaskUpdate \"Survey files\" to in_progress\n3) Glob \"*.rs\"\n4) Grep for \"println\" with output mode content\n5) Bash: `printf 'one\\ntwo\\n'` with a description\n6) Bash: `ls missing-file` (it fails; that is expected)\n7) Bash with run_in_background true: `sleep 1; echo bg-finished`\n8) Write notes.md containing two lines: \"# Notes\" and \"main.rs prints hello\"\n9) Use Agent tool to count lines in main.rs\n10) TaskUpdate both tasks to completed\n\nLet me start with step 1 - creating two tasks. I'll create both in parallel since they don't depend on each other."
+          lines: 14
+          chars: 689
+          full: ~
+    - id: "00000000-0000-4000-8000-000000000022:0"
+      at_ms: 1790482577477
+      body:
+        Text:
+          text: "Starting the sequence of steps:"
+          lines: 1
+          chars: 31
+          full: ~
+    - id: toolu_02
+      at_ms: 1790482577875
+      body:
+        Tool:
+          name: TaskCreate
+          detail:
+            TaskCreate:
+              task_id: "1"
+              subject: Survey files
+              description: Survey the available files in the project
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482577911
+    - id: toolu_03
+      at_ms: 1790482578134
+      body:
+        Tool:
+          name: TaskCreate
+          detail:
+            TaskCreate:
+              task_id: "2"
+              subject: Write notes
+              description: Write notes about findings
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482578164
+    - id: "00000000-0000-4000-8000-000000000028:0"
+      at_ms: 1790482579626
+      body:
+        Thinking:
+          text: "Good, both tasks created. Now step 2: TaskUpdate \"Survey files\" to in_progress. The task ID is \"1\" based on the output."
+          lines: 1
+          chars: 119
+          full: ~
+    - id: toolu_04
+      at_ms: 1790482579876
+      body:
+        Tool:
+          name: TaskUpdate
+          detail:
+            TaskUpdate:
+              task_id: "1"
+              from: pending
+              to: in_progress
+              subject: ~
+              fields:
+                - status
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482579900
+    - id: "00000000-0000-4000-8000-000000000032:0"
+      at_ms: 1790482581073
+      body:
+        Thinking:
+          text: "Good. Now step 3: Glob \"*.rs\""
+          lines: 1
+          chars: 29
+          full: ~
+    - id: toolu_05
+      at_ms: 1790482581210
+      body:
+        Tool:
+          name: Glob
+          detail:
+            Glob:
+              pattern: "*.rs"
+              path: ~
+              files: 1
+              truncated: false
+          result:
+            status: Ok
+            text:
+              text: main.rs
+              lines: 1
+              chars: 7
+              full: ~
+            at_ms: 1790482581229
+    - id: "00000000-0000-4000-8000-000000000036:0"
+      at_ms: 1790482582567
+      body:
+        Thinking:
+          text: "Found main.rs. Now step 4: Grep for \"println\" with output mode content"
+          lines: 1
+          chars: 70
+          full: ~
+    - id: toolu_06
+      at_ms: 1790482582807
+      body:
+        Tool:
+          name: Grep
+          detail:
+            Grep:
+              pattern: println
+              path: ~
+              glob: ~
+              mode: content
+              files: 0
+              lines: 1
+          result:
+            status: Ok
+            text:
+              text: "main.rs:2:    println!(\"hello\");"
+              lines: 1
+              chars: 32
+              full: ~
+            at_ms: 1790482582851
+    - id: "00000000-0000-4000-8000-000000000040:0"
+      at_ms: 1790482584171
+      body:
+        Thinking:
+          text: "Good, found a println statement. Now step 5: Bash: `printf 'one\\ntwo\\n'` with a description"
+          lines: 1
+          chars: 91
+          full: ~
+    - id: toolu_07
+      at_ms: 1790482584454
+      body:
+        Tool:
+          name: Bash
+          detail:
+            Bash:
+              command:
+                text: "printf 'one\\ntwo\\n'"
+                lines: 1
+                chars: 19
+                full: ~
+              description: Print two lines
+              background: false
+              task_id: ~
+              status: Done
+              exit_code: 0
+              stdout:
+                text: "one\ntwo"
+                lines: 2
+                chars: 7
+                full: ~
+              stderr: ~
+              output_file: ~
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482584717
+    - id: "00000000-0000-4000-8000-000000000044:0"
+      at_ms: 1790482586121
+      body:
+        Thinking:
+          text: "Good. Now step 6: Bash: `ls missing-file` (it fails; that is expected)"
+          lines: 1
+          chars: 70
+          full: ~
+    - id: toolu_08
+      at_ms: 1790482586422
+      body:
+        Tool:
+          name: Bash
+          detail:
+            Bash:
+              command:
+                text: ls missing-file
+                lines: 1
+                chars: 15
+                full: ~
+              description: Try to list a non-existent file
+              background: false
+              task_id: ~
+              status: Failed
+              exit_code: 2
+              stdout: ~
+              stderr: ~
+              output_file: ~
+          result:
+            status: Error
+            text:
+              text: "Exit code 2\n\"missing-file\": No such file or directory (os error 2)"
+              lines: 2
+              chars: 66
+              full: ~
+            at_ms: 1790482586485
+    - id: "00000000-0000-4000-8000-000000000048:0"
+      at_ms: 1790482587959
+      body:
+        Thinking:
+          text: "Good, that failed as expected. Now step 7: Bash with run_in_background true: `sleep 1; echo bg-finished`"
+          lines: 1
+          chars: 104
+          full: ~
+    - id: toolu_09
+      at_ms: 1790482588402
+      body:
+        Tool:
+          name: Bash
+          detail:
+            Bash:
+              command:
+                text: sleep 1; echo bg-finished
+                lines: 1
+                chars: 25
+                full: ~
+              description: Background sleep and echo
+              background: true
+              task_id: b00000001
+              status: Done
+              exit_code: 0
+              stdout: ~
+              stderr: ~
+              output_file: /private/tmp/claude-uid/-work/00000000-0000-4000-8000-000000000001/tasks/b00000001.output
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482588418
+    - id: "00000000-0000-4000-8000-000000000052:0"
+      at_ms: 1790482592446
+      body:
+        Thinking:
+          text: "Good, the background command is running. Now step 8: Write notes.md with two lines. Let me read the file first if it exists, but the user is asking me to write new content, so I'll just write it.\n\nActually, looking at the Write tool description, it says \"If this is an existing file, you MUST use the Read tool first to read the file's contents.\" But the user is asking me to create/write notes.md with specific content. Since this is a fresh file we're creating, I should check if it exists first. Let me just write it since we're creating new content.\n\nActually, let me reconsider - the instructions say I MUST use Read first if it's an existing file. But in this case, we're creating a new file. The tool description says \"If this is an existing file, you MUST use the Read tool first\". So if it doesn't exist, I don't need to read. Let me just write it."
+          lines: 5
+          chars: 857
+          full: ~
+    - id: toolu_10
+      at_ms: 1790482592898
+      body:
+        Tool:
+          name: Write
+          detail:
+            Write:
+              path: /work/notes.md
+              lines: 2
+              kind: Create
+              patch:
+                hunks: []
+                added: 0
+                removed: 0
+                clipped_lines: 0
+                full: ~
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482592914
+    - id: "00000000-0000-4000-8000-000000000058:0"
+      at_ms: 1790482595015
+      body:
+        Thinking:
+          text: "Great! The background task completed. Now step 9: Use Agent tool with subagent_type general-purpose to count lines in main.rs. Let me read the file first to get the content, but actually, the user is asking the Agent to count the lines by reading the file. So I should prompt the Agent to do that."
+          lines: 1
+          chars: 297
+          full: ~
+    - id: toolu_11
+      at_ms: 1790482595910
+      body:
+        Tool:
+          name: Agent
+          detail:
+            Agent:
+              agent_id: a0000000000000001
+              agent_type: general-purpose
+              description: Count lines
+              prompt:
+                text: "Read the file /work/main.rs and count how many lines it has. Reply with just the number, nothing else."
+                lines: 1
+                chars: 102
+                full: ~
+              background: false
+              status: Completed
+              report:
+                text: "4"
+                lines: 1
+                chars: 1
+                full: ~
+              tokens: 13422
+              tool_uses: 1
+              duration_ms: 3073
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482598999
+    - id: "00000000-0000-4000-8000-000000000062:0"
+      at_ms: 1790482600753
+      body:
+        Thinking:
+          text: "Perfect! The Agent found that main.rs has 4 lines. Now step 10: TaskUpdate both tasks to completed. Task #1 is \"Survey files\" and Task #2 is \"Write notes\"."
+          lines: 1
+          chars: 155
+          full: ~
+    - id: toolu_12
+      at_ms: 1790482601002
+      body:
+        Tool:
+          name: TaskUpdate
+          detail:
+            TaskUpdate:
+              task_id: "1"
+              from: in_progress
+              to: completed
+              subject: ~
+              fields:
+                - status
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482601041
+    - id: toolu_13
+      at_ms: 1790482601242
+      body:
+        Tool:
+          name: TaskUpdate
+          detail:
+            TaskUpdate:
+              task_id: "2"
+              from: pending
+              to: completed
+              subject: ~
+              fields:
+                - status
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482601264
+    - id: "00000000-0000-4000-8000-000000000068:0"
+      at_ms: 1790482603999
+      body:
+        Thinking:
+          text: "All steps completed! Let me summarize what happened:\n\n1. ✓ Created tasks \"Survey files\" and \"Write notes\"\n2. ✓ Updated \"Survey files\" to in_progress\n3. ✓ Glob found main.rs\n4. ✓ Grep found a println statement on line 2\n5. ✓ Bash printed one and two\n6. ✓ Bash failed to list missing-file (as expected)\n7. ✓ Bash background command ran and completed\n8. ✓ Wrote notes.md with the two lines\n9. ✓ Agent counted 4 lines in main.rs\n10. ✓ Updated both tasks to completed\n\nDone!"
+          lines: 14
+          chars: 469
+          full: ~
+    - id: "00000000-0000-4000-8000-000000000069:0"
+      at_ms: 1790482604047
+      body:
+        Text:
+          text: done
+          lines: 1
+          chars: 4
+          full: ~
+  tasks:
+    - id: "1"
+      subject: Survey files
+      status: completed
+    - id: "2"
+      subject: Write notes
+      status: completed
+- id:
+    Agent: a0000000000000001
+  origin:
+    tool_use_id: toolu_11
+    agent_type: general-purpose
+    description: Count lines
+  entries:
+    - id: 00000000-0000-4000-8000-000000000072
+      at_ms: 1790482595917
+      body:
+        Prompt:
+          text:
+            text: "Read the file /work/main.rs and count how many lines it has. Reply with just the number, nothing else."
+            lines: 1
+            chars: 102
+            full: ~
+          images: 0
+          command: ~
+    - id: toolu_14
+      at_ms: 1790482597611
+      body:
+        Tool:
+          name: Read
+          detail:
+            Read:
+              path: /work/main.rs
+              offset: ~
+              limit: ~
+              start_line: ~
+              lines: ~
+              total_lines: ~
+          result:
+            status: Ok
+            text:
+              text: "1\tfn main() {\n2\t    println!(\"hello\");\n3\t}\n4"
+              lines: 4
+              chars: 44
+              full: ~
+            at_ms: 1790482597625
+    - id: "00000000-0000-4000-8000-000000000089:0"
+      at_ms: 1790482598941
+      body:
+        Text:
+          text: "4"
+          lines: 1
+          chars: 1
+          full: ~
+  tasks: []

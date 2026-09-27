@@ -1,0 +1,225 @@
+---
+source: crates/slopty-agent/tests/conversation.rs
+expression: "decode(\"edit\").snapshot()"
+---
+- id: Main
+  origin: ~
+  entries:
+    - id: 00000000-0000-4000-8000-000000000003
+      at_ms: 1790482544096
+      body:
+        Prompt:
+          text:
+            text: "Do these steps in order with the named tools, then reply \"done\". 1) Read notes.txt. 2) Edit notes.txt: change beta to BETA. 3) Write notes.txt again with this exact content, four lines: alpha, BETA, gamma, delta. 4) Read notes.txt lines 2 to 3 only (offset 2, limit 2)."
+            lines: 1
+            chars: 269
+            full: ~
+          images: 0
+          command: ~
+    - id: "00000000-0000-4000-8000-000000000015:0"
+      at_ms: 1790482546185
+      body:
+        Thinking:
+          text: "The user wants me to do these steps in order:\n1. Read notes.txt\n2. Edit notes.txt: change beta to BETA\n3. Write notes.txt again with this exact content (four lines: alpha, BETA, gamma, delta)\n4. Read notes.txt lines 2 to 3 only (offset 2, limit 2)\n\nLet me start with step 1. First I need to read notes.txt. The file should be in the working directory /work."
+          lines: 7
+          chars: 357
+          full: ~
+    - id: "00000000-0000-4000-8000-000000000016:0"
+      at_ms: 1790482546526
+      body:
+        Text:
+          text: "I'll execute these steps in order.\n\n**Step 1: Read notes.txt**"
+          lines: 3
+          chars: 62
+          full: ~
+    - id: toolu_01
+      at_ms: 1790482546896
+      body:
+        Tool:
+          name: Read
+          detail:
+            Read:
+              path: /work/notes.txt
+              offset: ~
+              limit: ~
+              start_line: 1
+              lines: 4
+              total_lines: 4
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482546938
+    - id: "00000000-0000-4000-8000-000000000021:0"
+      at_ms: 1790482548207
+      body:
+        Thinking:
+          text: "Good, the file exists with content:\n1. alpha\n2. beta\n3. gamma\n4. (empty)\n\nStep 2: Edit notes.txt to change beta to BETA"
+          lines: 7
+          chars: 119
+          full: ~
+    - id: "00000000-0000-4000-8000-000000000022:0"
+      at_ms: 1790482548512
+      body:
+        Text:
+          text: "**Step 2: Edit notes.txt to change beta to BETA**"
+          lines: 1
+          chars: 49
+          full: ~
+    - id: toolu_02
+      at_ms: 1790482549108
+      body:
+        Tool:
+          name: Edit
+          detail:
+            Edit:
+              path: /work/notes.txt
+              edits: 1
+              replace_all: false
+              patch:
+                hunks:
+                  - old_start: 1
+                    old_lines: 3
+                    new_start: 1
+                    new_lines: 3
+                    lines:
+                      - " alpha"
+                      - "-beta"
+                      - +BETA
+                      - " gamma"
+                added: 1
+                removed: 1
+                clipped_lines: 0
+                full: ~
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482549152
+    - id: "00000000-0000-4000-8000-000000000027:0"
+      at_ms: 1790482550294
+      body:
+        Thinking:
+          text: "Good, the edit was successful. Now step 3: Write notes.txt with the exact content (four lines: alpha, BETA, gamma, delta)."
+          lines: 1
+          chars: 122
+          full: ~
+    - id: "00000000-0000-4000-8000-000000000028:0"
+      at_ms: 1790482550504
+      body:
+        Text:
+          text: "**Step 3: Write notes.txt with the exact content**"
+          lines: 1
+          chars: 50
+          full: ~
+    - id: toolu_03
+      at_ms: 1790482550977
+      body:
+        Tool:
+          name: Write
+          detail:
+            Write:
+              path: /work/notes.txt
+              lines: 4
+              kind: Overwrite
+              patch:
+                hunks:
+                  - old_start: 1
+                    old_lines: 3
+                    new_start: 1
+                    new_lines: 4
+                    lines:
+                      - " alpha"
+                      - " BETA"
+                      - " gamma"
+                      - +delta
+                      - "\\ No newline at end of file"
+                added: 1
+                removed: 0
+                clipped_lines: 0
+                full: ~
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482550991
+    - id: "00000000-0000-4000-8000-000000000032:0"
+      at_ms: 1790482552316
+      body:
+        Thinking:
+          text: "Good, the write was successful. Now step 4: Read notes.txt lines 2 to 3 only. The user said \"offset 2, limit 2\" which means starting from line 2 and reading 2 lines (lines 2 and 3)."
+          lines: 1
+          chars: 181
+          full: ~
+    - id: "00000000-0000-4000-8000-000000000033:0"
+      at_ms: 1790482552554
+      body:
+        Text:
+          text: "**Step 4: Read notes.txt lines 2 to 3 only**"
+          lines: 1
+          chars: 44
+          full: ~
+    - id: toolu_04
+      at_ms: 1790482553102
+      body:
+        Tool:
+          name: Read
+          detail:
+            Read:
+              path: /work/notes.txt
+              offset: 1
+              limit: 2
+              start_line: 1
+              lines: 2
+              total_lines: 4
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482553133
+    - id: "00000000-0000-4000-8000-000000000037:0"
+      at_ms: 1790482566496
+      body:
+        Thinking:
+          text: "Wait, I need to re-read the request. The user said \"Read notes.txt lines 2 to 3 only (offset 2, limit 2)\". \n\nThe Read tool uses offset (0-based line number to start from) and limit (number of lines to read). So:\n- offset 2 means start from line 2 (0-indexed), which is line 3 (1-indexed)\n- limit 2 means read 2 lines\n\nBut the user said \"lines 2 to 3\", which in 1-indexed counting would be 2 lines starting from line 2. In 0-indexed offset terms:\n- offset 1 (start at line 2, 1-indexed) \n- limit 2 (read 2 lines, so lines 2-3)\n\nThat's what I did, and it returned lines 1 and 2 in the display format. But that's showing offset 1, limit 2, which displays lines at positions 1 and 2 (0-indexed), which are lines 2 and 3 in 1-indexed format. However, the display shows \"1 alpha\" and \"2 BETA\". \n\nLet me reconsider. The file has:\nLine 1: alpha\nLine 2: BETA\nLine 3: gamma\nLine 4: delta\n\nIf the user wants \"lines 2 to 3 only\" (1-indexed), that's BETA and gamma.\n\nThe Read tool with offset=1, limit=2 should give me:\n- Starting at 0-indexed position 1 (which is line 2 in 1-indexed)\n- Reading 2 lines (lines 2 and 3 in 1-indexed)\n\nThe output shows:\n1\talpha\n2\tBETA\n\nThis is wrong. Let me check the offset parameter documentation. It says \"The line number to start reading from.\" This could be 1-indexed or 0-indexed. Looking at the output, it returned lines starting from \"alpha\" which is line 1.\nThe numbers on the left are just the cat -n display, showing this returned lines 1-2, not 2-3, so my offset=1 call was off. If offset is 0-indexed, offset=0 gives line 1, offset=1 gives line 2, offset=2 gives line 3 — so for lines 2-3 I actually need offset=1... but that gave alpha/BETA, meaning offset must behave differently than expected here.\n\nis 1-indexed? Testing this theory: offset=1 meaning \"start at line 1\" with limit=2 giving lines 1-2 matches what I got.\n\nSo offset is likely 1-indexed. For lines 2-3, I'd need offset=2, limit=2 - which is exactly what the user specified in parentheses. I must have misread and used offset=1 instead. Let me rerun with the correct parameters.\n\n"
+          lines: 35
+          chars: 2078
+          full: ~
+    - id: "00000000-0000-4000-8000-000000000038:0"
+      at_ms: 1790482566499
+      body:
+        Text:
+          text: "Let me correct step 4 - I need to use offset 2 as you specified:"
+          lines: 1
+          chars: 64
+          full: ~
+    - id: toolu_05
+      at_ms: 1790482566500
+      body:
+        Tool:
+          name: Read
+          detail:
+            Read:
+              path: /work/notes.txt
+              offset: 2
+              limit: 2
+              start_line: 2
+              lines: 2
+              total_lines: 4
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482566524
+    - id: "00000000-0000-4000-8000-000000000043:0"
+      at_ms: 1790482567641
+      body:
+        Thinking:
+          text: Perfect! Now I have the correct result showing lines 2 and 3 (BETA and gamma). All four steps are complete.
+          lines: 1
+          chars: 107
+          full: ~
+    - id: "00000000-0000-4000-8000-000000000044:0"
+      at_ms: 1790482567684
+      body:
+        Text:
+          text: done
+          lines: 1
+          chars: 4
+          full: ~
+  tasks: []

@@ -6913,6 +6913,7 @@ dependencies = [
 name = "slopty-agent"
 version = "0.1.0"
 dependencies = [
+ "insta",
  "serde",
  "serde_json",
  "slopty-core",
@@ -6938,6 +6939,7 @@ dependencies = [
  "slopty-platform",
  "slopty-proto",
  "slopty-settings",
+ "slopty-tailnet",
  "slopty-theme",
  "slopty-ui",
  "tempfile",

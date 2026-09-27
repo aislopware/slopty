@@ -94,6 +94,15 @@ pub struct Read {
     pub progress: Option<Progress>,
 }
 
+/// What one [`Tail::read_lines`] found.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Lines {
+    /// As [`Read::restarted`].
+    pub restarted: bool,
+    /// The complete lines appended, each with its newline.
+    pub text: String,
+}
+
 /// What the transcript's newest record says the agent is doing.
 ///
 /// This is the second-strongest attribution signal, used when no hook has spoken for the
@@ -117,9 +126,20 @@ impl Tail {
     ///
     /// When the file exists but cannot be read.
     pub fn read(&mut self, path: &Path) -> std::io::Result<Read> {
+        let lines = self.read_lines(path)?;
+        Ok(Read { restarted: lines.restarted, progress: progress(&lines.text) })
+    }
+
+    /// The complete lines appended since the last read, as text; an unterminated last line waits
+    /// for the next call. The conversation decoder ([`crate::conversation`]) reads through this.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read`].
+    pub fn read_lines(&mut self, path: &Path) -> std::io::Result<Lines> {
         let mut file = match std::fs::File::open(path) {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Read::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Lines::default()),
             Err(e) => return Err(e),
         };
         let len = file.metadata()?.len();
@@ -128,7 +148,7 @@ impl Tail {
             *self = Self::default();
         }
         if len == self.offset {
-            return Ok(Read { restarted, ..Read::default() });
+            return Ok(Lines { restarted, text: String::new() });
         }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut appended = Vec::new();
@@ -136,11 +156,11 @@ impl Tail {
         self.offset = self.offset.saturating_add(appended.len().try_into().unwrap_or(u64::MAX));
         self.partial.append(&mut appended);
         let Some(end) = self.partial.iter().rposition(|b| *b == b'\n') else {
-            return Ok(Read { restarted, ..Read::default() });
+            return Ok(Lines { restarted, text: String::new() });
         };
         let rest = self.partial.split_off(end.saturating_add(1));
         let complete = std::mem::replace(&mut self.partial, rest);
-        Ok(Read { restarted, progress: progress(&String::from_utf8_lossy(&complete)) })
+        Ok(Lines { restarted, text: String::from_utf8_lossy(&complete).into_owned() })
     }
 }
 

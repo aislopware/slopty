@@ -21,6 +21,7 @@ mod hook;
 mod link;
 mod mcp;
 mod service;
+mod statusline;
 mod verbs;
 mod workerctl;
 

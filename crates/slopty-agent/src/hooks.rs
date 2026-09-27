@@ -5,15 +5,23 @@
 //! human whose agent Slopty is guessing at may be sitting in front of a phone. The document
 //! is edited in place — other people's hooks and every other setting are kept — and written
 //! through a sibling temporary file, so a crash never leaves half a settings file behind.
+//!
+//! Every entry is asynchronous, so the agent never waits on the relay, except
+//! `PermissionRequest`: that one runs synchronously so the relay can answer the prompt with a
+//! decision from the conversation face ([`crate::permission`]). Until the worker answers, the
+//! relay prints nothing at once and Claude Code shows its own dialog, as before.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use crate::HOOK_EVENTS;
+use crate::{HOOK_EVENTS, permission, statusline};
 
 /// Hook `timeout` written to settings (seconds).
 const HOOK_TIMEOUT_S: u32 = 5;
+
+/// The event whose entry waits for the relay.
+const PERMISSION_EVENT: &str = "PermissionRequest";
 
 /// What editing the settings did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -65,8 +73,19 @@ pub fn relay_beside_this_binary() -> Option<PathBuf> {
 /// or a file relative to `cwd`) is read, gets the relay, and becomes the one `--settings`
 /// left; one that cannot be read is passed on untouched for Claude Code to report. A handler
 /// the user's settings register as well runs once.
+///
+/// The same `--settings` sets `statusLine` to the status-line wrapper (`<command> hook
+/// statusline`), which beats the project's and the user's own status line and then runs it
+/// (see [`statusline`] for the precedence). The person's setting keeps its other fields
+/// (`padding`, `refreshInterval`); one that came on the caller's `--settings`, which this
+/// replaces, travels on the wrapper's command line.
 #[must_use]
 pub fn with_relay(args: Vec<String>, command: &str, cwd: &Path) -> Vec<String> {
+    with_relay_for(args, command, cwd, &statusline::user_settings(&home_dir()))
+}
+
+/// [`with_relay`] with the user settings file named.
+fn with_relay_for(args: Vec<String>, command: &str, cwd: &Path, user: &Path) -> Vec<String> {
     let mut rest = Vec::with_capacity(args.len());
     let mut given = None;
     let mut words = args.iter().cloned();
@@ -92,7 +111,26 @@ pub fn with_relay(args: Vec<String>, command: &str, cwd: &Path) -> Vec<String> {
         return args;
     };
     install(&mut doc, command);
+    wrap_status_line(&mut doc, command, cwd, user);
     [SETTINGS_FLAG.to_owned(), doc.to_string()].into_iter().chain(rest).collect()
+}
+
+/// Point `statusLine` at the wrapper, keeping the person's own setting's other fields.
+fn wrap_status_line(doc: &mut Value, command: &str, cwd: &Path, user: &Path) {
+    let given = doc.get("statusLine").filter(|s| statusline::command_of(s).is_some()).cloned();
+    let carried = given.as_ref().and_then(statusline::command_of).map(str::to_owned);
+    let mut line = given
+        .or_else(|| statusline::configured(cwd, user))
+        .and_then(|setting| setting.as_object().cloned())
+        .unwrap_or_default();
+    line.insert("type".to_owned(), json!("command"));
+    line.insert(
+        "command".to_owned(),
+        json!(statusline::wrapper_command(command, carried.as_deref())),
+    );
+    if let Some(root) = doc.as_object_mut() {
+        root.insert("statusLine".to_owned(), Value::Object(line));
+    }
 }
 
 const SETTINGS_FLAG: &str = "--settings";
@@ -204,7 +242,17 @@ fn unquote(word: &str) -> &str {
         .unwrap_or(word)
 }
 
-fn relay_entry(command: &str) -> Value {
+/// The relay's entry for `event`: asynchronous, except for a permission request, which waits
+/// for a decision.
+fn relay_entry(command: &str, event: &str) -> Value {
+    if event == PERMISSION_EVENT {
+        return json!({
+            "type": "command",
+            "command": command,
+            "args": ["hook"],
+            "timeout": permission::HOOK_TIMEOUT_S,
+        });
+    }
     json!({
         "type": "command",
         "command": command,
@@ -249,7 +297,7 @@ pub fn install(doc: &mut Value, command: &str) -> bool {
         };
         // The first relay entry is repointed and any later ones go, with a group they leave
         // empty: settings an older install duplicated collapse to one entry per event.
-        let wanted = relay_entry(command);
+        let wanted = relay_entry(command, event);
         let mut found = false;
         groups.retain_mut(|group| {
             let Some(entries) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
@@ -336,7 +384,7 @@ mod tests {
         for ev in HOOK_EVENTS {
             assert!(has_relay(&doc, ev), "{ev} registered");
         }
-        assert!(!has_relay(&doc, "PreCompact"));
+        assert!(!has_relay(&doc, "MessageDisplay"), "held TUI paint: measured before registered");
         // A moved binary is repointed, not duplicated.
         assert!(install(&mut doc, "/usr/local/bin/slopty"));
         let pre = doc["hooks"]["PreToolUse"].as_array().expect("array");
@@ -353,6 +401,9 @@ mod tests {
     fn a_run_gets_the_relay_on_the_one_settings_it_keeps() {
         let relay = "/opt/Slopty/slopty";
         let dir = tempfile::tempdir().expect("tempdir");
+        let user = dir.path().join("user-settings.json");
+        let with_relay =
+            |args: Vec<String>, relay: &str, cwd: &Path| with_relay_for(args, relay, cwd, &user);
         let words = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
         let settings = |out: &[String]| -> Value {
             assert_eq!(
@@ -371,7 +422,7 @@ mod tests {
         let out = with_relay(words(&["--model", "opus"]), relay, dir.path());
         let doc = settings(&out);
         assert!(registers(&doc));
-        assert_eq!(doc["hooks"]["Stop"][0]["hooks"][0], relay_entry(relay));
+        assert_eq!(doc["hooks"]["Stop"][0]["hooks"][0], relay_entry(relay, "Stop"));
         assert_eq!(out.get(2..), Some(words(&["--model", "opus"]).as_slice()));
 
         let args = ["--settings", r#"{"model":"haiku"}"#, "-p", "--settings={\"theme\":\"dark\"}"];
@@ -393,6 +444,55 @@ mod tests {
         {
             assert_eq!(with_relay(words(unreadable), relay, dir.path()), words(unreadable));
         }
+    }
+
+    /// The run's status line is the wrapper, in front of the person's own: theirs from the
+    /// caller's `--settings` travels on the wrapper's command line, theirs from the files is
+    /// looked up when it runs, and either keeps its other fields.
+    #[test]
+    fn a_run_gets_the_status_line_wrapper_in_front_of_the_persons_own() {
+        let relay = "/opt/Slopty/slopty";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = dir.path().join("user-settings.json");
+        let line = |args: &[&str]| -> Value {
+            let args = args.iter().map(|&a| a.to_owned()).collect();
+            let out = with_relay_for(args, relay, dir.path(), &user);
+            let doc: Value = serde_json::from_str(out.get(1).expect("value")).expect("json");
+            doc["statusLine"].clone()
+        };
+        assert_eq!(
+            line(&[]),
+            json!({ "type": "command", "command": "'/opt/Slopty/slopty' hook statusline" })
+        );
+        let given = r#"{"statusLine":{"type":"command","command":"my-line --short","padding":1}}"#;
+        assert_eq!(
+            line(&["--settings", given]),
+            json!({
+                "type": "command",
+                "command": "'/opt/Slopty/slopty' hook statusline --command 'my-line --short'",
+                "padding": 1,
+            })
+        );
+        std::fs::write(
+            &user,
+            r#"{"statusLine":{"type":"command","command":"u.sh","refreshInterval":5}}"#,
+        )
+        .expect("write");
+        assert_eq!(
+            line(&[]),
+            json!({
+                "type": "command",
+                "command": "'/opt/Slopty/slopty' hook statusline",
+                "refreshInterval": 5,
+            }),
+            "found in the files: the wrapper looks it up itself"
+        );
+        let ours = json!({ "statusLine": { "command": statusline::wrapper_command(relay, None) } });
+        assert_eq!(
+            line(&["--settings", &ours.to_string()])["command"],
+            json!("'/opt/Slopty/slopty' hook statusline"),
+            "the wrapper never wraps itself"
+        );
     }
 
     #[test]
@@ -457,7 +557,7 @@ mod tests {
         assert_eq!(
             doc["hooks"]["Stop"],
             json!([
-                { "hooks": [relay_entry(spaced)] },
+                { "hooks": [relay_entry(spaced, "Stop")] },
                 { "matcher": "x", "hooks": [ { "type": "command", "command": "echo hi" } ] },
             ])
         );

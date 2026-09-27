@@ -9,6 +9,7 @@ mod bundle;
 mod check;
 mod deep;
 mod e2e;
+mod fixtures;
 mod gate;
 mod icon;
 mod ime;
@@ -91,6 +92,12 @@ enum Cmd {
         /// The command to profile.
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
+    },
+    /// Capture the Claude Code transcripts and hook payloads the conversation decoder is pinned
+    /// by, into `crates/slopty-agent/tests/fixtures/conversation`.
+    Fixtures {
+        #[command(subcommand)]
+        cmd: fixtures::FixturesCmd,
     },
     /// Run the live end-to-end tests (daemons, screen capture, input) in an isolated data dir.
     E2e(e2e::E2eOpts),
@@ -189,6 +196,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::E2e(opts) => e2e::run(&sh, &opts),
+        Cmd::Fixtures { cmd } => fixtures::run(&cmd),
         Cmd::Fmt => gate::fmt(&sh, true),
         Cmd::Lint => gate::lint(&sh),
         Cmd::Test { args } => gate::test(&sh, &args),

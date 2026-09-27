@@ -1,0 +1,135 @@
+---
+source: crates/slopty-agent/tests/conversation.rs
+expression: "decode(\"permission\").snapshot()"
+---
+- id: Main
+  origin: ~
+  entries:
+    - id: 00000000-0000-4000-8000-000000000003
+      at_ms: 1790482629839
+      body:
+        Prompt:
+          text:
+            text: "Run these three Bash commands one at a time, in order, each as its own call, then reply \"done\": `touch refused.txt`, `touch allowed.txt`, `touch always.txt`. If one is refused, go on with the next."
+            lines: 1
+            chars: 197
+            full: ~
+          images: 0
+          command: ~
+    - id: "00000000-0000-4000-8000-000000000015:0"
+      at_ms: 1790482631345
+      body:
+        Thinking:
+          text: "The user wants me to run three Bash commands sequentially:\n1. `touch refused.txt`\n2. `touch allowed.txt`\n3. `touch always.txt`\n\nThey want each as its own call, in order. If one is refused, I should continue with the next one, then reply \"done\".\n\nLet me execute these one at a time."
+          lines: 8
+          chars: 281
+          full: ~
+    - id: toolu_01
+      at_ms: 1790482631706
+      body:
+        Tool:
+          name: Bash
+          detail:
+            Bash:
+              command:
+                text: touch refused.txt
+                lines: 1
+                chars: 17
+                full: ~
+              description: Create refused.txt file
+              background: false
+              task_id: ~
+              status: Failed
+              exit_code: ~
+              stdout: ~
+              stderr: ~
+              output_file: ~
+          result:
+            status: Error
+            text:
+              text: Refused by the fixture.
+              lines: 1
+              chars: 23
+              full: ~
+            at_ms: 1790482631755
+    - id: "00000000-0000-4000-8000-000000000021:0"
+      at_ms: 1790482632727
+      body:
+        Thinking:
+          text: "The first command was refused. Now I'll try the second one."
+          lines: 1
+          chars: 59
+          full: ~
+    - id: toolu_02
+      at_ms: 1790482632964
+      body:
+        Tool:
+          name: Bash
+          detail:
+            Bash:
+              command:
+                text: touch allowed.txt
+                lines: 1
+                chars: 17
+                full: ~
+              description: Create allowed.txt file
+              background: false
+              task_id: ~
+              status: Done
+              exit_code: 0
+              stdout: ~
+              stderr: ~
+              output_file: ~
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482633255
+    - id: "00000000-0000-4000-8000-000000000026:0"
+      at_ms: 1790482634063
+      body:
+        Thinking:
+          text: "The second command succeeded. Now I'll try the third one."
+          lines: 1
+          chars: 57
+          full: ~
+    - id: toolu_03
+      at_ms: 1790482634304
+      body:
+        Tool:
+          name: Bash
+          detail:
+            Bash:
+              command:
+                text: touch always.txt
+                lines: 1
+                chars: 16
+                full: ~
+              description: Create always.txt file
+              background: false
+              task_id: ~
+              status: Done
+              exit_code: 0
+              stdout: ~
+              stderr: ~
+              output_file: ~
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1790482634363
+    - id: "00000000-0000-4000-8000-000000000032:0"
+      at_ms: 1790482635730
+      body:
+        Thinking:
+          text: "All three commands have been executed:\n1. `touch refused.txt` - was refused\n2. `touch allowed.txt` - succeeded\n3. `touch always.txt` - succeeded\n\nNow I should reply \"done\" as requested."
+          lines: 6
+          chars: 185
+          full: ~
+    - id: "00000000-0000-4000-8000-000000000033:0"
+      at_ms: 1790482635752
+      body:
+        Text:
+          text: done
+          lines: 1
+          chars: 4
+          full: ~
+  tasks: []

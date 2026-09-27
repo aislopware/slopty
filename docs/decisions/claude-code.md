@@ -1004,3 +1004,126 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Test: `a_spawned_agent_reports_through_the_relay_it_was_handed` (worker; a stand-in `claude`
     records its arguments, and the relay runs from the settings it was handed) and
     `a_run_gets_the_relay_on_the_one_settings_it_keeps`.
+
+- ✅ **Claude Code gets a conversation face; the TUI stays the source of truth** (2026-09-27,
+  verified against Claude Code 2.1.283; research and plan in
+  `.research/claude-gui-study-2026-09-27.md`). The person wants a view of an agent's work beside
+  its TUI, toggled per tile: the edits as diffs, the tool calls with their results, subagents,
+  background shells and the task list. This reverses the status-only half of "The agent is used
+  through its TUI; Slopty only reads its status" (2026-09-15). That ruling stood on three
+  things that have changed.
+  - The SDK's stream-json wire is now published (`sdk.d.ts` documents the unions and tells a
+    host to ignore unknown types).
+  - Hooks grew to 33 events. `PostToolUse` carries the tool's response,
+    `SubagentStop` the subagent's own transcript, and a `PermissionRequest` hook can answer the
+    prompt.
+  - A face that projects the live TUI keeps the TUI. The deleted driven card had none, so it
+    could not toggle back.
+  - What stays: nothing replaces the TUI, Slopty never types menu digits, and a driven
+    (stream-json) session waits until the observed face's lag is measured and found wanting.
+- **Architecture: observe the TUI.** `claude` keeps running in its PTY with the relay on
+  `--settings`. A tile toggles between the grid and the face with no restart. For a session a
+  client follows, the worker tails the transcript, each subagent's `agent_transcript_path` and
+  each background command's output file, and sends typed entries on a low-priority uni stream,
+  never the control stream. Hooks give the live moments; the transcript fills in text and
+  thinking as blocks complete. The composer types into the same PTY (bracketed paste, then
+  Enter), and approvals go through the blocking `PermissionRequest` hook.
+- **The drift risk has one owner.** `slopty_agent::conversation` is the only code that reads
+  the JSONL. Clients get typed entries. It skips unknown record types, fields and lines that
+  do not parse, and keeps an unknown tool as its name and clipped input.
+  - Golden fixtures pin it: `crates/slopty-agent/tests/fixtures/conversation/<scenario>/`
+    holds `transcript.jsonl`, `subagents/agent-<id>.jsonl` and `hooks.jsonl`, and insta
+    snapshots hold the decoded threads. `cargo xtask fixtures claude [--only <name>]`
+    recaptures them. It runs the installed `claude` on haiku in a scratch directory with no
+    user or project settings, takes the records from the `transcript_mirror` frames of
+    `--session-mirror` (never from files under `~/.claude`), registers itself as the hook to
+    record payloads and answer permission requests, and scrubs paths, the user name, e-mail
+    addresses and every id to numbered placeholders. Attachments keep only their type. Five
+    scenarios: `edit` (read, edit, overwrite, ranged read), `tools` (tasks, glob, grep, bash,
+    a failing bash, a background bash, a create, a subagent), `interrupt`, `compact`,
+    `permission`. A snapshot that moves after a recapture is the format moving.
+  - Entries: prompt (a slash command or `!` keeps its name), answer text, thinking, a tool call
+    paired with its result, compaction with its summary, Esc, and Claude Code's notes (API
+    errors, command output, informational lines). Tool details are typed for Edit/MultiEdit
+    (hunks from `structuredPatch`, +/− totals), Write (create or overwrite), Read, Grep, Glob,
+    Bash (exit code, stdout and stderr tails, background task and output file), WebFetch,
+    WebSearch, Agent, TaskCreate/TaskUpdate/TodoWrite (which also keep the thread's task list),
+    AskUserQuestion, ExitPlanMode and MCP tools.
+  - Ids stay put across reads: a tool call is its `tool_use_id`, anything else its record's
+    `uuid`, with `:<block>` for answer and thinking blocks. The decoder builds on `Tail`, and a
+    record appended later (a result, a background task's `task-notification`) comes back as an
+    upsert of the entry it belongs to. A record whose parent is not the newest one starts a
+    branch (a rewind), and the entries past the fork are removed.
+  - Subagents are threads keyed by agent id, from their own files or from `isSidechain`
+    records in the main one. The `agent_metadata` line at the top of a subagent's file names
+    the call that started it.
+  - Clipping happens on the worker. Prose stops at 400 lines or 32 000 characters, tool output
+    and inputs at 40 lines or 4 000 characters (Bash keeps the tail), a diff at 400 lines. A
+    clipped text says how long the whole was and carries a `TextRef` (record uuid and part)
+    that `full_text` resolves against the transcript later.
+- **The relay forwards what the face needs.** `HOOK_EVENTS` grows from 12 to 19: `StopFailure`,
+  `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `PreCompact`,
+  `PostCompact`. This reverses "forwards only what the tracker reads" (2026-09-26) for these
+  fields: `tool_response` and `duration_ms`, the subagent's id, type, transcript and last
+  message, the task, the compaction trigger and summary, the error, and the permission
+  request's input and `permission_suggestions`. `Hook::trimmed` keeps it small. A tool's input
+  and response keep 16 KiB of JSON each, an edit's `originalFile` goes, and free texts stop at
+  32 000 characters. The tracker reads `StopFailure` as `Done` with the error as detail; before,
+  a turn that died on an API error left the pill on "working".
+- **`MessageDisplay` is not registered.** Claude Code holds each batch of the TUI's paint until
+  that hook returns (10 s default timeout), so it goes on the input path. It is measured before
+  anyone registers it.
+- **Approvals: a blocking `PermissionRequest`.** Its entry is the one without `async`, with
+  `timeout: 600` (Claude Code's own default). The relay posts the hook as before, then sends
+  `{"cmd":"permission","session","payload","wait_ms"}` on the control socket
+  (`slopty_agent::permission::RelayRequest`) and waits up to 595 s for
+  `{"reply":"permission","decision":{"kind":"pass"|"allow"|"allow_always"|"deny",…}}`. It
+  prints the output the hooks reference defines (`hookSpecificOutput.decision.behavior`, with
+  `updatedPermissions` for always and `message`/`interrupt` for deny) and nothing for `pass`.
+  Today's worker cannot read the request and closes the connection, so the relay reads no
+  decision at once and the TUI shows its dialog as before. Phase 1b adds
+  `CtlRequest::Permission(PermissionAsk)` and `CtlReply::Permission(PermissionAnswer)`, which
+  tag the same way. It answers `pass` at once unless a client shows the face, and must not
+  apply the payload to the tracker a second time.
+  - Checked in the `permission` capture: 2.1.283 obeyed a deny (the file was not made), an
+    allow, and an allow-always that handed back the suggestions. For `touch` those were
+    `addDirectories` and `setMode acceptEdits`, so after it the next command needed no
+    permission. The payload has no `tool_use_id`.
+- **Meters: a status-line wrapper.** `with_relay` also sets `statusLine` to
+  `'<slopty>' hook statusline`. It forwards the model, context used, cost and rate limits to
+  the worker as a `Statusline` hook (the tracker ignores it), then runs the person's own
+  status-line command through `sh -c` with the same input and prints its output byte for byte.
+  The forward gives up after 500 ms so the line is never late.
+  - Precedence: Claude Code takes `statusLine` from managed settings, then `--settings`, then
+    the project's `settings.local.json`, its `settings.json`, then the user's (under
+    `CLAUDE_CONFIG_DIR` or `~/.claude`). The wrapper on `--settings` beats every file. The
+    person's line from the caller's `--settings`, which `with_relay` replaces, travels as
+    `--command`; one from the files is looked up each time the wrapper runs. Their other fields
+    (`padding`, `refreshInterval`) are kept. A managed `statusLine` beats the wrapper, and the
+    face then has no meters.
+- **Found in the captures.** Thinking reaches the transcript only as summaries, and only with
+  `showThinkingSummaries`; without it the block is empty and the decoder skips it. Records in a
+  subagent's file carry no `toolUseResult`, so its results show their text. Esc during a
+  running command writes a rejected result ("User rejected tool use") and then
+  "[Request interrupted by user for tool use]". In one run the command was moved to the
+  background and a `killed` task notification followed as a user record. A background task
+  that finishes writes a `queued_command` attachment whose `commandMode` is
+  `task-notification`.
+- **Phases.** 1a is this change: the decoder, the forwarding, the permission relay and the
+  status-line wrapper, with no wire change. 1b, after UI wave 2: entry wire types with goldens
+  in `slopty-proto`, follow and unfollow, the per-connection follow task and its uni stream, the
+  worker's side of the permission request, and the meters. 2: the face itself in `slopty-ui`
+  and `slopty-app`.
+- Tests: the `conversation` snapshots (`edit`, `tools`, `interrupt`, `compact`, `permission`),
+  `a_line_at_a_time_ends_where_a_whole_read_does` (half lines, files interleaved, a client
+  applying only the changes), the decoder's unit tests
+  (`a_result_pairs_with_its_call_whenever_it_arrives`,
+  `a_background_command_finishes_on_its_notice`, `a_subagent_talks_in_its_own_thread`,
+  `a_long_text_is_clipped_and_can_be_had_whole`, `what_it_does_not_know_is_passed_over`,
+  `a_branch_abandons_what_followed_its_fork`, …), the hook fixtures (`tests/hooks.rs`,
+  including `a_permission_decision_is_the_output_claude_code_acted_on`), the relay against a
+  stand-in socket (`a_permission_request_prints_the_workers_decision`,
+  `a_worker_that_does_not_decide_leaves_the_dialog_to_claude_code`,
+  `the_wait_for_a_decision_is_bounded`), and the wrapper
+  (`the_persons_line_passes_through_unchanged`, `the_meters_are_forwarded_as_a_hook`,
+  `a_run_gets_the_status_line_wrapper_in_front_of_the_persons_own`).

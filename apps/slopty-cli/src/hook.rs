@@ -7,6 +7,12 @@
 //! as an asynchronous exec-form command hook; `uninstall` removes exactly those entries.
 //! `slopty hook report <status> [message]` is the same relay for any program: a wrapper around
 //! another agent reports `working|blocked|done|idle|gone` and gets Claude Code's treatment.
+//!
+//! A `PermissionRequest` is the one hook Claude Code waits on (it is registered without
+//! `async`). After posting it, the relay asks the worker for a decision and prints what Claude
+//! Code expects; no decision, which is all a worker that does not answer these gives today,
+//! prints nothing and Claude Code shows its own dialog ([`slopty_agent::permission`]).
+//! `slopty hook statusline` is the status-line wrapper ([`crate::statusline`]).
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -16,13 +22,20 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Subcommand, ValueEnum};
 use slopty_agent::HOOK_EVENTS;
 use slopty_agent::hooks::{self, Outcome};
+use slopty_agent::permission::{self, Decision, PermissionAsk, RelayReply, RelayRequest};
+use slopty_core::SessionId;
 use slopty_worker::ctl::{CtlReply, CtlRequest};
 use slopty_worker::manager::SESSION_ENV;
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::net::UnixStream;
 
-use crate::workerctl;
+use crate::{statusline, workerctl};
 
 /// How long the relay waits for the daemon before giving up silently.
 const RELAY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The event the relay waits on for a decision.
+const PERMISSION_EVENT: &str = "PermissionRequest";
 
 #[derive(Subcommand, Debug)]
 pub enum HookCmd {
@@ -43,6 +56,13 @@ pub enum HookCmd {
         /// Settings file (default: `~/.claude/settings.json`).
         #[arg(long)]
         settings: Option<PathBuf>,
+    },
+    /// Claude Code's status line: forwards its meters to the worker, then runs your own
+    /// status-line command and prints what it prints.
+    Statusline {
+        /// Your status-line command (default: the one your Claude Code settings name).
+        #[arg(long)]
+        command: Option<String>,
     },
     /// Report this session's agent status yourself (any program, from inside the session).
     Report {
@@ -92,33 +112,116 @@ fn report_payload(status: ReportStatus, message: &[String]) -> String {
 
 /// Relay stdin to the daemon. Never fails: Claude Code must not notice us.
 pub async fn relay(data_dir: &Path) {
-    if let Err(e) = relay_stdin(data_dir).await {
+    let mut payload = String::new();
+    let read = std::io::stdin().lock().read_to_string(&mut payload);
+    if let Err(e) = read {
         tracing::debug!(error = %e, "hook relay");
+        return;
+    }
+    let session = match session() {
+        Ok(Some(session)) => session,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::debug!(error = %e, "hook relay");
+            return;
+        }
+    };
+    if let Some(output) = relay_at(&socket(data_dir), session, &payload, permission::WAIT).await {
+        println!("{output}");
     }
 }
 
-async fn relay_stdin(data_dir: &Path) -> Result<()> {
-    let mut payload = String::new();
-    std::io::stdin().lock().read_to_string(&mut payload)?;
-    relay_payload(data_dir, forwardable(&payload)?).await
-}
-
-/// The part of a hook payload the daemon reads. The payload is read whole, since a
-/// `PostToolUse` carries the tool's output and that can run to megabytes, and only the fields
-/// [`slopty_agent::Hook`] names go on.
-fn forwardable(payload: &str) -> Result<String> {
-    let hook = slopty_agent::Hook::parse(payload).context("the hook payload is not JSON")?;
-    Ok(serde_json::to_string(&hook)?)
-}
-
-/// Relay one payload for the session named by `SLOPTY_SESSION`; nothing to do outside one.
-async fn relay_payload(data_dir: &Path, payload: String) -> Result<()> {
-    let Some(session) = std::env::var_os(SESSION_ENV) else {
-        return Ok(());
+/// Post one hook payload and, for a permission request, wait up to `wait` for the worker's
+/// decision; what to print for Claude Code, if anything.
+async fn relay_at(
+    socket: &Path,
+    session: SessionId,
+    payload: &str,
+    wait: Duration,
+) -> Option<serde_json::Value> {
+    let (event, forwarded) = match forwardable(payload) {
+        Ok(forwardable) => forwardable,
+        Err(e) => {
+            tracing::debug!(error = %e, "hook relay");
+            return None;
+        }
     };
-    let session =
-        session.to_string_lossy().parse().context("SLOPTY_SESSION is not a session id")?;
-    let request = workerctl::call(data_dir, CtlRequest::Hook { session, payload });
+    if let Err(e) = post(socket, session, forwarded.clone()).await {
+        tracing::debug!(error = %e, "hook relay");
+        return None;
+    }
+    if event != PERMISSION_EVENT {
+        return None;
+    }
+    let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+    let ask = PermissionAsk { session, payload: forwarded, wait_ms };
+    decide(socket, ask, wait).await.hook_output()
+}
+
+/// The part of a hook payload the daemon reads, and the event it names. The payload is read
+/// whole, since a `PostToolUse` carries the tool's output and that can run to megabytes, and
+/// only the fields [`slopty_agent::Hook`] names go on, trimmed ([`slopty_agent::Hook::trimmed`]).
+fn forwardable(payload: &str) -> Result<(String, String)> {
+    let hook = slopty_agent::Hook::parse(payload).context("the hook payload is not JSON")?;
+    let hook = hook.trimmed();
+    Ok((hook.event.clone(), serde_json::to_string(&hook)?))
+}
+
+/// The worker's decision on a permission request, or [`Decision::Pass`] when it gives none
+/// within `wait`: no reply, a closed connection, an error or anything unreadable.
+async fn decide(socket: &Path, ask: PermissionAsk, wait: Duration) -> Decision {
+    let request = RelayRequest::Permission(ask);
+    match tokio::time::timeout(wait, exchange(socket, &request)).await {
+        Ok(Ok(RelayReply::Permission(answer))) => answer.decision,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "no permission decision");
+            Decision::Pass
+        }
+        Err(_elapsed) => Decision::Pass,
+    }
+}
+
+/// One line out, one line back, on the control socket.
+async fn exchange(socket: &Path, request: &RelayRequest) -> Result<RelayReply> {
+    let stream = UnixStream::connect(socket).await?;
+    let (rd, mut wr) = stream.into_split();
+    let mut line = serde_json::to_vec(request)?;
+    line.push(b'\n');
+    wr.write_all(&line).await?;
+    wr.shutdown().await?;
+    let mut reply = String::new();
+    BufReader::new(rd).read_line(&mut reply).await?;
+    if reply.trim().is_empty() {
+        bail!("the worker closed without a reply");
+    }
+    Ok(serde_json::from_str(reply.trim())?)
+}
+
+/// The session named by `SLOPTY_SESSION`; `None` outside one.
+pub fn session() -> Result<Option<SessionId>> {
+    let Some(session) = std::env::var_os(SESSION_ENV) else {
+        return Ok(None);
+    };
+    Ok(Some(session.to_string_lossy().parse().context("SLOPTY_SESSION is not a session id")?))
+}
+
+/// The worker's control socket: `$SLOPTY_WORKER_SOCKET`, else the installed agents' socket under
+/// `data_dir` when it exists, else the dev default. The same resolution as `slopty worker`'s,
+/// which keeps it private to `workerctl`.
+pub fn socket(data_dir: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("SLOPTY_WORKER_SOCKET") {
+        return PathBuf::from(path);
+    }
+    let installed = data_dir.join("run").join("worker.sock");
+    if installed.exists() {
+        return installed;
+    }
+    std::env::temp_dir().join("slopty").join("worker.sock")
+}
+
+/// Post one forwarded hook for `session`.
+pub async fn post(socket: &Path, session: SessionId, payload: String) -> Result<()> {
+    let request = workerctl::call_at(socket, CtlRequest::Hook { session, payload });
     let reply =
         tokio::time::timeout(RELAY_TIMEOUT, request).await.context("daemon did not answer")??;
     if let CtlReply::Error { message } = reply {
@@ -130,11 +233,12 @@ async fn relay_payload(data_dir: &Path, payload: String) -> Result<()> {
 pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
     match cmd {
         HookCmd::Report { status, message } => {
-            if std::env::var_os(SESSION_ENV).is_none() {
+            let Some(session) = session()? else {
                 bail!("not inside a Slopty session ({SESSION_ENV} is unset)");
-            }
-            relay_payload(data_dir, report_payload(status, &message)).await
+            };
+            post(&socket(data_dir), session, report_payload(status, &message)).await
         }
+        HookCmd::Statusline { command } => statusline::run(data_dir, command).await,
         HookCmd::Install { settings } => {
             let path = settings.unwrap_or_else(default_settings);
             let outcome = hooks::install_at(&path, &relay_command()?)
@@ -190,28 +294,41 @@ fn relay_command() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReportStatus, forwardable, report_payload};
+    use std::time::Instant;
 
-    /// A tool's output of several megabytes is dropped, not cut into invalid JSON: what goes on
-    /// reads as the same hook.
+    use serde_json::json;
+    use slopty_agent::permission::PermissionAnswer;
+    use tokio::net::UnixListener;
+
+    use super::*;
+
+    /// A tool's output of several megabytes is cut, not into invalid JSON: what goes on reads
+    /// as the same hook with the response's head.
     #[test]
-    fn a_large_tool_payload_is_forwarded_as_the_fields_the_daemon_reads() {
-        let payload = serde_json::json!({
+    fn a_large_tool_payload_is_forwarded_trimmed() {
+        let payload = json!({
             "session_id": "s1",
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
             "tool_use_id": "t1",
             "tool_input": { "command": "cat big.log" },
-            "tool_response": { "stdout": "x".repeat(8 << 20) },
+            "tool_response": { "stdout": "x".repeat(8 << 20), "interrupted": false },
+            "duration_ms": 12,
             "transcript_path": "/tmp/t.jsonl",
         })
         .to_string();
-        let forwarded = forwardable(&payload).expect("json");
-        assert!(forwarded.len() < 1024, "{} bytes", forwarded.len());
+        let (event, forwarded) = forwardable(&payload).expect("json");
+        assert_eq!(event, "PostToolUse");
+        assert!(forwarded.len() < slopty_agent::HOOK_JSON_BUDGET, "{} bytes", forwarded.len());
+        let hook = slopty_agent::Hook::parse(&forwarded).expect("json");
+        let original = slopty_agent::Hook::parse(&payload).expect("json");
         assert_eq!(
-            slopty_agent::Hook::parse(&forwarded).expect("json"),
-            slopty_agent::Hook::parse(&payload).expect("json")
+            (&hook.tool_use_id, &hook.tool_input, hook.duration_ms),
+            (&original.tool_use_id, &original.tool_input, Some(12))
         );
+        let response = hook.tool_response.expect("response");
+        assert_eq!(response["interrupted"], json!(false));
+        assert!(response["stdout"].as_str().is_some_and(|s| s.ends_with('…') && s.len() < 8 << 10));
         forwardable("{\"hook_event_name\": \"Stop\"").unwrap_err();
     }
 
@@ -223,5 +340,156 @@ mod tests {
         assert_eq!(hook.event, "Report");
         assert_eq!(hook.status.as_deref(), Some("blocked"));
         assert_eq!(hook.message.as_deref(), Some("approve it?"));
+    }
+
+    /// What a stand-in worker does with one connection.
+    enum Reply {
+        /// Answer this line.
+        Line(String),
+        /// Close without answering, as today's worker does with a request it cannot read.
+        Close,
+        /// Keep the connection and say nothing.
+        Hold,
+    }
+
+    /// A worker on a socket in `dir` that answers connections in order and hands back the
+    /// lines it was sent.
+    fn worker(dir: &Path, replies: Vec<Reply>) -> (PathBuf, tokio::task::JoinHandle<Vec<String>>) {
+        let socket = dir.join("worker.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let task = tokio::spawn(async move {
+            let mut heard = Vec::new();
+            for reply in replies {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let (rd, mut wr) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(rd).read_line(&mut line).await.expect("read");
+                heard.push(line.trim().to_owned());
+                match reply {
+                    Reply::Line(answer) => {
+                        wr.write_all(format!("{answer}\n").as_bytes()).await.expect("answer");
+                    }
+                    Reply::Close => drop(wr),
+                    Reply::Hold => {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        drop(wr);
+                    }
+                }
+            }
+            heard
+        });
+        (socket, task)
+    }
+
+    fn ok() -> Reply {
+        Reply::Line(serde_json::to_string(&CtlReply::Ok { changed: true }).expect("json"))
+    }
+
+    fn permission_request() -> String {
+        json!({
+            "session_id": "s1",
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "tool_input": { "command": "touch x", "description": "Make x" },
+            "permission_suggestions": [
+                { "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "touch x" }],
+                  "behavior": "allow", "destination": "localSettings" }
+            ],
+        })
+        .to_string()
+    }
+
+    /// A permission request is posted as a hook, then waits for the worker's decision, which
+    /// comes out as the hook output Claude Code reads.
+    #[tokio::test]
+    async fn a_permission_request_prints_the_workers_decision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let suggested = json!([{ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "touch x" }],
+            "behavior": "allow", "destination": "localSettings" }]);
+        let always = Decision::AllowAlways {
+            updated_permissions: suggested.as_array().cloned().unwrap_or_default(),
+        };
+        let answer = RelayReply::Permission(PermissionAnswer { decision: always.clone() });
+        let (socket, heard) = worker(
+            dir.path(),
+            vec![ok(), Reply::Line(serde_json::to_string(&answer).expect("json"))],
+        );
+        let session = SessionId::new();
+        let output = relay_at(&socket, session, &permission_request(), permission::WAIT).await;
+        assert_eq!(output, always.hook_output());
+        assert_eq!(
+            output.map(|o| o["hookSpecificOutput"]["decision"]["updatedPermissions"].clone()),
+            Some(suggested),
+            "the suggested rule goes back"
+        );
+        let heard = heard.await.expect("worker");
+        let [hook, ask] = heard.as_slice() else { panic!("{heard:?}") };
+        assert!(
+            matches!(serde_json::from_str(hook), Ok(CtlRequest::Hook { session: s, .. }) if s == session)
+        );
+        let RelayRequest::Permission(ask) = serde_json::from_str(ask).expect("an ask");
+        assert_eq!((ask.session, ask.wait_ms), (session, 595_000));
+        let asked = slopty_agent::Hook::parse(&ask.payload).expect("hook");
+        assert_eq!(
+            asked.tool_input,
+            Some(json!({ "command": "touch x", "description": "Make x" }))
+        );
+        assert!(asked.permission_suggestions.is_some());
+    }
+
+    /// Today's worker does not know the request and closes the connection: no decision, at
+    /// once, and nothing printed, so Claude Code shows its dialog as before.
+    #[tokio::test]
+    async fn a_worker_that_does_not_decide_leaves_the_dialog_to_claude_code() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (socket, _heard) = worker(dir.path(), vec![ok(), Reply::Close]);
+        let started = Instant::now();
+        assert_eq!(
+            relay_at(&socket, SessionId::new(), &permission_request(), permission::WAIT).await,
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+
+        let error = serde_json::to_string(&CtlReply::Error { message: "unknown".to_owned() })
+            .expect("json");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (socket, _heard) = worker(dir.path(), vec![ok(), Reply::Line(error)]);
+        assert_eq!(
+            relay_at(&socket, SessionId::new(), &permission_request(), permission::WAIT).await,
+            None
+        );
+
+        // No worker at all: nothing is posted, nothing asked.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let started = Instant::now();
+        let absent = dir.path().join("none.sock");
+        assert_eq!(
+            relay_at(&absent, SessionId::new(), &permission_request(), permission::WAIT).await,
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A worker that holds the request is let go when the wait is up.
+    #[tokio::test]
+    async fn the_wait_for_a_decision_is_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (socket, _heard) = worker(dir.path(), vec![ok(), Reply::Hold]);
+        let started = Instant::now();
+        let wait = Duration::from_millis(300);
+        assert_eq!(relay_at(&socket, SessionId::new(), &permission_request(), wait).await, None);
+        let took = started.elapsed();
+        assert!(took >= wait && took < Duration::from_secs(3), "{took:?}");
+    }
+
+    /// Any other event is posted and done with: no second connection, nothing printed.
+    #[tokio::test]
+    async fn other_events_ask_for_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (socket, heard) = worker(dir.path(), vec![ok()]);
+        let stop =
+            json!({ "hook_event_name": "Stop", "last_assistant_message": "done" }).to_string();
+        assert_eq!(relay_at(&socket, SessionId::new(), &stop, permission::WAIT).await, None);
+        assert_eq!(heard.await.expect("worker").len(), 1);
     }
 }

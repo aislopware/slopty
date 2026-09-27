@@ -39,9 +39,12 @@ in it until checked here.
   cleanly. Delete the old path, shims, serde defaults kept for old files, and aliases. Never
   layer compatibility on top.
 - **Priorities.** The terminal and the remote desktop come first: streaming, input, audio,
-  clipboard and files, polished to a fine grain. Claude Code support stays at the status level:
-  which shell runs an agent, and whether it is working, waiting or blocked. Nothing drives an
-  agent or renders its transcript; agents are TUI-only.
+  clipboard and files, polished to a fine grain. Claude Code support is the status (which shell
+  runs an agent, and whether it is working, waiting or blocked) plus a conversation face over
+  the TUI, toggled per tile. The face is a read-only projection of the transcript and hooks, a
+  composer that types into the same PTY, and approvals through the `PermissionRequest` hook.
+  The TUI stays the source of truth: nothing replaces it, drives the agent behind its back or
+  types its menu digits.
 - **Design.** Minimal and modern, in the Warp and Zed school. Every colour, size and spacing
   comes from the theme tokens, and the lint-as-tests in `crates/slopty-ui/src/kit.rs` enforce
   it. Honour Reduce Motion. Chrome text is sentence case. Keybindings go in the palette, not on

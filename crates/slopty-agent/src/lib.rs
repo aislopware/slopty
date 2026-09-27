@@ -22,14 +22,20 @@
 //! them in [`AgentSource`] order, so a weaker signal never overwrites what a stronger one
 //! said and hooks stay authoritative once they speak.
 //!
-//! That is all Slopty knows of an agent: it is used through its own TUI in the terminal, and
-//! nothing here drives it or answers for the human.
+//! The agent is used through its own TUI in the terminal, which stays the source of truth. The
+//! conversation face projects it: [`conversation`] decodes the transcript into typed entries,
+//! [`statusline`] reads the status line's meters, and [`permission`] carries the person's answer
+//! to a permission prompt when they give it from the face instead of the TUI's dialog. Nothing
+//! here drives the agent or answers for the person on its own.
 
 #![forbid(unsafe_code)]
 
+pub mod conversation;
 pub mod detect;
 pub mod discover;
 pub mod hooks;
+pub mod permission;
+pub mod statusline;
 pub mod title;
 pub mod transcript;
 
@@ -46,7 +52,12 @@ use crate::title::TitleSignal;
 use crate::transcript::Progress;
 
 /// Hook events `slopty hook install` registers. The relay ignores everything else.
-pub const HOOK_EVENTS: [&str; 12] = [
+///
+/// The status events come first; the rest feed the conversation face: subagents starting and
+/// stopping (with their transcripts), the task list, compaction, and a turn that ended on an
+/// API error. `MessageDisplay` is left out on purpose: Claude Code holds the TUI's paint until
+/// that hook returns, so it is measured before it is ever registered.
+pub const HOOK_EVENTS: [&str; 19] = [
     "SessionStart",
     "SessionEnd",
     "UserPromptSubmit",
@@ -59,14 +70,30 @@ pub const HOOK_EVENTS: [&str; 12] = [
     "Elicitation",
     "ElicitationResult",
     "Stop",
+    "StopFailure",
+    "SubagentStart",
+    "SubagentStop",
+    "TaskCreated",
+    "TaskCompleted",
+    "PreCompact",
+    "PostCompact",
 ];
 
 /// Longest `detail` string sent to clients.
 pub const DETAIL_MAX: usize = 60;
 
-/// A Claude Code hook payload, the fields Slopty reads. Serialized, it is the payload cut down
-/// to them, which is what the relay forwards (a tool's output can run to megabytes).
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+/// Bytes of JSON a forwarded hook keeps of each of a tool's input and response.
+///
+/// The relay cuts the rest ([`Hook::trimmed`]). A `Read` or a `cat` can hand the hook megabytes,
+/// and the face only shows a result's head (the transcript keeps the whole).
+pub const HOOK_JSON_BUDGET: usize = 16 * 1024;
+
+/// Characters a forwarded hook keeps of a free text: a final message, a compaction summary.
+pub const HOOK_TEXT_MAX: usize = conversation::PROSE.chars;
+
+/// A Claude Code hook payload, the fields Slopty reads. Serialized after [`Hook::trimmed`], it is
+/// the payload cut down to them, which is what the relay forwards.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Hook {
     /// Claude Code's session id.
     #[serde(default)]
@@ -74,15 +101,33 @@ pub struct Hook {
     /// The event (`hook_event_name`).
     #[serde(default, rename = "hook_event_name")]
     pub event: String,
+    /// The agent's working directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
     /// Tool events.
     #[serde(default)]
     pub tool_name: Option<String>,
-    /// The call's own id on tool and permission events, what its result names.
+    /// The call's own id on tool events, what its result names. `PermissionRequest` carries
+    /// none.
     #[serde(default)]
     pub tool_use_id: Option<String>,
     /// Tool arguments.
     #[serde(default)]
     pub tool_input: Option<serde_json::Value>,
+    /// `PostToolUse`: what the tool returned (its `toolUseResult`), trimmed to
+    /// [`HOOK_JSON_BUDGET`].
+    #[serde(default)]
+    pub tool_response: Option<serde_json::Value>,
+    /// `PostToolUse`: how long the tool ran, permission prompts not counted.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// `PermissionRequest`: the permission updates Claude Code suggests ("always allow"),
+    /// what a decision may hand back as `updatedPermissions`.
+    #[serde(default)]
+    pub permission_suggestions: Option<serde_json::Value>,
     /// `Notification`.
     #[serde(default)]
     pub notification_type: Option<String>,
@@ -98,18 +143,81 @@ pub struct Hook {
     /// The conversation transcript (JSONL); on every event in practice.
     #[serde(default)]
     pub transcript_path: Option<String>,
-    /// `Stop`: the text of the turn's final response, so nobody has to read the transcript.
+    /// `Stop` and `SubagentStop`: the text of the final response, so nobody has to read the
+    /// transcript. `StopFailure`: the API error as shown.
     #[serde(default)]
     pub last_assistant_message: Option<String>,
+    /// `SubagentStart`/`SubagentStop`: the subagent, its thread's key
+    /// ([`conversation::ThreadId::Agent`]).
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// `SubagentStart`/`SubagentStop`: `general-purpose`, `Explore`, a custom agent's name.
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    /// `SubagentStop`: the subagent's own transcript, which the worker tails as its thread.
+    #[serde(default)]
+    pub agent_transcript_path: Option<String>,
+    /// `TaskCreated`/`TaskCompleted`.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// `TaskCreated`/`TaskCompleted`: the task's title.
+    #[serde(default)]
+    pub task_subject: Option<String>,
+    /// `TaskCreated`/`TaskCompleted`.
+    #[serde(default)]
+    pub task_description: Option<String>,
+    /// `PreCompact`/`PostCompact`: `manual` or `auto`.
+    #[serde(default)]
+    pub trigger: Option<String>,
+    /// `PreCompact`: what the person passed to `/compact`.
+    #[serde(default)]
+    pub custom_instructions: Option<String>,
+    /// `PostCompact`: the summary the conversation continues from.
+    #[serde(default)]
+    pub compact_summary: Option<String>,
+    /// `StopFailure`: `rate_limit`, `overloaded`, `authentication_failed`, …
+    #[serde(default)]
+    pub error: Option<String>,
+    /// `StopFailure`.
+    #[serde(default)]
+    pub error_details: Option<String>,
     /// `Report` (`slopty hook report`): `working|blocked|done|idle|gone`, from any program.
     #[serde(default)]
     pub status: Option<String>,
+    /// `Statusline` (`slopty hook statusline`): the meters Claude Code's status line reads.
+    #[serde(default)]
+    pub meters: Option<statusline::Meters>,
 }
 
 impl Hook {
     /// Parse a payload; never fails on unknown shapes, only on non-JSON.
     pub fn parse(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+
+    /// The hook as the relay forwards it: a tool's input and response cut to
+    /// [`HOOK_JSON_BUDGET`] each (an edit's `originalFile` dropped outright), free texts to
+    /// [`HOOK_TEXT_MAX`] characters.
+    #[must_use]
+    pub fn trimmed(mut self) -> Self {
+        for value in [&mut self.tool_input, &mut self.tool_response].into_iter().flatten() {
+            clip_json(value, &mut HOOK_JSON_BUDGET.clone());
+        }
+        for text in [
+            &mut self.last_assistant_message,
+            &mut self.compact_summary,
+            &mut self.prompt,
+            &mut self.message,
+            &mut self.custom_instructions,
+            &mut self.task_description,
+            &mut self.error_details,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            clip_str(text, HOOK_TEXT_MAX);
+        }
+        self
     }
 
     /// One line describing the tool call ("Bash: cargo test", "Edit src/main.rs").
@@ -183,6 +291,50 @@ pub fn truncate(s: &str) -> String {
     }
     let cut: String = s.chars().take(DETAIL_MAX - 1).collect();
     format!("{}…", cut.trim_end())
+}
+
+/// Cut a string to `max` characters, marking the cut with an ellipsis.
+fn clip_str(text: &mut String, max: usize) {
+    if let Some((at, _)) = text.char_indices().nth(max) {
+        text.truncate(at);
+        text.push('…');
+    }
+}
+
+/// Cut a JSON value to about `budget` bytes of text: strings are cut, arrays shortened, and what
+/// is left once the budget is spent becomes `null`. An edit's `originalFile` (the whole file
+/// before it) goes first; its diff says the same in a fraction of the bytes.
+fn clip_json(value: &mut serde_json::Value, budget: &mut usize) {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => {
+            clip_str(text, conversation::OUTPUT.chars.min(*budget));
+            *budget = budget.saturating_sub(text.len());
+        }
+        Value::Array(items) => {
+            let mut kept = 0_usize;
+            for item in items.iter_mut() {
+                if *budget == 0 {
+                    break;
+                }
+                clip_json(item, budget);
+                kept = kept.saturating_add(1);
+            }
+            items.truncate(kept);
+        }
+        Value::Object(map) => {
+            map.remove("originalFile");
+            for (key, item) in map.iter_mut() {
+                *budget = budget.saturating_sub(key.len());
+                if *budget == 0 {
+                    *item = Value::Null;
+                } else {
+                    clip_json(item, budget);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => *budget = budget.saturating_sub(8),
+    }
 }
 
 /// Tool name from "Claude needs your permission to use Bash"-style messages.
@@ -346,7 +498,8 @@ impl Tracker {
     /// otherwise post its whole hook set here. It takes over only when this agent is at rest
     /// (a restart after a crash) or when the human started it (`/clear`, `/resume`).
     pub fn apply(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
-        if !self.owns(hook) {
+        // The status line's meters ride the hook path but say nothing about the turn.
+        if hook.event == statusline::STATUSLINE_EVENT || !self.owns(hook) {
             return None;
         }
         self.hooked = true;
@@ -534,7 +687,12 @@ impl Tracker {
         let Some(id) = hook.tool_use_id.as_ref() else {
             if matches!(
                 hook.event.as_str(),
-                "SessionStart" | "SessionEnd" | "UserPromptSubmit" | "Stop" | "Report"
+                "SessionStart"
+                    | "SessionEnd"
+                    | "UserPromptSubmit"
+                    | "Stop"
+                    | "StopFailure"
+                    | "Report"
             ) {
                 self.blocks.clear();
             }
@@ -604,7 +762,9 @@ impl Tracker {
                 "elicitation_complete" | "elicitation_response" => (AgentStatus::Working, None),
                 _ => return None,
             },
-            "Stop" => (AgentStatus::Done, hook.last_said()),
+            // A turn that ended on an API error ends as surely as one that finished; the detail is
+            // the error as shown.
+            "Stop" | "StopFailure" => (AgentStatus::Done, hook.last_said()),
             // Any program's own word (`slopty hook report`): a wrapper around another agent
             // gets the same pill, badge and attention as Claude Code's hooks buy it.
             "Report" => {

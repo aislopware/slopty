@@ -657,9 +657,19 @@ swallowed), ⌘⌥ and the wheel step columns, a header drag moves a tile, the g
 column resizes it, a pinch opens the overview. The keys are niri's on ⌘⌥ (the table is in the
 decision), bound in `Workspace && !Screen`: a focused remote window gets them all, ⌃Tab is the
 way back. The titlebar is the workspace name (the one given, else the first shell's repository
-or directory, else "Workspace N"), a dot per column (none for one column), "+" (a menu: new
-terminal, agent, window or display, note, then a new workspace), the bell and "…"; the status
-bar under the strip holds the readouts. A menu that closes hands the keyboard back to the
+or directory, else "Workspace N"), a dot per column (none for one column), "+" (a menu: with
+several workers, first the worker a new tile goes to; then new terminal, agent, window or
+display, note, then a new workspace), the bell and "…"; the status bar under the strip holds
+the readouts. The status bar is never empty: the focused shell's place, branch and working-tree
+changes (`+12 −3`), else the worker's name, and on the right what the focused tile is (a file's
+language and caret, a stream's size and rate, a page's host, a command's running time). A
+shell's title is, first that says something, the command it runs, a title its program set
+(not the shell's own name, a path or a `user@host:path` prompt), its repository or directory,
+else "Terminal"; an agent's is its own title, else the agent's name. Its header context then
+says where it is less what the title said (`WorkspaceView::terminal_title`, `shell_context`),
+and a path under the worker's home, which its `HelloAck` names, reads `~/…`. A command past
+`RUNNING_AFTER` (3 s) is `Status::Running`: the neutral tone and a calm mark that steps once a
+second, beside its running time, the least of what a rollup counts. A menu that closes hands the keyboard back to the
 focused tile (`WorkspaceView::return_keyboard`), as the settings and the add-worker dialog do. ⌘W on any tile takes it off and offers it
 back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the toast's "Undo" (toasts sit at the foot of the strip) put the
 item back as it was (`remember_closed`, `take_back`), else `forget_closed` lets go. An idle
@@ -783,10 +793,17 @@ device's layout is its own.
 
 ## 5. Agents
 
-Claude Code only, for now, and only through its own TUI: Slopty never draws a GUI of its
-own over the agent (decisions, "The agent is used through its TUI; Slopty only reads its
-status"), it reads the agent's state and points the human at the terminal that needs them.
-The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
+Claude Code only, for now, and always through its own TUI, which stays the source of truth.
+Slopty reads the agent's state and points the human at the terminal that needs them. It is
+also gaining a conversation face over that TUI, toggled per tile (decisions, "Claude Code gets
+a conversation face; the TUI stays the source of truth"). The face is a read-only projection
+of what the worker decodes from the transcript and the hooks (`slopty_agent::conversation`,
+typed entries with tool calls paired to their results, one thread per subagent), a composer
+that types into the same PTY, and approval cards answered through the blocking
+`PermissionRequest` hook (`slopty_agent::permission`). A status-line wrapper
+(`slopty hook statusline`) forwards the context, cost and rate-limit meters and still prints
+the person's own line. Phase 1a (the decoder, the relay and the wrapper) is built; the
+follow stream and the face come in 1b and 2. The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
 resolved on the worker through the login shell), which, like ⌘N's shell, starts in the active
 terminal's directory when there is one (`WorkspaceView::active_cwd`, the session's OSC 7 cwd as
 the worker last reported it), else the worker's default; the palette's "New agent in <dir>" line
@@ -1106,7 +1123,11 @@ only way to change it.
 client endpoint, with its own reconnect loop and silence check) per worker
 (`slopty_app::workers`), all feeding the one `WorkspaceView` under the worker's `WorkerKey`
 (its `WorkerId`'s 128 bits). A dropped link keeps the worker's tiles ("reconnecting"); the
-next connection's snapshot reconciles them. The titlebar names only the workers that are down;
+next connection's snapshot reconciles them. A worker's capabilities come with its `HelloAck`,
+then as `WorkerMsg::Caps`, and from the server's directory while its own link is down; its
+navigator header adds a warn line only when something is wrong (Screen Recording or
+Accessibility off on a Mac, another version), and the hosts list reads its machine
+("macOS 26.5 · load 2.1"). The titlebar names only the workers that are down;
 the "…" menu adds a worker and opens the workers list. The bell's inbox and the Dock badge count
 agents across every worker, and ⌘⇧A goes to the next one wherever it is. A banner names only
 a session, which the workspace finds on whichever worker runs it. The known workers are
@@ -1119,6 +1140,9 @@ page, which is the whole window: "Connect to a server", one line on what that is
 field, "Connect", and "Add a worker by address instead" as a quiet link (no titlebar, no
 workspace behind it). Later, "Connect to a server" and "Add a worker" (⌘⇧H) show the same panel
 as a dialog over the workspace with a Cancel. The phone adds "Paste", since it has no ⌘V.
+On the Mac the server panel looks on the tailnet at once and says so ("Looking on your
+tailnet…"); every server that answers is a row to connect to, best first, and when none does
+it says "Nothing answered on your tailnet".
 `slopty_app::net::add_worker` connects, says `Hello`, and stores the worker under the id its
 `HelloAck` carries, the same as `slopty add` on the CLI.
 
