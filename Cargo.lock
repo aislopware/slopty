@@ -6913,6 +6913,7 @@ dependencies = [
 name = "slopty-agent"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "insta",
  "serde",
  "serde_json",
@@ -7431,6 +7432,9 @@ dependencies = [
  "blake3",
  "bytes",
  "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "noq",
  "objc2-application-services",
  "objc2-core-foundation",
@@ -10010,6 +10014,7 @@ dependencies = [
  "anyhow",
  "camino",
  "clap",
+ "data-encoding",
  "icns",
  "objc2-core-foundation",
  "resvg 0.48.1",

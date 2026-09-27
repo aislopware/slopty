@@ -15,11 +15,19 @@
 //!
 //! `R` is what the caller keeps with a held prompt (the reply channel, the prompt as shown);
 //! the machine only ever hands it back once.
+//!
+//! **What followers watch.** [`Board`] keeps each session's [`Seen`] behind a watch: the hooks
+//! heard, the latest meters, the subagent files named, and the blocks Slopty's Claude Code mod
+//! reports as the model writes them. The mod is heard only after its `hello` passed
+//! `slopty_agent::live::gate`; a session whose mod was refused says so in the log once and is
+//! followed from the transcript alone.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use slopty_agent::Hook;
+use slopty_agent::live::{self, ModEvent};
 use slopty_core::SessionId;
 use slopty_proto::conversation::Meters;
 use tokio::sync::watch;
@@ -152,19 +160,31 @@ pub struct Seen {
     pub meters: Option<Meters>,
     /// Subagent transcripts the hooks named (`SubagentStop`'s `agent_transcript_path`).
     pub subagents: BTreeSet<PathBuf>,
+    /// The blocks the mod reports, once it is trusted.
+    pub live: live::Board,
+}
+
+/// Whether a session's mod is heard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trust {
+    /// It passed the gate.
+    Trusted,
+    /// It was refused, and the log said why.
+    Refused,
 }
 
 /// Every session's [`Seen`], each behind a watch its followers wait on.
 #[derive(Debug, Default)]
 pub struct Board {
     sessions: HashMap<SessionId, watch::Sender<Seen>>,
+    /// Each session's mod, once it said hello.
+    mods: HashMap<SessionId, Trust>,
 }
 
 impl Board {
     /// A hook fired in `session`.
     pub fn heard(&mut self, session: SessionId, hook: &Hook) {
-        let seen =
-            self.sessions.entry(session).or_insert_with(|| watch::channel(Seen::default()).0);
+        let seen = self.seen(session);
         seen.send_modify(|seen| {
             seen.hooks = seen.hooks.wrapping_add(1);
             if let Some(meters) = &hook.meters {
@@ -176,17 +196,59 @@ impl Board {
         });
     }
 
+    /// The mod in `session` reported `events`, at `now`. A `hello` decides whether it is heard
+    /// ([`live::gate`]); nothing else counts until one passed. Followers wake only when the
+    /// blocks or the meters changed.
+    pub fn reported(&mut self, session: SessionId, events: &[ModEvent], now: Instant) {
+        let mut trust = self.mods.get(&session).copied();
+        let seen =
+            self.sessions.entry(session).or_insert_with(|| watch::channel(Seen::default()).0);
+        seen.send_if_modified(|seen| {
+            let mut changed = false;
+            for event in events {
+                match event {
+                    ModEvent::Hello(hello) => {
+                        trust = Some(match live::gate(hello) {
+                            Ok(()) => Trust::Trusted,
+                            Err(refusal) if trust == Some(Trust::Refused) => {
+                                tracing::debug!(%session, %refusal, "the mod is still refused");
+                                Trust::Refused
+                            }
+                            Err(refusal) => {
+                                tracing::warn!(%session, %refusal, "the Claude Code mod is not heard; following the transcript");
+                                Trust::Refused
+                            }
+                        });
+                    }
+                    _ if trust != Some(Trust::Trusted) => {}
+                    ModEvent::Measure(measure) => {
+                        let meters = measure.onto(seen.meters.take());
+                        seen.meters = Some(meters);
+                        changed = true;
+                    }
+                    event => changed |= seen.live.apply(event, now),
+                }
+            }
+            changed
+        });
+        if let Some(trust) = trust {
+            self.mods.insert(session, trust);
+        }
+    }
+
     /// Watch `session`: the receiver holds what has been seen so far and wakes on each hook.
     pub fn watch(&mut self, session: SessionId) -> watch::Receiver<Seen> {
-        self.sessions
-            .entry(session)
-            .or_insert_with(|| watch::channel(Seen::default()).0)
-            .subscribe()
+        self.seen(session).subscribe()
     }
 
     /// The session is gone; its watchers see the sender close.
     pub fn forget(&mut self, session: SessionId) {
         self.sessions.remove(&session);
+        self.mods.remove(&session);
+    }
+
+    fn seen(&mut self, session: SessionId) -> &watch::Sender<Seen> {
+        self.sessions.entry(session).or_insert_with(|| watch::channel(Seen::default()).0)
     }
 }
 
@@ -318,5 +380,59 @@ mod tests {
         );
         board.forget(s);
         assert!(seen.has_changed().is_err(), "the watch closes with the session");
+    }
+
+    fn mod_event(value: &serde_json::Value) -> ModEvent {
+        ModEvent::decode(value)
+    }
+
+    fn hello(claude: &str) -> ModEvent {
+        mod_event(&serde_json::json!({"kind": "hello", "protocol": 1, "claude": claude}))
+    }
+
+    fn piece(text: &str) -> ModEvent {
+        mod_event(&serde_json::json!({
+            "kind": "text", "turnId": "t", "step": 0, "block": 0, "text": text,
+        }))
+    }
+
+    fn texts(seen: &watch::Receiver<Seen>) -> Vec<String> {
+        seen.borrow().live.blocks().values().map(|b| b.text.clone()).collect()
+    }
+
+    /// The mod is heard only after a hello from a verified Claude Code: what comes before it,
+    /// or after a refused one, wakes nobody and shows nothing.
+    #[test]
+    fn the_mod_is_heard_after_its_hello_passes() {
+        let mut board = Board::default();
+        let now = Instant::now();
+        let (trusted, refused) = (session(1), session(2));
+        let mut seen = board.watch(trusted);
+        board.reported(trusted, &[piece("early")], now);
+        assert!(!seen.has_changed().unwrap_or(true), "nothing before the hello");
+        let verified = slopty_agent::claude_mod::MOD_CLAUDE_VERSIONS[0];
+        board.reported(trusted, &[hello(verified), piece("Sun")], now);
+        board.reported(trusted, &[piece("day")], now);
+        assert!(seen.has_changed().unwrap_or(false));
+        assert_eq!(texts(&seen), ["Sunday"]);
+        let measure = serde_json::json!({
+            "kind": "measure", "context": {"percent": 3.5, "tokens": 7000, "window": 200_000},
+            "cost": {"usd": 0.25}, "rateLimits": [],
+        });
+        board.reported(trusted, &[mod_event(&measure)], now);
+        let meters = seen.borrow_and_update().meters.clone().expect("meters");
+        assert_eq!((meters.context_used_pct, meters.cost_usd), (Some(3.5), Some(0.25)));
+
+        let other = board.watch(refused);
+        board.reported(refused, &[hello("0.0.1"), piece("unheard")], now);
+        board.reported(refused, &[hello("0.0.1"), mod_event(&measure)], now);
+        assert!(!other.has_changed().unwrap_or(true), "a refused mod wakes nobody");
+        assert!(texts(&other).is_empty() && other.borrow().meters.is_none());
+        assert_eq!(board.mods.get(&refused), Some(&Trust::Refused));
+        board.reported(refused, &[hello(verified), piece("heard")], now);
+        assert_eq!(texts(&other), ["heard"], "a later hello that passes is heard");
+        board.forget(refused);
+        assert!(!board.mods.contains_key(&refused));
+        assert!(other.has_changed().is_err(), "the watch closes with the session");
     }
 }

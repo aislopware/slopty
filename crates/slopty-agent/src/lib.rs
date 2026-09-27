@@ -25,15 +25,19 @@
 //! The agent is used through its own TUI in the terminal, which stays the source of truth. The
 //! conversation face projects it: [`conversation`] decodes the transcript into typed entries,
 //! [`statusline`] reads the status line's meters, and [`permission`] carries the person's answer
-//! to a permission prompt when they give it from the face instead of the TUI's dialog. Nothing
-//! here drives the agent or answers for the person on its own.
+//! to a permission prompt when they give it from the face instead of the TUI's dialog. Where
+//! Claude Code runs Slopty's mod ([`claude_mod`]), [`live`] adds what the model is writing
+//! before the transcript has it. Nothing here drives the agent or answers for the person on its
+//! own.
 
 #![forbid(unsafe_code)]
 
+pub mod claude_mod;
 pub mod conversation;
 pub mod detect;
 pub mod discover;
 pub mod hooks;
+pub mod live;
 pub mod permission;
 pub mod statusline;
 pub mod title;

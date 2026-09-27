@@ -14,6 +14,7 @@ mod conn;
 mod ctl;
 mod files;
 pub mod follow;
+mod modsock;
 mod paths;
 mod ports;
 mod screens;
@@ -146,6 +147,9 @@ pub struct Daemon {
     pub home: String,
     /// Who follows which agent's conversation, and the permission prompts held for them.
     pub follows: Arc<parking_lot::Mutex<follow::Follows>>,
+    /// Slopty's Claude Code mod as written under the data dir, and the socket it posts to;
+    /// `None` when it could not be written, and agents run without it.
+    pub claude_mod: Option<slopty_agent::claude_mod::Installed>,
 }
 
 impl Daemon {
@@ -243,12 +247,16 @@ fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) 
             return;
         }
     };
+    let launch = slopty_worker::orchestrate::Launch {
+        relay: slopty_agent::hooks::relay_beside_this_binary(),
+        claude_mod: daemon.claude_mod.clone(),
+    };
     let orchestrator = slopty_worker::orchestrate::Orchestrator::new(
         daemon.id,
         daemon.worker.clone(),
         daemon.items.clone(),
         daemon.events.clone(),
-        slopty_agent::hooks::relay_beside_this_binary(),
+        launch,
     );
     let caps = daemon.caps.clone();
     tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, caps));
@@ -327,6 +335,15 @@ async fn run() -> Result<()> {
     let paths = tailnet::Paths::spawn(listener.admission().clone());
     let (caps_tx, caps) = tokio::sync::watch::channel(slopty_worker::caps::probe(&[]));
     watch_caps(caps_tx, events.clone());
+    let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
+    let mod_path = modsock::beside(&ctl_path);
+    let claude_mod = match slopty_agent::claude_mod::install(&data_dir) {
+        Ok(dir) => Some(slopty_agent::claude_mod::Installed { dir, socket: mod_path.clone() }),
+        Err(e) => {
+            tracing::warn!(error = %e, "the Claude Code mod could not be written; agents run without it");
+            None
+        }
+    };
     let daemon = Daemon {
         worker,
         listener,
@@ -353,6 +370,7 @@ async fn run() -> Result<()> {
         caps,
         home: std::env::var("HOME").unwrap_or_default(),
         follows: Arc::default(),
+        claude_mod,
     };
     let transfers = Arc::clone(&daemon.transfers);
     tokio::task::spawn_blocking(move || {
@@ -402,12 +420,15 @@ async fn run() -> Result<()> {
         });
     }
 
-    let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
-    // Sessions (and the `slopty hook` relay inside them) find this daemon through its socket.
-    daemon.worker.set_session_env(vec![(
-        "SLOPTY_WORKER_SOCKET".to_owned(),
-        ctl_path.to_string_lossy().into_owned(),
-    )]);
+    // Sessions (and the `slopty hook` relay inside them) find this daemon through its socket,
+    // and a `claude` typed in one finds the mod (the shell integration's `claude` function).
+    let mut session_env =
+        vec![("SLOPTY_WORKER_SOCKET".to_owned(), ctl_path.to_string_lossy().into_owned())];
+    if let Some(installed) = &daemon.claude_mod {
+        session_env.extend(installed.session_env());
+        tokio::spawn(modsock::serve(daemon.clone(), mod_path));
+    }
+    daemon.worker.set_session_env(session_env);
     tokio::spawn(ctl::serve(daemon.clone(), ctl_path));
 
     join_server(&daemon, args.server.as_deref(), &data_dir);

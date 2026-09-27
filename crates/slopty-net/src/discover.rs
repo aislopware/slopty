@@ -1,10 +1,16 @@
-//! Finding the Slopty server on the tailnet when none is named: each online node Tailscale
-//! lists is tried with a QUIC handshake on [`SERVER_PORT`], all at once.
+//! Finding Slopty on the tailnet when nothing is named.
 //!
-//! Only the handshake is made, so a probe registers nothing and says nothing to the server; the
-//! server port and the lease transport's ALPN are what mark a Slopty server. Nodes tagged
-//! [`SERVER_TAG`] come first, then this machine, then the rest, so a tailnet that names its
-//! server gets that one when others answer too.
+//! Each online node Tailscale lists is tried with a QUIC handshake, all at once, on
+//! [`SERVER_PORT`] for the server ([`find`], [`servers`]) or on [`WORKER_PORT`] for the workers
+//! ([`workers`]).
+//!
+//! Only the handshake is made, so a probe registers nothing and says nothing: it closes at once
+//! with [`PROBE_REASON`], which the listener logs as a probe, not as a peer that failed. The
+//! port and Slopty's own handshake (its null crypto, which nothing else completes) are what
+//! mark a Slopty server or worker; each is dialled with its own transport, the lease's for a
+//! server and a client's for a worker. Nodes tagged [`SERVER_TAG`] come first, then this
+//! machine, then the rest, so a tailnet that names its server gets that one when others answer
+//! too.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -12,7 +18,7 @@ use std::time::Duration;
 use slopty_tailnet::{LocalApi, Node, Status};
 use tokio::task::JoinSet;
 
-use crate::endpoint::SERVER_PORT;
+use crate::endpoint::{SERVER_PORT, WORKER_PORT};
 use crate::worker::close_code;
 use crate::{Endpoint, HostAddr};
 
@@ -22,6 +28,27 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// The tag a tailnet gives the node that runs its Slopty server, so it is tried first.
 pub const SERVER_TAG: &str = "tag:slopty-server";
+
+/// The reason a probe closes with, so the listener knows it for one.
+pub const PROBE_REASON: &[u8] = b"probe";
+
+/// What a probe looks for.
+#[derive(Clone, Copy, Debug)]
+enum Probe {
+    /// A server, on the lease's transport.
+    Server,
+    /// A worker, on a client's.
+    Worker,
+}
+
+impl Probe {
+    fn config(self) -> noq::ClientConfig {
+        match self {
+            Self::Server => crate::endpoint::lease_client_config(),
+            Self::Worker => crate::crypto::client_config(),
+        }
+    }
+}
 
 /// A node that answered on the server port.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +68,7 @@ impl Found {
 }
 
 /// The online nodes worth trying, best first, each at its IPv4 address on `port`: tagged
-/// [`SERVER_TAG`], then this machine, then the rest. Phones never run the server.
+/// [`SERVER_TAG`], then this machine, then the rest. Phones run neither a server nor a worker.
 #[must_use]
 pub fn candidates(status: &Status, port: u16) -> Vec<Found> {
     let rank = |node: &Node, me: bool| {
@@ -96,29 +123,45 @@ pub async fn servers(endpoint: &Endpoint, status: &Status) -> Vec<Found> {
     answering(endpoint, candidates(status, SERVER_PORT)).await
 }
 
-/// Those of `candidates` that answer a handshake within [`PROBE_TIMEOUT`], in their order.
+/// The Slopty workers on the tailnet `status` describes, dialled from `endpoint`, in
+/// [`candidates`] order: what a first run offers besides the servers.
+pub async fn workers(endpoint: &Endpoint, status: &Status) -> Vec<Found> {
+    answering_workers(endpoint, candidates(status, WORKER_PORT)).await
+}
+
+/// Those of `candidates` that answer a server's handshake within [`PROBE_TIMEOUT`], in their
+/// order.
 pub async fn answering(endpoint: &Endpoint, candidates: Vec<Found>) -> Vec<Found> {
+    answering_as(endpoint, candidates, Probe::Server).await
+}
+
+/// Those of `candidates` that answer a worker's handshake within [`PROBE_TIMEOUT`], in their
+/// order.
+pub async fn answering_workers(endpoint: &Endpoint, candidates: Vec<Found>) -> Vec<Found> {
+    answering_as(endpoint, candidates, Probe::Worker).await
+}
+
+async fn answering_as(endpoint: &Endpoint, candidates: Vec<Found>, what: Probe) -> Vec<Found> {
     let mut probes = JoinSet::new();
     for (i, found) in candidates.into_iter().enumerate() {
         let endpoint = endpoint.clone();
-        probes.spawn(async move { probe(&endpoint, found.addr).await.then_some((i, found)) });
+        probes.spawn(async move { probe(&endpoint, found.addr, what).await.then_some((i, found)) });
     }
     let mut answered: Vec<(usize, Found)> = probes.join_all().await.into_iter().flatten().collect();
     answered.sort_by_key(|(i, _)| *i);
     answered.into_iter().map(|(_, found)| found).collect()
 }
 
-async fn probe(endpoint: &Endpoint, addr: SocketAddr) -> bool {
-    let config = crate::endpoint::lease_client_config();
+async fn probe(endpoint: &Endpoint, addr: SocketAddr, what: Probe) -> bool {
     let name = addr.ip().to_string();
-    let dialed = crate::client::dial(endpoint, addr, &name, Some(config));
+    let dialed = crate::client::dial(endpoint, addr, &name, Some(what.config()));
     match tokio::time::timeout(PROBE_TIMEOUT, dialed).await {
         Ok(Ok(conn)) => {
-            conn.close(close_code::NORMAL.into(), b"probe");
+            conn.close(close_code::NORMAL.into(), PROBE_REASON);
             true
         }
         Ok(Err(e)) => {
-            tracing::debug!(%addr, error = %e, "no server");
+            tracing::debug!(%addr, ?what, error = %e, "nothing answered");
             false
         }
         Err(_elapsed) => false,
@@ -130,6 +173,7 @@ mod tests {
     use super::*;
     use crate::admission::Admission;
     use crate::server::ServerListener;
+    use crate::worker::WorkerListener;
 
     const STATUS: &str = r#"{"BackendState":"Running",
       "Self":{"ID":"n1","HostName":"mac","DNSName":"mac.ts.net.","OS":"macOS",
@@ -214,5 +258,27 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// A listening worker answers the worker probe from a client's endpoint; a closed port
+    /// does not; and the tailnet's nodes are tried on the worker port.
+    #[tokio::test]
+    async fn a_listening_worker_answers_the_worker_probe() {
+        let listener = WorkerListener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            Admission::with_tailnet(Vec::new(), None),
+        )
+        .unwrap();
+        let live = listener.local_addr().unwrap();
+        let dead = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let endpoint = crate::client::bind_client().unwrap();
+        let found = |name: &str, addr| Found { name: name.to_owned(), addr };
+        let answered =
+            answering_workers(&endpoint, vec![found("dead", dead), found("live", live)]).await;
+        assert_eq!(answered, [found("live", live)]);
+        let status: Status = serde_json::from_str(STATUS).unwrap();
+        let ports: Vec<u16> =
+            candidates(&status, WORKER_PORT).iter().map(|f| f.addr.port()).collect();
+        assert_eq!(ports, [WORKER_PORT; 3], "the three nodes that are not phones");
     }
 }

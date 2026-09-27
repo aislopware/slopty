@@ -11,6 +11,8 @@ description = "Slopty agent tracking: Claude Code hook events → per-session ag
 workspace = true
 
 [dependencies]
+# The Claude mod's directory is named by its files' digest (`claude_mod`).
+blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slopty-core.workspace = true

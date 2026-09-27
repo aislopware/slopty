@@ -1,0 +1,6 @@
+{
+  "name": "slopty",
+  "version": "1.0.0",
+  "description": "Streams a session's live text, thinking and tool calls to the Slopty worker that started it.",
+  "author": { "name": "Slopty" }
+}

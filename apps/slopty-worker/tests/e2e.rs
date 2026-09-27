@@ -4118,6 +4118,32 @@ mod tests {
         >,
         current: bool,
         meters: Option<slopty_proto::conversation::Meters>,
+        /// Live blocks shown: thread, kind and text.
+        live: std::collections::BTreeMap<
+            slopty_proto::conversation::LiveId,
+            (slopty_proto::conversation::ThreadId, slopty_proto::conversation::LiveKind, String),
+        >,
+        /// Each live block cleared, in order, and whether its thread already had the entry
+        /// that settles it when the clear came.
+        cleared: Vec<(slopty_proto::conversation::LiveId, bool)>,
+    }
+
+    /// Whether `entry` is the transcript's copy of a live block.
+    fn settles(
+        (_, kind, text): &(
+            slopty_proto::conversation::ThreadId,
+            slopty_proto::conversation::LiveKind,
+            String,
+        ),
+        entry: &slopty_proto::conversation::Entry,
+    ) -> bool {
+        use slopty_proto::conversation::{Body, LiveKind};
+        match (kind, &entry.body) {
+            (LiveKind::Text, Body::Text(answer)) => answer.text.trim() == text.trim(),
+            (LiveKind::Thinking, Body::Thinking(_)) => true,
+            (LiveKind::Tool { id, .. }, Body::Tool(_)) => entry.id == *id,
+            _ => false,
+        }
     }
 
     impl Copy {
@@ -4151,6 +4177,29 @@ mod tests {
                 ConversationEvent::Current => self.current = true,
                 ConversationEvent::Meters(meters) => self.meters = Some(meters),
                 ConversationEvent::Expanded { .. } => {}
+                ConversationEvent::Live(live) => {
+                    use slopty_proto::conversation::Live;
+                    for live in live {
+                        match live {
+                            Live::Start { thread, id, kind } => {
+                                self.live.insert(id, (thread, kind, String::new()));
+                            }
+                            Live::Append { id, text } => {
+                                if let Some((_, _, all)) = self.live.get_mut(&id) {
+                                    all.push_str(&text);
+                                }
+                            }
+                            Live::Clear { id } => {
+                                let settled = self.live.remove(&id).is_some_and(|block| {
+                                    self.threads.get(&block.0).is_some_and(|entries| {
+                                        entries.iter().any(|e| settles(&block, e))
+                                    })
+                                });
+                                self.cleared.push((id, settled));
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -4318,6 +4367,144 @@ mod tests {
 
         worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
         drop(file);
+    }
+
+    /// Where the agent runs Slopty's mod, a follower sees what the model writes before the
+    /// transcript has it: nothing until a hello from a verified Claude Code, then each block as
+    /// it grows, cleared only once the transcript's entry for it has come. The events are the
+    /// official build's own (`cargo xtask fixtures claude-mod`), posted to the mod socket.
+    #[tokio::test]
+    async fn a_trusted_mod_streams_live_blocks_that_the_transcript_settles() {
+        use slopty_proto::conversation::{ConversationRequest, LiveKind};
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let session = open_shell(&mut worker, dir.path()).await;
+        let recorded = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/slopty-agent/tests/fixtures/mod/bash");
+        let main = dir.path().join("projects/s1.jsonl");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(&main, "").unwrap();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+            "transcript_path": main, "cwd": dir.path(),
+        });
+        assert_eq!(printed(relay(dir.path(), session, &[], &start)).await, "");
+        let follow = ConversationRequest::Follow { session };
+        worker.tx.send(&ClientMsg::Conversation(follow)).await.unwrap();
+        let mut stream = conversation_stream(&worker.conn).await;
+        let mut copy = Copy::default();
+        copy.until(&mut stream, |c| c.current).await;
+
+        let socket = dir.path().join("worker.mod.sock");
+        let batches: Vec<serde_json::Value> =
+            std::fs::read_to_string(recorded.join("events.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let mut batch: serde_json::Value = serde_json::from_str(line).unwrap();
+                    batch["session"] = serde_json::Value::String(session.to_string());
+                    batch
+                })
+                .collect();
+        let has = |batch: &serde_json::Value, kind: &str| {
+            batch["events"].as_array().unwrap().iter().any(|e| e["kind"] == kind)
+        };
+        let stops: Vec<usize> =
+            batches.iter().enumerate().filter(|(_, b)| has(b, "stop")).map(|(i, _)| i).collect();
+        let [first_stop, second_stop] = stops[..] else { panic!("two steps: {stops:?}") };
+        let bye = batches.iter().position(|b| has(b, "bye")).unwrap();
+        let hello = batches.iter().position(|b| has(b, "hello")).unwrap();
+        let first_text = batches.iter().position(|b| has(b, "text")).unwrap();
+
+        // A piece before any hello, and after a hello from a Claude Code the mod was not
+        // verified against: neither shows.
+        assert_eq!(post(&socket, &batches[first_text]).await, 204);
+        let mut unknown = batches[hello].clone();
+        unknown["events"][0]["claude"] = "0.0.1".into();
+        assert_eq!(post(&socket, &unknown).await, 204);
+        assert_eq!(post(&socket, &batches[first_text]).await, 204);
+        let mut elsewhere = batches[first_text].clone();
+        elsewhere["session"] = "00000000-0000-4000-8000-000000000000".into();
+        assert_eq!(post(&socket, &elsewhere).await, 404, "no such session here");
+
+        // The first step, as the model writes it: the answer, then the Bash call's input.
+        for batch in &batches[..first_stop] {
+            assert_eq!(post(&socket, batch).await, 204);
+        }
+        let first_step = |c: &Copy| {
+            let blocks: Vec<(&LiveKind, &str)> =
+                c.live.values().map(|(_, kind, text)| (kind, text.as_str())).collect();
+            blocks.len() == 2
+                && blocks[0] == (&LiveKind::Text, "Let me run it.")
+                && blocks[1].1 == r#"{"command": "echo hi", "description": "Say hi"}"#
+        };
+        copy.until(&mut stream, first_step).await;
+        assert!(copy.threads.values().all(Vec::is_empty), "nothing in the transcript yet");
+
+        // The step stops and the transcript gets the answer and the call: both settle.
+        assert_eq!(post(&socket, &batches[first_stop]).await, 204);
+        // Written now, not when it was recorded: an entry stamped long before the follower saw
+        // the block is an older one, so the stamps go.
+        let transcript: Vec<String> = std::fs::read_to_string(recorded.join("transcript.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                record.as_object_mut().unwrap().remove("timestamp");
+                record.to_string()
+            })
+            .collect();
+        let result = transcript.iter().position(|l| l.contains(r#""type":"tool_result""#)).unwrap();
+        let (before, after) = transcript.split_at(result);
+        let append = |lines: &[String]| {
+            let mut file = std::fs::OpenOptions::new().append(true).open(&main).unwrap();
+            std::io::Write::write_all(&mut file, format!("{}\n", lines.join("\n")).as_bytes())
+                .unwrap();
+            std::time::Instant::now()
+        };
+        // Settled by the entries, well before the grace that clears a block nothing settles.
+        let soon = slopty_agent::live::SETTLE_GRACE / 2;
+        let written = append(before);
+        copy.until(&mut stream, |c| c.live.is_empty() && c.cleared.len() == 2).await;
+        assert!(written.elapsed() < soon, "settled in {:?}", written.elapsed());
+
+        // The second step streams, and settles when the transcript has the rest.
+        for batch in &batches[first_stop + 1..second_stop] {
+            assert_eq!(post(&socket, batch).await, 204);
+        }
+        let second =
+            |c: &Copy| c.live.values().any(|(_, _, text)| text == "Done: the command said hi.");
+        copy.until(&mut stream, second).await;
+        for batch in &batches[second_stop..bye] {
+            assert_eq!(post(&socket, batch).await, 204);
+        }
+        let written = append(after);
+        copy.until(&mut stream, |c| c.live.is_empty() && c.cleared.len() == 3).await;
+        assert!(written.elapsed() < soon, "settled in {:?}", written.elapsed());
+        assert!(copy.cleared.iter().all(|(_, settled)| *settled), "{:?}", copy.cleared);
+        copy.until(&mut stream, |c| c.meters.as_ref().is_some_and(|m| m.cost_usd.is_some())).await;
+        let meters = copy.meters.clone().unwrap();
+        assert_eq!(meters.context_window, Some(200_000), "the mod's measure: {meters:?}");
+        assert_eq!(post(&socket, &batches[bye]).await, 204);
+
+        worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+    }
+
+    /// Post one batch to the mod socket as the mod does; the answer's status.
+    async fn post(socket: &std::path::Path, batch: &serde_json::Value) -> u16 {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        let body = batch.to_string();
+        let head = format!(
+            "POST /v1/events HTTP/1.1\r\nhost: slopty\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(body.as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        tokio::time::timeout(STEP, stream.read_to_string(&mut answer)).await.unwrap().unwrap();
+        answer.split_whitespace().nth(1).and_then(|code| code.parse().ok()).unwrap_or(0)
     }
 
     /// Erase the line [`exact_echoes`] left in a `cat` session (⌃U) and let its frames pass,

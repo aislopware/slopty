@@ -15,6 +15,11 @@
 //! comes back as an upsert of the call it belongs to. Every text is clipped on the worker
 //! ([`Clipped`]); a clipped one carries a [`TextRef`] that [`ConversationRequest::Expand`]
 //! resolves.
+//!
+//! **Live blocks.** Where Claude Code runs Slopty's mod, the worker also hears the answer,
+//! thinking and tool input as the model writes them, before the transcript has them. They go
+//! as [`ConversationEvent::Live`]: uncommitted text a client shows at the end of its thread,
+//! cleared once the transcript settles it.
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, SessionId};
@@ -757,6 +762,68 @@ pub enum ConversationEvent {
         /// The whole text, clipped at [`EXPAND_CHARS`]; `None` when the transcript no longer
         /// has it.
         text: Option<Clipped>,
+    },
+    /// Blocks the model is writing now, ahead of the transcript, in order. Only where the
+    /// agent runs Slopty's Claude Code mod, and only after [`ConversationEvent::Current`].
+    Live(Vec<Live>),
+}
+
+/// A block the model is writing, not yet in the transcript.
+///
+/// It is the answer, thinking or a tool call's input as it streams, and never an entry. A
+/// client shows live blocks after its thread's last entry, in [`LiveId`] order, until
+/// [`Live::Clear`]. That comes once the transcript has the block (and its [`Change`] went
+/// first), or when the block was abandoned.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Live {
+    /// A new block, empty.
+    Start {
+        /// Its thread.
+        thread: ThreadId,
+        /// Which block.
+        id: LiveId,
+        /// What it is.
+        kind: LiveKind,
+    },
+    /// More of a started block: `text` goes on its end.
+    Append {
+        /// Which block.
+        id: LiveId,
+        /// The next piece.
+        text: String,
+    },
+    /// Drop the block.
+    Clear {
+        /// Which block.
+        id: LiveId,
+    },
+}
+
+/// Where a live block is: its turn, the model request within the turn and the content block
+/// within the answer. Unique within a session, subagents' turns included.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub struct LiveId {
+    /// Claude Code's id for the turn.
+    pub turn: String,
+    /// The model request within the turn, from 0.
+    pub step: u32,
+    /// The content block within the answer, from 0.
+    pub block: u32,
+}
+
+/// What a live block is.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum LiveKind {
+    /// Answer text.
+    Text,
+    /// Thinking.
+    Thinking,
+    /// A tool call; its text is the input JSON as the model writes it.
+    Tool {
+        /// Its `tool_use_id`: the transcript entry that settles it has this id.
+        id: String,
+        /// The tool.
+        name: String,
     },
 }
 

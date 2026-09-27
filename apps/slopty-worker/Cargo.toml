@@ -23,6 +23,11 @@ anyhow.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 clap.workspace = true
+# The mod socket: HTTP/1.1 on a Unix socket, the one transport the Claude Code mod's `fetch`
+# offers (`modsock`). Already in the daemon through `slopty-tailnet`'s LocalAPI client.
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 noq.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true

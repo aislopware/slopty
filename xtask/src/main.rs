@@ -7,6 +7,8 @@
 
 mod bundle;
 mod check;
+mod claude;
+mod claude_mod;
 mod deep;
 mod e2e;
 mod fixtures;

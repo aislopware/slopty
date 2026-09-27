@@ -87,3 +87,21 @@ if status is-interactive; and test -n "$TERMINFO"; and test file = (type -t sudo
         end
     end
 end
+
+# `claude` loads Slopty's Claude Code mod (SLOPTY_CLAUDE_MOD, set by the worker), so an agent
+# started by hand streams what the model writes to the conversation face, as one Slopty starts
+# does. The flag goes in its `=` form (the spaced one swallows the words after it), and not
+# twice. A `claude` of the user's own (a function, an alias, an autoloaded file) is left alone,
+# and SLOPTY_NO_CLAUDE_MOD=1 passes every call through untouched.
+if status is-interactive; and set -q SLOPTY_CLAUDE_MOD; and not functions -q claude
+    function claude --wraps claude -d "claude, with Slopty's mod"
+        set -l flag "--plugin-dir=$SLOPTY_CLAUDE_MOD"
+        if test -n "$SLOPTY_NO_CLAUDE_MOD"; and test "$SLOPTY_NO_CLAUDE_MOD" != 0
+            command claude $argv
+        else if not test -d "$SLOPTY_CLAUDE_MOD"; or contains -- $flag $argv
+            command claude $argv
+        else
+            CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 command claude $flag $argv
+        end
+    end
+end

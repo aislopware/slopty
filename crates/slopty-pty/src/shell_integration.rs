@@ -361,6 +361,25 @@ mod tests {
         rc_files: &[(&str, &str)],
         input: &str,
     ) -> String {
+        run_shell_with(tag, Shell { program, args, arg0 }, rc_files, &[], input).await
+    }
+
+    /// A shell to start: the program, its arguments and its `argv[0]`.
+    struct Shell<'a> {
+        program: &'a str,
+        args: &'a [&'a str],
+        arg0: Option<&'a str>,
+    }
+
+    /// [`run_shell`], with `extra` variables in the session's environment, last.
+    async fn run_shell_with(
+        tag: &str,
+        shell: Shell<'_>,
+        rc_files: &[(&str, &str)],
+        extra: &[(&str, &str)],
+        input: &str,
+    ) -> String {
+        let Shell { program, args, arg0 } = shell;
         let tmp = std::env::temp_dir().join(format!("slopty-shell-{tag}-{}", std::process::id()));
         let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
         let si = install(&tmp.join("shell")).unwrap();
@@ -389,6 +408,7 @@ mod tests {
             pair("TERMINFO", &tmp.join("terminfo").to_string_lossy()),
         ];
         env.extend(injection.env);
+        env.extend(extra.iter().map(|(k, v)| pair(k, v)));
         // Spawn exactly the way ptyd does, through `spawn_with`, so the rewrite is the real one.
         let spec = SpawnSpec {
             command: [vec![program.to_owned()], strings(args)].concat(),
@@ -583,5 +603,55 @@ mod tests {
             "user config.fish ran, the vendor snippet loaded, sudo wrapped: {text:?}"
         );
         assert_sudo_wrapped(&text, "fish");
+    }
+
+    /// A `claude` typed in a Slopty shell loads the mod the worker named, in the flag's `=`
+    /// form and with function hooks on; not twice, not when opted out, and not over the user's
+    /// own `claude`.
+    #[tokio::test]
+    async fn a_typed_claude_loads_the_mod_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bin, claude_mod) = (tmp.path().join("bin"), tmp.path().join("mod"));
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&claude_mod).unwrap();
+        let fake = bin.join("claude");
+        let script = "#!/bin/sh\nprintf 'got[%s]hooks[%s]\\n' \"$*\" \"${CLAUDE_CODE_ENABLE_FUNCTION_HOOKS-}\"\n";
+        fs::write(&fake, script).unwrap();
+        fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let module = claude_mod.to_string_lossy().into_owned();
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let env = [("SLOPTY_CLAUDE_MOD", module.as_str()), ("PATH", path.as_str())];
+        let input = format!(
+            "claude -p hi\nclaude --plugin-dir={module} x\nSLOPTY_NO_CLAUDE_MOD=1 claude y\nexit\n"
+        );
+        let mut shells: Vec<(&str, &str, &str)> =
+            vec![("/bin/zsh", ".zshrc", "alias claude='command claude --mine'\n")];
+        shells.extend(
+            bashes().into_iter().map(|b| (b, ".bashrc", "alias claude='command claude --mine'\n")),
+        );
+        let fish = ["/opt/homebrew/bin/fish", "/usr/local/bin/fish"]
+            .into_iter()
+            .find(|p| Path::new(p).is_file());
+        shells.extend(
+            fish.map(|f| (f, ".config/fish/config.fish", "alias claude 'command claude --mine'\n")),
+        );
+        for (n, (shell, rc, alias)) in shells.into_iter().enumerate() {
+            let tag = format!("claude-{n}");
+            let interactive = || Shell { program: shell, args: &["-i"], arg0: None };
+            let text = run_shell_with(&tag, interactive(), &[], &env, &input).await;
+            assert!(
+                text.contains(&format!("got[--plugin-dir={module} -p hi]hooks[1]")),
+                "{shell}: {text:?}"
+            );
+            assert!(
+                text.contains(&format!("got[--plugin-dir={module} x]hooks[]")),
+                "{shell}: {text:?}"
+            );
+            assert!(text.contains("got[y]hooks[]"), "{shell}, opted out: {text:?}");
+            let tag = format!("claude-own-{n}");
+            let own =
+                run_shell_with(&tag, interactive(), &[(rc, alias)], &env, "claude z\nexit\n").await;
+            assert!(own.contains("got[--mine z]hooks[]"), "{shell}, the user's alias: {own:?}");
+        }
     }
 }

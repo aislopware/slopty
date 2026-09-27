@@ -107,3 +107,20 @@ if [[ -n "${TERMINFO-}" ]]; then
         fi
     }
 fi
+
+# `claude` loads Slopty's Claude Code mod (SLOPTY_CLAUDE_MOD, set by the worker), so an agent
+# started by hand streams what the model writes to the conversation face, as one Slopty starts
+# does. The flag goes in its `=` form (the spaced one swallows the words after it), and not
+# twice. A `claude` of the user's own (an alias or a function) is left alone, and
+# SLOPTY_NO_CLAUDE_MOD=1 passes every call through untouched.
+if [[ -n "${SLOPTY_CLAUDE_MOD-}" ]] && (( ! $+functions[claude] && ! $+aliases[claude] )); then
+    function claude {
+        'builtin' 'local' _slopty_flag="--plugin-dir=${SLOPTY_CLAUDE_MOD-}"
+        if [[ -n "${SLOPTY_NO_CLAUDE_MOD-}" && "$SLOPTY_NO_CLAUDE_MOD" != 0 ]] \
+            || [[ ! -d "${SLOPTY_CLAUDE_MOD-}" ]] || (( ${argv[(Ie)$_slopty_flag]} )); then
+            'builtin' 'command' claude "$@"
+        else
+            CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 'builtin' 'command' claude "$_slopty_flag" "$@"
+        fi
+    }
+fi

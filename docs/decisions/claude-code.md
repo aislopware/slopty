@@ -1189,3 +1189,121 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the decoder's own reading, the appended half and the subagent arrive as changes, the meters
     come, an "always" answer is what the relay prints, a killed relay withdraws, an unfollow
     releases, and with nobody following the relay is let go at once).
+
+- ✅ **Slopty's Claude Code mod is the live channel, behind a strict version gate; the mod is
+  TypeScript** (2026-09-27, phase 1c of "Claude Code gets a conversation face", verified against
+  the official Claude Code 2.1.283; measured in `.research/claude-gui-study-2026-09-27.md`,
+  "Mods and Channels, measured").
+  - **What it adds.** The transcript has a block only once the model finished it. A Claude Code
+    mod (a plugin's function hooks) sees the answer, thinking and tool input as they stream,
+    with each subagent's `agentId`, plus the session's context and cost. The face shows those
+    as live blocks: `ConversationEvent::Live(Vec<Live>)`, with `Live::{Start, Append, Clear}`
+    keyed by `LiveId { turn, step, block }`. They are uncommitted text at the end of their
+    thread, never entries.
+  - **TypeScript, against "pure Rust everywhere".** Claude Code runs a mod in its own runtime
+    and loads only TypeScript or JavaScript modules, so the mod cannot be Rust. It is kept to
+    what that forces:
+    - Three files embedded in `slopty-agent` (`assets/claude-mod`: `plugin.json`,
+      `hooks/hooks.json`, `hooks/register.ts`).
+    - A pipe with no logic: it forwards a whitelist of events, changes nothing it passes on,
+      and swallows its own failures.
+    - Written by the worker under its data dir in a directory named by the files' BLAKE3
+      (`claude_mod::install`), so a running agent keeps the files it loaded.
+    - No script of Slopty's is TypeScript. The recorder and the checks are Rust
+      (`cargo xtask fixtures claude-mod`).
+  - **Pinned, strictly.** The plugin API is early access; its typings grew from 13k to 15k lines
+    between 2.1.277 and 2.1.283.
+    - The mod's first event is a `hello` naming its protocol (`MOD_PROTOCOL`) and Claude Code's
+      version. Nothing else is heard until a hello passes `slopty_agent::live::gate`: this
+      protocol, and a version in `MOD_CLAUDE_VERSIONS`, which holds exactly the versions
+      recorded (today `["2.1.283"]`).
+    - The person follows upstream version by version, so a new Claude Code is not trusted until
+      it is recorded. A refused hello is logged once per session (warn), and that session is
+      followed from the transcript alone.
+  - **What catches a break on update.** `cargo xtask fixtures claude-mod` downloads the official
+    build (`@anthropic-ai/claude-code-darwin-arm64@<version>` from the npm registry, its tarball
+    checked against the registry's SHA-512, into `target/claude/<version>`; `SLOPTY_CLAUDE`
+    names another binary, which must still report the version). `fixtures claude` records with
+    the same build, never with whatever `claude` is on `PATH` (here a patched managed launcher).
+    The recorder:
+    - runs `claude plugin validate --strict` on the mod and fails on any finding;
+    - runs three scenarios headless in a scratch home against a canned Messages API on loopback
+      (text and a Bash call, thinking, a subagent), so no account and no model are involved,
+      with the mod posting to a socket of the recorder's own;
+    - writes the scrubbed events, the transcripts of the same runs, the version recorded and a
+      copy of the mod as recorded (`crates/slopty-agent/tests/fixtures/mod`).
+    `slopty-agent`'s tests then hold the copy to the embedded files and the version to
+    `MOD_CLAUDE_VERSIONS`. An edited mod or a new version fails the build until it is recorded,
+    and a recording that no longer decodes, or no longer settles, fails too.
+  - **The fallback stays first-class.** Hooks, the transcript and the status line carry the face
+    everywhere the mod is not heard:
+    - on a Claude Code not recorded;
+    - in the person's daily `claude`, a patched managed launcher whose hooks worker crashes
+      loading any mod;
+    - with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set, which loads the mod but blocks its
+      `fetch` (Unix socket included), so no hello ever comes.
+    The mod only adds liveness. Every entry, prompt and meter still comes from the fallback
+    path.
+  - **Launch.** An agent the worker starts (`orchestrate::Launch`) gets:
+    - `--plugin-dir=<dir>`, always in the `=` form: the spaced form is variadic in 2.1.283 and
+      swallows the words after it, a prompt or a subcommand;
+    - `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, without which Claude Code does not load the
+      module;
+    - `SLOPTY_MOD_SOCKET`;
+    - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set empty. The worker cannot unset a variable
+      in a session it spawns, and Claude Code reads empty as unset: the recorder runs with it
+      so, which pins that.
+    The caller's own variables go last and win. Every session has `SLOPTY_CLAUDE_MOD` and
+    `SLOPTY_MOD_SOCKET`, and the shell integration (zsh, bash, fish) defines a `claude`
+    function that adds the flag and the hooks switch to a `claude` typed by hand. It adds them
+    once (not when the flag is already there, as in an agent the worker started through a login
+    shell), never over a `claude` alias or function of the person's own, and not at all with
+    `SLOPTY_NO_CLAUDE_MOD=1`. An inherited nonessential-traffic switch is left alone there: the
+    person set it.
+  - **The mod socket: hyper, not a parser of our own.** The mod can only `fetch`, so it posts
+    `{session, events}` as HTTP/1.1 to `POST /v1/events` on a Unix socket beside the control
+    socket (`worker.sock` → `worker.mod.sock`, in the same user-only directory). Each post is
+    answered `204` once its events are on the board. The daemon serves it with hyper's http1
+    server (`apps/slopty-worker/src/modsock.rs`): hyper and its utilities were already in the
+    daemon through `slopty-tailnet`'s LocalAPI client, so it adds no crate. A hand-rolled
+    reader would have been a second HTTP implementation to keep correct under keep-alive and
+    partial reads. A batch names its terminal session (`SLOPTY_SESSION`); one for no live
+    session here is refused `404`, and one over 8 MiB `413`.
+  - **Board and overlay.** `slopty_worker::conversation::Board::reported` gates each session's
+    events and keeps its blocks in flight (`slopty_agent::live::Board`) in the `Seen` its
+    followers watch. A block is kept 30 s after its step stopped, or 120 s if it never does.
+    A `measure` puts its context and cost on the meters, sooner than the status line. Each
+    follower keeps an `Overlay` of what it was shown, sends only a block's start and what it
+    grew by, and never shows a block that stopped before it first saw it (a late follower
+    leaves those to the transcript). The transcript is still read on the tick and on hooks,
+    not for every piece the mod reports.
+  - **Settling.** A live block is cleared in the same pass that sent the transcript change
+    settling it, after that change, so a client never shows a gap:
+    - a text block by an answer upserted in its thread with the same text (a clipped answer by
+      its head);
+    - a thinking block by thinking upserted in its thread (the transcript may hold a summary);
+    - a tool block by the call with its `tool_use_id`.
+    A block nothing settles goes 5 s after its step stopped, or when the board lets it go (the
+    session's `bye`). A new transcript (`/clear`) clears every block.
+  - Tests:
+    - the recording: `the_recorded_events_decode`,
+      `the_recording_is_of_this_mod_on_a_trusted_version`, and
+      `the_transcript_settles_every_recorded_block` (every block of the three runs is settled
+      by the transcript the same run wrote);
+    - `blocks_carry_their_thread_kind_and_text`, `a_follower_gets_only_what_is_new`,
+      `blocks_settle_on_their_entry_or_after_the_grace`,
+      `a_call_settles_by_its_id_and_a_long_answer_by_its_head`,
+      `a_measure_updates_the_meters`, `the_gate_names_what_it_refuses`;
+    - the mod on disk and on the command line: `the_mod_is_written_under_its_digest`,
+      `an_agent_loads_the_mod_once`, `an_agents_environment_enables_the_mod`;
+    - the board's gate: `the_mod_is_heard_after_its_hello_passes`;
+    - the shells: `a_typed_claude_loads_the_mod_once` (zsh, both bashes and fish: the flag and
+      switch once, not when opted out, not over the person's alias);
+    - the spawn: `a_spawned_agent_reports_through_the_relay_it_was_handed`, whose daemons
+      inherit `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and whose stand-in `claude` finds
+      it empty, the mod's flag and files, the hooks switch and the socket;
+    - the goldens: `golden__conversation__conversation_live`;
+    - end to end: `a_trusted_mod_streams_live_blocks_that_the_transcript_settles`. The recorded
+      events are posted to the real daemon's mod socket. A piece before the hello, one after an
+      unverified hello and one for another session show nothing. Then two steps stream, and
+      each block is cleared only after its entry arrived. The measure reaches the meters.

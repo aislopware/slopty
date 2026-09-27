@@ -1,8 +1,9 @@
 //! `cargo xtask fixtures claude`: capture the Claude Code transcripts and hook payloads that pin
 //! `slopty-agent`'s conversation decoder (`crates/slopty-agent/tests/fixtures/conversation`).
 //!
-//! Each scenario runs the installed `claude` headless on haiku, in a scratch directory of its
-//! own, with a cheap scripted prompt. The transcript is taken from the `transcript_mirror` frames
+//! Each scenario runs the official Claude Code build ([`crate::claude::official`], never
+//! whatever `claude` is on `PATH`) headless on haiku, in a scratch directory of its own, with a
+//! cheap scripted prompt. The transcript is taken from the `transcript_mirror` frames
 //! `--session-mirror` writes on stdout, never from the files under `~/.claude`. Hook payloads
 //! come from this binary, registered for the run as the hook (`fixtures hook-sink`), which also
 //! answers permission requests so the capture proves the decision output Claude Code accepts.
@@ -29,9 +30,16 @@ use crate::tools::repo_root;
 
 #[derive(Subcommand)]
 pub enum FixturesCmd {
-    /// Capture every scenario, or the one named, with the installed `claude`.
+    /// Capture every scenario, or the one named, with the official Claude Code build.
     Claude {
         /// Capture only this scenario.
+        #[arg(long)]
+        only: Option<String>,
+    },
+    /// Validate Slopty's Claude Code mod and record what it sends, with the official build
+    /// against a canned API: no account, no model.
+    ClaudeMod {
+        /// Record only this scenario.
         #[arg(long)]
         only: Option<String>,
     },
@@ -47,6 +55,7 @@ pub enum FixturesCmd {
 pub fn run(cmd: &FixturesCmd) -> Result<()> {
     match cmd {
         FixturesCmd::Claude { only } => capture_all(only.as_deref()),
+        FixturesCmd::ClaudeMod { only } => crate::claude_mod::capture_all(only.as_deref()),
         FixturesCmd::HookSink { dir } => hook_sink(dir),
     }
 }
@@ -158,15 +167,14 @@ const SINK_EVENTS: [&str; 14] = [
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn capture_all(only: Option<&str>) -> Result<()> {
-    let version = Command::new("claude").arg("--version").output().context("run claude")?;
-    let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
-    println!("claude {version}");
+    let claude = crate::claude::official()?;
+    println!("claude {} at {}", crate::claude::VERSION, claude.display());
     let out = repo_root()?.join("crates/slopty-agent/tests/fixtures/conversation");
     let mut ran = 0_usize;
     for scenario in SCENARIOS.iter().filter(|s| only.is_none_or(|name| name == s.name)) {
         let started = Instant::now();
         println!("▶ {}", scenario.name);
-        capture(scenario, out.as_std_path())
+        capture(&claude, scenario, out.as_std_path())
             .with_context(|| format!("scenario {}", scenario.name))?;
         println!("  ✓ {} ({:.1?})", scenario.name, started.elapsed());
         ran = ran.saturating_add(1);
@@ -191,7 +199,7 @@ impl Captured {
     }
 }
 
-fn capture(scenario: &Scenario, out: &Path) -> Result<()> {
+fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
     let work = PathBuf::from(format!("/tmp/slopty-fixture-{}", scenario.name));
     // Outside the scratch directory, so the agent's own searches never find the payloads.
     let sink = PathBuf::from(format!("/tmp/slopty-fixture-{}-hooks", scenario.name));
@@ -215,7 +223,7 @@ fn capture(scenario: &Scenario, out: &Path) -> Result<()> {
         "showThinkingSummaries": true,
         "hooks": SINK_EVENTS.iter().map(|e| ((*e).to_owned(), hook.clone())).collect::<Map<_, _>>(),
     });
-    let mut child = Command::new("claude")
+    let mut child = Command::new(claude)
         .args(["-p", "--model", "haiku", "--output-format", "stream-json", "--verbose"])
         .args(["--input-format", "stream-json", "--session-mirror", "--include-hook-events"])
         .args(["--setting-sources", "", "--strict-mcp-config", "--permission-prompts", "none"])
@@ -401,7 +409,7 @@ fn write_fixture(
 }
 
 /// Replaces what names the machine, the person and the run with stable placeholders.
-struct Scrub {
+pub struct Scrub {
     literal: Vec<(String, String)>,
     /// Ids that have no shape of their own (agent and background-task ids), collected from the
     /// fields that carry them.
@@ -412,23 +420,31 @@ struct Scrub {
 
 impl Scrub {
     fn new([sink, work, exe]: [&Path; 3]) -> Result<Self> {
-        let work = work.to_string_lossy().into_owned();
-        let private = format!("/private{work}");
-        let escape = |p: &str| p.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
-        let home = std::env::var("HOME").context("HOME")?;
-        let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&home)?);
         // Longest first: the sink's path begins with the scratch directory's.
-        let mut literal = vec![
+        let first = vec![
             (exe.to_string_lossy().into_owned(), "/xtask".to_owned()),
             (format!("/private{}", sink.display()), "/hooks".to_owned()),
             (sink.to_string_lossy().into_owned(), "/hooks".to_owned()),
+        ];
+        Self::with_places(first, work, &std::env::var("HOME").context("HOME")?)
+    }
+
+    /// `first` replaced before anything else, then the scratch directory `work` (as `/work`),
+    /// the home directory `home` (as `/home/user`) and the user's name.
+    pub fn with_places(first: Vec<(String, String)>, work: &Path, home: &str) -> Result<Self> {
+        let work = work.to_string_lossy().into_owned();
+        let private = format!("/private{work}");
+        let escape = |p: &str| p.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+        let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(home)?);
+        let mut literal = first;
+        literal.extend([
             (private.clone(), "/work".to_owned()),
             (work.clone(), "/work".to_owned()),
             (escape(&private), "-work".to_owned()),
             (escape(&work), "-work".to_owned()),
             (format!("claude-{uid}"), "claude-uid".to_owned()),
-            (home, "/home/user".to_owned()),
-        ];
+            (home.to_owned(), "/home/user".to_owned()),
+        ]);
         if let Ok(user) = std::env::var("USER")
             && user.len() >= 3
         {
@@ -438,7 +454,7 @@ impl Scrub {
     }
 
     /// Learn the opaque ids a value carries.
-    fn collect(&mut self, value: &Value) {
+    pub fn collect(&mut self, value: &Value) {
         match value {
             Value::Object(map) => {
                 for (key, v) in map {
@@ -486,7 +502,7 @@ impl Scrub {
 
     /// One transcript record: attachments keep only their type, except the queued commands
     /// that report background work.
-    fn record(&mut self, mut record: Value) -> Value {
+    pub fn record(&mut self, mut record: Value) -> Value {
         if record.get("type").and_then(Value::as_str) == Some("attachment")
             && let Some(attachment) = record.get_mut("attachment")
             && attachment.get("type").and_then(Value::as_str) != Some("queued_command")
@@ -497,7 +513,7 @@ impl Scrub {
         self.value(record, "")
     }
 
-    fn value(&mut self, value: Value, key: &str) -> Value {
+    pub fn value(&mut self, value: Value, key: &str) -> Value {
         match value {
             Value::String(_) if key == "signature" => Value::String("sig".to_owned()),
             Value::String(s) => Value::String(self.text(&s)),
@@ -517,7 +533,7 @@ impl Scrub {
         }
     }
 
-    fn text(&mut self, text: &str) -> String {
+    pub fn text(&mut self, text: &str) -> String {
         let mut s = text.to_owned();
         for (from, to) in &self.literal {
             s = s.replace(from.as_str(), to);

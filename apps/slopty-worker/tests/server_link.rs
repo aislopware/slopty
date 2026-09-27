@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Stdio;
     use std::time::Duration;
 
@@ -56,16 +56,12 @@ mod tests {
     }
 
     /// Start ptyd, then the worker pointed at `server`, in `dir`.
-    async fn daemons(dir: &std::path::Path, server: SocketAddr) -> Daemons {
+    async fn daemons(dir: &Path, server: SocketAddr) -> Daemons {
         daemons_finding(dir, server, None).await
     }
 
     /// As [`daemons`], with `programs` searched first for a command's program.
-    async fn daemons_finding(
-        dir: &std::path::Path,
-        server: SocketAddr,
-        programs: Option<&std::path::Path>,
-    ) -> Daemons {
+    async fn daemons_finding(dir: &Path, server: SocketAddr, programs: Option<&Path>) -> Daemons {
         let path = programs.map(|first| {
             let rest = std::env::var_os("PATH").unwrap_or_default();
             std::env::join_paths(
@@ -77,6 +73,9 @@ mod tests {
             if let Some(path) = &path {
                 command.env("PATH", path);
             }
+            // Inherited, as from a developer's shell: an agent the worker starts must not have
+            // it, or its mod goes silent.
+            command.env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
         };
         let ptyd_sock = dir.join("ptyd.sock");
         let mut ptyd = Command::new(bin("slopty-ptyd"));
@@ -174,7 +173,7 @@ mod tests {
     }
 
     /// A quiet interactive bash in `cwd`.
-    fn open(worker: WorkerId, cwd: &std::path::Path) -> Verb {
+    fn open(worker: WorkerId, cwd: &Path) -> Verb {
         Verb::OpenTerminal {
             worker,
             cwd: Some(cwd.to_string_lossy().into_owned()),
@@ -369,7 +368,9 @@ mod tests {
         let script = format!(
             "#!/bin/sh\n\
              [ -n \"$SLOPTY_SESSION\" ] || {{ echo '2.1.283 (Claude Code)'; exit 0; }}\n\
-             printf '%s\\n' \"$SLOPTY_SESSION\" \"$SLOPTY_WORKER_SOCKET\" > '{env}'\n\
+             printf '%s\\n' \"$SLOPTY_SESSION\" \"$SLOPTY_WORKER_SOCKET\" \"$SLOPTY_MOD_SOCKET\" \
+               \"$CLAUDE_CODE_ENABLE_FUNCTION_HOOKS\" \
+               \"[${{CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-unset}}]\" > '{env}'\n\
              for a in \"$@\"; do printf '%s\\0' \"$a\"; done > '{argv}.part'\n\
              mv '{argv}.part' '{argv}'\n\
              exec sleep 60\n",
@@ -413,8 +414,14 @@ mod tests {
             .filter(|word| !word.is_empty())
             .map(|word| String::from_utf8(word.to_vec()).unwrap())
             .collect();
-        let [flag, settings, rest @ ..] = args.as_slice() else { panic!("{args:?}") };
+        let [plugin, flag, settings, rest @ ..] = args.as_slice() else { panic!("{args:?}") };
         assert_eq!((flag.as_str(), rest), ("--settings", &["--verbose".to_owned()][..]));
+        // The mod, as the worker wrote it under its data dir, in the flag's `=` form.
+        let module = plugin.strip_prefix("--plugin-dir=").map(PathBuf::from).expect(plugin);
+        assert!(module.starts_with(dir.path().join("data/claude-mod")), "{module:?}");
+        for (path, content) in slopty_agent::claude_mod::FILES {
+            assert_eq!(std::fs::read_to_string(module.join(path)).unwrap(), content, "{path}");
+        }
         let settings: serde_json::Value = serde_json::from_str(settings).unwrap();
         assert_eq!(settings["model"], "haiku", "the caller's settings are kept");
         for event in slopty_agent::HOOK_EVENTS {
@@ -424,7 +431,13 @@ mod tests {
         assert_eq!(entry["command"].as_str().map(PathBuf::from), Some(relay));
 
         let env = std::fs::read_to_string(&env).unwrap();
-        let [session, socket] = env.lines().collect::<Vec<_>>()[..] else { panic!("{env:?}") };
+        let [session, socket, mod_socket, hooks, traffic] = env.lines().collect::<Vec<_>>()[..]
+        else {
+            panic!("{env:?}")
+        };
+        assert_eq!(Path::new(mod_socket), dir.path().join("worker.mod.sock"));
+        assert_eq!(hooks, "1", "function hooks on");
+        assert_eq!(traffic, "[]", "the inherited switch that silences the mod is cleared");
         let mut hook = Command::new(entry["command"].as_str().unwrap())
             .args(entry["args"].as_array().unwrap().iter().filter_map(|a| a.as_str()))
             .env("SLOPTY_SESSION", session)

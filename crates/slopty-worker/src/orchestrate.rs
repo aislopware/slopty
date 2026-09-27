@@ -132,7 +132,16 @@ struct Inner {
     worker: Worker,
     items: ItemStore,
     events: broadcast::Sender<WorkerMsg>,
-    relay: Option<PathBuf>,
+    launch: Launch,
+}
+
+/// What an agent the orchestrator starts is given.
+#[derive(Clone, Debug, Default)]
+pub struct Launch {
+    /// The `slopty hook` relay it reports through, registered on its `--settings`.
+    pub relay: Option<PathBuf>,
+    /// Slopty's Claude Code mod, loaded with its flag and environment.
+    pub claude_mod: Option<slopty_agent::claude_mod::Installed>,
 }
 
 impl std::fmt::Debug for Orchestrator {
@@ -143,16 +152,16 @@ impl std::fmt::Debug for Orchestrator {
 
 impl Orchestrator {
     /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry and
-    /// client broadcast. The agents it starts report through the hook relay at `relay`.
+    /// client broadcast. The agents it starts get what `launch` says.
     #[must_use]
     pub fn new(
         id: WorkerId,
         worker: Worker,
         items: ItemStore,
         events: broadcast::Sender<WorkerMsg>,
-        relay: Option<PathBuf>,
+        launch: Launch,
     ) -> Self {
-        Self { inner: Arc::new(Inner { id, worker, items, events, relay }) }
+        Self { inner: Arc::new(Inner { id, worker, items, events, launch }) }
     }
 
     /// Answer one verb. Every failure is an [`Outcome::Error`].
@@ -366,7 +375,9 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Start the agent's TUI; with a prompt, type it once the agent is at its prompt.
+    /// Start the agent's TUI; with a prompt, type it once the agent is at its prompt. It gets
+    /// the hook relay and the mod ([`Launch`]); the caller's own settings, arguments and
+    /// variables are kept, and its variables win.
     async fn spawn_agent(
         &self,
         agent: AgentKind,
@@ -380,13 +391,20 @@ impl Orchestrator {
         // returns.
         let events = self.inner.events.subscribe();
         let Spawn { cwd, args, env, size } = spawn;
-        let args = match self.inner.relay.as_deref() {
+        let launch = &self.inner.launch;
+        let args = match launch.relay.as_deref() {
             Some(relay) => {
                 let relay = relay.to_string_lossy().into_owned();
                 let dir = crate::file::expand_home(Path::new(&cwd));
                 blocking(move || Ok(slopty_agent::hooks::with_relay(args, &relay, &dir))).await?
             }
             None => args,
+        };
+        let (args, env) = match &launch.claude_mod {
+            Some(installed) => {
+                (installed.args(args), installed.agent_env().into_iter().chain(env).collect())
+            }
+            None => (args, env),
         };
         let req = OpenSession {
             size,

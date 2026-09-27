@@ -813,8 +813,18 @@ to the followers on the control stream (`WorkerMsg::Permission`): the relay's
 `CtlRequest::Permission` is held while someone follows the session
 (`slopty_worker::conversation::Holds`), the first answer is the decision the relay prints, and
 the last follower leaving, the wait running out or the relay going away hands it back
-undecided, so the TUI shows its own dialog. Phases 1a and 1b (the decoder, the relay, the
-wrapper, the wire and the worker) are built; the face comes in 2. The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
+undecided, so the TUI shows its own dialog. Where Claude Code runs Slopty's mod (a plugin
+whose TypeScript function hooks the worker embeds and writes under its data dir,
+`slopty_agent::claude_mod`), the face also gets what the model is writing before the
+transcript has it. The mod posts its events over HTTP to the worker's mod socket
+(`worker.mod.sock`, `apps/slopty-worker/src/modsock.rs`). They are heard only after its hello
+names a recorded Claude Code (`slopty_agent::live::gate`, `MOD_CLAUDE_VERSIONS`), and they go
+to the followers as live blocks (`ConversationEvent::Live`), each cleared right after the
+transcript change that settles it. Agents the worker starts load the mod, and so does a
+`claude` typed in a Slopty shell (the shell integration's `claude` function). Everywhere else,
+the hooks, the transcript and the status line are the whole face (decisions, "Slopty's Claude
+Code mod is the live channel"). Phases 1a–1c (the decoder, the relay, the wrapper, the wire,
+the worker and the mod) are built; the face comes in 2. The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
 resolved on the worker through the login shell), which, like ⌘N's shell, starts in the active
 terminal's directory when there is one (`WorkspaceView::active_cwd`, the session's OSC 7 cwd as
 the worker last reported it), else the worker's default; the palette's "New agent in <dir>" line

@@ -78,31 +78,39 @@ async fn admit<S, R, H>(
                 }
             };
             match greet(incoming, hello, grant).await {
-                Ok(peer) => {
+                Ok(Some(peer)) => {
                     let _sent = greeted.send(peer).await;
                 }
+                Ok(None) => tracing::debug!(%peer, "{who} probe"),
                 Err(e) => tracing::info!(%peer, error = %e, "{who} dropped"),
             }
         });
     }
 }
 
-/// Finish the handshake and read the hello.
+/// Finish the handshake and read the hello; `None` for a discovery probe
+/// (`crate::discover`), which closes as soon as the handshake is done.
 async fn greet<S, R, H>(
     incoming: noq::Incoming,
     hello: fn(R) -> Option<H>,
     grant: Grant,
-) -> Result<Greeted<S, R, H>, NetError>
+) -> Result<Option<Greeted<S, R, H>>, NetError>
 where
     S: Serialize,
     R: DeserializeOwned,
 {
     let remote = crate::endpoint::canonical(incoming.remote_address());
     let conn = incoming.await.map_err(|e| NetError::Connect(e.to_string()))?;
-    let (send, recv) = tokio::time::timeout(HELLO_TIMEOUT, conn.accept_bi())
-        .await
-        .map_err(|_elapsed| NetError::Protocol("no control stream"))?
-        .map_err(|e| NetError::stream(&e))?;
+    let (send, recv) = match tokio::time::timeout(HELLO_TIMEOUT, conn.accept_bi()).await {
+        Err(_elapsed) => return Err(NetError::Protocol("no control stream")),
+        Ok(Err(noq::ConnectionError::ApplicationClosed(close)))
+            if close.reason.as_ref() == crate::discover::PROBE_REASON =>
+        {
+            return Ok(None);
+        }
+        Ok(Err(e)) => return Err(NetError::stream(&e)),
+        Ok(Ok(streams)) => streams,
+    };
     let tx = FramedSend::<S>::new(send);
     let mut rx = FramedRecv::<R>::new(recv);
     let first = tokio::time::timeout(HELLO_TIMEOUT, rx.recv())
@@ -112,5 +120,44 @@ where
         conn.close(close_code::PROTOCOL.into(), b"hello first");
         return Err(NetError::Protocol("first message must be Hello"));
     };
-    Ok(Greeted { conn, remote, hello, grant, tx, rx })
+    Ok(Some(Greeted { conn, remote, hello, grant, tx, rx }))
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_proto::handshake::Hello;
+    use slopty_proto::{ClientMsg, WorkerMsg};
+
+    use super::*;
+
+    fn hello(first: ClientMsg) -> Option<Hello> {
+        match first {
+            ClientMsg::Hello(hello) => Some(hello),
+            _ => None,
+        }
+    }
+
+    /// A discovery probe, which closes once the handshake is done, is told apart from a peer
+    /// that went away before its hello: the listener logs it as a probe.
+    #[tokio::test]
+    async fn a_probe_is_not_a_dropped_peer() {
+        let listening = crate::endpoint::bind("127.0.0.1:0".parse().unwrap(), true).unwrap();
+        let at = listening.local_addr().unwrap();
+        let dialing = crate::client::bind_client().unwrap();
+        for (reason, probe) in [(crate::discover::PROBE_REASON, true), (&b"bye"[..], false)] {
+            let listener = listening.clone();
+            let greeting = tokio::spawn(async move {
+                let incoming = listener.accept().await.unwrap();
+                let greeted = greet::<WorkerMsg, ClientMsg, Hello>(incoming, hello, Grant::ALL);
+                greeted.await.map(|peer| peer.is_some())
+            });
+            let conn = crate::client::dial(&dialing, at, "probe", None).await.unwrap();
+            conn.close(close_code::NORMAL.into(), reason);
+            match greeting.await.unwrap() {
+                Ok(false) => assert!(probe, "{reason:?} read as a probe"),
+                Err(_) => assert!(!probe, "{reason:?} read as a dropped peer"),
+                Ok(true) => panic!("no hello was sent"),
+            }
+        }
+    }
 }

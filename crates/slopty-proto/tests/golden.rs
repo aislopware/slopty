@@ -1050,11 +1050,11 @@ mod conversation {
     use slopty_proto::conversation::{
         AgentDetail, AgentRun, Answer, BashDetail, Body, Change, Clipped, Compact,
         ConversationEvent, ConversationRequest, EditDetail, Entry, GlobDetail, Grant, GrepDetail,
-        Hunk, McpDetail, Meters, Note, NoteKind, Part, Patch, PermissionEvent, PermissionPrompt,
-        Prompt, Question, QuestionDetail, RateWindow, ReadDetail, ResultStatus, Settled,
-        ShellStatus, Suggestion, Task, TaskCreateDetail, TaskUpdateDetail, TextRef, ThreadId,
-        ToolCall, ToolDetail, ToolResult, Verdict, WebFetchDetail, WebSearchDetail, WriteDetail,
-        WriteKind,
+        Hunk, Live, LiveId, LiveKind, McpDetail, Meters, Note, NoteKind, Part, Patch,
+        PermissionEvent, PermissionPrompt, Prompt, Question, QuestionDetail, RateWindow,
+        ReadDetail, ResultStatus, Settled, ShellStatus, Suggestion, Task, TaskCreateDetail,
+        TaskUpdateDetail, TextRef, ThreadId, ToolCall, ToolDetail, ToolResult, Verdict,
+        WebFetchDetail, WebSearchDetail, WriteDetail, WriteKind,
     };
     use slopty_proto::transfer::UniHead;
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
@@ -1222,6 +1222,26 @@ mod conversation {
                 five_hour: Some(RateWindow { used_pct: 23.5, resets_at: Some(1_738_425_600) }),
                 seven_day: None,
             }),
+        );
+        let id = |block| LiveId { turn: "t1".to_owned(), step: 1, block };
+        snap(
+            "conversation_live",
+            &ConversationEvent::Live(vec![
+                Live::Start { thread: ThreadId::Main, id: id(0), kind: LiveKind::Thinking },
+                Live::Append { id: id(0), text: "hmm".to_owned() },
+                Live::Start {
+                    thread: ThreadId::Agent("a1".to_owned()),
+                    id: id(1),
+                    kind: LiveKind::Text,
+                },
+                Live::Start {
+                    thread: ThreadId::Main,
+                    id: id(2),
+                    kind: LiveKind::Tool { id: "toolu_1".to_owned(), name: "Bash".to_owned() },
+                },
+                Live::Append { id: id(2), text: "{\"command\"".to_owned() },
+                Live::Clear { id: id(0) },
+            ]),
         );
         snap(
             "conversation_expanded",

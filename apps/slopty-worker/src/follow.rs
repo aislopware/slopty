@@ -7,9 +7,12 @@
 //! (`slopty_agent::conversation::Transcripts`, off the runtime on the blocking pool) and sends
 //! what changed: first everything there is, behind a reset and closed by
 //! `ConversationEvent::Current`, then each change. It reads on a tick and at once when a hook
-//! fires in the session, and sends the status line's meters when they move. Nothing here is on
-//! a terminal's path: no lock is held across a read or a send, and the stream's writes wait on
-//! nobody but this client.
+//! fires in the session, and sends the status line's meters when they move. Where the agent
+//! runs Slopty's mod, it also sends the blocks the model is writing
+//! (`ConversationEvent::Live`) as the mod reports them (`slopty_agent::live::Overlay`), each
+//! cleared after the transcript change that settles it. Nothing here is on a terminal's path:
+//! no lock is held across a read or a send, and the stream's writes wait on nobody but this
+//! client.
 //!
 //! **Held prompts.** The relay's `CtlRequest::Permission` comes to [`ask`]. The daemon's
 //! [`Follows::holds`] (`slopty_worker::conversation::Holds`) decides: undecided at once when
@@ -18,10 +21,11 @@
 //! wait runs out or the relay goes away ([`release`]).
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use slopty_agent::Hook;
 use slopty_agent::conversation::Transcripts;
+use slopty_agent::live::Overlay;
 use slopty_agent::permission::{self, Decision, PermissionAsk};
 use slopty_core::{ClientId, SessionId};
 use slopty_net::framed::FramedSend;
@@ -231,15 +235,24 @@ async fn follow(
 ) -> Result<&'static str, NetError> {
     let mut transcripts = Transcripts::default();
     let mut first = true;
+    let mut current = false;
     let mut meters_sent: Option<Meters> = None;
+    let mut overlay = Overlay::default();
+    // The transcript is read on the tick and when a hook fired, not for every piece the mod
+    // reports.
+    let mut read_due = true;
+    let mut hooks_read = None;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let main = daemon.agents.lock().transcript_path(session);
-        let (known, meters) = {
+        let (known, meters, hooks) = {
             let now = seen.borrow_and_update();
-            (now.subagents.iter().cloned().collect::<Vec<PathBuf>>(), now.meters.clone())
+            let known = now.subagents.iter().cloned().collect::<Vec<PathBuf>>();
+            (known, now.meters.clone(), now.hooks)
         };
+        read_due |= hooks_read != Some(hooks);
+        hooks_read = Some(hooks);
+        let main = if read_due { daemon.agents.lock().transcript_path(session) } else { None };
         let changes = match main {
             Some(main) => {
                 let read = tokio::task::spawn_blocking(move || {
@@ -256,10 +269,26 @@ async fn follow(
             None => Vec::new(),
         };
         first = false;
+        read_due = false;
         let whole = changes.iter().any(|c| matches!(c, Change::Reset { thread: None }));
+        // Live blocks go after the changes, so a block is cleared only once its entry is there.
+        let mut live = Vec::new();
+        if current || whole {
+            let now = Instant::now();
+            if whole {
+                live.extend(overlay.clear_all());
+            }
+            live.extend(overlay.update(&seen.borrow().live, now, now_ms()));
+            live.extend(overlay.settle(&changes));
+            live.extend(overlay.expire(now));
+        }
         send_changes(out, session, changes).await?;
         if whole {
             out.send(&ConversationEvent::Current).await?;
+            current = true;
+        }
+        if !live.is_empty() {
+            out.send(&ConversationEvent::Live(live)).await?;
         }
         if meters.is_some() && meters != meters_sent {
             if let Some(meters) = &meters {
@@ -268,7 +297,7 @@ async fn follow(
             meters_sent = meters;
         }
         tokio::select! {
-            _ = tick.tick() => {}
+            _ = tick.tick() => read_due = true,
             changed = seen.changed() => {
                 if changed.is_err() {
                     return Ok("the session is gone");
