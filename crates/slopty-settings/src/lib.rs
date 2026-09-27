@@ -276,8 +276,8 @@ impl Default for RemoteSettings {
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkerSettings {
-    /// Address ranges (`100.64.0.0/10`, `fd00::/8`, a bare address) whose peers may connect,
-    /// replacing the default of the tailnet and private LANs. Loopback is always admitted.
+    /// Address ranges (`10.8.0.0/24`, `fd00::/8`, a bare address) whose peers may connect
+    /// besides loopback and the tailnet: a VPN or LAN Tailscale does not vouch for.
     pub allow: Vec<String>,
     /// The server to register with, `host[:port]` with
     /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
@@ -285,6 +285,15 @@ pub struct WorkerSettings {
     /// take precedence.
     #[serde(with = "server_address")]
     pub server: Option<HostAddr>,
+}
+
+/// `[server]`: what `slopty-server` reads from the file of the data directory its own lives in.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerSettings {
+    /// Address ranges whose peers may connect besides loopback and the tailnet, as
+    /// [`WorkerSettings::allow`].
+    pub allow: Vec<String>,
 }
 
 /// `[client]`: how the app and the `slopty` CLI find the workers.
@@ -335,6 +344,8 @@ pub struct Settings {
     pub colors: ColorSettings,
     /// The worker daemon: who may connect, and the server it registers with.
     pub worker: WorkerSettings,
+    /// The server daemon: who may connect.
+    pub server: ServerSettings,
     /// The app and the CLI as clients of a server.
     pub client: ClientSettings,
 }

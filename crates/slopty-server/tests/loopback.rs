@@ -40,7 +40,7 @@ mod tests {
         Role::Worker(Box::new(Registration {
             worker,
             name: "fake-worker".to_owned(),
-            port: 45999,
+            listen: std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45999)),
             caps: caps(),
             sessions: Vec::new(),
         }))

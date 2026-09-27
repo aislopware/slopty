@@ -623,3 +623,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Not yet: the worker and the CLI. The CLI takes the worker's and the client's crates, which
     call libproc, ScreenCaptureKit, VideoToolbox and the pasteboard directly; a Linux worker
     needs those behind platform seams first (`slopty-platform` is where they go).
+
+- ✅ **A worker is published where it listens, and the server admits a VPN** (2026-09-27). Two
+  gaps the through-server e2e found once it ran on a Mac with Tailscale up:
+  - **Where a worker is listed.** The server listed a worker that dialed over loopback at this
+    machine's tailnet address, whatever the worker listened on. A worker started with `--bind
+    127.0.0.1` listens on nothing there, so clients were sent where no one answers.
+    `Registration.port` became `listen`, the socket address the worker's listener is bound to.
+    A worker bound to one address is listed there. One bound to loopback is listed at the
+    loopback address it dialed from, reachable only on this machine. One on every interface
+    keeps the tailnet rewrite. The `server_worker_hello` golden moved.
+  - **Who reaches the server.** The worker read `[worker] allow` ranges for peers Tailscale
+    does not vouch for, but the server admitted only loopback and the tailnet: a person on a
+    plain VPN reached their workers and not the server that lists them. `[server] allow`, in
+    the `settings.toml` of the data directory the server's own lives in (the one the worker
+    and the app read), now does for the server what `[worker] allow` does for a worker.
+    `slopty_net::admission::parse_allow` parses both. `slopty-settings` joined the Linux lane
+    with the server.
+  - The e2e fleet binds both workers to loopback, so a run no longer depends on whether
+    Tailscale is up on the machine.
+  - Tests: `a_worker_on_the_servers_machine_is_published_at_its_tailnet_address` (the bound
+    cases), the server's `the_allow_list_comes_from_the_shared_settings`, and
+    `the_app_finds_its_workers_through_the_server`.

@@ -455,7 +455,7 @@ mod tests {
         let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
         let (mut peer, reg) = Peer::welcome(link).await;
         assert_eq!(reg.name, "link-test");
-        assert_eq!(reg.port, daemons.listen.port(), "clients dial the port it listens on");
+        assert_eq!(reg.listen, daemons.listen, "where its clients' listener is bound");
         assert!(reg.sessions.is_empty());
         assert_eq!(reg.caps.os, Os::MacOs);
         assert!(reg.caps.cpus > 0 && reg.caps.memory > 0, "{:?}", reg.caps);

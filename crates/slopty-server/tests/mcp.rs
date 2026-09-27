@@ -107,7 +107,7 @@ mod tests {
         let role = Role::Worker(Box::new(Registration {
             worker,
             name: "fake-worker".to_owned(),
-            port: 45550,
+            listen: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550)),
             caps: caps(),
             sessions: Vec::new(),
         }));
@@ -219,7 +219,7 @@ mod tests {
         let role = Role::Worker(Box::new(Registration {
             worker,
             name: "fake-worker".to_owned(),
-            port: 45550,
+            listen: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550)),
             caps: caps(),
             sessions: Vec::new(),
         }));

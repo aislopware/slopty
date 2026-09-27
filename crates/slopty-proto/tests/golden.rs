@@ -749,7 +749,7 @@ mod golden {
                 role: Role::Worker(Box::new(Registration {
                     worker,
                     name: "mac-studio".to_owned(),
-                    port: 45570,
+                    listen: std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45570)),
                     caps: caps.clone(),
                     sessions: Vec::new(),
                 })),

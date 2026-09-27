@@ -41,9 +41,10 @@ pub struct Registration {
     pub worker: WorkerId,
     /// Its name ("mac-studio").
     pub name: String,
-    /// The port its client listener takes; clients dial the address the server saw the
-    /// worker connect from, with this port.
-    pub port: u16,
+    /// Where its client listener is bound: every interface (`[::]`), or the one address
+    /// `--bind` gave it. The server publishes the port at an address clients can reach
+    /// (`slopty_server::link`).
+    pub listen: std::net::SocketAddr,
     /// What it can do.
     pub caps: WorkerCaps,
     /// The terminals it runs now.

@@ -172,6 +172,22 @@ struct Owner {
     user: Option<i64>,
 }
 
+/// The ranges of an `allow` list that parse; `section` names the list in the warning a range
+/// that does not parse leaves in the log.
+#[must_use]
+pub fn parse_allow(ranges: &[String], section: &str) -> Vec<Cidr> {
+    ranges
+        .iter()
+        .filter_map(|range| match range.parse::<Cidr>() {
+            Ok(cidr) => Some(cidr),
+            Err(e) => {
+                tracing::warn!(%range, error = %e, "{section} allow: skipped");
+                None
+            }
+        })
+        .collect()
+}
+
 impl Admission {
     /// Loopback, the ranges in `allow`, and the tailnet through this machine's Tailscale,
     /// looked up when a tailnet peer first calls.

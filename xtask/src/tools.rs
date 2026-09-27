@@ -14,9 +14,10 @@ pub const LINUX_TRIPLE: &str = "x86_64-unknown-linux-musl";
 /// The crates that build for Linux and must go on doing so: the server and what it stands on.
 /// A Linux worker and client come later; until then this lane keeps macOS-only calls out of the
 /// server's path (`docs/decisions/topology.md`, "The server builds for Linux").
-pub const LINUX_CRATES: [&str; 7] = [
+pub const LINUX_CRATES: [&str; 8] = [
     "slopty-core",
     "slopty-proto",
+    "slopty-settings",
     "slopty-tailnet",
     "slopty-net",
     "slopty-tools",

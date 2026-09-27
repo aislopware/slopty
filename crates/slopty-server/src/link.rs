@@ -56,7 +56,8 @@ async fn worker(
         return;
     }
     let (id, name, remote) = (registration.worker, registration.name.clone(), link.remote);
-    let lease = match hub.register(registration, published(remote.ip(), tailscale).await, out) {
+    let at = published(remote.ip(), registration.listen.ip(), tailscale).await;
+    let lease = match hub.register(registration, at, out) {
         Ok(lease) => lease,
         Err(why) => {
             tracing::info!(worker = %id, %name, %remote, ?why, "worker refused");
@@ -75,10 +76,19 @@ async fn worker(
     drop(lease);
 }
 
-/// Where clients reach a worker that dialed in from `ip`. A worker on the server's own machine
-/// dials over loopback, which no other machine can use, so it is published at this machine's
-/// tailnet address when Tailscale gives one.
-async fn published(ip: IpAddr, tailscale: Option<&LocalApi>) -> IpAddr {
+/// Where clients reach a worker that dialed in from `ip` and listens on `bound`.
+///
+/// A worker bound to one address is reachable there alone; one bound to loopback only from this
+/// machine, at the loopback address it dialed from. A worker on every interface of the server's
+/// own machine dials over loopback, which no other machine can use, so it is published at this
+/// machine's tailnet address when Tailscale gives one.
+async fn published(ip: IpAddr, bound: IpAddr, tailscale: Option<&LocalApi>) -> IpAddr {
+    if bound.is_loopback() {
+        return ip;
+    }
+    if !bound.is_unspecified() {
+        return bound;
+    }
     let Some(api) = tailscale.filter(|_| ip.is_loopback()) else { return ip };
     match api.status().await {
         Ok(status) => status.me.as_ref().and_then(slopty_tailnet::Node::ipv4).unwrap_or(ip),
@@ -322,9 +332,11 @@ mod tests {
     use crate::WAIT_CAP_MS;
     use crate::hub::tests::{registration, summary};
 
-    /// A worker on the server's own machine dials over loopback and is published at the
-    /// machine's tailnet address; any other worker at the address it dialed from, without
-    /// asking Tailscale. With no Tailscale, or one that fails, loopback stays.
+    /// A worker on every interface of the server's own machine dials over loopback and is
+    /// published at the machine's tailnet address; any other worker at the address it dialed
+    /// from, without asking Tailscale. With no Tailscale, or one that fails, loopback stays. A
+    /// worker bound to one address is published there, and one bound to loopback keeps the
+    /// loopback address it dialed from: nothing listens for it on the tailnet.
     #[tokio::test]
     async fn a_worker_on_the_servers_machine_is_published_at_its_tailnet_address() {
         let (api, seen) = slopty_tailnet::fake::daemon(|_| {
@@ -335,16 +347,18 @@ mod tests {
         .await
         .unwrap();
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
-        let tailnet = ip("100.64.0.3");
-        assert_eq!(published(ip("127.0.0.1"), Some(&api)).await, tailnet);
-        assert_eq!(published(ip("::1"), Some(&api)).await, tailnet);
+        let (tailnet, every) = (ip("100.64.0.3"), ip("::"));
+        assert_eq!(published(ip("127.0.0.1"), every, Some(&api)).await, tailnet);
+        assert_eq!(published(ip("::1"), every, Some(&api)).await, tailnet);
         let asked = seen.lock().len();
-        assert_eq!(published(ip("100.64.0.9"), Some(&api)).await, ip("100.64.0.9"));
-        assert_eq!(seen.lock().len(), asked, "a remote worker needs no status");
-        assert_eq!(published(ip("127.0.0.1"), None).await, ip("127.0.0.1"));
+        assert_eq!(published(ip("100.64.0.9"), every, Some(&api)).await, ip("100.64.0.9"));
+        assert_eq!(published(ip("::1"), ip("127.0.0.1"), Some(&api)).await, ip("::1"));
+        assert_eq!(published(ip("::1"), ip("10.0.0.5"), Some(&api)).await, ip("10.0.0.5"));
+        assert_eq!(seen.lock().len(), asked, "only a worker on every interface asks");
+        assert_eq!(published(ip("127.0.0.1"), every, None).await, ip("127.0.0.1"));
         let (broken, _) =
             slopty_tailnet::fake::daemon(|_| (500, "stuck".to_owned())).await.unwrap();
-        assert_eq!(published(ip("127.0.0.1"), Some(&broken)).await, ip("127.0.0.1"));
+        assert_eq!(published(ip("127.0.0.1"), every, Some(&broken)).await, ip("127.0.0.1"));
     }
 
     fn report(session: SessionId, status: AgentStatus) -> ToServer {

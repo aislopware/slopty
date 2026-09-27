@@ -33,7 +33,7 @@ mod tests {
         Registration {
             worker,
             name: "fake-worker".to_owned(),
-            port: 45550,
+            listen: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550)),
             caps: WorkerCaps {
                 os: Os::MacOs,
                 os_version: "26.5".to_owned(),

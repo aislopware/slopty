@@ -205,7 +205,7 @@ impl Hub {
         tx: mpsc::Sender<FromServer>,
     ) -> Result<Lease, Refusal> {
         let mut state = self.inner.state.lock();
-        let Registration { worker, name, port, caps, sessions } = registration;
+        let Registration { worker, name, listen, caps, sessions } = registration;
         if state.workers.get(&worker).is_some_and(|e| e.link.is_some()) {
             return Err(Refusal::DuplicateWorker);
         }
@@ -214,7 +214,7 @@ impl Hub {
         let info = WorkerInfo {
             worker,
             name,
-            address: SocketAddr::new(ip, port).to_string(),
+            address: SocketAddr::new(ip, listen.port()).to_string(),
             liveness: Liveness::Online,
             caps,
             last_seen_ms: now_ms(),
@@ -793,7 +793,8 @@ pub(crate) mod tests {
     }
 
     pub fn registration(worker: WorkerId, sessions: Vec<SessionSummary>) -> Registration {
-        Registration { worker, name: "studio".to_owned(), port: 45550, caps: caps(), sessions }
+        let listen = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550));
+        Registration { worker, name: "studio".to_owned(), listen, caps: caps(), sessions }
     }
 
     fn ip() -> IpAddr {

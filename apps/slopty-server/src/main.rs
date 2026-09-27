@@ -3,8 +3,8 @@
 //! Workers register over QUIC on `--port` and hold their lease there; clients, the CLI and
 //! agents get the worker directory and send verbs on the same port; AI agents also reach the
 //! verbs over MCP (Streamable HTTP) on `--mcp-port`. Both listeners admit loopback, the tailnet
-//! and private LANs only. The worker list survives restarts in `workers.json` in the data
-//! directory.
+//! and the `[server] allow` ranges of `settings.toml` (a VPN Tailscale does not vouch for). The
+//! worker list survives restarts in `workers.json` in the data directory.
 
 #![forbid(unsafe_code)]
 
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
-use slopty_net::admission::Admission;
+use slopty_net::admission::{Admission, parse_allow};
 use slopty_server::{Config, Server};
 
 /// Command line.
@@ -41,6 +41,18 @@ struct Args {
     print_addr: bool,
 }
 
+/// Who may connect: loopback, the tailnet as this machine's Tailscale vouches for it, and the
+/// `[server] allow` ranges of the `settings.toml` beside `data_dir` (the Slopty data directory
+/// the server's own lives in, which the worker and the app read too).
+fn admission(data_dir: &std::path::Path) -> Admission {
+    let root = data_dir.parent().unwrap_or(data_dir);
+    let loaded = slopty_settings::Settings::load(&slopty_settings::path_in(root));
+    if let Some(e) = &loaded.error {
+        tracing::warn!(error = %e, "settings.toml ignored; admitting no extra ranges");
+    }
+    Admission::new(parse_allow(&loaded.settings.server.allow, "[server]"))
+}
+
 /// The machine's computer name, else `server`.
 fn computer_name() -> String {
     std::process::Command::new("scutil")
@@ -67,12 +79,13 @@ async fn main() -> Result<()> {
     let data_dir = args.data_dir.unwrap_or_else(slopty_server::store::default_data_dir);
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
+    let admission = admission(&data_dir);
     let config = Config {
         name: args.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(computer_name),
         quic: slopty_net::endpoint::any(args.port),
         mcp: slopty_net::endpoint::any(args.mcp_port),
         data_dir,
-        admission: Admission::default(),
+        admission,
     };
     let server = Server::start(config).await.context("start (is another server running?)")?;
     if args.print_addr {
@@ -95,4 +108,23 @@ async fn main() -> Result<()> {
     tracing::info!("shutting down");
     server.shutdown().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admission;
+
+    /// The ranges come from the settings beside the server's own directory, and a range that
+    /// does not parse is skipped; with none, only loopback and the tailnet get in.
+    #[test]
+    fn the_allow_list_comes_from_the_shared_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let data_dir = root.path().join("server");
+        assert!(admission(&data_dir).ranges().is_empty(), "no range by default");
+        let settings = "[server]\nallow = [\"10.8.0.0/24\", \"bogus\"]\n";
+        std::fs::write(root.path().join("settings.toml"), settings).unwrap();
+        let ranges: Vec<String> =
+            admission(&data_dir).ranges().iter().map(ToString::to_string).collect();
+        assert_eq!(ranges, ["10.8.0.0/24"]);
+    }
 }

@@ -28,7 +28,7 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use slopty_agent::AgentTable;
 use slopty_core::{ClientId, SessionId, WorkerId};
-use slopty_net::admission::{Admission, Cidr};
+use slopty_net::admission::{Admission, parse_allow};
 use slopty_net::worker::WorkerListener;
 use slopty_proto::terminal::CloseReason;
 use slopty_worker::{ItemStore, Worker, WorkerError};
@@ -99,20 +99,7 @@ fn admission(data_dir: &std::path::Path) -> Admission {
     if let Some(e) = &loaded.error {
         tracing::warn!(error = %e, "settings.toml ignored; admitting no extra ranges");
     }
-    let allow = loaded
-        .settings
-        .worker
-        .allow
-        .iter()
-        .filter_map(|range| match range.parse::<Cidr>() {
-            Ok(cidr) => Some(cidr),
-            Err(e) => {
-                tracing::warn!(%range, error = %e, "[worker] allow: skipped");
-                None
-            }
-        })
-        .collect();
-    Admission::new(allow)
+    Admission::new(parse_allow(&loaded.settings.worker.allow, "[worker]"))
 }
 
 /// Shared daemon state.

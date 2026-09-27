@@ -123,7 +123,7 @@ async fn session(
     let registration = Registration {
         worker: daemon.id,
         name: daemon.name.clone(),
-        port: daemon.listen.port(),
+        listen: daemon.listen,
         caps: now,
         sessions: daemon.worker.summaries().await,
     };
