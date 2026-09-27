@@ -18,15 +18,15 @@ mod tests {
     use std::time::Duration;
 
     use slopty_e2e::harness::artifacts_dir;
-    use slopty_e2e::snapshot::{assert_matches, foreground_fraction, pixels_near};
+    use slopty_e2e::snapshot::{
+        MAC_TOLERANCE as TOLERANCE, assert_matches, foreground_fraction, pixels_near,
+    };
     use slopty_e2e::{Button, Command, Stack};
 
     /// How long a worker round trip (open a shell, run a command) may take.
     const STEP: Duration = Duration::from_secs(20);
     /// Window size for the renders: small, so the goldens stay small.
     const WINDOW: (f32, f32) = (900.0, 600.0);
-    /// Fraction of pixels allowed to differ from a golden (hinting, RTT readout, cursor).
-    const TOLERANCE: f64 = 0.01;
     /// Refresh requests the receiver may send for a target that produces no frame, checked
     /// against the worker's own count of what it was asked for.
     fn refresh_cap() -> u64 {

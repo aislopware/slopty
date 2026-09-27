@@ -8,15 +8,13 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use slopty_e2e::harness::artifacts_dir;
-use slopty_e2e::snapshot::assert_matches;
+use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches};
 use slopty_e2e::{Command, Driver, Dump, FileItemInfo, Stack};
 
 /// How long a worker round trip may take.
 const STEP: Duration = Duration::from_secs(20);
 /// The renders' window: the size the other app goldens use.
 const WINDOW: (f32, f32) = (900.0, 600.0);
-/// Fraction of pixels allowed to differ from a golden.
-const TOLERANCE: f64 = 0.01;
 
 fn gated() -> bool {
     if std::env::var_os("SLOPTY_APP_E2E").is_none() {

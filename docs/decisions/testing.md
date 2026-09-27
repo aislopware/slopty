@@ -250,3 +250,13 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   VideoToolbox and on CoreAudio are bounded at 100 s (`FOR_THE_MACHINE`). None of them
   measures the framework, so the bound only makes a stuck framework fail with the stats. The
   waits on the worker's own logic stay at 3 s.
+
+- ✅ **A Mac golden allows 0.2%, measured, not 1%** (2026-09-27). The 1% every Mac golden
+  allowed was set before the noise was known. At 1280×800 it let ten thousand pixels through, and
+  `through-server.png` kept a washed row and a word of status text for a day. The e2e cursor now
+  never blinks (`harness::pinned_settings`), so a frame no longer depends on the blink phase. Two
+  runs of every golden then differed by 0.051% at most on the Mac (`browser`), 0.005% for
+  `through-server` and 0.009% on the iPhone. `snapshot::MAC_TOLERANCE` is 0.2%, four times
+  that, shared by every Mac case. `transfers` keeps 1%: its port is the one the OS picked and its
+  upload moves (0.43% between runs). iOS stays at 0.3%, since the iPad's last measured noise
+  was 0.06%.

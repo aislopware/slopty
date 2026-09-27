@@ -15,10 +15,16 @@ use image::{Rgba, RgbaImage};
 /// Per-channel difference under which two pixels count as equal.
 ///
 /// Small, because a theme's surfaces sit close together: `canvas` and `panel` are 11 apart in
-/// the light theme, and at 24 a band moved from one to the other still matched. At 4, runs of
-/// every golden differ by 0.3% at most on the Mac and 0.1% in the simulator, bar `transfers`
-/// (0.56%, its ports and readouts), all under their tolerances.
+/// the light theme, and at 24 a band moved from one to the other still matched.
 pub const CHANNEL_SLACK: u8 = 4;
+
+/// Fraction of a Mac golden's pixels allowed to differ.
+///
+/// Two runs of every Mac golden, with the cursor held steady, differed by 0.051% at most
+/// (`browser`; the round-trip figure and a page's anti-aliasing), so 0.2% is four times the noise.
+/// At the old 1% a golden 1280 wide let ten thousand pixels through: a washed row and a word of
+/// status text went unseen.
+pub const MAC_TOLERANCE: f64 = 0.002;
 
 /// Where the goldens live.
 #[must_use]

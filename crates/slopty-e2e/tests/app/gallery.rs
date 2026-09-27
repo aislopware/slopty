@@ -12,15 +12,15 @@
 use std::time::Duration;
 
 use slopty_e2e::harness::artifacts_dir;
-use slopty_e2e::snapshot::assert_matches;
+use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches};
 use slopty_e2e::{Command, Driver, Dump, Stack};
 
 /// How long a worker round trip may take.
 const STEP: Duration = Duration::from_secs(20);
 /// The renders' window: the size the other app goldens use.
 const WINDOW: (f32, f32) = (900.0, 600.0);
-/// Fraction of pixels allowed to differ from a golden.
-const TOLERANCE: f64 = 0.01;
+/// The transfers golden's: a port and a moving upload are in it.
+const TRANSFERS_TOLERANCE: f64 = 0.01;
 
 fn gated() -> bool {
     if std::env::var_os("SLOPTY_APP_E2E").is_none() {
@@ -353,7 +353,8 @@ async fn a_forwarded_port_and_an_upload_show_on_their_tiles() {
         dump.a11y
     );
     let frame = drv.render(&dir.join("transfers.png")).await.unwrap();
-    assert_matches("transfers", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+    // Its port is the one the OS picked and its progress moves: two runs differ by 0.43%.
+    assert_matches("transfers", &frame, TRANSFERS_TOLERANCE, &artifacts_dir()).unwrap();
     let cancel = drv.dump().await.unwrap();
     if let Some(node) = cancel.a11y_node("Button", Some("Cancel upload")) {
         let [x, y, w, h] = node.bounds;

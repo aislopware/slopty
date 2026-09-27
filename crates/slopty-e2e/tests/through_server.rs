@@ -24,7 +24,7 @@ mod tests {
 
     use slopty_e2e::Dump;
     use slopty_e2e::harness::{ServerFleet, TAILNET, artifacts_dir};
-    use slopty_e2e::snapshot::assert_matches;
+    use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches};
 
     /// A round trip over the shaped link, a shell starting, the directory arriving.
     const STEP: Duration = Duration::from_secs(30);
@@ -40,8 +40,6 @@ mod tests {
     const HELD_BOUND: Duration = Duration::from_secs(15);
     /// The renders' window: room for the top bar's pill and two workers' tiles.
     const WINDOW: (f32, f32) = (1280.0, 800.0);
-    /// Fraction of pixels allowed to differ from the golden.
-    const TOLERANCE: f64 = 0.01;
 
     const NEAR: &str = "studio";
     const FAR: &str = "remote";
