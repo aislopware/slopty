@@ -208,6 +208,9 @@ pub enum WorkerMsg {
     /// How this link's packets travel, once the worker's Tailscale has a path and again each
     /// time it changes. Never sent over a link that is not on a tailnet.
     Path(tailnet::LinkPath),
+    /// What the worker can do changed since [`handshake::HelloAck::caps`]: a permission
+    /// granted or taken, a display attached, the load moved.
+    Caps(server::WorkerCaps),
 }
 
 impl WorkerMsg {
@@ -231,6 +234,7 @@ impl WorkerMsg {
             Self::Xfer(_) => "Xfer",
             Self::Ports { .. } => "Ports",
             Self::Path(_) => "Path",
+            Self::Caps(_) => "Caps",
         }
     }
 }

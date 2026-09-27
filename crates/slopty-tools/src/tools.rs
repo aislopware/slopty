@@ -862,6 +862,7 @@ mod tests {
                         cwd: None,
                         repo: None,
                         branch: None,
+                        changes: None,
                         started_ms: 0,
                         cols: 80,
                         rows: 24,

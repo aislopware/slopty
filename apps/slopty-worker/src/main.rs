@@ -137,6 +137,12 @@ pub struct Daemon {
         Arc<parking_lot::Mutex<slopty_worker::wake::Wake<Box<dyn slopty_worker::wake::Holds>>>>,
     /// How each client's packets travel, from this machine's Tailscale.
     pub paths: tailnet::Paths,
+    /// What this worker can do and how it is doing, kept current for the whole daemon's life
+    /// ([`slopty_worker::caps::watch`]): every client's greeting carries it, a change goes out
+    /// as `WorkerMsg::Caps`, and the server link registers with it.
+    pub caps: tokio::sync::watch::Receiver<slopty_proto::server::WorkerCaps>,
+    /// The daemon's home directory, which a client writes as `~`.
+    pub home: String,
 }
 
 impl Daemon {
@@ -211,9 +217,8 @@ impl slopty_worker::wake::Holds for Assertions {
     }
 }
 
-/// Register with the configured server, if there is one, on a task of its own: capabilities
-/// are probed first (the agents' versions follow once their `--version` answers), then the
-/// link dials and keeps dialing (`server::run`).
+/// Register with the configured server, if there is one, on a task of its own that dials and
+/// keeps dialing (`server::run`), registering with the daemon's [`Daemon::caps`].
 fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) {
     let settings = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings;
     let addr = match server::configured(flag, &settings) {
@@ -241,13 +246,27 @@ fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) 
         daemon.events.clone(),
         slopty_agent::hooks::relay_beside_this_binary(),
     );
-    let daemon = daemon.clone();
+    let caps = daemon.caps.clone();
+    tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, caps));
+}
+
+/// Keep `caps` current (the agents' versions follow once their `--version` answers) and tell
+/// every client each change.
+fn watch_caps(
+    caps: tokio::sync::watch::Sender<slopty_proto::server::WorkerCaps>,
+    events: broadcast::Sender<slopty_proto::WorkerMsg>,
+) {
+    let mut changed = caps.subscribe();
     tokio::spawn(async move {
-        let (caps, watched) = tokio::sync::watch::channel(slopty_worker::caps::probe(&[]));
-        tokio::spawn(server::run(daemon, orchestrator, endpoint, addr, watched));
         let agents = slopty_worker::caps::installed_agents().await;
         caps.send_modify(|c| c.agents.clone_from(&agents));
         slopty_worker::caps::watch(caps, agents).await;
+    });
+    tokio::spawn(async move {
+        while changed.changed().await.is_ok() {
+            let now = changed.borrow_and_update().clone();
+            let _sent = events.send(slopty_proto::WorkerMsg::Caps(now));
+        }
     });
 }
 
@@ -302,6 +321,8 @@ async fn run() -> Result<()> {
         move |live| wake.lock().streams(live)
     });
     let paths = tailnet::Paths::spawn(listener.admission().clone());
+    let (caps_tx, caps) = tokio::sync::watch::channel(slopty_worker::caps::probe(&[]));
+    watch_caps(caps_tx, events.clone());
     let daemon = Daemon {
         worker,
         listener,
@@ -325,6 +346,8 @@ async fn run() -> Result<()> {
         screens,
         wake,
         paths,
+        caps,
+        home: std::env::var("HOME").unwrap_or_default(),
     };
     let transfers = Arc::clone(&daemon.transfers);
     tokio::task::spawn_blocking(move || {

@@ -432,6 +432,8 @@ mod tests {
         let ack = slopty_proto::handshake::HelloAck {
             worker: slopty_core::WorkerId::new(),
             name: "bench".to_owned(),
+            home: String::new(),
+            caps: slopty_proto::server::WorkerCaps::default(),
             sessions: Vec::new(),
         };
         accepted.tx.send(&slopty_net::WorkerMsg::HelloAck(ack)).await.unwrap();

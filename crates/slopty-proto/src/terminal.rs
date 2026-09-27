@@ -82,6 +82,10 @@ pub struct SessionSummary {
     /// digits when `HEAD` is detached. Read again when the directory changes and when a
     /// command ends, so a checkout shows by the next prompt.
     pub branch: Option<String>,
+    /// What [`Self::repo`]'s working tree has changed against `HEAD`, counted by the worker
+    /// in the background after the same moments the branch is read; `None` outside a
+    /// repository, before the first count, or when git could not say.
+    pub changes: Option<RepoChanges>,
     /// Milliseconds since the Unix epoch when the session's program was spawned. Wall clock,
     /// because the summary is held and relayed (the server hands it to clients that join
     /// later) and an age measured at sending would be wrong by the time it is read.
@@ -98,6 +102,18 @@ pub struct SessionSummary {
     pub command: Vec<String>,
     /// The coding agent running in it and what it is doing, when one is.
     pub agent: Option<crate::agent::SessionAgent>,
+}
+
+/// A working tree's changes against `HEAD`: what `git diff --numstat HEAD` counts, plus the
+/// untracked files `.gitignore` does not hide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct RepoChanges {
+    /// Files changed, added, removed or untracked.
+    pub files: u32,
+    /// Lines added in tracked text files.
+    pub added: u32,
+    /// Lines removed in tracked text files.
+    pub removed: u32,
 }
 
 /// Why a session closed.

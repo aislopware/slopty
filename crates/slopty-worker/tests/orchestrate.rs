@@ -111,6 +111,7 @@ mod orchestrate {
             exited: None,
             port_hints: None,
             moves: None,
+            touched: None,
         })
         .unwrap();
         until_screen(&handle, |s| last_row(s) == "$").await;

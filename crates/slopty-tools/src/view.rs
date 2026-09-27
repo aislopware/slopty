@@ -1174,6 +1174,7 @@ mod tests {
             cwd: Some(cwd.to_owned()),
             repo: None,
             branch: None,
+            changes: None,
             started_ms: 0,
             cols: 120,
             rows: 40,

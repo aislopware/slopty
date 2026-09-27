@@ -64,6 +64,7 @@ mod actor {
             exited: None,
             port_hints: None,
             moves,
+            touched: None,
         })
         .unwrap();
         (handle, child, tap_rx)

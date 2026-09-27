@@ -19,7 +19,7 @@ use slopty_proto::handshake::HelloAck;
 use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::items::ItemSync;
 use slopty_proto::screen::{Feedback, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest};
-use slopty_proto::terminal::{CloseReason, SessionState, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{CloseReason, SessionSummary, TermEvent, TermRequest, TermSize};
 use slopty_proto::transfer::{ClipMsg, Dest, XferMsg};
 use slopty_worker::WorkerError;
 use slopty_worker::clip::Paste;
@@ -142,9 +142,9 @@ struct Asked {
 /// has (in the `HelloAck`, the first snapshot or a resync) is not sent to it twice.
 #[derive(Debug, Default)]
 struct Heard {
-    /// Each session told of, in the state it was told in: a summary in another state (the
-    /// program exited) is news.
-    sessions: HashMap<SessionId, SessionState>,
+    /// Each session told of, as it was told: a summary that differs (the program exited, the
+    /// directory, branch or the working tree's changes moved) is news.
+    sessions: HashMap<SessionId, SessionSummary>,
     /// The item registry version of the last snapshot sent: deltas up to it are in it.
     items_floor: u64,
 }
@@ -154,7 +154,7 @@ impl Heard {
     fn admit(&mut self, msg: &WorkerMsg) -> bool {
         match msg {
             WorkerMsg::SessionOpened(summary) => {
-                self.sessions.insert(summary.id, summary.state) != Some(summary.state)
+                self.sessions.insert(summary.id, summary.clone()).as_ref() != Some(summary)
             }
             WorkerMsg::SessionClosed { session, .. } => {
                 self.sessions.remove(session);
@@ -202,13 +202,16 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     // Subscribed before anything the greeting carries is read, so an event in between is
     // heard, not lost; `Heard` drops the ones the greeting already told.
     let events = daemon.events.subscribe();
+    let caps = daemon.caps.borrow().clone();
     let ack = HelloAck {
         worker: daemon.id,
         name: daemon.name.clone(),
+        home: daemon.home.clone(),
+        caps,
         sessions: daemon.worker.summaries().await,
     };
     let mut heard = Heard {
-        sessions: ack.sessions.iter().map(|s| (s.id, s.state)).collect(),
+        sessions: ack.sessions.iter().map(|s| (s.id, s.clone())).collect(),
         ..Heard::default()
     };
     let mut greeting = vec![WorkerMsg::HelloAck(ack), WorkerMsg::Items(daemon.items.snapshot())];
@@ -528,6 +531,7 @@ async fn resync(
     }
     msgs.extend(summaries.into_iter().map(WorkerMsg::SessionOpened));
     msgs.push(WorkerMsg::Items(daemon.items.snapshot()));
+    msgs.push(WorkerMsg::Caps(daemon.caps.borrow().clone()));
     // Collected first: the locks must not be held across the sends.
     let agents = daemon.agents.lock().snapshot();
     msgs.extend(agents.into_iter().map(WorkerMsg::Agent));
@@ -1182,7 +1186,7 @@ mod tests {
     use slopty_proto::input::{KeyAction, KeyCode, Mods};
     use slopty_proto::items::{ItemOp, ItemSync};
     use slopty_proto::screen::ScreenInput;
-    use slopty_proto::terminal::{CloseReason, SessionState, SessionSummary};
+    use slopty_proto::terminal::{CloseReason, RepoChanges, SessionState, SessionSummary};
 
     use super::{Heard, InputOrder, Route, StreamId, route};
 
@@ -1191,12 +1195,17 @@ mod tests {
     }
 
     fn opened(id: SessionId) -> WorkerMsg {
-        WorkerMsg::SessionOpened(SessionSummary {
+        WorkerMsg::SessionOpened(summary(id))
+    }
+
+    fn summary(id: SessionId) -> SessionSummary {
+        SessionSummary {
             id,
             title: String::new(),
             cwd: None,
             repo: None,
             branch: None,
+            changes: None,
             started_ms: 0,
             cols: 80,
             rows: 24,
@@ -1204,7 +1213,7 @@ mod tests {
             viewers: 0,
             command: Vec::new(),
             agent: None,
-        })
+        }
     }
 
     fn delta(version: u64) -> WorkerMsg {
@@ -1214,12 +1223,12 @@ mod tests {
 
     /// The events are subscribed to before the greeting is read, so one that happened in
     /// between arrives after it: what the greeting (or a resync) already told is not told
-    /// again, and what it did not is.
+    /// again, and what it did not is, a summary whose working tree moved included.
     #[test]
     fn an_event_the_greeting_carried_is_not_told_again() {
         let (told, new) = (SessionId::new(), SessionId::new());
         let mut heard =
-            Heard { sessions: HashMap::from([(told, SessionState::Running)]), ..Heard::default() };
+            Heard { sessions: HashMap::from([(told, summary(told))]), ..Heard::default() };
         let snapshot = WorkerMsg::Items(ItemSync::Snapshot { version: 5, items: Vec::new() });
         assert!(heard.admit(&snapshot));
 
@@ -1234,10 +1243,14 @@ mod tests {
         }
         assert!(heard.admit(&exited), "its program exited: the new state is news");
         assert!(!heard.admit(&exited), "and told once");
+        let mut edited = exited.clone();
+        if let WorkerMsg::SessionOpened(summary) = &mut edited {
+            summary.changes = Some(RepoChanges { files: 1, added: 3, removed: 0 });
+        }
+        assert!(heard.admit(&edited), "its working tree moved");
         let closed = WorkerMsg::SessionClosed { session: told, reason: CloseReason::Exited };
         assert!(heard.admit(&closed));
-        let exited = SessionState::Exited { status: 3 };
-        assert_eq!(heard.sessions, HashMap::from([(new, exited)]));
+        assert_eq!(heard.sessions.keys().collect::<Vec<_>>(), [&new]);
     }
 
     /// Each input reaches the PTY once and in the order it was sent, whichever copy of it came

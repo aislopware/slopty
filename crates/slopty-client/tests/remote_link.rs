@@ -39,7 +39,13 @@ mod tests {
         let worker = WorkerId::new();
         let accepted = tokio::spawn(async move {
             let mut client = listener.accept().await.unwrap();
-            let ack = HelloAck { worker, name: "worker".to_owned(), sessions: Vec::new() };
+            let ack = HelloAck {
+                worker,
+                name: "worker".to_owned(),
+                home: String::new(),
+                caps: slopty_proto::server::WorkerCaps::default(),
+                sessions: Vec::new(),
+            };
             client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
             client
         });

@@ -253,6 +253,40 @@ mod golden {
         );
     }
 
+    /// The worker's greeting names its home, so a client writes `~` knowing, and what it can do;
+    /// a later change to what it can do comes on its own.
+    #[test]
+    fn worker_greeting() {
+        use slopty_core::WorkerId;
+        use slopty_proto::handshake::HelloAck;
+        use slopty_proto::server::{Os, WorkerCaps};
+        let caps = WorkerCaps {
+            os: Os::MacOs,
+            os_version: "26.5".to_owned(),
+            arch: "aarch64".to_owned(),
+            cpus: 12,
+            memory: 32 << 30,
+            encoders: Vec::new(),
+            displays: Vec::new(),
+            agents: Vec::new(),
+            can_capture: false,
+            can_inject: true,
+            load: 2.5,
+            version: "0.1.0".to_owned(),
+        };
+        snap(
+            "worker_hello_ack",
+            &WorkerMsg::HelloAck(HelloAck {
+                worker: WorkerId::from_uuid(Uuid::from_u128(0x77)),
+                name: "mac-studio".to_owned(),
+                home: "/Users/w".to_owned(),
+                caps: caps.clone(),
+                sessions: Vec::new(),
+            }),
+        );
+        snap("worker_caps", &WorkerMsg::Caps(WorkerCaps { can_capture: true, ..caps }));
+    }
+
     /// Where a session runs: the directory it reports, the repository the worker resolved it
     /// to and the branch checked out there, and when it started. The workspace groups shells
     /// by that root and names them by the branch, so both are wire-visible.
@@ -267,6 +301,11 @@ mod golden {
                 cwd: Some("/w/slopty/crates/ui".to_owned()),
                 repo: Some("/w/slopty".to_owned()),
                 branch: Some("main".to_owned()),
+                changes: Some(slopty_proto::terminal::RepoChanges {
+                    files: 3,
+                    added: 12,
+                    removed: 4,
+                }),
                 started_ms: 1_790_000_000_000,
                 cols: 80,
                 rows: 24,

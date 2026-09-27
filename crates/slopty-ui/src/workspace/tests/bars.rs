@@ -58,6 +58,7 @@ fn shell_in_repo(
     let summary = SessionSummary {
         repo: Some(repo.to_owned()),
         branch: Some(branch.to_owned()),
+        changes: None,
         ..summary(session, Some(cwd))
     };
     view.update_in(cx, |v, _window, cx| {

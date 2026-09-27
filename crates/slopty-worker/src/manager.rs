@@ -81,6 +81,8 @@ struct Inner {
     moves_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
     /// The coding agents seen in the sessions, which every summary carries.
     agents: Arc<dyn Agents>,
+    /// Each repository's changes against `HEAD`, which every summary in it carries.
+    changes: crate::changes::Changes,
     /// Since when each exited session has had no viewer.
     unwatched: Mutex<Unwatched>,
 }
@@ -104,6 +106,7 @@ impl Worker {
         let (tap, tap_rx) = mpsc::channel(TAP_QUEUE);
         let (port_hints, port_hints_rx) = mpsc::unbounded_channel();
         let (moves, moves_rx) = mpsc::unbounded_channel();
+        let changes = crate::changes::Changes::start(crate::changes::git_counter(), moves.clone());
         let worker = Self {
             inner: Arc::new(Inner {
                 ptyd: tokio::sync::Mutex::new(client),
@@ -116,6 +119,7 @@ impl Worker {
                 moves,
                 moves_rx: Mutex::new(Some(moves_rx)),
                 agents,
+                changes,
                 unwatched: Mutex::new(Unwatched::default()),
             }),
         };
@@ -217,6 +221,7 @@ impl Worker {
             exited,
             port_hints: Some(self.inner.port_hints.clone()),
             moves: Some(self.inner.moves.clone()),
+            touched: Some(self.inner.changes.toucher()),
         })?;
         let started_ms = attached.started_ms;
         self.inner
@@ -276,6 +281,7 @@ impl Worker {
                 .clone()
                 .unwrap_or_else(|| command.first().cloned().unwrap_or_else(|| "shell".to_owned())),
             cwd: snap.cwd,
+            changes: snap.repo.as_deref().and_then(|repo| self.inner.changes.get(repo)),
             repo: snap.repo,
             branch: snap.branch,
             started_ms,
@@ -338,6 +344,7 @@ impl Worker {
     /// Kill the child and drop the session everywhere.
     pub async fn close(&self, id: SessionId) -> Result<(), WorkerError> {
         let entry = self.inner.sessions.lock().remove(&id).ok_or(WorkerError::NoSuchSession)?;
+        self.inner.changes.forget(id);
         entry.handle.close();
         self.inner.ptyd.lock().await.close(id).await?;
         Ok(())

@@ -93,6 +93,7 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     view.update_in(cx, |v, _w, cx| {
         let summary = SessionSummary {
             branch: Some("main".into()),
+            changes: None,
             started_ms: u64::try_from(started).unwrap(),
             ..summary(session, Some("/Users/me/oss/slopty"))
         };
@@ -256,6 +257,7 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
         let started = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
         sessions.push(SessionSummary {
             branch: Some("main".into()),
+            changes: None,
             started_ms: u64::try_from(started).unwrap(),
             ..summary(session, Some(&format!("/Users/me/src/project_{n}")))
         });

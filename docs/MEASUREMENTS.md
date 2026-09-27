@@ -5786,3 +5786,24 @@ SLOPTY_STREAM_WINDOW=4194304 cargo nextest run -p slopty-net --release \
   --test echo_beside_sessions --run-ignored only --no-capture
 ```
 
+
+## 2026-09-27 — counting a working tree's changes
+
+What one `slopty_worker::changes::count` costs, `git diff --numstat HEAD` and `git ls-files
+--others --exclude-standard` run side by side, release, five counts after a warm-up, the
+repositories on the external volume, load 7–11:
+
+| repository | tracked files | changes found | fastest | slowest |
+| --- | --- | --- | --- | --- |
+| slopty | 616 | 37 files, +289 −38 | 32 ms | 40 ms |
+| zed | 4351 | clean | 34 ms | 36 ms |
+| ghostty | 5890 | clean (large ignored build caches) | 168 ms | 172 ms |
+
+A count runs on a Tokio task, never on a session actor, at most one per repository at a time and
+no sooner than 2 s after the last began (`changes::MIN_INTERVAL`), so the worst of these costs a
+background core a twelfth of the time at the fastest cadence.
+
+```sh
+SLOPTY_COUNT_REPO=/path/to/repo cargo test -p slopty-worker --release --lib \
+  counting_a_repository_costs -- --ignored --nocapture
+```

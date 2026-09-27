@@ -483,6 +483,9 @@ pub struct SessionStart {
     /// Where the session says its directory, repository or branch changed, so its summary is
     /// sent again.
     pub moves: Option<mpsc::UnboundedSender<SessionId>>,
+    /// Where the session says which repository it is in, each time it reads the branch, so
+    /// that repository's changes are counted ([`crate::changes`]).
+    pub touched: Option<mpsc::UnboundedSender<(SessionId, String)>>,
 }
 
 /// Spawn the actor thread.
@@ -764,6 +767,8 @@ struct Actor {
     port_hints: Option<mpsc::UnboundedSender<SessionId>>,
     /// See [`SessionStart::moves`].
     moves: Option<mpsc::UnboundedSender<SessionId>>,
+    /// See [`SessionStart::touched`].
+    touched: Option<mpsc::UnboundedSender<(SessionId, String)>>,
     /// No port hint is sent before this, so a flood of addresses is one hint a second.
     next_hint: Option<tokio::time::Instant>,
 }
@@ -886,6 +891,7 @@ impl Actor {
             activity,
             port_hints: start.port_hints,
             moves: start.moves,
+            touched: start.touched,
             next_hint: None,
         })
     }
@@ -894,6 +900,8 @@ impl Actor {
         let mut buf = vec![0_u8; READ_BUF];
         let pty = Arc::clone(&self.master);
         let room = Arc::clone(&self.room);
+        // A session adopted in a repository has its changes counted before its next prompt.
+        self.touch_repo();
         // The replay answered nothing yet: take its title and cwd, then checkpoint at once.
         // ptyd handed us its ring with the master, so until this lands another restart would
         // have nothing but the previous checkpoint.
@@ -996,6 +1004,7 @@ impl Actor {
         // prompt").
         if std::mem::take(&mut self.place_due) {
             self.resolve_place();
+            self.touch_repo();
         }
         self.checkpoint_if_owed();
     }
@@ -1016,6 +1025,14 @@ impl Actor {
             branch: self.branch.clone(),
         });
         self.moved();
+    }
+
+    /// Tell the daemon which repository the session is in, so its changes are counted again:
+    /// after each directory report and command end, since either may have edited the tree.
+    fn touch_repo(&self) {
+        if let (Some(touched), Some(repo)) = (&self.touched, &self.repo) {
+            let _sent = touched.send((self.id, repo.clone()));
+        }
     }
 
     /// Tell the daemon the summary is out of date.

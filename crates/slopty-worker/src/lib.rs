@@ -10,6 +10,7 @@
 //! files, [`ports`]); [`caps`] says what this worker can do.
 
 pub mod caps;
+pub mod changes;
 pub mod clip;
 pub mod ctl;
 pub mod file;

@@ -34,7 +34,8 @@ plain UDP (n0's `noq`, standalone) with a null crypto provider: every worker is 
 Tailscale, WireGuard or a VPN, which encrypts and authenticates already, so Slopty adds no
 TLS, no endpoint keys, no relays and no pairing. A worker is named by `host[:port]` (a
 `MagicDNS` name, a LAN name or an IP; port 45550 by default) and identified by the `WorkerId`
-in its `HelloAck`. It admits a connection once, before any handshake state exists: loopback and the
+in its `HelloAck`, which also names the daemon's home directory (a client writes paths under it
+as `~`) and carries its `WorkerCaps`; a later change to those comes as `WorkerMsg::Caps`. It admits a connection once, before any handshake state exists: loopback and the
 `[worker] allow` ranges of its `settings.toml` by address, and a tailnet address
 (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) only as the machine's Tailscale vouches for it through
 `whois` and the tailnet's grants (`slopty_net::admission`, `slopty-tailnet`). The server
@@ -302,7 +303,9 @@ tailnet address when it listens everywhere and dialed over loopback) and its ses
 session and agent events,
 and redials with capped backoff when the link drops. Every `SessionSummary` carries the agent
 running in the session, its status and the signal that status came from (`SessionAgent`), read
-from the daemon's agent table (`Worker::summaries`),
+from the daemon's agent table (`Worker::summaries`), and the working tree's changes against
+`HEAD` when the session is in a repository (`slopty-worker::changes`, counted by git on a task
+of its own, at most one run per repository every 2 s),
 and the server's hub keeps each listed terminal's agent current from the `Agent` events, so
 `ListTerminals` (and `slopty workers`, which counts the agents waiting on a human from it)
 answers without asking each worker. `slopty-worker::orchestrate::Orchestrator`

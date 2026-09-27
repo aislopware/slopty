@@ -52,9 +52,10 @@ pub struct Registration {
 }
 
 /// Operating system of a worker.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Os {
     /// macOS.
+    #[default]
     MacOs,
     /// Linux.
     Linux,
@@ -85,7 +86,8 @@ pub struct InstalledAgent {
 }
 
 /// What a worker can do and how it is doing, sent at registration and whenever it changes.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+/// The default is a worker that says nothing about itself: no permission, no display, no agent.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct WorkerCaps {
     /// Operating system.
     pub os: Os,

@@ -20,6 +20,7 @@ fn crowd(
         let session = SessionId::new();
         summaries.push(SessionSummary {
             branch: Some("main".into()),
+            changes: None,
             started_ms: u64::try_from(started).unwrap(),
             ..summary(session, Some(&format!("/Users/me/src/project_{n}")))
         });

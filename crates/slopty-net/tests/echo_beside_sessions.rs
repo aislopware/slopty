@@ -44,8 +44,13 @@ mod tests {
     /// its own), and one session that echoes every key it is sent.
     async fn serve(listener: WorkerListener, lifted: bool) {
         let mut client = listener.accept().await.unwrap();
-        let ack =
-            HelloAck { worker: WorkerId::new(), name: "worker".to_owned(), sessions: Vec::new() };
+        let ack = HelloAck {
+            worker: WorkerId::new(),
+            name: "worker".to_owned(),
+            home: String::new(),
+            caps: slopty_proto::server::WorkerCaps::default(),
+            sessions: Vec::new(),
+        };
         client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
         let wait = streams::SESSION_STREAM_WAIT;
         let mut typed = streams::open_session(&client.conn, SessionId::new(), wait).await.unwrap();

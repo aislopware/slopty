@@ -1713,3 +1713,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     to 20 ms (MEASUREMENTS, "the prediction threshold over a shaped link").
   Tests: `prediction_gates` (grid), `the_line_discipline_is_in_the_modes_and_sends_a_frame`
   (engine), `guesses_show_from_half_a_refresh` (predict).
+
+- ✅ **A summary carries its repository's changes, counted off every latency path**
+  (2026-09-27). A person running agents on several Macs checks first what each has changed, and
+  the summary had the repository and the branch but not that. `SessionSummary.changes` is the
+  working tree against `HEAD`: files, lines added and lines removed.
+  - **Counted by git, never where a key waits.** A session actor only sends which repository it
+    is in over a channel, when it reads the branch (a directory reported, a command ended) and
+    when it starts. `slopty_worker::changes` runs `git diff --numstat HEAD` and `git ls-files
+    --others --exclude-standard` on a Tokio task, one run per repository at a time and none
+    sooner than 2 s after the last began. Touches during a run fold into one more. A count of
+    32–40 ms here and 170 ms on ghostty's tree (MEASUREMENTS.md, "counting a working tree's
+    changes") therefore costs a background core at most a twelfth of its time.
+  - **No lock, no dialog.** Both runs pass `--no-optional-locks`, so a count never takes the
+    index lock from a person's own `git`. The git run is the first on `PATH`, Homebrew's, or the
+    Command Line Tools' or Xcode's own, never `/usr/bin/git`: on a Mac without the developer
+    tools that shim offers to install them, and a daemon must not put up a dialog. No git, no
+    `HEAD`, a failure or a run over 10 s gives `None`.
+  - **A changed summary reaches a direct client.** A client connection told a session's summary
+    again only when its state changed (the program exited). The directory and branch reach
+    viewers as `TermEvent::Cwd`, but the changes have no event. `Heard` now remembers the whole
+    summary it sent and lets through one that differs.
+  - Tests: `numstat_counts_files_and_lines_and_a_binary_as_a_file`,
+    `touches_fold_into_one_more_count_and_only_a_change_is_announced`,
+    `a_working_tree_is_counted_against_head`, the worker's
+    `a_shell_in_a_repository_carries_its_changes` and
+    `an_event_the_greeting_carried_is_not_told_again`, and the `worker_session_opened` golden.

@@ -43,3 +43,5 @@ objc2-core-video.workspace = true
 objc2-video-toolbox.workspace = true
 slopty-grid.workspace = true
 tempfile.workspace = true
+# Paused time for the change counts' coalescing test.
+tokio = { workspace = true, features = [ "test-util" ] }

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, WorkerId};
 
+use crate::server::WorkerCaps;
 use crate::terminal::SessionSummary;
 
 /// First message from a client.
@@ -15,13 +16,19 @@ pub struct Hello {
 }
 
 /// Worker's acceptance.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct HelloAck {
     /// Worker identity: a UUID the worker keeps in its data directory, so a client keys
     /// everything by it and not by the address it happened to dial.
     pub worker: WorkerId,
     /// Worker name ("mac-studio").
     pub name: String,
+    /// The worker's home directory (`$HOME` of its daemon), so a client writes a path under it
+    /// as `~/…` knowing, not guessing from the path's shape. Empty when the daemon has none.
+    pub home: String,
+    /// What the worker can do and how it is doing, as the server's directory lists it; later
+    /// changes come as [`WorkerMsg::Caps`](crate::WorkerMsg::Caps).
+    pub caps: WorkerCaps,
     /// Sessions currently alive on the worker, so the client can reattach immediately.
     pub sessions: Vec<SessionSummary>,
 }

@@ -3939,6 +3939,80 @@ mod tests {
         serde_json::from_str(reply.trim()).unwrap()
     }
 
+    /// The greeting names the daemon's home, which a client writes as `~`, and what the worker
+    /// can do, as the server's directory would list it.
+    #[tokio::test]
+    async fn the_greeting_names_the_home_and_what_the_worker_can_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(worker.ack.home, home);
+        let caps = &worker.ack.caps;
+        assert!(caps.cpus > 0 && caps.memory > 0 && !caps.os_version.is_empty(), "{caps:?}");
+        assert_eq!(caps.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// A shell in a repository whose working tree has an edited file and a new one carries the
+    /// changes in its summary once the worker counted them, off the session, after its prompt.
+    #[tokio::test]
+    async fn a_shell_in_a_repository_carries_its_changes() {
+        use slopty_proto::terminal::RepoChanges;
+
+        let Some(git) = slopty_worker::changes::git() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(dir.path()).unwrap().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new(git)
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "first"]);
+        std::fs::write(repo.join("a.txt"), "one\n2\nthree\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "new\n").unwrap();
+
+        let (_guard, mut worker) = connect(dir.path()).await;
+        worker
+            .tx
+            .send(&ClientMsg::OpenSession(OpenSession {
+                size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
+                cwd: Some(repo.to_string_lossy().into_owned()),
+                // The directory report a shell's prompt hook prints (OSC 7), then nothing more.
+                command: vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    r#"printf '\033]7;file://localhost%s\007' "$PWD"; exec sleep 60"#.to_owned(),
+                ],
+                env: Vec::new(),
+                title: None,
+                attach: false,
+            }))
+            .await
+            .unwrap();
+        let expected = RepoChanges { files: 2, added: 2, removed: 1 };
+        let root = repo.to_string_lossy().into_owned();
+        next_msg(&mut worker, |m| match m {
+            WorkerMsg::SessionOpened(s)
+                if s.repo.as_deref() == Some(root.as_str()) && s.changes == Some(expected) =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+        .await;
+    }
+
     /// A session's summary carries the agent a hook reported in it, and that a hook said so,
     /// for every later listing.
     #[tokio::test]

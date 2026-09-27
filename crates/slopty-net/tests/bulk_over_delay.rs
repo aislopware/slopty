@@ -58,7 +58,13 @@ mod tests {
         let worker = WorkerId::new();
         let received = tokio::spawn(async move {
             let mut client = listener.accept().await.unwrap();
-            let ack = HelloAck { worker, name: "worker".to_owned(), sessions: Vec::new() };
+            let ack = HelloAck {
+                worker,
+                name: "worker".to_owned(),
+                home: String::new(),
+                caps: slopty_proto::server::WorkerCaps::default(),
+                sessions: Vec::new(),
+            };
             client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
             let Uni::Bulk { mut rx, .. } = streams::accept_uni(&client.conn).await.unwrap() else {
                 panic!("a bulk stream")

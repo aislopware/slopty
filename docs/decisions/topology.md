@@ -645,3 +645,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `a_worker_on_the_servers_machine_is_published_at_its_tailnet_address` (the bound
     cases), the server's `the_allow_list_comes_from_the_shared_settings`, and
     `the_app_finds_its_workers_through_the_server`.
+
+- ✅ **A worker's greeting names its home and what it can do** (2026-09-27). A client guessed a
+  home directory from a path's shape (`/Users/<name>`), so a worker whose daemon runs with
+  another `HOME` showed its whole path where `~` belonged, and a client that dialed a worker
+  directly never heard its capabilities: only the server's directory had them, and nothing
+  showed a Mac without Screen Recording until a window stream failed.
+  - `HelloAck.home` is the daemon's `$HOME`. `HelloAck.caps` is the `WorkerCaps` the server
+    registers with, and `WorkerMsg::Caps` carries each later change: a grant, a display, a load
+    step. The daemon keeps one caps watch for its whole life (`Daemon::caps`), which the
+    greeting, the resync after a lagged broadcast and the server link all read.
+  - Tests: the `worker_hello_ack` and `worker_caps` goldens, and the worker's
+    `the_greeting_names_the_home_and_what_the_worker_can_do`.

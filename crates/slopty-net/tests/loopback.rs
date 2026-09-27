@@ -20,7 +20,13 @@ mod tests {
     }
 
     fn ack(worker: WorkerId) -> HelloAck {
-        HelloAck { worker, name: "worker".to_owned(), sessions: Vec::new() }
+        HelloAck {
+            worker,
+            name: "worker".to_owned(),
+            home: String::new(),
+            caps: slopty_proto::server::WorkerCaps::default(),
+            sessions: Vec::new(),
+        }
     }
 
     /// A worker on every interface, any port, answering each `Hello` with `ack(id)` and holding
