@@ -258,5 +258,5 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   runs of every golden then differed by 0.051% at most on the Mac (`browser`), 0.005% for
   `through-server` and 0.009% on the iPhone. `snapshot::MAC_TOLERANCE` is 0.2%, four times
   that, shared by every Mac case. `transfers` keeps 1%: its port is the one the OS picked and its
-  upload moves (0.43% between runs). iOS stays at 0.3%, since the iPad's last measured noise
-  was 0.06%.
+  upload moves (0.43% between runs). iOS went from 0.3% to 0.05%: the iPad's runs, once 0.06%
+  apart with a blinking cursor, now differ by 0.002%.

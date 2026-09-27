@@ -20,10 +20,10 @@ mod tests {
     const STEP: Duration = Duration::from_secs(30);
     /// A viewport narrower than this is a phone (`slopty_client::layout`'s `phone_below`).
     const PHONE_BELOW: f32 = 700.0;
-    /// Fraction of pixels allowed to differ from a golden (hinting, RTT readout, cursor): runs
-    /// differ by 0.06 % at most. At 1 %, an iPad frame, mostly canvas, passed with its whole
-    /// chrome redrawn (0.84 %).
-    const TOLERANCE: f64 = 0.003;
+    /// Fraction of pixels allowed to differ from a golden: with the cursor steady, two runs
+    /// differ by 0.009 % at most (iPhone; the iPad 0.002 %), so 0.05 % is five times the noise.
+    /// At 1 %, an iPad frame, mostly canvas, passed with its whole chrome redrawn (0.84 %).
+    const TOLERANCE: f64 = 0.0005;
     /// Long enough for a spring or the soft keyboard to come to rest before a golden.
     const SETTLE: Duration = Duration::from_millis(600);
     /// Foreground below this is a blank frame: a fitted terminal's few lines are under 1 % of
