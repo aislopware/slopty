@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use slopty_proto::conversation::{
-    Body, Entry, LiveId, LiveKind, NoteKind, ResultStatus, ThreadId, ToolCall, ToolDetail,
+    Body, Entry, LiveId, LiveKind, NoteKind, ResultStatus, ThreadId, ToolCall, ToolDetail, Turn,
     WriteKind,
 };
 
@@ -223,7 +223,32 @@ pub enum Row {
         /// Opened by the reader.
         open: bool,
     },
-    /// An answer, thinking, a tool call, a compaction, an interruption, a note.
+    /// Answer text. The last answer of a settled turn is its `end`: it carries the turn's
+    /// time and its copy.
+    Answer {
+        /// The entry.
+        id: String,
+        /// It ends a settled turn.
+        end: bool,
+    },
+    /// The files a settled turn changed, under its answer.
+    Changes {
+        /// The turn's prompt.
+        prompt: String,
+    },
+    /// In the session's changes: a file, heading the edits that changed it.
+    File {
+        /// Its path.
+        path: String,
+    },
+    /// In the session's changes: one edit or write, its diff whole.
+    Edit {
+        /// Its thread.
+        thread: ThreadId,
+        /// The call.
+        id: String,
+    },
+    /// Thinking, a tool call, a compaction, an interruption, a note, a rewind.
     Entry {
         /// The entry.
         id: String,
@@ -259,6 +284,13 @@ impl Row {
     pub fn key(&self) -> String {
         match self {
             Self::Prompt { id } => format!("p:{id}"),
+            Self::Answer { id, .. } => format!("a:{id}"),
+            Self::Changes { prompt } => format!("c:{prompt}"),
+            Self::File { path } => format!("file:{path}"),
+            Self::Edit { thread, id } => match thread {
+                ThreadId::Main => format!("edit:{id}"),
+                ThreadId::Agent(agent) => format!("edit:{agent}:{id}"),
+            },
             Self::Fold { id, .. } => fold_key(id),
             Self::Entry { id, .. } => format!("e:{id}"),
             Self::Group { ids, .. } => group_key(ids.first().map_or("", String::as_str)),
@@ -331,8 +363,9 @@ fn turns(entries: &[Entry]) -> Vec<std::ops::Range<usize>> {
     starts.iter().copied().zip(ends).map(|(a, b)| a..b).filter(|r| !r.is_empty()).collect()
 }
 
-/// What a turn's work adds up to.
-fn fold_of(turn: &[Entry]) -> Fold {
+/// What a turn's work adds up to; `figures` are the transcript's own for it, whose end Claude
+/// Code stamped when it closed the turn.
+fn fold_of(turn: &[Entry], figures: Option<&Turn>) -> Fold {
     let mut fold = Fold::default();
     let start = turn.first().map_or(0, |e| e.at_ms);
     let mut end = start;
@@ -356,6 +389,13 @@ fn fold_of(turn: &[Entry]) -> Fold {
         }
     }
     fold.took_ms = (start > 0 && end > start).then(|| end.saturating_sub(start));
+    if let Some(figures) = figures
+        && let Some(ended) = figures.ended_ms
+        && figures.started_ms > 0
+        && ended > figures.started_ms
+    {
+        fold.took_ms = Some(ended.saturating_sub(figures.started_ms));
+    }
     fold
 }
 
@@ -417,6 +457,9 @@ impl Builder<'_> {
                         }
                     }
                 }
+                _ if matches!(entry.body, Body::Text(_)) => {
+                    self.rows.push(Row::Answer { id: entry.id.clone(), end: false });
+                }
                 _ => {
                     let level = self.level(entry);
                     self.rows.push(Row::Entry { id: entry.id.clone(), level });
@@ -434,6 +477,26 @@ impl Builder<'_> {
         if let Some(prompt) = prompt {
             self.rows.push(Row::Prompt { id: prompt.id.clone() });
         }
+        let start = self.rows.len();
+        self.work(turn, prompt, body, live);
+        let Some(prompt) = prompt.filter(|_| !live) else { return };
+        // A settled turn ends on its last answer, which carries its time and its copy, and
+        // then the files it changed.
+        if let Some(Row::Answer { end, .. }) = self
+            .rows
+            .get_mut(start..)
+            .and_then(|rows| rows.iter_mut().rev().find(|r| matches!(r, Row::Answer { .. })))
+        {
+            *end = true;
+        }
+        let thread = self.input.id;
+        if !super::figures::files(body.iter().map(|e| (thread, e))).is_empty() {
+            self.rows.push(Row::Changes { prompt: prompt.id.clone() });
+        }
+    }
+
+    /// The work of a turn under its prompt: folded once settled, or all of it.
+    fn work(&mut self, turn: &[Entry], prompt: Option<&Entry>, body: &[Entry], live: bool) {
         let all: Vec<&Entry> = body.iter().collect();
         let foldable = self.input.density != Density::Verbose && !live;
         let last_work = body.iter().rposition(is_work);
@@ -442,7 +505,8 @@ impl Builder<'_> {
             return;
         };
         let open = self.input.toggled.contains(&fold_key(&prompt.id));
-        self.rows.push(Row::Fold { id: prompt.id.clone(), fold: fold_of(turn), open });
+        let figures = self.input.thread.turn(&prompt.id);
+        self.rows.push(Row::Fold { id: prompt.id.clone(), fold: fold_of(turn, figures), open });
         if open {
             self.emit(&all);
             return;
@@ -455,9 +519,11 @@ impl Builder<'_> {
             .filter(|(ix, e)| match e.body {
                 Body::Text(_) => *ix > last_work,
                 Body::Thinking(_) | Body::Tool(_) => false,
-                Body::Prompt(_) | Body::Compact(_) | Body::Interrupted { .. } | Body::Note(_) => {
-                    true
-                }
+                Body::Prompt(_)
+                | Body::Compact(_)
+                | Body::Interrupted { .. }
+                | Body::Note(_)
+                | Body::Rewound { .. } => true,
             })
             .map(|(_, e)| e)
             .collect();
@@ -499,6 +565,20 @@ pub fn build(input: Input<'_>) -> Vec<Row> {
         builder.rows.push(Row::Pending { index });
     }
     builder.rows
+}
+
+/// The rows of the session's changes: each file the session changed, in the order it was
+/// first changed, over the edits and writes that changed it.
+#[must_use]
+pub fn changes(files: &[super::figures::FileChange]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for file in files {
+        rows.push(Row::File { path: file.path.clone() });
+        for (thread, id) in &file.edits {
+            rows.push(Row::Edit { thread: thread.clone(), id: id.clone() });
+        }
+    }
+    rows
 }
 
 /// The rows of `rows` that are prompts, with their row index: the prompt rail's ticks and
@@ -558,11 +638,16 @@ mod tests {
                         Body::Interrupted { .. } => "esc".to_owned(),
                         Body::Note(_) => "note".to_owned(),
                         Body::Prompt(_) => "prompt?".to_owned(),
+                        Body::Rewound { .. } => "rewound".to_owned(),
                     }
                 }
                 Row::Group { kind, ids, open } => {
                     format!("group{} {kind:?} {}", if *open { "+" } else { "" }, ids.len())
                 }
+                Row::Answer { end, .. } => if *end { "answer." } else { "answer" }.to_owned(),
+                Row::Changes { .. } => "changes".to_owned(),
+                Row::File { .. } => "file".to_owned(),
+                Row::Edit { .. } => "edit".to_owned(),
                 Row::Live { .. } => "live".to_owned(),
                 Row::Working => "working".to_owned(),
                 Row::Pending { .. } => "pending".to_owned(),
@@ -570,7 +655,8 @@ mod tests {
             .collect()
     }
 
-    /// A settled turn folds to its prompt, the one line of what it did, and its answer.
+    /// A settled turn folds to its prompt, the one line of what it did, and its answer, which
+    /// ends the turn; the files it changed come after.
     #[test]
     fn a_settled_turn_folds_to_its_prompt_its_work_and_its_answer() {
         let model = scenario("tools");
@@ -580,7 +666,8 @@ mod tests {
             [
                 "prompt",
                 "fold Worked for 35 s \u{b7} 13 steps \u{b7} +2 \u{2212}0 \u{b7} 1 failed",
-                "text"
+                "answer.",
+                "changes",
             ]
         );
     }
@@ -596,7 +683,7 @@ mod tests {
             [
                 "prompt",
                 "ToolSearch Title",
-                "text",
+                "answer",
                 "group Tasks 3",
                 "group Explore 2",
                 "Bash Summary",
@@ -605,7 +692,7 @@ mod tests {
                 "Write Summary",
                 "Agent Summary",
                 "group Tasks 2",
-                "text",
+                "answer",
                 "working",
             ]
         );
@@ -661,12 +748,13 @@ mod tests {
         assert_eq!(rows, ["prompt", "fold Stopped after 5 s \u{b7} 1 step", "esc"]);
     }
 
-    /// A compaction and Claude Code's notes are never hidden in a fold.
+    /// A compaction and Claude Code's notes are never hidden in a fold. The fold is timed to
+    /// Claude Code's own end of the turn: the compaction 16 s later is not the turn's work.
     #[test]
     fn a_compaction_stays_outside_the_fold() {
         let model = scenario("compact");
         let rows = words(&model, &ThreadId::Main, Density::Normal, false, &[]);
-        assert_eq!(rows, ["prompt", "fold Worked for 17 s", "text", "compact", "prompt", "note"]);
+        assert_eq!(rows, ["prompt", "fold Worked for 1 s", "answer.", "compact", "prompt", "note"]);
     }
 
     /// A subagent's thread builds the same way, from its brief.
@@ -676,7 +764,7 @@ mod tests {
         let agent = ThreadId::Agent("a0000000000000001".to_owned());
         assert_eq!(
             words(&model, &agent, Density::Normal, false, &[]),
-            ["prompt", "fold Worked for 3 s \u{b7} 1 step", "text"]
+            ["prompt", "fold Worked for 3 s \u{b7} 1 step", "answer."]
         );
         let (description, kind) = model.subagent("a0000000000000001");
         assert_eq!(

@@ -221,7 +221,7 @@ impl WorkspaceView {
                 .pl(px(theme.spacing.inset()))
                 .pr(px(if action.is_some() { theme.spacing.xs } else { theme.spacing.inset() }))
                 .py(px(theme.spacing.xs))
-                .rounded(px(theme.radii.md))
+                .rounded(px(theme.radii.lg))
                 .text_color(hsla(s.text))
                 .text_size(px(theme.typography.small()))
                 .font_family(theme.typography.ui_family.clone())

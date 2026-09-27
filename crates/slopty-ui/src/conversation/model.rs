@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use slopty_proto::conversation::{
     Body, Change, Clipped, ConversationEvent, Entry, Live, LiveId, LiveKind, Meters, Origin, Part,
-    Task, TextRef, ThreadId,
+    Task, TextRef, ThreadId, Turn,
 };
 
 /// One thread: its entries in order, its task list and, for a subagent, the call that
@@ -32,6 +32,8 @@ pub struct Thread {
     revs: HashMap<String, u64>,
     tasks: Vec<Task>,
     origin: Option<Origin>,
+    /// What each turn took, by the prompt that opened it.
+    turns: HashMap<String, Turn>,
 }
 
 impl Thread {
@@ -65,6 +67,22 @@ impl Thread {
         self.entries.get(*self.index.get(id)?)
     }
 
+    /// The figures of the turn the prompt `id` opened (empty for work before any prompt).
+    #[must_use]
+    pub fn turn(&self, prompt: &str) -> Option<&Turn> {
+        self.turns.get(prompt)
+    }
+
+    /// The newest turn's figures: the one a working agent is on.
+    #[must_use]
+    pub fn last_turn(&self) -> Option<&Turn> {
+        let prompt = self.entries.iter().rev().find_map(|e| match e.body {
+            Body::Prompt(_) => Some(e.id.as_str()),
+            _ => None,
+        });
+        self.turns.get(prompt.unwrap_or_default())
+    }
+
     fn upsert(&mut self, entry: Entry) {
         match self.index.get(&entry.id).and_then(|&ix| self.entries.get_mut(ix)) {
             Some(old) if *old == entry => {}
@@ -81,6 +99,7 @@ impl Thread {
     }
 
     fn remove(&mut self, id: &str) {
+        self.turns.remove(id);
         if self.index.remove(id).is_none() {
             return;
         }
@@ -230,6 +249,9 @@ impl Model {
             }
             Change::Tasks { thread, tasks } => {
                 threads.entry(thread).or_default().tasks = tasks;
+            }
+            Change::Turn { thread, turn } => {
+                threads.entry(thread).or_default().turns.insert(turn.prompt.clone(), turn);
             }
             Change::Reset { thread: Some(thread) } => {
                 threads.remove(&thread);

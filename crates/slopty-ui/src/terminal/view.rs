@@ -1430,10 +1430,8 @@ impl TerminalView {
         };
         let failed = block.exit.is_some_and(|code| code != 0).then(|| {
             let look = FailedLook::new(theme, self.zoom);
-            // As far as the grid's wash reaches: the inset, then the columns.
-            let wash_w = inset + metrics.cell_width * f32::from(metrics.cols);
             [
-                div().absolute().top_0().bottom_0().left_0().w(wash_w).bg(look.wash),
+                div().absolute().inset_0().bg(look.wash),
                 div().absolute().top_0().bottom_0().left_0().w(look.bar_width).bg(look.bar),
             ]
         });
@@ -2082,6 +2080,23 @@ impl TerminalView {
             .iter()
             .map(|row| row.line.map(|l| l.text().trim_end().to_owned()).unwrap_or_default())
             .collect()
+    }
+
+    /// The last `n` visible rows that hold anything, top to bottom, trailing spaces trimmed:
+    /// what the overview's cover shows of the screen.
+    #[must_use]
+    pub fn tail(&self, n: usize) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .state
+            .view()
+            .iter()
+            .rev()
+            .filter_map(|row| row.line.filter(|l| !l.is_blank()))
+            .take(n)
+            .map(|l| l.text().trim_end().to_owned())
+            .collect();
+        out.reverse();
+        out
     }
 
     /// Program title (OSC 0/2), if set.
@@ -3773,7 +3788,7 @@ mod tests {
     }
 
     /// The view rows (0 = top) that carry a command-block separator, with its colour: the
-    /// 1 px quads spanning the grid's width, read from the scene.
+    /// 1 px quads spanning the element edge to edge, read from the scene.
     fn separators(
         view: &Entity<TerminalView>,
         cx: &mut VisualTestContext,
@@ -3784,12 +3799,11 @@ mod tests {
         let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
             f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
         };
-        let grid_width = metrics.cell_width * f32::from(metrics.cols);
         let mut out = Vec::new();
         for q in &quads {
             if !(near(q.bounds.size.height, px(1.0))
-                && near(q.bounds.size.width, grid_width)
-                && near(q.bounds.origin.x, metrics.origin.x))
+                && near(q.bounds.size.width, bounds.size.width)
+                && near(q.bounds.origin.x, bounds.origin.x))
             {
                 continue;
             }
@@ -3806,8 +3820,8 @@ mod tests {
     }
 
     /// The view rows a failed block covers, as `(first row, rows)`: the error bar down the
-    /// element's left edge and the wash from there to the grid's last column, where the block
-    /// separators end, read from the scene. Each bar must have its wash.
+    /// element's left edge and the wash edge to edge, as the block separators run, read from
+    /// the scene. Each bar must have its wash.
     fn failed_bands(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> Vec<(u16, u16)> {
         let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
         let (metrics, zoom) =
@@ -3829,9 +3843,7 @@ mod tests {
             }
             let color = q.background.as_solid();
             let bar = near(q.bounds.size.width, look.bar_width) && color == Some(look.bar);
-            let reach = metrics.origin.x + metrics.cell_width * f32::from(metrics.cols);
-            let wash =
-                near(q.bounds.size.width, reach - bounds.origin.x) && color == Some(look.wash);
+            let wash = near(q.bounds.size.width, bounds.size.width) && color == Some(look.wash);
             if !(bar || wash) {
                 continue;
             }

@@ -1937,7 +1937,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     | `border` | 11 % | `2D2F33` | 21 % | `D0D0D0` |
 
     Mixing from white loses the light theme's cool tint; a tinted background keeps its own
-    (solarized light's cream survives in its bars).
+    (solarized light's cream survives in its bars). Amended 2026-09-27 (design direction): new
+    shares put the bars one notch under the content; the table there replaces this one.
   - **Text is lifted until it reads.** At these steps dark `text_muted` read 4.48 on `overlay`
     and light `accent`, `error`, `success` and `text_muted` about 4.40. Each text tone now moves
     toward white (dark) or black (light) only as far as WCAG AA on all six surfaces text lands
@@ -2361,7 +2362,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   sits on the accent fill takes `accent_ink`: the kit's primary button and gpui-kit's
   `primary_foreground`, a ticked note box, a lit key cap, the terminal's accent buttons. Tests:
   the theme's fills test holds `accent_ink` on `accent_fill` and `fill_fg` on the rest to AA in
-  both variants; `the_kit_theme_follows_the_tokens`.
+  both variants; `the_kit_theme_follows_the_tokens`. Amended 2026-09-27 (design direction): the
+  dark fill is now `346BF1` and carries white too, and light's is `1B4ED8`.
 
 - ✅ **The design review wave: say, don't ask; one place; every row an icon** (2026-09-27, a
   review of every golden against Warp, Zed and monocode).
@@ -2590,3 +2592,296 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_phone_header_keeps_its_title_and_the_pill_gives_way`,
     `tiles_that_read_alike_are_numbered`, `a_place_does_not_repeat_the_title`, and the app
     golden `conversation-live` (`a_step_being_written_shows_live_until_the_transcript_settles_it`).
+
+- ✅ **Design direction 2026-09-27: the chrome one notch from the content, white on the
+  primary, a lit edge on what floats** (2026-09-27, `.research/design-direction-2026-09-27.md`).
+  The user asked for chrome that stays minimal but reads as finished and modern rather than
+  plain, held to Warp, T3 Code, Amp, Linear and Geist, with nothing that looks generated. The
+  study read those products from source, CSS and token files, and reviewed only Slopty's own
+  goldens. It found the dark window framed in near-black, light chrome greyer and its hairline
+  darker than any reference, one weight above regular doing every job, a dark primary button
+  that read as disabled, and floating sheets whose shadow vanished on near-black. This entry
+  amends three rulings: "The chrome is derived from the content" (its shares),
+  "The accent fill has its own ink" (white in both variants) and the one elevation (a lit
+  edge in dark). Waves 3 to 6 of the document follow as their own entries.
+  - **Shares.** Same derivation, new steps. The bars sit one notch under the content, where
+    Linear dims its navigation, rather than three.
+
+    | Step | Dark share | Dark | Light share | Light |
+    |---|---|---|---|---|
+    | `canvas` | 28 % to black | `101115` | 4 % to text | `F6F6F6` |
+    | `panel` | 16 % to black | `121418` | 2.5 % to text | `F9F9F9` |
+    | content | | `16181D` | | `FFFFFF` |
+    | `elevated` | 4.5 % to text | `1F2126` | 60 % to white | `FFFFFF` |
+    | `raised` | 6.5 % | `24252A` | 5.5 % | `F3F3F3` |
+    | `border_subtle` | 6 % | `222429` | 6.5 % | `F0F0F0` |
+    | `overlay` | 8.5 % | `282A2E` | 8.5 % | `ECECEC` |
+    | `border` | 10.5 % | `2C2E32` | 11.5 % | `E5E5E5` |
+
+    The document proposed dark 24 % and 12 % (`111216`, `13151A`). That put the dark panel
+    1.5 CIE L* under the content against the light one's 2.1, so an unfocused header barely
+    parted from a focused one and the two variants no longer stepped alike. At 28 % and 16 %
+    the steps are content to panel 2.0 / 2.1 L* (dark / light), panel to bars 1.2 / 1.1 and
+    content to bars 3.1 / 3.1. The 1.05 contrast step of "Three surfaces in order" is retired:
+    on near-black every step one notch apart is under it, which is why the steps are held in
+    L* now. The text tones need no lift at these steps.
+  - **Primary fill.** `accent_fill` is `346BF1` in dark and `1B4ED8` in light (T3 Code's
+    primaries), and `accent_ink` is white in both: 4.65:1 and 6.71:1. Dark's `6AA1FF` with
+    near-black words read as a disabled or foreign control. `346BF1` still stands 3:1 off
+    every surface in dark.
+  - **Type, radius, motion.** `Typography::MEDIUM_WEIGHT` (500) says "this one": a button's
+    words now, and the selected row, the focused title, the active tab and an approval's
+    statement as their waves land. `STRONG_WEIGHT` narrows to titles (`kit::title`, the title
+    and display sizes, headings, the first run's wordmark); the workspace's name, a worker's
+    name and the overview's names move to the medium weight. `prose()` is 14 for assistant text
+    and prompts; `display()` is 22. `Radii::lg` (12) is the radius of what floats: dialogs,
+    menus, the inbox, the workers' popover, toasts and the add-worker panel; a hint and a pill
+    keep their control's radius, since at 12 a 20 pt hint is a lozenge. `slopty_theme::Motion`
+    holds the durations (hover 0, fade 120, settle 160, sheet 240 ms) and the two curves as
+    cubic-bezier points (ease-out `0.22, 1, 0.36, 1`; drawer `0.32, 0.72, 0, 1`), solved by
+    `Curve::at`; `kit::FADE`, `kit::ease_out` and `kit::drawer` read them.
+  - **One elevation, lit in dark.** The soft layer is now 12 down with a 32 blur (0.5 dark,
+    0.10 light); at 4 and 12 it did not show on `16181D`. In dark `kit::elevate` adds an inset
+    line of white at `alpha::EDGE` (0.06, a new, quietest step of the ladder) along the top,
+    between T3 Code's 4 % and Raycast's 10 %. GPUI paints an inset shadow under the element's
+    border, so the line is two points deep and the second one shows, just inside the hairline.
+  - **Focus.** The keyboard's ring is a 2 pt gap, then a 2 pt ring of the accent at
+    `alpha::STRONG`, its corners the element's grown by 4 (Geist's `0 0 0 2px background,
+    0 0 0 4px blue`). A spread shadow could not draw the gap without knowing the colour behind
+    each element, and it showed through a transparent one, so the zed fork gained
+    `Style::outline` (CSS's `outline` with an offset). Pointer focus shows nothing. A focused
+    text field shows its caret only: gpui-kit's `ring` colour is now `border`, and the composer
+    no longer turns its hairline accent.
+  - **Key caps** sit on `overlay` with no hairline; a ring round every cap made the palette's
+    foot a row of buttons.
+  - **Checks.** Kit lint-tests: `a_floating_surface_is_rounded_lg`,
+    `strong_weight_is_for_titles`, and `the_accent_text_tone_is_never_a_fill` now also fails a
+    focused field told by an accent border (waived for the terminal's find bar until its owner's
+    next change). The document's clause that the composer and the approval card wear
+    `kit::elevate` lands with the conversation wave, which needs a frame-time number first.
+  - Tests: theme `the_chrome_sits_one_notch_from_the_content`,
+    `the_surfaces_climb_bars_panel_content`, `the_primary_fill_carries_white`,
+    `a_curve_runs_from_rest_to_landed`, `elevation_and_density`, `chrome_text_clears_wcag_aa`,
+    `the_ladder_is_monotonic`, `status_fills_read_as_their_hue`; kit
+    `the_elevation_is_two_layers_of_the_shade_and_a_lit_edge_in_dark`, `the_curves_ease_out_and_land`,
+    `the_focus_border_check_knows_a_field_from_a_ring`, `the_kit_theme_follows_the_tokens`;
+    a11y `the_keyboard_rings_a_stop_and_the_pointer_does_not`; gpui (fork)
+    `an_outline_rings_the_element_clear_of_its_edge`. Every golden is taken again.
+
+- ✅ **A focused element with no node of its own is announced by its labelled ancestor**
+  (2026-09-27). GPUI logged "a focused element has an id but no role" whenever a gpui-kit field
+  took the focus: the field tracks focus on a role-less `input-state` element inside the
+  labelled `TextInput` frame, so the tree's focus stayed on the window and a screen reader
+  announced the window. The zed fork's `A11y::set_focus` (commit `a0282ca21a`) now reports the
+  nearest ancestor with a node as focused. The focused element's prepaint runs after every
+  ancestor pushed its node, so the top of the node stack is that ancestor; an element with no
+  element id falls back the same way. Tests: gpui
+  `a_focused_element_without_a_role_focuses_its_labelled_ancestor`,
+  `a_node_less_focus_falls_back_to_the_nearest_ancestor`; ui
+  `the_focused_field_is_what_a_screen_reader_hears`.
+
+- ✅ **Navigator and palette: one chrome surface, *Needs you* only for what is out of sight, the
+  palette as an instrument** (2026-09-27, wave 3 of `.research/design-direction-2026-09-27.md`,
+  §5.2 and §5.5). The user asked for the navigator and the palette to read as finished, calm
+  and modern with nothing generated about them, held to Linear, Raycast, T3 Code and Warp.
+  - **The navigator is the bars' surface.** It sits on `canvas`, as T3 Code's sidebar shares
+    its header's colour and Linear dims its navigation a notch; `panel` is left for the
+    unfocused tiles' headers. Its top row has no hairline under it: the column is one surface
+    from top to bottom and the rows need no rule to start. The filter is a well a row tall
+    (28, touch 44) on `raised` with no border, its glyph a base unit in, 8 pt from the panel's
+    trailing edge. The list starts half a base unit under it.
+  - **Hierarchy by weight and space.** The selected row is `overlay` with its title in `text`
+    at the medium weight (T3's `font-medium` on the active row); a worker's name is 500 in
+    `text` over tiles in `text_secondary`. A worker after another's rows stands a base unit off
+    them; under a heading, or first, it needs none. A worker's round trip is set like every
+    other readout, at the meta size, where it had been a size larger than its neighbours. An
+    open worker with no tile says "No tiles" in one quiet line on its tiles' titles' edge; a
+    filter that matched the worker's name lists it bare. The filter's empty state is the lists'
+    one quiet line.
+  - **The dots between facts are quieter than the facts.** A second line's " · " is drawn in
+    `text_muted` at `alpha::PRESSED`, as one run of text (`palette::dotted`), so the line still
+    ends in one ellipsis. The document proposed the hairline's colour; on the light canvas that
+    vanished and the facts read as spaced words. The palette's context column and the picker's
+    place take the same dot.
+  - ***Needs you* lists only what the list does not show.** A waiting tile whose row is in view
+    ends its first line in "Needs you", so a second row for it at the top repeated it (the
+    duplicate "Claude Code" in `agent-needs-you-navigator`). The section now lists a waiting
+    agent only while its tile is folded away, filtered out, scrolled out of the list's view, or
+    it has none. In view is read off the list's last layout; a row it has not placed yet (new
+    this frame, or before the first layout) counts as in view, so nothing flashes in for a
+    frame. The rule cannot flip back and forth: the section sits above the row it stands for,
+    so showing it only pushes that row further away. A list at its very top stays there when a
+    section opens above its first row; gpui's splice would otherwise keep the old first row
+    anchored and open the section out of sight.
+  - **The palette's field is bare.** 15 pt in a 44 pt row (a row plus 16), no frame and no fill,
+    a `border_subtle` hairline under it (T3's `CommandInput`, Raycast's larger search than its
+    rows). The rows are 32 (a row plus a half unit) on a 6 pt pad, radius 6 in the 12 shell, so
+    the corners nest. The selected row is `overlay` with its title at 500 and its glyph in
+    `text_secondary`; there is no hover wash, and the pointer moves the selection instead
+    (Raycast: no hover highlights on a list), so the list has one highlight, the line ↩ runs.
+    Section labels stand 8 above and 4 below their rows in every list that uses them.
+  - **Recent is its own group.** An empty field's commands that come from history sit under
+    "Recent", the rest under "Commands", so the list says why a command is there. The tiles
+    still lead: ↩ on an empty field goes back to the last tile, which is what the palette is
+    opened for most.
+  - **The foot says what ↩ will do.** A 32 pt band on `raised` at the sheet's bottom radius,
+    with no hairline; ↑↓ and esc on its left, and on its right ↩ with the selected line's verb
+    ("go to", "run", "open"), as Raycast's action bar names its primary action where the eye
+    ends. The caps are plates with no ring.
+  - **Motion.** The palette and the picker rise 4 pt into place over the fade (120 ms,
+    ease-out) while the layer under them fades in. The phone's palette sheet reaches the top
+    edge under the status bar and the island, its field below them, and comes down 8 pt with a
+    fade over the sheet's 240 ms on the drawer curve. The navigator laid over the frame (a
+    phone's drawer, an iPad's overlay) slides in from its leading edge while the scrim comes up,
+    on the same time and curve; it carries its hairline on the trailing edge only, since it
+    meets the window's other three. Entry only; under Reduce Motion, and in a headless frame,
+    all of it lands at once.
+  - **The picker speaks the palette's language.** No title row: the field heads the sheet and
+    its placeholder says what the picker is for ("Jump to a session or add a window"). Its rows,
+    selection, pointer and empty states are the palette's; "Nothing on the canvas or shareable
+    on the worker" is a quiet line on the rows' edge, not a centred message.
+  - Tests: `needs_you_lists_a_waiting_tile_scrolled_out_of_view`,
+    `the_navigator_lists_what_needs_you_then_the_workers` (folded away, it leads),
+    `a_tile_row_reads_its_age_or_its_state_then_its_place`,
+    `a_worker_with_no_tile_says_so_quietly`, `the_palette_foot_names_its_keys` (the verb
+    follows the selection), `the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone`, the
+    picker's `the_chosen_row_is_scrolled_into_view`; app goldens `workspace-navigator(-dark)`,
+    `agent-needs-you-navigator`, `palette(-dark)` and the iOS navigator and palette goldens.
+
+- ✅ **The first run is a page with a place for the tailnet, and the key bar is the body's input
+  row** (2026-09-27, design direction wave 5, §5.8–5.10). The first run was a web form: a blue
+  mark tile over a heading, a status line, a bordered grey field and a button, left alone on
+  white. The key bar was desktop chrome grown to 44 pt: white slabs with hairlines on the grey
+  bar, "esc" and "tab" in lower case, and in the self-test's Split View it laid its keys out
+  for the whole screen and cut them off at half of it.
+  - **The page.** The app's name as a word (13/600, `text_secondary`), the heading at
+    `display()`, one line under it, then two sections a step apart: what the tailnet answered
+    and the address. A foot on the column's left edge says why there is nothing to pair
+    ("Tailscale or your VPN encrypts every link…"). The block still sits a third down, now of
+    the room over the foot. Linear's and Geist's sign-in pages are the model: a name, a
+    heading, a short column, one line of fine print at the foot, and no hero.
+  - **The tailnet has one place.** What answered is a framed list, radius `md` with its rows
+    at `sm` inside a 2 pt pad so the corners nest, under "On your tailnet". Each row is the
+    palette's two-line row: the kind's glyph, the name at the medium weight, "Server ·
+    100.64.0.1" in tabular meta, a chevron, `raised` on hover. The per-row hairline is gone
+    (§3.18). While it looks, or when nothing answered, the same frame holds one row that says
+    so and what to do next ("Start the Slopty server on a machine there, or type its
+    address."), so the page does not jump when the look ends. A Mac whose Tailscale is off
+    says "Tailscale is not running on this Mac" (`net::Tailnet::running`), where it used to
+    say that nothing answered.
+  - **The field is a well.** 36 pt, `raised`, no hairline, caret-only focus, and its text on
+    the rows' glyph edge. On the Mac its primary shares the row at the same height (T3 Code's
+    `h-9` field). On touch the field is 44 pt with Paste, and the primary is full width under
+    it. "Or type an address" labels it only when the tailnet's list is above. Over the
+    workspace the same panel is the `lg` dialog, with no name and no foot.
+  - **Key bar.** The bar takes the body's surface under the `border` hairline. On the canvas a
+    cap was only visible with a hairline of its own. Caps are `raised` plates with no
+    hairline, `overlay` while pressed, and the accent fill with its ink when armed. Words
+    ("Esc", "Tab", "Paste", "Find") are `small()` and glyphs are `title()`, both at the
+    medium weight, the way a keyboard sets its word keys smaller than its letters. The
+    scrolled edge fades over 16 pt. The home band under it takes its surface. A screen
+    reader hears each cap by name (`key_spoken`), so `a11y::key_name` left slopty-ui.
+  - **Split View.** The key bar measures the size the app lays out in (`frame_size`), so at
+    half an iPad it scrolls like a phone's instead of spreading three groups past its edge.
+  - The drawer's trailing edge and sheet motion, and the palette sheet running up under the
+    status bar, belong to the navigator's and the palette's owners and land with their wave.
+  - Tests: app `the_first_run_sits_a_third_down_over_its_foot_on_every_device`,
+    `the_field_and_its_action_share_a_row`,
+    `the_panel_names_its_host_and_the_server_the_tailnet_found` (rows over the field, no
+    tailnet here), `the_first_run_offers_the_workers_the_tailnet_found`,
+    `every_key_is_spoken_by_name_and_shown_in_sentence_case`; goldens `first-run(-dark)`,
+    `add-worker`, `ios-phone-*`, `ios-pad-*`, to be taken again.
+
+- ✅ **Design wave 3, the frame: a status bar that says where you are, tabs on the midline**
+  (2026-09-27, `.research/design-direction-2026-09-27.md` §5.1 and §5.4). The user asked for
+  a frame that stays minimal yet reads as finished, held to Warp, T3 Code, Linear and Geist.
+  Most goldens showed a status bar holding "~" and a sub-millisecond round trip, and a title
+  bar whose one workspace carried a "3 tiles" count.
+  - **Where you are, as one path.** The status bar's left is the focused tile's worker, its
+    directory (a repository's name and the path within it) and its branch, the steps a faint
+    "·" apart (`text_muted` at `alpha::PRESSED`, the column dots' faint step; the document's
+    `border` colour was all but invisible on light chrome). The worker is named with one
+    worker too, since which machine a shell runs on is the first thing a remote tool says,
+    and it leads in `text_secondary` while the rest stay muted, a breadcrumb read from its
+    root. What the working tree changed follows the branch as figures in the muted tone with
+    only the `+` and `−` in a diff's colours, as the tile header's counts are to be. The
+    right's own compound readouts (a file's language and caret, the uploads) take the same
+    faint dot.
+  - **The round trip speaks when it matters.** It shows past the navigator's
+    `RTT_SHOWN_FROM` (20 ms, one threshold for "slow enough to name"), in `warn` from 150 ms,
+    and whenever the pointer is over the bar; how the tailnet carries the link shows on a
+    DERP relay or under the pointer. It leads the right-hand cluster, which is pinned right,
+    so appearing grows it leftward and moves nothing else; its figure keeps a slot pinned at
+    its right, so a new sample moves only its digits. A quick link's samples no longer draw
+    the workspace: `rtt_shown` asks the bar, which prints them only while slow or hovered.
+    The frame time stays behind the stream stats.
+  - **24 pt**, not 26: a notch under a tile's 28 pt header, so the bottom bar does not read as
+    a second header row.
+  - **Tabs on the bar's midline.** A tab's words sit in a row-high band (28, 44 on touch)
+    centred where the traffic lights, the buttons and a lone name sit, and the tab's box runs
+    from that band down through the bar's hairline. The active one fills its box with the
+    content's colour inside `border` hairlines at `radii.sm`, in the medium weight and `text`,
+    and joins the tile under it; the rest are regular weight in `text_secondary` and take
+    `raised` in their band under the pointer, a row's hover rather than a tab's. Each name is
+    laid out in the medium weight whichever it is drawn in, so the active tab is no wider and
+    switching moves no neighbour. Sides are 12 pt each. The rollup's slot opens only for a
+    mark; an always-empty slot pushed every name off centre, and a tab already changes width
+    with its name. The two-line tabs (name over "3 tiles · 2 workers") and the lone name's
+    count are gone: the navigator and the overview count tiles, and a count beside a name is
+    badge soup in waiting. A closing tab folds over `Motion::settle` on `kit::ease_out`.
+  - **Column dots**: those in view in `text_secondary`, the rest faint. Three dots in `text`
+    were the darkest thing in the bar.
+  - **The bell's badge** is 16 pt, with the accent's own white ink when only finished work is
+    counted (it had near-black `fill_fg` on the new blue), and a 1 pt ring of the bar's colour
+    that cuts it out of the bell's stroke, as a Dock badge is cut out of its icon. Under the
+    pointer the ring takes the button's hover fill. It hangs a base unit off the button's
+    corner, so the bell still reads under it.
+  - Tests: `the_status_bar_says_where_the_shell_is_and_counts_what_is_shared`,
+    `a_quick_round_trip_waits_for_the_pointer_and_a_slow_one_stands`,
+    `the_link_path_shows_beside_the_round_trip_and_goes_with_the_link`,
+    `the_active_tab_joins_the_content_on_the_bars_midline`, `a_lone_workspace_is_its_name_alone`,
+    `the_workspaces_are_tabs_in_the_title_bar`, `the_status_bar_reads_the_focused_tile_and_its_link`.
+
+- ✅ **Design direction, wave 3: tiles** (2026-09-27, `.research/design-direction-2026-09-27.md`
+  §5.3, §5.7 and the empty workspace of §5.8). Amends **A waiting agent is marked once on its
+  tile** (the slot), **Design review, round two** (overview covers) and the overview and empty
+  workspace of the design review wave.
+  - **Header.** The focused title is 500 in `text`; the others 400 in `text_secondary` (in
+    `text_muted` an unfocused title read as disabled). The kind glyph sits a step under its
+    title's tone. A header holds one filled chip at most, the state's: the agent's pill. Take,
+    Mute or Muted, an upload's progress, the hooks offer and a forwarded port are ghosts, their
+    tone in words at `radii.sm` with `raised` under the pointer, as T3 Code keeps fills for
+    badges and leaves buttons bare. A waiting agent's slot keeps its kind's glyph: the chip
+    beside the title says it, and the warn mark said it a second time. The tab shown in the
+    focused column takes 500 too.
+  - **Overview.** Each workspace is a card on the content's surface at `radii.lg` with a
+    `border` hairline, a base unit (8) round its panes so their square corners sit well inside
+    the round ones. Only the active card floats: `kit::elevate` and the keyboard's ring
+    (`a11y::ring`, 2 pt of the accent outside a 2 pt gap), so where you are reads the way focus
+    does. A shadow under every card said they all float. Names are 13 at 500 above their
+    cards, counts in the meta size. "New workspace" is a ghost button a row tall on the last
+    card's left edge, its glyph where the names start; the dashed slab, larger than a real
+    workspace, is gone.
+  - **Covers** are composed as a card is: the state or kind and the title (500) at the top
+    left, the navigator's second line from the title's text edge, then as many of the tile's
+    last lines as the card holds, in `caption()` and `text_muted`: a shell's screen
+    (`TerminalView::tail`) and a file's first lines (`FileView::head`, off the rope) in the
+    content's mono face, a note's lines with the Markdown marks left off. Niri and Warp show
+    what a window holds in their overviews; a centred label over a blank card said only its
+    name. Built only at the overview's shapes zoom, at most the rows that fit.
+  - **The empty workspace is a start page on every empty workspace**, once the strip has come
+    to rest on it (laid over a workspace still sliding in, it would hide the slide). It lands
+    without a fade: a fade cut short by a tile arriving owed a frame after the strip was at
+    rest. It was drawn only when no workspace had a tile, so the workspace the
+    overview's "New workspace" opened was a blank strip. It hangs at `kit::MODAL_ANCHOR`, where
+    the palette opens, not in the middle: a list read from the top, not a centred hero. Under
+    the three ways to begin, *Recent* lists where shells stand on the workers that are up, one
+    row per directory (the repository and the path in it, else the path's tail; its branch
+    and, with several workers, the worker in the meta size), the latest used tile's first,
+    then the latest started, five at most; a press opens another shell there. Then *Workers*.
+    Sections part by space, never a rule.
+  - Tests: tiles `a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it`,
+    `the_status_mark_follows_the_agent_the_last_exit_and_the_link`; strip_marks
+    `the_overview_lifts_each_workspace_and_offers_a_new_one`,
+    `the_empty_workspace_offers_where_shells_stand`. App goldens to be taken again: overview,
+    empty-workspace, tabbed-column, agent-needs-you, transfers, workspace(-dark).

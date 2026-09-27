@@ -86,6 +86,10 @@ pub struct E2eOpts {
     /// Rewrite every render golden under `crates/slopty-e2e/golden/`.
     #[arg(long)]
     accept_all: bool,
+    /// Fail on no render golden and write none: every changed frame leaves its render and diff
+    /// under the artifacts, so one run shows every golden for a design review.
+    #[arg(long, conflicts_with_all = ["accept", "accept_all"])]
+    review: bool,
     /// Data directory for the daemons the tests spawn (default `target/e2e`).
     #[arg(long)]
     data_dir: Option<String>,
@@ -289,6 +293,8 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Some(sh.push_env("SLOPTY_E2E_ACCEPT", "all"))
     } else if opts.accept {
         Some(sh.push_env("SLOPTY_E2E_ACCEPT", "changed"))
+    } else if opts.review {
+        Some(sh.push_env("SLOPTY_E2E_ACCEPT", "review"))
     } else {
         None
     };

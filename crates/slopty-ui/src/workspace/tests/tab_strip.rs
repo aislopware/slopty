@@ -41,8 +41,8 @@ fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut T
 
 /// Each workspace with something in it is a tab, the active one too when empty; a lone one is
 /// its name. A tab is as wide as its name, within its bounds, switching tabs moves none, and
-/// "+" opens a new workspace. A tab's slot rolls up what its tiles want; its name carries no
-/// chord.
+/// "+" opens a new workspace. A tab ends in what its tiles want, a mark in a slot that opens
+/// for it; its name carries no chord.
 #[gpui::test]
 fn the_workspaces_are_tabs_in_the_title_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -83,8 +83,12 @@ fn the_workspaces_are_tabs_in_the_title_bar(cx: &mut TestAppContext) {
         view.read_with(cx, |v, _| v.layout().position(v.tile_of_session(first).unwrap()).unwrap());
     let rollup = if first_ws.workspace == 0 { "ws-rollup-0" } else { "ws-rollup-1" };
     assert!(cx.debug_bounds(rollup).is_some(), "the warn mark on its workspace's tab");
-    let after = (cx.debug_bounds("ws-tab-0").unwrap(), cx.debug_bounds("ws-tab-1").unwrap());
-    assert_eq!(before, after, "the mark takes the tab's own slot");
+    let (tab, mark) = (
+        cx.debug_bounds(if first_ws.workspace == 0 { "ws-tab-0" } else { "ws-tab-1" }).unwrap(),
+        cx.debug_bounds(rollup).unwrap(),
+    );
+    assert!(tab.contains(&mark.center()), "inside its own tab: {tab:?} {mark:?}");
+    assert_eq!(cx.debug_bounds("ws-tab-0").unwrap().left(), before.0.left(), "the first stays");
 
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());

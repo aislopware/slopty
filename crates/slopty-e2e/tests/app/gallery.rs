@@ -19,6 +19,10 @@ use slopty_e2e::{Command, Driver, Dump, Stack};
 pub const STEP: Duration = Duration::from_secs(20);
 /// The renders' window: the size the other app goldens use.
 const WINDOW: (f32, f32) = (900.0, 600.0);
+/// Where the pointer rests before a golden: the title bar's top-left corner, left of the window
+/// buttons, over nothing that answers a hover. The bottom-left corner is the status bar, which
+/// shows the round trip under the pointer.
+const PARK: (f32, f32) = (1.0, 1.0);
 
 pub fn gated() -> bool {
     if std::env::var_os("SLOPTY_APP_E2E").is_none() {
@@ -120,7 +124,7 @@ async fn the_first_run_offers_one_way_in() {
     assert!(labels(&dump, "Button").iter().any(|b| b == "Add"), "{:#?}", dump.a11y);
     // The pointer leaves the link it clicked, so the golden holds the panel at rest and not
     // the link's hover.
-    drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "add-worker").await;
 
     stack.add_worker().await.unwrap();
@@ -210,12 +214,12 @@ async fn a_workspace_of_columns_in_both_themes() {
     let [x, y, w, h] = dump.a11y_node("Button", Some("More")).expect("the menu button").bounds;
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
     drv.wait_for("the menu", STEP, |d| d.a11y_node("Menu", None).is_some()).await.unwrap();
-    drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "more-menu").await;
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
     drv.wait_for("the menu closed", STEP, |d| d.a11y_node("Menu", None).is_none()).await.unwrap();
     // Off "…", so the shot shows the bar at rest rather than the button under the pointer.
-    drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
 
     stack.set_appearance("dark").unwrap();
     let drv = &mut stack.driver;
@@ -466,7 +470,7 @@ async fn the_inbox_lists_what_waits_and_what_finished() {
         dump.a11y
     );
     // The pointer leaves the bell, so the golden holds the inbox at rest.
-    drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "inbox").await;
     stack.set_appearance("dark").unwrap();
     let drv = &mut stack.driver;
@@ -559,7 +563,7 @@ async fn a_tabbed_column_draws_its_tab_row() {
         .await
         .unwrap();
     assert!(dump.a11y.iter().all(|n| n.label.as_deref() != Some("2/2")), "{:#?}", dump.a11y);
-    drv.ok(&Command::Move { x: 1.0, y: WINDOW.1 - 1.0 }).await.unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "tabbed-column").await;
     stack.shutdown().await;
 }

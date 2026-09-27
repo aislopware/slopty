@@ -278,7 +278,7 @@ impl WorkspaceView {
             .w(px(INBOX_W))
             .flex()
             .flex_col()
-            .rounded(px(theme.radii.md))
+            .rounded(px(theme.radii.lg))
             .overflow_hidden()
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())

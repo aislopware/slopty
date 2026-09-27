@@ -113,7 +113,7 @@ async fn the_face_holds_a_prompt_over_the_turn_it_interrupts() {
     let drv = &mut stack.driver;
     let dump = drv
         .wait_for("the prompt held for the face", STEP, |d| {
-            has(d, "AlertDialog", "Claude wants to use Bash")
+            has(d, "AlertDialog", "Claude wants to run a command")
         })
         .await
         .unwrap();
@@ -128,7 +128,9 @@ async fn the_face_holds_a_prompt_over_the_turn_it_interrupts() {
     stack.shutdown().await;
 }
 
-/// A subagent's card opens its own thread, under a bar that names it and leads back.
+/// A settled turn reads as its prompt, one line of what it did and its answer, with the files
+/// it changed; a subagent's card opens its own thread, under a bar that names it and leads
+/// back.
 #[tokio::test]
 async fn a_subagent_has_a_thread_of_its_own() {
     if !gated() {
@@ -143,6 +145,14 @@ async fn a_subagent_has_a_thread_of_its_own() {
     let drv = &mut stack.driver;
     drv.keys("cmd-j").await.unwrap();
     drv.wait_for("the conversation", STEP, |d| has(d, "Group", "Conversation")).await.unwrap();
+    // Settled: the prompt, the turn folded to its figures, the answer and the files it changed.
+    drv.wait_for("the settled turn", STEP, |d| {
+        labels(d, "Button").iter().any(|l| l.starts_with("Worked for 35 s"))
+            && has(d, "List", "Changed files")
+    })
+    .await
+    .unwrap();
+    golden(drv, &dir, "conversation-settled").await;
     // Every step shown: the settled turn opens, the subagent's card with it.
     drv.keys("ctrl-o ctrl-o").await.unwrap();
     let dump = drv
@@ -190,7 +200,7 @@ async fn a_phone_opens_on_the_conversation() {
     let _held = stack.relay_hook(&session, &[], &permission_request(&transcript)).unwrap();
     let drv = &mut stack.driver;
     drv.wait_for("the prompt held for the face", STEP, |d| {
-        has(d, "AlertDialog", "Claude wants to use Bash")
+        has(d, "AlertDialog", "Claude wants to run a command")
     })
     .await
     .unwrap();
@@ -281,7 +291,11 @@ async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
     let dump = stack
         .driver
         .wait_for("the step settled", STEP, |d| {
-            labels(d, "Button").iter().any(|l| l == "Worked \u{b7} 1 step")
+            // The fold carries the turn's figures from the transcript: the model and what it
+            // wrote.
+            labels(d, "Button")
+                .iter()
+                .any(|l| l == "Worked \u{b7} 1 step \u{b7} Haiku 4.5 \u{b7} 20 tokens")
                 && !has(d, "Article", writing)
                 && !has(d, "Status", "Preparing Bash")
         })
@@ -292,5 +306,249 @@ async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
         "{:#?}",
         dump.a11y
     );
+    stack.shutdown().await;
+}
+
+/// A long session made up for measuring: `turns` turns, each a prompt, an answer in Markdown
+/// with a list and a fenced block, a command with its output, an edit with its diff and a
+/// read, every assistant record carrying a model and its usage as Claude Code writes them.
+fn synthetic_session(turns: usize) -> String {
+    struct Log {
+        out: String,
+        n: u64,
+        parent: Option<String>,
+    }
+    impl Log {
+        fn push(&mut self, mut record: Value) -> String {
+            self.n = self.n.saturating_add(1);
+            let uuid = format!("00000000-0000-4000-9000-{:012}", self.n);
+            let secs = self.n.saturating_mul(2);
+            let stamp = format!(
+                "2026-09-27T{:02}:{:02}:{:02}.000Z",
+                4_u64.saturating_add(secs / 3_600),
+                (secs / 60) % 60,
+                secs % 60
+            );
+            record["uuid"] = Value::String(uuid.clone());
+            record["parentUuid"] = self.parent.clone().map_or(Value::Null, Value::String);
+            record["timestamp"] = Value::String(stamp);
+            record["sessionId"] = Value::String("s1".to_owned());
+            record["isSidechain"] = Value::Bool(false);
+            self.out.push_str(&record.to_string());
+            self.out.push('\n');
+            self.parent = Some(uuid.clone());
+            uuid
+        }
+
+        fn assistant(&mut self, content: &Value) {
+            let usage = json!({
+                "input_tokens": 12, "cache_read_input_tokens": 41_000,
+                "cache_creation_input_tokens": 800, "output_tokens": 420,
+            });
+            self.push(json!({
+                "type": "assistant",
+                "message": {
+                    "id": format!("msg_{}", self.n), "role": "assistant",
+                    "model": "claude-opus-5-5", "content": [content], "usage": usage,
+                    "stop_reason": "tool_use",
+                },
+            }));
+        }
+    }
+    let mut log = Log { out: String::new(), n: 0, parent: None };
+    for turn in 0..turns {
+        log.push(json!({
+            "type": "user",
+            "message": { "role": "user", "content": format!(
+                "Step {turn}: tighten the parser's error path and run the tests again"
+            )},
+        }));
+        log.assistant(&json!({ "type": "thinking", "thinking": format!(
+            "The parser returns early on turn {turn}; the error path loses the span."
+        )}));
+        log.assistant(&json!({ "type": "text", "text": format!(
+            "Turn {turn}. The failure comes from **two** places:\n\n\
+             - `parse_header` drops the span when the line is empty\n\
+             - `recover` retries without resetting the cursor\n\n\
+             ```rust\nfn recover(&mut self) -> Result<(), Error> {{\n    self.cursor = self.mark;\n    self.next()\n}}\n```\n\n\
+             I will fix both and run the suite."
+        )}));
+        let bash = format!("toolu_b{turn}");
+        log.assistant(&json!({
+            "type": "tool_use", "id": bash, "name": "Bash",
+            "input": { "command": "cargo test -p parser", "description": "Run the parser tests" },
+        }));
+        let stdout = (0..30).map(|i| format!("test case_{i:02} ... ok")).collect::<Vec<_>>();
+        log.push(json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": bash, "content": stdout.join("\n"),
+                "is_error": false,
+            }]},
+            "toolUseResult": { "stdout": stdout.join("\n"), "stderr": "", "interrupted": false },
+        }));
+        let edit = format!("toolu_e{turn}");
+        log.assistant(&json!({
+            "type": "tool_use", "id": edit, "name": "Edit",
+            "input": {
+                "file_path": "/work/src/parser.rs",
+                "old_string": "self.next()", "new_string": "self.cursor = self.mark;\nself.next()",
+            },
+        }));
+        log.push(json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": edit, "content": "The file was updated.",
+            }]},
+            "toolUseResult": {
+                "filePath": "/work/src/parser.rs",
+                "structuredPatch": [{
+                    "oldStart": 40, "oldLines": 6, "newStart": 40, "newLines": 8,
+                    "lines": [
+                        "     fn recover(&mut self) -> Result<(), Error> {",
+                        "-        self.next()",
+                        "+        self.cursor = self.mark;",
+                        "+        self.next()",
+                        "     }",
+                        " ",
+                        "+    /// The span of the line being read.",
+                        "     fn span(&self) -> Span {",
+                    ],
+                }],
+            },
+        }));
+        let read = format!("toolu_r{turn}");
+        log.assistant(&json!({
+            "type": "tool_use", "id": read, "name": "Read",
+            "input": { "file_path": "/work/src/lexer.rs" },
+        }));
+        log.push(json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": read, "content": "1\tuse std::str;",
+            }]},
+            "toolUseResult": { "file": { "startLine": 1, "numLines": 120, "totalLines": 120 } },
+        }));
+        log.assistant(&json!({ "type": "text", "text": format!(
+            "Done with turn {turn}: the tests pass and the span survives an empty line."
+        )}));
+    }
+    log.out
+}
+
+/// The face over a long conversation while the model writes an answer, the frame-time case
+/// behind `docs/MEASUREMENTS.md` ("the conversation face under a streaming answer"). Runs only
+/// with `SLOPTY_SMOOTH_E2E=1`, alone, since other tests' frames would be counted.
+///
+/// (h) the list following the tail while an answer grows by a piece every 16 ms, as Slopty's
+/// Claude Code mod reports it; (i) the same with the reader panning the history at 120
+/// events per second.
+#[tokio::test]
+async fn the_face_draws_a_streaming_answer_within_a_frame() {
+    if std::env::var_os("SLOPTY_SMOOTH_E2E").is_none() {
+        eprintln!("skipped: set SLOPTY_SMOOTH_E2E=1 (and SLOPTY_APP_E2E=1)");
+        return;
+    }
+    let run = std::time::Duration::from_secs(5);
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let dump = first_shell(&mut stack.driver).await;
+    let session = dump.terminals[0].session.clone();
+    let main = stack.path("projects").join("s1.jsonl");
+    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+    std::fs::write(&main, synthetic_session(80)).unwrap();
+    let start = json!({
+        "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+        "transcript_path": main, "cwd": stack.path("home"),
+    });
+    let done = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
+    assert!(done.success(), "the relay ran");
+    stack.driver.keys("cmd-j").await.unwrap();
+    stack
+        .driver
+        .wait_for("the conversation", STEP, |d| {
+            has(d, "Group", "Conversation") && labels(d, "Article").len() > 4
+        })
+        .await
+        .unwrap();
+
+    let (batches, _) = recorded_mod("bash", &session);
+    for batch in &batches[..3] {
+        assert_eq!(stack.post_mod(batch).await.unwrap(), 204, "{batch}");
+    }
+    let turn = batches[1]["events"][0]["turnId"].clone();
+    let piece = |text: &str| {
+        json!({ "session": session, "events": [{
+            "kind": "text", "block": 0, "step": 0, "turnId": turn,
+            "model": "claude-haiku-4-5-20251001", "text": text,
+        }]})
+    };
+    let words = [
+        "The ",
+        "parser ",
+        "now ",
+        "keeps ",
+        "the ",
+        "span ",
+        "through ",
+        "`recover`, ",
+        "and ",
+        "an ",
+        "empty ",
+        "line ",
+        "reads ",
+        "as ",
+        "one.\n\n",
+        "- ",
+        "fixed ",
+        "`parse_header`\n",
+        "- ",
+        "reset ",
+        "the ",
+        "cursor\n\n",
+    ];
+    assert_eq!(stack.post_mod(&piece("Writing ")).await.unwrap(), 204);
+    stack
+        .driver
+        .wait_for("the live answer", STEP, |d| {
+            labels(d, "Article").iter().any(|l| l.starts_with("Writing: "))
+        })
+        .await
+        .unwrap();
+
+    let region = stack
+        .driver
+        .dump()
+        .await
+        .unwrap()
+        .a11y_node("Group", Some("Conversation"))
+        .expect("the face")
+        .bounds;
+    let (x, y) = (region[0] + region[2] / 2.0, region[1] + region[3] / 2.0);
+    for (scenario, pan) in [
+        ("(h) face, following a streaming answer", false),
+        ("(i) face, panning while it streams", true),
+    ] {
+        stack.driver.frames_reset().await.unwrap();
+        let begin = tokio::time::Instant::now();
+        let mut n = 0_usize;
+        while begin.elapsed() < run {
+            let word = words[n % words.len()];
+            assert_eq!(stack.post_mod(&piece(word)).await.unwrap(), 204);
+            if pan {
+                let dy = if (n / 60).is_multiple_of(2) { 40.0 } else { -40.0 };
+                stack.driver.scroll(x, y, 0.0, dy, false).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                stack.driver.scroll(x, y, 0.0, dy, false).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            }
+            n = n.saturating_add(1);
+        }
+        let frames = stack.driver.dump().await.unwrap().frames;
+        println!("MEASURE {scenario}: {}", frames.row());
+        assert!(frames.frames >= 100, "too few frames to judge: {frames:?}");
+    }
     stack.shutdown().await;
 }

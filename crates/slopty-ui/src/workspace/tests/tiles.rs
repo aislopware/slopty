@@ -307,8 +307,70 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     assert!(quads_at(cx, tile).iter().all(|q| q.border_widths.left.0 == 0.0), "no outline");
 }
 
-/// One mark says how each tile is doing: its agent's state, a shell's failed last command,
-/// and a worker out of reach.
+/// A header holds one filled chip at most: the state's. An agent the worker guessed at still
+/// offers the hooks, but as words with no fill, and the leading slot keeps the agent's glyph
+/// rather than a warn mark that would say the chip's news again.
+#[gpui::test]
+fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let agent = SessionId::new();
+    let waiting = opens(&view, cx, &fake, agent, fake.me, 1);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(
+            AgentEvent {
+                session: agent,
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Blocked(BlockReason::Question),
+                agent_session: None,
+                detail: None,
+                attention: false,
+                source: AgentSource::Transcript,
+                since_ms: 0,
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
+    let hooks = cx.debug_bounds(selector("hooks", waiting.item)).expect("the hooks offered");
+    let chip = cx.debug_bounds(selector("agent", waiting.item)).expect("the state chip");
+    let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+    let inside = |q: &gpui::Quad, b: Bounds<Pixels>| {
+        let (x, y) = (q.bounds.origin.x.0 / scale, q.bounds.origin.y.0 / scale);
+        let (w, h) = (q.bounds.size.width.0 / scale, q.bounds.size.height.0 / scale);
+        x >= f32::from(b.left()) - 0.5
+            && y >= f32::from(b.top()) - 0.5
+            && x + w <= f32::from(b.right()) + 0.5
+            && y + h <= f32::from(b.bottom()) + 0.5
+    };
+    let surface = |q: &gpui::Quad| {
+        let theme = Theme::default();
+        [theme.content(), theme.surfaces.panel]
+            .iter()
+            .any(|c| q.background.as_solid() == Some(crate::colors::hsla(*c)))
+    };
+    let fills: Vec<&gpui::Quad> = quads
+        .iter()
+        .filter(|q| inside(q, header) && !q.background.is_transparent() && !surface(q))
+        .collect();
+    assert_eq!(fills.len(), 1, "one fill in the header: {fills:#?}");
+    assert!(inside(fills[0], chip), "and it is the state's chip");
+    assert!(quads.iter().filter(|q| inside(q, hooks)).all(|q| q.background.is_transparent()));
+    let slot = cx.debug_bounds(selector("status", waiting.item)).expect("the slot");
+    let nodes = tree(cx);
+    let in_slot = |n: &&crate::a11y::Node| {
+        let [x, y, ..] = n.bounds;
+        slot.contains(&point(px(x + 1.0), px(y + 1.0)))
+    };
+    assert!(
+        !nodes.iter().filter(in_slot).any(|n| n.is("Image", Some("Needs you"))),
+        "the chip says it; the slot keeps the agent's glyph"
+    );
+}
+
+/// One mark says how each tile is doing: its agent's state (a waiting one by its chip), a
+/// shell's failed last command, and a worker out of reach.
 #[gpui::test]
 fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -337,7 +399,9 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
         v.term_event(shell, marked_frame(1, &rows, 0), cx);
     });
     let drawn = marks(cx);
-    assert!(drawn.iter().any(|m| m == "Needs you"), "the agent waits: {drawn:?}");
+    // A waiting agent's news is its header's chip; its slot keeps the agent's glyph.
+    assert!(cx.debug_bounds(selector("agent", agent_tile.item)).is_some(), "the agent waits");
+    assert!(drawn.iter().all(|m| m != "Needs you"), "said once, by the chip: {drawn:?}");
     assert!(drawn.iter().any(|m| m == "Failed"), "the shell's last command failed: {drawn:?}");
 
     let key = fake.key;

@@ -2,18 +2,21 @@
 //!
 //! On the left, where the human is: the server's state while it does not answer, then the
 //! focused tile's worker (a warn dot before it while it is away), its directory (inside a
-//! repository, the repository's name and the path within it) and the branch checked out there,
-//! read as one path in the UI face. On the right, the ports forwarded here (which list them
-//! when clicked), the uploads in flight, what is wrong with the focused worker's link when
-//! something is (a link that is up says nothing), the round trip to it, the count of workers
-//! only while one of them is not up (which opens the hosts popover: each worker's link,
-//! connect and forget), and the agents at work. Who waits on the human is counted once, on the
-//! bell. The frame time shows only with the stream stats (⌘⇧I). Each readout is meta text with
-//! no icon, its figures tabular, and a state is a small dot of its fill beside quiet words: the
-//! tile and the bell carry the loud marks. A phone keeps the worker, the round trip and the
-//! agents.
+//! repository, the repository's name and the path within it) and the branch checked out there
+//! with what the working tree changed, the steps a faint "·" apart. The worker leads in the
+//! secondary tone, the rest are muted. On the right, the link to the focused worker while it is
+//! worth a look (a round trip past [`RTT_SHOWN_FROM`], or a DERP relay) or while the pointer is
+//! over the bar, what is wrong with the link when something is, what the focused tile says of
+//! itself (a file's language and caret), the ports forwarded here (which list them when
+//! clicked), the uploads in flight, the count of workers only while one of them is not up
+//! (which opens the hosts popover: each worker's link, connect and forget), and the agents at
+//! work. Who waits on the human is counted once, on the bell. The frame time shows only with
+//! the stream stats (⌘⇧I). Each readout is meta text with no icon, its figures tabular, and a
+//! state is a small dot of its fill beside quiet words: the tile and the bell carry the loud
+//! marks. A phone keeps the worker, a slow round trip and the agents.
 //!
-//! It is a view of its own, drawn cached: an echo in a terminal does not draw it again.
+//! It is a view of its own, drawn cached: an echo in a terminal does not draw it again, nor
+//! does a round trip nobody would read.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -27,20 +30,24 @@ use gpui::{
 };
 use slopty_client::layout::WorkerKey;
 use slopty_proto::items::{Item, ItemKind};
-use slopty_theme::Theme;
+use slopty_theme::{Theme, alpha};
 
-use super::navigator::{Mode, host_line, path_label, rtt_label, worker_health};
-use super::rollup::meta_line;
+use super::navigator::{Mode, RTT_SHOWN_FROM, host_line, path_label, rtt_label, worker_health};
+use super::rollup::{META_SEPARATOR, meta_line};
 use super::tile::repo_place;
 use super::{MenuRun, WorkspaceView};
 use crate::a11y::tab_stop;
-use crate::colors::hsla;
+use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
 use crate::kit::{self, meta, tabular};
 use crate::palette::section_heading;
 
-/// The bar's height.
-pub(super) const STATUSBAR_H: f32 = 26.0;
+/// The bar's height: a line of meta text and a base unit round it, a notch under a tile's
+/// header, so the frame's two bars do not read as a second row of headers.
+pub(super) const STATUSBAR_H: f32 = 24.0;
+
+/// A round trip slow enough to wear the warning tone: typing lags behind the fingers.
+const RTT_WARN_FROM: Duration = Duration::from_millis(150);
 
 /// The hosts popover's width, in points.
 const HOSTS_W: f32 = 300.0;
@@ -80,6 +87,8 @@ pub(super) struct Bar {
     add: Option<MenuRun>,
     /// Draws the bar again when the frame time's readout is due, while the stats show.
     tick: Option<Task<()>>,
+    /// The pointer is over the bar, which then shows the link however quick it is.
+    hovered: bool,
 }
 
 impl std::fmt::Debug for Bar {
@@ -88,6 +97,7 @@ impl std::fmt::Debug for Bar {
             .field("hosts_open", &self.hosts_open)
             .field("hosts", &self.hosts)
             .field("add", &self.add.is_some())
+            .field("hovered", &self.hovered)
             .finish_non_exhaustive()
     }
 }
@@ -251,7 +261,6 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let safe = window.insets().effective();
-        let muted = hsla(s.text_muted);
 
         // A state is a dot of its fill beside its words; no readout wears an icon.
         let server = self.server_status.clone().map(|text| {
@@ -274,11 +283,9 @@ impl WorkspaceView {
         let cwd = focused_item
             .filter(|item| matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::File { .. }))
             .and_then(|item| self.cwd_of(item));
-        // With one worker its name says nothing the window does not, until its link is down
-        // or there is nothing else to say: the bar is never empty.
-        let lone = self.workers.len() == 1;
-        let placed = cwd.is_some() || session.is_some_and(|s| s.branch.is_some());
-        let name = link.filter(|w| !lone || !w.status.is_up() || !placed).map(|w| {
+        // The worker leads the path in the secondary tone: with one worker too, since where a
+        // shell runs is the first thing a remote tool says.
+        let name = link.map(|w| {
             let away = (!w.status.is_up()).then(|| {
                 state_dot(theme, s.warn_fill).debug_selector(|| "status-worker-away".to_owned())
             });
@@ -302,28 +309,45 @@ impl WorkspaceView {
                 .text_ellipsis()
                 .child(cwd)
         });
-        let branch = session.and_then(|s| s.branch.clone()).map(|branch| {
-            let branch = SharedString::from(branch);
-            readout("status-branch", branch.clone())
-                .aria_label(SharedString::from(format!("branch {branch}")))
-                .child(branch)
-        });
-        // What the working tree has changed, after the branch it is on, in the tones of a diff.
+        // The branch, then what the working tree changed: the figures muted, only the signs in
+        // a diff's tones, so the bar holds no green or red words.
         let changes = session.and_then(|s| s.changes).and_then(|c| {
             let (added, removed) = super::navigator::change_words(c)?;
             let label = SharedString::from(format!("{added} {removed}"));
+            let signed = |id: &'static str, words: String, tone: slopty_theme::Rgb| {
+                let mut chars = words.chars();
+                let sign = chars.next().map(String::from).unwrap_or_default();
+                div()
+                    .id(id)
+                    .flex()
+                    .child(div().text_color(hsla(tone)).child(SharedString::from(sign)))
+                    .child(SharedString::from(chars.collect::<String>()))
+            };
             Some(
-                readout("status-changes", label)
+                tabular(readout("status-changes", label))
                     .flex()
                     .items_center()
                     .gap(px(spacing.xs))
-                    .pl(px(spacing.xs))
-                    .child(div().text_color(hsla(s.success)).child(added))
-                    .child(div().text_color(hsla(s.error)).child(removed)),
+                    .child(signed("status-added", added, s.success))
+                    .child(signed("status-removed", removed, s.error)),
             )
         });
-        // Worker › directory › branch: one path, its steps a quiet chevron apart.
-        let step = || div().flex_none().text_color(muted).child("\u{203a}");
+        let branch = session.and_then(|s| s.branch.clone()).map(|branch| {
+            let branch = SharedString::from(branch);
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(spacing.sm))
+                .child(
+                    readout("status-branch", branch.clone())
+                        .aria_label(SharedString::from(format!("branch {branch}")))
+                        .child(branch),
+                )
+                .children(changes)
+        });
+        // Worker · directory · branch: one path, its steps a faint dot apart.
+        let step = || separator(theme);
         let mut place_parts: Vec<gpui::AnyElement> = Vec::new();
         for part in [
             name.map(gpui::IntoElement::into_any_element),
@@ -348,13 +372,13 @@ impl WorkspaceView {
             .children(server)
             .child(
                 div()
+                    .debug_selector(|| "status-place".to_owned())
                     .min_w_0()
                     .overflow_hidden()
                     .flex()
                     .items_center()
                     .gap(px(spacing.xs))
-                    .children(place_parts)
-                    .children(changes),
+                    .children(place_parts),
             );
 
         let ports = (!phone).then(|| self.forwarded_count()).filter(|n| *n > 0).map(|n| {
@@ -369,34 +393,14 @@ impl WorkspaceView {
                 (d.saturating_add(u.done), t.saturating_add(u.total))
             });
             let text: SharedString = transfers_label(self.uploads.len(), done, total).into();
-            tabular(readout("status-transfers", text.clone())).child(text)
+            spaced(tabular(readout("status-transfers", text.clone())), &text, theme)
         });
-        // How the tailnet carries the link, beside its round trip; a DERP relay in the warning
-        // tone, being the slow path.
-        let path = link.filter(|w| w.status.is_up()).and_then(|w| w.path.as_ref()).map(|path| {
-            let (text, slow) = path_label(path);
-            let text = SharedString::from(text);
-            readout("status-path", text.clone())
-                .when(slow, |el| el.text_color(hsla(s.warn)))
-                .child(text)
-        });
-        // The round trip in its own slot, held from the link's first frame at the width of any
-        // figure it will show: the first sample lands without moving what is left of it. The
-        // figure alone; its unit says what it is, and a screen reader hears the words.
-        let rtt = link.filter(|w| w.status.is_up()).map(|w| {
-            let figure = w.rtt.map(|rtt| {
-                let text = SharedString::from(rtt_label(rtt));
-                tabular(readout("status-rtt", text.clone()))
-                    .aria_label(SharedString::from(format!("Round trip {text}")))
-                    .child(text)
-            });
-            div()
-                .debug_selector(|| "status-rtt-slot".to_owned())
-                .flex_none()
-                .flex()
-                .justify_end()
-                .min_w(px(theme.typography.small() * RTT_SLOT_EMS))
-                .children(figure)
+        let link_readout = link.filter(|w| w.status.is_up()).and_then(|w| {
+            let path = w.path.as_ref().map(path_label);
+            let relayed = path.as_ref().is_some_and(|(_, slow)| *slow);
+            let shown =
+                self.bar.hovered || relayed || w.rtt.is_some_and(|rtt| rtt >= RTT_SHOWN_FROM);
+            shown.then(|| self.render_link(path, w.rtt))
         });
         // The link says something only when it is not up: a word in its tone, the mark being
         // on the left.
@@ -418,24 +422,26 @@ impl WorkspaceView {
         });
         let facts = focused_item.and_then(|item| self.focus_facts(item, cx)).map(|text| {
             let text = SharedString::from(text);
-            tabular(readout("status-facts", text.clone())).child(text)
+            spaced(tabular(readout("status-facts", text.clone())), &text, theme)
         });
+        // The link leads the right: it comes and goes with the pointer, and growing leftward
+        // from the start of a cluster that is pinned right, it moves nothing else.
         let right = div()
             .debug_selector(|| "status-right".to_owned())
             .flex_none()
             .flex()
             .items_center()
             .gap(px(spacing.md))
+            .children(link_readout)
+            .children(health)
             .children(facts)
             .children(ports)
             .children(transfers)
-            .children(health)
-            .children(path)
-            .children(rtt)
             .children(frame)
             .children(workers)
             .children(agents);
         let hosts = (self.bar.hosts_open && !phone).then(|| self.render_hosts(window, cx));
+        let statusbar = self.chrome.statusbar.entity_id();
         let bar = div()
             .id("statusbar")
             .debug_selector(|| "statusbar".to_owned())
@@ -450,8 +456,65 @@ impl WorkspaceView {
             .bg(hsla(s.canvas))
             .border_t_1()
             .border_color(hsla(s.border))
-            .font_family(theme.typography.ui_family.clone());
+            .font_family(theme.typography.ui_family.clone())
+            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                if this.bar.hovered != *hovered {
+                    this.bar.hovered = *hovered;
+                    App::notify(cx, statusbar);
+                }
+            }));
         meta(bar, theme).child(left).child(right).children(hosts).into_any_element()
+    }
+
+    /// The link to the focused worker: how the tailnet carries it (a DERP relay in the
+    /// warning tone, being the slow path) and its round trip, warning past [`RTT_WARN_FROM`].
+    /// The figure sits in a slot as wide as any it shows, pinned at its right, so a new sample
+    /// moves only its own digits; its unit says what it is, and a screen reader hears the
+    /// words.
+    fn render_link(&self, path: Option<(String, bool)>, rtt: Option<Duration>) -> Div {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let path = path.map(|(text, slow)| {
+            let text = SharedString::from(text);
+            readout("status-path", text.clone())
+                .when(slow, |el| el.text_color(hsla(s.warn)))
+                .child(text)
+        });
+        let figure = rtt.map(|rtt| {
+            let text = SharedString::from(rtt_label(rtt));
+            tabular(readout("status-rtt", text.clone()))
+                .aria_label(SharedString::from(format!("Round trip {text}")))
+                .when(rtt >= RTT_WARN_FROM, |el| el.text_color(hsla(s.warn)))
+                .child(text)
+        });
+        div()
+            .debug_selector(|| "status-link-readout".to_owned())
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm))
+            .children(path)
+            .child(
+                div()
+                    .debug_selector(|| "status-rtt-slot".to_owned())
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .min_w(px(theme.typography.meta() * RTT_SLOT_EMS))
+                    .children(figure),
+            )
+    }
+
+    /// Whether the status bar prints `key`'s round trip, going from `was` to `now`: the
+    /// focused worker's, while it is slow or the pointer is over the bar.
+    pub(super) fn status_prints_rtt(
+        &self,
+        key: WorkerKey,
+        was: Option<Duration>,
+        now: Option<Duration>,
+    ) -> bool {
+        let slow = |rtt: Option<Duration>| rtt.is_some_and(|rtt| rtt >= RTT_SHOWN_FROM);
+        self.status_worker() == Some(key) && (self.bar.hovered || slow(was) || slow(now))
     }
 
     /// "N workers" with a dot in the worst link's tone, only while any is not up (all up, the
@@ -536,7 +599,7 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             .pb(px(spacing.xs))
-            .rounded(px(theme.radii.md))
+            .rounded(px(theme.radii.lg))
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
@@ -733,6 +796,27 @@ const fn state_fill(theme: &Theme, status: Status) -> slopty_theme::Rgb {
 /// A small dot of a state's fill beside a readout's words.
 fn state_dot(theme: &Theme, fill: slopty_theme::Rgb) -> Div {
     div().flex_none().size(px(theme.spacing.xs + theme.spacing.xxs)).rounded_full().bg(hsla(fill))
+}
+
+/// The faint dot between the steps of a readout, as between worker, directory and branch:
+/// the parts read as one line, the dot as no word of its own.
+fn separator(theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .text_color(hsla_alpha(theme.surfaces.text_muted, alpha::PRESSED))
+        .child(SharedString::from(META_SEPARATOR.trim()))
+}
+
+/// `el` holding `text`, its parts (joined by [`META_SEPARATOR`]) set apart by the faint dot.
+fn spaced(el: Stateful<Div>, text: &str, theme: &Theme) -> Stateful<Div> {
+    let mut el = el.flex().items_center().gap(px(theme.spacing.xs));
+    for (i, part) in text.split(META_SEPARATOR).enumerate() {
+        if i > 0 {
+            el = el.child(separator(theme));
+        }
+        el = el.child(SharedString::from(part.to_owned()));
+    }
+    el
 }
 
 /// A readout: a status the screen reader reads as `text`, on one line.

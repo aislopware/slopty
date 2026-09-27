@@ -104,10 +104,10 @@ fn a_workspace_is_named_by_where_its_first_shell_is(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "release", "a given name wins");
 }
 
-/// The left of the bar says where the focused shell is: the repository and the path within
-/// it, and the branch; its worker only once there are two, or the one is down. The right counts the
-/// ports forwarded here, which list them; the workers go uncounted while every one is up, and the
-/// frame time waits for the stream stats.
+/// The left of the bar says where the focused shell is, as one path: its worker (with one
+/// worker too), the repository and the path within it, the branch, in that order. The right
+/// counts the ports forwarded here, which list them; the workers go uncounted while every one
+/// is up, and the frame time waits for the stream stats.
 #[gpui::test]
 fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -122,10 +122,15 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, forwards, cx));
     cx.run_until_parked();
     let names = labels(&view, cx);
-    for readout in ["slopty/crates/ui", "branch main", "2 ports"] {
+    for readout in ["studio", "slopty/crates/ui", "branch main", "2 ports"] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
-    assert!(cx.debug_bounds("status-worker").is_none(), "one worker goes unnamed: {names:#?}");
+    let at = |cx: &mut VisualTestContext, selector: &'static str| {
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"))
+    };
+    let (worker, cwd, branch) =
+        (at(cx, "status-worker"), at(cx, "status-cwd"), at(cx, "status-branch"));
+    assert!(worker.right() < cwd.left() && cwd.right() < branch.left(), "one path, in order");
     assert!(cx.debug_bounds("status-frame").is_none(), "no frame time without the stats");
     assert!(cx.debug_bounds("status-workers").is_none(), "a worker that is up says nothing");
 
@@ -137,27 +142,82 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
     assert_eq!(lines, 4, "a tile and a browser line for each port");
 }
 
-/// The round trip's slot is held from the link's first frame, so the first sample, and a
-/// slower one, land without moving the rest of the bar; the figure says its unit, not "RTT".
+/// A quick round trip is said only under the pointer, and its samples draw nothing; a slow
+/// one stands on its own. Either lands at the start of the bar's right, so nothing else there
+/// moves, and the figure says its unit, not "RTT".
 #[gpui::test]
-fn the_round_trip_lands_without_moving_the_bar(cx: &mut TestAppContext) {
+fn a_quick_round_trip_waits_for_the_pointer_and_a_slow_one_stands(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    shell_in_repo(&view, cx, &studio, "/w/oss/slopty", "/w/oss/slopty", "main");
-    let right = |cx: &mut VisualTestContext| {
-        let at = cx.debug_bounds("status-right").expect("the bar's right");
-        (f32::from(at.left()), f32::from(at.size.width))
+    let (shell, _tile) =
+        shell_in_repo(&view, cx, &studio, "/w/oss/slopty", "/w/oss/slopty", "main");
+    let forward = Forward {
+        port: Port { number: 5173, pid: 2, process: "vite".to_owned(), session: Some(shell) },
+        local: Some(5173),
     };
-    let before = right(cx);
-    assert!(cx.debug_bounds("status-rtt").is_none(), "nothing sampled yet");
-    for micros in [4_240, 123_000] {
-        let key = studio.key;
+    view.update_in(cx, |v, _window, cx| v.ports_changed(shell, vec![forward], cx));
+    cx.run_until_parked();
+    let key = studio.key;
+    let sample = |cx: &mut VisualTestContext, micros: u64| {
         view.update_in(cx, |v, _w, cx| v.set_rtt(key, Some(Duration::from_micros(micros)), cx));
         cx.run_until_parked();
-        assert!(cx.debug_bounds("status-rtt").is_some(), "the figure shows");
-        assert_eq!(right(cx), before, "{micros} µs moved the bar");
-    }
+    };
+    let ports = |cx: &mut VisualTestContext| cx.debug_bounds("status-ports").expect("the ports");
+    let before = ports(cx);
+
+    sample(cx, 4_240);
+    assert!(cx.debug_bounds("status-rtt").is_none(), "a quick link says nothing");
+    let drawn = view.read_with(cx, WorkspaceView::chrome_renders);
+    sample(cx, 4_870);
+    assert_eq!(view.read_with(cx, WorkspaceView::chrome_renders), drawn, "nor draws the bar");
+
+    hover(cx, "statusbar");
+    assert!(cx.debug_bounds("status-rtt").is_some(), "under the pointer it shows");
+    assert!(labels(&view, cx).iter().any(|l| l == "Round trip 4.9 ms"), "the latest sample");
+    assert_eq!(ports(cx), before, "the round trip moved the ports");
+    let away = cx.debug_bounds("navigator").expect("the navigator").center();
+    cx.simulate_mouse_move(away, None, Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("status-rtt").is_none(), "and goes with it");
+
+    sample(cx, 123_000);
+    assert!(cx.debug_bounds("status-rtt").is_some(), "a slow link says so unasked");
     assert!(labels(&view, cx).iter().any(|l| l == "Round trip 123 ms"));
+    assert_eq!(ports(cx), before, "{before:?}");
+}
+
+/// A tab's words sit on the bar's midline with its buttons, the active tab reaches down
+/// through the bar's edge to join the content, and every tab keeps the same box, so switching
+/// moves none.
+#[gpui::test]
+fn the_active_tab_joins_the_content_on_the_bars_midline(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shells = three_shells(&view, cx, &studio);
+    // A column moved down makes a second workspace worth a tab.
+    view.update_in(cx, |v, _w, cx| {
+        v.tick();
+        v.layout.move_column_to_workspace_down();
+        v.after_focus_moved(cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let at = |cx: &mut VisualTestContext, selector: &'static str| {
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"))
+    };
+    let (bar, bell) = (at(cx, "titlebar"), at(cx, "bell"));
+    let active = view.read_with(cx, |v, _| v.layout.active_workspace());
+    for ix in [0, 1] {
+        let (tab, band) =
+            (at(cx, leak(format!("ws-tab-{ix}"))), at(cx, leak(format!("ws-tab-band-{ix}"))));
+        let off = f32::from(band.center().y - bell.center().y).abs();
+        assert!(off < 0.5, "tab {ix}'s words {off} pt off the buttons' midline");
+        assert!(tab.bottom() >= bar.bottom(), "tab {ix} reaches the edge: {tab:?} {bar:?}");
+    }
+    let before = (at(cx, "ws-tab-0"), at(cx, "ws-tab-1"));
+    click(cx, if active == 0 { "ws-tab-1" } else { "ws-tab-0" });
+    assert_ne!(view.read_with(cx, |v, _| v.layout.active_workspace()), active, "switched");
+    assert_eq!((at(cx, "ws-tab-0"), at(cx, "ws-tab-1")), before, "switching moved a tab");
 }
 
 /// "N workers" shows, with a dot, once a worker is not up, and opens the hosts popover: each worker
@@ -242,8 +302,11 @@ fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut Tes
     });
     cx.run_until_parked();
     let names = labels(&view, cx);
-    assert!(names.iter().any(|l| l == "Direct"), "the focused worker's path: {names:#?}");
+    assert!(!names.iter().any(|l| l == "Direct"), "a quick direct link is quiet: {names:#?}");
     assert!(names.iter().any(|l| l == "laptop, DERP · fra"), "a relay is named: {names:#?}");
+    hover(cx, "statusbar");
+    let names = labels(&view, cx);
+    assert!(names.iter().any(|l| l == "Direct"), "the focused worker's path: {names:#?}");
     assert!(cx.debug_bounds(leak(format!("nav-path-{studio_key}"))).is_none(), "direct is quiet");
     assert!(cx.debug_bounds(leak(format!("nav-path-{laptop_key}"))).is_some());
 

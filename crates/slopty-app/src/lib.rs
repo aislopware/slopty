@@ -32,7 +32,7 @@ use slopty_core::{SessionId, WorkerId};
 use slopty_proto::WorkerMsg;
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::{Density, Spacing, Theme, Typography};
-use slopty_ui::a11y::{key_name, tab_stop};
+use slopty_ui::a11y::tab_stop;
 use slopty_ui::colors::hsla;
 use slopty_ui::kit::{self, ButtonKind};
 use slopty_ui::screen::{ScreenView, Sticky};
@@ -59,8 +59,12 @@ const fn key_bar_visible(touch_platform: bool, hardware_keyboard: bool) -> bool 
 const KEY_BAR_H: f32 = Density::TOUCH.hit;
 /// Half a point: a scroll offset this close to an end is at it.
 const AT_END: f32 = 0.5;
-/// The add-worker panel's width: a line of help and an address field, not a document.
-const ADD_PANEL_W: f32 = 400.0;
+/// The add-worker panel's width: a line of help, the tailnet's rows and an address field
+/// beside its button, not a document.
+const ADD_PANEL_W: f32 = 440.0;
+/// The address field's height, and its button's beside it: T3 Code's field (`h-9`) under a
+/// pointer, a finger's target on glass.
+const FIELD_H: f32 = if TOUCH { Density::TOUCH.hit } else { 36.0 };
 
 /// Whether a hardware keyboard is attached. The e2e build lets `SLOPTY_HARDWARE_KEYBOARD=0|1`
 /// decide instead of the platform: on the simulator `GameController` reports the Mac's keyboard
@@ -81,8 +85,8 @@ const LINK_BATCH: usize = 256;
 /// non-printing keys). In the order a phone shows them before the row scrolls: the keys the
 /// soft keyboard has no way to type come first, the punctuation it only hides after.
 const BAR_KEYS: [(&str, &str, Option<&str>); 12] = [
-    ("esc", "escape", None),
-    ("tab", "tab", None),
+    ("Esc", "escape", None),
+    ("Tab", "tab", None),
     ("⌃", "", None),
     ("←", "left", None),
     ("↑", "up", None),
@@ -126,7 +130,7 @@ enum KeyGroup {
 /// The group `label`'s key belongs to.
 fn key_group(label: &str) -> KeyGroup {
     match label {
-        "esc" | "tab" | "⌃" | "⌘" => KeyGroup::Lead,
+        "Esc" | "Tab" | "⌃" | "⌘" => KeyGroup::Lead,
         "←" | "↑" | "↓" | "→" => KeyGroup::Arrows,
         _ => KeyGroup::Trail,
     }
@@ -149,8 +153,8 @@ fn key_bar_fades(scrolled: f32, max: f32) -> (bool, bool) {
 /// The key bar over a remote window: ⌘ joins ⌃ (an IDE lives on chords), the shell
 /// punctuation goes.
 const SCREEN_BAR_KEYS: [(&str, &str, Option<&str>); 9] = [
-    ("esc", "escape", None),
-    ("tab", "tab", None),
+    ("Esc", "escape", None),
+    ("Tab", "tab", None),
     ("⌃", "", None),
     ("⌘", "cmd", None),
     ("←", "left", None),
@@ -231,6 +235,8 @@ enum Search {
         servers: Vec<Offer>,
         /// Nodes that answered as a worker not yet added.
         workers: Vec<Offer>,
+        /// This Mac's Tailscale is up: an empty answer is the tailnet's, not a look never made.
+        running: bool,
     },
 }
 
@@ -238,7 +244,7 @@ impl Search {
     /// The rows a panel in `mode` offers, in order: the servers (a server's panel only), then
     /// the workers, since a tailnet without a server still has its workers to add.
     fn offers(&self, mode: Panel) -> Vec<(Host, &Offer)> {
-        let Self::Answered { servers, workers } = self else { return Vec::new() };
+        let Self::Answered { servers, workers, .. } = self else { return Vec::new() };
         let servers = servers.iter().filter(|_| mode == Panel::Server).map(|o| (Host::Server, o));
         servers.chain(workers.iter().map(|o| (Host::Worker, o))).collect()
     }
@@ -247,7 +253,26 @@ impl Search {
     fn words(&self, mode: Panel) -> Option<&'static str> {
         match self {
             Self::Looking => Some(LOOKING),
+            Self::Answered { running: false, .. } => {
+                self.offers(mode).is_empty().then_some(NOT_RUNNING)
+            }
             Self::Answered { .. } => self.offers(mode).is_empty().then_some(NOTHING_ANSWERED),
+        }
+    }
+
+    /// The line under [`Self::words`]: what to do about it. Nothing while it looks.
+    const fn next_step(&self, mode: Panel) -> Option<&'static str> {
+        match (self, mode) {
+            (Self::Looking, _) => None,
+            (Self::Answered { running: false, .. }, _) => {
+                Some("Start it here, or type an address on your VPN.")
+            }
+            (Self::Answered { .. }, Panel::Server) => {
+                Some("Start the Slopty server on a machine there, or type its address.")
+            }
+            (Self::Answered { .. }, Panel::Worker) => {
+                Some("Start the Slopty worker on a Mac there, or type its address.")
+            }
         }
     }
 }
@@ -256,6 +281,11 @@ impl Search {
 const LOOKING: &str = "Looking on your tailnet\u{2026}";
 /// The panel's word when nothing on the tailnet answered as a server or a worker.
 const NOTHING_ANSWERED: &str = "Nothing answered on your tailnet";
+/// The panel's word when this Mac has no tailnet to look on: Tailscale is off or absent.
+const NOT_RUNNING: &str = "Tailscale is not running on this Mac";
+/// The first run's foot: why there is no pairing code, key or password to find.
+const TAILNET_NOTE: &str =
+    "Tailscale or your VPN encrypts every link, so there is nothing to pair.";
 
 /// The window's root view.
 #[derive(Debug)]
@@ -886,7 +916,7 @@ impl Workspace {
             let at = best.at.clone();
             adding.address.update(cx, |input, cx| input.set_value(at, window, cx));
         }
-        adding.search = Some(Search::Answered { servers, workers });
+        adding.search = Some(Search::Answered { servers, workers, running: found.running });
         cx.notify();
     }
 
@@ -1049,11 +1079,15 @@ impl Workspace {
         self.adding.is_some() && self.workers.is_empty() && self.server.is_none()
     }
 
-    /// The way in: a heading, one line on what it is, the address, one primary action, and the
-    /// other way in as a quiet link. On the first run it stands alone on the canvas, a third of
-    /// the way down; later ("Add a worker…", "Connect to a server…") it is a dialog over the
-    /// workspace, closed by Cancel, Esc or a click outside it. On touch the field ends in a
-    /// Paste, since the phone has no ⌘V, and the primary action is a thumb's full width.
+    /// The way in: the app's name, a heading and a line on what it is, what the tailnet
+    /// answered as a list to press, the address with its one primary action, and the other way
+    /// in as a quiet link.
+    ///
+    /// On the first run it is the page, a third of the way down the content surface over a foot
+    /// that says why there is nothing to pair. Later ("Add a worker…", "Connect to a server…")
+    /// it is a dialog over the workspace, closed by Cancel, Esc or a click outside it. On the
+    /// Mac the field and its action share a row; on touch the field ends in a Paste, since the
+    /// phone has no ⌘V, and the action is a thumb's full width under it.
     fn add_worker_panel(
         &self,
         adding: &Adding,
@@ -1062,7 +1096,7 @@ impl Workspace {
     ) -> impl IntoElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let (spacing, radii) = (theme.spacing, theme.radii);
+        let (spacing, radii, ty) = (theme.spacing, theme.radii, &theme.typography);
         let button = |id, text, kind| kit::button(theme, id, text, kind);
         // Each blurb fits one line of a 402 pt phone.
         let (title, blurb, field, go, other, other_mode) = match adding.mode {
@@ -1083,78 +1117,96 @@ impl Workspace {
                 Panel::Server,
             ),
         };
-        let blurb = div()
-            .id("add-worker-blurb")
-            .debug_selector(|| "add-worker-blurb".to_owned())
-            .child(blurb);
-        // Each server and worker the tailnet found is a row to press, as a nearby device is:
-        // its name, what it is and its address. While it looks, or when nothing answered, one
-        // quiet line says so.
-        let search = adding.search.as_ref();
-        let found: Vec<gpui::AnyElement> = search
-            .map(|search| search.offers(adding.mode))
-            .unwrap_or_default()
-            .into_iter()
-            .enumerate()
-            .map(|(ix, (host, offer))| {
-                let target = offer.at.clone();
-                found_row(theme, ix, host, offer)
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.connect_found(host, &target, window, cx);
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-        let searching = search.and_then(|search| search.words(adding.mode)).map(|words| {
-            div()
-                .id("add-worker-search")
-                .debug_selector(|| "add-worker-search".to_owned())
-                .role(Role::Status)
-                .aria_label(words)
-                .text_size(px(theme.typography.small()))
-                .text_color(hsla(s.text_muted))
-                .child(words)
-        });
         let welcome = self.welcome();
-        // The first run is the app's front page: its mark over the heading, as a sign on the
-        // door. A dialog over the workspace needs none.
-        let brand = welcome.then(|| brand(theme));
+        // The page names the app over its heading, as a sign on the door does; a dialog over
+        // the workspace needs no sign.
+        let wordmark = welcome.then(|| wordmark(theme));
+        let heading = div()
+            .id("add-worker-title")
+            .role(Role::Heading)
+            .aria_label(title)
+            .text_size(px(if welcome { ty.display() } else { ty.title() }))
+            .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
+            .text_color(hsla(s.text))
+            .child(title);
+        let intro = div().flex().flex_col().gap(px(spacing.xs)).child(heading).child(
+            div()
+                .id("add-worker-blurb")
+                .debug_selector(|| "add-worker-blurb".to_owned())
+                .text_size(px(ty.ui_size))
+                .text_color(hsla(s.text_secondary))
+                .child(blurb),
+        );
+        let tailnet =
+            adding.search.as_ref().map(|search| self.tailnet_list(search, adding.mode, cx));
         let status = match (&adding.error, adding.busy) {
             (Some(e), _) => Some((e.clone(), s.error)),
             (None, true) => Some(("Connecting…".to_owned(), s.text_muted)),
             (None, false) => None,
         };
-        let switch = button("panel-switch", other, ButtonKind::Link)
-            .text_size(px(theme.typography.small()))
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                this.show_add_worker(other_mode, window, cx);
-            }));
         let go = button("add", go, ButtonKind::Primary)
+            .h(px(FIELD_H))
             .when(TOUCH, gpui::Styled::w_full)
             .on_click(cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)));
-        let cancel = (!welcome).then(|| {
-            button("cancel-add", "Cancel", ButtonKind::Ghost)
-                .on_click(cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)))
-        });
         let paste = TOUCH.then(|| {
             button("paste-address", "Paste", ButtonKind::Link)
                 .on_click(cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)))
         });
-        let address = Input::new(&adding.address).aria_label(field).when_some(paste, Input::suffix);
-        // The Mac: the action and Cancel on one row, the other way in under them. Touch: the
-        // action alone across the panel, then the other way in beside Cancel.
-        let actions = if TOUCH {
-            div().flex().flex_col().gap(px(spacing.md)).child(go).child(
-                div().flex().items_center().child(switch).child(div().flex_1()).children(cancel),
-            )
+        // A field is a well in the page, not a box drawn round one: the raised fill, no
+        // hairline, and its caret the only sign of focus (T3 Code, Geist).
+        let address = div()
+            .id("add-worker-field")
+            .debug_selector(|| "add-worker-field".to_owned())
+            .flex_1()
+            .min_w_0()
+            .h(px(FIELD_H))
+            .flex()
+            .items_center()
+            // The field's own pad and this put its text on the tailnet rows' glyphs.
+            .pl(px(spacing.xs))
+            .rounded(px(radii.sm))
+            .bg(hsla(s.raised))
+            .text_size(px(ty.ui_size))
+            .child(
+                Input::new(&adding.address)
+                    .appearance(false)
+                    .aria_label(field)
+                    .when_some(paste, Input::suffix),
+            );
+        let entry = if TOUCH {
+            div().flex().flex_col().gap(px(spacing.sm)).child(address.w_full()).child(go)
         } else {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(spacing.md))
-                .child(div().flex().items_center().child(go).child(div().flex_1()).children(cancel))
-                .child(div().flex().child(switch))
+            div().flex().items_center().gap(px(spacing.sm)).child(address).child(go)
         };
+        let entry = div()
+            .flex()
+            .flex_col()
+            .gap(px(spacing.sm))
+            // Under the tailnet's list the field is the other way; alone it needs no label.
+            .when(tailnet.is_some(), |el| el.child(kit::label(theme, "Or type an address")))
+            .child(entry)
+            .when_some(status, |el, (text, tone)| {
+                el.child(
+                    div()
+                        .id("add-worker-status")
+                        .role(Role::Status)
+                        .aria_label(SharedString::from(text.clone()))
+                        .text_size(px(ty.small()))
+                        .text_color(hsla(tone))
+                        .child(SharedString::from(text)),
+                )
+            });
+        let switch = button("panel-switch", other, ButtonKind::Link)
+            .text_size(px(ty.small()))
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                this.show_add_worker(other_mode, window, cx);
+            }));
+        let cancel = (!welcome).then(|| {
+            button("cancel-add", "Cancel", ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)))
+        });
+        let aside =
+            div().flex().items_center().child(switch).child(div().flex_1()).children(cancel);
         let panel = div()
             .id("add-worker")
             .debug_selector(|| "add-worker".to_owned())
@@ -1162,85 +1214,35 @@ impl Workspace {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(spacing.md))
+            .gap(px(spacing.lg))
             .w(px(ADD_PANEL_W))
             .max_w_full()
-            .font_family(theme.typography.ui_family.clone())
+            .font_family(ty.ui_family.clone())
             .when(!welcome, |el| {
                 kit::elevate(el, theme)
                     .p(px(spacing.xl))
-                    .rounded(px(radii.md))
+                    .rounded(px(radii.lg))
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                         this.cancel_add_worker(window, cx);
                         cx.stop_propagation();
                     }))
             })
-            .children(brand)
+            // The intro stands a step further from what follows than the sections do apart.
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(spacing.xs))
-                    .child(
-                        div()
-                            .id("add-worker-title")
-                            .role(Role::Heading)
-                            .aria_label(title)
-                            .text_size(px(if welcome {
-                                theme.typography.display()
-                            } else {
-                                theme.typography.title()
-                            }))
-                            .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
-                            .text_color(hsla(s.text))
-                            .child(title),
-                    )
-                    .child(
-                        blurb
-                            .text_size(px(theme.typography.small()))
-                            .text_color(hsla(s.text_muted)),
-                    ),
+                    .gap(px(spacing.lg))
+                    .mb(px(spacing.sm))
+                    .children(wordmark)
+                    .child(intro),
             )
-            .children(found)
-            .children(searching)
-            .child(address)
-            .when_some(status, |el, (text, tone)| {
-                el.child(
-                    div()
-                        .id("add-worker-status")
-                        .role(Role::Status)
-                        .aria_label(SharedString::from(text.clone()))
-                        .text_size(px(theme.typography.small()))
-                        .text_color(hsla(tone))
-                        .child(SharedString::from(text)),
-                )
-            })
-            .child(actions);
-        if welcome {
-            // Not a dialog over an app that does nothing yet: the page itself, its block a third
-            // of the way down the height it has, where the eye starts. Spacers rather than a
-            // percentage pad, which would resolve against the width. The safe area includes a
-            // phone's keyboard, so the block rises with it.
-            let safe = window.insets().effective();
-            div()
-                .id("welcome")
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .pt(safe.top)
-                .pb(safe.bottom)
-                .px(px(spacing.lg))
-                // A page of content, not a bar: the content surface the tiles' bodies take,
-                // where the canvas's near-black read as nothing having loaded yet.
-                .bg(hsla(theme.content()))
-                .child(div().flex_grow(1.0))
-                .child(panel)
-                .child(div().flex_grow(2.0))
-                .into_any_element()
-        } else {
-            kit::backdrop(theme, window)
+            .children(tailnet)
+            .child(entry)
+            .child(aside);
+        if !welcome {
+            return kit::backdrop(theme, window)
                 .id("add-worker-backdrop")
                 .occlude()
                 .on_mouse_down(
@@ -1251,14 +1253,114 @@ impl Workspace {
                     }),
                 )
                 .child(panel)
-                .into_any_element()
+                .into_any_element();
         }
+        // Not a dialog over an app that does nothing yet: the page itself, on the content
+        // surface the tiles' bodies take. Its block sits a third of the way down the room over
+        // the foot, where the eye starts; spacers rather than a percentage pad, which would
+        // resolve against the width. The safe area includes a phone's keyboard, so the block
+        // rises with it.
+        let safe = window.insets().effective();
+        let foot = div()
+            .id("add-worker-foot")
+            .debug_selector(|| "add-worker-foot".to_owned())
+            .flex_none()
+            .w(px(ADD_PANEL_W))
+            .max_w_full()
+            .pb(px(spacing.lg))
+            .child(kit::meta(div(), theme).child(TAILNET_NOTE));
+        div()
+            .id("welcome")
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(safe.top)
+            .pb(safe.bottom)
+            // A phone on its side has the island at one end: the page keeps clear of it.
+            .pl(safe.left + px(spacing.lg))
+            .pr(safe.right + px(spacing.lg))
+            .bg(hsla(theme.content()))
+            .font_family(ty.ui_family.clone())
+            .child(div().flex_grow(1.0))
+            .child(panel)
+            .child(div().flex_grow(2.0))
+            .child(foot)
+            .into_any_element()
+    }
+
+    /// What the tailnet answered: each server and worker a row to press, under a label, in
+    /// one framed list; while it looks, or when nothing answered, the same frame holds one
+    /// row saying so and what to do, so the page does not jump as the look ends.
+    fn tailnet_list(&self, search: &Search, mode: Panel, cx: &Context<Self>) -> gpui::AnyElement {
+        use slopty_ui::icons::{IconName, IconSize, Status, icon, status_icon};
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        // The rows' radius plus the pad round them, so the corners nest.
+        let frame = div()
+            .id("add-worker-tailnet")
+            .flex()
+            .flex_col()
+            .p(px(theme.spacing.xxs))
+            .rounded(px(theme.radii.md))
+            .border_1()
+            .border_color(hsla(s.border));
+        let glyph = px(theme.typography.icon());
+        if let Some(words) = search.words(mode) {
+            let mark = match search {
+                Search::Looking => status_icon(theme, Status::Running, glyph, hsla(s.text_muted)),
+                Search::Answered { running, .. } => {
+                    let name = if *running { IconName::Search } else { IconName::WifiOff };
+                    icon(theme, name, IconSize::Inline, hsla(s.text_muted))
+                        .size(glyph)
+                        .into_any_element()
+                }
+            };
+            let row = kit::row(theme, kit::Row::Two)
+                .id("add-worker-search")
+                .debug_selector(|| "add-worker-search".to_owned())
+                .role(Role::Status)
+                .aria_label(words)
+                .child(mark)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(theme.typography.ui_size))
+                                .text_color(hsla(s.text_secondary))
+                                .child(words),
+                        )
+                        .children(
+                            search.next_step(mode).map(|step| kit::meta(div(), theme).child(step)),
+                        ),
+                );
+            return frame.child(row).into_any_element();
+        }
+        let rows = search.offers(mode).into_iter().enumerate().map(|(ix, (host, offer))| {
+            let target = offer.at.clone();
+            found_row(theme, ix, host, offer).on_click(cx.listener(move |this, _ev, window, cx| {
+                this.connect_found(host, &target, window, cx);
+            }))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(theme.spacing.sm))
+            .child(kit::label(theme, "On your tailnet"))
+            .child(frame.children(rows))
+            .into_any_element()
     }
 
     /// Esc, Tab, sticky Control, arrows and the shell symbols a phone keyboard hides; shown
-    /// above the keyboard inset while a terminal or a remote window is active. The bar is chrome
-    /// on `canvas` under a hairline; its row scrolls where it overflows, and an end with keys
-    /// past it fades out.
+    /// above the keyboard inset while a terminal or a remote window is active.
+    ///
+    /// The bar is the body's own surface under a hairline, so it reads as the tile's input row
+    /// and its caps as plates on it; on the canvas a cap needed a hairline of its own to be
+    /// seen. Its row scrolls where it overflows, and an end with keys past it fades out.
     fn key_bar(
         &mut self,
         target: &KeyTarget,
@@ -1266,7 +1368,7 @@ impl Workspace {
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let safe = window.insets().effective();
-        let width = f32::from(window.viewport_size().width - safe.left - safe.right);
+        let width = f32::from(self.frame_size(window).width - safe.left - safe.right);
         let row = match target {
             KeyTarget::Terminal(terminal) => self.terminal_key_bar(terminal, width, cx),
             KeyTarget::Screen(screen) => self.screen_key_bar(screen, width, cx),
@@ -1280,10 +1382,9 @@ impl Workspace {
                 cx.notify();
             }
         });
-        let s = &self.theme.surfaces;
-        let solid = hsla(s.canvas);
+        let solid = hsla(self.theme.content());
         let fade = |toward: f32| {
-            div().absolute().top_0().bottom_0().w(px(self.theme.spacing.xl)).bg(
+            div().absolute().top_0().bottom_0().w(px(self.theme.spacing.lg)).bg(
                 gpui::linear_gradient(
                     toward,
                     gpui::linear_color_stop(gpui::Hsla { a: 0.0, ..solid }, 0.0),
@@ -1296,7 +1397,7 @@ impl Workspace {
             .w_full()
             .bg(solid)
             .border_t_1()
-            .border_color(hsla(s.border))
+            .border_color(hsla(self.theme.surfaces.border))
             .child(row)
             .when(leading, |el| {
                 el.child(fade(270.0).left_0().debug_selector(|| "key-bar-fade-leading".to_owned()))
@@ -1305,6 +1406,12 @@ impl Workspace {
                 el.child(fade(90.0).right_0().debug_selector(|| "key-bar-fade-trailing".to_owned()))
             })
             .into_any_element()
+    }
+
+    /// The size the app lays itself out in: the window's, or the self-test's stand-in for
+    /// Split View.
+    fn frame_size(&self, window: &Window) -> gpui::Size<gpui::Pixels> {
+        self.split_view.unwrap_or_else(|| window.viewport_size())
     }
 
     /// [`key_bar_fades`] for the key row as it is scrolled now.
@@ -1366,19 +1473,14 @@ impl Workspace {
             .font_family(self.theme.typography.ui_family.clone())
     }
 
-    /// A key cap of the bar: `elevated` under the `border` hairline so it holds its edges on
-    /// the `canvas` bar in both variants, `overlay` while pressed, the accent fill with the
-    /// fills' ink when `lit` (armed or toggled on).
-    fn key_cap(
-        &self,
-        id: String,
-        label: &str,
-        lit: bool,
-        text_size: f32,
-    ) -> gpui::Stateful<gpui::Div> {
+    /// A key cap of the bar: a plate of `raised` with no hairline, `overlay` while pressed, the
+    /// accent fill with its ink when `lit` (armed or toggled on). A word ("Esc", "Paste") is
+    /// set small, as a keyboard sets its word keys; a glyph at the title size, so an arrow
+    /// reads at a glance on a 36 pt cap.
+    fn key_cap(&self, id: String, label: &str, lit: bool) -> gpui::Stateful<gpui::Div> {
         let s = &self.theme.surfaces;
-        let spacing = self.theme.spacing;
-        let pressed = if lit { s.accent_fill } else { s.overlay };
+        let (spacing, ty) = (self.theme.spacing, &self.theme.typography);
+        let word = label.chars().count() > 1;
         div()
             .id(SharedString::from(id))
             .flex_none()
@@ -1388,12 +1490,11 @@ impl Workspace {
             .items_center()
             .justify_center()
             .rounded(px(self.theme.radii.sm))
-            .border_1()
-            .border_color(hsla(if lit { s.accent_fill } else { s.border }))
-            .text_size(px(text_size))
+            .text_size(px(if word { ty.small() } else { ty.title() }))
+            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
             .text_color(hsla(if lit { s.accent_ink } else { s.text }))
-            .bg(hsla(if lit { s.accent_fill } else { s.elevated }))
-            .active(move |el| el.bg(hsla(pressed)))
+            .bg(hsla(if lit { s.accent_fill } else { s.raised }))
+            .when(!lit, |el| el.active(|el| el.bg(hsla(s.overlay))))
     }
 
     /// One key of the bar; `lit` draws it armed.
@@ -1404,18 +1505,13 @@ impl Workspace {
         lit: bool,
         on_click: impl Fn(&mut Window, &mut App) + 'static,
     ) -> gpui::Stateful<gpui::Div> {
-        let accent = self.theme.surfaces.accent;
-        let size = if label.chars().count() > 1 {
-            self.theme.typography.small()
-        } else {
-            self.theme.typography.ui_size
-        };
         let key = self
-            .key_cap(id, label, lit, size)
+            .key_cap(id, label, lit)
             .role(Role::Button)
             .aria_label(SharedString::from(key_label(label, lit)))
             .child(SharedString::from(label));
-        tab_stop(key, accent).on_click(move |_ev, window, cx| on_click(window, cx))
+        tab_stop(key, self.theme.surfaces.accent)
+            .on_click(move |_ev, window, cx| on_click(window, cx))
     }
 
     /// The bar over a remote window: chords and arrows, copy and paste through the worker.
@@ -1474,12 +1570,10 @@ impl Workspace {
         width: f32,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
-        let s = &self.theme.surfaces;
-        let armed = terminal.read(cx).sticky_control();
-        let armed_command = terminal.read(cx).sticky_command();
-        let has_selection = terminal.read(cx).selection().is_some();
-        let ui = self.theme.typography.ui_size;
-        let small = self.theme.typography.small();
+        let accent = self.theme.surfaces.accent;
+        let view = terminal.read(cx);
+        let (armed, armed_command) = (view.sticky_control(), view.sticky_command());
+        let (has_selection, finding) = (view.selection().is_some(), view.finding());
         let mut keys: Vec<(&'static str, gpui::AnyElement)> =
             Vec::with_capacity(BAR_KEYS.len().saturating_add(2));
         for (label, key, typed) in BAR_KEYS {
@@ -1487,13 +1581,7 @@ impl Workspace {
             let is_command = key == "cmd";
             let lit = (is_control && armed) || (is_command && armed_command);
             let target = terminal.clone();
-            let size = if label.chars().count() > 1 { small } else { ui };
-            let key_el = self
-                .key_cap(format!("key-{label}"), label, lit, size)
-                .role(Role::Button)
-                .aria_label(SharedString::from(key_label(label, lit)))
-                .child(SharedString::from(label));
-            let key_el = tab_stop(key_el, s.accent).on_click(move |_ev, _window, cx| {
+            let el = self.bar_key(format!("key-{label}"), label, lit, move |_window, cx| {
                 target.update(cx, |t, cx| {
                     if is_control {
                         let on = !t.sticky_control();
@@ -1513,17 +1601,17 @@ impl Workspace {
                     }
                 });
             });
-            keys.push((label, key_el.into_any_element()));
+            keys.push((label, el.into_any_element()));
         }
         // The phone has no ⌘C/⌘V: while text is selected the bar offers copy, otherwise paste.
         let target = terminal.clone();
         let clip_label = if has_selection { "Copy" } else { "Paste" };
         let clipboard = self
-            .key_cap("key-clipboard".to_owned(), clip_label, has_selection, small)
+            .key_cap("key-clipboard".to_owned(), clip_label, has_selection)
             .role(Role::Button)
             .aria_label(clip_label)
             .child(clip_label);
-        let clipboard = tab_stop(clipboard, s.accent).on_click(move |_ev, window, cx| {
+        let clipboard = tab_stop(clipboard, accent).on_click(move |_ev, window, cx| {
             target.update(cx, |t, cx| {
                 if has_selection {
                     // Copy, then the key reads "Paste" again.
@@ -1538,13 +1626,12 @@ impl Workspace {
         keys.insert(ARROWS_END.min(keys.len()), (clip_label, clipboard.into_any_element()));
         // No ⌘F either: "Find" opens the search bar, or closes it while it is open.
         let target = terminal.clone();
-        let finding = terminal.read(cx).finding();
         let find = self
-            .key_cap("key-find".to_owned(), "Find", finding, small)
+            .key_cap("key-find".to_owned(), "Find", finding)
             .role(Role::Button)
             .aria_label(if finding { "Close find" } else { "Find" })
             .child("Find");
-        let find = tab_stop(find, s.accent).on_click(move |_ev, window, cx| {
+        let find = tab_stop(find, accent).on_click(move |_ev, window, cx| {
             target.update(cx, |t, cx| {
                 if finding {
                     t.close_find(&slopty_ui::terminal::CloseFind, window, cx);
@@ -1573,8 +1660,26 @@ async fn wait_or_wake(
 
 /// A key-bar key as a screen reader names it; an armed modifier says so.
 fn key_label(label: &str, lit: bool) -> String {
-    let name = key_name(label);
+    let name = key_spoken(label);
     if lit { format!("{name}, armed") } else { name.to_owned() }
+}
+
+/// A key-bar key's name for a screen reader: what the cap shows, spelled out.
+fn key_spoken(label: &str) -> &str {
+    match label {
+        "Esc" => "Escape",
+        "⌃" => "Control",
+        "⌘" => "Command",
+        "←" => "Left arrow",
+        "↑" => "Up arrow",
+        "↓" => "Down arrow",
+        "→" => "Right arrow",
+        "-" => "Minus",
+        "/" => "Slash",
+        "|" => "Pipe",
+        "~" => "Tilde",
+        word => word,
+    }
 }
 
 impl Render for Workspace {
@@ -1589,6 +1694,7 @@ impl Render for Workspace {
             .flatten()
             .map(|target| self.key_bar(&target, window, cx));
         let surfaces = self.theme.surfaces;
+        let band = if key_bar.is_some() { self.theme.content() } else { surfaces.canvas };
         if std::mem::take(&mut self.pending_focus_editor)
             && let Some(editor) = self.settings_editor.clone()
         {
@@ -1630,9 +1736,9 @@ impl Render for Workspace {
                     .when_some(key_bar, |el, bar| {
                         el.child(div().w_full().pl(insets.left).pr(insets.right).child(bar))
                     })
-                    // The home indicator's band continues the bar above it: the key bar and the
-                    // status bar are both chrome on `canvas`.
-                    .child(div().w_full().h(insets.bottom).bg(hsla(surfaces.canvas)))
+                    // The home indicator's band continues the bar above it: the key bar on the
+                    // body's surface, else the status bar on `canvas`.
+                    .child(div().w_full().h(insets.bottom).bg(hsla(band)))
             })
             .when_some(adding, gpui::ParentElement::child)
             .when_some(settings_editor, gpui::ParentElement::child)
@@ -1741,48 +1847,25 @@ fn frame_nominal() -> std::time::Duration {
         })
 }
 
-/// The app's name in the product's hand: its mark (a terminal glyph on the accent fill, the
-/// primary button's pair) beside the word.
-fn brand(theme: &Theme) -> impl IntoElement {
-    use slopty_ui::icons::{IconName, IconSize, icon};
-    let s = &theme.surfaces;
-    let side = theme.typography.title() + theme.spacing.sm;
+/// The app's name where it names itself: the word alone, at the strong weight in the secondary
+/// tone. A mark on an accent tile read as a web page's logo over a form.
+fn wordmark(theme: &Theme) -> impl IntoElement {
     div()
         .id("app-brand")
         .debug_selector(|| "app-brand".to_owned())
-        .role(Role::Image)
+        .role(Role::Label)
         .aria_label(APP_NAME)
-        .flex()
-        .items_center()
-        .gap(px(theme.spacing.sm))
-        .child(
-            div()
-                .flex_none()
-                .size(px(side))
-                .rounded(px(theme.radii.sm))
-                .bg(hsla(s.accent_fill))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    icon(theme, IconName::SquareTerminal, IconSize::Inline, hsla(s.accent_ink))
-                        .size(px(theme.typography.icon())),
-                ),
-        )
-        .child(
-            div()
-                .text_size(px(theme.typography.ui_size))
-                .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
-                .text_color(hsla(s.text))
-                .child(APP_NAME),
-        )
+        .text_size(px(theme.typography.ui_size))
+        .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
+        .text_color(hsla(theme.surfaces.text_secondary))
+        .child(APP_NAME)
 }
 
 /// What the app is called where it names itself.
 const APP_NAME: &str = "Slopty";
 
-/// A server or a worker the tailnet found, as a row to press: its name over what it is and its
-/// address.
+/// A server or a worker the tailnet found, as a row to press, the palette's: its kind's glyph,
+/// its name over what it is and its address, and a chevron that says the press goes on.
 fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::Stateful<gpui::Div> {
     use slopty_ui::icons::{IconName, IconSize, icon};
     let s = theme.surfaces;
@@ -1790,20 +1873,17 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
         Host::Server => (IconName::Server, "Server", "Connect to"),
         Host::Worker => (IconName::Monitor, "Worker", "Add"),
     };
+    let glyph_size = px(theme.typography.icon());
     let row = kit::row(theme, kit::Row::Two)
         .id(("add-worker-found", ix))
         .debug_selector(move || format!("add-worker-found-{ix}"))
         .role(Role::Button)
         .aria_label(SharedString::from(format!("{verb} {}", offer.name)))
         .rounded(px(theme.radii.sm))
-        .border_1()
-        .border_color(hsla(s.border_subtle))
         .cursor_pointer()
         .hover(move |el| el.bg(hsla(s.raised)))
-        .child(
-            icon(theme, glyph, IconSize::Inline, hsla(s.text_muted))
-                .size(px(theme.typography.icon())),
-        )
+        .active(move |el| el.bg(hsla(s.overlay)))
+        .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)).size(glyph_size))
         .child(
             div()
                 .flex_1()
@@ -1813,6 +1893,7 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
                 .child(
                     div()
                         .text_size(px(theme.typography.ui_size))
+                        .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(s.text))
                         .overflow_hidden()
                         .text_ellipsis()
@@ -1820,9 +1901,13 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
                         .child(SharedString::from(offer.name.clone())),
                 )
                 .child(
-                    kit::meta(div(), theme)
+                    kit::tabular(kit::meta(div(), theme))
                         .child(SharedString::from(format!("{what} \u{b7} {}", offer.at))),
                 ),
+        )
+        .child(
+            icon(theme, IconName::ChevronRight, IconSize::Inline, hsla(s.text_muted))
+                .size(glyph_size),
         );
     tab_stop(row, s.accent)
 }
@@ -2071,6 +2156,20 @@ mod tests {
         assert!(!key_bar_visible(false, true));
     }
 
+    /// A cap's words are sentence case ("Esc", not "esc"), and a screen reader hears each key
+    /// by name, never its glyph, with an armed modifier saying so.
+    #[test]
+    fn every_key_is_spoken_by_name_and_shown_in_sentence_case() {
+        for (label, ..) in BAR_KEYS.iter().chain(&SCREEN_BAR_KEYS) {
+            let spoken = key_spoken(label);
+            assert!(spoken.chars().next().is_some_and(char::is_uppercase), "{label}: {spoken}");
+            assert!(spoken.chars().count() > 1, "{label} is named, not drawn");
+            assert!(!label.starts_with(char::is_lowercase), "{label} is sentence case");
+        }
+        assert_eq!(key_label("⌃", true), "Control, armed");
+        assert_eq!(key_label("Esc", false), "Escape");
+    }
+
     /// A key row that fits has no fade; one that runs past the edge fades where keys remain,
     /// the leading end once it is scrolled off the start.
     #[test]
@@ -2099,7 +2198,7 @@ mod tests {
     fn a_wide_key_bar_spreads_its_groups() {
         let spacing = Theme::default().spacing;
         let group = |labels: &[&str]| labels.iter().map(|l| key_group(l)).collect::<Vec<_>>();
-        assert!(group(&["esc", "tab", "⌃", "⌘"]).iter().all(|g| *g == KeyGroup::Lead));
+        assert!(group(&["Esc", "Tab", "⌃", "⌘"]).iter().all(|g| *g == KeyGroup::Lead));
         assert!(group(&["←", "↑", "↓", "→"]).iter().all(|g| *g == KeyGroup::Arrows));
         let trail = group(&["~", "|", "/", "-", "Copy", "Paste", "Find"]);
         assert!(trail.iter().all(|g| *g == KeyGroup::Trail));
@@ -2108,7 +2207,7 @@ mod tests {
         for row in [key_row_width(terminal, spacing), key_row_width(screen, spacing)] {
             assert!(row <= 744.0, "every bar spreads on the narrowest iPad: {row}");
         }
-        assert!(key_row_width(["esc"], spacing) > 0.0, "one key is a row");
+        assert!(key_row_width(["Esc"], spacing) > 0.0, "one key is a row");
     }
 
     /// The shell in a headless window with the add-worker panel up, `worker` ones known so
@@ -2149,10 +2248,11 @@ mod tests {
         (ws, cx)
     }
 
-    /// The first run's block sits a third of the way down the height on every device, which a
-    /// percentage pad (resolved against the width) did not: 42 % on the Mac, 12 % on a phone.
+    /// The first run's block sits a third of the way down the room over its foot on every
+    /// device, which a percentage pad (resolved against the width) did not: 42 % on the Mac,
+    /// 12 % on a phone. The foot says why there is nothing to pair, on the block's left edge.
     #[gpui::test]
-    fn the_first_run_sits_a_third_down_on_every_device(cx: &mut TestAppContext) {
+    fn the_first_run_sits_a_third_down_over_its_foot_on_every_device(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, false);
@@ -2161,20 +2261,42 @@ mod tests {
             cx.simulate_resize(size(px(w), px(h)));
             cx.run_until_parked();
             let panel = cx.debug_bounds("add-worker").expect("the panel is drawn");
+            let foot = cx.debug_bounds("add-worker-foot").expect("the foot is drawn");
             let above = f32::from(panel.top());
-            let below = h - f32::from(panel.bottom());
+            let below = f32::from(foot.top() - panel.bottom());
             assert!(
                 2.0_f32.mul_add(-above, below).abs() < 1.0,
                 "{w}×{h}: {above} above, {below} below"
             );
+            assert!((f32::from(foot.left() - panel.left())).abs() < 0.5, "one left edge");
+            assert!(f32::from(foot.bottom()) <= h, "{w}×{h}: the foot is on the page");
         }
+    }
+
+    /// Over the workspace the panel is a dialog, and it has no foot: the note is the first
+    /// run's. On the Mac the field and its action share a row, the field taking the room.
+    #[gpui::test]
+    fn the_field_and_its_action_share_a_row(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (_ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.simulate_resize(size(px(900.0), px(600.0)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("add-worker-foot").is_none(), "a dialog has no foot");
+        assert!(cx.debug_bounds("app-brand").is_none(), "nor the app's name");
+        let field = cx.debug_bounds("add-worker-field").expect("the field");
+        let go = cx.debug_bounds("add").expect("its action");
+        assert!((f32::from(field.top() - go.top())).abs() < 0.5, "{field:?} {go:?}");
+        assert!((f32::from(field.size.height - go.size.height)).abs() < 0.5, "one height");
+        assert!(field.right() < go.left(), "the action after the field");
+        assert!(field.size.width > go.size.width * 3.0, "the field takes the room");
     }
 
     /// Each panel's field gives an example of its own kind of host, and switching panels
     /// switches it. While it looks on the tailnet it says so; each server that answered is a row
-    /// to connect to under the blurb, the best one's address in the field, and when none did it
-    /// says that. The first run carries
-    /// the app's mark over its heading.
+    /// to connect to under the blurb and over the field, the best one's address in the field;
+    /// when none did it says that, and with no tailnet here it says so. The first run carries
+    /// the app's name over its heading.
     #[gpui::test]
     fn the_panel_names_its_host_and_the_server_the_tailnet_found(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -2223,7 +2345,7 @@ mod tests {
         };
         cx.update(|window, cx| {
             let servers = vec![found("home-server", 1), found("office-server", 2)];
-            let answered = net::Tailnet { servers, workers: Vec::new() };
+            let answered = net::Tailnet { servers, workers: Vec::new(), running: true };
             ws.update(cx, |ws, cx| ws.offer_found(answered, window, cx));
         });
         cx.run_until_parked();
@@ -2232,20 +2354,29 @@ mod tests {
         assert!(first.bottom() <= second.top(), "best first");
         let field = cx.debug_bounds("add-worker-blurb").expect("the blurb stays");
         assert!(field.bottom() <= first.top(), "under what the panel is for");
-        let brand = cx.debug_bounds("app-brand").expect("the first run carries the mark");
+        let brand = cx.debug_bounds("app-brand").expect("the first run carries the name");
         assert!(brand.bottom() <= field.top(), "over the heading");
+        let address = cx.debug_bounds("add-worker-field").expect("the field");
+        assert!(second.bottom() <= address.top(), "the rows over the field");
         assert_eq!(words(cx), None, "done looking");
         let typed = ws.read_with(cx, |ws, cx| {
             ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())
         });
         assert_eq!(typed.as_deref(), Some("100.64.0.1"), "the best one's address, ready");
 
-        // Nothing answering says so, and leaves what is in the field.
+        // Nothing answering says so, and leaves what is in the field; with no tailnet to look
+        // on, it says that instead.
+        looking(&ws, cx);
+        cx.update(|window, cx| {
+            let empty = net::Tailnet { running: true, ..net::Tailnet::default() };
+            ws.update(cx, |ws, cx| ws.offer_found(empty, window, cx));
+        });
+        assert_eq!(words(cx).as_deref(), Some(NOTHING_ANSWERED));
         looking(&ws, cx);
         cx.update(|window, cx| {
             ws.update(cx, |ws, cx| ws.offer_found(net::Tailnet::default(), window, cx));
         });
-        assert_eq!(words(cx).as_deref(), Some(NOTHING_ANSWERED));
+        assert_eq!(words(cx).as_deref(), Some(NOT_RUNNING));
         let typed = ws.read_with(cx, |ws, cx| {
             ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())
         });
@@ -2280,6 +2411,7 @@ mod tests {
         let tailnet = net::Tailnet {
             servers: vec![found("home-server", 1)],
             workers: vec![found("mac-studio", 3), found("macbook", 4)],
+            running: true,
         };
         answer(&ws, tailnet.clone(), cx);
         let rows = |cx: &mut VisualTestContext| {
@@ -2304,7 +2436,8 @@ mod tests {
         );
 
         // Workers alone: nothing goes in a server's field, and no "nothing answered".
-        let workers_only = net::Tailnet { servers: Vec::new(), workers: tailnet.workers.clone() };
+        let workers_only =
+            net::Tailnet { servers: Vec::new(), workers: tailnet.workers.clone(), running: true };
         let field = |cx: &mut VisualTestContext| {
             ws.read_with(cx, |ws, cx| {
                 ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())

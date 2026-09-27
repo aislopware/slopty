@@ -128,8 +128,9 @@ fn the_composer_types_into_the_same_pty(cx: &mut TestAppContext) {
     );
 }
 
-/// A held prompt takes the composer's place; Allow once answers it once, however often it is
-/// pressed, and the worker's word that it settled takes the card away.
+/// A held prompt takes the composer's place and says, when asked, what Always would grant;
+/// Allow once answers it once, however often it is pressed, and the worker's word that it
+/// settled takes the card away.
 #[gpui::test]
 fn a_held_prompt_is_answered_once(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -145,6 +146,10 @@ fn a_held_prompt_is_answered_once(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("approval").is_some(), "the card is up");
     assert!(cx.debug_bounds("composer").is_none(), "in the composer's place");
+    assert!(cx.debug_bounds("always-grants").is_none(), "what Always grants waits to be asked");
+    let what = cx.debug_bounds("always-what").expect("the way to what Always grants").center();
+    cx.simulate_click(what, Modifiers::none());
+    cx.run_until_parked();
     assert!(cx.debug_bounds("always-grants").is_some(), "Always says what it grants");
 
     for _ in 0..2 {

@@ -118,11 +118,13 @@ mod tests {
     fn ids(changes: &[Change]) -> Vec<String> {
         changes
             .iter()
+            .filter(|change| !matches!(change, Change::Turn { .. }))
             .map(|change| match change {
                 Change::Upsert { thread, entry } => format!("{thread:?} {}", entry.id),
                 Change::Remove { thread, id } => format!("{thread:?} -{id}"),
                 Change::Tasks { thread, .. } => format!("{thread:?} tasks"),
                 Change::Reset { thread } => format!("reset {thread:?}"),
+                Change::Turn { .. } => String::new(),
             })
             .collect()
     }
@@ -179,7 +181,7 @@ mod tests {
         std::fs::create_dir_all(subagents_dir(&main)).expect("mkdir");
         append(&subagents_dir(&main).join("agent-a1.jsonl"), &subagent("s1", "sub"));
         let mut transcripts = Transcripts::default();
-        assert_eq!(transcripts.read(&main, &[]).len(), 3);
+        assert_eq!(ids(&transcripts.read(&main, &[])).len(), 3);
 
         std::fs::write(&main, prompt("w1", None, "short")).expect("rewrite");
         assert_eq!(

@@ -1310,3 +1310,80 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       events are posted to the real daemon's mod socket. A piece before the hello, one after an
       unverified hello and one for another session show nothing. Then two steps stream, and
       each block is cleared only after its entry arrived. The measure reaches the meters.
+
+- ✅ **The face reads as a finished product: turn figures, changed files, copy, find, and a
+  calmer page** (2026-09-27; gap analysis against T3 Code and Amp in
+  `.research/conversation-face-gaps-2026-09-27.md`).
+  - **Turn figures come from the transcript, per turn.** `Change::Turn { thread, turn }` carries
+    a `Turn` keyed by its prompt's entry id: when it started and ended, the models that
+    answered, how many requests, their summed `Usage` (input, cache read and write, output,
+    thinking), the context at the last request, the permission mode and the last stop reason.
+    - The end is Claude Code's own: `system/stop_hook_summary` or `turn_duration`. Timing the
+      fold from the entries' stamps counted a `/compact` sixteen seconds later as the turn's
+      work (`a_compaction_stays_outside_the_fold` now reads 1 s, not 17 s).
+    - Claude Code writes one assistant record per content block, each with the request's usage
+      so far. A record with the same `message.id` and no user record since is the same request,
+      so its usage replaces the earlier one rather than adding to it.
+    - Checked on the `edit` recording: the turn's usage (input 50, cache read 125 375, cache
+      write 2 344, output 1 942, thinking 1 359) equals the `cost-state` record's `modelUsage`
+      for the run exactly.
+    - No per-turn cost. `cost-state` is written only when the process exits, as session totals,
+      so a turn's price would be a guess from a price table. The session's cost stays with the
+      status line and shows in the context chip's hint.
+  - **More the transcript says, now on the wire.** All additive, each with its golden:
+    - `Body::Rewound { dropped }` where a branch set entries aside; the fold's turns go with
+      them;
+    - `Note::retry` (`attempt`, `max`, `in_ms`) on an API error that Claude Code retries;
+    - `NoteKind::Hook` for a Stop hook that failed or stopped the turn;
+    - `WebSearchDetail::links`, the first ten pages a search found.
+  - **The page.** A centred 720-point reading column (between T3 Code's 768 and Amp's 672).
+    - Prose: answers are set at the prose size (14) on the Markdown leading. Headings step
+      18, 16, 14, paragraphs are 10 apart, and each code block names its language and has a
+      copy.
+    - Prompts: a raised bubble at the large radius, up to 85 % of the column. Its time and copy
+      show on hover, and always under a finger.
+    - Calls: a 24-point line. The verb is in the secondary tone and the subject in the text tone
+      at the medium weight. A failure adds a small ✕ after the subject; nothing else turns red.
+    - Diffs: in a frame at the medium radius headed by the file's directory, its name and its
+      size. The call's own line then drops the size.
+    - No raw JSON anywhere: an MCP or unknown tool's input reads as its keys and values.
+    - Subagents: a subagent is a row with a body, not a bordered card. While it runs, it shows
+      the call it is on and for how long.
+    - Thinking is upright, not italic.
+  - **What a turn changed.** A settled turn ends on its answer, whose hover shows its time and a
+    copy, then "Changed N files" with each file's `+a −r`.
+    - A file's click, or the header's `+N −M` chip, opens the session's changes in the same
+      list: each file over every edit and write that changed it, across threads, diffs whole.
+    - A created file shows its line count, because its content is not on the wire.
+  - **The composer floats.** It sits on `kit::elevate` at the large radius, with no accent
+    border and a 24-point fade where the list slides under it. That fade is the face's only
+    gradient.
+  - **The approval.** A held permission prompt takes the composer's shell rather than a card
+    of its own. It is worded as a statement ("Claude wants to run a command").
+    - A warn dot, not an amber border.
+    - The command appears on the raised plate, capped at five lines with a "Show all".
+    - What "always" grants opens on request, and the answers sit at the right with the primary
+      last.
+  - **Find.** ⌘F opens a floating bar over the list. It searches prompts, answers, call titles,
+    notes, and thinking where the density shows it. Enter and Shift-Enter step through the
+    matches, opening the fold that hides one, and Esc gives the composer the keyboard back.
+  - Not done: images need their bytes on the wire, and a background task's live output needs
+    the worker to tail its file. Model and mode pickers would have to type into the TUI's menus,
+    which the face never does, so the mode shows as text in the composer's foot instead.
+  - Tests:
+    - the decoder: `a_turn_adds_up_its_requests`, `an_api_error_says_when_it_retries`,
+      `a_branch_abandons_what_followed_its_fork` (the rewind marker) and the five `conversation`
+      snapshots;
+    - the goldens: `golden__conversation__conversation_changes`, `_tools`;
+    - `figures` (model names, turn meta, clock, files);
+    - `find` (`a_query_finds_what_the_reader_can_read`,
+      `a_folded_match_names_the_fold_that_opens_it`);
+    - `a_tools_input_reads_as_keys_and_values`;
+    - `a_prompt_is_a_statement`;
+    - the face in a window: `a_changed_file_opens_the_sessions_changes`,
+      `cmd_f_finds_words_in_a_folded_turn`, `an_answer_copies_its_words`;
+    - end to end: the fold's label in `a_step_being_written_shows_live_until_the_transcript_settles_it`
+      carries the turn's model and tokens, and the goldens `conversation`, `-dark`, `-phone`,
+      `-subagent` and the new `conversation-settled` (a settled turn: its prompt, its fold with
+      its figures, its answer and the file it changed);
+    - the frame probe: `the_face_draws_a_streaming_answer_within_a_frame` (docs/MEASUREMENTS.md).

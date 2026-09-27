@@ -4172,7 +4172,7 @@ mod tests {
                                 self.threads.clear();
                                 self.current = false;
                             }
-                            Change::Tasks { .. } => {}
+                            Change::Tasks { .. } | Change::Turn { .. } => {}
                         }
                     }
                 }

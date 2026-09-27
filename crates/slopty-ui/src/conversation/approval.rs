@@ -6,7 +6,9 @@
 //! "always" grants is said before it is pressed, from the updates Claude Code suggested.
 
 use slopty_core::ClientId;
-use slopty_proto::conversation::{Grant, PermissionPrompt, Settled, Suggestion, Verdict};
+use slopty_proto::conversation::{
+    Grant, PermissionPrompt, Settled, Suggestion, ToolDetail, Verdict,
+};
 
 /// How a prompt ended, as the line under the conversation says it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -149,6 +151,29 @@ pub fn grants(suggestions: &[Suggestion]) -> Vec<String> {
         .collect()
 }
 
+/// What a held prompt asks, as a statement rather than a question: "Claude wants to run a
+/// command", "Claude wants to edit view.rs".
+#[must_use]
+pub fn statement(prompt: &PermissionPrompt) -> String {
+    let file = |path: &str| super::tools::file_name(path).to_owned();
+    let what = match &prompt.detail {
+        ToolDetail::Bash(_) => "run a command".to_owned(),
+        ToolDetail::Edit(edit) => format!("edit {}", file(&edit.path)),
+        ToolDetail::Write(write) => format!("write {}", file(&write.path)),
+        ToolDetail::Read(read) => format!("read {}", file(&read.path)),
+        ToolDetail::WebFetch(fetch) => {
+            let host = fetch.url.split("://").nth(1).and_then(|r| r.split('/').next());
+            format!("fetch {}", host.unwrap_or(&fetch.url))
+        }
+        ToolDetail::WebSearch(_) => "search the web".to_owned(),
+        ToolDetail::Agent(_) => "start a subagent".to_owned(),
+        ToolDetail::Plan { .. } => "leave plan mode".to_owned(),
+        ToolDetail::Mcp(mcp) => format!("use {} from {}", mcp.tool, mcp.server),
+        _ => format!("use {}", prompt.tool),
+    };
+    format!("Claude wants to {what}")
+}
+
 /// A permission mode's name as Claude Code's own footer says it.
 #[must_use]
 pub fn mode_label(mode: &str) -> &str {
@@ -182,6 +207,22 @@ mod tests {
             asked_ms: 1,
             until_ms: 2,
         }
+    }
+
+    /// A held prompt says what Claude wants as a statement, naming the file or the host.
+    #[test]
+    fn a_prompt_is_a_statement() {
+        let mut asked = prompt(1);
+        assert_eq!(statement(&asked), "Claude wants to use Bash");
+        asked.detail = crate::conversation::fixtures::bash_prompt(SessionId::new(), 1).detail;
+        assert_eq!(statement(&asked), "Claude wants to run a command");
+        asked.detail = ToolDetail::WebFetch(slopty_proto::conversation::WebFetchDetail {
+            url: "https://docs.rs/gpui/latest".to_owned(),
+            prompt: None,
+            code: None,
+            bytes: None,
+        });
+        assert_eq!(statement(&asked), "Claude wants to fetch docs.rs");
     }
 
     /// An answer goes once: pressing again while it is on its way sends nothing.

@@ -58,3 +58,19 @@ expression: "decode(\"interrupt\").snapshot()"
         Interrupted:
           during_tool: true
   tasks: []
+  turns:
+    - prompt: 00000000-0000-4000-8000-000000000003
+      started_ms: 1790482605008
+      ended_ms: ~
+      models:
+        - claude-haiku-4-5-20251001
+      requests: 1
+      usage:
+        input: 10
+        cache_read: 20399
+        cache_write: 0
+        output: 392
+        thinking: 314
+      context_tokens: 20409
+      mode: default
+      stop: tool_use

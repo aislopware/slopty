@@ -7,10 +7,10 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Action, App, AppContext as _, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement as _, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, px,
+    Action, AnimationExt as _, App, AppContext as _, Context, ElementId, Entity, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
+    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_core::SessionId;
@@ -22,8 +22,15 @@ use crate::icons::{self, IconName, IconSize, Status};
 /// What the list says when the query leaves nothing.
 pub(crate) const NO_COMMAND_MATCHES: &str = "No command matches";
 
-/// The keys the palette's foot names, each with what it does.
-pub(crate) const LEGEND: [(&str, &str); 3] = [("↩", "open"), ("esc", "close"), ("↑↓", "move")];
+/// The keys the palette's foot names beside ↩, each with what it does. What ↩ does is the
+/// selected line's own verb ([`PaletteRun::verb`]).
+pub(crate) const LEGEND: [(&str, &str); 2] = [("↑↓", "move"), ("esc", "close")];
+
+/// What the palette's foot says ↩ does with nothing selected.
+const RETURN_VERB: &str = "open";
+
+/// The heading over the commands an empty field lists because they were run last.
+const RECENT: &str = "Recent";
 
 /// How many commands an empty field lists: the ones run last, then the first of the rest.
 pub const RECENT_COMMANDS: usize = 5;
@@ -109,32 +116,149 @@ pub(crate) fn quiet_line(
         .child(text)
 }
 
-/// The palette's foot: its keys in key caps, small and muted, read as one line.
-fn legend(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+/// The height of a line in a list that floats (the palette's, a picker's): a step taller than
+/// the navigator's rows, since a list typed at is read one line at a time, and its foot takes
+/// the same height.
+pub(crate) fn line_height(theme: &Theme) -> f32 {
+    theme.density.row + theme.spacing.xs
+}
+
+/// The pad round a floating list's rows: their fills sit this far in from the sheet's edges, so
+/// a row's radius and the pad make the sheet's (6 + 6 = 12).
+pub(crate) fn list_pad(theme: &Theme) -> f32 {
+    theme.spacing.xs + theme.spacing.xxs
+}
+
+/// The ink of the dot between the facts of a meta line: the muted tone at the pressed step,
+/// so the dot divides the facts without reading as one of them (monocode's footer sets its
+/// dot at a quarter of the text). The hairline's own colour vanished on the light canvas.
+pub(crate) fn separator_ink(theme: &Theme) -> gpui::Hsla {
+    crate::colors::hsla_alpha(theme.surfaces.text_muted, slopty_theme::alpha::PRESSED)
+}
+
+/// `text`, a meta line whose facts are joined by a spaced middle dot, with each dot in
+/// [`separator_ink`]: one run of text, so the line still ends in one ellipsis.
+pub(crate) fn dotted(theme: &Theme, text: impl Into<SharedString>) -> gpui::StyledText {
+    const SEPARATOR: &str = " \u{b7} ";
+    let text: SharedString = text.into();
+    let ink = gpui::HighlightStyle { color: Some(separator_ink(theme)), ..Default::default() };
+    let dots: Vec<_> = text
+        .match_indices(SEPARATOR)
+        .map(|(at, _)| {
+            let dot = at.saturating_add(' '.len_utf8());
+            (dot..dot.saturating_add('\u{b7}'.len_utf8()), ink)
+        })
+        .collect();
+    gpui::StyledText::new(text).with_highlights(dots)
+}
+
+/// A floating list's field row: the query bare at the title size, the text on the rows' edge,
+/// a quiet hairline under it. The field wears no frame and no fill: the sheet is its frame.
+pub(crate) fn field_row(
+    theme: &Theme,
+    input: &Entity<InputState>,
+    label: &'static str,
+) -> gpui::Div {
+    crate::kit::inset_x(div(), theme)
+        .flex_none()
+        .h(px(theme.density.row + theme.spacing.lg))
+        .flex()
+        .items_center()
+        .border_b_1()
+        .border_color(hsla(theme.surfaces.border_subtle))
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .px_0()
+                .text_size(px(theme.typography.title()))
+                .aria_label(label),
+        )
+}
+
+/// `el`, the sheet of a list typed at, rising the base unit's half into place as it fades in
+/// ([`crate::kit::fade_in`] on the layer under it). Under Reduce Motion it is there at once.
+pub(crate) fn rise_in(
+    el: gpui::Stateful<gpui::Div>,
+    id: &'static str,
+    theme: &Theme,
+    cx: &App,
+) -> gpui::AnyElement {
+    let motion = slopty_theme::Motion::DEFAULT;
+    slide_in(el, id, cx, (motion.fade, crate::kit::ease_out()), theme.spacing.xs, false)
+}
+
+/// `el`, a phone's sheet from the top edge, coming down the base unit into place as it fades
+/// in, on a sheet's time and curve. Under Reduce Motion it is there at once.
+fn drop_in(
+    el: gpui::Stateful<gpui::Div>,
+    id: &'static str,
+    theme: &Theme,
+    cx: &App,
+) -> gpui::AnyElement {
+    let motion = slopty_theme::Motion::DEFAULT;
+    slide_in(el, id, cx, (motion.sheet, crate::kit::drawer()), -theme.spacing.sm, true)
+}
+
+/// `el` entering from `from` points below its place (above, when negative) over `time`, and
+/// with `fade` from clear; drawn in place at once when chrome may not move.
+fn slide_in(
+    el: gpui::Stateful<gpui::Div>,
+    id: &'static str,
+    cx: &App,
+    time: (std::time::Duration, impl Fn(f32) -> f32 + 'static),
+    from: f32,
+    fade: bool,
+) -> gpui::AnyElement {
+    if !crate::kit::motion(cx) {
+        return el.into_any_element();
+    }
+    let (duration, curve) = time;
+    el.relative()
+        .with_animation(id, gpui::Animation::new(duration).with_easing(curve), move |el, t| {
+            el.top(px(from * (1.0 - t))).when(fade, |el| el.opacity(t))
+        })
+        .into_any_element()
+}
+
+/// One key of a foot: its cap, then what it does.
+fn foot_key(theme: &Theme, key: &'static str, what: &'static str) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(theme.spacing.xs + theme.spacing.xxs))
+        .child(crate::kit::key_cap(theme, key))
+        .child(what)
+}
+
+/// The palette's foot: a quiet band across the sheet's bottom, what ↩ does with the selected
+/// line on its right (where the eye ends), the other keys on its left. Its caps are plates
+/// with no ring, and it needs no hairline: the band is a step off the sheet.
+fn legend(theme: &Theme, verb: &'static str) -> gpui::Stateful<gpui::Div> {
     let s = &theme.surfaces;
-    let said = LEGEND.map(|(key, what)| format!("{key} {what}")).join(" · ");
+    let said = LEGEND
+        .iter()
+        .chain(&[("↩", verb)])
+        .map(|(key, what)| format!("{key} {what}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let inner = theme.radii.lg - 1.0;
     crate::kit::inset_x(div(), theme)
         .id("palette-legend")
         .debug_selector(|| "palette-legend".to_owned())
         .role(gpui::accesskit::Role::Label)
         .aria_label(SharedString::from(said))
         .flex_none()
+        .h(px(line_height(theme)))
         .flex()
         .items_center()
         .gap(px(theme.spacing.md))
-        .py(px(theme.spacing.xs))
-        .border_t_1()
-        .border_color(hsla(s.border))
+        .bg(hsla(s.raised))
+        .rounded_b(px(inner))
         .text_size(px(theme.typography.small()))
         .text_color(hsla(s.text_muted))
-        .children(LEGEND.map(|(key, what)| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xs))
-                .child(crate::kit::key_cap(theme, key))
-                .child(what)
-        }))
+        .children(LEGEND.map(|(key, what)| foot_key(theme, key, what)))
+        .child(div().flex_1())
+        .child(foot_key(theme, "↩", verb).text_color(hsla(s.text_secondary)))
 }
 
 /// What a line does when it is chosen.
@@ -190,6 +314,26 @@ pub enum PaletteRun {
         /// What was typed.
         needle: String,
     },
+}
+
+impl PaletteRun {
+    /// What ↩ does with a line that runs this, as the palette's foot says it.
+    #[must_use]
+    pub const fn verb(&self) -> &'static str {
+        match self {
+            Self::Action(_) | Self::Rerun { .. } => "run",
+            Self::Session(_)
+            | Self::Item(_)
+            | Self::Worker(_)
+            | Self::FindIn { .. }
+            | Self::FindInFile { .. } => "go to",
+            Self::OpenFile { .. }
+            | Self::OpenShell { .. }
+            | Self::OpenAgent { .. }
+            | Self::OpenUrl(_)
+            | Self::OpenInTile(_) => "open",
+        }
+    }
 }
 
 impl Clone for PaletteRun {
@@ -611,6 +755,16 @@ pub fn brief<'a>(items: Vec<&'a PaletteItem>, recent: &[String]) -> Vec<&'a Pale
     out
 }
 
+/// The heading a line is listed under, and its selector's slug: its section's, except that a
+/// command in `recent` (the history, while an empty field lists it) sits under *Recent*.
+fn group(item: &PaletteItem, recent: &[String]) -> (&'static str, &'static str) {
+    if item.section == Section::Commands && recent.contains(&item.label) {
+        (RECENT, "recent")
+    } else {
+        (item.section.heading(), item.section.slug())
+    }
+}
+
 /// `items` in the order they are shown and stepped through: grouped by section, the order
 /// within each kept. The files come first when `path_first` (the field spells a path).
 #[must_use]
@@ -640,7 +794,7 @@ pub(crate) fn section_heading(
         .role(gpui::accesskit::Role::Heading)
         .aria_label(text)
         .pt(px(theme.spacing.sm))
-        .pb(px(theme.spacing.xxs))
+        .pb(px(theme.spacing.xs))
 }
 
 /// The fixed square a row's kind icon sits in, so every title starts on one edge.
@@ -1066,7 +1220,7 @@ impl CommandPalette {
     /// padding under the last row is still to come.
     fn runs_on(&self) -> bool {
         let left = self.scroll.max_offset().y + self.scroll.offset().y;
-        left > px(self.theme.spacing.xs + 0.5)
+        left > px(list_pad(&self.theme) + 0.5)
     }
 
     fn step(&mut self, delta: i64, cx: &mut Context<Self>) {
@@ -1080,6 +1234,15 @@ impl CommandPalette {
         cx.notify();
     }
 
+    /// The pointer on a line selects it: the palette has one highlight, the line ↩ runs, and
+    /// the pointer moves it as the arrows do (Raycast draws no hover on a list either).
+    fn point_at(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.selected != ix {
+            self.selected = ix;
+            cx.notify();
+        }
+    }
+
     fn row(
         &self,
         ix: usize,
@@ -1090,8 +1253,9 @@ impl CommandPalette {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
-        let (raised, overlay) = (s.raised, s.overlay);
-        let icon_ink = if chosen { s.text } else { s.text_muted };
+        let pad = list_pad(theme);
+        let overlay = s.overlay;
+        let icon_ink = if chosen { s.text_secondary } else { s.text_muted };
         let trailing = item.trailing().filter(|_| self.chords || !item.is_chord());
         let places =
             [(item.worker.clone(), false), (item.cwd.clone(), true), (item.place.clone(), false)];
@@ -1108,7 +1272,7 @@ impl CommandPalette {
             places.into_iter().filter_map(|(text, path)| Some((text?, path))).enumerate()
         {
             if n > 0 {
-                context = context.child("·");
+                context = context.child(div().text_color(separator_ink(theme)).child("·"));
             }
             context = context.child(
                 // A path in the UI face, as every other context in the chrome is; mono is
@@ -1125,14 +1289,16 @@ impl CommandPalette {
             .debug_selector(move || format!("palette-item-{ix}"))
             .role(gpui::accesskit::Role::ListBoxOption)
             .aria_label(SharedString::from(item.a11y_label()))
-            // The fill sits a base unit in from the dialog's edges; the text on the edge grid.
-            .mx(px(spacing.xs))
-            .px(px(spacing.inset() - spacing.xs))
+            .aria_selected(chosen)
+            .h(px(line_height(theme)))
+            // The fill sits the list's pad in from the sheet's edges; the text on the edge grid.
+            .mx(px(pad))
+            .px(px(spacing.inset() - pad))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .when(chosen, |el| el.bg(hsla(overlay)))
-            .when(!chosen, |el| el.hover(move |st| st.bg(hsla(raised))))
             .active(move |st| st.bg(hsla(overlay)))
+            .on_mouse_move(cx.listener(move |this, _ev, _window, cx| this.point_at(ix, cx)))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(cx.listener(move |_this, _ev, _window, cx| Self::choose(&chosen_item, cx)))
             .child(status_slot(theme, item.icon, item.status, hsla(icon_ink), 1.0))
@@ -1145,13 +1311,16 @@ impl CommandPalette {
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_color(hsla(s.text))
+                    .when(chosen, |el| {
+                        el.font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
+                    })
                     .child(SharedString::from(item.label.clone())),
             )
             .child(context)
             .children(trailing.map(|(text, tone)| {
                 if item.is_chord() {
-                    // Keys as plain muted glyphs, as Zed's palette prints them; key caps are
-                    // the foot's alone.
+                    // Keys as plain muted glyphs, as Zed's and T3 Code's palettes print them;
+                    // key caps are the foot's alone.
                     div()
                         .debug_selector(move || format!("palette-keys-{ix}"))
                         .flex_none()
@@ -1175,22 +1344,27 @@ impl Render for CommandPalette {
         let s = theme.surfaces;
         let matches: Vec<PaletteItem> = self.matches(cx).into_iter().cloned().collect();
         let chosen = self.selected(matches.len());
+        // An empty field's commands are the ones run last, then a few more: the ones from
+        // history sit under a heading of their own, so the list says why they are there.
+        let recent = if self.brief && self.input.read(cx).value().trim().is_empty() {
+            recent_commands(cx)
+        } else {
+            Vec::new()
+        };
+        let group = |item: &PaletteItem| group(item, &recent);
         // A heading only where there are two groups to tell apart: a list of workers, of
         // ports or of hits is one kind already, and the dialog's title names it.
-        let grouped =
-            matches.iter().zip(matches.iter().skip(1)).any(|(a, b)| a.section != b.section);
+        let grouped = matches.iter().zip(matches.iter().skip(1)).any(|(a, b)| group(a) != group(b));
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut section = None;
         for (ix, item) in matches.iter().enumerate() {
-            if grouped && section != Some(item.section) {
-                section = Some(item.section);
-                let name = format!("palette-heading-{}", item.section.slug());
-                let heading = section_heading(
-                    &theme,
-                    ElementId::Name(name.clone().into()),
-                    item.section.heading(),
-                )
-                .debug_selector(move || name);
+            let (heading, slug) = group(item);
+            if grouped && section != Some(slug) {
+                section = Some(slug);
+                let name = format!("palette-heading-{slug}");
+                let heading =
+                    section_heading(&theme, ElementId::Name(name.clone().into()), heading)
+                        .debug_selector(move || name);
                 rows.push(heading.into_any_element());
             }
             if ix == chosen && std::mem::take(&mut self.reveal) {
@@ -1199,6 +1373,7 @@ impl Render for CommandPalette {
             }
             rows.push(self.row(ix, item, ix == chosen, cx).into_any_element());
         }
+        let verb = matches.get(chosen).map_or(RETURN_VERB, |item| item.run.verb());
         // A find with nothing typed yet has nothing to report: the field says what it is for.
         let waiting = self.finding && self.input.read(cx).value().trim().is_empty();
         let nothing = rows.is_empty() && !waiting;
@@ -1209,15 +1384,17 @@ impl Render for CommandPalette {
         let safe_top = window.insets().effective().top;
         // No scrim: a list typed at floats over the work (`kit::anchor`).
         let backdrop = crate::kit::anchor(&theme, window);
-        let backdrop = if sheet { backdrop.px_0().pt(safe_top) } else { backdrop };
+        let backdrop = if sheet { backdrop.px_0().pt_0() } else { backdrop };
         let dialog = crate::kit::dialog(&theme, crate::kit::Overlay::List);
         let dialog = if sheet {
-            // A sheet from the top: the window's width, down to the keyboard.
+            // A sheet from the top: the window's width, down to the keyboard. Its surface runs
+            // up under the status bar and the island, and its field starts below them.
             dialog
                 .max_w_full()
                 .max_h_full()
                 .flex_1()
                 .mb_0()
+                .pt(safe_top)
                 .border_t_0()
                 .border_x_0()
                 .rounded_t(px(0.0))
@@ -1227,7 +1404,7 @@ impl Render for CommandPalette {
         };
         // A fade over the list's foot says there is more below: a touch list has no scrollbar,
         // and on a desktop the row the list's height cuts would otherwise end on the foot's
-        // hairline, read as a row that lost its bottom. The scroll's extent is the last
+        // band, read as a row that lost its bottom. The scroll's extent is the last
         // layout's, so the frame after this one checks it again (a list just opened, or
         // narrowed by a query) and draws once more only if it changed.
         self.more_below = self.runs_on();
@@ -1251,6 +1428,49 @@ impl Render for CommandPalette {
                     gpui::linear_color_stop(solid, 1.0),
                 ))
         });
+        let panel = dialog
+            .id("palette")
+            .debug_selector(|| "palette".to_owned())
+            .role(gpui::accesskit::Role::Dialog)
+            .aria_label("Commands")
+            // The typed text starts on the rows' text: the edge grid.
+            .child(field_row(&theme, &self.input, "Command"))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id("palette-list")
+                            .debug_selector(|| "palette-list".to_owned())
+                            .track_scroll(&self.scroll)
+                            .role(gpui::accesskit::Role::ListBox)
+                            .aria_label("Commands")
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .py(px(list_pad(&theme)))
+                            .children(rows)
+                            .when(nothing, |el| {
+                                el.child(quiet_line(
+                                    &theme,
+                                    "palette-empty",
+                                    NO_COMMAND_MATCHES,
+                                ))
+                            }),
+                    )
+                    .children(fade),
+            )
+            .when(self.chords, |el| el.child(legend(&theme, verb)));
+        // The phone's sheet hangs from the window's top edge and comes down from it; on a
+        // desktop the sheet rises into place.
+        let panel = if sheet {
+            drop_in(panel, "palette-drop", &theme, cx)
+        } else {
+            rise_in(panel, "palette-rise", &theme, cx)
+        };
         let root = backdrop
             .id("palette-backdrop")
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
@@ -1265,55 +1485,7 @@ impl Render for CommandPalette {
                     cx.stop_propagation();
                 }),
             )
-            .child(
-                dialog
-                    .id("palette")
-                    .debug_selector(|| "palette".to_owned())
-                    .role(gpui::accesskit::Role::Dialog)
-                    .aria_label("Commands")
-                    .child(
-                        // The typed text starts on the rows' text: the edge grid.
-                        crate::kit::inset_x(div(), &theme)
-                            .py(px(theme.spacing.sm))
-                            .border_b_1()
-                            .border_color(hsla(s.border))
-                            .child(
-                                Input::new(&self.input)
-                                    .appearance(false)
-                                    .px_0()
-                                    .aria_label("Command"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .min_h_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .id("palette-list")
-                                    .debug_selector(|| "palette-list".to_owned())
-                                    .track_scroll(&self.scroll)
-                                    .role(gpui::accesskit::Role::ListBox)
-                                    .aria_label("Commands")
-                                    .flex_1()
-                                    .overflow_y_scroll()
-                                    .py(px(theme.spacing.xs))
-                                    .children(rows)
-                                    .when(nothing, |el| {
-                                        el.child(quiet_line(
-                                            &theme,
-                                            "palette-empty",
-                                            NO_COMMAND_MATCHES,
-                                        ))
-                                    }),
-                            )
-                            .children(fade),
-                    )
-                    .when(self.chords, |el| el.child(legend(&theme))),
-            );
+            .child(panel);
         gpui::deferred(crate::kit::fade_in(root, "palette-fade", cx))
             .with_priority(Layer::Dialog.priority())
     }
@@ -1482,6 +1654,23 @@ mod tests {
             ["zsh", "studio", "G", "Rerun cargo test", "A", "B", "C"],
             "the recent first, a line no longer offered skipped"
         );
+    }
+
+    /// The commands run lately sit under *Recent*, the rest of the commands under *Commands*,
+    /// and a tile keeps its group whatever its name; ↩ says what it will do with each.
+    #[test]
+    fn the_recent_commands_have_their_own_group() {
+        let recent = vec!["New note".to_owned()];
+        let command =
+            |label: &str| PaletteItem::new(label, IconName::Command, Box::new(MoveUp), &[]);
+        assert_eq!(group(&command("New note"), &recent), ("Recent", "recent"));
+        assert_eq!(group(&command("Zoom in"), &recent), ("Commands", "commands"));
+        assert_eq!(group(&command("New note"), &[]), ("Commands", "commands"), "a typed query");
+        let tile = PaletteItem::session("New note", SessionId::new());
+        assert_eq!(group(&tile, &recent), ("Tiles", "tiles"));
+        assert_eq!(command("New note").run.verb(), "run");
+        assert_eq!(tile.run.verb(), "go to");
+        assert_eq!(PaletteItem::open_file("/w/a.rs", None).run.verb(), "open");
     }
 
     /// A line that goes somewhere carries its kind in the leading slot; a command carries

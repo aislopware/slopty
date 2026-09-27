@@ -16,6 +16,11 @@
 //! ([`Clipped`]); a clipped one carries a [`TextRef`] that [`ConversationRequest::Expand`]
 //! resolves.
 //!
+//! **Turns.** Beside its entries, a thread's turns carry what the transcript says of each one
+//! and no entry shows: the models that answered, the tokens they read and wrote, the context
+//! the last request carried, the permission mode, and when Claude Code closed it
+//! ([`Change::Turn`], keyed by the prompt that opened the turn).
+//!
 //! **Live blocks.** Where Claude Code runs Slopty's mod, the worker also hears the answer,
 //! thinking and tool input as the model writes them, before the transcript has them. They go
 //! as [`ConversationEvent::Live`]: uncommitted text a client shows at the end of its thread,
@@ -197,6 +202,12 @@ pub enum Body {
     },
     /// A line from Claude Code itself.
     Note(Note),
+    /// The person went back to an earlier prompt (an edited prompt, a rewind): what came after
+    /// it on the old branch is gone from the thread, and the new branch goes on from here.
+    Rewound {
+        /// Entries the old branch had past the point it left.
+        dropped: u32,
+    },
 }
 
 /// A prompt.
@@ -230,6 +241,8 @@ pub struct Note {
     pub kind: NoteKind,
     /// What it says.
     pub text: Clipped,
+    /// For an API error Claude Code retries: which attempt comes next, and when.
+    pub retry: Option<Retry>,
 }
 
 /// Kinds of [`Note`].
@@ -241,6 +254,19 @@ pub enum NoteKind {
     Command,
     /// Something Claude Code wanted to say.
     Info,
+    /// A hook failed or stopped the turn (the text is what it said).
+    Hook,
+}
+
+/// Claude Code retrying a request the API refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retry {
+    /// The attempt that comes next, from 1.
+    pub attempt: u32,
+    /// Attempts it makes before it gives up.
+    pub max: u32,
+    /// How long it waits before that attempt, in ms.
+    pub in_ms: u64,
 }
 
 /// A tool call.
@@ -495,6 +521,17 @@ pub struct WebSearchDetail {
     pub query: String,
     /// Links found.
     pub results: Option<u64>,
+    /// The first of them, as the search gave them.
+    pub links: Vec<Link>,
+}
+
+/// A page a web search found.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Link {
+    /// Its title.
+    pub title: String,
+    /// Its address.
+    pub url: String,
 }
 
 /// A subagent (`Agent`).
@@ -636,6 +673,80 @@ pub struct ThreadState {
     pub entries: Vec<Entry>,
     /// Its task list.
     pub tasks: Vec<Task>,
+    /// What each of its turns took, oldest first.
+    pub turns: Vec<Turn>,
+}
+
+/// What a turn took: from a prompt up to the next, the requests the model answered in it, as
+/// the transcript records each one (its model and its usage).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Turn {
+    /// The prompt entry that opened it; empty for work before a thread's first prompt.
+    pub prompt: String,
+    /// When the prompt was sent, in ms since the Unix epoch.
+    pub started_ms: u64,
+    /// When Claude Code closed the turn (its end-of-turn record); `None` while it runs, or
+    /// when the transcript never says.
+    pub ended_ms: Option<u64>,
+    /// The models that answered in it, in the order they first did (`claude-opus-5-5`).
+    pub models: Vec<String>,
+    /// Requests the model answered.
+    pub requests: u32,
+    /// Tokens, summed over its requests.
+    pub usage: Usage,
+    /// The context the last request carried: its input, cached or not.
+    pub context_tokens: Option<u64>,
+    /// The permission mode the prompt was sent in (`default`, `plan`, `acceptEdits`, …).
+    pub mode: Option<String>,
+    /// Why the model last stopped (`end_turn`, `tool_use`, `max_tokens`, `refusal`).
+    pub stop: Option<String>,
+}
+
+/// Tokens a request (or a turn's) used.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    /// Input read fresh.
+    pub input: u64,
+    /// Input read from the prompt cache.
+    pub cache_read: u64,
+    /// Input written to the prompt cache.
+    pub cache_write: u64,
+    /// Output written, thinking included.
+    pub output: u64,
+    /// Of the output, thinking.
+    pub thinking: u64,
+}
+
+impl Usage {
+    /// Everything the request read: the context it carried.
+    #[must_use]
+    pub const fn context(&self) -> u64 {
+        self.input.saturating_add(self.cache_read).saturating_add(self.cache_write)
+    }
+
+    /// `self` with `other` added.
+    #[must_use]
+    pub const fn plus(self, other: Self) -> Self {
+        Self {
+            input: self.input.saturating_add(other.input),
+            cache_read: self.cache_read.saturating_add(other.cache_read),
+            cache_write: self.cache_write.saturating_add(other.cache_write),
+            output: self.output.saturating_add(other.output),
+            thinking: self.thinking.saturating_add(other.thinking),
+        }
+    }
+
+    /// `self` with `other` taken away.
+    #[must_use]
+    pub const fn minus(self, other: Self) -> Self {
+        Self {
+            input: self.input.saturating_sub(other.input),
+            cache_read: self.cache_read.saturating_sub(other.cache_read),
+            cache_write: self.cache_write.saturating_sub(other.cache_write),
+            output: self.output.saturating_sub(other.output),
+            thinking: self.thinking.saturating_sub(other.thinking),
+        }
+    }
 }
 
 /// What a read changed.
@@ -666,6 +777,14 @@ pub enum Change {
     Reset {
         /// The thread, or all.
         thread: Option<ThreadId>,
+    },
+    /// A turn's figures are now these: replace the thread's turn opened by the same prompt,
+    /// or add it. A turn whose prompt is removed goes with it.
+    Turn {
+        /// The thread.
+        thread: ThreadId,
+        /// The turn.
+        turn: Turn,
     },
 }
 

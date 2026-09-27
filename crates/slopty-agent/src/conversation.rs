@@ -49,10 +49,10 @@ use std::path::Path;
 use serde_json::Value;
 pub use slopty_proto::conversation::{
     AgentDetail, AgentRun, Answer, BashDetail, Body, Cap, Change, Clipped, Compact, EditDetail,
-    Entry, GlobDetail, GrepDetail, Hunk, McpDetail, Note, NoteKind, Origin, Part, Patch, Prompt,
-    Question, QuestionDetail, ReadDetail, ResultStatus, ShellStatus, Task, TaskCreateDetail,
-    TaskUpdateDetail, TextRef, ThreadId, ThreadState, ToolCall, ToolDetail, ToolResult,
-    WebFetchDetail, WebSearchDetail, WriteDetail, WriteKind,
+    Entry, GlobDetail, GrepDetail, Hunk, Link, McpDetail, Note, NoteKind, Origin, Part, Patch,
+    Prompt, Question, QuestionDetail, ReadDetail, ResultStatus, Retry, ShellStatus, Task,
+    TaskCreateDetail, TaskUpdateDetail, TextRef, ThreadId, ThreadState, ToolCall, ToolDetail,
+    ToolResult, Turn, Usage, WebFetchDetail, WebSearchDetail, WriteDetail, WriteKind,
 };
 
 use crate::transcript::Tail;
@@ -70,6 +70,9 @@ pub const OUTPUT: Cap = Cap { lines: 40, chars: 4_000 };
 
 /// Diff lines kept per call, across its hunks.
 pub const PATCH_LINES: usize = 400;
+
+/// Links a web search keeps: the first page of results.
+pub const LINKS: usize = 10;
 
 /// Results and notices waiting for a call not seen yet; past this many, they are dropped (a tail
 /// that started after the calls would otherwise hold them forever).
@@ -101,6 +104,11 @@ struct Thread {
     at: HashMap<String, usize>,
     tasks: Vec<Task>,
     origin: Option<Origin>,
+    /// Its turns, oldest first; the last is the one records now add to.
+    turns: Vec<Turn>,
+    /// The request the assistant records now arriving belong to: its message id and the usage
+    /// already counted for it. A user record ends it, since the next request answers that.
+    request: Option<(String, Usage)>,
 }
 
 impl Thread {
@@ -171,6 +179,7 @@ struct Batch {
     changes: Vec<Change>,
     upserts: HashMap<(ThreadId, String), usize>,
     tasks: HashMap<ThreadId, usize>,
+    turns: HashMap<(ThreadId, String), usize>,
 }
 
 impl Batch {
@@ -196,6 +205,16 @@ impl Batch {
         }
         self.tasks.insert(thread.clone(), self.changes.len());
         self.changes.push(Change::Tasks { thread: thread.clone(), tasks });
+    }
+
+    fn turn(&mut self, thread: &ThreadId, turn: Turn) {
+        let key = (thread.clone(), turn.prompt.clone());
+        if let Some(change) = self.turns.get(&key).and_then(|&at| self.changes.get_mut(at)) {
+            *change = Change::Turn { thread: thread.clone(), turn };
+            return;
+        }
+        self.turns.insert(key, self.changes.len());
+        self.changes.push(Change::Turn { thread: thread.clone(), turn });
     }
 }
 
@@ -280,6 +299,12 @@ impl Conversation {
         self.threads.get(thread).map_or(&[], |t| t.tasks.as_slice())
     }
 
+    /// A thread's turns, oldest first.
+    #[must_use]
+    pub fn turns(&self, thread: &ThreadId) -> &[Turn] {
+        self.threads.get(thread).map_or(&[], |t| t.turns.as_slice())
+    }
+
     /// Everything as it stands: what a client that starts following is sent first.
     #[must_use]
     pub fn snapshot(&self) -> Vec<ThreadState> {
@@ -290,6 +315,7 @@ impl Conversation {
                 origin: t.origin.clone(),
                 entries: t.entries.clone(),
                 tasks: t.tasks.clone(),
+                turns: t.turns.clone(),
             })
             .collect()
     }
@@ -319,12 +345,22 @@ impl Conversation {
         else {
             return;
         };
-        for entry in dropped {
-            self.calls.remove(&entry.id);
-            batch.remove(&thread, entry.id);
-        }
         let at_ms = str_at(record, "timestamp").and_then(parse_ms).unwrap_or(0);
         let context = Ctx { thread: &thread, uuid, at_ms, made_at };
+        if !dropped.is_empty() {
+            if let Some(t) = self.threads.get_mut(&thread) {
+                t.turns.retain(|turn| !dropped.iter().any(|e| e.id == turn.prompt));
+            }
+            let count = to_u32(dropped.len());
+            for entry in dropped {
+                self.calls.remove(&entry.id);
+                batch.remove(&thread, entry.id);
+            }
+            // The rewind marker sits where the old branch left off, before the prompt that
+            // starts the new one.
+            let marker = Body::Rewound { dropped: count };
+            self.add(&context, format!("{uuid}:rewound"), marker, batch);
+        }
         match kind {
             "user" => self.user(&context, record, batch),
             "assistant" => self.assistant(&context, record, batch),
@@ -354,6 +390,9 @@ impl Conversation {
     }
 
     fn user(&mut self, ctx: &Ctx<'_>, record: &Value, batch: &mut Batch) {
+        if let Some(t) = self.threads.get_mut(ctx.thread) {
+            t.request = None;
+        }
         if bool_at(record, "isMeta") {
             return;
         }
@@ -420,6 +459,7 @@ impl Conversation {
                 Body::Note(Note {
                     kind: NoteKind::Command,
                     text: Clipped::head(&output, OUTPUT, Some(reference())),
+                    retry: None,
                 })
             } else if text.trim_start().starts_with('<') || text.trim().is_empty() || prompt_made {
                 // Text Claude Code injects for the model (reminders, caveats) is not the person's.
@@ -433,21 +473,95 @@ impl Conversation {
                 })
             };
             let id = if index == 0 { ctx.uuid.to_owned() } else { format!("{}:{index}", ctx.uuid) };
-            self.add(ctx, id, body, batch);
+            let opens_turn = matches!(body, Body::Prompt(_));
+            self.add(ctx, id.clone(), body, batch);
+            if opens_turn {
+                self.start_turn(ctx, &id, string_at(record, "permissionMode"), batch);
+            }
         }
     }
 
+    /// A prompt opens a turn: what the thread's records say from here on is its.
+    fn start_turn(&mut self, ctx: &Ctx<'_>, prompt: &str, mode: Option<String>, batch: &mut Batch) {
+        let thread = self.threads.entry(ctx.thread.clone()).or_default();
+        let turn =
+            Turn { prompt: prompt.to_owned(), started_ms: ctx.at_ms, mode, ..Turn::default() };
+        thread.turns.push(turn.clone());
+        batch.turn(ctx.thread, turn);
+    }
+
+    /// An assistant record's model and usage, counted in its turn. The records of one request
+    /// (one per content block) repeat its usage, so a request is counted once, at the latest
+    /// figures its records give.
+    fn usage(&mut self, ctx: &Ctx<'_>, message: &Value, batch: &mut Batch) {
+        let model = str_at(message, "model").filter(|m| !m.is_empty() && !m.starts_with('<'));
+        let Some(usage) = message.get("usage").filter(|u| u.is_object()) else { return };
+        let n = |key: &str| u64_at(usage, key).unwrap_or(0);
+        let now = Usage {
+            input: n("input_tokens"),
+            cache_read: n("cache_read_input_tokens"),
+            cache_write: n("cache_creation_input_tokens"),
+            output: n("output_tokens"),
+            thinking: usage
+                .get("output_tokens_details")
+                .and_then(|d| u64_at(d, "thinking_tokens"))
+                .unwrap_or(0),
+        };
+        let id = string_at(message, "id").unwrap_or_default();
+        let thread = self.threads.entry(ctx.thread.clone()).or_default();
+        let counted = match thread.request.take() {
+            Some((same, before)) if same == id => Some(before),
+            _ => None,
+        };
+        thread.request = Some((id, now));
+        // Work before any prompt (a thread picked up mid-way) has a turn of its own.
+        if thread.turns.is_empty() {
+            thread.turns.push(Turn { started_ms: ctx.at_ms, ..Turn::default() });
+        }
+        let Some(turn) = thread.turns.last_mut() else { return };
+        if let Some(before) = counted {
+            turn.usage = turn.usage.minus(before).plus(now);
+        } else {
+            turn.requests = turn.requests.saturating_add(1);
+            turn.usage = turn.usage.plus(now);
+        }
+        turn.context_tokens = Some(now.context());
+        if let Some(model) = model
+            && !turn.models.iter().any(|m| m == model)
+        {
+            turn.models.push(model.to_owned());
+        }
+        if let Some(stop) = str_at(message, "stop_reason") {
+            turn.stop = Some(stop.to_owned());
+        }
+        let turn = turn.clone();
+        batch.turn(ctx.thread, turn);
+    }
+
+    /// Claude Code closed the thread's turn at this record.
+    fn end_turn(&mut self, ctx: &Ctx<'_>, batch: &mut Batch) {
+        let Some(turn) = self.threads.get_mut(ctx.thread).and_then(|t| t.turns.last_mut()) else {
+            return;
+        };
+        turn.ended_ms = Some(ctx.at_ms);
+        let turn = turn.clone();
+        batch.turn(ctx.thread, turn);
+    }
+
     fn assistant(&mut self, ctx: &Ctx<'_>, record: &Value, batch: &mut Batch) {
-        let Some(content) = record.get("message").and_then(|m| m.get("content")) else { return };
+        let Some(message) = record.get("message") else { return };
+        let Some(content) = message.get("content") else { return };
         if bool_at(record, "isApiErrorMessage") {
             let text = content_text(content);
             let body = Body::Note(Note {
                 kind: NoteKind::ApiError,
                 text: Clipped::head(text.trim(), OUTPUT, None),
+                retry: None,
             });
             self.add(ctx, ctx.uuid.to_owned(), body, batch);
             return;
         }
+        self.usage(ctx, message, batch);
         let blocks: Vec<&Value> = match content {
             Value::String(_) => vec![content],
             Value::Array(blocks) => blocks.iter().collect(),
@@ -514,15 +628,58 @@ impl Conversation {
                 let text = if content.is_empty() {
                     record
                         .get("error")
-                        .and_then(|e| str_at(e, "message").or_else(|| e.as_str()))
+                        .and_then(|e| {
+                            str_at(e, "message")
+                                .or_else(|| {
+                                    e.get("error").and_then(|inner| str_at(inner, "message"))
+                                })
+                                .or_else(|| e.as_str())
+                        })
                         .unwrap_or("API error")
                         .to_owned()
                 } else {
                     content.to_owned()
                 };
+                let attempt = u64_at(record, "retryAttempt");
+                let retry = attempt.map(|attempt| Retry {
+                    attempt: u32::try_from(attempt).unwrap_or(u32::MAX),
+                    max: u64_at(record, "maxRetries")
+                        .map_or(0, |m| u32::try_from(m).unwrap_or(u32::MAX)),
+                    in_ms: record.get("retryInMs").and_then(Value::as_f64).map_or(0, ms_of),
+                });
                 Body::Note(Note {
                     kind: NoteKind::ApiError,
                     text: Clipped::head(&text, OUTPUT, None),
+                    retry,
+                })
+            }
+            Some("stop_hook_summary" | "turn_duration") => {
+                self.end_turn(ctx, batch);
+                let errors: Vec<String> = record
+                    .get("hookErrors")
+                    .and_then(Value::as_array)
+                    .map(|errors| {
+                        errors
+                            .iter()
+                            .filter_map(|e| {
+                                e.as_str().map(str::to_owned).or_else(|| string_at(e, "message"))
+                            })
+                            .filter(|e| !e.trim().is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let stopped = bool_at(record, "preventedContinuation")
+                    .then(|| string_at(record, "stopReason"))
+                    .flatten()
+                    .filter(|r| !r.trim().is_empty());
+                let said: Vec<String> = errors.into_iter().chain(stopped).collect();
+                if said.is_empty() {
+                    return;
+                }
+                Body::Note(Note {
+                    kind: NoteKind::Hook,
+                    text: Clipped::head(&strip_ansi(&said.join("\n")), OUTPUT, None),
+                    retry: None,
                 })
             }
             Some("local_command") => {
@@ -537,11 +694,13 @@ impl Conversation {
                 Body::Note(Note {
                     kind: NoteKind::Command,
                     text: Clipped::head(&text, OUTPUT, None),
+                    retry: None,
                 })
             }
             Some("informational") if !content.trim().is_empty() => Body::Note(Note {
                 kind: NoteKind::Info,
                 text: Clipped::head(content.trim(), OUTPUT, None),
+                retry: None,
             }),
             _ => return,
         };
@@ -851,6 +1010,7 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
         "WebSearch" => ToolDetail::WebSearch(WebSearchDetail {
             query: text("query").unwrap_or_default(),
             results: None,
+            links: Vec::new(),
         }),
         "Agent" | "Task" => ToolDetail::Agent(AgentDetail {
             agent_id: None,
@@ -1025,13 +1185,24 @@ fn apply_result(
             false
         }
         ToolDetail::WebSearch(search) => {
-            search.results = field("results").and_then(Value::as_array).map(|results| {
-                results
-                    .iter()
-                    .map(|r| r.get("content").and_then(Value::as_array).map_or(0, Vec::len))
-                    .fold(0_u64, |sum, n| sum.saturating_add(to_u64(n)))
-            });
-            false
+            let found: Vec<&Value> = field("results")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r.get("content").and_then(Value::as_array))
+                .flatten()
+                .collect();
+            search.results = field("results").is_some().then(|| to_u64(found.len()));
+            search.links = found
+                .iter()
+                .filter_map(|link| {
+                    let url = string_at(link, "url")?;
+                    let title = string_at(link, "title").filter(|t| !t.trim().is_empty());
+                    Some(Link { title: title.unwrap_or_else(|| url.clone()), url })
+                })
+                .take(LINKS)
+                .collect();
+            !search.links.is_empty()
         }
         ToolDetail::Agent(agent) => {
             let Some(r) = result else { return false };
@@ -1307,6 +1478,21 @@ fn to_u32(n: usize) -> u32 {
 
 fn to_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+/// A count of milliseconds Claude Code wrote as a fraction (`1084.53`), whole.
+fn ms_of(ms: f64) -> u64 {
+    if !ms.is_finite() || ms <= 0.0 {
+        return 0;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "checked positive and finite, a wait in ms; the bound need not be exact"
+    )]
+    let whole = ms.round().min(u64::MAX as f64) as u64;
+    whole
 }
 
 /// An RFC 3339 UTC stamp (`2026-09-27T03:15:25.849Z`) in ms since the Unix epoch.

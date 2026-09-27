@@ -98,6 +98,42 @@ fn the_focused_tiles_row_scrolls_into_view(cx: &mut TestAppContext) {
     assert!(in_view(&view, cx, shell), "a new row at the end came into view with it");
 }
 
+/// A waiting tile scrolled out of the list's view is listed under *Needs you*, which shows at
+/// the top of a list at its top; scrolled back into view, its own row says it and the section
+/// goes.
+#[gpui::test]
+fn needs_you_lists_a_waiting_tile_scrolled_out_of_view(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    notes(&view, cx, &studio, 60);
+    let session = SessionId::new();
+    let waiting = opens(&view, cx, &laptop, session, laptop.me, 1);
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
+    cx.run_until_parked();
+    let redraw = |cx: &mut VisualTestContext| {
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+    };
+    redraw(cx);
+    assert!(in_view(&view, cx, waiting), "focused, its row came into view");
+    assert!(cx.debug_bounds("nav-needs-you").is_none(), "its own row says it");
+
+    scroll_list(&view, cx, 100_000.0);
+    redraw(cx);
+    assert!(!in_view(&view, cx, waiting), "scrolled to the top, the row is far below");
+    let list = view.read_with(cx, |v, _| v.navigator_list_bounds());
+    let heading = cx.debug_bounds("nav-needs-you").expect("out of view, the section lists it");
+    assert!(heading.top() >= list.top() && heading.bottom() <= list.bottom(), "{heading:?}");
+    let row = Box::leak(format!("nav-waiting-{session}").into_boxed_str());
+    assert!(cx.debug_bounds(row).is_some(), "the waiting agent's row");
+
+    scroll_list(&view, cx, -100_000.0);
+    redraw(cx);
+    assert!(in_view(&view, cx, waiting), "scrolled to the end");
+    assert!(cx.debug_bounds("nav-needs-you").is_none(), "back in view, the section goes");
+}
+
 /// A row under its worker's header never repeats the worker's name: a shell with no directory
 /// yet, or only its home, has nothing to add, and its row is one line. A directory, a command
 /// or an agent's words give it its second.

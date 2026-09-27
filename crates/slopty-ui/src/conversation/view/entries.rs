@@ -1,32 +1,53 @@
 //! One row of the list, drawn: a prompt, a fold, an answer, thinking, a call at its level, a
-//! group, a live block, the working line, a pending message.
+//! group, the files a turn changed, a live block, the working line, a pending message.
 //!
-//! Every row sits on one reading column: the list's inset from the tile's edge, the text no
-//! wider than [`READING`]. A call's title leads with a fixed square (its kind, or how it is
-//! doing), so every verb starts on one edge and what a call shows under its title starts
-//! there too: the scientific layout, a gutter of marks and a column of words.
+//! Every row sits on one reading column, centred once the tile is wider than it. Prose (a
+//! prompt, an answer) is set at the prose size and carries no frame but the prompt's bubble.
+//! A call is a quiet line: a mark in a fixed square, so every verb starts on one edge, the verb
+//! in the secondary tone, its subject in the text tone at the medium weight, a fact at the far
+//! right. What a call shows under its title starts where the verb does.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Div, ElementId, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    AnyElement, AppContext as _, ClipboardItem, Context, Div, ElementId, FontWeight,
+    InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px, relative,
 };
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_proto::conversation::{
     Body, Clipped, Compact, Entry, LiveKind, Note, NoteKind, Prompt, ThreadId, ToolCall,
 };
+use slopty_theme::{Rgb, Typography};
 
 use super::ConversationView;
 use crate::colors::hsla;
+use crate::conversation::figures;
 use crate::conversation::model::Expanded;
 use crate::conversation::rows::{self, Fold, Level, Row, ToolKind};
 use crate::conversation::tools::{self, State};
 use crate::icons::{IconName, IconSize, Status};
 
-/// The widest the reading column grows, in points at zoom 1: past it a line of prose is too
-/// long to read, and a wide tile keeps its words in one column centred.
-pub(super) const READING: f32 = 800.0;
+/// The widest the reading column grows, in points at zoom 1: between T3 Code's 768 and Amp's
+/// 672, the measure of a comfortable line at the prose size.
+pub(super) const READING: f32 = 720.0;
+
+/// A call's line: its least height and the square its mark sits in.
+pub(super) const TOOL_ROW: f32 = 24.0;
+
+/// The widest a prompt's bubble grows, as a share of the column: what is left beside it holds
+/// the prompt's time and copy.
+const BUBBLE: f32 = 0.85;
+
+/// The gap between an answer's paragraphs, in points at the prose size.
+const PARAGRAPH: f32 = 10.0;
+
+/// The hover groups whose rows show a time and a copy.
+const PROMPT_GROUP: &str = "prompt";
+const ANSWER_GROUP: &str = "answer";
+
+/// Markdown headings at the prose base: h1, h2, then the rest at the prose size.
+const HEADINGS: [f32; 2] = [18.0, 16.0];
 
 impl ConversationView {
     /// Row `ix` of the list.
@@ -34,43 +55,69 @@ impl ConversationView {
         &self,
         ix: usize,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
-        let Some(row) = self.rows.get(ix).cloned() else { return div().into_any_element() };
+        let rows = std::rc::Rc::clone(&self.rows);
+        let Some(row) = rows.get(ix) else { return div().into_any_element() };
         let first = ix == 0;
-        let body = match &row {
+        let body = match row {
             Row::Prompt { id } => self.prompt_row(id, first, cx),
             Row::Fold { id, fold, open } => self.fold_row(id, fold, *open, cx),
+            Row::Answer { id, end } => self.answer_row(id, *end, cx),
+            Row::Changes { prompt } => self.changes_row(prompt, cx),
+            Row::File { path } => self.file_row(path, first),
+            Row::Edit { thread, id } => self.edit_row(thread, id, cx),
             Row::Entry { id, level } => self.entry_row(id, *level, cx),
             Row::Group { kind, ids, open } => self.group_row(*kind, ids, *open, cx),
-            Row::Live { id } => self.live_row(id),
+            Row::Live { id } => self.live_row(id, cx),
             Row::Working => self.working_row(),
             Row::Pending { index } => self.pending_row(*index),
         };
         let last = ix.saturating_add(1) == self.rows.len();
+        let found = self.find_row() == Some(ix);
+        let s = self.theme.surfaces;
         div()
             .w_full()
             .flex()
             .justify_center()
             .px(self.z(self.theme.spacing.inset()))
             .when(last, |el| el.pb(self.z(self.theme.spacing.lg)))
-            .child(div().w_full().max_w(self.z(READING)).min_w_0().child(body))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(self.z(READING))
+                    .min_w_0()
+                    .when(found, |el| {
+                        // The match the find bar is on: a wash under the whole row, the
+                        // selection's hue at its faint step.
+                        el.rounded(self.z(self.theme.radii.sm)).bg(crate::colors::hsla_alpha(
+                            s.accent_fill,
+                            slopty_theme::alpha::FAINT,
+                        ))
+                    })
+                    .child(body),
+            )
             .into_any_element()
     }
 
     /// The row's thread.
-    fn shown_thread(&self) -> Option<&crate::conversation::model::Thread> {
+    pub(super) fn shown_thread(&self) -> Option<&crate::conversation::model::Thread> {
         self.model.thread(&self.thread)
     }
 
-    fn entry(&self, id: &str) -> Option<&Entry> {
+    pub(super) fn entry(&self, id: &str) -> Option<&Entry> {
         self.shown_thread()?.entry(id)
     }
 
     /// A clipped text as shown: whole once expanded.
     pub(super) fn text_of<'a>(&'a self, clipped: &'a Clipped) -> &'a str {
+        self.text_in(&self.thread, clipped)
+    }
+
+    /// [`Self::text_of`] for a text of `thread`.
+    pub(super) fn text_in<'a>(&'a self, thread: &ThreadId, clipped: &'a Clipped) -> &'a str {
         match &clipped.full {
-            Some(reference) => match self.model.expanded(&self.thread, reference) {
+            Some(reference) => match self.model.expanded(thread, reference) {
                 Some(Expanded::Whole(whole)) => &whole.text,
                 Some(Expanded::Gone) | None => &clipped.text,
             },
@@ -85,8 +132,19 @@ impl ConversationView {
         clipped: &Clipped,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
+        self.expand_link_in(&self.thread, key, clipped, cx)
+    }
+
+    /// [`Self::expand_link`] for a text of `thread`.
+    pub(super) fn expand_link_in(
+        &self,
+        thread: &ThreadId,
+        key: &str,
+        clipped: &Clipped,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
         let reference = clipped.full.clone()?;
-        let state = self.model.expanded(&self.thread, &reference);
+        let state = self.model.expanded(thread, &reference);
         let s = self.theme.surfaces;
         if matches!(state, Some(Expanded::Gone)) {
             return Some(
@@ -100,6 +158,7 @@ impl ConversationView {
         if state.is_some() {
             return None;
         }
+        let thread = thread.clone();
         let label = SharedString::from(format!(
             "Show all {}",
             tools::count(u64::from(clipped.lines), "line", "lines")
@@ -120,79 +179,188 @@ impl ConversationView {
                     .child(label),
                 s.accent,
             )
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.expand(reference.clone(), cx)))
+            .on_click(cx.listener(move |_this, _ev, _w, cx| {
+                Self::expand_in(thread.clone(), reference.clone(), cx);
+            }))
             .into_any_element(),
         )
     }
 
-    /// Markdown at the face's size.
+    /// The prose look: the theme's Markdown at the prose size, headings stepping 18, 16, 14 at
+    /// the strong weight, paragraphs 10 apart, code in the mono face on the raised surface.
+    fn prose_style(&self) -> TextViewStyle {
+        let theme = &self.theme;
+        let z = self.zoom;
+        let base = theme.typography.prose();
+        let mono = self.mono();
+        let mut style = crate::markdown::style(theme, &mono, z);
+        style.paragraph_gap = gpui::rems(PARAGRAPH / base);
+        style.heading_base_font_size = px(base * z);
+        style.heading_font_size = Some(std::sync::Arc::new(move |level: u8, _base| {
+            let size = match level {
+                1 => HEADINGS[0],
+                2 => HEADINGS[1],
+                _ => base,
+            };
+            px(size * z)
+        }));
+        style.code_block = gpui::StyleRefinement::default()
+            .font_family(mono.to_string())
+            .text_size(px(theme.typography.small() * z))
+            .bg(hsla(theme.surfaces.raised))
+            .rounded(px(theme.radii.md * z))
+            .px(px(theme.spacing.md * z))
+            .py(px(theme.spacing.sm * z));
+        style
+    }
+
+    /// Markdown at the prose size, its code blocks each with their language and a copy.
     pub(super) fn markdown(&self, id: String, text: &str) -> AnyElement {
         self.markdown_view(id, text).into_any_element()
     }
 
-    /// [`Self::markdown`] in `tone` rather than the text's own ink.
-    fn markdown_in(&self, id: String, text: &str, tone: slopty_theme::Rgb) -> AnyElement {
-        self.markdown_view(id, text).text_color(hsla(tone)).into_any_element()
-    }
-
     fn markdown_view(&self, id: String, text: &str) -> TextView {
-        let mono = self.mono();
+        let theme = std::sync::Arc::clone(&self.shared);
+        let zoom = self.zoom;
         TextView::markdown(ElementId::Name(id.into()), SharedString::from(text.to_owned()))
-            .style(crate::markdown::style(&self.theme, &mono, self.zoom))
+            .style(self.prose_style())
             .selectable(true)
+            .code_block_actions(move |block, _window, _cx| code_actions(&theme, zoom, block))
     }
 
-    /// The square every mark sits in, the width of a large icon.
+    /// The square every mark sits in.
     pub(super) fn slot(&self) -> Div {
-        div()
-            .flex_none()
-            .size(self.z(self.theme.typography.icon_large()))
-            .flex()
-            .items_center()
-            .justify_center()
+        div().flex_none().size(self.z(TOOL_ROW)).flex().items_center().justify_center()
     }
 
     /// Where what sits under a title starts: past its slot and the gap after it.
     pub(super) fn indent(&self) -> gpui::Pixels {
-        self.z(self.theme.typography.icon_large() + self.theme.spacing.sm)
+        self.z(TOOL_ROW + self.theme.spacing.xs)
     }
 
-    pub(super) fn icon(&self, name: IconName, tone: slopty_theme::Rgb) -> AnyElement {
+    pub(super) fn icon(&self, name: IconName, tone: Rgb) -> AnyElement {
         crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
             .size(self.z(self.theme.typography.icon()))
             .into_any_element()
     }
 
+    /// A small icon button that shows only while the pointer is on the row named `group`
+    /// (always, under a finger), and says it copied once it did.
+    pub(super) fn copy_button(
+        &self,
+        key: String,
+        group: &'static str,
+        what: &'static str,
+        text: String,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let s = self.theme.surfaces;
+        let copied = self.copied.as_deref() == Some(key.as_str());
+        let touch = self.theme.density == slopty_theme::Density::TOUCH;
+        let selector = format!("copy-{key}");
+        let label: SharedString = if copied { "Copied".into() } else { what.into() };
+        crate::a11y::tab_stop(
+            div()
+                .id(ElementId::Name(selector.clone().into()))
+                .debug_selector(move || selector)
+                .role(Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .size(self.z(self.theme.typography.icon_large()))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(self.z(self.theme.radii.xs))
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.raised)))
+                .when(!touch && !copied, |el| {
+                    el.invisible().group_hover(group, gpui::Styled::visible)
+                })
+                .child(self.icon(
+                    if copied { IconName::Check } else { IconName::Copy },
+                    if copied { s.success } else { s.text_muted },
+                )),
+            s.accent,
+        )
+        .on_click(cx.listener(move |this, _ev, _w, cx| this.copy(key.clone(), text.clone(), cx)))
+        .into_any_element()
+    }
+
+    /// A time of day at the meta size, shown with the row's copy.
+    fn clock_label(&self, at_ms: u64, group: &'static str) -> Option<AnyElement> {
+        let s = self.theme.surfaces;
+        let touch = self.theme.density == slopty_theme::Density::TOUCH;
+        figures::clock(at_ms).map(|time| {
+            crate::kit::tabular(div())
+                .flex_none()
+                .text_size(self.z(self.theme.typography.meta()))
+                .text_color(hsla(s.text_muted))
+                .when(!touch, |el| el.invisible().group_hover(group, gpui::Styled::visible))
+                .child(SharedString::from(time))
+                .into_any_element()
+        })
+    }
+
     // ----- prompts ---------------------------------------------------------------------
 
     fn prompt_row(&self, id: &str, first: bool, cx: &Context<Self>) -> AnyElement {
-        let Some(Entry { body: Body::Prompt(prompt), .. }) = self.entry(id) else {
+        let Some(Entry { body: Body::Prompt(prompt), at_ms, .. }) = self.entry(id) else {
             return div().into_any_element();
         };
-        let prompt = prompt.clone();
         let theme = &self.theme;
         let top = if first { theme.spacing.md } else { theme.spacing.xl };
-        self.prompt_card(&prompt, id, cx)
+        let words = self.prompt_words(prompt);
+        div()
+            .id(ElementId::Name(SharedString::from(format!("prompt-row-{id}"))))
             .debug_selector({
                 let id = id.to_owned();
                 move || format!("prompt-{id}")
             })
+            .group(PROMPT_GROUP)
+            .w_full()
+            .flex()
+            .items_start()
+            .gap(self.z(theme.spacing.sm))
             .mt(self.z(top))
-            .mb(self.z(theme.spacing.sm))
+            .mb(self.z(theme.spacing.md))
+            .child(self.prompt_card(prompt, id, cx))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(self.z(theme.spacing.xs))
+                    .pt(self.z(theme.spacing.xs))
+                    .children(self.clock_label(*at_ms, PROMPT_GROUP))
+                    .child(self.copy_button(
+                        format!("p:{id}"),
+                        PROMPT_GROUP,
+                        "Copy prompt",
+                        words,
+                        cx,
+                    )),
+            )
             .into_any_element()
     }
 
-    /// What the person sent, on the panel: a command as its name in the mono face, then its
-    /// words.
+    /// A prompt as it was typed: a command with its name.
+    fn prompt_words(&self, prompt: &Prompt) -> String {
+        let text = self.text_of(&prompt.text);
+        match &prompt.command {
+            Some(command) if command == "!" => format!("!{text}"),
+            Some(command) if text.is_empty() => command.clone(),
+            Some(command) => format!("{command} {text}"),
+            None => text.to_owned(),
+        }
+    }
+
+    /// What the person sent, as a bubble on the column's left edge: the raised surface at the
+    /// floating radius, the prose size, a command's name in the mono face and the accent.
     fn prompt_card(&self, prompt: &Prompt, key: &str, cx: &Context<Self>) -> gpui::Stateful<Div> {
         let theme = &self.theme;
         let s = theme.surfaces;
         let text = self.text_of(&prompt.text).to_owned();
-        let label = match &prompt.command {
-            Some(command) if command == "!" => format!("!{text}"),
-            Some(command) => format!("{command} {text}"),
-            None => text.clone(),
-        };
         let command = prompt.command.clone().map(|command| {
             div()
                 .flex_none()
@@ -203,25 +371,31 @@ impl ConversationView {
         });
         let images = (prompt.images > 0).then(|| {
             div()
+                .flex()
+                .items_center()
+                .gap(self.z(theme.spacing.xs))
                 .text_size(self.z(theme.typography.meta()))
                 .text_color(hsla(s.text_muted))
+                .child(self.icon(IconName::Image, s.text_muted))
                 .child(SharedString::from(tools::count(prompt.images.into(), "image", "images")))
         });
         let expand = self.expand_link(&format!("prompt-{key}"), &prompt.text, cx);
         div()
             .id(ElementId::Name(SharedString::from(format!("prompt-card-{key}"))))
             .role(Role::Article)
-            .aria_label(SharedString::from(label))
-            .w_full()
+            .aria_label(SharedString::from(self.prompt_words(prompt)))
+            .flex_initial()
+            .min_w_0()
+            .max_w(relative(BUBBLE))
             .flex()
             .flex_col()
             .gap(self.z(theme.spacing.xs))
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.sm))
-            .rounded(self.z(theme.radii.md))
-            .bg(hsla(s.panel))
-            .border_1()
-            .border_color(hsla(s.border_subtle))
+            .rounded(self.z(theme.radii.lg))
+            .bg(hsla(s.raised))
+            .text_size(self.z(theme.typography.prose()))
+            .line_height(relative(theme.typography.markdown_line_height))
             .child(
                 div().flex().items_baseline().gap(self.z(theme.spacing.sm)).children(command).when(
                     !text.is_empty(),
@@ -248,57 +422,62 @@ impl ConversationView {
         let s = theme.surfaces;
         let word = if pending.queued { "Queued" } else { "Sending" };
         div()
-            .debug_selector(move || format!("pending-{index}"))
-            .id(ElementId::Name(SharedString::from(format!("pending-{index}"))))
-            .role(Role::Article)
-            .aria_label(SharedString::from(format!("{word}: {}", pending.text)))
-            .mt(self.z(theme.spacing.lg))
             .w_full()
             .flex()
-            .flex_col()
-            .gap(self.z(theme.spacing.xs))
-            .px(self.z(theme.spacing.md))
-            .py(self.z(theme.spacing.sm))
-            .rounded(self.z(theme.radii.md))
-            .border_1()
-            .border_color(hsla(s.border))
-            .text_color(hsla(s.text_secondary))
-            .child(div().whitespace_normal().child(SharedString::from(pending.text.clone())))
+            .mt(self.z(theme.spacing.lg))
             .child(
                 div()
+                    .debug_selector(move || format!("pending-{index}"))
+                    .id(ElementId::Name(SharedString::from(format!("pending-{index}"))))
+                    .role(Role::Article)
+                    .aria_label(SharedString::from(format!("{word}: {}", pending.text)))
+                    .min_w_0()
+                    .max_w(relative(BUBBLE))
                     .flex()
-                    .items_center()
+                    .flex_col()
                     .gap(self.z(theme.spacing.xs))
-                    .text_size(self.z(theme.typography.meta()))
-                    .text_color(hsla(s.text_muted))
-                    .child(self.icon(IconName::Clock, s.text_muted))
-                    .child(word),
+                    .px(self.z(theme.spacing.md))
+                    .py(self.z(theme.spacing.sm))
+                    .rounded(self.z(theme.radii.lg))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(hsla(s.border))
+                    .text_size(self.z(theme.typography.prose()))
+                    .text_color(hsla(s.text_secondary))
+                    .child(
+                        div().whitespace_normal().child(SharedString::from(pending.text.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(self.z(theme.spacing.xs))
+                            .text_size(self.z(theme.typography.meta()))
+                            .text_color(hsla(s.text_muted))
+                            .child(self.icon(IconName::Clock, s.text_muted))
+                            .child(word),
+                    ),
             )
             .into_any_element()
     }
 
-    // ----- folds and groups --------------------------------------------------------------
+    // ----- folds, answers and what a turn changed --------------------------------------------
 
     fn fold_row(&self, id: &str, fold: &Fold, open: bool, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let key = rows::fold_key(id);
         let selector = format!("fold-{id}");
+        let dot = || div().text_color(hsla(s.text_muted)).child("\u{b7}").into_any_element();
         let mut parts: Vec<AnyElement> = vec![
             div()
                 .text_color(hsla(s.text_secondary))
                 .child(SharedString::from(fold.lead()))
                 .into_any_element(),
         ];
-        let dot = || div().text_color(hsla(s.text_muted)).child("\u{b7}").into_any_element();
         if let Some(steps) = fold.steps_label() {
             parts.push(dot());
-            parts.push(
-                div()
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(steps))
-                    .into_any_element(),
-            );
+            parts.push(div().child(SharedString::from(steps)).into_any_element());
         }
         if fold.added > 0 || fold.removed > 0 {
             parts.push(dot());
@@ -308,47 +487,70 @@ impl ConversationView {
             parts.push(dot());
             parts.push(
                 div()
-                    .text_color(hsla(s.error))
                     .child(SharedString::from(format!("{} failed", fold.failed)))
                     .into_any_element(),
             );
         }
+        let figures = self.shown_thread().and_then(|t| t.turn(id));
+        let session_model = self.model.meters().and_then(|m| m.model.as_deref());
+        let meta = figures.and_then(|t| figures::turn_meta(t, session_model));
+        let hint = figures
+            .map(|t| figures::turn_detail(t, self.model.meters().and_then(|m| m.context_window)))
+            .filter(|h| !h.is_empty());
+        let label = match &meta {
+            Some(meta) => format!("{} \u{b7} {meta}", fold.label()),
+            None => fold.label(),
+        };
         let chevron = if open { IconName::ChevronDown } else { IconName::ChevronRight };
-        crate::a11y::tab_stop(
-            crate::kit::tabular(div())
-                .id(ElementId::Name(SharedString::from(selector.clone())))
-                .debug_selector(move || selector)
-                .role(Role::Button)
-                .aria_label(SharedString::from(fold.label()))
-                .aria_expanded(open)
-                .group("fold")
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .h(self.z(theme.density.row))
-                .text_size(self.z(theme.typography.small()))
-                .cursor_pointer()
-                .child(self.slot().child(self.icon(chevron, s.text_muted)))
-                .children(parts)
-                .child(
-                    div()
-                        .flex_1()
-                        .ml(self.z(theme.spacing.sm))
-                        .h(gpui::px(1.0))
-                        .bg(hsla(s.border_subtle))
-                        .group_hover("fold", |el| el.bg(hsla(s.border))),
-                ),
-            s.accent,
-        )
-        .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key.clone(), cx)))
-        .into_any_element()
+        let line = crate::kit::tabular(div())
+            .id(ElementId::Name(SharedString::from(selector.clone())))
+            .debug_selector(move || selector)
+            .role(Role::Button)
+            .aria_label(SharedString::from(label))
+            .aria_expanded(open)
+            .group("fold")
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .h(self.z(theme.density.row))
+            .mb(self.z(theme.spacing.xs))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_muted))
+            .cursor_pointer()
+            .child(self.slot().child(self.icon(chevron, s.text_muted)))
+            .children(parts)
+            .child(
+                div()
+                    .flex_1()
+                    .mx(self.z(theme.spacing.sm))
+                    .h(px(1.0))
+                    .bg(hsla(s.border_subtle))
+                    .group_hover("fold", |el| el.bg(hsla(s.border))),
+            )
+            .children(meta.map(|meta| {
+                div()
+                    .flex_none()
+                    .text_size(self.z(theme.typography.meta()))
+                    .child(SharedString::from(meta))
+            }))
+            .when_some(hint, |el, hint| {
+                let theme = std::rc::Rc::clone(&self.hint_theme);
+                el.tooltip(move |_window, cx| {
+                    let (hint, theme) = (hint.clone(), std::rc::Rc::clone(&theme));
+                    cx.new(|_| crate::kit::Hint::new(hint, "", theme)).into()
+                })
+            });
+        crate::a11y::tab_stop(line, s.accent)
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key.clone(), cx)))
+            .into_any_element()
     }
 
     /// `+a −r` in the success and error tones.
     pub(super) fn changes_label(&self, added: u32, removed: u32) -> AnyElement {
         let s = self.theme.surfaces;
         crate::kit::tabular(div())
+            .flex_none()
             .flex()
             .gap(self.z(self.theme.spacing.xs))
             .child(div().text_color(hsla(s.success)).child(SharedString::from(format!("+{added}"))))
@@ -359,6 +561,271 @@ impl ConversationView {
             )
             .into_any_element()
     }
+
+    /// An answer: prose on the column, no frame. The last of a settled turn ends on its time
+    /// and a copy, shown while the pointer is on it.
+    fn answer_row(&self, id: &str, end: bool, cx: &Context<Self>) -> AnyElement {
+        let Some(Entry { body: Body::Text(text), at_ms, .. }) = self.entry(id) else {
+            return div().into_any_element();
+        };
+        let theme = &self.theme;
+        let shown = self.text_of(text);
+        let foot = end.then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(self.z(theme.spacing.xs))
+                .h(self.z(theme.typography.icon_large()))
+                .child(self.copy_button(
+                    format!("a:{id}"),
+                    ANSWER_GROUP,
+                    "Copy answer",
+                    shown.to_owned(),
+                    cx,
+                ))
+                .children(self.clock_label(*at_ms, ANSWER_GROUP))
+        });
+        div()
+            .debug_selector({
+                let id = id.to_owned();
+                move || format!("answer-{id}")
+            })
+            .id(ElementId::Name(SharedString::from(format!("answer-{id}"))))
+            .role(Role::Article)
+            .aria_label(SharedString::from(first_line(shown)))
+            .group(ANSWER_GROUP)
+            .py(self.z(theme.spacing.xs))
+            .text_size(self.z(theme.typography.prose()))
+            .line_height(relative(theme.typography.markdown_line_height))
+            .text_color(hsla(theme.surfaces.text))
+            .child(self.markdown(format!("md-{}-{id}", self.session), shown))
+            .children(self.expand_link(id, text, cx))
+            .children(foot)
+            .into_any_element()
+    }
+
+    /// The files a settled turn changed, under its answer: each with its directory and its
+    /// `+a −r`; a click opens the session's changes at that file.
+    fn changes_row(&self, prompt: &str, cx: &Context<Self>) -> AnyElement {
+        let Some(thread) = self.shown_thread() else { return div().into_any_element() };
+        let entries = thread.entries();
+        let start =
+            entries.iter().position(|e| e.id == prompt).map_or(0, |at| at.saturating_add(1));
+        let end = entries
+            .iter()
+            .skip(start)
+            .position(|e| matches!(e.body, Body::Prompt(_)))
+            .map_or(entries.len(), |n| start.saturating_add(n));
+        let id = &self.thread;
+        let files =
+            figures::files(entries.get(start..end).unwrap_or_default().iter().map(|e| (id, e)));
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let (added, removed) = files.iter().fold((0_u32, 0_u32), |(a, r), f| {
+            (a.saturating_add(f.added), r.saturating_add(f.removed))
+        });
+        let many = files.len() > 1;
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .h(self.z(TOOL_ROW))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_muted))
+            .child(self.slot().child(self.icon(IconName::FilePen, s.text_muted)))
+            .child(SharedString::from(format!(
+                "Changed {}",
+                tools::count(files.len() as u64, "file", "files")
+            )))
+            .when(many, |el| {
+                el.child(
+                    div()
+                        .text_size(self.z(theme.typography.meta()))
+                        .child(self.changes_label(added, removed)),
+                )
+            });
+        let list = files.into_iter().map(|file| {
+            let path = file.path.clone();
+            let selector = format!("changed-{prompt}-{}", tools::file_name(&file.path));
+            let dir = figures::short_dir(&file.path);
+            crate::a11y::tab_stop(
+                div()
+                    .id(ElementId::Name(selector.clone().into()))
+                    .debug_selector(move || selector)
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!(
+                        "{}, {} lines added, {} removed",
+                        tools::file_name(&file.path),
+                        file.added,
+                        file.removed
+                    )))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(self.z(theme.spacing.sm))
+                    .h(self.z(TOOL_ROW))
+                    .pl(self.indent())
+                    .pr(self.z(theme.spacing.xs))
+                    .rounded(self.z(theme.radii.sm))
+                    .text_size(self.z(theme.typography.small()))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.raised)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(hsla(s.text))
+                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                            .child(SharedString::from(tools::file_name(&file.path).to_owned())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(dir)),
+                    )
+                    .child(
+                        div()
+                            .text_size(self.z(theme.typography.meta()))
+                            .child(self.changes_label(file.added, file.removed)),
+                    ),
+                s.accent,
+            )
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.open_changes(Some(&path), cx)))
+        });
+        div()
+            .id(ElementId::Name(SharedString::from(format!("changes-{prompt}"))))
+            .debug_selector({
+                let prompt = prompt.to_owned();
+                move || format!("changes-{prompt}")
+            })
+            .role(Role::List)
+            .aria_label("Changed files")
+            .flex()
+            .flex_col()
+            .mt(self.z(theme.spacing.xs))
+            .child(head)
+            .children(list)
+            .into_any_element()
+    }
+
+    // ----- the session's changes -------------------------------------------------------------
+
+    /// A file over its edits: its name at the medium weight, its directory, its `+a −r`.
+    fn file_row(&self, path: &str, first: bool) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let file = self.session_files().into_iter().find(|f| f.path == path);
+        let (added, removed) = file.as_ref().map_or((0, 0), |f| (f.added, f.removed));
+        let dir = figures::short_dir(path);
+        div()
+            .id(ElementId::Name(SharedString::from(format!("file-{path}"))))
+            .debug_selector({
+                let name = tools::file_name(path).to_owned();
+                move || format!("file-{name}")
+            })
+            .role(Role::Heading)
+            .aria_label(SharedString::from(tools::file_name(path).to_owned()))
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.sm))
+            .h(self.z(theme.density.row))
+            .mt(self.z(if first { theme.spacing.md } else { theme.spacing.xl }))
+            .text_size(self.z(theme.typography.ui_size))
+            .child(self.slot().child(self.icon(
+                if file.is_some_and(|f| f.created) {
+                    IconName::FilePlus
+                } else {
+                    IconName::FilePen
+                },
+                s.text_muted,
+            )))
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                    .child(SharedString::from(tools::file_name(path).to_owned())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(self.z(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(dir)),
+            )
+            .child(
+                div()
+                    .text_size(self.z(theme.typography.small()))
+                    .child(self.changes_label(added, removed)),
+            )
+            .into_any_element()
+    }
+
+    /// One edit of the session's changes: when it was made and by whom, then its diff whole.
+    fn edit_row(&self, thread: &ThreadId, id: &str, cx: &Context<Self>) -> AnyElement {
+        let Some(entry) = self.model.thread(thread).and_then(|t| t.entry(id)) else {
+            return div().into_any_element();
+        };
+        let Body::Tool(call) = &entry.body else { return div().into_any_element() };
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let title = tools::title(call, &[]);
+        let who = match thread {
+            ThreadId::Main => None,
+            ThreadId::Agent(agent) => self.model.subagent(agent).0,
+        };
+        let when = figures::clock(entry.at_ms);
+        let (added, _) = rows::entry_changes(entry);
+        let body = match &call.detail {
+            slopty_proto::conversation::ToolDetail::Edit(edit) => {
+                self.patch_block(thread, &entry.id, &edit.path, &edit.patch, Level::Full, cx)
+            }
+            slopty_proto::conversation::ToolDetail::Write(write) => {
+                self.patch_block(thread, &entry.id, &write.path, &write.patch, Level::Full, cx)
+            }
+            _ => None,
+        };
+        // A new file's words are not on the wire, only how many lines it has.
+        let size = body.is_none().then(|| tools::count(u64::from(added), "line", "lines"));
+        let facts: Vec<String> = [size, when, who].into_iter().flatten().collect();
+        div()
+            .debug_selector({
+                let id = id.to_owned();
+                move || format!("edit-{id}")
+            })
+            .flex()
+            .flex_col()
+            .pb(self.z(theme.spacing.sm))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(self.z(theme.spacing.sm))
+                    .h(self.z(TOOL_ROW))
+                    .pl(self.indent())
+                    .text_size(self.z(theme.typography.small()))
+                    .text_color(hsla(s.text_secondary))
+                    .child(SharedString::from(title.verb))
+                    .child(div().flex_1())
+                    .child(
+                        crate::kit::tabular(div())
+                            .text_size(self.z(theme.typography.meta()))
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(facts.join(" \u{b7} "))),
+                    ),
+            )
+            .children(body.map(|body| div().pl(self.indent()).child(body)))
+            .into_any_element()
+    }
+
+    // ----- groups and entries --------------------------------------------------------------
 
     fn group_row(
         &self,
@@ -385,10 +852,12 @@ impl ConversationView {
             TitleParts {
                 mark: if running { Mark::Running } else { Mark::Icon(icon) },
                 verb: verb.to_owned(),
-                subject: None,
+                subject: Some(meta),
+                subject_quiet: true,
                 code: false,
-                meta: Some(meta),
-                meta_tone: None,
+                failed: false,
+                meta: None,
+                changes: None,
                 expandable: Some(open),
             },
             key,
@@ -396,56 +865,83 @@ impl ConversationView {
         )
     }
 
-    // ----- entries ---------------------------------------------------------------------
-
-    fn entry_row(&self, id: &str, level: Level, cx: &mut Context<Self>) -> AnyElement {
-        let Some(entry) = self.entry(id).cloned() else { return div().into_any_element() };
+    fn entry_row(&self, id: &str, level: Level, cx: &Context<Self>) -> AnyElement {
+        let Some(entry) = self.entry(id) else { return div().into_any_element() };
         let theme = &self.theme;
         let s = theme.surfaces;
         match &entry.body {
-            Body::Text(text) => {
-                let shown = self.text_of(text).to_owned();
-                div()
-                    .debug_selector({
-                        let id = id.to_owned();
-                        move || format!("answer-{id}")
-                    })
-                    .id(ElementId::Name(SharedString::from(format!("answer-{id}"))))
-                    .role(Role::Article)
-                    .aria_label(SharedString::from(first_line(&shown)))
-                    .py(self.z(theme.spacing.xs))
-                    .text_size(self.z(theme.typography.ui_size))
-                    .line_height(gpui::relative(theme.typography.markdown_line_height))
-                    .child(self.markdown(format!("md-{}-{id}", self.session), &shown))
-                    .children(self.expand_link(id, text, cx))
-                    .into_any_element()
-            }
-            Body::Thinking(text) => self.thinking_block(id, self.text_of(text), cx),
-            Body::Tool(call) => self.tool_row(&entry, call, level, cx),
+            Body::Text(_) => self.answer_row(id, false, cx),
+            Body::Thinking(text) => self.thinking_block(id, self.text_of(text)),
+            Body::Tool(call) => self.tool_row(entry, call, level, cx),
             Body::Compact(compact) => self.compact_row(id, compact, level, cx),
             Body::Interrupted { during_tool } => {
                 let words =
                     if *during_tool { "Interrupted while a tool ran" } else { "Interrupted" };
-                div()
-                    .id(ElementId::Name(SharedString::from(format!("esc-{id}"))))
-                    .role(Role::Status)
-                    .aria_label(words)
-                    .flex()
-                    .items_center()
-                    .gap(self.z(theme.spacing.sm))
-                    .h(self.z(theme.density.row))
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(self.slot().child(self.icon(IconName::CirclePause, s.text_muted)))
-                    .child(words)
-                    .into_any_element()
+                self.marker_line(&format!("esc-{id}"), IconName::CirclePause, words, s.text_muted)
+            }
+            Body::Rewound { dropped } => {
+                let words = match dropped {
+                    0 => "Rewound to an earlier prompt".to_owned(),
+                    n => format!(
+                        "Rewound \u{b7} {} set aside",
+                        tools::count(u64::from(*n), "entry", "entries")
+                    ),
+                };
+                self.rule_marker(&format!("rewound-{id}"), IconName::Undo2, &words)
             }
             Body::Note(note) => self.note_row(id, note, cx),
             Body::Prompt(prompt) => self.prompt_card(prompt, id, cx).into_any_element(),
         }
     }
 
-    fn thinking_block(&self, id: &str, text: &str, _cx: &mut Context<Self>) -> AnyElement {
+    /// A quiet one-line mark in a call's slot: an interruption.
+    fn marker_line(&self, id: &str, icon: IconName, words: &str, tone: Rgb) -> AnyElement {
+        let theme = &self.theme;
+        div()
+            .id(ElementId::Name(SharedString::from(id.to_owned())))
+            .role(Role::Status)
+            .aria_label(SharedString::from(words.to_owned()))
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .h(self.z(TOOL_ROW))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(tone))
+            .child(self.slot().child(self.icon(icon, tone)))
+            .child(SharedString::from(words.to_owned()))
+            .into_any_element()
+    }
+
+    /// A line across the column with words in it, where the thread's history turns: a rewind.
+    fn rule_marker(&self, id: &str, icon: IconName, words: &str) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let rule = || div().flex_1().h(px(1.0)).bg(hsla(s.border_subtle));
+        crate::kit::tabular(div())
+            .id(ElementId::Name(SharedString::from(id.to_owned())))
+            .debug_selector({
+                let id = id.to_owned();
+                move || id
+            })
+            .role(Role::Status)
+            .aria_label(SharedString::from(words.to_owned()))
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.sm))
+            .h(self.z(theme.density.row))
+            .my(self.z(theme.spacing.md))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_muted))
+            .child(rule())
+            .child(self.icon(icon, s.text_muted))
+            .child(SharedString::from(words.to_owned()))
+            .child(rule())
+            .into_any_element()
+    }
+
+    /// Thinking, where the density shows it: the prose's size a step down, in the muted tone,
+    /// behind a hairline, set upright (italic made a wall of it).
+    fn thinking_block(&self, id: &str, text: &str) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         div()
@@ -454,18 +950,18 @@ impl ConversationView {
             .aria_label("Thinking")
             .py(self.z(theme.spacing.xs))
             .flex()
-            .gap(self.z(theme.spacing.sm))
+            .gap(self.z(theme.spacing.xs))
             .child(self.slot().child(self.icon(IconName::Brain, s.text_muted)))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .pl(self.z(theme.spacing.sm))
-                    .border_l_2()
-                    .border_color(hsla(s.border_subtle))
+                    .border_l_1()
+                    .border_color(hsla(s.border))
                     .text_size(self.z(theme.typography.small()))
+                    .line_height(relative(theme.typography.markdown_line_height))
                     .text_color(hsla(s.text_muted))
-                    .italic()
                     .whitespace_normal()
                     .debug_selector({
                         let id = id.to_owned();
@@ -500,12 +996,11 @@ impl ConversationView {
             if tokens.is_empty() { words.to_owned() } else { format!("{words} \u{b7} {tokens}") };
         let key = rows::entry_key(id);
         let open = level == Level::Full || self.toggled.contains(&key);
-        let rule = || div().flex_1().h(gpui::px(1.0)).bg(hsla(s.border_subtle));
+        let rule = || div().flex_1().h(px(1.0)).bg(hsla(s.border_subtle));
         let summary = compact.summary.as_ref().filter(|_| open).map(|summary| {
             div()
                 .pl(self.indent())
                 .pb(self.z(theme.spacing.sm))
-                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(
                     self.markdown(format!("compact-{}-{id}", self.session), self.text_of(summary)),
@@ -549,33 +1044,65 @@ impl ConversationView {
         let text = self.text_of(&note.text).to_owned();
         let (icon, tone) = match note.kind {
             NoteKind::ApiError => (IconName::CircleAlert, s.error),
+            NoteKind::Hook => (IconName::CircleAlert, s.warn),
             NoteKind::Command => (IconName::SquareTerminal, s.text_muted),
             NoteKind::Info => (IconName::Info, s.text_muted),
+        };
+        let retry = note.retry.map(|r| {
+            let wait = rows::took(r.in_ms);
+            if r.max > 0 {
+                format!("Retrying in {wait}, attempt {} of {}", r.attempt, r.max)
+            } else {
+                format!("Retrying in {wait}, attempt {}", r.attempt)
+            }
+        });
+        let lead = match note.kind {
+            NoteKind::Hook => Some("A hook said".to_owned()),
+            _ => None,
         };
         let body = if note.kind == NoteKind::Command {
             self.code_text(&text, s.text_secondary).into_any_element()
         } else {
             div()
                 .whitespace_normal()
-                .text_color(hsla(if rows::note_is_error(note.kind) {
-                    s.error
-                } else {
-                    s.text_secondary
+                .text_color(hsla(s.text_secondary))
+                .children(lead.map(|lead| {
+                    div().text_color(hsla(s.text_muted)).child(SharedString::from(lead))
                 }))
                 .child(SharedString::from(text.clone()))
                 .into_any_element()
         };
+        let label = match &retry {
+            Some(retry) => format!("{} \u{b7} {retry}", first_line(&text)),
+            None => first_line(&text),
+        };
         div()
             .id(ElementId::Name(SharedString::from(format!("note-{id}"))))
+            .debug_selector({
+                let id = id.to_owned();
+                move || format!("note-{id}")
+            })
             .role(Role::Note)
-            .aria_label(SharedString::from(first_line(&text)))
-            .py(self.z(theme.spacing.xs))
+            .aria_label(SharedString::from(label))
+            .py(self.z(theme.spacing.xxs))
             .flex()
-            .gap(self.z(theme.spacing.sm))
+            .gap(self.z(theme.spacing.xs))
             .text_size(self.z(theme.typography.small()))
+            .line_height(relative(theme.typography.markdown_line_height))
             .child(self.slot().child(self.icon(icon, tone)))
             .child(
-                div().flex_1().min_w_0().child(body).children(self.expand_link(id, &note.text, cx)),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pt(self.z(theme.spacing.xxs))
+                    .child(body)
+                    .children(retry.map(|retry| {
+                        crate::kit::tabular(div())
+                            .text_size(self.z(theme.typography.meta()))
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(retry))
+                    }))
+                    .children(self.expand_link(id, &note.text, cx)),
             )
             .into_any_element()
     }
@@ -597,66 +1124,65 @@ impl ConversationView {
             Level::Title => None,
             Level::Summary | Level::Full => self.tool_body(entry, call, level, cx),
         };
+        let framed = body.is_some() && kind == ToolKind::Change;
         let expandable = Self::expandable(call, level);
-        let meta_tone = match title.state {
-            State::Failed => Some(self.theme.surfaces.error),
-            _ => None,
-        };
         let mark = match title.state {
             State::Running => Mark::Running,
-            State::Failed => Mark::Status(Status::Failed),
+            State::Failed | State::Done => Mark::Icon(title.icon),
             State::Stopped => Mark::Icon(IconName::CirclePause),
-            State::Done => Mark::Icon(title.icon),
         };
+        // An edit's size moves into its diff's header once the diff shows.
         let changes = match (kind, &title.meta) {
-            (ToolKind::Change, Some(meta)) if meta.starts_with('+') => {
-                let (added, removed) = rows::entry_changes(entry);
-                Some(self.changes_label(added, removed))
+            (ToolKind::Change, Some(meta)) if meta.starts_with('+') && !framed => {
+                Some(rows::entry_changes(entry))
             }
             _ => None,
         };
+        let meta = match (kind, title.meta) {
+            (ToolKind::Change, Some(meta)) if meta.starts_with('+') => None,
+            (_, meta) => meta,
+        };
+        let meta = [meta, Self::took_of(entry, call)].into_iter().flatten().collect::<Vec<_>>();
         let line = self.title_line(
             &format!("tool-{}", entry.id),
             TitleParts {
                 mark,
                 verb: title.verb,
                 subject: title.subject,
+                subject_quiet: false,
                 code: title.code,
-                meta: if changes.is_some() { None } else { title.meta },
-                meta_tone,
+                failed: title.state == State::Failed,
+                meta: (!meta.is_empty()).then(|| meta.join(" \u{b7} ")),
+                changes,
                 expandable: expandable.then_some(level == Level::Full),
             },
             key,
             cx,
         );
-        let line = match changes {
-            Some(changes) => div()
-                .relative()
-                .child(line)
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .right(self.z(self.theme.typography.icon_large() + self.theme.spacing.xs))
-                        .flex()
-                        .items_center()
-                        .text_size(self.z(self.theme.typography.meta()))
-                        .child(changes),
-                )
-                .into_any_element(),
-            None => line,
-        };
         div()
             .flex()
             .flex_col()
             .child(line)
-            .children(
-                body.map(|body| {
-                    div().pl(self.indent()).pb(self.z(self.theme.spacing.sm)).child(body)
-                }),
-            )
+            .children(body.map(|body| {
+                div()
+                    .pl(self.indent())
+                    .pt(self.z(self.theme.spacing.xxs))
+                    .pb(self.z(self.theme.spacing.sm))
+                    .child(body)
+            }))
             .into_any_element()
+    }
+
+    /// How long a command or a subagent took, when it was long enough to say: a second or
+    /// more.
+    fn took_of(entry: &Entry, call: &ToolCall) -> Option<String> {
+        let kind = rows::tool_kind(call);
+        if !matches!(kind, ToolKind::Shell) {
+            return None;
+        }
+        let ended = call.result.as_ref()?.at_ms;
+        let ms = ended.checked_sub(entry.at_ms).filter(|ms| *ms >= 1_000 && entry.at_ms > 0)?;
+        Some(rows::took(ms))
     }
 
     /// Whether a click on a call's title shows more or less of it.
@@ -664,8 +1190,8 @@ impl ConversationView {
         level == Level::Full || super::blocks::has_body(call)
     }
 
-    /// A title line: the mark in its slot, the verb, the subject, a fact at the end, and the
-    /// chevron when a click opens it. The whole line is the button.
+    /// A title line: the mark in its slot, the verb, the subject, a ✕ when it failed, a fact at
+    /// the far right, and the chevron when a click opens it. The whole line is the button.
     pub(super) fn title_line(
         &self,
         id: &str,
@@ -675,23 +1201,19 @@ impl ConversationView {
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let label = [Some(parts.verb.clone()), parts.subject.clone(), parts.meta.clone()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let failed_word = parts.failed.then(|| "failed".to_owned());
+        let label =
+            [Some(parts.verb.clone()), parts.subject.clone(), parts.meta.clone(), failed_word]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ");
         let mark = match parts.mark {
             Mark::Running => crate::icons::status_icon(
                 theme,
                 Status::Working,
                 self.z(theme.typography.icon()),
                 hsla(s.accent),
-            ),
-            Mark::Status(status) => crate::icons::status_icon(
-                theme,
-                status,
-                self.z(theme.typography.icon()),
-                hsla(status.tone(theme)),
             ),
             Mark::Icon(icon) => self.icon(icon, s.text_muted),
         };
@@ -701,18 +1223,31 @@ impl ConversationView {
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
-                .text_color(hsla(s.text))
+                .when(!parts.subject_quiet, |el| {
+                    el.text_color(hsla(s.text)).font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                })
+                .when(parts.subject_quiet, |el| el.text_color(hsla(s.text_muted)))
                 .when(parts.code, |el| {
-                    el.font_family(self.mono()).text_size(self.z(theme.typography.meta()))
+                    el.font_family(self.mono()).text_size(self.z(theme.typography.small()))
                 })
                 .child(SharedString::from(subject))
+        });
+        let failed = parts.failed.then(|| {
+            crate::icons::icon(theme, IconName::X, IconSize::Inline, hsla(s.error))
+                .size(self.z(theme.typography.meta()))
+                .flex_none()
         });
         let meta = parts.meta.map(|meta| {
             crate::kit::tabular(div())
                 .flex_none()
                 .text_size(self.z(theme.typography.meta()))
-                .text_color(hsla(parts.meta_tone.unwrap_or(s.text_muted)))
+                .text_color(hsla(s.text_muted))
                 .child(SharedString::from(meta))
+        });
+        let changes = parts.changes.map(|(added, removed)| {
+            div()
+                .text_size(self.z(theme.typography.meta()))
+                .child(self.changes_label(added, removed))
         });
         let chevron = parts.expandable.map(|open| {
             self.slot()
@@ -736,10 +1271,11 @@ impl ConversationView {
             .min_w_0()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.sm))
-            .h(self.z(theme.density.row))
+            .gap(self.z(theme.spacing.xs))
+            .min_h(self.z(TOOL_ROW))
+            .my(self.z(theme.spacing.xxs / 2.0))
             .rounded(self.z(theme.radii.sm))
-            .text_size(self.z(theme.typography.small()))
+            .text_size(self.z(theme.typography.ui_size))
             .child(self.slot().child(mark))
             .child(
                 div()
@@ -747,7 +1283,7 @@ impl ConversationView {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .gap(self.z(theme.spacing.sm))
+                    .gap(self.z(theme.spacing.xs))
                     .child(
                         div()
                             .flex_none()
@@ -755,10 +1291,13 @@ impl ConversationView {
                             .child(SharedString::from(parts.verb)),
                     )
                     .children(subject)
-                    .child(div().flex_1())
+                    .children(failed)
+                    .child(div().flex_1().min_w(self.z(theme.spacing.sm)))
+                    .children(changes)
                     .children(meta),
             )
-            .children(chevron);
+            .children(chevron)
+            .when(parts.expandable.is_none(), |el| el.pr(self.z(theme.spacing.xs)));
         match parts.expandable {
             Some(_) => crate::a11y::tab_stop(
                 line.cursor_pointer().hover(move |el| el.bg(hsla(s.raised))),
@@ -772,14 +1311,15 @@ impl ConversationView {
 
     // ----- what is live ------------------------------------------------------------------
 
-    fn live_row(&self, id: &slopty_proto::conversation::LiveId) -> AnyElement {
+    fn live_row(&self, id: &slopty_proto::conversation::LiveId, cx: &Context<Self>) -> AnyElement {
         let Some(block) = self.model.live_block_at(id) else { return div().into_any_element() };
         let theme = &self.theme;
         let s = theme.surfaces;
         let key = format!("{}-{}-{}", id.turn, id.step, id.block);
         match &block.kind {
             // What the model is writing reads a step lighter than what the transcript settled,
-            // until the entry for it comes and takes its place.
+            // until the entry for it comes and takes its place. New words fade in, unless the
+            // system asks for less motion.
             LiveKind::Text => div()
                 .debug_selector({
                     let key = key.clone();
@@ -789,38 +1329,23 @@ impl ConversationView {
                 .role(Role::Article)
                 .aria_label(SharedString::from(format!("Writing: {}", first_line(&block.text))))
                 .py(self.z(theme.spacing.xs))
-                .line_height(gpui::relative(theme.typography.markdown_line_height))
-                .child(self.markdown_in(
-                    format!("live-md-{}-{key}", self.session),
-                    &block.text,
-                    s.text_secondary,
-                ))
+                .text_size(self.z(theme.typography.prose()))
+                .line_height(relative(theme.typography.markdown_line_height))
+                .text_color(hsla(s.text_secondary))
+                .child(
+                    self.markdown_view(format!("live-md-{}-{key}", self.session), &block.text)
+                        .stream_fade(crate::kit::motion(cx)),
+                )
                 .into_any_element(),
             LiveKind::Thinking => div()
                 .id(ElementId::Name(SharedString::from(format!("live-{key}"))))
-                .role(Role::Article)
-                .aria_label("Thinking")
                 .debug_selector(move || format!("live-{key}"))
-                .py(self.z(theme.spacing.xs))
-                .flex()
-                .gap(self.z(theme.spacing.sm))
-                .child(self.slot().child(self.icon(IconName::Brain, s.text_muted)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .pl(self.z(theme.spacing.sm))
-                        .border_l_2()
-                        .border_color(hsla(s.border_subtle))
-                        .text_size(self.z(theme.typography.small()))
-                        .text_color(hsla(s.text_muted))
-                        .italic()
-                        .whitespace_normal()
-                        .child(SharedString::from(block.text.clone())),
-                )
+                .child(self.thinking_block(&format!("live-{}", id.block), &block.text))
                 .into_any_element(),
             LiveKind::Tool { name, .. } => {
                 let input = tools::preparing(&block.text);
+                let (verb, subject, code) =
+                    (name.clone(), (!input.is_empty()).then_some(input), true);
                 div()
                     .id("live-tool")
                     .debug_selector(move || format!("live-{key}"))
@@ -828,9 +1353,9 @@ impl ConversationView {
                     .aria_label(SharedString::from(format!("Preparing {name}")))
                     .flex()
                     .items_center()
-                    .gap(self.z(theme.spacing.sm))
-                    .h(self.z(theme.density.row))
-                    .text_size(self.z(theme.typography.small()))
+                    .gap(self.z(theme.spacing.xs))
+                    .min_h(self.z(TOOL_ROW))
+                    .text_size(self.z(theme.typography.ui_size))
                     .child(self.slot().child(crate::icons::status_icon(
                         theme,
                         Status::Working,
@@ -841,20 +1366,21 @@ impl ConversationView {
                         div()
                             .flex_none()
                             .text_color(hsla(s.text_secondary))
-                            .child(SharedString::from(name.clone())),
+                            .child(SharedString::from(verb)),
                     )
-                    .child(
+                    .children(subject.map(|subject| {
                         div()
-                            .flex_1()
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .font_family(self.mono())
-                            .text_size(self.z(theme.typography.meta()))
                             .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(input)),
-                    )
+                            .when(code, |el| {
+                                el.font_family(self.mono())
+                                    .text_size(self.z(theme.typography.small()))
+                            })
+                            .child(SharedString::from(subject))
+                    }))
                     .into_any_element()
             }
         }
@@ -866,7 +1392,15 @@ impl ConversationView {
         let thinking = self.model.live(&ThreadId::Main).any(|(_, b)| b.kind == LiveKind::Thinking);
         let since = self.agent.as_ref().map_or(0, |a| a.since_ms);
         let elapsed = (since > 0).then(|| rows::took(super::now_ms().saturating_sub(since)));
+        let written = self
+            .model
+            .thread(&ThreadId::Main)
+            .and_then(|t| t.last_turn())
+            .map(|t| t.usage.output)
+            .filter(|n| *n > 0)
+            .map(|n| format!("{} tokens", tools::tokens(n)));
         let word = if thinking { "Thinking" } else { "Working" };
+        let facts: Vec<String> = [elapsed, written].into_iter().flatten().collect();
         crate::kit::tabular(div())
             .id("working")
             .debug_selector(|| "working".to_owned())
@@ -875,9 +1409,9 @@ impl ConversationView {
             .mt(self.z(theme.spacing.xs))
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.sm))
-            .h(self.z(theme.density.row))
-            .text_size(self.z(theme.typography.small()))
+            .gap(self.z(theme.spacing.xs))
+            .min_h(self.z(TOOL_ROW))
+            .text_size(self.z(theme.typography.ui_size))
             .child(self.slot().child(crate::icons::status_icon(
                 theme,
                 Status::Working,
@@ -885,11 +1419,58 @@ impl ConversationView {
                 hsla(s.accent),
             )))
             .child(div().text_color(hsla(s.text_secondary)).child(word))
-            .children(
-                elapsed.map(|e| div().text_color(hsla(s.text_muted)).child(SharedString::from(e))),
-            )
+            .when(!facts.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_size(self.z(theme.typography.small()))
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(facts.join(" \u{b7} "))),
+                )
+            })
             .into_any_element()
     }
+}
+
+/// A fenced block's corner: its language and a copy, at the meta size.
+fn code_actions(
+    theme: &slopty_theme::Theme,
+    zoom: f32,
+    block: &gpui_kit::base::text::CodeBlock,
+) -> AnyElement {
+    let s = theme.surfaces;
+    let code = block.code().to_string();
+    let lang = block.lang().filter(|l| !l.is_empty());
+    div()
+        .flex()
+        .items_center()
+        .gap(px(theme.spacing.xs * zoom))
+        .px(px(theme.spacing.xs * zoom))
+        .font_family(theme.typography.ui_family.clone())
+        .text_size(px(theme.typography.meta() * zoom))
+        .text_color(hsla(s.text_muted))
+        .children(lang.map(|lang| div().child(lang)))
+        .child(
+            div()
+                .id("copy")
+                .role(Role::Button)
+                .aria_label("Copy code")
+                .size(px(theme.typography.icon_large() * zoom))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme.radii.xs * zoom))
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.overlay)))
+                .child(
+                    crate::icons::icon(theme, IconName::Copy, IconSize::Inline, hsla(s.text_muted))
+                        .size(px(theme.typography.icon() * zoom)),
+                )
+                .on_click(move |_ev, _window, cx| {
+                    cx.stop_propagation();
+                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                }),
+        )
+        .into_any_element()
 }
 
 /// What a title line's slot shows.
@@ -897,8 +1478,6 @@ impl ConversationView {
 pub(super) enum Mark {
     /// The working spinner.
     Running,
-    /// A status's mark in its tone.
-    Status(Status),
     /// An icon in the muted tone.
     Icon(IconName),
 }
@@ -909,9 +1488,14 @@ pub(super) struct TitleParts {
     pub mark: Mark,
     pub verb: String,
     pub subject: Option<String>,
+    /// The subject is a summary (a group's counts), in the muted tone at the base weight.
+    pub subject_quiet: bool,
     pub code: bool,
+    /// It failed: a ✕ after the subject, and nothing else turns red.
+    pub failed: bool,
     pub meta: Option<String>,
-    pub meta_tone: Option<slopty_theme::Rgb>,
+    /// Lines added and removed, before the meta.
+    pub changes: Option<(u32, u32)>,
     /// `Some(open)` when a click opens or closes it.
     pub expandable: Option<bool>,
 }

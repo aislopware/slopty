@@ -311,7 +311,10 @@ fn a_branch_abandons_what_followed_its_fork() {
         .collect();
     assert_eq!(removed, ["t1", "p2"]);
     let ids: Vec<&str> = c.entries(&MAIN).iter().map(|e| e.id.as_str()).collect();
-    assert_eq!(ids, ["p1", "a1:0", "p3"]);
+    assert_eq!(ids, ["p1", "a1:0", "p3:rewound", "p3"], "the new branch opens with its marker");
+    assert!(matches!(c.entries(&MAIN)[2].body, Body::Rewound { dropped: 2 }));
+    let turns: Vec<&str> = c.turns(&MAIN).iter().map(|t| t.prompt.as_str()).collect();
+    assert_eq!(turns, ["p1", "p3"], "the abandoned prompt's turn goes with it");
     // A result for the abandoned call finds nothing to update.
     assert!(c.ingest(&MAIN, &result("u9", Some("a2"), "t1", "x", &json!({}))).is_empty());
     // A record read twice (a tail that went back) changes nothing.
@@ -456,9 +459,11 @@ fn questions_plans_and_the_web_are_typed() {
     let found =
         json!({"results": [{"tool_use_id": "s", "content": [{"url": "a"}, {"url": "b"}]}, "text"]});
     c.ingest(&MAIN, &result("u4", Some("a4"), "t4", "links", &found));
-    assert!(
-        matches!(&tool(&c, &MAIN, "t4").detail, ToolDetail::WebSearch(s) if s.results == Some(2))
-    );
+    let ToolDetail::WebSearch(search) = &tool(&c, &MAIN, "t4").detail else { panic!("search") };
+    assert_eq!(search.results, Some(2));
+    let links: Vec<(&str, &str)> =
+        search.links.iter().map(|l| (l.title.as_str(), l.url.as_str())).collect();
+    assert_eq!(links, [("a", "a"), ("b", "b")], "an untitled page is named by its address");
 }
 
 /// A truncated main file is a new conversation; a subagent's only resets its thread.
@@ -475,8 +480,9 @@ fn a_file_that_shrank_starts_over() {
     std::fs::write(&agent, line(&side)).expect("write");
     let (mut c, mut main_tail, mut agent_tail) =
         (Conversation::default(), Tail::default(), Tail::default());
-    assert_eq!(c.read(&mut main_tail, &main).expect("read").len(), 1);
-    assert_eq!(c.read(&mut agent_tail, &agent).expect("read").len(), 1);
+    // The prompt and the turn it opens.
+    assert_eq!(c.read(&mut main_tail, &main).expect("read").len(), 2);
+    assert_eq!(c.read(&mut agent_tail, &agent).expect("read").len(), 2);
     assert!(c.read(&mut main_tail, &main).expect("read").is_empty(), "nothing new");
 
     std::fs::write(&agent, "").expect("truncate");
@@ -516,4 +522,95 @@ fn the_results_of_parallel_calls_branch_nothing() {
         c.entries(&MAIN).iter().all(|e| matches!(&e.body, Body::Tool(t) if t.result.is_some()))
     );
     assert_eq!(c.entries(&MAIN).len(), 2);
+}
+
+/// An assistant record with a model and usage, as Claude Code writes one per content block of a
+/// request (every block of the request repeats the request's usage).
+fn answered(uuid: &str, message: &str, blocks: &Value, usage: &Value, stop: Option<&str>) -> Value {
+    let mut record = assistant(uuid, None, blocks);
+    record["message"]["id"] = json!(message);
+    record["message"]["model"] = json!("claude-opus-5-5");
+    record["message"]["usage"] = usage.clone();
+    record["message"]["stop_reason"] = json!(stop);
+    record
+}
+
+/// A turn counts each request once, however many records it wrote, and adds up its tokens; it
+/// knows its model, the context its last request carried, why the model stopped, the mode the
+/// prompt was sent in, and when Claude Code closed it.
+#[test]
+fn a_turn_adds_up_its_requests() {
+    let mut c = Conversation::default();
+    let mut prompt = user("p1", None, &json!("go"));
+    prompt["permissionMode"] = json!("plan");
+    c.ingest(&MAIN, &prompt);
+    let first = json!({
+        "input_tokens": 10, "cache_read_input_tokens": 1_000, "cache_creation_input_tokens": 200,
+        "output_tokens": 50, "output_tokens_details": {"thinking_tokens": 20},
+    });
+    c.ingest(
+        &MAIN,
+        &answered("a1", "m1", &json!([{"type": "thinking", "thinking": "hm"}]), &first, None),
+    );
+    let tool_use =
+        json!([{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/f"}}]);
+    c.ingest(&MAIN, &answered("a2", "m1", &tool_use, &first, Some("tool_use")));
+    c.ingest(&MAIN, &result("u1", Some("a2"), "t1", "x", &json!({})));
+    let second = json!({
+        "input_tokens": 5, "cache_read_input_tokens": 1_300, "cache_creation_input_tokens": 0,
+        "output_tokens": 30,
+    });
+    let changes = c.ingest(
+        &MAIN,
+        &answered(
+            "a3",
+            "m1",
+            &json!([{"type": "text", "text": "done"}]),
+            &second,
+            Some("end_turn"),
+        ),
+    );
+    assert!(
+        changes.iter().any(|ch| matches!(ch, Change::Turn { turn, .. } if turn.prompt == "p1"))
+    );
+    let [turn] = c.turns(&MAIN) else { panic!("one turn: {:?}", c.turns(&MAIN)) };
+    assert_eq!(turn.requests, 2, "a user record between them makes two requests of one id");
+    assert_eq!(
+        turn.usage,
+        Usage { input: 15, cache_read: 2_300, cache_write: 200, output: 80, thinking: 20 }
+    );
+    assert_eq!(turn.context_tokens, Some(1_305));
+    assert_eq!(turn.models, ["claude-opus-5-5"]);
+    assert_eq!((turn.stop.as_deref(), turn.mode.as_deref()), (Some("end_turn"), Some("plan")));
+    assert_eq!(turn.ended_ms, None);
+    let mut end = json!({
+        "type": "system", "subtype": "stop_hook_summary", "uuid": "s1",
+        "timestamp": "2026-09-27T03:15:40.000Z", "hookErrors": [], "preventedContinuation": false,
+    });
+    c.ingest(&MAIN, &end);
+    assert_eq!(c.turns(&MAIN)[0].ended_ms, parse_ms("2026-09-27T03:15:40.000Z"));
+    assert_eq!(c.entries(&MAIN).len(), 4, "a clean stop says nothing");
+    end["uuid"] = json!("s2");
+    end["hookErrors"] = json!(["lint failed: 2 warnings"]);
+    c.ingest(&MAIN, &end);
+    let Some(Entry { body: Body::Note(note), .. }) = c.entries(&MAIN).last() else { panic!() };
+    assert_eq!((note.kind, note.text.text.as_str()), (NoteKind::Hook, "lint failed: 2 warnings"));
+}
+
+/// An API error Claude Code retries says which attempt comes next and when.
+#[test]
+fn an_api_error_says_when_it_retries() {
+    let mut c = Conversation::default();
+    c.ingest(
+        &MAIN,
+        &json!({
+            "type": "system", "subtype": "api_error", "uuid": "e1",
+            "timestamp": "2026-09-27T03:15:40.000Z",
+            "error": {"error": {"type": "overloaded_error", "message": "Overloaded"}},
+            "retryInMs": 1_084.6, "retryAttempt": 2, "maxRetries": 10,
+        }),
+    );
+    let [Entry { body: Body::Note(note), .. }] = c.entries(&MAIN) else { panic!() };
+    assert_eq!(note.text.text, "Overloaded");
+    assert_eq!(note.retry, Some(Retry { attempt: 2, max: 10, in_ms: 1_085 }));
 }

@@ -248,13 +248,7 @@ impl Render for SettingsEditor {
                             .py(px(spacing.sm))
                             .border_b_1()
                             .border_color(hsla(s.border))
-                            .child(
-                                div()
-                                    .font_weight(gpui::FontWeight(
-                                        slopty_theme::Typography::STRONG_WEIGHT,
-                                    ))
-                                    .child("Settings"),
-                            )
+                            .child(crate::kit::title(&theme, "Settings"))
                             .child(
                                 div()
                                     .id("settings-path")
@@ -386,6 +380,21 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.error().map(str::to_owned)), None);
         assert!(view.read_with(cx, |v, cx| v.text(cx).ends_with("[terminal]x")));
+    }
+
+    /// A screen reader hears the focused field, not the window: gpui-kit keeps the focus handle
+    /// on a role-less element inside the labelled field, and the fork's gpui reports that
+    /// element's nearest labelled ancestor as focused.
+    #[gpui::test]
+    fn the_focused_field_is_what_a_screen_reader_hears(cx: &mut TestAppContext) {
+        let (_view, _events, cx) = editor(cx, "", true);
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let focused: Vec<_> = tree.iter().filter(|n| n.focused).collect();
+        assert!(
+            matches!(focused.as_slice(), [n] if n.role.ends_with("TextInput")
+                && n.label.as_deref() == Some("settings.toml")),
+            "{focused:#?}"
+        );
     }
 
     /// The field is the code editor with TOML's colours (`highlight`'s grammar test holds what

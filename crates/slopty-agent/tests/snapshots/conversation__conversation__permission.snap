@@ -133,3 +133,19 @@ expression: "decode(\"permission\").snapshot()"
           chars: 4
           full: ~
   tasks: []
+  turns:
+    - prompt: 00000000-0000-4000-8000-000000000003
+      started_ms: 1790482629839
+      ended_ms: 1790482635789
+      models:
+        - claude-haiku-4-5-20251001
+      requests: 4
+      usage:
+        input: 34
+        cache_read: 82322
+        cache_write: 569
+        output: 423
+        thinking: 179
+      context_tokens: 21006
+      mode: default
+      stop: end_turn

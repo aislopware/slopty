@@ -125,8 +125,8 @@ pub struct Prepared {
     link: Hsla,
     /// The scrollbar's thumb over the grid's right edge, while the bar shows.
     scrollbar: Option<(Bounds<Pixels>, Hsla)>,
-    /// The failed blocks' rows as `(top, height)` bands: washed from the left edge to the
-    /// grid's last column, a bar at the left edge.
+    /// The failed blocks' rows as `(top, height)` bands: washed edge to edge, a bar at the
+    /// left edge.
     failed: Vec<(Pixels, Pixels)>,
     /// The failed blocks' wash and bar colours, and the bar's width.
     failed_look: FailedLook,
@@ -303,11 +303,11 @@ pub fn separator_color(theme: &Theme) -> Hsla {
 }
 
 /// How a block whose command failed is drawn, as Warp does it: a bar of the error fill down
-/// the block's left edge and a faint wash of it over the block, from the element's left edge
-/// to where the block separators end, so the band never runs past its rules.
+/// the block's left edge and a faint wash of it over the block, edge to edge as its rules
+/// run, so the band never runs past them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FailedLook {
-    /// Over the block's rows, from the left edge to the grid's last column.
+    /// Over the block's rows, edge to edge.
     pub wash: Hsla,
     /// Down the element's left edge, in the inset beside the text.
     pub bar: Hsla,
@@ -794,6 +794,35 @@ fn predicted_cells(
     Some(cells)
 }
 
+/// Where the prompt ends on a row marked `mark`: the column the typed command starts at; with
+/// nothing typed yet, the shell's cursor on this row (`typing_at`), else the whole row. `None`
+/// on a row that is not a prompt's.
+fn prompt_end(mark: slopty_grid::SemanticMark, typing_at: Option<u16>) -> Option<u16> {
+    mark.is_prompt().then(|| mark.input_col().or(typing_at).unwrap_or(u16::MAX))
+}
+
+/// A prompt's cells before `end` set back with the faint attribute (SGR 2), where the shell
+/// drew them in the default colours: the prompt steps back and the command after it reads
+/// first, as Warp sets its prompt apart from the command. A prompt the shell coloured itself
+/// keeps its colours. `None` when no cell changes, so an unset prompt costs no copy.
+fn faint_prompt(cells: &[Cell], end: u16) -> Option<Vec<Cell>> {
+    let end = usize::from(end);
+    let plain = |cell: &Cell| {
+        cell.style.fg == slopty_grid::Color::Default
+            && cell.style.bg == slopty_grid::Color::Default
+            && !cell.style.flags.intersects(StyleFlags::INVERSE | StyleFlags::FAINT)
+            && !plain_space(cell)
+    };
+    if !cells.iter().take(end).any(plain) {
+        return None;
+    }
+    let mut out = cells.to_vec();
+    for cell in out.iter_mut().take(end).filter(|cell| plain(cell)) {
+        cell.style.flags.insert(StyleFlags::FAINT);
+    }
+    Some(out)
+}
+
 /// The whole device pixels `start..start + len` (points) covers when GPUI snaps it: each edge
 /// rounded half toward zero on its own, as `Window::paint_svg` snaps a bounds. The size a
 /// sprite's atlas tile is rasterised at.
@@ -1238,6 +1267,9 @@ impl Element for TerminalElement {
             let predicted = view.predictions();
             let cursor = predicted.map_or_else(|| state.cursor(), |guesses| guesses.cursor);
             let view_offset = state.view_offset();
+            // Where the shell's own cursor stands, guesses aside: a prompt with nothing typed
+            // yet ends there. Scrolled back, no row of the view is the cursor's.
+            let shell_cursor = (view_offset == 0).then(|| state.cursor());
             let modes = state.modes();
             let marked = view.marked();
             let selection = view.selection();
@@ -1323,6 +1355,10 @@ impl Element for TerminalElement {
                     predicted_cells(&line.cells, guesses.pending, screen_row, guesses.marked)
                 });
                 let cells: &[Cell] = guessed.as_deref().unwrap_or(&line.cells);
+                let typing_at = shell_cursor.filter(|c| c.row == screen_row).map(|c| c.col);
+                let prompt =
+                    prompt_end(line.mark, typing_at).and_then(|end| faint_prompt(cells, end));
+                let cells: &[Cell] = prompt.as_deref().unwrap_or(cells);
                 let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
                 let mut decorations: Vec<Decoration> = Vec::new();
                 let mut sprites: Vec<SpriteCell> = Vec::new();
@@ -1685,22 +1721,18 @@ impl Element for TerminalElement {
         });
         window.paint_quad(fill(bounds, prepared.background));
         let look = prepared.failed_look;
-        // As wide as the separators reach: the inset the bar sits in, then the grid's columns.
-        let grid_right = m.origin.x + m.cell_width * f32::from(m.cols);
+        // A block spans the tile, as Warp's do: its wash and its rule run edge to edge, so the
+        // band and the rules end together whatever width the grid's last column leaves.
         for &(top, height) in &prepared.failed {
-            let band = Bounds::new(
-                point(bounds.origin.x, top),
-                size(grid_right - bounds.origin.x, height),
-            );
+            let band = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height));
             window.paint_quad(fill(band, look.wash));
             window
                 .paint_quad(fill(Bounds::new(band.origin, size(look.bar_width, height)), look.bar));
         }
         for row in &prepared.rows {
             if let Some(color) = row.separator {
-                let w = m.cell_width * f32::from(m.cols);
                 window.paint_quad(fill(
-                    Bounds::new(point(m.origin.x, row.y), size(w, px(1.0))),
+                    Bounds::new(point(bounds.origin.x, row.y), size(bounds.size.width, px(1.0))),
                     color,
                 ));
             }
@@ -2679,6 +2711,39 @@ mod tests {
         let guessed = predicted_cells(&prompt, &guesses, 0, false).expect("guessed");
         assert_eq!(guessed[2].style, shaded, "after a blank: the cell it covers");
         assert_eq!(guessed[3].style, shaded, "and the guess before it from then on");
+    }
+
+    /// A prompt steps back and the command typed after it does not: the prompt's cells in the
+    /// default colours turn faint up to where the command starts, or, with nothing typed, up
+    /// to the shell's cursor (so a guess typed there is not set back with it), or the whole
+    /// row. A prompt the shell coloured, an output row and a row of blanks are left alone.
+    #[test]
+    fn a_prompt_steps_back_and_its_command_reads_first() {
+        use slopty_grid::SemanticMark;
+        let typed = SemanticMark::Prompt { exit: None, input: Some(4) };
+        let waiting = SemanticMark::Prompt { exit: None, input: None };
+        let second = SemanticMark::PromptContinuation { input: Some(2) };
+        assert_eq!(prompt_end(typed, Some(9)), Some(4), "the command's column wins");
+        assert_eq!(prompt_end(waiting, Some(4)), Some(4), "nothing typed: the cursor");
+        assert_eq!(prompt_end(waiting, None), Some(u16::MAX), "not the cursor's row: all of it");
+        assert_eq!(prompt_end(second, None), Some(2));
+        assert_eq!(prompt_end(SemanticMark::Output, Some(4)), None);
+
+        let row = Line::from_text("~ % ls -la", 16, CellStyle::DEFAULT).cells;
+        let faint = faint_prompt(&row, 4).expect("the prompt changes");
+        let flagged: Vec<bool> =
+            faint.iter().map(|c| c.style.flags.contains(StyleFlags::FAINT)).collect();
+        let prompt = [true, false, true, false];
+        assert_eq!(flagged[..4], prompt, "the prompt's glyphs, not its blanks");
+        assert!(flagged[4..].iter().all(|f| !f), "the command stays");
+        assert_eq!(faint[..4].iter().map(|c| c.text.as_str()).collect::<String>(), "~ % ");
+
+        let green = CellStyle { fg: slopty_grid::Color::Palette(2), ..CellStyle::DEFAULT };
+        let coloured = Line::from_text("~ % ls", 8, green).cells;
+        assert_eq!(faint_prompt(&coloured, 4), None, "the shell's own colours stay");
+        assert_eq!(faint_prompt(&row, 0), None, "no prompt before the command");
+        let blank = Line::from_text("", 8, CellStyle::DEFAULT).cells;
+        assert_eq!(faint_prompt(&blank, u16::MAX), None, "blanks cost no copy");
     }
 
     /// Under a block cursor a glyph takes the cursor-text colour; beside it, or hidden, not.

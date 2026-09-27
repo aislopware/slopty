@@ -10,6 +10,8 @@
 //! * [`rows`] — a thread as the list's rows: turns folded once settled, calls grouped, densities.
 //! * [`tools`] — each tool's title line and what a group of calls adds up to.
 //! * [`diff`] — an edit's patch numbered and coloured, in a column or side by side.
+//! * [`figures`] — a turn's figures, times of day and the files a run of entries changed.
+//! * [`find`] — which entries hold a query, and the row that shows each.
 //! * [`composer`] — what the composer types into the terminal.
 //! * [`approval`] — a held permission prompt and how it ended.
 //! * [`view`] — the face itself: the list, the prompt rail, the task card, the composer.
@@ -18,6 +20,8 @@ mod actions;
 pub mod approval;
 pub mod composer;
 pub mod diff;
+pub mod figures;
+pub mod find;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub mod model;

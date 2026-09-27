@@ -1,5 +1,8 @@
 //! The face: one virtualized column of the conversation, the prompt rail beside it, the task
-//! card, and the composer (or the permission card that takes its place) under it.
+//! card, and the composer under it (the permission prompt takes the composer's shell).
+//!
+//! The same list shows the session's changes on the header chip's click: every file the
+//! session changed, over the diffs that changed it.
 //!
 //! The list is gpui's `ListState` in tail-follow, as Zed's agent panel keeps its thread: new
 //! rows keep the reader at the bottom while they are there, and the strict band gpui keeps
@@ -18,10 +21,10 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, FollowMode,
-    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
-    div, list, px,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable,
+    FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use slopty_core::{ClientId, SessionId};
@@ -33,13 +36,14 @@ use slopty_theme::Theme;
 
 use super::approval::Approvals;
 use super::diff::Block;
+use super::figures::{self, FileChange};
 use super::model::Model;
 use super::rows::{self, Density, Input, Row};
 use super::{CTX, CycleDensity, Interrupt, MESSAGE_PLACEHOLDER};
 use crate::colors::hsla;
 
-/// Diffs coloured once, by entry id and revision.
-type Coloured = HashMap<(String, u64), Rc<[Block]>>;
+/// Diffs coloured once, by thread, entry id and revision.
+type Coloured = HashMap<(ThreadId, String, u64), Rc<[Block]>>;
 
 /// How far past the viewport the list lays rows out, as Zed's thread does: a fling shows
 /// rows already measured.
@@ -53,6 +57,27 @@ const PENDING_FOR: Duration = Duration::from_secs(15);
 
 /// How wide a tile has to be, at rest, for an edit's diff to show its sides beside each other.
 pub const SPLIT_FROM: f32 = 960.0;
+
+/// How long a copy button says it copied.
+const COPIED_FOR: Duration = Duration::from_millis(1_500);
+
+/// What the list shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Pane {
+    /// The thread on show.
+    #[default]
+    Conversation,
+    /// Every file the session changed, over the edits that changed it.
+    Changes,
+}
+
+/// The find bar over the list: its field, the entries that match, and the one on show.
+struct Finder {
+    field: gpui::Entity<InputState>,
+    hits: Vec<String>,
+    at: usize,
+    _typing: Subscription,
+}
 
 /// What the face asks the workspace to do: everything that reaches the worker goes through
 /// the workspace, which knows the link.
@@ -84,6 +109,10 @@ pub enum FaceEvent {
 pub struct ConversationView {
     session: SessionId,
     theme: Theme,
+    /// The theme, shared with what outlives a frame (a code block's corner, a hint), so a
+    /// frame never copies it.
+    shared: std::sync::Arc<Theme>,
+    hint_theme: Rc<Theme>,
     /// The chrome's zoom (the overview's).
     zoom: f32,
     /// The tile's width at rest, in points: whether a diff splits.
@@ -108,8 +137,19 @@ pub struct ConversationView {
     approvals: Approvals,
     /// This client's id on the worker, for telling its own answers from another's.
     me: Option<ClientId>,
-    /// Diffs coloured once, by entry id and revision.
+    /// Diffs coloured once, by thread, entry id and revision.
     diffs: std::cell::RefCell<Coloured>,
+    /// What the list shows.
+    pane: Pane,
+    /// The find bar, while it is open.
+    find: Option<Finder>,
+    /// The copy button that just copied, by key, and the timer that clears it.
+    copied: Option<String>,
+    copied_clear: Option<Task<()>>,
+    /// The permission prompt's grants show.
+    grants_open: bool,
+    /// The permission prompt's command shows whole.
+    ask_all: bool,
     /// The task card shows every task.
     tasks_open: bool,
     /// The face is in the tile: the list and its clock run only then.
@@ -174,6 +214,8 @@ impl ConversationView {
         list.set_follow_mode(FollowMode::Tail);
         Self {
             session,
+            shared: std::sync::Arc::new(theme.clone()),
+            hint_theme: Rc::new(theme.clone()),
             theme,
             zoom: 1.0,
             width: 0.0,
@@ -191,6 +233,12 @@ impl ConversationView {
             approvals: Approvals::default(),
             me: None,
             diffs: std::cell::RefCell::default(),
+            pane: Pane::Conversation,
+            find: None,
+            copied: None,
+            copied_clear: None,
+            grants_open: false,
+            ask_all: false,
             tasks_open: false,
             shown: false,
             clock: None,
@@ -229,6 +277,36 @@ impl ConversationView {
     #[must_use]
     pub const fn thread(&self) -> &ThreadId {
         &self.thread
+    }
+
+    /// What the list shows.
+    #[must_use]
+    pub const fn pane(&self) -> &Pane {
+        &self.pane
+    }
+
+    /// The find bar's field, while it is open.
+    fn find_field(&self) -> Option<&gpui::Entity<InputState>> {
+        self.find.as_ref().map(|f| &f.field)
+    }
+
+    /// The find bar's matches and the one on show, while it is open.
+    #[must_use]
+    pub fn found(&self) -> Option<(usize, usize)> {
+        self.find.as_ref().map(|f| (f.at, f.hits.len()))
+    }
+
+    /// Every file the session changed, in the order each was first changed, across its
+    /// threads.
+    #[must_use]
+    pub fn session_files(&self) -> Vec<FileChange> {
+        let mut entries: Vec<(&ThreadId, &slopty_proto::conversation::Entry)> = self
+            .model
+            .threads()
+            .flat_map(|(id, t)| t.entries().iter().map(move |e| (id, e)))
+            .collect();
+        entries.sort_by_key(|(_, e)| e.at_ms);
+        figures::files(entries)
     }
 
     /// The list follows the tail.
@@ -332,6 +410,8 @@ impl ConversationView {
             PermissionEvent::Asked(prompt) => {
                 self.approvals.asked(*prompt);
                 self.deny_open = false;
+                self.grants_open = false;
+                self.ask_all = false;
             }
             PermissionEvent::Settled { ask, outcome, .. } => {
                 self.approvals.settled(ask, outcome, self.me);
@@ -382,8 +462,11 @@ impl ConversationView {
     /// The theme changed.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme != theme {
+            self.shared = std::sync::Arc::new(theme.clone());
+            self.hint_theme = Rc::new(theme.clone());
             self.theme = theme;
             self.diffs.borrow_mut().clear();
+            self.list.remeasure();
             self.list.remeasure();
             cx.notify();
         }
@@ -477,6 +560,16 @@ impl ConversationView {
 
     /// Build the rows again and splice what changed into the list.
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        if self.pane == Pane::Changes {
+            let rows = rows::changes(&self.session_files());
+            let keys: Vec<(String, u64)> =
+                rows.iter().map(|row| (row.key(), self.rev(row))).collect();
+            self.splice(&keys);
+            self.keys = keys;
+            self.rows = Rc::from(rows);
+            cx.notify();
+            return;
+        }
         let empty = super::model::Thread::default();
         let thread = self.model.thread(&self.thread).unwrap_or(&empty);
         let live: Vec<_> = self.model.live(&self.thread).collect();
@@ -507,17 +600,27 @@ impl ConversationView {
         let entry_rev = |id: &str| thread.map_or(0, |t| t.rev(id));
         match row {
             Row::Prompt { id } => entry_rev(id),
+            Row::Answer { id, end } => entry_rev(id).wrapping_mul(2).wrapping_add(u64::from(*end)),
             Row::Entry { id, level } => entry_rev(id).wrapping_mul(4).wrapping_add(*level as u64),
-            Row::Fold { fold, open, .. } => u64::from(fold.steps)
-                .wrapping_mul(31)
-                .wrapping_add(fold.took_ms.unwrap_or(0))
-                .wrapping_mul(2)
-                .wrapping_add(u64::from(*open)),
+            Row::Fold { id, fold, open } => {
+                let figures = thread.and_then(|t| t.turn(id)).map_or(0, |t| {
+                    t.usage.output.wrapping_mul(31).wrapping_add(u64::from(t.requests))
+                });
+                u64::from(fold.steps)
+                    .wrapping_mul(31)
+                    .wrapping_add(fold.took_ms.unwrap_or(0))
+                    .wrapping_mul(31)
+                    .wrapping_add(figures)
+                    .wrapping_mul(2)
+                    .wrapping_add(u64::from(*open))
+            }
+            Row::Edit { thread, id } => self.model.thread(thread).map_or(0, |t| t.rev(id)),
             Row::Group { ids, open, .. } => ids
                 .iter()
                 .fold(u64::from(*open), |acc, id| acc.wrapping_mul(31).wrapping_add(entry_rev(id))),
             Row::Live { id } => self.model.live_block_at(id).map_or(0, |b| b.text.len() as u64),
-            Row::Working | Row::Pending { .. } => 0,
+            // What a settled turn changed stays as it was once the turn settled.
+            Row::Working | Row::Pending { .. } | Row::Changes { .. } | Row::File { .. } => 0,
         }
     }
 
@@ -565,8 +668,10 @@ impl ConversationView {
 
     /// Show another thread: a subagent's, or back to the session's own.
     pub fn open_thread(&mut self, thread: ThreadId, cx: &mut Context<Self>) {
-        if self.thread != thread {
+        if self.thread != thread || self.pane != Pane::Conversation {
             self.thread = thread;
+            self.pane = Pane::Conversation;
+            self.find = None;
             self.keys.clear();
             self.list.reset(0);
             self.list.set_follow_mode(FollowMode::Tail);
@@ -626,9 +731,152 @@ impl ConversationView {
         self.answer(Verdict::Deny { message, interrupt: false }, cx);
     }
 
-    /// Ask the worker for a clipped text whole.
-    fn expand(&self, reference: TextRef, cx: &mut Context<Self>) {
-        cx.emit(FaceEvent::Expand { thread: self.thread.clone(), reference });
+    /// Ask the worker for a clipped text of `thread` whole.
+    fn expand_in(thread: ThreadId, reference: TextRef, cx: &mut Context<Self>) {
+        cx.emit(FaceEvent::Expand { thread, reference });
+    }
+
+    /// Show the session's changes, `at` a file's first edit when given; the conversation
+    /// again when they show and no file is asked for.
+    pub fn open_changes(&mut self, at: Option<&str>, cx: &mut Context<Self>) {
+        if self.pane == Pane::Changes && at.is_none() {
+            self.close_changes(cx);
+            return;
+        }
+        if self.pane != Pane::Changes {
+            self.pane = Pane::Changes;
+            self.find = None;
+            self.keys.clear();
+            self.list.reset(0);
+            self.list.set_follow_mode(FollowMode::Normal);
+            self.rebuild(cx);
+        }
+        let row = at.and_then(|path| {
+            self.rows.iter().position(|r| matches!(r, Row::File { path: p } if p == path))
+        });
+        self.scroll_to_row(row.unwrap_or(0), cx);
+    }
+
+    /// Back from the session's changes to the thread that showed before them.
+    pub fn close_changes(&mut self, cx: &mut Context<Self>) {
+        if self.pane == Pane::Changes {
+            self.pane = Pane::Conversation;
+            self.keys.clear();
+            self.list.reset(0);
+            self.list.set_follow_mode(FollowMode::Tail);
+            self.rebuild(cx);
+        }
+    }
+
+    /// Put `text` on the clipboard, and have the button `key` say so for a moment.
+    fn copy(&mut self, key: String, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied = Some(key);
+        self.copied_clear = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_FOR).await;
+            let _gone = this.update(cx, |this, cx| {
+                this.copied = None;
+                this.copied_clear = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    // ----- finding ---------------------------------------------------------------------
+
+    /// Open the find bar, or give it the keyboard again.
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane != Pane::Conversation {
+            return;
+        }
+        if let Some(find) = &self.find {
+            find.field.update(cx, |f, cx| f.focus(window, cx));
+            return;
+        }
+        let field =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Find in the conversation"));
+        let typing =
+            cx.subscribe_in(&field, window, |this, _field, event, _window, cx| match event {
+                InputEvent::Change => this.search(cx),
+                InputEvent::PressEnter { shift, .. } => {
+                    this.step_find(if *shift { -1 } else { 1 }, cx);
+                }
+                _ => {}
+            });
+        field.update(cx, |f, cx| f.focus(window, cx));
+        self.find = Some(Finder { field, hits: Vec::new(), at: 0, _typing: typing });
+        cx.notify();
+    }
+
+    /// Close the find bar and give the composer the keyboard.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.take().is_some() {
+            self.composer.update(cx, |c, cx| c.focus(window, cx));
+            cx.notify();
+        }
+    }
+
+    /// Match the find bar's words again, and go to the first match.
+    fn search(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = &self.find else { return };
+        let query = find.field.read(cx).value().to_string();
+        let thinking = self.density != Density::Normal;
+        let hits = self
+            .model
+            .thread(&self.thread)
+            .map(|t| super::find::matches(t, &query, thinking))
+            .unwrap_or_default();
+        if let Some(find) = &mut self.find {
+            find.hits = hits;
+            find.at = 0;
+        }
+        self.reveal(cx);
+    }
+
+    /// The next match (`1`) or the one before (`-1`), round.
+    fn step_find(&mut self, delta: i8, cx: &mut Context<Self>) {
+        let Some(find) = &mut self.find else { return };
+        let count = find.hits.len();
+        if count == 0 {
+            return;
+        }
+        let next = find.at.saturating_add(1);
+        find.at = if delta < 0 {
+            find.at.checked_sub(1).unwrap_or_else(|| count.saturating_sub(1))
+        } else if next < count {
+            next
+        } else {
+            0
+        };
+        self.reveal(cx);
+    }
+
+    /// Bring the match on show into view, opening the fold or group that hides it.
+    fn reveal(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.find.as_ref().and_then(|f| f.hits.get(f.at)).cloned() else {
+            cx.notify();
+            return;
+        };
+        if super::find::row_of(&self.rows, &id).is_none()
+            && let Some(key) =
+                self.model.thread(&self.thread).and_then(|t| super::find::fold_over(t, &id))
+        {
+            self.toggled.insert(key);
+            self.rebuild(cx);
+        }
+        if let Some(ix) = super::find::row_of(&self.rows, &id) {
+            self.list.set_follow_mode(FollowMode::Normal);
+            self.scroll_to_row(ix, cx);
+        }
+        cx.notify();
+    }
+
+    /// The row the find bar is on.
+    fn find_row(&self) -> Option<usize> {
+        let find = self.find.as_ref()?;
+        let id = find.hits.get(find.at)?;
+        super::find::row_of(&self.rows, id)
     }
 
     /// Scroll to the prompt before the top of the view (`-1`) or after it (`1`).
@@ -662,12 +910,13 @@ impl ConversationView {
     /// A diff coloured once per entry revision.
     fn diff_blocks(
         &self,
+        thread: &ThreadId,
         id: &str,
         path: &str,
         patch: &slopty_proto::conversation::Patch,
     ) -> Rc<[Block]> {
-        let rev = self.model.thread(&self.thread).map_or(0, |t| t.rev(id));
-        let key = (id.to_owned(), rev);
+        let rev = self.model.thread(thread).map_or(0, |t| t.rev(id));
+        let key = (thread.clone(), id.to_owned(), rev);
         if let Some(blocks) = self.diffs.borrow().get(&key) {
             return Rc::clone(blocks);
         }
@@ -693,7 +942,7 @@ impl Render for ConversationView {
         let s = theme.surfaces;
         let rows = self.list_region(window, cx);
         let bar = self.thread_bar(cx);
-        let foot = self.foot(window, cx);
+        let foot = self.foot(cx);
         div()
             .id("conversation")
             .debug_selector(|| "conversation".to_owned())
@@ -705,10 +954,16 @@ impl Render for ConversationView {
             .on_action(cx.listener(Self::on_interrupt))
             .on_action(cx.listener(|this, _: &crate::terminal::PrevPrompt, _w, cx| this.step_prompt(-1, cx)))
             .on_action(cx.listener(|this, _: &crate::terminal::NextPrompt, _w, cx| this.step_prompt(1, cx)))
+            .on_action(cx.listener(|this, _: &crate::terminal::Find, window, cx| this.open_find(window, cx)))
+            .on_action(cx.listener(|this, _: &crate::terminal::FindNext, _w, cx| this.step_find(1, cx)))
+            .on_action(cx.listener(|this, _: &crate::terminal::FindPrev, _w, cx| this.step_find(-1, cx)))
             // Esc in the composer stops the agent's turn while it has one; otherwise it is the
             // field's own.
-            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::Escape, _w, cx| {
-                if this.working() && this.approvals.prompt().is_none() {
+            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::Escape, window, cx| {
+                if this.find.as_ref().is_some_and(|f| f.field.focus_handle(cx).is_focused(window)) {
+                    this.close_find(window, cx);
+                    cx.stop_propagation();
+                } else if this.working() && this.approvals.prompt().is_none() {
                     this.interrupt(cx);
                     cx.stop_propagation();
                 }
@@ -723,7 +978,7 @@ impl Render for ConversationView {
             .text_color(hsla(s.text))
             .children(bar)
             .child(rows)
-            .child(foot)
+            .children(foot)
     }
 }
 
@@ -767,9 +1022,17 @@ impl ConversationView {
             cx.processor(|this, ix: usize, window, cx| this.render_row(ix, window, cx)),
         )
         .size_full();
-        let rail = self.rail(cx);
-        let latest = (!self.list.is_following_tail()).then(|| self.latest_pill(cx));
-        region.child(items).children(rail).children(latest).into_any_element()
+        let conversation = self.pane == Pane::Conversation;
+        let rail = self.rail(cx).filter(|_| conversation);
+        let latest = (conversation && !self.list.is_following_tail()).then(|| self.latest_pill(cx));
+        let find = self.find_bar(cx);
+        region
+            .child(items)
+            .child(self.list_fade())
+            .children(rail)
+            .children(latest)
+            .children(find)
+            .into_any_element()
     }
 }
 

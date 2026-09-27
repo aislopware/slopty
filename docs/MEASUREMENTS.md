@@ -5897,3 +5897,63 @@ SLOPTY_DATA_DIR=$D SLOPTY_PTYD_SOCKET=$D/run/ptyd.sock SLOPTY_WORKER_SOCKET=$D/r
 
 Logs: `target/logs/typing-shaped-diag.log` (before), `target/logs/typing-shaped-after1.log` and
 `target/logs/typing-shaped-after2.log`.
+
+## 2026-09-27 — the conversation face under a streaming answer
+
+How long the face takes to draw a frame while the model writes (`the_face_draws_a_streaming_answer_within_a_frame`, slopty-e2e app, debug build, mac-studio, 1000 × 720 window).
+- The session is 80 made-up turns. Each has a prompt, a Markdown answer with a list and a fenced block, a 30-line command output, an edit with its diff and a read, and every assistant record carries a model and usage.
+- On top of that, the mod streams a text block one word every 16 ms for 5 s.
+- (h) follows the tail. (i) pans ±40 points twice per word.
+- Before is HEAD 294ed05 with 0 cargo or rustc processes running. After is the redesigned face: turn figures, changed files, copy and time, the floating composer. The load average was about 11 for the two quiet runs and 110 to 190 for the loaded one.
+
+| face | scenario | draw p50 / p95 / p99 / max | frames, over 16.7 ms |
+| --- | --- | --- | --- |
+| before | (h) following | 2.6 / 2.9 / 3.2 / 3.5 ms | 288, 0 |
+| | (i) panning | 2.5 / 4.6 / 6.1 / 6.8 ms | 272, 0 |
+| after, run 1 | (h) following | 2.5 / 2.9 / 3.1 / 3.8 ms | 338, 0 |
+| | (i) panning | 2.4 / 4.6 / 5.6 / 6.3 ms | 249, 0 |
+| after, run 2 | (h) following | 2.5 / 2.9 / 3.0 / 3.3 ms | 332, 0 |
+| | (i) panning | 2.4 / 4.4 / 5.4 / 6.8 ms | 254, 0 |
+| after, loaded | (h) following | 2.4 / 2.8 / 3.9 / 4.7 ms | 329, 0 |
+| | (i) panning | 2.5 / 5.0 / 6.7 / 7.2 ms | 239, 0 |
+
+The quiet runs hold p99 where it was, or a little under it, while each row now draws more. The row no longer clones its `Row` or its entry. The code blocks' corner and the fold's hint share the view's theme through an `Arc` / `Rc`, so a frame copies none of it. The list stays virtualized: only the rows in view and the 2048-point overdraw are laid out.
+
+```sh
+# the app suite, with the frame probe let in; its lines start with MEASURE
+SLOPTY_SMOOTH_E2E=1 cargo xtask e2e app
+```
+
+## 2026-09-27 — a prompt set back, and blocks edge to edge
+
+The terminal paint now sets a prompt back (its default-coloured cells before the typed command
+take the faint attribute, on a copy of the row made only when one of them changes) and draws
+the block rule and the failed wash across the whole element rather than to the grid's last
+column. Both benches below are headless GPUI in release on mac-studio, so the numbers are the
+element's and the layout's own work, not CoreText's. "Before" is the test binary built from
+the tree as it stood (`target/bench-tiles/before`), "after" the same tree with this change
+(`target/bench-tiles/after`), run alternately while other sessions built on the machine (load
+average 15 to 19).
+
+`failed_blocks_cost`: 100 × 40, ten four-row blocks, every prompt row `$ run N` with its
+command at column 2, so every frame copies and flags ten prompt rows. p50 in µs, four runs
+each:
+
+| build | pointer away | pointer over a failed block |
+| --- | --- | --- |
+| before | 103.3–103.5 | 117.4–117.6 |
+| after | 105.6–106.1 | 119.6–120.3 |
+
+About 2.4 µs a frame for ten prompts on screen, a quarter of a microsecond a prompt: the row
+copy and the words keyed with the faint style. The rule and the wash cost nothing more; they
+are the same quads, wider. `dense_screen_cost` (200 × 60, no prompt marks, three runs each)
+moved within its noise: unchanged screen 453–473 µs before, 466–471 after; a line a frame
+491–517 before, 505–518 after. The p95 and p99 moved with the load, not with the build.
+
+```sh
+cargo test -p slopty-ui --release --lib --no-run   # then copy the binary it names
+target/bench-tiles/before failed_blocks_cost --ignored --nocapture --test-threads 1
+target/bench-tiles/after failed_blocks_cost --ignored --nocapture --test-threads 1
+```
+
+Logs: `target/logs/tiles-blocks-ab.log`, `target/logs/tiles-dense-ab.log`.

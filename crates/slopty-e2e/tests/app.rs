@@ -154,10 +154,11 @@ mod tests {
 
         // The frame the app draws, from its own renderer.
         let frame = drv.render(&render_path).await.unwrap();
-        // Panes sit flush on a surface a shade from the title bar's, so what differs from the
-        // corner pixel is the text and the chrome: about 1% of this window. Blank is none.
+        // Panes sit flush on a surface a notch from the title bar's, and the light hairlines are
+        // too faint to count, so what differs from the corner pixel is the text: about half a
+        // percent of this window. Blank is none.
         let fg = foreground_fraction(&frame);
-        assert!(fg > 0.004, "frame is blank ({fg:.4} foreground)");
+        assert!(fg > 0.002, "frame is blank ({fg:.4} foreground)");
         assert_matches("terminal", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
         // A kitty graphics image typed through the shell: 16 × 16 red pixels transmitted and
@@ -895,7 +896,8 @@ mod tests {
         assert_eq!(dump.workers[0].status, "connected", "{dump:#?}");
         drv.wait_for("the first round trip", STEP, slopty_e2e::Dump::rtt_sampled).await.unwrap();
         let frame = drv.render(&stack.path("server-unreachable.png")).await.unwrap();
-        assert!(foreground_fraction(&frame) > 0.01, "the degraded frame is blank");
+        let fg = foreground_fraction(&frame);
+        assert!(fg > 0.004, "the degraded frame is blank ({fg:.4} foreground)");
         assert_matches("server-unreachable", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
         // Back on the same port: the app links again, and the terminal never noticed.

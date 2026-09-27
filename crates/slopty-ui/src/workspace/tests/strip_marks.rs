@@ -149,11 +149,13 @@ fn the_drop_line_sits_on_the_divider_and_a_join_washes_its_share(cx: &mut TestAp
     cx.run_until_parked();
 }
 
-/// In the overview a workspace with tiles is one lifted card round its panes: the elevated
-/// surface a base unit wider all round, rounded (lifted by `kit::elevate`), and a 2 pt accent
-/// ring round the active one only. The place for a new workspace is a card of the same size
-/// under the last, only its outline, and a click on it opens that workspace. No tile's header
-/// is a band of its own at that zoom: every header is the body's surface, with no hairline.
+/// In the overview a workspace with tiles is one card round its panes: the content's surface
+/// a base unit wider all round, rounded at the floating radius, with a hairline. Only the
+/// active one floats (the one elevation, which the scene does not expose) and wears the
+/// keyboard's ring, a 2 pt accent ring outside a 2 pt gap. The place for a new workspace is a ghost
+/// button under the last card, on its left edge, a row tall, and a click on it opens that
+/// workspace. No tile's header is a band of its own at that zoom: every header is the body's
+/// surface, with no hairline.
 #[gpui::test]
 fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -164,7 +166,8 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
     cx.simulate_keystrokes("cmd-alt-o");
     cx.run_until_parked();
     let theme = Theme::default();
-    let pad = theme.spacing.xs;
+    let pad = theme.spacing.sm;
+    let content = crate::colors::hsla(theme.content());
 
     let card = |cx: &mut VisualTestContext, ix: usize| {
         let at = cx.debug_bounds(Box::leak(format!("overview-block-{ix}").into_boxed_str()));
@@ -172,25 +175,34 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
         let quads = quads_at(cx, at);
         let quad = quads
             .into_iter()
-            .find(|q| q.background.as_solid() == Some(crate::colors::hsla(theme.surfaces.elevated)))
-            .unwrap_or_else(|| panic!("block {ix} is on the elevated surface"));
+            .find(|q| q.background.as_solid() == Some(content))
+            .unwrap_or_else(|| panic!("block {ix} is on the content's surface"));
         (at, quad)
     };
     let (first, first_quad) = card(cx, 0);
     let (second, second_quad) = card(cx, 1);
-    for quad in [&first_quad, &second_quad] {
-        assert!(!square(quad), "rounded: {quad:?}");
-    }
     let scale = cx.update(|window, _| window.scale_factor());
+    for (at, quad) in [(first, &first_quad), (second, &second_quad)] {
+        let lg = theme.radii.lg * scale;
+        assert!((quad.corner_radii.top_left.0 - lg).abs() < 0.01, "radii.lg: {quad:?}");
+        let hairline = quads_at(cx, at).iter().any(|q| q.border_widths.top.0 > 0.0);
+        assert!(hairline, "a hairline round {at:?}");
+    }
+    let (ring, gap) = (crate::a11y::RING, crate::a11y::RING);
+    let ring_color = crate::colors::hsla_alpha(theme.surfaces.accent, slopty_theme::alpha::STRONG);
     let ringed = |cx: &mut VisualTestContext, at: Bounds<Pixels>| {
-        quads_at(cx, at).iter().any(|q| {
-            q.border_color == accent()
-                && 2.0_f32.mul_add(-scale, q.border_widths.top.0).abs() < 0.01
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let reach = 2.0 * (gap + ring);
+        quads.iter().any(|q| {
+            q.border_color == ring_color
+                && (q.border_widths.top.0 / scale - ring).abs() < 0.01
+                && (q.bounds.size.width.0 / scale - f32::from(at.size.width) - reach).abs() < 0.5
+                && (q.bounds.origin.y.0 / scale - f32::from(at.origin.y) + reach / 2.0).abs() < 0.5
         })
     };
     let active = view.read_with(cx, |v, _| v.layout.active_workspace());
     assert_eq!(active, 1, "the tile moved down and the focus with it");
-    assert!(ringed(cx, second), "a 2 pt accent ring round the active one");
+    assert!(ringed(cx, second), "the keyboard's ring round the active one");
     assert!(!ringed(cx, first), "and only that one");
 
     let pane = shells
@@ -206,13 +218,12 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
     near(f32::from(name.left()), f32::from(second.left()) + pad);
     near(f32::from(new.left()), f32::from(second.left()));
     assert!(new.top() >= second.bottom() - px(0.5), "under the last card");
-    near(f32::from(new.size.height), f32::from(second.size.height));
-    let dashed = quads_at(cx, new).iter().any(|q| q.border_style == gpui::BorderStyle::Dashed);
-    assert!(dashed, "only its outline");
+    near(f32::from(new.size.height), theme.density.row);
+    assert!(new.size.width < second.size.width, "a button, not a card: {new:?}");
+    assert!(quads_at(cx, new).iter().all(|q| q.background.is_transparent()), "a ghost at rest");
     for (_, tile) in &shells {
         let header = cx.debug_bounds(selector("title", tile.item)).expect("a header");
         let quads = quads_at(cx, header);
-        let content = crate::colors::hsla(theme.content());
         assert!(!quads.is_empty(), "the header paints");
         assert!(
             quads.iter().all(|q| q.background.as_solid() == Some(content)),
@@ -307,4 +318,44 @@ fn a_healthy_worker_shows_no_word_in_the_empty_workspace(cx: &mut TestAppContext
     let (label, marks) = row(&view, cx);
     assert_eq!(label, "New terminal on studio, reconnecting");
     assert_eq!(marks, ["Away"]);
+}
+
+/// The empty workspace offers the directories shells already stand in on the workers, one row
+/// each whatever number of shells stand there, under the ways to begin; a press opens another
+/// shell in that directory on that worker.
+#[gpui::test]
+fn the_empty_workspace_offers_where_shells_stand(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let shells = three_shells(&view, cx, &fake);
+    let key = fake.key;
+    let dirs = ["/Users/me/oss/slopty", "/Users/me/src", "/Users/me/oss/slopty"];
+    for ((session, _), dir) in shells.iter().zip(dirs) {
+        view.update_in(cx, |v, _w, cx| v.session_opened(key, summary(*session, Some(dir)), cx));
+    }
+    view.update_in(cx, |v, _w, cx| {
+        let last = v.layout.workspaces().len().saturating_sub(1);
+        v.go_to_workspace(last, cx);
+    });
+    cx.run_until_parked();
+    let places = view.read_with(cx, |v, _| v.recent_places());
+    let mut names: Vec<&str> = places.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["oss/slopty", "~/src"], "one row per directory");
+
+    let begin = bounds(cx, "empty-window");
+    let label = bounds(cx, "empty-recent");
+    let workers = bounds(cx, "empty-workers");
+    let row = bounds(cx, "empty-place-1");
+    assert!(label.top() > begin.bottom() && workers.top() > row.bottom(), "between the two");
+    near(f32::from(row.left()), f32::from(begin.left()));
+    fake.drain();
+    cx.simulate_click(row.center(), Modifiers::default());
+    cx.run_until_parked();
+    let cwd = places.get(1).map(|p| p.cwd.clone());
+    let sent = fake.drain();
+    assert!(
+        sent.iter().any(|m| matches!(m, ClientMsg::OpenSession(open) if open.cwd == cwd)),
+        "a shell in {cwd:?}: {sent:?}"
+    );
 }

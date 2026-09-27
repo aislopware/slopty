@@ -53,6 +53,9 @@ pub struct Tailnet {
     pub servers: Vec<slopty_net::discover::Found>,
     /// Nodes that answered a worker's handshake.
     pub workers: Vec<slopty_net::discover::Found>,
+    /// This machine's Tailscale answered and is up, so an empty answer means nothing there
+    /// runs Slopty rather than that nothing was asked.
+    pub running: bool,
 }
 
 /// The servers and workers this machine's Tailscale finds on the tailnet, for the panel.
@@ -61,25 +64,23 @@ pub struct Tailnet {
 /// where no app can read it. A worker already added at the address it answered from is left
 /// out: it has its link.
 pub async fn find_on_tailnet() -> Tailnet {
-    let (Ok(endpoint), Some(status)) = (endpoint(), tailnet_status().await) else {
+    let Some(status) = tailnet_status().await.filter(slopty_tailnet::Status::running) else {
         return Tailnet::default();
     };
-    match status {
-        status if status.running() => {
-            let (servers, mut workers) = tokio::join!(
-                slopty_net::discover::servers(&endpoint, &status),
-                slopty_net::discover::workers(&endpoint, &status),
-            );
-            let added: Vec<String> = known_workers()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|w| w.address.host().to_owned())
-                .collect();
-            workers.retain(|w| !added.contains(&w.addr.ip().to_string()));
-            Tailnet { servers, workers }
-        }
-        _ => Tailnet::default(),
-    }
+    let Ok(endpoint) = endpoint() else {
+        return Tailnet { running: true, ..Tailnet::default() };
+    };
+    let (servers, mut workers) = tokio::join!(
+        slopty_net::discover::servers(&endpoint, &status),
+        slopty_net::discover::workers(&endpoint, &status),
+    );
+    let added: Vec<String> = known_workers()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|w| w.address.host().to_owned())
+        .collect();
+    workers.retain(|w| !added.contains(&w.addr.ip().to_string()));
+    Tailnet { servers, workers, running: true }
 }
 
 /// The tailnet as this machine's Tailscale describes it, if one this process can read runs; in

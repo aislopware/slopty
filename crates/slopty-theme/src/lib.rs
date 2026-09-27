@@ -344,8 +344,12 @@ pub struct Typography {
 }
 
 impl Typography {
-    /// The one weight above the regular one: headings and the workspace's name. Chrome has
-    /// no bold; a second step would be a weight nobody could name.
+    /// "This one": the selected row, the focused title, the active tab, a button's words, an
+    /// approval's statement. It says which without shouting, where the strong weight is kept
+    /// for titles.
+    pub const MEDIUM_WEIGHT: f32 = 500.0;
+    /// Titles: a dialog's or a panel's, the first run's heading, Markdown headings. Chrome has
+    /// no bold.
     pub const STRONG_WEIGHT: f32 = 600.0;
 
     /// The smallest chrome size: HUD readouts, timestamps, chevrons (base − 3).
@@ -367,6 +371,12 @@ impl Typography {
         (self.ui_size - 1.0).max(7.0)
     }
 
+    /// Prose read at length: an assistant's answer and the prompt it answers (base + 1).
+    #[must_use]
+    pub fn prose(&self) -> f32 {
+        self.ui_size + 1.0
+    }
+
     /// Titles of panels and dialogs (base + 2).
     #[must_use]
     pub fn title(&self) -> f32 {
@@ -385,10 +395,11 @@ impl Typography {
         self.ui_size + 3.0
     }
 
-    /// The heading of a page that is the whole window, the first run (base + 7).
+    /// The heading of a page that is the whole window, the first run (base + 9). At 22 the
+    /// system face switches to its Display cut on its own.
     #[must_use]
     pub fn display(&self) -> f32 {
-        self.ui_size + 7.0
+        self.ui_size + 9.0
     }
 }
 
@@ -411,19 +422,24 @@ impl Default for Typography {
 }
 
 /// Corner radii, in points.
+///
+/// Two families: 6 at rest and 12 for what floats. A floating shell is its rows' radius plus
+/// the pad round them (6 + 6), so the corners nest.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Radii {
-    /// Pills and inline buttons.
+    /// Key caps, chips, inline code.
     pub xs: f32,
-    /// Buttons, inputs, key caps.
+    /// Buttons, fields, rows (their hover and selected fills), tabs.
     pub sm: f32,
-    /// Panels, canvas items, popovers.
+    /// Framed blocks inside content: a diff, a code block.
     pub md: f32,
+    /// Everything that floats: the palette, menus, dialogs, the inbox, a toast, the composer.
+    pub lg: f32,
 }
 
 impl Default for Radii {
     fn default() -> Self {
-        Self { xs: 4.0, sm: 6.0, md: 8.0 }
+        Self { xs: 4.0, sm: 6.0, md: 8.0, lg: 12.0 }
     }
 }
 
@@ -464,6 +480,9 @@ impl Default for Spacing {
 /// Opacities for tints and washes over a surface: one ladder, used everywhere, so the chrome
 /// reads as one surface rather than a collection of one-off transparencies.
 pub mod alpha {
+    /// An edge that catches the light: the white line along the top of a dark floating
+    /// surface.
+    pub const EDGE: f32 = 0.06;
     /// Barely there: a selected row, the faint fill of a quiet pill, the hover wash over a
     /// bare button, a wash across the terminal grid (a block separator, the visual bell).
     pub const FAINT: f32 = 0.12;
@@ -545,8 +564,7 @@ pub struct Surfaces {
     /// Text on the success, warn and error fills: a badge's count.
     pub fill_fg: Rgb,
     /// Text on the accent fill: a primary button's label, a tick, a key that is on. White on a
-    /// deep blue in the light variant, as a native primary button is; dark on the lighter blue
-    /// of the dark one.
+    /// saturated blue in both variants, as a native primary button is.
     pub accent_ink: Rgb,
 }
 
@@ -603,13 +621,16 @@ struct Tones {
 /// toward the text.
 #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
 const DARK_TONES: Tones = Tones {
-    canvas: Step { toward: Toward::Black, share: 0.66 },
-    panel: Step { toward: Toward::Black, share: 0.32 },
-    elevated: ink(0.035),
-    raised: ink(0.05),
+    // One notch under the content, not three: at 0.66 the bars framed the window in black.
+    // The panel sits two L* under the content, as the light one does, so an unfocused header
+    // still reads as one; at 0.12 it was 1.5.
+    canvas: Step { toward: Toward::Black, share: 0.28 },
+    panel: Step { toward: Toward::Black, share: 0.16 },
+    elevated: ink(0.045),
+    raised: ink(0.065),
     border_subtle: ink(0.06),
-    overlay: ink(0.09),
-    border: ink(0.11),
+    overlay: ink(0.085),
+    border: ink(0.105),
     pole: Rgb::hex(0xffffff),
     text: Rgb::hex(0xe6e6e6),
     text_secondary: Rgb::hex(0xb4b9c3),
@@ -618,26 +639,26 @@ const DARK_TONES: Tones = Tones {
     success: Rgb::hex(0x98c379),
     warn: Rgb::hex(0xe5c07b),
     error: Rgb::hex(0xf06c75),
-    accent_fill: Rgb::hex(0x6aa1ff),
+    accent_fill: Rgb::hex(0x346bf1),
     success_fill: Rgb::hex(0x34c759),
     warn_fill: Rgb::hex(0xf5b83d),
     error_fill: Rgb::hex(0xf0555f),
     fill_fg: Rgb::hex(0x0a0b0e),
-    accent_ink: Rgb::hex(0x0a0b0e),
+    accent_ink: Rgb::hex(0xffffff),
 };
 
 /// Light: every step below the content darkens toward the text; what floats goes to white.
 #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
 const LIGHT_TONES: Tones = Tones {
-    canvas: ink(0.08),
-    // As far from the content in lightness as the dark panel is: at 0.035 an unfocused tile's
-    // header was all but the focused one's white.
-    panel: ink(0.05),
+    // Near-white chrome and a zinc-200 hairline: at 0.08 and 0.21 the bars were a grey slab
+    // under a darker rule than any reference draws.
+    canvas: ink(0.04),
+    panel: ink(0.025),
     elevated: Step { toward: Toward::White, share: 0.6 },
-    raised: ink(0.10),
-    border_subtle: ink(0.11),
-    overlay: ink(0.13),
-    border: ink(0.21),
+    raised: ink(0.055),
+    border_subtle: ink(0.065),
+    overlay: ink(0.085),
+    border: ink(0.115),
     pole: Rgb::hex(0x000000),
     text: Rgb::hex(0x1d1d1f),
     text_secondary: Rgb::hex(0x4b4f58),
@@ -646,7 +667,7 @@ const LIGHT_TONES: Tones = Tones {
     success: Rgb::hex(0x187633),
     warn: Rgb::hex(0x8b5d00),
     error: Rgb::hex(0xc7212c),
-    accent_fill: Rgb::hex(0x2563eb),
+    accent_fill: Rgb::hex(0x1b4ed8),
     success_fill: Rgb::hex(0x2da44e),
     warn_fill: Rgb::hex(0xf0a000),
     error_fill: Rgb::hex(0xef4b52),
@@ -759,32 +780,127 @@ pub struct Elevation {
     pub scrim: f32,
     /// The shadow under an `elevated` surface: a tight contact layer, then a soft one.
     pub shadow: [Shadow; 2],
+    /// The opacity of a 1 pt white line inside the top edge of an `elevated` surface, in dark
+    /// only. A black shadow on a near-black window cannot show where a sheet ends; an edge
+    /// that catches the light can.
+    pub highlight: Option<f32>,
 }
 
 impl Elevation {
-    /// Dark: shadows strong enough to read on near-black, and a deep scrim.
+    /// Dark: a shadow deep enough to read on near-black, a lit top edge, and a deep scrim.
     pub const DARK: Self = Self {
         shade: Rgb::hex(0),
         scrim: alpha::SCRIM,
         shadow: [
             Shadow { y: 1.0, blur: 2.0, alpha: 0.4 },
-            Shadow { y: 4.0, blur: 12.0, alpha: 0.5 },
+            Shadow { y: 12.0, blur: 32.0, alpha: 0.5 },
         ],
+        highlight: Some(alpha::EDGE),
     };
-    /// Light: a soft shadow and a light scrim, since white panels read on their own.
+    /// Light: a faint shadow and a light scrim, since white panels read on their own.
     pub const LIGHT: Self = Self {
         shade: Rgb::hex(0),
         scrim: alpha::TINT,
         shadow: [
             Shadow { y: 1.0, blur: 2.0, alpha: 0.06 },
-            Shadow { y: 4.0, blur: 12.0, alpha: 0.12 },
+            Shadow { y: 12.0, blur: 32.0, alpha: 0.10 },
         ],
+        highlight: None,
     };
 
     /// The elevation for chrome over `content`.
     #[must_use]
     pub const fn of(content: Rgb) -> Self {
         if content.is_light() { Self::LIGHT } else { Self::DARK }
+    }
+}
+
+/// A timing curve: CSS's `cubic-bezier(x1, y1, x2, y2)`, from (0, 0) to (1, 1).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Curve {
+    /// The first control point.
+    pub p1: (f32, f32),
+    /// The second control point.
+    pub p2: (f32, f32),
+}
+
+impl Curve {
+    /// How far along the motion is at `t` (0 to 1) of its time.
+    ///
+    /// Solves the curve's x for `t` by Newton's method, falling back to bisection where the
+    /// slope is too flat to step on, then reads y there.
+    #[must_use]
+    pub fn at(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        // One axis of the curve and its slope at parameter `s`, from its two control values.
+        let axis = |a: f32, b: f32, s: f32| {
+            let u = 1.0 - s;
+            (3.0 * u * u * s).mul_add(a, (3.0 * u * s * s).mul_add(b, s * s * s))
+        };
+        let slope = |a: f32, b: f32, s: f32| {
+            let u = 1.0 - s;
+            (3.0 * u * u).mul_add(a, (6.0 * u * s).mul_add(b - a, 3.0 * s * s * (1.0 - b)))
+        };
+        let (x1, x2) = (self.p1.0, self.p2.0);
+        let mut s = t;
+        for _ in 0..8 {
+            let dx = slope(x1, x2, s);
+            if dx.abs() < 1e-6 {
+                break;
+            }
+            s = (s - (axis(x1, x2, s) - t) / dx).clamp(0.0, 1.0);
+        }
+        if (axis(x1, x2, s) - t).abs() > 1e-4 {
+            let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+            for _ in 0..24 {
+                s = f32::midpoint(lo, hi);
+                if axis(x1, x2, s) < t {
+                    lo = s;
+                } else {
+                    hi = s;
+                }
+            }
+        }
+        axis(self.p1.1, self.p2.1, s)
+    }
+}
+
+/// How chrome moves: durations and curves, one set for every animation.
+///
+/// Every duration stays at or under 160 ms but a sheet's: an overlay that takes longer to arrive
+/// than a key takes to type reads as waiting. What moves is opacity and a small translate, never
+/// the scale of text. Under Reduce Motion all of it lands at once (`slopty_ui::kit::motion`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Motion {
+    /// Hover fills and cursor changes: instant.
+    pub hover: std::time::Duration,
+    /// Overlays, menus and hints appearing.
+    pub fade: std::time::Duration,
+    /// A selected row's fill moving, a tab resizing, a fold opening.
+    pub settle: std::time::Duration,
+    /// A phone's palette sheet, the iPad's drawer, the composer turning into an approval.
+    pub sheet: std::time::Duration,
+    /// The curve of everything but a sheet: fast out of the gate, a long soft landing.
+    pub ease_out: Curve,
+    /// A sheet's curve: a drawer's, which follows a finger's flick.
+    pub drawer: Curve,
+}
+
+impl Motion {
+    /// The one set.
+    pub const DEFAULT: Self = Self {
+        hover: std::time::Duration::ZERO,
+        fade: std::time::Duration::from_millis(120),
+        settle: std::time::Duration::from_millis(160),
+        sheet: std::time::Duration::from_millis(240),
+        ease_out: Curve { p1: (0.22, 1.0), p2: (0.36, 1.0) },
+        drawer: Curve { p1: (0.32, 0.72), p2: (0.0, 1.0) },
+    };
+}
+
+impl Default for Motion {
+    fn default() -> Self {
+        Self::DEFAULT
     }
 }
 
@@ -1070,13 +1186,18 @@ mod tests {
         );
 
         let r = Radii::default();
-        assert!(r.xs < r.sm && r.sm < r.md);
+        assert!(r.xs < r.sm && r.sm < r.md && r.md < r.lg);
+        assert!((r.sm + r.sm - r.lg).abs() < f32::EPSILON, "a sheet is its rows' radius and pad");
 
         let mut t = Typography::default();
         assert_eq!(
-            (t.caption(), t.meta(), t.small(), t.title(), t.display()),
-            (10.0, 11.0, 12.0, 15.0, 20.0)
+            (t.caption(), t.meta(), t.small(), t.prose(), t.title(), t.display()),
+            (10.0, 11.0, 12.0, 14.0, 15.0, 22.0)
         );
+        const {
+            assert!(Typography::MEDIUM_WEIGHT > 400.0);
+            assert!(Typography::MEDIUM_WEIGHT < Typography::STRONG_WEIGHT);
+        };
         t.ui_size = 8.0;
         assert_eq!(
             (t.caption(), t.meta(), t.small(), t.title()),
@@ -1087,44 +1208,41 @@ mod tests {
         assert!(s.xxs < s.xs && s.xs < s.sm && s.sm < s.md && s.md < s.lg && s.lg < s.xl);
     }
 
-    /// The window reads in three steps that climb in both variants (bars, navigator, content),
-    /// each far enough from the next to be seen, and the in-panel hairline is quieter than the
-    /// one between panes on every step while still showing on the content.
+    /// The window climbs in both variants (bars, then unfocused headers, then the content),
+    /// and the in-panel hairline is quieter than the one between panes on every step while
+    /// still showing on the content.
     ///
-    /// Before this, the light variant's navigator, status bar, headers and bodies were all
-    /// white, and the dark one's content sat between its bars and its navigator.
+    /// Before the first ruling, the light variant's navigator, status bar, headers and bodies
+    /// were all white, and the dark one's content sat between its bars and its navigator.
     #[test]
-    fn the_surfaces_climb_in_three_steps_bars_navigator_content() {
-        // Adjacent steps a little over 5 % apart read as two surfaces; the pair a step apart
-        // twice that (VS Code's dark modern is 1.05 a step, Zed's One 1.08 to 1.22).
-        const STEP: f32 = 1.05;
+    fn the_surfaces_climb_bars_panel_content() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
             let content = theme.content();
             assert_eq!(content, theme.terminal.bg, "{variant:?}: the content is the grid's");
-            let (bars, navigator) = (s.canvas.luminance(), s.panel.luminance());
-            assert!(bars < navigator && navigator < content.luminance(), "{variant:?} climbs");
-            for (low, high) in [(s.canvas, s.panel), (s.panel, content)] {
-                let step = low.contrast(high);
-                assert!(step >= STEP, "{variant:?}: {low:?} to {high:?} is {step:.3}");
-            }
+            let (bars, panel) = (s.canvas.luminance(), s.panel.luminance());
+            assert!(bars < panel && panel < content.luminance(), "{variant:?} climbs");
             for (name, surface) in [("canvas", s.canvas), ("panel", s.panel), ("content", content)]
             {
                 let (loud, quiet) = (s.border.contrast(surface), s.border_subtle.contrast(surface));
                 assert!(quiet < loud, "{variant:?}: the subtle hairline is quieter on {name}");
             }
             let subtle = s.border_subtle.contrast(content);
-            assert!(subtle >= STEP, "{variant:?}: the subtle hairline shows on content");
+            assert!(subtle >= 1.05, "{variant:?}: the subtle hairline shows on content");
         }
     }
 
-    /// The steps read alike in both variants: light's are as far apart in perceived lightness
-    /// (CIE L*) as dark's, give or take half a unit. A contrast ratio alone passed a light
-    /// panel two thirds as far from its content, and a focused tile's header, on the content,
-    /// barely stood out from the others, on the panel.
+    /// The chrome sits one notch from the content, as Linear's navigation sits a few notches
+    /// dimmer than its content and Ghostty's tab bar takes the terminal's own colour: the bars
+    /// 2.5 to 4 CIE L* under it, the panel between, each step at least one unit, and the light
+    /// variant's steps as far apart as the dark one's, give or take half a unit.
+    ///
+    /// At three notches (dark bars 66 % toward black, `07080A` round `16181D`) the window wore a
+    /// black frame; in light a grey slab (`EDEDED`) under a `D0D0D0` rule. A contrast ratio
+    /// cannot see this: on near-black every step is under 1.05.
     #[test]
-    fn the_steps_are_as_far_apart_in_light_as_in_dark() {
+    fn the_chrome_sits_one_notch_from_the_content() {
         let lightness = |c: Rgb| {
             let y = c.luminance();
             if y > 216.0 / 24_389.0 {
@@ -1138,14 +1256,19 @@ mod tests {
             let s = theme.surfaces;
             let (content, panel, canvas) =
                 (lightness(theme.content()), lightness(s.panel), lightness(s.canvas));
-            [(content - panel).abs(), (panel - canvas).abs()]
+            [(content - panel).abs(), (panel - canvas).abs(), (content - canvas).abs()]
         };
         let (dark, light) = (steps(Variant::Dark), steps(Variant::Light));
-        for (name, d, l) in
-            [("content to panel", dark[0], light[0]), ("panel to bars", dark[1], light[1])]
-        {
+        for (name, d, l) in [
+            ("content to panel", dark[0], light[0]),
+            ("panel to bars", dark[1], light[1]),
+            ("content to bars", dark[2], light[2]),
+        ] {
             assert!((d - l).abs() <= 0.5, "{name}: dark {d:.2}, light {l:.2}");
-            assert!(d.min(l) >= 2.0, "{name} shows: dark {d:.2}, light {l:.2}");
+            assert!(d.min(l) >= 1.0, "{name} shows: dark {d:.2}, light {l:.2}");
+        }
+        for (variant, notch) in [("dark", dark[2]), ("light", light[2])] {
+            assert!((2.5..=4.0).contains(&notch), "{variant}: bars {notch:.2} L* under content");
         }
     }
 
@@ -1479,12 +1602,53 @@ mod tests {
             assert!(contact.blur < soft.blur && contact.y < soft.y, "a tight layer, then a soft");
             assert!(soft.alpha >= least, "{:?}: the shadow shows", theme.variant());
         }
+        assert_eq!(dark.elevation.highlight, Some(alpha::EDGE), "a dark sheet's lit edge");
+        assert_eq!(light.elevation.highlight, None, "white sheets read on their own");
+        const { assert!(alpha::EDGE < alpha::FAINT, "the edge is the ladder's quietest step") };
         const { assert!(Elevation::DARK.scrim > Elevation::LIGHT.scrim, "dark dims deeper") };
         let (compact, touch) = (Density::COMPACT, Density::TOUCH);
         assert!(touch.hit >= 44.0 && touch.row >= 44.0 && touch.header >= 44.0);
         assert!(compact.row < touch.row && compact.row_two_line < touch.row_two_line);
         assert!(compact.row < compact.row_two_line && touch.row < touch.row_two_line);
         assert_eq!(Theme::default().density, compact, "the Mac is the default");
+    }
+
+    /// A primary button is white words on a saturated blue in both variants, as a native one
+    /// is: dark's `346BF1` and light's `1B4ED8` both carry white at AA. Dark's lighter
+    /// `6AA1FF` with dark words read as a disabled or foreign control.
+    #[test]
+    fn the_primary_fill_carries_white() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let s = Theme::new(variant).surfaces;
+            assert_eq!(s.accent_ink, Rgb::hex(0xff_ffff), "{variant:?}: white words");
+            let ink = s.accent_ink.contrast(s.accent_fill);
+            assert!(ink >= AA, "{variant:?}: white on {:?} is {ink:.2}", s.accent_fill);
+        }
+    }
+
+    /// A curve starts at rest and lands, and CSS's named curves read as CSS draws them: the
+    /// ease-out ahead of a straight line all the way, and a curve whose control points sit on
+    /// the diagonal is that line.
+    #[test]
+    fn a_curve_runs_from_rest_to_landed() {
+        let motion = Motion::DEFAULT;
+        for curve in [motion.ease_out, motion.drawer] {
+            assert!(curve.at(0.0).abs() < 1e-4 && (curve.at(1.0) - 1.0).abs() < 1e-4);
+            let mut last = 0.0;
+            for step in 1..=20_u8 {
+                let y = curve.at(f32::from(step) / 20.0);
+                assert!(y >= last - 1e-4, "{curve:?} turns back at {step}");
+                last = y;
+            }
+        }
+        for step in 1..10_u8 {
+            let t = f32::from(step) / 10.0;
+            assert!(motion.ease_out.at(t) > t, "ease-out leads at {t}");
+        }
+        let linear = Curve { p1: (0.25, 0.25), p2: (0.75, 0.75) };
+        assert!((linear.at(0.3) - 0.3).abs() < 1e-3);
+        assert!(motion.fade <= motion.settle && motion.settle < motion.sheet);
+        assert!(motion.hover.is_zero(), "hover is instant");
     }
 
     #[test]

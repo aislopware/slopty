@@ -65,4 +65,35 @@ expression: "decode(\"compact\").snapshot()"
             lines: 2
             chars: 148
             full: ~
+          retry: ~
   tasks: []
+  turns:
+    - prompt: 00000000-0000-4000-8000-000000000003
+      started_ms: 1790482610982
+      ended_ms: 1790482612451
+      models:
+        - claude-haiku-4-5-20251001
+      requests: 1
+      usage:
+        input: 10
+        cache_read: 20383
+        cache_write: 0
+        output: 51
+        thinking: 45
+      context_tokens: 20393
+      mode: default
+      stop: end_turn
+    - prompt: 00000000-0000-4000-8000-000000000024
+      started_ms: 1790482612459
+      ended_ms: ~
+      models: []
+      requests: 0
+      usage:
+        input: 0
+        cache_read: 0
+        cache_write: 0
+        output: 0
+        thinking: 0
+      context_tokens: ~
+      mode: ~
+      stop: ~

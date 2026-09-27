@@ -42,9 +42,9 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _, IntoElement as _,
-    ListAlignment, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    Window, canvas, div, list, px,
+    ListAlignment, ListOffset, ListState, MouseButton, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, Window, canvas, div, list, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
@@ -77,11 +77,15 @@ pub(super) const HANDLE_W: f32 = 12.0;
 /// The rail's width, where the navigator is hidden: one glyph per worker.
 pub(super) const RAIL_W: f32 = 40.0;
 
+/// What an open worker with no tile says under its name.
+pub const NO_TILES: &str = "No tiles";
+
 /// How many rows *Working* lists before "Show N more".
 const WORKING_SHOWN: usize = 4;
 
 /// A round trip the navigator names: above it typing starts to feel remote, below it the
-/// number is noise beside every worker. The hosts popover and the status bar give it always.
+/// number is noise beside every worker. The status bar uses the same threshold (and shows it
+/// under the pointer); the hosts popover gives it always.
 pub(super) const RTT_SHOWN_FROM: Duration = Duration::from_millis(20);
 
 /// How far past each edge of the view the list lays rows out, in points, so a scroll does not
@@ -176,7 +180,12 @@ impl Default for NavList {
 impl NavList {
     /// Take this frame's rows. Where a row's shape changed (its kind, or a tile's line
     /// count), the list forgets its height and measures it on its next layout.
+    ///
+    /// A list at its very top stays there: a section that opens above the first row (*Needs
+    /// you*, *Working*) shows, rather than pushing the view down past it.
     fn set_rows(&mut self, rows: Vec<NavRow>) {
+        let scrolled = self.state.logical_scroll_top();
+        let at_top = scrolled.item_ix == 0 && scrolled.offset_in_item <= px(0.0);
         let same = |(a, b): &(&NavRow, &NavRow)| a.shape() == b.shape();
         let old = self.rows.len();
         let head = self.rows.iter().zip(&rows).take_while(same).count();
@@ -190,8 +199,29 @@ impl NavList {
             if !added.is_empty() {
                 self.state.remeasure_items(added);
             }
+            if at_top {
+                self.state.scroll_to(ListOffset::default());
+            }
         }
         self.rows = rows;
+    }
+
+    /// Whether `tile`'s row was in view in the last layout. A row the list has not placed yet
+    /// (new this frame, or before the first layout) counts as in view, so nothing flashes in
+    /// for a frame on its account; a row above the list's top is out.
+    fn in_view(&self, tile: TileRef) -> bool {
+        let Some(ix) =
+            self.rows.iter().position(|r| matches!(r, NavRow::Tile(t) if t.tile == tile))
+        else {
+            return true;
+        };
+        if ix < self.state.logical_scroll_top().item_ix {
+            return false;
+        }
+        let view = self.state.viewport_bounds();
+        self.state
+            .bounds_for_item(ix)
+            .is_none_or(|row| row.bottom() > view.top() && row.top() < view.bottom())
     }
 
     /// Scroll the selected tile's row into view if the focus moved to it since the last reveal.
@@ -518,6 +548,8 @@ struct NavHeader {
     linked: bool,
     rollup: Rollup,
     folded: bool,
+    /// It follows another worker's rows, and stands a step off them.
+    gap: bool,
 }
 
 /// An agent in *Needs you* or *Working*: what it is, what it says, where, and since when.
@@ -547,14 +579,26 @@ enum NavRow {
     More(usize),
     Worker(NavHeader),
     Tile(NavTile),
+    /// An open worker with no tile, in one quiet line where its tiles would be.
+    Vacant(WorkerKey),
     /// The filter left nothing.
     Nothing,
 }
 
 impl NavRow {
-    /// What a row's height follows: its kind, and for a tile whether it has a second line.
-    const fn shape(&self) -> (Discriminant<Self>, bool) {
-        (discriminant(self), matches!(self, Self::Tile(t) if t.meta.is_empty()))
+    /// What a row's height follows: its kind, then for a tile whether it has a second line,
+    /// and for a worker's header whether it has a warning line and a step above it.
+    const fn shape(&self) -> (Discriminant<Self>, bool, bool) {
+        let (lines, gap) = match self {
+            Self::Tile(t) => (t.meta.is_empty() && t.changes.is_none(), false),
+            Self::Worker(h) => (h.warning.is_some(), h.gap),
+            Self::Heading { .. }
+            | Self::Agent(_)
+            | Self::More(_)
+            | Self::Vacant(_)
+            | Self::Nothing => (false, false),
+        };
+        (discriminant(self), lines, gap)
     }
 }
 
@@ -868,6 +912,7 @@ impl WorkspaceView {
                 linked: w.link.is_some(),
                 rollup,
                 folded,
+                gap: false,
             };
             out.push(NavWorker { header, tiles });
         }
@@ -937,7 +982,9 @@ impl WorkspaceView {
     }
 
     /// The top row, the title bar's height: room for the traffic lights on a Mac, then the
-    /// filter's field, a raised rounded well a base unit in from the panel's edge.
+    /// filter's field, a raised well a row tall, the base unit in from the panel's edge. No
+    /// hairline under it: the panel is one surface from the top to the bottom, as T3 Code's and
+    /// Linear's sidebars are, and the rows under the field need no rule to start.
     fn navigator_header(&self, window: &Window, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -945,12 +992,13 @@ impl WorkspaceView {
         let safe = window.insets().effective();
         let leading = if cfg!(target_os = "macos") { LEADING_INSET } else { spacing.sm };
         let input = self.nav.filter.input.as_ref().map(|input| {
-            div()
-                .debug_selector(|| "nav-filter".to_owned())
-                .flex_1()
-                .min_w_0()
-                .text_size(px(theme.typography.ui_size))
-                .child(Input::new(input).appearance(false).px_0().aria_label("Filter"))
+            div().debug_selector(|| "nav-filter".to_owned()).flex_1().min_w_0().child(
+                Input::new(input)
+                    .appearance(false)
+                    .px_0()
+                    .text_size(px(theme.typography.ui_size))
+                    .aria_label("Filter"),
+            )
         });
         let clear = (!self.nav.filter.query.is_empty()).then(|| {
             let el = div()
@@ -976,11 +1024,11 @@ impl WorkspaceView {
             .id("nav-filter-field")
             .flex_1()
             .min_w_0()
-            .h(px(2.0_f32.mul_add(spacing.xs, theme.typography.icon_large())))
-            .px(px(spacing.xs))
+            .h(px(theme.density.row))
+            .px(px(spacing.sm))
             .flex()
             .items_center()
-            .gap(px(spacing.xs))
+            .gap(px(spacing.xs + spacing.xxs))
             .rounded(px(theme.radii.sm))
             .bg(hsla(s.raised))
             .child(icon(theme, IconName::Search, IconSize::Inline, hsla(s.text_muted)))
@@ -994,17 +1042,28 @@ impl WorkspaceView {
             .pr(px(spacing.sm))
             .flex()
             .items_center()
-            .border_b_1()
-            .border_color(hsla(s.border))
             .child(field)
     }
 
-    /// Every row the list holds this frame: *Needs you* while an agent waits, *Working* while
-    /// one is at its turn, then each worker's header and, unless it is folded, its tiles. The
-    /// workers' own heading shows only under another section. While the filter holds
-    /// something, a fold hides nothing.
+    /// Every row the list holds this frame: *Needs you* while an agent waits out of sight,
+    /// *Working* while one is at its turn, then each worker's header and, unless it is folded,
+    /// its tiles. The workers' own heading shows only under another section. While the filter
+    /// holds something, a fold hides nothing.
+    ///
+    /// A waiting agent is listed under *Needs you* only while its own row is not there to say
+    /// so: its tile is folded away, scrolled out of view, filtered out, or it has none. A tile
+    /// in view already ends its first line in "Needs you", and a second row for it repeated it.
     fn nav_rows(&self, cx: &gpui::App) -> Vec<NavRow> {
         let query = self.nav.filter.query.trim().to_lowercase();
+        let listing = self.nav_listing(cx);
+        let listed: HashSet<TileRef> = listing
+            .iter()
+            .filter(|w| !w.header.folded)
+            .flat_map(|w| w.tiles.iter().map(|t| t.tile))
+            .collect();
+        let seen = |at: &Waiting| {
+            at.tile.is_some_and(|tile| listed.contains(&tile) && self.nav.list.in_view(tile))
+        };
         let mut rows = Vec::new();
         let agents = |list: &[Waiting], status: Status| -> Vec<NavAgent> {
             list.iter()
@@ -1012,7 +1071,9 @@ impl WorkspaceView {
                 .filter(|a| matches(&query, &[&a.title, &a.words, &a.place]))
                 .collect()
         };
-        let waiting = agents(&self.drawn_waiting, Status::NeedsYou);
+        let unseen: Vec<Waiting> =
+            self.drawn_waiting.iter().filter(|at| !seen(at)).copied().collect();
+        let waiting = agents(&unseen, Status::NeedsYou);
         if !waiting.is_empty() {
             rows.push(NavRow::Heading {
                 selector: "nav-needs-you",
@@ -1035,17 +1096,25 @@ impl WorkspaceView {
                 rows.push(NavRow::More(count.saturating_sub(shown)));
             }
         }
-        let listing = self.nav_listing(cx);
         if !listing.is_empty() && !rows.is_empty() {
             rows.push(NavRow::Heading { selector: "nav-workers", text: "Workers", working: None });
         }
         for worker in listing {
-            let NavWorker { header, tiles } = worker;
-            let folded = header.folded;
+            let NavWorker { mut header, tiles } = worker;
+            // A worker after another's rows stands a step off them; under a heading, or first,
+            // it needs none.
+            header.gap = matches!(rows.last(), Some(NavRow::Worker(_) | NavRow::Tile(_)));
+            let (key, folded) = (header.key, header.folded);
             rows.push(NavRow::Worker(header));
-            if !folded {
-                rows.extend(tiles.into_iter().map(NavRow::Tile));
+            if folded {
+                continue;
             }
+            // A worker listed under a filter matched by its name; with no tiles it has nothing
+            // else to say, and "No tiles" there would read as the filter's answer.
+            if tiles.is_empty() && query.is_empty() {
+                rows.push(NavRow::Vacant(key));
+            }
+            rows.extend(tiles.into_iter().map(NavRow::Tile));
         }
         if rows.is_empty() {
             rows.push(NavRow::Nothing);
@@ -1086,7 +1155,14 @@ impl WorkspaceView {
     /// Row `ix` of the list, drawn only while it is in view or measured. The list lays a row
     /// out at its own size; the wrapper gives it the list's width, less its margins.
     fn nav_row(&self, ix: usize, cx: &Context<Self>) -> gpui::AnyElement {
-        div().w_full().flex().flex_col().child(self.nav_row_content(ix, cx)).into_any_element()
+        let gap = matches!(self.nav.list.rows.get(ix), Some(NavRow::Worker(h)) if h.gap);
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .when(gap, |el| el.pt(px(self.theme.spacing.sm)))
+            .child(self.nav_row_content(ix, cx))
+            .into_any_element()
     }
 
     fn nav_row_content(&self, ix: usize, cx: &Context<Self>) -> gpui::AnyElement {
@@ -1099,13 +1175,29 @@ impl WorkspaceView {
             Some(NavRow::More(hidden)) => self.more_row(*hidden, cx),
             Some(NavRow::Worker(header)) => self.worker_header(header, cx),
             Some(NavRow::Tile(tile)) => self.tile_row(tile, self.nav.list.selected, cx),
-            Some(NavRow::Nothing) => kit::inset_x(div(), theme)
-                .debug_selector(|| "nav-nothing".to_owned())
-                .py(px(theme.spacing.md))
-                .text_size(px(theme.typography.small()))
-                .text_color(hsla(theme.surfaces.text_muted))
-                .child(crate::picker::NOTHING_MATCHES)
-                .into_any_element(),
+            Some(NavRow::Vacant(key)) => {
+                let key = *key;
+                // On the tiles' titles' edge: past the worker's glyph and its gap, as a tile's
+                // title stands past its kind's.
+                let title_edge = theme.spacing.inset()
+                    + theme.typography.icon_large().mul_add(2.0, -glyph_margin(theme))
+                    + theme.spacing.xs;
+                meta(div(), theme)
+                    .id(ElementId::Name(format!("nav-vacant-{key}").into()))
+                    .debug_selector(move || format!("nav-vacant-{key}"))
+                    .role(Role::Label)
+                    .aria_label(NO_TILES)
+                    .h(px(kit::Row::One.height(theme)))
+                    .flex()
+                    .items_center()
+                    .pl(px(theme.spacing.xs + title_edge))
+                    .child(NO_TILES)
+                    .into_any_element()
+            }
+            Some(NavRow::Nothing) => {
+                crate::palette::quiet_line(theme, "nav-nothing", crate::picker::NOTHING_MATCHES)
+                    .into_any_element()
+            }
             None => div().into_any_element(),
         }
     }
@@ -1132,6 +1224,7 @@ impl WorkspaceView {
         )
         .flex_1()
         .min_h_0()
+        .pt(px(theme.spacing.xs))
         .pb(px(theme.spacing.md));
         div()
             .id("navigator")
@@ -1146,12 +1239,15 @@ impl WorkspaceView {
             .when(mode != Mode::Docked, |panel| panel.pb(safe.bottom))
             .flex()
             .flex_col()
-            .bg(hsla(s.panel))
+            // The bars' surface: the navigator is chrome, one surface with them, and the panel
+            // step is left to the unfocused tiles' headers.
+            .bg(hsla(s.canvas))
             .border_r_1()
             .border_color(hsla(s.border))
             .font_family(theme.typography.ui_family.clone())
-            // Over the frame it floats, as every floating layer does.
-            .when(mode != Mode::Docked, |panel| kit::elevate(panel, theme))
+            // Over the frame it floats, as every floating layer does. It meets the window's
+            // top, left and bottom edges, so only its trailing edge carries the hairline.
+            .when(mode != Mode::Docked, |panel| kit::elevate(panel, theme).border_0().border_r_1())
             // Esc in the filter empties it and hands the keyboard back.
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                 if !this.nav.filter.query.is_empty() {
@@ -1227,7 +1323,7 @@ impl WorkspaceView {
             .items_center()
             .pt(px(spacing.sm))
             .gap(px(spacing.xs))
-            .bg(hsla(s.panel))
+            .bg(hsla(s.canvas))
             .border_r_1()
             .border_color(hsla(s.border))
             .children(buttons)
@@ -1342,6 +1438,7 @@ impl WorkspaceView {
             div()
                 .debug_selector(move || format!("{prefix}-separator-{session}"))
                 .flex_none()
+                .text_color(crate::palette::separator_ink(theme))
                 .child(META_SEPARATOR)
         });
         let line2 = meta(div(), theme)
@@ -1360,7 +1457,7 @@ impl WorkspaceView {
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .child(agent.place.clone()),
+                    .child(crate::palette::dotted(theme, agent.place.clone())),
             );
         let waiting = agent.at;
         row(
@@ -1440,7 +1537,7 @@ impl WorkspaceView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
+            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
             .text_color(hsla(s.text))
             .child(SharedString::from(worker.name.clone()));
         // Only when something is wrong with the worker itself: a line under its name, in the
@@ -1462,28 +1559,23 @@ impl WorkspaceView {
         // before them what a folded worker's tiles add up to. They grow leftwards, so a rollup
         // coming or going moves nothing after it.
         let rollup = folded.then_some(worker.rollup).filter(|r| r.shown().is_some());
-        let rest = div()
-            .flex()
-            .items_center()
-            .justify_end()
-            .gap(px(theme.spacing.xs))
-            .group_hover(group.clone(), gpui::Styled::invisible)
-            .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r, false)))
-            .children(worker.health.map(|(_, word)| readout(theme, word)))
-            .children(worker.relay.clone().map(|relay| {
-                readout(theme, relay)
-                    .debug_selector(move || format!("nav-path-{key}"))
-                    .text_color(hsla(s.warn))
-            }))
-            .children(worker.rtt.clone().map(|rtt| {
-                tabular(div())
-                    .debug_selector(move || format!("nav-rtt-{key}"))
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(rtt)
-            }));
+        let rest =
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(theme.spacing.xs))
+                .group_hover(group.clone(), gpui::Styled::invisible)
+                .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r, false)))
+                .children(worker.health.map(|(_, word)| readout(theme, word)))
+                .children(worker.relay.clone().map(|relay| {
+                    readout(theme, relay)
+                        .debug_selector(move || format!("nav-path-{key}"))
+                        .text_color(hsla(s.warn))
+                }))
+                .children(worker.rtt.clone().map(|rtt| {
+                    readout(theme, rtt).debug_selector(move || format!("nav-rtt-{key}"))
+                }));
         let chevron = if folded { IconName::ChevronRight } else { IconName::ChevronDown };
         let side = theme.typography.icon_large();
         let add = worker.linked.then(|| {
@@ -1608,14 +1700,17 @@ impl WorkspaceView {
                     .into_any_element()
             }),
         };
-        let line1 = div()
-            .h(px(first))
-            .line_height(px(first))
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs))
-            .child(title(t.title.clone(), hsla(ink)))
-            .children(end);
+        let line1 =
+            div()
+                .h(px(first))
+                .line_height(px(first))
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .child(title(t.title.clone(), hsla(ink)).when(selected, |el| {
+                    el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+                }))
+                .children(end);
         // The working tree's changes end the line whole, in a diff's tones; the words before
         // them give way.
         let changes = t.changes.clone().map(|(added, removed)| {
@@ -1643,7 +1738,7 @@ impl WorkspaceView {
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .child(t.meta.clone()),
+                        .child(crate::palette::dotted(theme, t.meta.clone())),
                 )
                 .children(changes)
         });

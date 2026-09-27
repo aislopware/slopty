@@ -27,8 +27,8 @@ mod tests {
     /// Long enough for a spring or the soft keyboard to come to rest before a golden.
     const SETTLE: Duration = Duration::from_millis(600);
     /// Foreground below this is a blank frame: a fitted terminal's few lines are under 1 % of
-    /// an iPad's 2064×2752 pixels.
-    const BLANK: f64 = 0.002;
+    /// an iPad's 2064×2752 pixels, and the light chrome's hairlines are too faint to count.
+    const BLANK: f64 = 0.001;
 
     /// Which device family the app is on, from its viewport: the golden's name prefix.
     fn device(window_width: f32) -> &'static str {

@@ -223,3 +223,19 @@ expression: "decode(\"edit\").snapshot()"
           chars: 4
           full: ~
   tasks: []
+  turns:
+    - prompt: 00000000-0000-4000-8000-000000000003
+      started_ms: 1790482544096
+      ended_ms: 1790482567721
+      models:
+        - claude-haiku-4-5-20251001
+      requests: 6
+      usage:
+        input: 50
+        cache_read: 125375
+        cache_write: 2344
+        output: 1942
+        thinking: 1359
+      context_tokens: 22814
+      mode: default
+      stop: end_turn

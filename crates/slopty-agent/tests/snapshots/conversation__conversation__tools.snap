@@ -403,6 +403,22 @@ expression: "decode(\"tools\").snapshot()"
     - id: "2"
       subject: Write notes
       status: completed
+  turns:
+    - prompt: 00000000-0000-4000-8000-000000000003
+      started_ms: 1790482568649
+      ended_ms: 1790482604079
+      models:
+        - claude-haiku-4-5-20251001
+      requests: 14
+      usage:
+        input: 118
+        cache_read: 341718
+        cache_write: 7467
+        output: 2805
+        thinking: 1468
+      context_tokens: 26832
+      mode: default
+      stop: end_turn
 - id:
     Agent: a0000000000000001
   origin:
@@ -451,3 +467,19 @@ expression: "decode(\"tools\").snapshot()"
           chars: 1
           full: ~
   tasks: []
+  turns:
+    - prompt: 00000000-0000-4000-8000-000000000072
+      started_ms: 1790482595917
+      ended_ms: ~
+      models:
+        - claude-haiku-4-5-20251001
+      requests: 2
+      usage:
+        input: 18
+        cache_read: 12984
+        cache_write: 13356
+        output: 182
+        thinking: 105
+      context_tokens: 13364
+      mode: ~
+      stop: end_turn

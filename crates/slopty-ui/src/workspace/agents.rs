@@ -511,6 +511,7 @@ impl WorkspaceView {
             .rounded(px(theme.radii.xs * k))
             .bg(hsla_alpha(color, alpha::FAINT))
             .text_size(px(ui_size))
+            .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
             .text_color(hsla(color))
             .child(
                 div().min_w_0().overflow_hidden().child(

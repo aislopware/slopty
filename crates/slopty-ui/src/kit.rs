@@ -13,11 +13,11 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, App, BoxShadow, Context, Div, FontFeatures, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, ease_out_quint, point, px,
+    StatefulInteractiveElement as _, Styled, Window, div, point, px,
 };
 use gpui_kit::base::text::TextViewDefaults;
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
-use slopty_theme::{Theme, Variant, alpha};
+use slopty_theme::{Motion, Rgb, Theme, Typography, Variant, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 
@@ -50,7 +50,18 @@ pub fn tabular<E: Styled>(el: E) -> E {
 
 /// How long chrome takes to appear: an overlay, a menu, the palette, a hint. Short enough
 /// that a key typed at once still lands in what opened (focus does not wait for it).
-pub const FADE: std::time::Duration = std::time::Duration::from_millis(120);
+pub const FADE: std::time::Duration = Motion::DEFAULT.fade;
+
+/// The curve of everything that moves but a sheet: [`Motion::ease_out`], fast out of the gate
+/// and a long soft landing.
+pub fn ease_out() -> impl Fn(f32) -> f32 {
+    move |t| Motion::DEFAULT.ease_out.at(t)
+}
+
+/// A sheet's curve: [`Motion::drawer`], a phone's palette sheet, the iPad's drawer.
+pub fn drawer() -> impl Fn(f32) -> f32 {
+    move |t| Motion::DEFAULT.drawer.at(t)
+}
 
 /// Whether chrome may move: not while the system asks for reduced motion (or a test asks
 /// through [`App::set_reduce_motion`]). GPUI's own flag is not set from the system, so both
@@ -71,7 +82,7 @@ where
     if !motion(cx) {
         return el.into_any_element();
     }
-    el.with_animation(id, Animation::new(FADE).with_easing(ease_out_quint()), Styled::opacity)
+    el.with_animation(id, Animation::new(FADE).with_easing(ease_out()), Styled::opacity)
         .into_any_element()
 }
 
@@ -99,26 +110,41 @@ impl Overlay {
 }
 
 /// The one elevation's shadow, as GPUI draws it: a tight contact layer and a soft one, from
-/// [`slopty_theme::Elevation::shadow`].
+/// [`slopty_theme::Elevation::shadow`], and in dark the lit top edge
+/// ([`slopty_theme::Elevation::highlight`]).
+///
+/// GPUI paints an inset shadow under the element's border, so the edge is two points deep: the
+/// hairline covers the first and the second shows, the light just inside the rim.
 #[must_use]
 pub fn elevation(theme: &Theme) -> Vec<BoxShadow> {
     let e = &theme.elevation;
-    e.shadow
-        .iter()
-        .map(|layer| BoxShadow {
-            color: hsla_alpha(e.shade, layer.alpha),
-            offset: point(px(0.0), px(layer.y)),
-            blur_radius: px(layer.blur),
-            spread_radius: px(0.0),
-            inset: false,
-        })
-        .collect()
+    let drop = e.shadow.iter().map(|layer| BoxShadow {
+        color: hsla_alpha(e.shade, layer.alpha),
+        offset: point(px(0.0), px(layer.y)),
+        blur_radius: px(layer.blur),
+        spread_radius: px(0.0),
+        inset: false,
+    });
+    let edge = e.highlight.map(|a| BoxShadow {
+        color: hsla_alpha(Rgb::hex(0xff_ffff), a),
+        offset: point(px(0.0), px(EDGE_DEPTH)),
+        blur_radius: px(0.0),
+        spread_radius: px(0.0),
+        inset: true,
+    });
+    drop.chain(edge).collect()
 }
 
-/// `el` lifted off the chrome: the `elevated` surface, the `border` hairline and the shadow.
+/// How far down the lit edge reaches from a floating surface's top: its hairline, then one
+/// point of light.
+const EDGE_DEPTH: f32 = 2.0;
+
+/// `el` lifted off the chrome: the `elevated` surface, the `border` hairline, the shadow and,
+/// in dark, the lit top edge.
 ///
 /// Everything that floats wears it: a dialog, the palette, a menu, a popover, a hint, a find
-/// bar, a pill over a body. The caller keeps its own radius.
+/// bar, a pill over a body. The caller keeps its own radius: `radii.lg` for a sheet (a dialog,
+/// a menu, the inbox, a toast), the control's own for a hint or a pill.
 ///
 /// A floating layer on `panel` sat below the content it covered (darker in dark, grey on white
 /// in light), so it read as a hole, not a sheet.
@@ -174,7 +200,7 @@ pub fn backdrop(theme: &Theme, window: &Window) -> Div {
     anchor(theme, window).bg(scrim(theme))
 }
 
-/// The shell every overlay wears: one radius, [`elevate`]d, the UI font.
+/// The shell every overlay wears: the floating radius, [`elevate`]d, the UI font.
 ///
 /// `min_w_0` so an unwrapped title cannot hold the box wider than a phone, and `min_h_0` so it
 /// gives up height to what is under the [`backdrop`] (a phone's keyboard and key bar) rather
@@ -193,11 +219,24 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
         .mb(px(theme.spacing.xl))
         .flex()
         .flex_col()
-        .rounded(px(theme.radii.md))
+        .rounded(px(theme.radii.lg))
         .text_size(px(theme.typography.ui_size))
         .font_family(theme.typography.ui_family.clone())
         .text_color(hsla(theme.surfaces.text))
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+}
+
+/// A dialog's or a panel's title: the title size at the strong weight, in `text`.
+///
+/// The strong weight is for titles like this one and for headings; a row, a tab or a name that
+/// has to stand out takes the medium weight.
+#[must_use]
+pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    div()
+        .text_size(px(theme.typography.title()))
+        .font_weight(FontWeight(Typography::STRONG_WEIGHT))
+        .text_color(hsla(theme.surfaces.text))
+        .child(text.into())
 }
 
 /// How far a framed [`button`]'s words sit in from its edge: its pad and its hairline. A
@@ -213,7 +252,9 @@ pub fn button_text_inset(theme: &Theme) -> f32 {
 pub enum ButtonKind {
     /// The one action the surface is for: the accent fill, with the fills' ink on it.
     Primary,
-    /// Another way on: the panel with a hairline, so it holds its edge on any surface.
+    /// Another way on: the floating surface with a hairline, a step above whatever it sits on
+    /// (white with a rule in light, as Geist's is), so it holds its edge on any surface. On the
+    /// panel it sat below a dialog's own surface and read as a hole.
     Secondary,
     /// A way out (Cancel): text only until the pointer is on it.
     Ghost,
@@ -227,8 +268,8 @@ pub enum ButtonKind {
 /// Four had been written by hand, and the secondary among them filled itself with `raised`,
 /// which on the light canvas is one step from the canvas itself: "Add a window" and the phone's
 /// "Paste" were words floating on a smudge. Every kind wears a 1 pt border (clear on a ghost or
-/// a link) so they all stand the same height side by side and the keyboard's focus hairline
-/// moves nothing.
+/// a link) so they all stand the same height side by side. Its words are at the medium weight:
+/// a button is an action, and its label reads as one against the prose round it.
 #[must_use]
 pub fn button(
     theme: &Theme,
@@ -251,6 +292,7 @@ pub fn button(
         .py(px(theme.spacing.xs))
         .rounded(px(theme.radii.sm))
         .text_size(px(theme.typography.ui_size))
+        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
         .cursor_pointer()
         .child(label);
     let el = match kind {
@@ -260,7 +302,7 @@ pub fn button(
             .text_color(hsla(s.accent_ink)),
         ButtonKind::Secondary => el
             .border_color(hsla(s.border))
-            .bg(hsla(s.panel))
+            .bg(hsla(s.elevated))
             .text_color(hsla(s.text))
             .hover(move |el| el.bg(hsla(s.raised)))
             .active(move |el| el.bg(hsla(s.overlay))),
@@ -398,8 +440,11 @@ pub fn icon_button_at(
     crate::a11y::tab_stop(el, s.accent)
 }
 
-/// A key cap: the keys on a small raised plate, the way the empty workspace teaches its chords
-/// and the palette's foot names its keys. `keys` comes from the key tables, or is a lone key.
+/// A key cap: the keys on a small plate, the way the empty workspace teaches its chords and the
+/// palette's foot names its keys. `keys` comes from the key tables, or is a lone key.
+///
+/// The plate is the selected fill with no hairline: a ring round every cap made a row of them
+/// read as a row of buttons.
 #[must_use]
 pub fn key_cap(theme: &Theme, keys: impl Into<SharedString>) -> Div {
     let s = &theme.surfaces;
@@ -407,9 +452,7 @@ pub fn key_cap(theme: &Theme, keys: impl Into<SharedString>) -> Div {
         .flex_none()
         .px(px(theme.spacing.xs))
         .rounded(px(theme.radii.xs))
-        .border_1()
-        .border_color(hsla(s.border))
-        .bg(hsla(s.raised))
+        .bg(hsla(s.overlay))
         .text_size(px(theme.typography.small()))
         .text_color(hsla(s.text_secondary))
         .child(SharedString::from(crate::palette::drawn_keys(&keys.into())))
@@ -473,7 +516,9 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.foreground = hsla(s.text);
     c.border = hsla(s.border);
     c.input = hsla(s.border);
-    c.ring = hsla(s.accent);
+    // A focused field shows its caret, not a ring: the accent spent on every focused field's
+    // hairline made each form one more place the accent shouted.
+    c.ring = hsla(s.border);
     c.caret = hsla(s.accent);
     c.selection = hsla_alpha(s.accent, alpha::TINT);
     c.accent = hsla(s.raised);
@@ -514,8 +559,7 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.success = hsla(s.success);
     c.warning = hsla(s.warn);
     c.scrollbar_thumb = hsla_alpha(s.text_muted, alpha::PRESSED);
-    // Focus is one accent hairline. gpui-kit's ring is a second, wider halo painted outside
-    // the field's border, and the first-run field wore both.
+    // gpui-kit's ring is a wider halo painted outside a focused field's border.
     kit.focus_ring = false;
     // The editor's gutter would take the input background (the panel), a grey band beside a
     // body on the content surface; it belongs to the body.
@@ -602,7 +646,7 @@ mod tests {
                 assert_eq!(kit.colors.primary, hsla(theme.surfaces.accent_fill), "a fill");
                 assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.accent_ink));
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
-                assert_eq!(kit.colors.ring, hsla(theme.surfaces.accent));
+                assert_eq!(kit.colors.ring, hsla(theme.surfaces.border), "no accent on a field");
                 assert_eq!(kit.colors.title_bar, hsla(theme.surfaces.canvas));
                 assert_eq!(kit.colors.sidebar, hsla(theme.surfaces.panel));
                 assert_eq!(kit.colors.tab_active, hsla(theme.content()));
@@ -717,11 +761,44 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// A focused element told by an accent border: the field that turns its hairline blue
+    /// when it takes the caret. The keyboard's ring is `a11y::tab_stop`'s outline, not a border.
+    fn accent_focus_border(line: &str) -> bool {
+        let squeezed: String = line.split_whitespace().collect();
+        let accent = ["hsla(s.accent)", "hsla(theme.surfaces.accent)", "{s.accent}else"];
+        squeezed.contains(".border_color(")
+            && accent.iter().any(|a| squeezed.contains(a))
+            && squeezed.contains("focus")
+            && !squeezed.trim_start().starts_with("//")
+    }
+
+    #[test]
+    fn the_focus_border_check_knows_a_field_from_a_ring() {
+        assert!(accent_focus_border(".when(focused, |el| el.border_color(hsla(s.accent)))"));
+        assert!(accent_focus_border(
+            ".border_color(hsla(if focused { s.accent } else { s.border }))"
+        ));
+        assert!(!accent_focus_border(
+            ".border_color(hsla(if picked { s.accent } else { s.border }))"
+        ));
+        assert!(!accent_focus_border(".when(focused, |el| el.border_color(hsla(s.border)))"));
+        assert!(!accent_focus_border(
+            ".when(active, |el| el.border_2().border_color(hsla(s.accent)))"
+        ));
+    }
+
     /// The accent's text tone is never a fill: lifted for reading on the canvas, it is a pale
     /// blue in dark, and a button or a ticked box in it read as disabled. A fill takes
     /// `accent_fill` with the fills' ink.
+    ///
+    /// Nor is it a focused field's border: a field shows focus by its caret, and the accent is
+    /// kept for the one primary action, the keyboard's ring, the selection, links and the busy
+    /// mark.
     #[test]
     fn the_accent_text_tone_is_never_a_fill() {
+        // The terminal's find bar is the latency work's file; its accent border goes with the
+        // next change there.
+        const AWAITING: [&str; 1] = ["slopty-ui/src/terminal/view.rs"];
         let mut wrong = Vec::new();
         for dir in ["slopty-ui/src", "slopty-app/src"] {
             for (file, line_no, line) in chrome_lines(dir) {
@@ -730,6 +807,77 @@ mod tests {
                     [".bg(hsla(s.accent))", ".bg(hsla(theme.surfaces.accent))", "{s.accent}else"];
                 if fills.iter().any(|f| squeezed.contains(f)) && squeezed.contains(".bg(") {
                     wrong.push(format!("{file}:{line_no}: {line}"));
+                }
+                let waived = AWAITING.iter().any(|f| file.ends_with(f));
+                if accent_focus_border(&line) && !waived {
+                    wrong.push(format!("{file}:{line_no}: a focused field in the accent: {line}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// What floats as a sheet (a dialog, a menu, the inbox, the workers' popover, a toast, the
+    /// add-worker panel) is rounded at `radii.lg`, the rows' radius plus the pad round them. A
+    /// hint and a pill keep their control's radius: at 12 a 20 pt hint is a lozenge.
+    #[test]
+    fn a_floating_surface_is_rounded_lg() {
+        const SHEETS: [(&str, &str); 8] = [
+            ("slopty-ui/src/kit.rs", "pub fn dialog("),
+            ("slopty-ui/src/conversation/view/parts.rs", "\"composer-shell\""),
+            ("slopty-ui/src/conversation/view/parts.rs", ".id(\"conversation-find\")"),
+            ("slopty-ui/src/workspace/titlebar.rs", "fn menu_panel("),
+            ("slopty-ui/src/workspace/statusbar.rs", ".id(\"hosts\")"),
+            ("slopty-ui/src/workspace/inbox.rs", ".id(\"inbox\")"),
+            ("slopty-ui/src/workspace/toast.rs", ".id((\"toast\""),
+            ("slopty-app/src/lib.rs", ".id(\"add-worker\")"),
+        ];
+        let lines: Vec<_> =
+            ["slopty-ui/src", "slopty-app/src"].into_iter().flat_map(chrome_lines).collect();
+        for (sheet, marker) in SHEETS {
+            let start = lines
+                .iter()
+                .position(|(f, _, l)| f.ends_with(sheet) && l.contains(marker))
+                .unwrap_or_else(|| panic!("{sheet}: no {marker}"));
+            let rounded = lines
+                .iter()
+                .skip(start)
+                .take(30)
+                .find(|(f, _, l)| f.ends_with(sheet) && l.contains(".rounded("))
+                .unwrap_or_else(|| panic!("{sheet}: {marker} is not rounded"));
+            assert!(rounded.2.contains("radii.lg"), "{}:{}: {}", rounded.0, rounded.1, rounded.2);
+        }
+    }
+
+    /// The strong weight is for titles: a dialog's or a panel's (`kit::title` or the title
+    /// size), a page's heading, and the first run's wordmark. A name, a row or a tab that has
+    /// to stand out takes the medium weight; with 600 on the workspace's name, the worker's name
+    /// and the overview's names, nothing between a label and the loudest line could say
+    /// "this one".
+    #[test]
+    fn strong_weight_is_for_titles() {
+        let mut wrong = Vec::new();
+        for dir in ["slopty-ui/src", "slopty-app/src"] {
+            let lines = chrome_lines(dir);
+            for (ix, (file, line_no, line)) in lines.iter().enumerate() {
+                if !line.contains("STRONG_WEIGHT") || line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let near = lines
+                    .iter()
+                    .skip(ix.saturating_sub(8))
+                    .take(12)
+                    .filter(|(f, ..)| f == file)
+                    .map(|(_, _, l)| l.as_str());
+                let title = [
+                    "typography.title()",
+                    "typography.display()",
+                    "Role::Heading",
+                    "APP_NAME",
+                    "pub fn title(",
+                ];
+                if !near.into_iter().any(|l| title.iter().any(|t| l.contains(t))) {
+                    wrong.push(format!("{file}:{line_no}: the strong weight off a title"));
                 }
             }
         }
@@ -790,18 +938,37 @@ mod tests {
         assert!(theme.typography.icon() < icon_button_side(&theme), "the icon stays its size");
     }
 
-    /// The elevation reaches GPUI as the theme says: two layers, falling down, the soft one
-    /// wider, both in the shade.
+    /// The elevation reaches GPUI as the theme says: two layers of the shade, falling down, the
+    /// soft one wider, and in dark a third, inset: white at `alpha::EDGE` along the top, the
+    /// edge a dark sheet needs to be seen on a near-black window.
     #[test]
-    fn the_elevation_is_two_layers_of_the_shade() {
+    fn the_elevation_is_two_layers_of_the_shade_and_a_lit_edge_in_dark() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
+            let dark = variant == Variant::Dark;
             let layers = elevation(&theme);
-            assert_eq!(layers.len(), 2);
-            assert!(layers.iter().all(|l| l.offset.y > px(0.0) && !l.inset));
-            assert!(layers.first().map(|l| l.blur_radius) < layers.last().map(|l| l.blur_radius));
+            assert_eq!(layers.len(), 2 + usize::from(dark), "{variant:?}");
+            let (drop, edge): (Vec<_>, Vec<_>) = layers.iter().partition(|l| !l.inset);
+            assert!(drop.iter().all(|l| l.offset.y > px(0.0)));
+            assert!(drop.first().map(|l| l.blur_radius) < drop.last().map(|l| l.blur_radius));
+            let white = hsla_alpha(Rgb::hex(0xff_ffff), alpha::EDGE);
+            assert!(edge.iter().all(|l| l.color == white && l.offset.y > px(0.0)), "{edge:?}");
+            assert_eq!(edge.len(), usize::from(dark), "{variant:?}: the lit edge is dark's");
             assert!((scrim(&theme).a - theme.elevation.scrim).abs() < f32::EPSILON);
         }
+    }
+
+    /// The motion curves are the theme's: they start at rest and land, and ease out, ahead of
+    /// a straight line half way.
+    #[test]
+    fn the_curves_ease_out_and_land() {
+        let (out, sheet) = (ease_out(), drawer());
+        let curves: [&dyn Fn(f32) -> f32; 2] = [&out, &sheet];
+        for curve in curves {
+            assert!(curve(0.0).abs() < 1e-3 && (curve(1.0) - 1.0).abs() < 1e-3);
+            assert!(curve(0.5) > 0.5, "eased out: {}", curve(0.5));
+        }
+        assert_eq!(FADE, Motion::DEFAULT.fade);
     }
 
     /// The ruling in `docs/decisions/ui.md`, as a check rather than a paragraph: chrome takes
@@ -884,7 +1051,7 @@ mod tests {
     ];
     const DRAWN_AFTER_ID: [&str; 5] = ["pill(", "button(", "heading(", "key_cap(", "bar_key("];
     /// The helpers whose first argument is the theme draw the first literal after it.
-    const DRAWN_AFTER_THEME: [&str; 1] = ["kit::label("];
+    const DRAWN_AFTER_THEME: [&str; 2] = ["kit::label(", "kit::title("];
 
     /// A literal drawn as chrome text that starts lowercase: `"take"` on a pill, `"opening…"`
     /// in a body. Sentence case is checked on the text drawn, not only on the names a screen

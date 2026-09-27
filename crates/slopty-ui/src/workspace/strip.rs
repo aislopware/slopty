@@ -16,8 +16,10 @@ use gpui::{
     Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
     Styled as _, TouchPhase, Window, canvas, div, px,
 };
-use slopty_client::layout::{Axis, AxisLock, DropTarget, Frame, Rect, TileRef, WHEEL_TICK};
-use slopty_core::ItemId;
+use slopty_client::layout::{
+    Axis, AxisLock, DropTarget, Frame, Rect, TileRef, WHEEL_TICK, WorkerKey,
+};
+use slopty_core::{ItemId, SessionId};
 use slopty_proto::items::ItemKind;
 use slopty_theme::{Typography, alpha};
 
@@ -552,9 +554,9 @@ impl WorkspaceView {
     /// scrolled on, then the frame worked out once for the bar and the strip.
     pub(super) fn frame_at_clock(&mut self, window: &Window) -> Frame {
         self.tick();
-        // The overview's gaps hold the names drawn in them, and the blocks' margins either side.
+        // The overview's gaps hold the names drawn in them, and the cards' margins either side.
         let spacing = self.theme.spacing;
-        self.layout.set_overview_label(2.0_f32.mul_add(spacing.xs, spacing.xl));
+        self.layout.set_overview_label(2.0_f32.mul_add(spacing.sm, spacing.xl));
         if let Some(Drag::Move { moving: true, .. }) = self.drag {
             // The pointer resting in an edge band keeps the strip scrolling.
             let (x, _) = self.local(window.mouse_position());
@@ -630,7 +632,12 @@ impl WorkspaceView {
         )
         .absolute()
         .inset_0();
-        let empty = self.layout.tiles().next().is_none().then(|| self.render_empty(cx));
+        // Any workspace with nothing on it is a start page, once the strip has come to rest on
+        // it: laid over a workspace still sliding in, it would hide the slide.
+        let active = self.layout.active_workspace();
+        let bare = self.layout.workspaces().get(active).is_none_or(|w| w.columns().is_empty());
+        let empty =
+            (bare && frame.overview <= 0.0 && !frame.animating).then(|| self.render_empty(cx));
         div()
             .id("strip")
             .debug_selector(|| "strip".to_owned())
@@ -653,15 +660,19 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// The overview's blocks, under the tiles: each workspace with tiles is one card holding
-    /// its panes flush, a base unit wider all round so its corners clear theirs, lifted by the
-    /// one elevation, with a 2 pt accent ring round the active one and its name above. The empty
-    /// workspace kept at the end is where the next one goes, as niri shows it: a card of the
-    /// same size, only its dashed outline and a "+ New workspace" in the middle, which opens it.
+    /// The overview's cards, under the tiles: each workspace with tiles is one card on the
+    /// content's surface holding its panes flush, a base unit wider all round so its corners
+    /// (`radii.lg`, the radius of what floats) clear theirs, with a hairline. Only the active
+    /// one floats: it takes the one elevation and the 2 pt accent ring outside a 2 pt gap, the
+    /// keyboard's ring, so "where you are" reads the way focus does. A shadow under every card
+    /// would say they all float. Each name sits above its card at the medium weight, its count
+    /// in the meta size. The empty workspace kept at the end is where the next one goes: a
+    /// ghost "New workspace" button under the last card, on its left edge, which opens it.
     fn overview_blocks(&self, frame: &Frame, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let pad = theme.spacing.xs;
+        // A base unit, so the panes' square corners sit well inside the card's round ones.
+        let pad = theme.spacing.sm;
         let workspaces = self.layout.workspaces();
         let active = self.layout.active_workspace();
         let fade = frame.overview;
@@ -677,30 +688,28 @@ impl WorkspaceView {
             if tiles == 0 {
                 let x = left.unwrap_or(r.x);
                 let muted = hsla(s.text_muted);
-                let ghost = div()
+                let new = div()
                     .id("overview-new-workspace")
                     .debug_selector(|| "overview-new-workspace".to_owned())
                     .role(gpui::accesskit::Role::Button)
                     .aria_label(NEW_WORKSPACE)
                     .absolute()
+                    // On the card's edge, its glyph where the names above the cards start.
                     .left(px(x - pad))
                     .top(px(r.y - pad))
-                    .w(px(2.0_f32.mul_add(pad, r.w)))
-                    .h(px(2.0_f32.mul_add(pad, r.h)))
-                    .rounded(px(theme.radii.md))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(hsla(s.border))
+                    .h(px(theme.density.row))
+                    .px(px(pad))
+                    .rounded(px(theme.radii.sm))
                     .opacity(fade)
                     .flex()
                     .items_center()
-                    .justify_center()
                     .gap(px(theme.spacing.xs))
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.raised)))
-                    .text_size(px(theme.typography.small()))
+                    .active(move |el| el.bg(hsla(s.overlay)))
+                    .text_size(px(theme.typography.ui_size))
                     .font_family(theme.typography.ui_family.clone())
-                    .text_color(muted)
+                    .text_color(hsla(s.text_secondary))
                     .child(
                         crate::icons::icon(
                             theme,
@@ -714,26 +723,37 @@ impl WorkspaceView {
                         div()
                             .debug_selector(|| "overview-new-workspace-words".to_owned())
                             .child(NEW_WORKSPACE),
-                    )
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                    );
+                let new = crate::a11y::tab_stop(new, s.accent).on_click(cx.listener(
+                    move |this, _ev, _w, cx| {
                         this.layout.set_overview(false);
                         this.go_to_workspace(ix, cx);
-                    }));
-                out.push(ghost.into_any_element());
+                    },
+                ));
+                out.push(new.into_any_element());
                 continue;
             }
             left = Some(r.x);
-            let block = kit::elevate(div(), theme)
+            let here = ix == active;
+            let card = div()
                 .debug_selector(move || format!("overview-block-{ix}"))
                 .absolute()
                 .left(px(r.x - pad))
                 .top(px(r.y - pad))
                 .w(px(2.0_f32.mul_add(pad, r.w)))
                 .h(px(2.0_f32.mul_add(pad, r.h)))
-                .rounded(px(theme.radii.md))
+                .rounded(px(theme.radii.lg))
                 .opacity(fade)
-                .when(ix == active, |el| el.border_2().border_color(hsla(s.accent)));
-            let ink = if ix == active { s.text } else { s.text_secondary };
+                .map(|el| {
+                    if here {
+                        kit::elevate(el, theme).outline(crate::a11y::ring(s.accent))
+                    } else {
+                        el.border_1().border_color(hsla(s.border))
+                    }
+                })
+                // The panes' own surface, lifted or not: the card is what they sit on.
+                .bg(hsla(theme.content()));
+            let ink = if here { s.text } else { s.text_secondary };
             let count = if tiles == 1 { "1 tile".to_owned() } else { format!("{tiles} tiles") };
             let label = div()
                 .absolute()
@@ -746,7 +766,6 @@ impl WorkspaceView {
                 .gap(px(theme.spacing.sm))
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_size(px(theme.typography.small()))
                 .font_family(theme.typography.ui_family.clone())
                 .child(
                     div()
@@ -754,13 +773,15 @@ impl WorkspaceView {
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .font_weight(FontWeight(Typography::STRONG_WEIGHT))
+                        .text_size(px(theme.typography.ui_size))
+                        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                         .text_color(hsla_alpha(ink, fade))
                         .child(SharedString::from(self.workspace_name_at(ix))),
                 )
                 .child(
-                    div()
+                    kit::tabular(div())
                         .flex_none()
+                        .text_size(px(theme.typography.meta()))
                         .text_color(hsla_alpha(s.text_muted, fade))
                         .child(SharedString::from(count)),
                 )
@@ -770,18 +791,20 @@ impl WorkspaceView {
                     self.workspace_rollup(ix, cx).0,
                     true,
                 ));
-            out.push(block.into_any_element());
+            out.push(card.into_any_element());
             out.push(label.into_any_element());
         }
         out
     }
 
-    /// An empty workspace: what this is, then the three ways to begin, the first shown as the
-    /// palette shows the row Enter would run, each with its keys in the palette's plain muted
-    /// glyphs where there is a keyboard to press them on; then the workers, each marked only
-    /// where its link is not up, each opening a shell on itself here. With no worker there is
-    /// nothing to open, and the page says where one comes from. One left edge for all of it,
-    /// and no art.
+    /// An empty workspace: a start page composed as a list, never a centred picture. It hangs
+    /// a fifth of the way down, where the palette opens, on one left edge: what this is, then
+    /// the three ways to begin, the first shown as the palette shows the row Enter would run,
+    /// each with its keys in the palette's plain muted glyphs where there is a keyboard to
+    /// press them on; then where shells already stand on the workers ([`Self::recent_places`]),
+    /// each opening another shell there; then the workers, each marked only where its link is
+    /// not up, each opening a shell on itself here. With no worker there is nothing to open,
+    /// and the page says where one comes from.
     fn render_empty(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -795,7 +818,16 @@ impl WorkspaceView {
                 .text_color(hsla(s.text))
                 .child(text)
         };
-        let column = div().w(px(EMPTY_W)).flex().flex_col();
+        // A section: its quiet label, then its rows; a section apart from the one above by
+        // space alone, no rule.
+        let section = |id: &'static str, label: &'static str| {
+            div().w_full().pt(px(spacing.lg)).flex().flex_col().child(
+                kit::inset_x(kit::label(theme, label), theme)
+                    .debug_selector(move || id.to_owned())
+                    .pb(px(spacing.xs)),
+            )
+        };
+        let column = div().w_full().max_w(px(EMPTY_W)).flex().flex_col();
         let column = if self.workers.is_empty() {
             column
                 .child(title(NO_WORKERS))
@@ -832,6 +864,33 @@ impl WorkspaceView {
                             this.add_window(&super::actions::AddWindow, window, cx);
                         })),
                 );
+            let several = self.workers.len() > 1;
+            let places: Vec<gpui::AnyElement> = self
+                .recent_places()
+                .into_iter()
+                .take(RECENT_PLACES)
+                .enumerate()
+                .map(|(ix, place)| {
+                    let worker = self.worker_name(place.worker);
+                    let meta = super::rollup::meta_line([
+                        place.branch.as_deref(),
+                        several.then_some(worker.as_str()),
+                    ]);
+                    let label = if several {
+                        format!("New terminal in {} on {worker}", place.name)
+                    } else {
+                        format!("New terminal in {}", place.name)
+                    };
+                    let (key, cwd) = (place.worker, place.cwd);
+                    self.place_row(("empty-place", ix), IconName::Folder, place.name, meta)
+                        .debug_selector(move || format!("empty-place-{ix}"))
+                        .aria_label(SharedString::from(label))
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.open_session_on(key, Some(cwd.clone()), Vec::new(), None, cx);
+                        }))
+                        .into_any_element()
+                })
+                .collect();
             let workers = self.workers.iter().enumerate().map(|(ix, (key, w))| {
                 let key = *key;
                 let health = super::navigator::worker_health(&w.status);
@@ -874,33 +933,112 @@ impl WorkspaceView {
                     )
                     .into_any_element()
             });
-            column.child(title(EMPTY_WORKSPACE)).child(begin).child(
-                div()
-                    .w_full()
-                    .pt(px(spacing.md))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        kit::inset_x(kit::label(theme, "Workers"), theme)
-                            .debug_selector(|| "empty-workers".to_owned())
-                            .pb(px(spacing.xs)),
-                    )
-                    .children(workers),
-            )
+            let recent =
+                (!places.is_empty()).then(|| section("empty-recent", RECENT).children(places));
+            column
+                .child(title(EMPTY_WORKSPACE))
+                .child(begin)
+                .children(recent)
+                .child(section("empty-workers", "Workers").children(workers))
         };
         // The strip is the content step with or without a tile on it: the empty workspace is
         // the page a tile would be, not a hole down to the bars' canvas.
+        let top = f32::from(self.viewport.size.height) * kit::MODAL_ANCHOR;
         div()
+            .id("empty-workspace")
             .absolute()
             .inset_0()
+            .overflow_y_scroll()
             .bg(hsla(theme.content()))
             .flex()
+            .flex_col()
             .items_center()
-            .justify_center()
+            .px(px(spacing.md))
+            .pt(px(top))
+            .pb(px(spacing.xl))
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
             .child(column)
             .into_any_element()
+    }
+
+    /// Where shells stand across the workers that are up, one entry per directory on each: the
+    /// most recently used tile's first (the tile recency), then the latest started. What the
+    /// empty workspace offers as a way back to the work in progress.
+    pub(super) fn recent_places(&self) -> Vec<RecentPlace> {
+        let rank = |item: ItemId| self.recency.iter().rposition(|i| *i == item);
+        let mut places: Vec<(Option<usize>, u64, RecentPlace)> = Vec::new();
+        for (key, w) in self.workers.iter().filter(|(_, w)| w.link.is_some()) {
+            let home = w.home.as_deref();
+            let items: Vec<(SessionId, ItemId)> = w
+                .doc
+                .items()
+                .filter_map(|i| match i.kind {
+                    ItemKind::Terminal { session } => Some((session, i.id)),
+                    _ => None,
+                })
+                .collect();
+            for summary in w.sessions.values() {
+                let Some(cwd) = summary.cwd.clone() else { continue };
+                if places.iter().any(|(.., p)| p.worker == *key && p.cwd == cwd) {
+                    continue;
+                }
+                let item = items.iter().find(|(s, _)| *s == summary.id).map(|(_, i)| *i);
+                let place = RecentPlace {
+                    worker: *key,
+                    name: super::tile::repo_place(&cwd, summary.repo.as_deref(), home),
+                    branch: summary.branch.clone(),
+                    cwd,
+                };
+                places.push((item.and_then(rank), summary.started_ms, place));
+            }
+        }
+        places.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        places.into_iter().map(|(.., place)| place).collect()
+    }
+
+    /// A row of the empty workspace that goes somewhere: its glyph, its name and, after it,
+    /// its facts in the meta size.
+    fn place_row(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        icon: IconName,
+        name: String,
+        meta: String,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let row = kit::row(theme, kit::Row::One)
+            .id(id)
+            .role(gpui::accesskit::Role::Button)
+            .w_full()
+            .rounded(px(theme.radii.sm))
+            .cursor_pointer()
+            .hover(|st| st.bg(hsla(s.raised)))
+            .active(|st| st.bg(hsla(s.overlay)))
+            .child(crate::palette::icon_slot(theme, icon, hsla(s.text_muted)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(hsla(s.text))
+                    .child(SharedString::from(name)),
+            )
+            .when(!meta.is_empty(), |el| {
+                el.child(
+                    kit::meta(div(), theme)
+                        .flex_none()
+                        .max_w(px(EMPTY_W / 2.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(SharedString::from(meta)),
+                )
+            });
+        crate::a11y::tab_stop(row, s.accent)
     }
 
     /// One way to begin: its icon, what it does and, with a keyboard to press it on, its keys;
@@ -944,9 +1082,26 @@ impl WorkspaceView {
     }
 }
 
-/// How wide the empty workspace's column stands: room for the longest way to begin and its
-/// keys, narrow enough to read as one block in the middle of the strip.
-const EMPTY_W: f32 = 320.0;
+/// How wide the empty workspace's column stands: room for a directory beside its branch and
+/// worker, narrow enough to read as one block down the strip.
+const EMPTY_W: f32 = 400.0;
+
+/// How many directories the empty workspace offers.
+const RECENT_PLACES: usize = 5;
+
+/// The empty workspace's section of directories shells stand in.
+pub const RECENT: &str = "Recent";
+
+/// A directory a shell stands in on a worker: where the empty workspace offers another shell.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct RecentPlace {
+    pub worker: WorkerKey,
+    /// Its full path on the worker, where the new shell starts.
+    pub cwd: String,
+    /// What it is called: the repository and the path within it, else the path's tail.
+    pub name: String,
+    pub branch: Option<String>,
+}
 
 /// What the empty workspace says.
 pub const EMPTY_WORKSPACE: &str = "Empty workspace";

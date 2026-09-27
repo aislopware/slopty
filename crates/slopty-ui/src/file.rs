@@ -290,6 +290,17 @@ impl FileView {
         self.text(cx).split('\n').map(str::to_owned).collect()
     }
 
+    /// The first `n` lines, read off the editor's rope rather than a copy of the whole text:
+    /// what the overview's cover shows of the file.
+    #[must_use]
+    pub fn head(&self, n: usize, cx: &gpui::App) -> Vec<String> {
+        if let Some(text) = &self.pending_text {
+            return text.split('\n').take(n).map(str::to_owned).collect();
+        }
+        let text = self.editor.read(cx).text();
+        (0..text.lines_len().min(n)).map(|row| text.slice_line(row).to_string()).collect()
+    }
+
     /// Lines in the editor.
     #[must_use]
     pub fn line_count(&self, cx: &gpui::App) -> usize {

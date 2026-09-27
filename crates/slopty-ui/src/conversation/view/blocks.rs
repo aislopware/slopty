@@ -1,10 +1,11 @@
 //! What a call shows under its title: an edit's diff, a command and its output, a subagent's
 //! card, a result's text, a plan, the questions asked.
 //!
-//! Code sits in one frame everywhere: the panel under a quiet hairline, the mono face at the
-//! meta size. A diff washes its added and removed lines in the success and error fills and
-//! colours their text by the file's grammar; context stays muted so the change is what the
-//! eye finds.
+//! Code sits in one frame everywhere: the panel under a quiet hairline at the medium radius,
+//! the mono face at the small size. A diff heads its frame with the file and its size, washes
+//! its added and removed lines in the success and error fills at the faint step and colours
+//! their text by the file's grammar; context stays muted so the change is what the eye finds.
+//! Nothing shows raw JSON: a tool's input reads as its keys and their values.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -26,7 +27,7 @@ use crate::conversation::model::Expanded;
 use crate::conversation::rows::{self, Level};
 use crate::conversation::tools;
 use crate::highlight::{self, Span};
-use crate::icons::{IconName, Status};
+use crate::icons::IconName;
 
 /// Lines of a command's output a summary shows: its end, where a log says how it went.
 const OUTPUT_TAIL: usize = 4;
@@ -54,12 +55,44 @@ pub(super) fn has_body(call: &ToolCall) -> bool {
         ToolDetail::Other { input } => result_text || input.text.trim() != "{}",
         ToolDetail::TaskCreate(task) => task.description.is_some(),
         ToolDetail::WebFetch(fetch) => fetch.prompt.is_some() || result_text,
+        ToolDetail::WebSearch(search) => !search.links.is_empty() || result_text,
         ToolDetail::Read(_)
         | ToolDetail::Grep(_)
         | ToolDetail::Glob(_)
-        | ToolDetail::WebSearch(_)
         | ToolDetail::TaskUpdate(_) => result_text,
     }
+}
+
+/// A tool's input as its keys and their values, when it is a JSON object: a string's first
+/// line, anything else as compact JSON. `None` for input that is not an object (a clipped one).
+#[must_use]
+pub(super) fn input_pairs(input: &str) -> Option<Vec<(String, String)>> {
+    let serde_json::Value::Object(map) = serde_json::from_str::<serde_json::Value>(input).ok()?
+    else {
+        return None;
+    };
+    Some(
+        map.into_iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    serde_json::Value::String(text) => {
+                        let first = text.lines().next().unwrap_or_default().to_owned();
+                        let more = text.lines().count().saturating_sub(1);
+                        if more > 0 {
+                            format!(
+                                "{first} \u{2026} +{}",
+                                tools::count(more as u64, "line", "lines")
+                            )
+                        } else {
+                            first
+                        }
+                    }
+                    other => other.to_string(),
+                };
+                (key, value)
+            })
+            .collect(),
+    )
 }
 
 /// `text` with its tabs as spaces, and `spans` stretched to match.
@@ -87,7 +120,8 @@ fn detab(text: &str, spans: Option<&[Span]>) -> (String, Option<Vec<Span>>) {
 }
 
 impl ConversationView {
-    /// Code's frame: the panel, a quiet hairline, the mono face at the meta size.
+    /// Code's frame: the panel, a quiet hairline at the medium radius, the mono face at the
+    /// small size, lines at the prose's leading.
     pub(super) fn code_frame(&self) -> Div {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -96,13 +130,14 @@ impl ConversationView {
             .min_w_0()
             .flex()
             .flex_col()
-            .rounded(self.z(theme.radii.sm))
+            .rounded(self.z(theme.radii.md))
             .border_1()
             .border_color(hsla(s.border_subtle))
             .bg(hsla(s.panel))
             .overflow_hidden()
             .font_family(self.mono())
-            .text_size(self.z(theme.typography.meta()))
+            .text_size(self.z(theme.typography.small()))
+            .line_height(gpui::relative(theme.typography.markdown_line_height))
     }
 
     /// Plain text in the mono face, wrapped, in `tone`.
@@ -112,7 +147,7 @@ impl ConversationView {
             .min_w_0()
             .whitespace_normal()
             .font_family(self.mono())
-            .text_size(self.z(self.theme.typography.meta()))
+            .text_size(self.z(self.theme.typography.small()))
             .text_color(hsla(tone))
             .child(SharedString::from(text.replace('\t', TAB)))
     }
@@ -134,17 +169,18 @@ impl ConversationView {
             .filter(|t| !t.text.trim().is_empty());
         let body = match &call.detail {
             ToolDetail::Edit(edit) => {
-                self.patch_block(&entry.id, &edit.path, &edit.patch, level, cx)
+                self.patch_block(&self.thread, &entry.id, &edit.path, &edit.patch, level, cx)
             }
             ToolDetail::Write(write) => {
-                self.patch_block(&entry.id, &write.path, &write.patch, level, cx)
+                self.patch_block(&self.thread, &entry.id, &write.path, &write.patch, level, cx)
             }
             ToolDetail::Bash(bash) => Some(self.shell_block(&entry.id, bash, failure, level, cx)),
-            ToolDetail::Agent(agent) => Some(self.agent_card(&entry.id, agent, level, cx)),
+            ToolDetail::Agent(agent) => Some(self.agent_card(entry, agent, level, cx)),
             ToolDetail::Question(question) => Some(self.questions(question)),
             ToolDetail::Plan { plan } => Some(
                 div()
-                    .text_size(self.z(self.theme.typography.small()))
+                    .text_size(self.z(self.theme.typography.prose()))
+                    .line_height(gpui::relative(self.theme.typography.markdown_line_height))
                     .child(self.markdown(
                         format!("plan-{}-{}", self.session, entry.id),
                         self.text_of(plan),
@@ -182,6 +218,9 @@ impl ConversationView {
                         .children(self.result_block(&entry.id, call, level, cx))
                         .into_any_element(),
                 )
+            }
+            ToolDetail::WebSearch(search) if !search.links.is_empty() => {
+                Some(self.links(&entry.id, &search.links))
             }
             ToolDetail::Read(_)
             | ToolDetail::Grep(_)
@@ -253,12 +292,47 @@ impl ConversationView {
         level: Level,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let s = self.theme.surfaces;
+        let theme = &self.theme;
+        let s = theme.surfaces;
         let input = input.filter(|i| i.text.trim() != "{}").map(|input| {
-            self.code_frame()
-                .px(self.z(self.theme.spacing.sm))
-                .py(self.z(self.theme.spacing.xs))
-                .child(self.code_text(self.text_of(input), s.text_secondary))
+            let text = self.text_of(input);
+            match input_pairs(text) {
+                Some(pairs) => div()
+                    .debug_selector({
+                        let id = id.to_owned();
+                        move || format!("input-{id}")
+                    })
+                    .flex()
+                    .flex_col()
+                    .gap(self.z(theme.spacing.xxs))
+                    .text_size(self.z(theme.typography.small()))
+                    .children(pairs.into_iter().map(|(key, value)| {
+                        div()
+                            .flex()
+                            .gap(self.z(theme.spacing.sm))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(hsla(s.text_muted))
+                                    .child(SharedString::from(key)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .text_color(hsla(s.text_secondary))
+                                    .child(SharedString::from(value)),
+                            )
+                    })),
+                None => self
+                    .code_frame()
+                    .px(self.z(theme.spacing.sm))
+                    .py(self.z(theme.spacing.xs))
+                    .child(self.code_text(text, s.text_secondary)),
+            }
         });
         div()
             .flex()
@@ -356,96 +430,113 @@ impl ConversationView {
             .into_any_element()
     }
 
-    /// A subagent as a card of its own: what it was asked, how it is doing, what it reported;
-    /// a click opens its thread.
+    /// A subagent under its call's title, with no frame of its own: while it runs, the call
+    /// it is on and for how long; once done, its figures and the head of its report. A click
+    /// opens its thread.
     fn agent_card(
         &self,
-        id: &str,
+        entry: &Entry,
         agent: &AgentDetail,
         level: Level,
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let status = match agent.status {
-            AgentRun::Running => Status::Working,
-            AgentRun::Completed => Status::Done,
-            AgentRun::Failed => Status::Failed,
-            AgentRun::Killed => Status::Idle,
-        };
+        let id = entry.id.as_str();
         let word = match agent.status {
             AgentRun::Running => "Working",
             AgentRun::Completed => "Done",
             AgentRun::Failed => "Failed",
             AgentRun::Killed => "Stopped",
         };
+        let thread = agent.agent_id.clone().map(ThreadId::Agent);
+        let own = thread.as_ref().and_then(|t| self.model.thread(t));
+        let running = agent.status == AgentRun::Running;
+        // What it is doing now: the newest call in its own thread.
+        let now = own.filter(|_| running).and_then(|t| {
+            t.entries().iter().rev().find_map(|e| match &e.body {
+                slopty_proto::conversation::Body::Tool(call) => {
+                    let title = tools::title(call, t.tasks());
+                    Some(match title.subject {
+                        Some(subject) => format!("{} {subject}", title.verb),
+                        None => title.verb,
+                    })
+                }
+                _ => None,
+            })
+        });
+        let elapsed = (running && entry.at_ms > 0)
+            .then(|| rows::took(super::now_ms().saturating_sub(entry.at_ms)));
         let facts = [
             agent.tool_uses.map(|n| tools::count(n, "tool use", "tool uses")),
             agent.tokens.map(|n| format!("{} tokens", tools::tokens(n))),
-            agent.duration_ms.map(rows::took),
+            agent.duration_ms.map(rows::took).or(elapsed),
         ];
         let facts = facts.into_iter().flatten().collect::<Vec<_>>().join(" \u{b7} ");
-        let report = agent.report.as_ref().map(|report| {
+        let report = agent.report.as_ref().filter(|_| !running).map(|report| {
             let text = self.text_of(report);
             let text = if level == Level::Full {
                 text.to_owned()
             } else {
-                text.lines().take(3).collect::<Vec<_>>().join("\n")
+                text.lines().filter(|l| !l.trim().is_empty()).take(3).collect::<Vec<_>>().join("\n")
             };
             div()
-                .pt(self.z(theme.spacing.xs))
                 .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(self.markdown(format!("report-{}-{id}", self.session), &text))
         });
         let brief = (level == Level::Full).then(|| {
             div()
-                .pt(self.z(theme.spacing.xs))
                 .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .whitespace_normal()
                 .child(SharedString::from(self.text_of(&agent.prompt).to_owned()))
         });
-        let thread = agent.agent_id.clone().map(ThreadId::Agent);
-        let opens = thread.as_ref().is_some_and(|t| self.model.thread(t).is_some());
+        let opens = own.is_some();
         let selector = format!("subagent-{id}");
         let name = agent.description.clone().unwrap_or_else(|| "Subagent".to_owned());
+        let tone = match agent.status {
+            AgentRun::Failed => s.error,
+            _ => s.text_secondary,
+        };
+        let status = crate::kit::tabular(div())
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.sm))
+            .text_size(self.z(theme.typography.small()))
+            .child(div().flex_none().text_color(hsla(tone)).child(word))
+            .children(now.map(|now| {
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(hsla(s.text_secondary))
+                    .child(SharedString::from(now))
+            }))
+            .child(div().flex_1())
+            .when(!facts.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_size(self.z(theme.typography.meta()))
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(facts)),
+                )
+            })
+            .when(opens, |el| el.child(self.icon(IconName::ChevronRight, s.text_muted)));
         let card = div()
             .id(ElementId::Name(SharedString::from(selector.clone())))
             .debug_selector(move || selector)
             .role(if opens { Role::Button } else { Role::Article })
             .aria_label(SharedString::from(format!("Subagent {name}: {word}")))
-            .group("subagent")
             .w_full()
             .flex()
             .flex_col()
-            .px(self.z(theme.spacing.md))
-            .py(self.z(theme.spacing.sm))
-            .rounded(self.z(theme.radii.md))
-            .border_1()
-            .border_color(hsla(s.border_subtle))
-            .child(
-                crate::kit::tabular(div())
-                    .flex()
-                    .items_center()
-                    .gap(self.z(theme.spacing.sm))
-                    .text_size(self.z(theme.typography.small()))
-                    .child(crate::icons::status_icon(
-                        theme,
-                        status,
-                        self.z(theme.typography.icon()),
-                        hsla(status.tone(theme)),
-                    ))
-                    .child(div().text_color(hsla(s.text)).child(SharedString::from(name)))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(self.z(theme.typography.meta()))
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(facts)),
-                    )
-                    .when(opens, |el| el.child(self.icon(IconName::ChevronRight, s.text_muted))),
-            )
+            .gap(self.z(theme.spacing.xs))
+            .py(self.z(theme.spacing.xxs))
+            .rounded(self.z(theme.radii.sm))
+            .child(status)
             .children(brief)
             .children(report);
         match thread.filter(|_| opens) {
@@ -457,6 +548,67 @@ impl ConversationView {
             .into_any_element(),
             None => card.into_any_element(),
         }
+    }
+
+    /// The pages a web search found: each title over its host; a click opens the page.
+    fn links(&self, id: &str, links: &[slopty_proto::conversation::Link]) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        div()
+            .debug_selector({
+                let id = id.to_owned();
+                move || format!("links-{id}")
+            })
+            .flex()
+            .flex_col()
+            .text_size(self.z(theme.typography.small()))
+            .children(links.iter().enumerate().map(|(n, link)| {
+                let host = link
+                    .url
+                    .split("://")
+                    .nth(1)
+                    .and_then(|rest| rest.split('/').next())
+                    .unwrap_or(&link.url)
+                    .trim_start_matches("www.")
+                    .to_owned();
+                let url = link.url.clone();
+                let title =
+                    if link.title.trim().is_empty() { host.clone() } else { link.title.clone() };
+                crate::a11y::tab_stop(
+                    div()
+                        .id(ElementId::Name(SharedString::from(format!("link-{id}-{n}"))))
+                        .role(Role::Link)
+                        .aria_label(SharedString::from(format!("{title}, {host}")))
+                        .flex()
+                        .items_center()
+                        .gap(self.z(theme.spacing.sm))
+                        .min_h(self.z(theme.density.row))
+                        .px(self.z(theme.spacing.xs))
+                        .rounded(self.z(theme.radii.sm))
+                        .cursor_pointer()
+                        .hover(move |el| el.bg(hsla(s.raised)))
+                        .child(self.icon(IconName::Globe, s.text_muted))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_color(hsla(s.text))
+                                .child(SharedString::from(title)),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(self.z(theme.typography.meta()))
+                                .text_color(hsla(s.text_muted))
+                                .child(SharedString::from(host)),
+                        ),
+                    s.accent,
+                )
+                .on_click(move |_ev, _window, cx| cx.open_url(&url))
+            }))
+            .into_any_element()
     }
 
     fn questions(&self, question: &QuestionDetail) -> AnyElement {
@@ -546,8 +698,13 @@ impl ConversationView {
 
     /// An edit's diff: the whole of it at full, its first lines at summary with the way to
     /// the rest; side by side when the tile is wide.
-    fn patch_block(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a diff's place (thread, entry), its file and patch, its level, and the view"
+    )]
+    pub(super) fn patch_block(
         &self,
+        thread: &ThreadId,
         id: &str,
         path: &str,
         patch: &Patch,
@@ -558,7 +715,7 @@ impl ConversationView {
         let whole = patch
             .full
             .as_ref()
-            .and_then(|r| match self.model.expanded(&self.thread, r)? {
+            .and_then(|r| match self.model.expanded(thread, r)? {
                 Expanded::Whole(whole) => Some(whole),
                 Expanded::Gone => None,
             })
@@ -567,7 +724,7 @@ impl ConversationView {
         if patch.hunks.is_empty() {
             return None;
         }
-        let blocks = self.diff_blocks(id, path, patch);
+        let blocks = self.diff_blocks(thread, id, path, patch);
         let theme = &self.theme;
         let s = theme.surfaces;
         let total: usize = blocks.iter().map(|b| b.lines.len()).sum();
@@ -638,7 +795,7 @@ impl ConversationView {
                     chars: 0,
                     full: Some(full),
                 };
-                self.expand_link(&format!("patch-{id}"), &text, cx)
+                self.expand_link_in(thread, &format!("patch-{id}"), &text, cx)
             })
             .flatten()
             .map(|link| {
@@ -653,12 +810,53 @@ impl ConversationView {
                 .id(ElementId::Name(SharedString::from(format!("diff-{id}"))))
                 .role(Role::Figure)
                 .aria_label(SharedString::from(format!("Diff of {}", tools::file_name(path))))
-                .py(self.z(theme.spacing.xxs))
-                .children(children)
+                .child(self.diff_head(path, patch.added, patch.removed))
+                .child(div().py(self.z(theme.spacing.xxs)).children(children))
                 .children(foot)
                 .children(clipped)
                 .into_any_element(),
         )
+    }
+
+    /// A diff's head: where the file is, its name at the medium weight, its size at the right.
+    fn diff_head(&self, path: &str, added: u32, removed: u32) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let dir = crate::conversation::figures::short_dir(path);
+        div()
+            .flex()
+            .items_center()
+            .h(self.z(theme.density.row))
+            .px(self.z(theme.spacing.sm))
+            .border_b_1()
+            .border_color(hsla(s.border_subtle))
+            .font_family(theme.typography.ui_family.clone())
+            .text_size(self.z(theme.typography.small()))
+            .when(!dir.is_empty(), |el| {
+                el.child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(format!("{dir}/"))),
+                )
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(hsla(s.text))
+                    .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
+                    .child(SharedString::from(tools::file_name(path).to_owned())),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(self.z(theme.typography.meta()))
+                    .child(self.changes_label(added, removed)),
+            )
+            .into_any_element()
     }
 
     fn hunk_divider(&self, block: &Block) -> AnyElement {
@@ -824,6 +1022,26 @@ mod tests {
             (9, 1, 2)
         );
         assert_eq!((patch.added, patch.removed), (2, 1));
+    }
+
+    /// A tool's input reads as its keys and values in the order the model wrote them, a long
+    /// string by its first line; input
+    /// that is not an object (clipped mid-way) is left to the code frame.
+    #[test]
+    fn a_tools_input_reads_as_keys_and_values() {
+        let pairs = input_pairs(r#"{"query": "rust gpui", "limit": 5, "body": "a\nb\nc"}"#);
+        assert_eq!(
+            pairs.as_deref(),
+            Some(
+                &[
+                    ("query".to_owned(), "rust gpui".to_owned()),
+                    ("limit".to_owned(), "5".to_owned()),
+                    ("body".to_owned(), "a \u{2026} +2 lines".to_owned()),
+                ][..]
+            )
+        );
+        assert_eq!(input_pairs(r#"{"query": "rust"#), None);
+        assert_eq!(input_pairs("[1, 2]"), None);
     }
 
     /// A tab widens to spaces, and the colours after it move with the text.

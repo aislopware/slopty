@@ -289,11 +289,11 @@ fn the_handle_straddles_the_edge_and_a_double_click_resets_it(cx: &mut TestAppCo
     assert!((width - slopty_client::layout::Navigator::DEFAULT_WIDTH).abs() < 0.5, "{width}");
 }
 
-/// Workspaces of their own are tabs, a lone one only its name, with no rollup mark: the bell
-/// already counts what waits. Where the bar has room a tab says what it holds under its name.
-/// The title bar has no second "+".
+/// Workspaces of their own are tabs, a lone one only its name, with no rollup mark (the bell
+/// already counts what waits) and no count of what it holds, which the navigator and the
+/// overview give. The title bar has no second "+".
 #[gpui::test]
-fn a_lone_workspace_is_its_name_and_tabs_say_what_they_hold(cx: &mut TestAppContext) {
+fn a_lone_workspace_is_its_name_alone(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let [(asking, _), ..] = three_shells(&view, cx, &studio);
@@ -315,7 +315,7 @@ fn a_lone_workspace_is_its_name_and_tabs_say_what_they_hold(cx: &mut TestAppCont
     let name = cx.debug_bounds("ws-name-0").expect("the name");
     let whole = cx.update(|window, _cx| {
         let mut style = window.text_style();
-        style.font_weight = gpui::FontWeight(slopty_theme::Typography::STRONG_WEIGHT);
+        style.font_weight = gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT);
         let text = "Workspace 1";
         let run = style.to_run(text.len());
         let size = px(Theme::default().typography.ui_size);
@@ -323,11 +323,12 @@ fn a_lone_workspace_is_its_name_and_tabs_say_what_they_hold(cx: &mut TestAppCont
     });
     assert!(name.size.width + px(0.5) >= whole, "{name:?}, whole {whole:?}");
 
+    let new = cx.debug_bounds("new-menu").expect("+");
+    let gap = f32::from(new.left() - name.right());
+    assert!(gap <= Theme::default().spacing.md, "nothing between the name and +: {gap}");
+
     new_workspace_from_the_bar(cx);
     assert!(cx.debug_bounds("ws-tab-1").is_some(), "two tabs");
-    let meta = cx.debug_bounds("ws-tab-meta-0").expect("room for what it holds");
-    let tab = cx.debug_bounds("ws-tab-0").expect("drawn");
-    assert!(tab.contains(&meta.center()), "{meta:?} {tab:?}");
 }
 
 /// A tab that goes folds its width away where it stood, unless motion is reduced. (The last

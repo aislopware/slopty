@@ -1456,6 +1456,10 @@ impl WorkspaceView {
     }
 
     /// The navigator laid over the frame in `mode`, on the scrim, which a click closes it by.
+    ///
+    /// It enters as a sheet does: the panel slides in from the leading edge while the scrim
+    /// comes up under it, on the sheet's time and the drawer's curve. Under Reduce Motion, or in
+    /// a headless frame, it is there at once. Only the entry moves; it leaves at once.
     fn navigator_over(
         &self,
         mode: navigator::Mode,
@@ -1464,19 +1468,46 @@ impl WorkspaceView {
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         use gpui::{
-            InteractiveElement as _, IntoElement as _, MouseButton, ParentElement as _,
-            Styled as _, px,
+            Animation, AnimationExt as _, InteractiveElement as _, IntoElement as _, MouseButton,
+            ParentElement as _, Styled as _, px,
         };
         let safe = window.insets().effective();
         let width = px(self.navigator_panel_width(mode, window)) + safe.left;
         let panel = panel.cached(StyleRefinement::default().h_full().w(width));
         let handle = (mode == navigator::Mode::Overlay).then(|| Self::render_handle(width, cx));
+        let sheet = || {
+            Animation::new(slopty_theme::Motion::DEFAULT.sheet).with_easing(crate::kit::drawer())
+        };
+        let moves = self.animate && crate::kit::motion(cx);
+        let scrim = gpui::div().absolute().inset_0().bg(crate::kit::scrim(&self.theme));
+        let scrim = if moves {
+            scrim
+                .with_animation("navigator-scrim", sheet(), gpui::Styled::opacity)
+                .into_any_element()
+        } else {
+            scrim.into_any_element()
+        };
+        let drawn = gpui::div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left_0()
+            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .child(panel);
+        let drawn = if moves {
+            drawn
+                .with_animation("navigator-slide", sheet(), move |el, t| {
+                    el.left(-width * (1.0 - t))
+                })
+                .into_any_element()
+        } else {
+            drawn.into_any_element()
+        };
         let away = gpui::div()
             .id("navigator-away")
             .debug_selector(|| "navigator-away".to_owned())
             .absolute()
             .inset_0()
-            .bg(crate::kit::scrim(&self.theme))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _ev, _w, cx| {
@@ -1484,15 +1515,8 @@ impl WorkspaceView {
                     cx.notify();
                 }),
             )
-            .child(
-                gpui::div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-                    .child(panel),
-            )
+            .child(scrim)
+            .child(drawn)
             .children(handle);
         match mode {
             // A touch device's workspace ends above the home indicator's band (and the key

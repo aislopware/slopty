@@ -136,10 +136,11 @@ fn dragging_the_handle_resizes_the_navigator_within_its_clamps(cx: &mut TestAppC
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// *Needs you* shows only while an agent waits, above *Workers*, whose heading shows only then:
-/// alone it would head nothing. Each worker lists its tiles beneath it, with an accessible
-/// name, until its row folds them. The workspaces are no section of the navigator: they are
-/// the title bar's, named with their count.
+/// *Needs you* shows only while an agent waits out of sight, above *Workers*, whose heading
+/// shows only then: alone it would head nothing. A waiting tile in view says so in its own row,
+/// so the section is for one folded away. Each worker lists its tiles beneath it, with an
+/// accessible name, until its row folds them. The workspaces are no section of the navigator:
+/// they are the title bar's, named with their count.
 #[gpui::test]
 fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -158,9 +159,9 @@ fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) 
 
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
     cx.run_until_parked();
-    assert!(top(cx, "nav-needs-you") < top(cx, "nav-workers"), "first while something waits");
     let waiting_row = leak(format!("nav-waiting-{session}"));
-    assert!(cx.debug_bounds(waiting_row).is_some());
+    assert!(cx.debug_bounds("nav-needs-you").is_none(), "its own row, in view, says so");
+    assert!(cx.debug_bounds(waiting_row).is_none());
     let names = labels(&view, cx);
     assert!(names.iter().any(|l| l == "studio"), "a worker that is fine is its name: {names:#?}");
     assert!(
@@ -168,6 +169,12 @@ fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) 
         "the waiting tile's row: {names:#?}"
     );
     assert!(names.iter().any(|l| l == "Workspace 1, 2 tiles, 1 needs you"), "{names:#?}");
+
+    click(cx, leak(format!("nav-worker-{}", laptop.key)));
+    assert!(top(cx, "nav-needs-you") < top(cx, "nav-workers"), "folded away, it leads");
+    assert!(cx.debug_bounds(waiting_row).is_some());
+    click(cx, leak(format!("nav-worker-{}", laptop.key)));
+    assert!(cx.debug_bounds("nav-needs-you").is_none(), "unfolded, the row says it again");
 
     click(cx, "nav-worker-00000000000000000000000000000001");
     assert!(cx.debug_bounds(selector("nav-tile", mine.item)).is_none(), "folded away");
@@ -230,14 +237,14 @@ fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
     let _here = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 2, Some("/w/oss/slopty"));
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| {
-        v.set_rtt(key, Some(Duration::from_micros(4_240)), cx);
+        v.set_rtt(key, Some(Duration::from_micros(42_400)), cx);
         v.agent_event(blocked(session), cx);
         v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(busy) }, cx);
     });
     cx.run_until_parked();
     let names = labels(&view, cx);
     // The same place the header names: the last two directories, a home as `~`.
-    for readout in ["studio", "oss/slopty", "Round trip 4.2 ms", "1 working"] {
+    for readout in ["studio", "oss/slopty", "Round trip 42 ms", "1 working"] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
     assert!(cx.debug_bounds("rtt").is_none(), "the round trip left the title bar");

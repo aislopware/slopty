@@ -88,6 +88,9 @@ pub enum Accept {
     Changed,
     /// Rewrite every golden encountered.
     All,
+    /// Write no golden and fail on none: a changed frame leaves its render and diff under the
+    /// artifacts for a design review, so one run renders every golden a test reaches.
+    Review,
 }
 
 impl Accept {
@@ -97,6 +100,7 @@ impl Accept {
         match val {
             Some("1" | "changed") => Self::Changed,
             Some("all") => Self::All,
+            Some("review") => Self::Review,
             _ => Self::Off,
         }
     }
@@ -118,6 +122,8 @@ pub enum GoldenAction {
     Keep,
     /// Fail the snapshot comparison.
     Fail,
+    /// Leave the golden, report the change and carry on.
+    Report,
 }
 
 /// Decide what action to take for a golden snapshot.
@@ -127,13 +133,13 @@ pub const fn golden_action(
     golden_exists: bool,
     within_tolerance: bool,
 ) -> GoldenAction {
-    if !golden_exists {
-        return GoldenAction::Write;
-    }
-    match (accept, within_tolerance) {
-        (Accept::All, _) | (Accept::Changed, false) => GoldenAction::Write,
-        (Accept::Changed | Accept::Off, true) => GoldenAction::Keep,
-        (Accept::Off, false) => GoldenAction::Fail,
+    match (accept, golden_exists, within_tolerance) {
+        (Accept::Review, false, _) | (Accept::Review, true, false) => GoldenAction::Report,
+        (_, false, _) | (Accept::All, true, _) | (Accept::Changed, true, false) => {
+            GoldenAction::Write
+        }
+        (Accept::Changed | Accept::Off | Accept::Review, true, true) => GoldenAction::Keep,
+        (Accept::Off, true, false) => GoldenAction::Fail,
     }
 }
 
@@ -163,14 +169,15 @@ pub fn assert_matches(
     let accept = Accept::from_env();
     let golden_exists = golden_path.exists();
     if !golden_exists {
-        let _action = golden_action(accept, false, false);
+        let total = u64::from(actual.width()).saturating_mul(u64::from(actual.height()));
+        if golden_action(accept, false, false) == GoldenAction::Report {
+            eprintln!("snapshot {name}: REVIEW no golden yet; render at {}", actual_path.display());
+            return Ok(Diff { differing: total, total });
+        }
         std::fs::create_dir_all(golden_dir())?;
         actual.save(&golden_path).with_context(|| format!("write {}", golden_path.display()))?;
         eprintln!("snapshot {name}: wrote golden {}", golden_path.display());
-        return Ok(Diff {
-            differing: 0,
-            total: u64::from(actual.width()).saturating_mul(u64::from(actual.height())),
-        });
+        return Ok(Diff { differing: 0, total });
     }
 
     let golden = image::open(&golden_path)
@@ -197,6 +204,20 @@ pub fn assert_matches(
                 diff.differing,
                 diff.total,
                 fraction * 100.0
+            );
+            Ok(diff)
+        }
+        GoldenAction::Report => {
+            let diff_path = artifacts.join(format!("{name}.diff.png"));
+            if same_size {
+                image.save(&diff_path)?;
+            }
+            eprintln!(
+                "snapshot {name}: REVIEW {:.3}% of pixels differ (tolerance {:.3}%)\n  actual: {}\n  diff:   {}",
+                fraction * 100.0,
+                tolerance * 100.0,
+                actual_path.display(),
+                diff_path.display()
             );
             Ok(diff)
         }
@@ -313,5 +334,9 @@ mod tests {
         assert_eq!(golden_action(Accept::Off, true, false), GoldenAction::Fail);
         assert_eq!(golden_action(Accept::Changed, true, false), GoldenAction::Write);
         assert_eq!(golden_action(Accept::All, true, false), GoldenAction::Write);
+        assert_eq!(golden_action(Accept::Review, true, false), GoldenAction::Report);
+        assert_eq!(golden_action(Accept::Review, false, false), GoldenAction::Report);
+        assert_eq!(golden_action(Accept::Review, true, true), GoldenAction::Keep);
+        assert_eq!(Accept::parse(Some("review")), Accept::Review);
     }
 }

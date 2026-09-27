@@ -1050,11 +1050,11 @@ mod conversation {
     use slopty_proto::conversation::{
         AgentDetail, AgentRun, Answer, BashDetail, Body, Change, Clipped, Compact,
         ConversationEvent, ConversationRequest, EditDetail, Entry, GlobDetail, Grant, GrepDetail,
-        Hunk, Live, LiveId, LiveKind, McpDetail, Meters, Note, NoteKind, Part, Patch,
+        Hunk, Link, Live, LiveId, LiveKind, McpDetail, Meters, Note, NoteKind, Part, Patch,
         PermissionEvent, PermissionPrompt, Prompt, Question, QuestionDetail, RateWindow,
-        ReadDetail, ResultStatus, Settled, ShellStatus, Suggestion, Task, TaskCreateDetail,
-        TaskUpdateDetail, TextRef, ThreadId, ToolCall, ToolDetail, ToolResult, Verdict,
-        WebFetchDetail, WebSearchDetail, WriteDetail, WriteKind,
+        ReadDetail, ResultStatus, Retry, Settled, ShellStatus, Suggestion, Task, TaskCreateDetail,
+        TaskUpdateDetail, TextRef, ThreadId, ToolCall, ToolDetail, ToolResult, Turn, Usage,
+        Verdict, WebFetchDetail, WebSearchDetail, WriteDetail, WriteKind,
     };
     use slopty_proto::transfer::UniHead;
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
@@ -1286,12 +1286,50 @@ mod conversation {
                     }),
                 ),
                 entry("u4", Body::Interrupted { during_tool: true }),
-                entry("u5", Body::Note(Note { kind: NoteKind::ApiError, text: text("529") })),
-                entry("u6", Body::Note(Note { kind: NoteKind::Command, text: text("ok") })),
-                entry("u7", Body::Note(Note { kind: NoteKind::Info, text: text("fyi") })),
+                entry(
+                    "u5",
+                    Body::Note(Note {
+                        kind: NoteKind::ApiError,
+                        text: text("529"),
+                        retry: Some(Retry { attempt: 2, max: 10, in_ms: 1_100 }),
+                    }),
+                ),
+                entry(
+                    "u6",
+                    Body::Note(Note { kind: NoteKind::Command, text: text("ok"), retry: None }),
+                ),
+                entry(
+                    "u7",
+                    Body::Note(Note { kind: NoteKind::Info, text: text("fyi"), retry: None }),
+                ),
+                entry(
+                    "u8",
+                    Body::Note(Note { kind: NoteKind::Hook, text: text("no"), retry: None }),
+                ),
+                entry("u9", Body::Rewound { dropped: 6 }),
                 Change::Remove { thread: ThreadId::Agent("a1".to_owned()), id: "u0".to_owned() },
                 Change::Tasks { thread: ThreadId::Main, tasks: vec![task.clone()] },
                 Change::Reset { thread: Some(ThreadId::Agent("a1".to_owned())) },
+                Change::Turn {
+                    thread: ThreadId::Main,
+                    turn: Turn {
+                        prompt: "u1".to_owned(),
+                        started_ms: 7,
+                        ended_ms: Some(9),
+                        models: vec!["claude-opus-5-5".to_owned()],
+                        requests: 3,
+                        usage: Usage {
+                            input: 12,
+                            cache_read: 40_000,
+                            cache_write: 800,
+                            output: 900,
+                            thinking: 300,
+                        },
+                        context_tokens: Some(41_200),
+                        mode: Some("plan".to_owned()),
+                        stop: Some("end_turn".to_owned()),
+                    },
+                },
             ]),
         );
         let bash = BashDetail {
@@ -1388,6 +1426,10 @@ mod conversation {
                     ToolDetail::WebSearch(WebSearchDetail {
                         query: "rust".to_owned(),
                         results: Some(10),
+                        links: vec![Link {
+                            title: "Rust".to_owned(),
+                            url: "https://rust-lang.org".to_owned(),
+                        }],
                     }),
                     ok,
                 ),

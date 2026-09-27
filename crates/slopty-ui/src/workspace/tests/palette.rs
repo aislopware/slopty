@@ -97,18 +97,27 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("palette").is_none());
 }
 
-/// The palette's foot names its keys: ↩ opens, esc closes, ↑↓ move. It sits under the list,
-/// across the dialog, and reads as one line.
+/// The palette's foot names its keys: ↑↓ move and esc closes, and ↩ says what it does with the
+/// line selected (goes to a worker, runs a command). It sits under the list, across the
+/// dialog, and reads as one line.
 #[gpui::test]
 fn the_palette_foot_names_its_keys(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let _studio = connect(&view, cx, 1, "studio");
     cx.update(|window, _cx| window.set_a11y_active(true));
     open_palette(cx);
-    view.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("Label", Some("↩ open · esc close · ↑↓ move"))), "{tree:#?}");
+    let legend = |cx: &mut VisualTestContext| {
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        tree.into_iter()
+            .filter(|n| n.role == "Label")
+            .filter_map(|n| n.label)
+            .find(|l| l.starts_with("↑↓"))
+    };
+    assert_eq!(legend(cx).as_deref(), Some("↑↓ move · esc close · ↩ go to"), "on the worker");
+    cx.simulate_keystrokes("down");
+    assert_eq!(legend(cx).as_deref(), Some("↑↓ move · esc close · ↩ run"), "on a command");
     let (dialog, legend, list) = (
         cx.debug_bounds("palette").expect("the dialog"),
         cx.debug_bounds("palette-legend").expect("the foot"),
@@ -324,6 +333,8 @@ fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContex
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     three_shells(&view, cx, &fake);
+    // Where the sheet lands, not its rise into place.
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
     open_palette(cx);
     let (w, h) = VIEWPORT;
     let brief = cx.debug_bounds("palette").expect("drawn");
@@ -376,6 +387,8 @@ fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContex
 fn the_palette_scrolls_to_the_selected_line(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let _studio = connect(&view, cx, 1, "studio");
+    // Where the lines land, not the sheet rising into place under them.
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
     open_palette(cx);
     // Every command with an e in it: past the brief list an empty field shows.
     cx.simulate_input("e");

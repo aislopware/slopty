@@ -8,7 +8,7 @@ mod conversation {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
-    use slopty_agent::conversation::{Change, Conversation, Entry, ThreadId};
+    use slopty_agent::conversation::{Change, Conversation, Entry, ThreadId, Turn};
     use slopty_agent::transcript::Tail;
 
     fn scenario(name: &str) -> PathBuf {
@@ -35,25 +35,41 @@ mod conversation {
         conversation
     }
 
+    /// A client's copy of a thread: its entries and its turns.
+    #[derive(Default)]
+    struct Copy {
+        entries: Vec<Entry>,
+        turns: Vec<Turn>,
+    }
+
     /// A client's copy, kept from nothing but the changes.
-    fn apply(copy: &mut BTreeMap<ThreadId, Vec<Entry>>, changes: Vec<Change>) {
+    fn apply(copy: &mut BTreeMap<ThreadId, Copy>, changes: Vec<Change>) {
         for change in changes {
             match change {
                 Change::Upsert { thread, entry } => {
-                    let list = copy.entry(thread).or_default();
+                    let list = &mut copy.entry(thread).or_default().entries;
                     match list.iter_mut().find(|e| e.id == entry.id) {
                         Some(old) => *old = entry,
                         None => list.push(entry),
                     }
                 }
                 Change::Remove { thread, id } => {
-                    copy.entry(thread).or_default().retain(|e| e.id != id);
+                    let held = copy.entry(thread).or_default();
+                    held.entries.retain(|e| e.id != id);
+                    held.turns.retain(|t| t.prompt != id);
                 }
                 Change::Reset { thread: Some(thread) } => {
                     copy.remove(&thread);
                 }
                 Change::Reset { thread: None } => copy.clear(),
                 Change::Tasks { .. } => {}
+                Change::Turn { thread, turn } => {
+                    let turns = &mut copy.entry(thread).or_default().turns;
+                    match turns.iter_mut().find(|t| t.prompt == turn.prompt) {
+                        Some(old) => *old = turn,
+                        None => turns.push(turn),
+                    }
+                }
             }
         }
     }
@@ -121,9 +137,15 @@ mod conversation {
             }
             assert_eq!(conversation.snapshot(), whole.snapshot(), "{name}");
             for thread in whole.snapshot() {
+                let held = copy.get(&thread.id);
                 assert_eq!(
-                    copy.get(&thread.id).map(Vec::as_slice),
+                    held.map(|c| c.entries.as_slice()),
                     Some(thread.entries.as_slice()),
+                    "{name}"
+                );
+                assert_eq!(
+                    held.map(|c| c.turns.as_slice()),
+                    Some(thread.turns.as_slice()),
                     "{name}"
                 );
             }

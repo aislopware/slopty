@@ -73,7 +73,7 @@ fn the_filter_keeps_the_rows_that_match(cx: &mut TestAppContext) {
 /// A shell's row reads two lines: its title, ended by its age from the session's start, then
 /// what its agent says, its directory and its branch, in the order every second line keeps. Once
 /// the agent waits on the human, the state takes the age's place in a word, and the row is not
-/// washed: the *Needs you* section already leads with it.
+/// washed: the word is the one mark it needs. Folded away, *Needs you* lists it.
 #[gpui::test]
 fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -147,8 +147,12 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     });
     assert!(!washed, "a row waiting on the human is not washed a second time");
 
-    // Its *Needs you* row joins the agent's words and its place as a tile's second line does:
-    // the one separator, spaces and all, flush against both.
+    // Folded out of sight, it is listed under *Needs you*, whose row joins the agent's words and
+    // its place as a tile's second line does: the one separator, spaces and all, flush against
+    // both.
+    assert!(!shown(cx, "nav-needs-you"), "in view, its own row says it");
+    click(cx, leak(format!("nav-worker-{key}")));
+    assert!(shown(cx, "nav-needs-you"), "folded away, the section lists it");
     let mut part = |name: &str| {
         cx.debug_bounds(leak(format!("nav-waiting-{name}-{session}")))
             .unwrap_or_else(|| panic!("the agent row's {name}"))
@@ -174,6 +178,25 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
         (shape(text), shape(dot))
     });
     assert!(separator.size.width > spaced.1 + px(1.0), "the spaces stay: {spaced:?}");
+}
+
+/// An open worker with no tile says so in one quiet line on its tiles' edge; a filter that
+/// matched its name lists it bare, and its first tile takes the line's place.
+#[gpui::test]
+fn a_worker_with_no_tile_says_so_quietly(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let vacant = leak(format!("nav-vacant-{}", laptop.key));
+    assert!(shown(cx, vacant), "an empty worker says so");
+    assert!(!shown(cx, leak(format!("nav-vacant-{}", studio.key))), "one with a tile does not");
+    filter(cx, "lapt");
+    assert!(shown(cx, leak(format!("nav-worker-{}", laptop.key))) && !shown(cx, vacant));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let tile = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
+    assert!(shown(cx, selector("nav-tile", tile.item)) && !shown(cx, vacant), "a tile takes it");
 }
 
 /// A note's row says how far its tasks got, not that it is a note.

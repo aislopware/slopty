@@ -1783,3 +1783,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_guess_is_marked_only_when_it_is_unsure`; element `a_guess_is_a_cell_of_its_row`; e2e smooth
   `typing_over_a_shaped_round_trip_on_the_mac`, which now wants the adaptive policy to draw at
   least half the keys past half a 60 Hz refresh.
+
+- ✅ **A prompt steps back so its command reads first, and a block spans its tile**
+  (2026-09-27, design direction wave 3). Warp sets a block's prompt apart from the command and
+  runs its blocks, rules and failure wash across the whole pane.
+  - **The prompt.** On a prompt row the cells before the command's column (`OSC 133;B`,
+    `SemanticMark::input_col`) that the shell drew in the default colours take the faint
+    attribute (SGR 2), as if the shell had dimmed them; with nothing typed yet the prompt ends
+    at the shell's own cursor, and a prompt row off the cursor's row is prompt to its end. A
+    prompt the shell coloured keeps its colours, and the command and its output stay as they
+    are. The cursor read is the shell's, never the predictor's, so a guessed key is not set
+    back with the prompt. The row is copied only when a cell changes.
+  - **Edge to edge.** The rule over a prompt, a failed block's wash and the sticky header's
+    wash span the element. Clipped at the grid's last column they left a ragged strip at the
+    right, up to a cell plus the inset, that changed with the tile's width, while the bar sat
+    on the left edge. Block padding in line units (Warp's 1.1, 0.5 and 1.0) stays open: it
+    changes how the grid maps rows.
+  - Cost: about 2.4 µs a frame with ten prompts on screen, nothing measurable without prompts
+    (MEASUREMENTS, "a prompt set back, and blocks edge to edge"). Tests: element
+    `a_prompt_steps_back_and_its_command_reads_first`; view
+    `cmd_up_and_down_walk_the_prompts_and_separators_follow` and the failed-block tests, whose
+    scene readers now want the rule and the wash edge to edge.

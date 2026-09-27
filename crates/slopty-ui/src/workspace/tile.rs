@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, Div, ElementId, ExternalPaths, InteractiveElement as _, IntoElement as _,
-    MouseButton, MouseDownEvent, ParentElement as _, SharedString, Stateful,
+    App, Context, Div, ElementId, ExternalPaths, FontWeight, InteractiveElement as _,
+    IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _, SharedString, Stateful,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div, px,
 };
 use gpui_kit::component::input::Input;
@@ -19,14 +19,14 @@ use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::screen::SourceState;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
-use slopty_theme::{Theme, alpha};
+use slopty_theme::{Theme, Typography};
 
 use super::actions::{CloseItem, FullscreenTile};
 use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::browser::BrowserView;
 use crate::chrome_text::ChromeText;
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 use crate::icons::{IconName, IconSize, Status};
 use crate::kit;
 use crate::terminal::TerminalView;
@@ -663,7 +663,9 @@ impl WorkspaceView {
             ItemKind::Terminal { session } => self.agent_state(session).map(|a| (session, a)),
             _ => None,
         };
-        let ink = if focused { s.text } else { s.text_muted };
+        // The focused title leads at the medium weight in primary text; the rest step back to
+        // the secondary tone at the regular weight, so a wall of tiles reads as titles still.
+        let ink = if focused { s.text } else { s.text_secondary };
         let heading = SharedString::from(if kind == title {
             title.clone()
         } else {
@@ -900,7 +902,7 @@ impl WorkspaceView {
                 .child(strip);
             header.bg(hsla(s.panel)).border_b_0().child(tabs).child(rest)
         } else {
-            let lead = self.leading_slot(tile, item, ink, k, cx);
+            let lead = self.leading_slot(tile, item, focused, k, cx);
             let name = self.header_name(tile, id, title, chrome);
             // The title keeps its width and what is beside it gives way: the place first, then
             // the readouts at the end (an agent's pill), the title last. Each takes what it
@@ -912,6 +914,7 @@ impl WorkspaceView {
                 .flex()
                 .items_center()
                 .gap(px(theme.spacing.xs * k))
+                .when(focused, |el| el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT)))
                 .child(name)
                 .when_some(unsaved, gpui::ParentElement::child);
             let renaming = self.rename.as_ref().is_some_and(|r| r.tile == tile);
@@ -935,23 +938,28 @@ impl WorkspaceView {
     }
 
     /// The header's leading slot: the kind's icon at rest and the status mark once there is
-    /// one (working, waiting, failed, done, away), in one fixed square so every title starts
-    /// on the same edge, as the navigator's rows and the palette's do. On a Mac a file's slot
-    /// is its proxy, dragged out as a document window's title icon is.
+    /// one (working, failed, done, away), in one fixed square so every title starts on the
+    /// same edge, as the navigator's rows and the palette's do. An agent waiting on the human
+    /// keeps its kind's glyph: the state chip beside the title says it, and a warn mark in the
+    /// slot said it a second time. The glyph sits a step under the title's tone. On a Mac a
+    /// file's slot is its proxy, dragged out as a document window's title icon is.
     fn leading_slot(
         &self,
         tile: TileRef,
         item: &Item,
-        ink: slopty_theme::Rgb,
+        focused: bool,
         k: f32,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let id = item.id;
+        let s = &self.theme.surfaces;
         let agent = match item.kind {
             ItemKind::Terminal { session } => self.agent_state(session).is_some(),
             _ => false,
         };
-        let status = self.tile_status(tile, item, cx);
+        let status =
+            self.tile_status(tile, item, cx).filter(|st| !(agent && *st == Status::NeedsYou));
+        let ink = if focused { s.text_secondary } else { s.text_muted };
         let slot =
             crate::palette::status_slot(&self.theme, kind_icon(item, agent), status, hsla(ink), k)
                 .debug_selector(move || format!("status-{}", id.as_uuid()))
@@ -1059,6 +1067,9 @@ impl WorkspaceView {
                     .pr(px(theme.spacing.xs * k))
                     .border_r_1()
                     .text_color(hsla(ink))
+                    .when(shown && placed.focused, |el| {
+                        el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                    })
                     .map(|el| {
                         if shown {
                             el.border_color(hsla(s.border_subtle)).bg(hsla(theme.content()))
@@ -1181,9 +1192,10 @@ impl WorkspaceView {
                     _ => format!("{number}"),
                 };
                 let tone = theme.surfaces.text_secondary;
+                let raised = theme.surfaces.raised;
                 let k = chrome.k;
-                // The two ends share the pill's one fill and corner; each deepens alone under
-                // the pointer.
+                // Words, not a chip: the header's one fill is the state's. The two ends share
+                // one corner, and each takes the hover fill alone under the pointer.
                 let part = |part: String, label: SharedString, name: String| {
                     let selector = format!("{part}-{}", id.as_uuid());
                     div()
@@ -1194,7 +1206,7 @@ impl WorkspaceView {
                         .flex_none()
                         .py(px(theme.spacing.xxs * k))
                         .cursor_pointer()
-                        .hover(move |el| el.bg(hsla_alpha(tone, alpha::FAINT)))
+                        .hover(move |el| el.bg(hsla(raised)))
                         .child(
                             ChromeText::new(label, px(theme.typography.small()), k)
                                 .zooming(chrome.zooming),
@@ -1222,9 +1234,8 @@ impl WorkspaceView {
                 kit::tabular(div())
                     .flex()
                     .flex_none()
-                    .rounded(px(theme.radii.xs * k))
+                    .rounded(px(theme.radii.sm * k))
                     .overflow_hidden()
-                    .bg(hsla_alpha(tone, alpha::FAINT))
                     .text_size(px(theme.typography.small() * k))
                     .text_color(hsla(tone))
                     .font_family(crate::palette::mono_family(theme))
@@ -1263,7 +1274,9 @@ impl WorkspaceView {
                     && !self.layout.is_phone()
                     && let Some(view) = self.faces.views.get(&session)
                 {
-                    actions.extend(view.read(cx).header_chips(chrome.k));
+                    actions.extend(crate::conversation::ConversationView::header_chips(
+                        view, chrome.k, cx,
+                    ));
                 }
                 if self.agent_state(session).is_some_and(|a| a.status != AgentStatus::None) {
                     let (icon, label) = if face {
@@ -1606,7 +1619,7 @@ impl WorkspaceView {
             .justify_center()
             .size(px(theme.typography.icon_large() * k))
             .rounded(px(theme.radii.xs * k))
-            .hover(|s| s.bg(hsla_alpha(theme.surfaces.text_secondary, alpha::FAINT)))
+            .hover(|s| s.bg(hsla(theme.surfaces.raised)))
             .cursor_grab()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1651,80 +1664,12 @@ impl WorkspaceView {
         let pill = state.map(|state| self.render_state_pill(placed.tile, item, &state, chrome, cx));
         // Text a few points high is mush: the overview's small zoom lays the body's own surface
         // over it. The view stays under it, so the keyboard stays where it was.
-        let id = item.id;
         let cover = (bare
             && matches!(
                 item.kind,
                 ItemKind::Terminal { .. } | ItemKind::Note { .. } | ItemKind::File { .. }
             ))
-        .then(|| {
-            // The shapes alone left every tile the same blank card. What each one is goes
-            // over it at the chrome's type scale, as the workspace names above the cards
-            // do: its state (else its kind) and its title, then one muted line of what the
-            // navigator's second line says, and its worker where there are several. Centred.
-            let theme = &self.theme;
-            let muted = hsla(theme.surfaces.text_muted);
-            let agent = matches!(item.kind, ItemKind::Terminal { session } if self.agent_state(session).is_some());
-            let (mark, _) = self.tile_marks(placed.tile, item, cx);
-            let lead =
-                crate::palette::status_slot(theme, kind_icon(item, agent), mark, muted, 1.0);
-            let label = div()
-                .debug_selector(move || format!("shapes-label-{}", id.as_uuid()))
-                .max_w_full()
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xs))
-                .overflow_hidden()
-                .text_color(hsla(theme.surfaces.text_secondary))
-                .child(lead)
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(SharedString::from(self.card_title(placed.tile, item, cx))),
-                );
-            let worker = (self.workers.len() > 1).then(|| self.worker_name(placed.tile.worker));
-            let (meta, _) = self.tile_meta(item, std::time::SystemTime::now(), cx);
-            let meta = super::rollup::meta_line([Some(meta.as_str()), worker.as_deref()]);
-            // Hung under the title rather than stacked with it, so every cover's title sits on
-            // one line across the card, with a line under it or not.
-            let meta = (!meta.is_empty()).then(|| {
-                div()
-                    .absolute()
-                    .top_full()
-                    .left_0()
-                    .right_0()
-                    .pt(px(theme.spacing.xxs))
-                    .flex()
-                    .justify_center()
-                    .child(
-                        div()
-                            .debug_selector(move || format!("shapes-meta-{}", id.as_uuid()))
-                            .max_w_full()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_color(muted)
-                            .child(SharedString::from(meta)),
-                    )
-            });
-            let titled =
-                div().relative().w_full().flex().justify_center().child(label).children(meta);
-            div()
-                .debug_selector(move || format!("shapes-{}", id.as_uuid()))
-                .absolute()
-                .inset_0()
-                .px(px(theme.spacing.sm))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .whitespace_nowrap()
-                .text_size(px(theme.typography.small()))
-                .font_family(theme.typography.ui_family.clone())
-                .bg(hsla(theme.terminal.bg))
-                .child(titled)
-        });
+        .then(|| self.render_cover(placed, item, chrome, cx));
         if pill.is_none() && cover.is_none() {
             return content;
         }
@@ -1739,6 +1684,152 @@ impl WorkspaceView {
             .children(cover)
             .children(pill)
             .into_any_element()
+    }
+
+    /// A tile's cover in the overview's small zoom, where the body's own text is a few points
+    /// high. It is composed as a card is, on the body's surface: the state (else the kind) and
+    /// the title at the top left, one muted line of what the navigator's second line says and
+    /// the worker where there are several, then the last lines of what the tile shows in the
+    /// type it shows them in (a shell's screen and a file in the mono face, a note in the UI
+    /// face), as many as the card has room for. All of it is chrome, drawn at the type scale
+    /// whatever the zoom, so it reads however far the overview zooms out.
+    fn render_cover(
+        &self,
+        placed: &Placed,
+        item: &Item,
+        chrome: Chrome,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let t = &theme.typography;
+        let id = item.id;
+        let muted = hsla(s.text_muted);
+        let agent = matches!(item.kind, ItemKind::Terminal { session } if self.agent_state(session).is_some());
+        let (mark, _) = self.tile_marks(placed.tile, item, cx);
+        let lead = crate::palette::status_slot(theme, kind_icon(item, agent), mark, muted, 1.0);
+        let title = div()
+            .debug_selector(move || format!("shapes-label-{}", id.as_uuid()))
+            .h(px(t.icon_large()))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .overflow_hidden()
+            .child(lead)
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                    .text_color(hsla(s.text))
+                    .child(SharedString::from(self.card_title(placed.tile, item, cx))),
+            );
+        let worker = (self.workers.len() > 1).then(|| self.worker_name(placed.tile.worker));
+        let (meta, _) = self.tile_meta(item, std::time::SystemTime::now(), cx);
+        let meta = super::rollup::meta_line([Some(meta.as_str()), worker.as_deref()]);
+        let meta_line = t.meta() + theme.spacing.xs;
+        // Everything under the title starts at its text's edge, as a list row's second line
+        // does: the slot is the title's alone.
+        let text_edge = t.icon_large() + theme.spacing.xs;
+        let meta = (!meta.is_empty()).then(|| {
+            div()
+                .debug_selector(move || format!("shapes-meta-{}", id.as_uuid()))
+                .flex_none()
+                .pl(px(text_edge))
+                .h(px(meta_line))
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_size(px(t.meta()))
+                .line_height(px(meta_line))
+                .text_color(muted)
+                .child(SharedString::from(meta))
+        });
+        // As many of the last lines as the card holds under its title and meta.
+        let pad = theme.spacing.sm;
+        let line = t.caption() + theme.spacing.xs;
+        let body_h = theme.density.header.mul_add(-chrome.k, placed.rect.h * placed.scale);
+        let used = 2.0_f32.mul_add(pad, t.icon_large() + meta_line + theme.spacing.sm);
+        let room = ((body_h - used) / line).floor();
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
+        let room = room.clamp(0.0, 64.0) as usize;
+        let (lines, mono) = self.cover_lines(item, room, cx);
+        let preview = (!lines.is_empty()).then(|| {
+            div()
+                .debug_selector(move || format!("shapes-lines-{}", id.as_uuid()))
+                .pt(px(theme.spacing.sm))
+                .pl(px(text_edge))
+                .min_h_0()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .text_size(px(t.caption()))
+                .line_height(px(line))
+                .text_color(muted)
+                // A shell's and a file's lines in the face their tile sets them in: content,
+                // not chrome.
+                .when_some(mono.then(|| t.mono_families.first().cloned()).flatten(), |el, f| {
+                    el.font_family(f)
+                })
+                .children(lines.into_iter().map(|text| {
+                    div().h(px(line)).overflow_hidden().child(SharedString::from(text))
+                }))
+        });
+        div()
+            .debug_selector(move || format!("shapes-{}", id.as_uuid()))
+            .absolute()
+            .inset_0()
+            .p(px(pad))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(t.small()))
+            .font_family(t.ui_family.clone())
+            .bg(hsla(theme.terminal.bg))
+            .child(title)
+            .children(meta)
+            .children(preview)
+            .into_any_element()
+    }
+
+    /// What a cover shows of its tile, at most `n` lines, and whether they are set in the mono
+    /// face: the last lines of a shell's screen, a file's first lines, a note's lines after its
+    /// title with Markdown's marks left off.
+    fn cover_lines(&self, item: &Item, n: usize, cx: &App) -> (Vec<String>, bool) {
+        if n == 0 {
+            return (Vec::new(), false);
+        }
+        match &item.kind {
+            ItemKind::Terminal { session } => {
+                let lines = self.terminals.get(session).map(|v| v.read(cx).tail(n));
+                (lines.unwrap_or_default(), true)
+            }
+            ItemKind::File { .. } => {
+                let lines = self.files.get(&item.id).map(|v| v.read(cx).head(n, cx));
+                (lines.unwrap_or_default(), true)
+            }
+            ItemKind::Note { text } => {
+                let body = crate::note::split_title(text).map_or(text.as_str(), |(_, rest)| rest);
+                let lines = body
+                    .lines()
+                    .map(|line| {
+                        crate::markdown::task_line(line).map_or_else(
+                            || line.trim().trim_start_matches(['#', '-', '*', '>']).trim(),
+                            |(_, task)| task.trim(),
+                        )
+                    })
+                    .filter(|line| !line.is_empty())
+                    .take(n)
+                    .map(str::to_owned)
+                    .collect();
+                (lines, false)
+            }
+            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Browser { .. } => {
+                (Vec::new(), false)
+            }
+        }
     }
 
     /// A body with nothing to show yet, saying why in one muted line: at once for a state
@@ -1960,8 +2051,11 @@ pub(super) fn place_beside(place: String, title: &str) -> Option<String> {
     }
 }
 
-/// A header pill: `small()` type on a faint fill of its tone, the tone as text, `radii.xs`;
-/// hover deepens the fill. Scaled by the chrome's `k`. Its id is scoped by the tile's.
+/// A header action in words ("Take", "Mute", an upload's progress): `small()` type in its
+/// tone with no fill at rest, a control's `radii.sm`, and the `raised` fill under the pointer.
+/// A header holds one filled chip at most, the state's (the agent's pill); every other word
+/// in it is a ghost, so the state is the one shape that stands out. Scaled by the chrome's
+/// `k`. Its id is scoped by the tile's.
 fn pill(
     part: impl Into<SharedString>,
     item: ItemId,
@@ -1971,6 +2065,7 @@ fn pill(
     chrome: Chrome,
 ) -> Stateful<Div> {
     let k = chrome.k;
+    let (raised, pressed) = (theme.surfaces.raised, theme.surfaces.overlay);
     let part: SharedString = part.into();
     let selector = format!("{part}-{}", item.as_uuid());
     div()
@@ -1979,11 +2074,11 @@ fn pill(
         .flex_none()
         .px(px(theme.spacing.sm * k))
         .py(px(theme.spacing.xxs * k))
-        .rounded(px(theme.radii.xs * k))
-        .bg(hsla_alpha(tone, alpha::FAINT))
+        .rounded(px(theme.radii.sm * k))
         .text_size(px(theme.typography.small() * k))
         .text_color(hsla(tone))
         .cursor_pointer()
-        .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT)))
+        .hover(move |el| el.bg(hsla(raised)))
+        .active(move |el| el.bg(hsla(pressed)))
         .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
 }
