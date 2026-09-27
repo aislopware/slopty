@@ -242,3 +242,41 @@ fn a_phone_shows_the_face_first(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!face_shown(&view, cx, session), "the person picked the TUI");
 }
+
+/// On a phone the title of an agent's tile reads whole beside its pill: the pill says the
+/// state alone ("Needs approval"), the face under it showing what the agent asks, and a
+/// screen reader still hears all of it. Nothing runs past the header.
+#[gpui::test]
+fn a_phone_header_keeps_its_title_and_the_pill_gives_way(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(1280.0), px(800.0)));
+    cx.run_until_parked();
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &studio, session, studio.me, 1);
+    let asks = AgentEvent {
+        status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
+        detail: Some("$ touch a-file-with-a-rather-long-name-for-a-phone.txt".into()),
+        ..blocked(session)
+    };
+    view.update_in(cx, |v, _w, cx| v.agent_event(asks, cx));
+    cx.run_until_parked();
+    let widths = |cx: &mut VisualTestContext| {
+        let name = cx.debug_bounds(selector("name", tile.item)).expect("the title");
+        let pill = cx.debug_bounds(selector("agent", tile.item)).expect("the pill");
+        let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
+        assert!(pill.left() >= name.right(), "side by side: {name:?} {pill:?}");
+        assert!(pill.right() <= header.right(), "inside the header: {pill:?} {header:?}");
+        (f32::from(name.size.width), f32::from(pill.size.width))
+    };
+    let (title, detailed) = widths(cx);
+
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    let (phone_title, word) = widths(cx);
+    assert!((phone_title - title).abs() < 0.5, "the whole title: {phone_title} of {title}");
+    assert!(word < detailed / 2.0, "the state alone: {word} against {detailed}");
+    let nodes = tree(cx);
+    let full = "Needs approval: $ touch a-file-with-a-rather-long-name-for-a-phone.txt";
+    assert!(nodes.iter().any(|n| n.label.as_deref() == Some(full)), "all of it, said");
+}

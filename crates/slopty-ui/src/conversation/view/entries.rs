@@ -127,11 +127,19 @@ impl ConversationView {
 
     /// Markdown at the face's size.
     pub(super) fn markdown(&self, id: String, text: &str) -> AnyElement {
+        self.markdown_view(id, text).into_any_element()
+    }
+
+    /// [`Self::markdown`] in `tone` rather than the text's own ink.
+    fn markdown_in(&self, id: String, text: &str, tone: slopty_theme::Rgb) -> AnyElement {
+        self.markdown_view(id, text).text_color(hsla(tone)).into_any_element()
+    }
+
+    fn markdown_view(&self, id: String, text: &str) -> TextView {
         let mono = self.mono();
         TextView::markdown(ElementId::Name(id.into()), SharedString::from(text.to_owned()))
             .style(crate::markdown::style(&self.theme, &mono, self.zoom))
             .selectable(true)
-            .into_any_element()
     }
 
     /// The square every mark sits in, the width of a large icon.
@@ -770,16 +778,28 @@ impl ConversationView {
         let s = theme.surfaces;
         let key = format!("{}-{}-{}", id.turn, id.step, id.block);
         match &block.kind {
+            // What the model is writing reads a step lighter than what the transcript settled,
+            // until the entry for it comes and takes its place.
             LiveKind::Text => div()
                 .debug_selector({
                     let key = key.clone();
                     move || format!("live-{key}")
                 })
+                .id(ElementId::Name(SharedString::from(format!("live-{key}"))))
+                .role(Role::Article)
+                .aria_label(SharedString::from(format!("Writing: {}", first_line(&block.text))))
                 .py(self.z(theme.spacing.xs))
                 .line_height(gpui::relative(theme.typography.markdown_line_height))
-                .child(self.markdown(format!("live-md-{}-{key}", self.session), &block.text))
+                .child(self.markdown_in(
+                    format!("live-md-{}-{key}", self.session),
+                    &block.text,
+                    s.text_secondary,
+                ))
                 .into_any_element(),
             LiveKind::Thinking => div()
+                .id(ElementId::Name(SharedString::from(format!("live-{key}"))))
+                .role(Role::Article)
+                .aria_label("Thinking")
                 .debug_selector(move || format!("live-{key}"))
                 .py(self.z(theme.spacing.xs))
                 .flex()
@@ -800,7 +820,7 @@ impl ConversationView {
                 )
                 .into_any_element(),
             LiveKind::Tool { name, .. } => {
-                let input = block.text.lines().last().unwrap_or_default().trim().to_owned();
+                let input = tools::preparing(&block.text);
                 div()
                     .id("live-tool")
                     .debug_selector(move || format!("live-{key}"))

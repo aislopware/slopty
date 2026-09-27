@@ -31,6 +31,12 @@ pub use harness::Stack;
 /// Environment variable naming the socket the app should listen on.
 pub const SOCKET_ENV: &str = "SLOPTY_TEST_SOCKET";
 
+/// Environment variable naming a file of Tailscale `Status` JSON for the e2e build's app.
+///
+/// The app reads it in place of this machine's tailnet, so its panel offers what the test put
+/// there and never what the machine's real tailnet answers.
+pub const TAILNET_STATUS_ENV: &str = "SLOPTY_TAILNET_STATUS";
+
 /// A pointer button, as the driver names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

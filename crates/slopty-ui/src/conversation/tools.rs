@@ -337,8 +337,37 @@ pub fn tokens(n: u64) -> String {
     }
 }
 
+/// What a call being prepared is about, from the input the model has written so far.
+///
+/// Once that is a whole JSON object, its subject (the command, the file's name, the pattern,
+/// the address), as its title will say it; before that, the last line written.
+#[must_use]
+pub fn preparing(input: &str) -> String {
+    const SUBJECTS: [&str; 8] =
+        ["command", "file_path", "path", "pattern", "url", "query", "description", "prompt"];
+    let whole = serde_json::from_str::<serde_json::Value>(input).ok();
+    let subject = whole.as_ref().and_then(|v| {
+        SUBJECTS.iter().find_map(|key| {
+            let text = v.get(*key)?.as_str()?;
+            Some(if key.ends_with("path") { file_name(text) } else { first_line(text) })
+        })
+    });
+    subject.unwrap_or_else(|| input.lines().last().unwrap_or_default().trim()).to_owned()
+}
+
 #[cfg(test)]
 mod tests {
+    /// A call being prepared shows its subject once its input is whole, and the line being
+    /// written before that.
+    #[test]
+    fn a_call_being_prepared_is_named_by_its_subject() {
+        assert_eq!(preparing(r#"{"command": "echo hi", "description": "Say hi"}"#), "echo hi");
+        assert_eq!(preparing(r#"{"file_path": "/work/notes.txt", "content": "x"}"#), "notes.txt");
+        assert_eq!(preparing(r#"{"command": "echo"#), r#"{"command": "echo"#);
+        assert_eq!(preparing(r#"{"todos": []}"#), r#"{"todos": []}"#);
+        assert_eq!(preparing(""), "");
+    }
+
     use slopty_proto::conversation::ThreadId;
 
     use super::*;

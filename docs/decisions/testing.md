@@ -275,6 +275,27 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   acknowledgements, so load moves neither. Stuck, the ratio is 0.08 at 60 ms and 0.25 at 10 ms
   each way. The short-trip test checks from 10 ms each way up. The vendored crate's own tests
   (patch 6's unit test) do not run in Slopty's gate. The rates stay printed as `MEASURE` lines.
-  The many-small-files bound is now half the one-round-trip-per-file time (1.08 s), not a quarter:
+  The many-small-files bound is now half the one-round-trip-per-file time (1 s), not a quarter:
   it read 0.58 s with every core taken, and the bug took 2.16 s. The nextest override that ran
   `bulk_over_delay` alone is gone.
+
+- ✅ **`transfers` is deterministic and holds the Mac's 0.2%** (2026-09-27). Amends the 0.2%
+  entry above, which let `transfers` keep 1%. Its runs differed by 0.43% to 2.8%, and the diff
+  showed why: the long temporary path the test `cd`'d into wrapped differently from run to run,
+  and the port was the one the OS picked. The test now runs with a home of its own
+  (`Stack::launch_at_home`, the real path of `home` under the run's root), so the shells say
+  `~/drop-here` and no temporary path of the machine's is in the render. It listens on the first
+  pair of free ports from 47310 (`steady_port`; the app forwards a port its own machine holds on
+  the next one), which is 47310 → 47311 on a quiet machine. The upload's progress needs no hold:
+  a 2 GiB sparse file still reads 0% when the frame is taken. Three runs then differed from the
+  golden by 0.008%, 0.008% and 0.009% (the `app` suite's `a_forwarded_port` test, run alone
+  three times in `cargo xtask e2e app`'s environment; each run's `snapshot transfers` line), so
+  it uses `snapshot::MAC_TOLERANCE` and `TRANSFERS_TOLERANCE` is gone.
+
+- ✅ **The app under test reads a stand-in tailnet** (2026-09-27). The first-run panel now looks
+  for servers and workers on the tailnet (`docs/decisions/ui.md`). An app under test on a Mac
+  running Tailscale would find what this machine's tailnet answers, a worker of the developer's
+  own included, and the `first-run` and `add-worker` goldens would show it or not by timing.
+  In the e2e build the app reads the `Status` JSON named by `slopty_e2e::TAILNET_STATUS_ENV`
+  instead of the `LocalAPI`, and `spawn_app` writes an empty running tailnet there, so the panel
+  says "Nothing answered on your tailnet" at once; `first-run` waits for those words.

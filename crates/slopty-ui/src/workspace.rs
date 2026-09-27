@@ -485,6 +485,9 @@ pub struct WorkspaceView {
     items_dirty: bool,
     /// Who needs the human, worked out once per frame for everything that frame draws.
     drawn_waiting: Vec<agents::Waiting>,
+    /// The number each unnamed tile that reads like an earlier one of its worker carries after
+    /// its title ("Terminal 2"), worked out once a frame.
+    twins: HashMap<ItemId, u32>,
     /// The active workspace's strip as this frame lays it out: the title bar's column dots.
     drawn_strip: slopty_client::layout::Strip,
     /// The navigator, the title bar and the status bar, each a view of its own.
@@ -678,6 +681,7 @@ impl WorkspaceView {
             file_focus: HashMap::new(),
             items_dirty: true,
             drawn_waiting: Vec::new(),
+            twins: HashMap::new(),
             drawn_strip: slopty_client::layout::Strip::default(),
             chrome: Chrome::new(cx),
             running: HashMap::new(),
@@ -1262,6 +1266,7 @@ impl gpui::Render for WorkspaceView {
         // frame draws: the bar's column dots and the strip agree, and none is worked out twice.
         let frame = self.frame_at_clock(window);
         self.drawn_waiting = self.needs_you();
+        self.twins = self.number_twins(cx);
         if self.drawn_strip != frame.strip {
             self.drawn_strip.clone_from(&frame.strip);
         }

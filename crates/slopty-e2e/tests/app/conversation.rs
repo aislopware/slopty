@@ -5,8 +5,12 @@
 //! conversation to the app once ⌘J shows the face, and holds the permission prompt for it.
 //! Nothing is typed into a shell and no agent runs.
 //!
+//! What the model writes before the transcript has it comes from Slopty's Claude Code mod: its
+//! recorded events are posted to the worker's mod socket as the mod posts them.
+//!
 //! Goldens: the face with a held prompt over an edit's diff, light and dark; a subagent's own
-//! thread; and the face on a phone-width window, where it is the default.
+//! thread; the face on a phone-width window, where it is the default; and a step the model is
+//! still writing.
 
 use std::path::{Path, PathBuf};
 
@@ -191,5 +195,102 @@ async fn a_phone_opens_on_the_conversation() {
     .await
     .unwrap();
     golden(drv, &dir, "conversation-phone").await;
+    stack.shutdown().await;
+}
+
+/// The recorded mod session `name`: its batches, each put in `session`, and its transcript's
+/// records with their stamps taken out, since an entry stamped long before the follower saw
+/// the block it settles is an older one.
+fn recorded_mod(name: &str, session: &str) -> (Vec<Value>, Vec<String>) {
+    let dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../slopty-agent/tests/fixtures/mod").join(name);
+    let batches = std::fs::read_to_string(dir.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut batch: Value = serde_json::from_str(line).unwrap();
+            batch["session"] = Value::String(session.to_owned());
+            batch
+        })
+        .collect();
+    let records = std::fs::read_to_string(dir.join("transcript.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut record: Value = serde_json::from_str(line).unwrap();
+            record.as_object_mut().unwrap().remove("timestamp");
+            record.to_string()
+        })
+        .collect();
+    (batches, records)
+}
+
+/// While the model writes a step, the face shows it after the thread's last entry in a lighter
+/// tone: the answer as it grows and the tool call being prepared. When the step stops and the
+/// transcript has its entries, they take the live blocks' place.
+#[tokio::test]
+async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
+    if !gated() {
+        return;
+    }
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let dump = first_shell(&mut stack.driver).await;
+    let session = dump.terminals[0].session.clone();
+    let main = stack.path("projects").join("s1.jsonl");
+    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+    std::fs::write(&main, "").unwrap();
+    let start = json!({
+        "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+        "transcript_path": main, "cwd": stack.path("home"),
+    });
+    let done = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
+    assert!(done.success(), "the relay ran");
+    stack.driver.keys("cmd-j").await.unwrap();
+    stack
+        .driver
+        .wait_for("the conversation", STEP, |d| has(d, "Group", "Conversation"))
+        .await
+        .unwrap();
+
+    // The first step as the model writes it: its answer, then the Bash call's input.
+    let (batches, records) = recorded_mod("bash", &session);
+    let stop = |b: &Value| b["events"].as_array().unwrap().iter().any(|e| e["kind"] == "stop");
+    let first_stop = batches.iter().position(stop).unwrap();
+    for batch in &batches[..first_stop] {
+        assert_eq!(stack.post_mod(batch).await.unwrap(), 204, "{batch}");
+    }
+    let writing = "Writing: Let me run it.";
+    let drv = &mut stack.driver;
+    drv.wait_for("the live step", STEP, |d| {
+        has(d, "Article", writing) && has(d, "Status", "Preparing Bash")
+    })
+    .await
+    .unwrap();
+    assert!(labels(&drv.dump().await.unwrap(), "Article").iter().all(|l| l == writing));
+    golden(drv, &dir, "conversation-live").await;
+
+    // The step stops and the transcript gets the answer and the call: both settle, into the
+    // turn's fold now that the agent has no turn going.
+    assert_eq!(stack.post_mod(&batches[first_stop]).await.unwrap(), 204);
+    let result = records.iter().position(|l| l.contains(r#""type":"tool_result""#)).unwrap();
+    let mut transcript = records[..result].join("\n");
+    transcript.push('\n');
+    std::fs::write(&main, transcript).unwrap();
+    let dump = stack
+        .driver
+        .wait_for("the step settled", STEP, |d| {
+            labels(d, "Button").iter().any(|l| l == "Worked \u{b7} 1 step")
+                && !has(d, "Article", writing)
+                && !has(d, "Status", "Preparing Bash")
+        })
+        .await
+        .unwrap();
+    assert!(
+        !labels(&dump, "Article").iter().any(|l| l.starts_with("Writing: ")),
+        "{:#?}",
+        dump.a11y
+    );
     stack.shutdown().await;
 }

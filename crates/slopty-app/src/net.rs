@@ -46,16 +46,51 @@ fn endpoint() -> Result<slopty_net::Endpoint, String> {
     Ok(ENDPOINT.get_or_init(|| bound).clone())
 }
 
-/// The Slopty servers this machine's Tailscale finds on the tailnet, best first, for the first
-/// run to offer; none while Tailscale is not up here, and none on iOS, where no app can read it.
-pub async fn find_servers() -> Vec<slopty_net::discover::Found> {
-    let (Ok(endpoint), Some(api)) = (endpoint(), slopty_tailnet::LocalApi::find()) else {
-        return Vec::new();
+/// What answered on the tailnet: the Slopty servers and the workers, each best first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tailnet {
+    /// Nodes that answered a server's handshake.
+    pub servers: Vec<slopty_net::discover::Found>,
+    /// Nodes that answered a worker's handshake.
+    pub workers: Vec<slopty_net::discover::Found>,
+}
+
+/// The servers and workers this machine's Tailscale finds on the tailnet, for the panel.
+///
+/// Both are looked for at once. Nothing is found while Tailscale is not up here, nor on iOS,
+/// where no app can read it. A worker already added at the address it answered from is left
+/// out: it has its link.
+pub async fn find_on_tailnet() -> Tailnet {
+    let (Ok(endpoint), Some(status)) = (endpoint(), tailnet_status().await) else {
+        return Tailnet::default();
     };
-    match api.status().await {
-        Ok(status) if status.running() => slopty_net::discover::servers(&endpoint, &status).await,
-        Ok(_) | Err(_) => Vec::new(),
+    match status {
+        status if status.running() => {
+            let (servers, mut workers) = tokio::join!(
+                slopty_net::discover::servers(&endpoint, &status),
+                slopty_net::discover::workers(&endpoint, &status),
+            );
+            let added: Vec<String> = known_workers()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|w| w.address.host().to_owned())
+                .collect();
+            workers.retain(|w| !added.contains(&w.addr.ip().to_string()));
+            Tailnet { servers, workers }
+        }
+        _ => Tailnet::default(),
     }
+}
+
+/// The tailnet as this machine's Tailscale describes it, if one this process can read runs; in
+/// the e2e build, the stand-in the harness names instead ([`slopty_e2e::TAILNET_STATUS_ENV`]).
+async fn tailnet_status() -> Option<slopty_tailnet::Status> {
+    #[cfg(feature = "e2e")]
+    if let Some(path) = std::env::var_os(slopty_e2e::TAILNET_STATUS_ENV) {
+        let text = std::fs::read(path).ok()?;
+        return serde_json::from_slice(&text).ok();
+    }
+    slopty_tailnet::LocalApi::find()?.status().await.ok()
 }
 
 /// Which app this is, by platform, as workers and the server show it.

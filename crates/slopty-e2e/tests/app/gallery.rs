@@ -19,8 +19,6 @@ use slopty_e2e::{Command, Driver, Dump, Stack};
 pub const STEP: Duration = Duration::from_secs(20);
 /// The renders' window: the size the other app goldens use.
 const WINDOW: (f32, f32) = (900.0, 600.0);
-/// The transfers golden's: a port and a moving upload are in it.
-const TRANSFERS_TOLERANCE: f64 = 0.01;
 
 pub fn gated() -> bool {
     if std::env::var_os("SLOPTY_APP_E2E").is_none() {
@@ -83,7 +81,13 @@ async fn the_first_run_offers_one_way_in() {
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    drv.wait_for("the connect panel", STEP, |d| d.adding).await.unwrap();
+    // The look on the tailnet (the harness's empty one) has ended, so the golden does not
+    // depend on which side of it the frame landed.
+    drv.wait_for("the connect panel, done looking", STEP, |d| {
+        d.adding && d.a11y_node("Status", Some("Nothing answered on your tailnet")).is_some()
+    })
+    .await
+    .unwrap();
     golden(drv, &dir, "first-run").await;
     stack.set_appearance("dark").unwrap();
     let drv = &mut stack.driver;
@@ -303,20 +307,29 @@ async fn a_forwarded_port_and_an_upload_show_on_their_tiles() {
     if !gated() {
         return;
     }
-    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    // A home of the run's own: the shells name the directory under it from `~`, so no
+    // temporary path of the machine's is in the render.
+    let mut stack = Stack::launch_at_home("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
-    let work = stack.path("drop-here");
-    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(stack.path("home").join("drop-here")).unwrap();
     // Sparse: a file big enough to still be on its way when the frame is drawn, that costs
     // the disk nothing to make.
     let source = stack.path("disk.img");
     std::fs::File::create(&source).unwrap().set_len(2 << 30).unwrap();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    let dump = crate::tests::shell_in(drv, &work).await;
+    first_shell(drv).await;
+    drv.type_text("cd drop-here").await.unwrap();
+    drv.keys("enter").await.unwrap();
+    let dump = drv
+        .wait_for("the shell in the drop directory", STEP, |d| {
+            d.rows_containing("~/drop-here %").len() == 1
+        })
+        .await
+        .unwrap();
     let shell = dump.item("terminal").unwrap().clone();
 
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = steady_port();
     let listen = port.to_string();
     drv.keys("cmd-t").await.unwrap();
     drv.wait_for("a second shell with a prompt", STEP, |d| {
@@ -355,14 +368,26 @@ async fn a_forwarded_port_and_an_upload_show_on_their_tiles() {
         dump.a11y
     );
     let frame = drv.render(&dir.join("transfers.png")).await.unwrap();
-    // Its port is the one the OS picked and its progress moves: two runs differ by 0.43%.
-    assert_matches("transfers", &frame, TRANSFERS_TOLERANCE, &artifacts_dir()).unwrap();
+    assert_matches("transfers", &frame, TOLERANCE, &artifacts_dir()).unwrap();
     let cancel = drv.dump().await.unwrap();
     if let Some(node) = cancel.a11y_node("Button", Some("Cancel upload")) {
         let [x, y, w, h] = node.bounds;
         drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
     }
     stack.shutdown().await;
+}
+
+/// The first port of a fixed run that is free here, with the one after it: the app forwards a
+/// port its own machine holds (as this one's `nc` does) on the next free one, and a golden
+/// shows both. Free, as it is on a quiet machine, it is the same number every run.
+fn steady_port() -> u16 {
+    let free = |port: u16| {
+        ["127.0.0.1", "0.0.0.0"].iter().all(|ip| std::net::TcpListener::bind((*ip, port)).is_ok())
+    };
+    (47_310_u16..47_410)
+        .step_by(10)
+        .find(|p| free(*p) && free(p.saturating_add(1)))
+        .expect("a free pair of ports in 47310..47410")
 }
 
 /// A remote window before its first frame: the chrome a picture sits in, around the

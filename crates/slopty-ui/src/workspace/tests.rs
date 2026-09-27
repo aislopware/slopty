@@ -243,6 +243,13 @@ fn marked_frame(seq: u64, rows: &[(&str, SemanticMark)], cursor_row: u16) -> Ter
 }
 
 /// `debug_bounds` wants a static selector; tests may leak a handful.
+/// The accessibility tree of the next frame.
+fn tree(cx: &mut VisualTestContext) -> Vec<crate::a11y::Node> {
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    cx.run_until_parked();
+    cx.update(|window, _cx| crate::a11y::tree(window))
+}
+
 fn selector(part: &str, id: ItemId) -> &'static str {
     Box::leak(format!("{part}-{}", id.as_uuid()).into_boxed_str())
 }

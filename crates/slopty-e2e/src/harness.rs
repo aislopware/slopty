@@ -394,6 +394,9 @@ fn loopback_address(listen: &str) -> Result<String> {
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 set -e
 stage() { while [ ! -f "$SLOPTY_FAKE_CLAUDE_DIR/$1" ]; do sleep 0.05; done; }
+# The worker asks for the version at start-up. Waiting on a stage there outlived the killed
+# worker as an orphan; failing at once reports what the wait's time-out did: no version.
+[ "$1" = "--version" ] && exit 1
 echo "fake claude in $PWD"
 stage working
 # OSC 2 with U+25D0 CIRCLE WITH LEFT HALF BLACK, one of the frames Claude Code paints into
@@ -422,12 +425,15 @@ async fn spawn_app(
     std::fs::create_dir_all(&app_dir)?;
     pin_appearance(&app_dir)?;
     let app_sock = root.join(format!("{name}.sock"));
+    let tailnet = root.join("tailnet.json");
+    std::fs::write(&tailnet, EMPTY_TAILNET)?;
     let mut app = Command::new(bin("slopty-app")?)
         .env("RUST_LOG", log)
         .env("SLOPTY_DATA_DIR", &app_dir)
         .env(crate::SOCKET_ENV, &app_sock)
         // Local echo would put predicted text in the rows before the worker confirms it.
         .env("SLOPTY_PREDICT", "never")
+        .env(crate::TAILNET_STATUS_ENV, &tailnet)
         .envs(env.iter().copied())
         .env(PASTEBOARD_ENV, pasteboard_name(root, name))
         .stdin(Stdio::null())
@@ -440,6 +446,10 @@ async fn spawn_app(
     let driver = connect_with_retry(&app_sock, &mut app).await?;
     Ok((app, driver))
 }
+
+/// The tailnet an app under test sees: up, with no node to try. What the machine's own tailnet
+/// answers (a worker of its own, a server) would otherwise land in the first-run goldens.
+const EMPTY_TAILNET: &str = r#"{"BackendState":"Running","Self":null,"Peer":null}"#;
 
 /// The appearance every app under test starts in, whatever the machine's is: the default
 /// (`system`) would make each golden depend on System Settings on the day it runs.
@@ -611,6 +621,24 @@ impl Stack {
     pub async fn launch_with(worker_name: &str, env: &[(&str, &str)]) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-")?;
         Self::launch_in(dir, worker_name, env).await
+    }
+
+    /// [`Self::launch`] with a `HOME` of the run's own for the daemons and the app (`home`
+    /// under the run's root, its real path), so a shell's prompt, title and place name the
+    /// directories under it from `~` and none of the machine's temporary path reaches a render.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`], plus when the home cannot be made.
+    pub async fn launch_at_home(worker_name: &str) -> Result<Self> {
+        let dir = StackDir::new("slopty-e2e-")?;
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home)?;
+        // The real path: a shell started in a directory under it reports that one, and its
+        // prompt shortens only what starts with `HOME` as written.
+        let home = std::fs::canonicalize(&home)?;
+        let home = home.to_string_lossy().into_owned();
+        Self::launch_in(dir, worker_name, &[("HOME", &home)]).await
     }
 
     /// [`Self::launch`] up to the app's first frame, before it knows any worker: what someone
@@ -908,6 +936,40 @@ impl Stack {
             let _written = stdin.write_all(&bytes).await;
         });
         Ok(child)
+    }
+
+    /// Post one batch of Slopty's Claude Code mod events to the worker's mod socket
+    /// (`worker.mod.sock`, beside its control socket) as the mod does: `POST /v1/events` over
+    /// HTTP/1.1. Returns the answer's status, `204` once the events are on the board.
+    ///
+    /// # Errors
+    ///
+    /// When the socket cannot be reached or does not answer within the start-up bound.
+    pub async fn post_mod(&self, batch: &Value) -> Result<u16> {
+        let body = batch.to_string();
+        let head = format!(
+            "POST /v1/events HTTP/1.1\r\nhost: slopty\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        let socket = self.path("worker.mod.sock");
+        let exchange = async {
+            let mut stream = UnixStream::connect(&socket).await?;
+            stream.write_all(head.as_bytes()).await?;
+            stream.write_all(body.as_bytes()).await?;
+            let mut answer = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut answer).await?;
+            anyhow::Ok(answer)
+        };
+        let answer = tokio::time::timeout(STARTUP, exchange)
+            .await
+            .with_context(|| format!("{} did not answer", socket.display()))??;
+        let answer = String::from_utf8_lossy(&answer);
+        answer
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .with_context(|| format!("no HTTP status: {answer:?}"))
     }
 
     /// Play a Claude Code hook in `session` (the id from the dump): write [`TRANSCRIPT`] under

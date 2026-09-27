@@ -18,13 +18,6 @@ fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> 
     cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"))
 }
 
-/// The accessibility tree of the next frame.
-fn tree(cx: &mut VisualTestContext) -> Vec<crate::a11y::Node> {
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    cx.run_until_parked();
-    cx.update(|window, _cx| crate::a11y::tree(window))
-}
-
 /// A remote window whose stream has not opened keeps a blank body for the loading grace, so a
 /// fast answer never flashes a word; past it the body says what is opening and on which
 /// worker. Its header slot turns the working mark the whole time.

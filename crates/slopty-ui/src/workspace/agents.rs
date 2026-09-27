@@ -84,6 +84,22 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
     }
 }
 
+/// The agent's state in a word or two, without the detail: a header's pill where there is no
+/// room for more (a phone), or where the face beside it shows the detail itself.
+#[must_use]
+pub fn agent_status_word(agent: &AgentEvent) -> String {
+    match &agent.status {
+        AgentStatus::None => String::new(),
+        AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt) => "Idle".to_owned(),
+        AgentStatus::Working => "Working".to_owned(),
+        AgentStatus::Tool { tool } => tool.clone(),
+        AgentStatus::Blocked(BlockReason::Permission { .. }) => "Needs approval".to_owned(),
+        AgentStatus::Blocked(BlockReason::Question) => "Has a question".to_owned(),
+        AgentStatus::Blocked(BlockReason::Elicitation) => "Needs input".to_owned(),
+        AgentStatus::Done => "Turn finished".to_owned(),
+    }
+}
+
 impl WorkspaceView {
     /// A worker observed a coding agent's state in a session.
     pub fn agent_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
@@ -448,7 +464,9 @@ impl WorkspaceView {
     /// The agent pill in a terminal's header: a short line in the tone of its status, which the
     /// status mark beside it draws as an icon. While the agent waits on the human the pill is a
     /// button that brings the terminal up so the TUI's own prompt can be answered there. Slopty
-    /// never answers for the human.
+    /// never answers for the human. On a phone, which has no room for the detail, and beside a
+    /// face, which shows it itself, the pill says the state alone; a screen reader still hears
+    /// all of it. An idle agent has no pill, its mark saying all there is.
     pub(super) fn agent_badge(
         &self,
         tile: TileRef,
@@ -456,13 +474,15 @@ impl WorkspaceView {
         agent: &AgentEvent,
         chrome: Chrome,
         cx: &Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let k = chrome.k;
         // The pill's tone is its status mark's; busy states (thinking, a tool) share the
         // accent, and the label says which.
-        let Some(status) = Status::of_agent(agent) else { return div().into_any_element() };
-        let (label, color) = (agent_status_text(agent), status.tone(theme));
+        let status = Status::of_agent(agent).filter(|s| *s != Status::Idle)?;
+        let (full, color) = (agent_status_text(agent), status.tone(theme));
+        let compact = self.layout.is_phone() || self.face_shown(session);
+        let label = if compact { agent_status_word(agent) } else { full.clone() };
         let item = tile.item;
         // An agent waiting on the human is the one state worth a click: the badge itself
         // goes to it. No second "go" beside it — a click on the tile did the same.
@@ -477,12 +497,12 @@ impl WorkspaceView {
             .id("agent")
             .debug_selector(move || format!("agent-{}", item.as_uuid()))
             .role(if waiting { Role::Button } else { Role::Status })
-            .aria_label(SharedString::from(label.clone()))
+            .aria_label(SharedString::from(full))
             // The answer belongs to the agent's own prompt; the click only goes there.
             .when(waiting, |el| el.aria_description(SHOW_PROMPT))
             .flex()
             .items_center()
-            .flex_none()
+            .min_w_0()
             .max_w(px(ui_size * 22.0))
             .overflow_hidden()
             .gap(px(theme.spacing.xs * k))
@@ -493,7 +513,7 @@ impl WorkspaceView {
             .text_size(px(ui_size))
             .text_color(hsla(color))
             .child(
-                div().overflow_hidden().child(
+                div().min_w_0().overflow_hidden().child(
                     ChromeText::new(label, px(theme.typography.small()), k)
                         .fill()
                         .zooming(chrome.zooming),
@@ -508,14 +528,16 @@ impl WorkspaceView {
         } else {
             pill
         };
-        div()
-            .id("badge")
-            .debug_selector(move || format!("badge-{}", item.as_uuid()))
-            .flex()
-            .flex_none()
-            .items_center()
-            .child(pill)
-            .into_any_element()
+        Some(
+            div()
+                .id("badge")
+                .debug_selector(move || format!("badge-{}", item.as_uuid()))
+                .flex()
+                .min_w_0()
+                .items_center()
+                .child(pill)
+                .into_any_element(),
+        )
     }
 
     /// The badge for a long shell command that ended unwatched: its status and how long it

@@ -2,6 +2,8 @@
 //! the body (a terminal, a remote window or display, a note, a file card), with the pill that
 //! says when the body cannot show what it should.
 
+use std::collections::HashMap;
+
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -11,7 +13,7 @@ use gpui::{
 };
 use gpui_kit::component::input::Input;
 use slopty_client::layout::{Placed, TileRef, WorkerKey};
-use slopty_core::SessionId;
+use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
@@ -63,6 +65,9 @@ const HEADER_GROUP: &str = "tile-header";
 
 /// How much faster a header's place shrinks than its title.
 const PLACE_SHRINK: f32 = 1000.0;
+/// How much faster than the title a header's readouts give way: an agent's pill shortens to
+/// an ellipsis while the title still reads whole.
+const STRIP_SHRINK: f32 = 20.0;
 
 /// What the in-body pill says while a tile's worker is being dialled again.
 pub const RECONNECTING: &str = "Reconnecting…";
@@ -404,7 +409,29 @@ impl WorkspaceView {
     /// What a header says: the name the human gave the tile, else its derived title.
     #[must_use]
     pub fn card_title(&self, _tile: TileRef, item: &Item, cx: &App) -> String {
-        item.name.clone().unwrap_or_else(|| self.derived_title(item, cx))
+        item.name.clone().unwrap_or_else(|| {
+            let title = self.derived_title(item, cx);
+            match self.twins.get(&item.id) {
+                Some(n) => format!("{title} {n}"),
+                None => title,
+            }
+        })
+    }
+
+    /// Unnamed tiles of one worker that would read alike ("Terminal" and "Terminal") are told
+    /// apart by a number after the first, in the order they were made: the second is
+    /// "Terminal 2". A named tile keeps the name it was given.
+    pub(super) fn number_twins(&self, cx: &App) -> HashMap<ItemId, u32> {
+        let mut seen: HashMap<(WorkerKey, String), u32> = HashMap::new();
+        let mut twins = HashMap::new();
+        for (worker, item) in self.items().filter(|(_, i)| i.name.is_none()) {
+            let count = seen.entry((worker, self.derived_title(item, cx))).or_insert(0);
+            *count = count.saturating_add(1);
+            if *count > 1 {
+                twins.insert(item.id, *count);
+            }
+        }
+        twins
     }
 
     /// A terminal's title, the first that says something: the command it runs, a title its
@@ -629,6 +656,7 @@ impl WorkspaceView {
         let id = item.id;
         let k = chrome.k;
         let focused = placed.focused;
+        let derived = self.derived_title(item, cx);
         let title = self.card_title(tile, item, cx);
         let kind = kind_name(item);
         let agent = match item.kind {
@@ -691,7 +719,7 @@ impl WorkspaceView {
         if shapes {
             return header.into_any_element();
         }
-        let badge = agent.map(|(session, a)| self.agent_badge(tile, session, a, chrome, cx));
+        let badge = agent.and_then(|(session, a)| self.agent_badge(tile, session, a, chrome, cx));
         let unwatched = match &item.kind {
             ItemKind::Terminal { session } => self.finished.get(session).map(|f| (*session, f)),
             _ => None,
@@ -780,6 +808,10 @@ impl WorkspaceView {
         // not it, how far a note's tasks got. Muted, in the UI face as every header's context
         // is, with no separator: the colour tells it from the title.
         let place = self.tile_place(item, cx);
+        let place = match item.kind {
+            ItemKind::Terminal { .. } => place.and_then(|p| place_beside(p, &derived)),
+            _ => place,
+        };
         // A directory keeps the folder it ends in; an address keeps its host.
         let path = matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::File { .. });
         let place = place.map(|text| {
@@ -870,8 +902,9 @@ impl WorkspaceView {
         } else {
             let lead = self.leading_slot(tile, item, ink, k, cx);
             let name = self.header_name(tile, id, title, chrome);
-            // The title and its place share what the right side leaves, the place giving way
-            // first.
+            // The title keeps its width and what is beside it gives way: the place first, then
+            // the readouts at the end (an agent's pill), the title last. Each takes what it
+            // needs, and an empty stretch between them takes the rest.
             // The unsaved dot follows the title it qualifies, as an editor's tab has it, not
             // the far end of the bar.
             let named = div()
@@ -881,20 +914,16 @@ impl WorkspaceView {
                 .gap(px(theme.spacing.xs * k))
                 .child(name)
                 .when_some(unsaved, gpui::ParentElement::child);
-            let names = div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.sm * k))
-                .child(named)
-                .children(place);
+            let renaming = self.rename.as_ref().is_some_and(|r| r.tile == tile);
+            let named = if renaming { named.flex_1() } else { named };
             header
                 .items_center()
                 .px(px(theme.spacing.inset() * k))
                 .gap(px(theme.spacing.sm * k))
                 .child(lead)
-                .child(names)
+                .child(named)
+                .children(place)
+                .when(!renaming, |el| el.child(div().flex_1()))
                 .when_some(worker, gpui::ParentElement::child)
                 .children(ports)
                 .when_some(upload, gpui::ParentElement::child)
@@ -934,7 +963,7 @@ impl WorkspaceView {
     fn header_name(
         &self,
         tile: TileRef,
-        id: slopty_core::ItemId,
+        id: ItemId,
         title: String,
         chrome: Chrome,
     ) -> gpui::AnyElement {
@@ -1392,16 +1421,20 @@ impl WorkspaceView {
             .child(close);
         let readouts = div()
             .debug_selector(move || format!("readouts-{id}"))
+            .min_w_0()
+            .overflow_hidden()
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs * k))
             .group_hover(HEADER_GROUP, gpui::Styled::invisible)
             .children(readouts);
+        let mut strip = div();
+        // Gives way well before the title does and well after the place, down to its buttons.
+        strip.style().flex_shrink = Some(STRIP_SHRINK);
         kit::tabular(
-            div()
+            strip
                 .debug_selector(move || format!("strip-{id}"))
                 .relative()
-                .flex_none()
                 .h_full()
                 .min_w(px(buttons * kit::icon_button_side(theme) * k))
                 .flex()
@@ -1654,15 +1687,29 @@ impl WorkspaceView {
             let worker = (self.workers.len() > 1).then(|| self.worker_name(placed.tile.worker));
             let (meta, _) = self.tile_meta(item, std::time::SystemTime::now(), cx);
             let meta = super::rollup::meta_line([Some(meta.as_str()), worker.as_deref()]);
+            // Hung under the title rather than stacked with it, so every cover's title sits on
+            // one line across the card, with a line under it or not.
             let meta = (!meta.is_empty()).then(|| {
                 div()
-                    .debug_selector(move || format!("shapes-meta-{}", id.as_uuid()))
-                    .max_w_full()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_color(muted)
-                    .child(SharedString::from(meta))
+                    .absolute()
+                    .top_full()
+                    .left_0()
+                    .right_0()
+                    .pt(px(theme.spacing.xxs))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .debug_selector(move || format!("shapes-meta-{}", id.as_uuid()))
+                            .max_w_full()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(muted)
+                            .child(SharedString::from(meta)),
+                    )
             });
+            let titled =
+                div().relative().w_full().flex().justify_center().child(label).children(meta);
             div()
                 .debug_selector(move || format!("shapes-{}", id.as_uuid()))
                 .absolute()
@@ -1672,13 +1719,11 @@ impl WorkspaceView {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(theme.spacing.xxs))
                 .whitespace_nowrap()
                 .text_size(px(theme.typography.small()))
                 .font_family(theme.typography.ui_family.clone())
                 .bg(hsla(theme.terminal.bg))
-                .child(label)
-                .children(meta)
+                .child(titled)
         });
         if pill.is_none() && cover.is_none() {
             return content;
@@ -1901,11 +1946,25 @@ impl WorkspaceView {
     }
 }
 
+/// Where a shell is, beside a title that may already name the directory it stands in: then
+/// the directory above it ("drop-here" over "~/work", not "~/work/drop-here"), and nothing
+/// when that is all there was.
+pub(super) fn place_beside(place: String, title: &str) -> Option<String> {
+    if place == title {
+        return None;
+    }
+    match place.strip_suffix(title).and_then(|p| p.strip_suffix('/')) {
+        Some("") => Some("/".to_owned()),
+        Some(parent) => Some(parent.to_owned()),
+        None => Some(place),
+    }
+}
+
 /// A header pill: `small()` type on a faint fill of its tone, the tone as text, `radii.xs`;
 /// hover deepens the fill. Scaled by the chrome's `k`. Its id is scoped by the tile's.
 fn pill(
     part: impl Into<SharedString>,
-    item: slopty_core::ItemId,
+    item: ItemId,
     label: impl Into<SharedString>,
     tone: slopty_theme::Rgb,
     theme: &Theme,

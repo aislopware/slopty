@@ -2547,3 +2547,46 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     answer once, released prompt, unfollow on close and agent exit, phone default); app goldens
     `conversation`, `conversation-dark`, `conversation-subagent` and `conversation-phone`,
     driven through the real worker and `slopty hook`.
+
+- ✅ **Design review, round three: the title reads first, alike tiles are numbered, the
+  tailnet's workers are a way in** (2026-09-27, a review of the goldens).
+  - **The first run offers the tailnet's workers too.** It looked only for servers, so a
+    tailnet with workers and no server said "Nothing answered". The panel now looks for both at
+    once (`net::find_on_tailnet`, over `discover::servers` and `discover::workers`). Each server
+    is a row ("Server · 100.64.0.1", press to connect), then each worker not yet added
+    ("Worker · …", a Mac glyph, press to add it at once; the panel turns into the worker's, so a
+    failure is told beside its address). A worker's own panel ("Add a worker…") looks too, and
+    offers only workers. The field takes the best host of the panel's own kind, never a
+    worker's address in a server's field. The words stay "Looking on your tailnet…" and
+    "Nothing answered on your tailnet". Workers the server lists or the store holds are left
+    out. The e2e app reads a stand-in tailnet (`slopty_e2e::TAILNET_STATUS_ENV`, empty from the
+    harness), so no golden shows what this Mac's own tailnet answers, and `first-run` is taken
+    once the look has ended.
+  - **A header's title keeps its width; the pill gives way.** On a phone the agent's pill
+    ("Needs approval: $ touch …") took the header and squeezed the title. The title is now its
+    own flex item at its text's width, the place gives way first (`PLACE_SHRINK`), the readout
+    strip next (`STRIP_SHRINK`, an ellipsis, down to its buttons), the title last. On a phone,
+    and beside a face that shows the detail itself, the pill says the state alone
+    (`agent_status_word`: "Needs approval", "Has a question"); a screen reader still hears the
+    whole line. An idle agent has no pill: the hollow mark in the slot says it, and a grey
+    "Idle" chip read as a button.
+  - **Alike tiles are numbered.** Two shells in one worker both read "Terminal" in the
+    navigator, the tabs, the overview and the palette. `number_twins` numbers each unnamed tile
+    that reads like an earlier one of its worker, in the order they were made ("Terminal 2"),
+    once a frame; a named tile keeps its name. A number, not the directory: two shells side by
+    side are usually in the same one.
+  - **A place does not repeat the title.** A shell titled by the directory it stands in showed
+    that directory twice ("drop-here …/drop-here"). Its place is now the directory above
+    (`place_beside`), or none.
+  - **Overview covers share a title line.** A cover with a second line (a note's "1 of 3 done")
+    centred the pair, so its title sat half a line above its neighbours'. The line now hangs
+    under a title centred on every card.
+  - **A step being written reads lighter.** The mod's live text block is `text_secondary`
+    until the transcript's entry takes its place, and it is an `Article` labelled "Writing: …"
+    (live thinking, "Thinking"), so a screen reader and the e2e can tell it from the settled
+    answer. A call being prepared names its subject once its input is whole JSON ("Bash
+    echo hi", `tools::preparing`), not the raw object.
+  - Tests: `the_first_run_offers_the_workers_the_tailnet_found`,
+    `a_phone_header_keeps_its_title_and_the_pill_gives_way`,
+    `tiles_that_read_alike_are_numbered`, `a_place_does_not_repeat_the_title`, and the app
+    golden `conversation-live` (`a_step_being_written_shows_live_until_the_transcript_settles_it`).

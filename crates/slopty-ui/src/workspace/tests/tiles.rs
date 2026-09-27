@@ -9,13 +9,6 @@ use super::*;
 use crate::workspace::tile::{CLOSE_TILE, RECONNECTING, cwd_tail};
 use crate::workspace::toast::{SAY_FOR, SHOWN};
 
-/// The accessibility tree of the next frame.
-fn tree(cx: &mut VisualTestContext) -> Vec<crate::a11y::Node> {
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    cx.run_until_parked();
-    cx.update(|window, _cx| crate::a11y::tree(window))
-}
-
 /// The status marks drawn, by label.
 fn marks(cx: &mut VisualTestContext) -> Vec<String> {
     tree(cx).into_iter().filter(|n| n.role == "Image").filter_map(|n| n.label).collect()
@@ -48,8 +41,9 @@ fn a_place_is_its_last_two_directories_with_home_as_a_tilde() {
     assert_eq!(cwd_tail("/Users/w/src", Some("/Users/w/")), "~/src");
 }
 
-/// A header is its title, then its context, muted with no separator: a shell's directory, a
-/// file's, a note's progress. A note with no tasks has none. (That the context is in the UI
+/// A header is its title, then its context, muted with no separator: a shell's directory
+/// (the one above it when the title already names it: "slopty" then "src"), a file's, a
+/// note's progress. A note with no tasks has none. (That the context is in the UI
 /// face is `kit`'s `the_mono_face_is_for_ports_and_the_settings_file`: the test platform
 /// shapes every family alike.)
 #[gpui::test]
@@ -62,7 +56,8 @@ fn a_header_is_its_title_then_its_context_in_the_ui_face(cx: &mut TestAppContext
     let tasks = "# Release\n- [x] tag\n- [ ] ship\n".to_owned();
     let release = arrives(&view, cx, &fake, ItemKind::Note { text: tasks }, 3);
     let nodes = tree(cx);
-    for label in ["src/slopty", "1 of 2 done", "src"] {
+    assert!(nodes.iter().any(|n| n.is("Heading", Some("terminal slopty"))), "{nodes:#?}");
+    for label in ["src", "1 of 2 done"] {
         assert!(nodes.iter().any(|n| n.is("Label", Some(label))), "{label}: {nodes:#?}");
     }
     assert!(!nodes.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains(" · "))));
@@ -681,4 +676,38 @@ fn a_tile_that_fills_a_phone_offers_no_fullscreen(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!button(cx), "a phone's column already does");
     assert!(cx.debug_bounds(selector("close", shell.item)).is_some(), "close stays");
+}
+
+/// Two shells of one worker that would read alike are told apart, in the order they were
+/// made: the second is "Terminal 2" in its header and wherever the tile is named. Another
+/// worker's shell starts its own count, and a tile given a name keeps it.
+#[gpui::test]
+fn tiles_that_read_alike_are_numbered(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let second = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    let laptop = connect(&view, cx, 2, "laptop");
+    let other = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
+    cx.run_until_parked();
+    let titles = view.read_with(cx, |v, cx| {
+        [first, second, other].map(|t| v.card_title(t, v.item(t).unwrap(), cx))
+    });
+    assert_eq!(titles, ["Terminal", "Terminal 2", "Terminal"]);
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Heading", Some("terminal Terminal 2"))), "{nodes:#?}");
+}
+
+/// A shell titled by the directory it stands in shows the one above it as its place, and no
+/// place when that is all its place said.
+#[test]
+fn a_place_does_not_repeat_the_title() {
+    use crate::workspace::tile::place_beside;
+    let beside = |place: &str, title: &str| place_beside(place.to_owned(), title);
+    assert_eq!(beside("~/src/slopty", "slopty").as_deref(), Some("~/src"));
+    assert_eq!(beside("oss/slopty", "slopty").as_deref(), Some("oss"));
+    assert_eq!(beside("/etc", "etc").as_deref(), Some("/"));
+    assert_eq!(beside("slopty", "slopty"), None);
+    assert_eq!(beside("~", "Terminal").as_deref(), Some("~"));
+    assert_eq!(beside("~/src/myslopty", "slopty").as_deref(), Some("~/src/myslopty"));
 }
