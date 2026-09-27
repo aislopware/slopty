@@ -7376,6 +7376,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "serde_json",
  "similar 3.2.0",
+ "slopty-agent",
  "slopty-client",
  "slopty-core",
  "slopty-grid",

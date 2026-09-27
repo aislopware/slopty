@@ -13,6 +13,7 @@ use slopty_net::client::WorkerConn;
 use slopty_net::framed::FramedRecv;
 use slopty_net::streams::{RawRecv, Uni, read_uni};
 use slopty_net::{ClientMsg, NetError, WorkerMsg};
+use slopty_proto::conversation::ConversationEvent;
 use slopty_proto::datagram::{ClientDatagram, TermDatagram, parse_term_datagram};
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::screen::VideoCodec;
@@ -59,6 +60,14 @@ pub enum LinkEvent {
         xfer: XferId,
         /// Why, for a person.
         error: String,
+    },
+    /// An event of a conversation this client follows, in the order the worker sent it. The
+    /// stream ending (an unfollow, the session gone) sends nothing more.
+    Conversation {
+        /// The terminal session the agent runs in.
+        session: SessionId,
+        /// Event.
+        event: ConversationEvent,
     },
     /// The connection is gone; `WorkerLink` is dead after this.
     Disconnected(String),
@@ -168,6 +177,14 @@ impl WorkerLink {
                         }
                         Ok(Uni::Bulk { header, rx }) => {
                             receive_bulk(header, rx, table, clips).await;
+                        }
+                        Ok(Uni::Conversation { session, mut rx }) => {
+                            while let Ok(event) = rx.recv().await {
+                                let event = LinkEvent::Conversation { session, event };
+                                if events.send(event).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
                         Err(e) => tracing::debug!(error = %e, "unidirectional stream refused"),
                     }

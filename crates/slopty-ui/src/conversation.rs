@@ -1,0 +1,35 @@
+//! The conversation face of a Claude Code terminal: the agent's session read as a structured
+//! transcript, toggled per tile with the TUI, over the same PTY and the same session.
+//!
+//! The TUI stays the source of truth. The face is a projection of what the worker decodes from
+//! the transcript, the hooks and the status line (`slopty_proto::conversation`), a composer
+//! that types into the same PTY, and a card for the permission prompts the worker holds while a
+//! client shows the face. Nothing here drives the agent behind its back.
+//!
+//! * [`model`] — the conversation as received: threads, live blocks, meters, pending messages.
+//! * [`rows`] — a thread as the list's rows: turns folded once settled, calls grouped, densities.
+//! * [`tools`] — each tool's title line and what a group of calls adds up to.
+//! * [`diff`] — an edit's patch numbered and coloured, in a column or side by side.
+//! * [`composer`] — what the composer types into the terminal.
+//! * [`approval`] — a held permission prompt and how it ended.
+//! * [`view`] — the face itself: the list, the prompt rail, the task card, the composer.
+
+mod actions;
+pub mod approval;
+pub mod composer;
+pub mod diff;
+#[cfg(test)]
+pub(crate) mod fixtures;
+pub mod model;
+pub mod rows;
+pub mod tools;
+pub mod view;
+
+pub use actions::{CycleDensity, Interrupt};
+pub use view::{ConversationView, FaceEvent};
+
+/// The key context the face binds in.
+pub const CTX: &str = "Conversation";
+
+/// What the composer says before anything is typed.
+pub const MESSAGE_PLACEHOLDER: &str = "Message Claude";

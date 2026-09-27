@@ -76,6 +76,12 @@ pub const CLOSE_TILE: &str = "Close tile";
 /// The accessible name of a tile's fullscreen button.
 pub const FULLSCREEN_TILE: &str = "Fullscreen tile";
 
+/// The header button that shows an agent terminal's conversation.
+pub const SHOW_CONVERSATION: &str = "Show conversation";
+
+/// The same button while the conversation shows.
+pub const SHOW_TERMINAL: &str = "Show terminal";
+
 /// The accessible name of the [`HOOKS`] pill.
 pub const INSTALL_HOOKS: &str = "Install hooks";
 
@@ -1221,6 +1227,37 @@ impl WorkspaceView {
         let mut actions: Vec<gpui::AnyElement> = Vec::new();
         match &item.kind {
             ItemKind::Terminal { session } => {
+                let session = *session;
+                let face = self.face_shown(session);
+                // A phone's header has room for the tile's name and its state only.
+                if face
+                    && !self.layout.is_phone()
+                    && let Some(view) = self.faces.views.get(&session)
+                {
+                    actions.extend(view.read(cx).header_chips(chrome.k));
+                }
+                if self.agent_state(session).is_some_and(|a| a.status != AgentStatus::None) {
+                    let (icon, label) = if face {
+                        (IconName::SquareTerminal, SHOW_TERMINAL)
+                    } else {
+                        (IconName::MessageSquare, SHOW_CONVERSATION)
+                    };
+                    actions.push(
+                        kit::icon_button_at(
+                            theme,
+                            format!("face-{}", id.as_uuid()),
+                            icon,
+                            label,
+                            chrome.k,
+                        )
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            this.focus_tile(tile, cx);
+                            this.show_face(session, !face, cx);
+                        }))
+                        .into_any_element(),
+                    );
+                }
+                let session = &session;
                 // Another client's size rules this PTY: offer to take it.
                 if self.terminals.get(session).is_some_and(|v| !v.read(cx).driving()) {
                     let pill = pill("take", id, TAKE, theme.surfaces.accent, theme, chrome)
@@ -1737,6 +1774,21 @@ impl WorkspaceView {
         let well = || div().flex_1().w_full().into_any_element();
         match &item.kind {
             ItemKind::Terminal { session } => match self.terminals.get(session) {
+                Some(_)
+                    if self.face_shown(*session)
+                        && self.body_state(placed.tile, item).is_none() =>
+                {
+                    let Some(face) = self.faces.views.get(session) else { return well() };
+                    face.update(cx, |v, cx| v.set_layout(k, placed.target.w, cx));
+                    let body = if self.cacheable(placed) {
+                        face.clone()
+                            .cached(StyleRefinement::default().size_full())
+                            .into_any_element()
+                    } else {
+                        face.clone().into_any_element()
+                    };
+                    fixed(body)
+                }
                 Some(view) => {
                     let covered = self.body_state(placed.tile, item).is_some();
                     let restyled = view.update(cx, |v, _| {

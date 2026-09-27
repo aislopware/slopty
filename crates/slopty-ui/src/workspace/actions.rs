@@ -7,6 +7,7 @@
 
 use gpui::{Action, KeyBinding, actions};
 
+use crate::conversation::{CycleDensity, Interrupt};
 use crate::icons::IconName;
 use crate::palette::PaletteItem;
 
@@ -104,6 +105,8 @@ actions!(
         FontSmaller,
         /// Terminal text back to the settings' size.
         FontReset,
+        /// The focused agent terminal between its TUI and its conversation.
+        ToggleConversation,
     ]
 );
 
@@ -123,6 +126,9 @@ const RING_CTX: Option<&str> = Some("Workspace");
 /// Inside a file tile's editor, gpui-kit's input binds some of the workspace's chords to
 /// editing (⌘⌥↑ adds a caret, ⌘F opens its own search); bound here after it, ours win there.
 const FILE_INPUT: Option<&str> = Some("FileEditor > Input");
+/// A conversation face, and its composer.
+const FACE: Option<&str> = Some(crate::conversation::CTX);
+const FACE_INPUT: Option<&str> = Some("Conversation > Input");
 
 /// Key bindings for the workspace context.
 #[must_use]
@@ -173,6 +179,16 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-=", FontLarger, CTX),
         KeyBinding::new("cmd--", FontSmaller, CTX),
         KeyBinding::new("cmd-0", FontReset, CTX),
+        KeyBinding::new("cmd-j", ToggleConversation, CTX),
+        KeyBinding::new("ctrl-o", CycleDensity, FACE),
+        KeyBinding::new("escape", Interrupt, FACE),
+        KeyBinding::new("cmd-up", crate::terminal::PrevPrompt, FACE),
+        KeyBinding::new("cmd-down", crate::terminal::NextPrompt, FACE),
+        // The composer is where the keyboard sits in a face: bound after gpui-kit's input,
+        // these win there.
+        KeyBinding::new("ctrl-o", CycleDensity, FACE_INPUT),
+        KeyBinding::new("cmd-up", crate::terminal::PrevPrompt, FACE_INPUT),
+        KeyBinding::new("cmd-down", crate::terminal::NextPrompt, FACE_INPUT),
         KeyBinding::new("cmd-s", crate::file::SaveFile, Some(crate::file::CTX)),
         KeyBinding::new("cmd-f", crate::terminal::Find, FILE_INPUT),
         KeyBinding::new("cmd-alt-up", FocusUp, FILE_INPUT),
@@ -251,6 +267,9 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Center column", IconName::AlignCenterHorizontal, Box::new(CenterColumn)),
         w("Tabbed column", IconName::PanelsTopLeft, Box::new(ToggleTabbed)),
         w("Overview", IconName::LayoutGrid, Box::new(ToggleOverview)),
+        w("Show conversation or terminal", IconName::MessageSquare, Box::new(ToggleConversation)),
+        w("Conversation density", IconName::ListChecks, Box::new(CycleDensity)),
+        w("Stop the agent", IconName::Square, Box::new(Interrupt)),
         w("Larger text", IconName::AArrowUp, Box::new(FontLarger)),
         w("Smaller text", IconName::AArrowDown, Box::new(FontSmaller)),
         w("Default text size", IconName::Type, Box::new(FontReset)),

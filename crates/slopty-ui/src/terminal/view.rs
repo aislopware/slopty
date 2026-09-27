@@ -560,10 +560,20 @@ impl TerminalView {
     /// any paste, so a multi-line block arrives whole), then ↩ as a key, the way the human
     /// would have. Shared by the block menu's "rerun" and the canvas's "run in shell".
     pub fn run_text(&mut self, text: String, cx: &mut Context<Self>) {
-        self.send(TermRequest::Paste(text));
+        self.paste(text);
         if let Ok(enter) = Keystroke::parse("enter") {
             self.press(enter, cx);
         }
+    }
+
+    /// Type `text` into this session as a paste, without ↩ (the conversation face's
+    /// composer). Like any paste it ends the predictor's guesses.
+    #[expect(
+        clippy::same_name_method,
+        reason = "the composer's paste; the inherent method wins over `EntityInputHandler::paste`"
+    )]
+    pub fn paste(&mut self, text: String) {
+        self.send(TermRequest::Paste(text));
     }
 
     /// The worker's word on the agent in this session (`None`: no agent).
@@ -4733,6 +4743,8 @@ mod tests {
         right_click(cx);
         pick(cx, "rerun");
         assert_eq!(drain_input(&mut rx), ["paste:seq 2", "enter"]);
+        view.update(cx, |view, _cx| view.paste("seq 3".to_owned()));
+        assert_eq!(drain_input(&mut rx), ["paste:seq 3"], "typed, not run");
 
         let notes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let seen = std::rc::Rc::clone(&notes);

@@ -7,6 +7,8 @@
 //! * [`screen`] — a remote window or display painted from decoded frames, with input forwarding.
 //! * [`clipboard`] — the clipboard shared with the workers: announced, fetched on paste, echoes
 //!   broken.
+//! * [`conversation`] — a Claude Code terminal's conversation face: the transcript as a list, the
+//!   composer that types into the same PTY, the permission card.
 //! * [`note`] — a sticky note read as Markdown and edited in place, text shared through the
 //!   document.
 //! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
@@ -24,6 +26,7 @@ pub mod browser;
 pub mod chrome_text;
 pub mod clipboard;
 pub mod colors;
+pub mod conversation;
 pub mod file;
 pub mod fonts;
 pub mod frames;

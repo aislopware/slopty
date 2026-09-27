@@ -874,6 +874,42 @@ impl Stack {
         self.path("agent.jsonl")
     }
 
+    /// Run the real relay, `slopty hook` (with `args`, such as `statusline --command true`),
+    /// for `session` as Claude Code runs it: `payload` on its stdin, the worker's control socket
+    /// in its environment, a home and a Claude config directory of the run's own. It is
+    /// returned running, since a `PermissionRequest`'s relay waits for the answer; dropping it
+    /// kills it.
+    ///
+    /// # Errors
+    ///
+    /// When the CLI is not built or does not start.
+    pub fn relay_hook(&self, session: &str, args: &[&str], payload: &Value) -> Result<Child> {
+        let home = self.path("home");
+        std::fs::create_dir_all(&home)?;
+        let mut child = Command::new(bin("slopty")?)
+            .arg("--data-dir")
+            .arg(self.path("hook-data"))
+            .arg("hook")
+            .args(args)
+            .env("SLOPTY_SESSION", session)
+            .env("SLOPTY_WORKER_SOCKET", self.path("worker.sock"))
+            .env("HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", self.path("claude-config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawn slopty hook")?;
+        let mut stdin = child.stdin.take().context("the hook's stdin")?;
+        let bytes = payload.to_string().into_bytes();
+        tokio::spawn(async move {
+            // A relay that exits before reading all of it is the relay's to report.
+            let _written = stdin.write_all(&bytes).await;
+        });
+        Ok(child)
+    }
+
     /// Play a Claude Code hook in `session` (the id from the dump): write [`TRANSCRIPT`] under
     /// the run's directory and hand the worker the payload for `event` (plus `fields`, more JSON
     /// members) naming it over its control socket, exactly what `slopty hook` relays from the

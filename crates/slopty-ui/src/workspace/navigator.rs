@@ -747,17 +747,30 @@ impl WorkspaceView {
         match &item.kind {
             ItemKind::Terminal { session } => {
                 let summary = self.summary(*session);
-                let agent = self
-                    .agent_state(*session)
-                    .filter(|a| a.status != AgentStatus::None)
-                    .map(agent_status_text);
+                let state = self.agent_state(*session).filter(|a| a.status != AgentStatus::None);
+                // A followed conversation says more than the hooks: the call the agent is on
+                // where the hooks name none, and the gist of its last answer once it stopped.
+                let face = state.and_then(|_| self.face_summary(*session, cx));
+                let (agent, said) = match (state, face) {
+                    (Some(a), Some(face))
+                        if matches!(a.status, AgentStatus::Working) && a.detail.is_none() =>
+                    {
+                        (Some(face), None)
+                    }
+                    (Some(a), Some(face))
+                        if matches!(a.status, AgentStatus::Idle | AgentStatus::Done) =>
+                    {
+                        (Some(agent_status_text(a)), Some(face))
+                    }
+                    (a, _) => (a.map(agent_status_text), None),
+                };
                 let command = agent.is_none().then(|| self.last_command(*session, cx)).flatten();
                 let doing = agent.or(command);
                 let branch = summary.and_then(|s| s.branch.as_deref());
                 let place = self
                     .session_tail(*session)
                     .filter(|p| p != "~" || doing.is_some() || branch.is_some());
-                let meta = meta_line([doing.as_deref(), place.as_deref(), branch]);
+                let meta = meta_line([doing.as_deref(), said.as_deref(), place.as_deref(), branch]);
                 (meta, summary.and_then(|s| age_at(s.started_ms, now)))
             }
             // The header's place; a page named by its address says nothing more.

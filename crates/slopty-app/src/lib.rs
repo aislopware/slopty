@@ -1640,6 +1640,12 @@ fn apply_link_event(
         LinkEvent::XferFailed { xfer, error } => {
             view.update(cx, |v, cx| v.xfer_failed(xfer, &error, cx));
         }
+        LinkEvent::Conversation { session, event } => {
+            view.update(cx, |v, cx| v.conversation_event(session, event, cx));
+        }
+        LinkEvent::Control(WorkerMsg::Permission(event)) => {
+            view.update(cx, |v, cx| v.permission_event(event, cx));
+        }
         LinkEvent::Control(_) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));

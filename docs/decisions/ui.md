@@ -2491,3 +2491,59 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_running_mark_steps_once_a_second_even_under_reduce_motion`, `rollup`, app
     `the_panel_names_its_host_and_the_server_the_tailnet_found`. The goldens are to be recorded
     again with this change.
+- ✅ **The conversation face: a projection of the TUI, toggled per tile** (2026-09-27). An agent
+  terminal shows its TUI or its conversation face (`slopty_ui::conversation`), and the tile
+  keeps the same PTY and session under both.
+  - **The toggle.** ⌘J (`ToggleConversation`, Workspace context) switches between them, as ⌘J
+    shows and hides the terminal in the editors this app learns from. The header has a quiet
+    icon button that does the same, and the palette lists "Show conversation or terminal". The
+    keyboard goes with the body: the composer when the face shows, the TUI when it hides.
+    Showing the face sends `Follow`. Hiding it, closing the tile, the agent leaving or a new
+    link sends `Unfollow` or drops the follow, so the worker hands a held prompt back to the
+    TUI. The face is made once per session and kept while the session lives, so its draft and
+    scroll place survive a toggle. On a phone-width layout (`Layout::is_phone`) an agent's tile
+    shows the face until the person picks, and the pick then sticks for that session.
+  - **The place survives a re-follow.** A follow replays the whole conversation (`Reset` of
+    every thread, the entries, `Current`). The model builds the replay aside and swaps it in at
+    `Current`. The rows are diffed by key and spliced into the `ListState`, so a replay of the
+    same conversation changes nothing and the anchor stays. The list follows the tail
+    (`FollowMode::Tail`) until it is scrolled up, which shows a "latest" pill. It follows again
+    at the bottom or from the pill.
+  - **Turns fold.** A settled turn folds to one row between its prompt and its answer, such as
+    "Worked for 35 s · 13 steps · +2 −0 · 1 failed", or "Stopped after …" when Esc ended it. The
+    notes, compaction and final text stay outside the fold. The turn the agent is on, which
+    includes one blocked on a prompt, never folds. Two or more consecutive reads, searches or
+    task updates group into one row outside Verbose.
+  - **Densities.** Normal, Thinking (adds the model's thinking to open turns) and Verbose (opens
+    every settled turn and ungroups). ⌃O steps through them, as Claude Code's own ⌃O expands
+    its transcript. The chip in the composer shows the density and cycles it on a click.
+  - **Tools render at three levels.** Title, summary and full. An edit or write shows its
+    syntax-coloured diff unasked, up to 12 lines, then "N more lines". Each side of a hunk is
+    highlighted as its own text. The diff is unified in a tile narrower than 960 pt and side by
+    side from 960 pt up. Bash shows its command and output tail. A subagent is a card that
+    opens its own thread under a bar that leads back, and the bar is named from the `Agent`
+    call when the thread's origin has no description. A clipped text offers "Show all" and
+    sends `Expand`.
+  - **The composer types into the same PTY, as a person would.** A message goes as one
+    bracketed paste (`TerminalView::paste`, which also ends the predictor's guesses). Then,
+    200 ms later, Enter goes through the view's own key path, because Ink drops an Enter that
+    arrives in the same read as the paste (`orchestrate::SUBMIT_PAUSE`). A one-line `/` or `!`
+    command is typed raw, so Claude Code's command menu sees it keyed. Esc interrupts only
+    while the agent has a turn, and is otherwise the field's own. A message sent while the
+    agent works shows as queued until the transcript records it.
+  - **Approvals own the composer's area.** The card previews the call at full level and
+    offers Allow once, Always allow (listing what it grants, with where it is stored) and
+    Deny (with a reason field). An answer goes once. A second press finds the card answering.
+    Settled removes the card and leaves a line saying how it ended. Released, where the TUI
+    shows its own dialog, offers "Show the terminal".
+  - **Header chips** come from the meters: `+N −M` for the lines the conversation changed, a
+    context ring (warn from 80 %, error from 95 %, the percentage in its hint), and the model.
+    The navigator row and the overview cover keep the state vocabulary. With a followed
+    conversation they add the call the agent is on, where the hooks give no detail, and the
+    first line of its last answer once it stopped.
+  - Tests: `conversation::{model, rows, tools, diff, composer, approval}` units over the
+    recorded fixtures; `conversation::view::tests` (tail follow and replay anchor, ⌃O,
+    subagent thread); `workspace::tests::faces` (toggle and follow, draft kept, composer bytes,
+    answer once, released prompt, unfollow on close and agent exit, phone default); app goldens
+    `conversation`, `conversation-dark`, `conversation-subagent` and `conversation-phone`,
+    driven through the real worker and `slopty hook`.

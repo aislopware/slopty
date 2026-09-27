@@ -172,7 +172,8 @@ async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
                     LinkEvent::Control(_)
                     | LinkEvent::Term { .. }
                     | LinkEvent::Ports { .. }
-                    | LinkEvent::XferFailed { .. },
+                    | LinkEvent::XferFailed { .. }
+                    | LinkEvent::Conversation { .. },
                 ) => {}
                 Some(LinkEvent::Disconnected(why)) => break Err(anyhow::anyhow!("disconnected: {why}")),
                 None => break Ok(("link closed".to_owned(), 0)),

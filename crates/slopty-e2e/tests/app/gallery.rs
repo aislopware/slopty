@@ -16,13 +16,13 @@ use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches};
 use slopty_e2e::{Command, Driver, Dump, Stack};
 
 /// How long a worker round trip may take.
-const STEP: Duration = Duration::from_secs(20);
+pub const STEP: Duration = Duration::from_secs(20);
 /// The renders' window: the size the other app goldens use.
 const WINDOW: (f32, f32) = (900.0, 600.0);
 /// The transfers golden's: a port and a moving upload are in it.
 const TRANSFERS_TOLERANCE: f64 = 0.01;
 
-fn gated() -> bool {
+pub fn gated() -> bool {
     if std::env::var_os("SLOPTY_APP_E2E").is_none() {
         eprintln!("skipped: set SLOPTY_APP_E2E=1 (or run `cargo xtask e2e app`)");
         return false;
@@ -33,7 +33,7 @@ fn gated() -> bool {
 /// Wait until nothing moves and every link has its round trip: two dumps a frame apart place
 /// every tile alike, so a spring still running cannot end up in a golden, nor a status bar
 /// whose readout is yet to land.
-async fn settled(drv: &mut Driver) -> Dump {
+pub async fn settled(drv: &mut Driver) -> Dump {
     drv.wait_for("the first round trip", STEP, Dump::rtt_sampled).await.unwrap();
     let deadline = tokio::time::Instant::now().checked_add(STEP);
     let mut last = drv.dump().await.unwrap();
@@ -51,7 +51,7 @@ async fn settled(drv: &mut Driver) -> Dump {
 }
 
 /// Render the frame as it rests and hold it against `golden/<name>.png`.
-async fn golden(drv: &mut Driver, stack_dir: &std::path::Path, name: &str) {
+pub async fn golden(drv: &mut Driver, stack_dir: &std::path::Path, name: &str) {
     settled(drv).await;
     let frame = drv.render(&stack_dir.join(format!("{name}.png"))).await.unwrap();
     assert_matches(name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
@@ -63,7 +63,7 @@ fn labels(d: &Dump, role: &str) -> Vec<String> {
 }
 
 /// The first shell, connected and prompted.
-async fn first_shell(drv: &mut Driver) -> Dump {
+pub async fn first_shell(drv: &mut Driver) -> Dump {
     drv.wait_for("the first shell with a prompt", STEP, |d| {
         d.status == "connected"
             && d.focus.as_deref() == Some("terminal")

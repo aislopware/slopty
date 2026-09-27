@@ -1382,6 +1382,7 @@ mod away;
 mod bars;
 mod bodies;
 mod cwd;
+mod faces;
 mod facts;
 mod frame;
 mod measure;

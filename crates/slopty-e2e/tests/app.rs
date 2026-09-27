@@ -6,6 +6,10 @@
 //! skips without `SLOPTY_SCREEN_E2E`.
 
 #[cfg(test)]
+#[path = "app/conversation.rs"]
+mod conversation;
+
+#[cfg(test)]
 #[path = "app/gallery.rs"]
 mod gallery;
 

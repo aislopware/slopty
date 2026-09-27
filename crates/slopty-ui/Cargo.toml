@@ -48,5 +48,7 @@ e2e = [ "gpui/test-support" ]
 
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }
+# The captured Claude Code sessions, decoded as the worker decodes them, feed the face's tests.
+slopty-agent.workspace = true
 slopty-client = { workspace = true, features = [ "headless" ] }
 tempfile.workspace = true

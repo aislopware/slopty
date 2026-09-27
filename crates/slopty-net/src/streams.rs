@@ -96,6 +96,13 @@ pub enum Uni {
         /// The bytes.
         rx: RawRecv,
     },
+    /// A followed session's conversation (worker → client).
+    Conversation {
+        /// The terminal session the agent runs in.
+        session: SessionId,
+        /// Its events.
+        rx: FramedRecv<ConversationEvent>,
+    },
 }
 
 /// Raw bytes after a header.
@@ -195,11 +202,7 @@ pub async fn read_uni(recv: RecvStream) -> Result<Uni, NetError> {
     Ok(match head.recv().await? {
         UniHead::Session { session } => Uni::Session { session, rx: head.retype() },
         UniHead::Bulk(header) => Uni::Bulk { header, rx: head.into_raw() },
-        // Read by a client that follows a conversation, with `FramedRecv<ConversationEvent>`;
-        // no client reads it through here yet.
-        UniHead::Conversation { .. } => {
-            return Err(NetError::Protocol("a conversation stream is not read here"));
-        }
+        UniHead::Conversation { session } => Uni::Conversation { session, rx: head.retype() },
     })
 }
 

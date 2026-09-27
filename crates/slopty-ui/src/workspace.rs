@@ -29,6 +29,7 @@ pub mod actions;
 mod agents;
 mod browsers;
 mod commands;
+mod faces;
 mod inbox;
 mod navigator;
 mod overlays;
@@ -575,6 +576,8 @@ pub struct WorkspaceView {
     park_pending: bool,
     /// A terminal to focus on the next frame.
     pending_focus: Option<SessionId>,
+    /// Agent terminals' conversation faces.
+    faces: faces::Faces,
     pending_focus_note: Option<ItemId>,
     /// A file tile whose editor takes the keyboard on the next frame.
     pending_focus_file: Option<ItemId>,
@@ -727,6 +730,7 @@ impl WorkspaceView {
             drawn_zoom: 1.0,
             park_pending: false,
             pending_focus: None,
+            faces: faces::Faces::default(),
             pending_focus_note: None,
             pending_focus_file: None,
             pending_focus_picker: false,
@@ -1043,6 +1047,9 @@ impl WorkspaceView {
         for view in self.browsers.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
+        for view in self.faces.views.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
         if let Some((_, picker)) = &self.picker {
             picker.update(cx, |p, cx| p.set_theme(theme.clone(), cx));
         }
@@ -1154,11 +1161,15 @@ impl WorkspaceView {
 
     /// Focus asked for since the last frame, now that there is a window to give it in.
     fn apply_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(session) = self.pending_focus.take()
-            && let Some(view) = self.terminals.get(&session)
-        {
-            let handle = view.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
+        if let Some(session) = self.pending_focus.take() {
+            // A tile showing its conversation takes the keyboard in its composer.
+            if let Some(face) = self.faces.views.get(&session).filter(|_| self.face_shown(session))
+            {
+                face.clone().update(cx, |v, cx| v.focus(window, cx));
+            } else if let Some(view) = self.terminals.get(&session) {
+                let handle = view.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            }
         }
         if let Some((session, needle)) = self.pending_find.take()
             && let Some(view) = self.terminals.get(&session).cloned()
@@ -1244,6 +1255,7 @@ impl gpui::Render for WorkspaceView {
         }
         self.frames_drawn = self.frames_drawn.wrapping_add(1);
         cx.set_global(crate::browser::FrameCount(self.frames_drawn));
+        self.sync_faces(window, cx);
         self.apply_pending_focus(window, cx);
         self.sync_clipboard_watch();
         // One clock, one frame and one count of who needs the human for everything this
@@ -1281,6 +1293,7 @@ impl gpui::Render for WorkspaceView {
             .bg(crate::colors::hsla(self.theme.surfaces.canvas));
         let root = Self::register_layout_actions(root, cx);
         root.on_action(cx.listener(Self::new_terminal))
+            .on_action(cx.listener(Self::toggle_conversation))
             .on_action(cx.listener(Self::new_agent))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
