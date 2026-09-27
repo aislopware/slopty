@@ -5,7 +5,9 @@
 //! none) in a monospace field; ⌘↩ or the Save button hands the text back to the app, which
 //! parses it and either writes it and applies it, or puts the parse error under the field and
 //! keeps the dialog open so the typo can be fixed. Escape or a click outside discards. On the
-//! Mac an "Open in editor" button keeps the old path to the default `.toml` editor.
+//! Mac an "Open in editor" button keeps the old path to the default `.toml` editor. The field is
+//! the file tile's editor with its TOML colours and line numbers, so a parse error's line is
+//! one glance away.
 //!
 //! The dialog is as tall as the file (between [`MIN_ROWS`] and [`MAX_ROWS`] lines), not a
 //! fixed share of the window: two lines of TOML in a window-high box was mostly empty field.
@@ -16,8 +18,8 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render,
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
-use gpui_kit::component::input::{Enter, Escape, InputEvent, Textarea, TextareaState};
-use gpui_kit::component::{Sizable as _, Size};
+use gpui_kit::component::Size;
+use gpui_kit::component::input::{Editor, EditorState, Enter, Escape, InputEvent};
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
@@ -55,7 +57,7 @@ pub enum SettingsEditorEvent {
 /// The dialog and its field.
 #[derive(Debug)]
 pub struct SettingsEditor {
-    text: Entity<TextareaState>,
+    text: Entity<EditorState>,
     /// The file's name, shown beside the title; the whole path is its accessible name. A temp
     /// or sandbox path is seventy characters of noise to read and wraps on a phone.
     file_name: SharedString,
@@ -81,7 +83,15 @@ impl SettingsEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let state = cx.new(|cx| TextareaState::new(window, cx).default_value(text.to_owned()));
+        let state = cx.new(|cx| {
+            let mut state = EditorState::new(window, cx)
+                .folding(false)
+                .line_number_gap(px(theme.spacing.md))
+                .default_value(text.to_owned());
+            state.set_searchable(false, cx);
+            state
+        });
+        install_highlighter(&state, &theme, cx);
         let subscription = cx.subscribe(&state, |this, _state, event, cx| match event {
             // Typing past an error is the fix in progress; the line goes on the next save. A
             // line added or taken away grows or shrinks the dialog with the file.
@@ -141,6 +151,7 @@ impl SettingsEditor {
     /// New tokens.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme != theme {
+            install_highlighter(&self.text, &theme, cx);
             self.theme = theme;
             cx.notify();
         }
@@ -158,6 +169,16 @@ impl SettingsEditor {
             cx.stop_propagation();
         }
     }
+}
+
+/// TOML's colours in `theme`.
+fn install_highlighter<T>(editor: &Entity<EditorState>, theme: &Theme, cx: &mut Context<T>) {
+    let toml = crate::highlight::Syntax::for_token("toml");
+    let factory = crate::highlight::editor::factory(toml, theme.clone());
+    editor.update(cx, |e, cx| {
+        e.set_highlighter_factory(factory, cx);
+        e.set_highlighter("toml", cx);
+    });
 }
 
 impl EventEmitter<SettingsEditorEvent> for SettingsEditor {}
@@ -188,7 +209,7 @@ impl Render for SettingsEditor {
         // The file's text at the document size and line: the field is as tall as its lines,
         // and gives up height to a short window (a phone's keyboard), scrolling inside.
         let line = theme.typography.mono_size * theme.typography.markdown_line_height;
-        let field = px(f32::from(self.rows) * line) + Size::Small.input_py() * 2.0;
+        let field = px(f32::from(self.rows) * line) + Size::Medium.input_py() * 2.0;
         let root = crate::kit::backdrop(&theme, window)
             .id("settings-backdrop")
             .key_context(CTX)
@@ -250,12 +271,11 @@ impl Render for SettingsEditor {
                             .h(field + px(spacing.sm * 2.0))
                             // The text starts on the edge grid: the field pads itself by its
                             // size's inset, and this makes up the rest.
-                            .px(px(spacing.inset()) - Size::Small.input_px())
+                            .px(px(spacing.inset()) - Size::Medium.input_px())
                             .py(px(spacing.sm))
                             .font_family(crate::palette::mono_family(&theme))
                             .child(
-                                Textarea::new(&self.text)
-                                    .small()
+                                Editor::new(&self.text)
                                     .appearance(false)
                                     .bordered(false)
                                     .aria_label("settings.toml")
@@ -366,6 +386,21 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.error().map(str::to_owned)), None);
         assert!(view.read_with(cx, |v, cx| v.text(cx).ends_with("[terminal]x")));
+    }
+
+    /// The field is the code editor with TOML's colours (`highlight`'s grammar test holds what
+    /// they paint), and keeps them across a theme change.
+    #[gpui::test]
+    fn the_field_colours_the_file_as_toml(cx: &mut TestAppContext) {
+        let (view, _events, cx) = editor(cx, "[theme]\nappearance = \"light\"\n", true);
+        let language = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, cx| v.text.read(cx).language_name().to_string())
+        };
+        assert_eq!(language(cx), "toml");
+        let light = Theme::new(slopty_theme::Variant::Light);
+        view.update(cx, |v, cx| v.set_theme(light, cx));
+        cx.run_until_parked();
+        assert_eq!(language(cx), "toml");
     }
 
     /// Escape and the Cancel button discard; the phone's dialog has no external editor.

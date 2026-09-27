@@ -176,10 +176,11 @@ impl Syntax {
     }
 }
 
-/// The bundled grammars, loaded once on first use (a few tens of milliseconds, paid on a
-/// background thread by the first card).
+/// The grammars bat ships, loaded once on first use (a few tens of milliseconds, paid on a
+/// background thread by the first card): syntect's own set has no TOML, TypeScript, Dockerfile,
+/// Zig or Nix, all of which a remote project is made of.
 fn syntaxes() -> &'static SyntaxSet {
-    static SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+    static SET: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
     &SET
 }
 
@@ -203,8 +204,8 @@ fn scope_theme() -> &'static ScopeTheme {
             ),
             (
                 "entity.name.type, entity.name.class, entity.name.struct, entity.name.enum, \
-                 entity.name.trait, entity.name.union, entity.name.tag, support.type, \
-                 support.class, entity.other.inherited-class",
+                 entity.name.trait, entity.name.union, entity.name.tag, entity.name.section, \
+                 entity.name.table, support.type, support.class, entity.other.inherited-class",
                 Token::Type,
                 SyntectStyle::empty(),
             ),
@@ -445,6 +446,30 @@ mod tests {
         assert!(first.windows(2).all(|w| {
             w.first().zip(w.get(1)).is_none_or(|(a, b)| a.token != b.token || a.italic != b.italic)
         }));
+        Ok(())
+    }
+
+    /// What a remote project is made of beyond syntect's own set: the settings file's TOML
+    /// colours its keys apart from its values, and TypeScript, TSX, Dockerfile, Zig and Nix
+    /// files all find a grammar.
+    #[test]
+    fn toml_and_the_languages_syntect_lacks_are_coloured() -> Result<(), String> {
+        let toml = grammar("toml")?;
+        let line = r#"appearance = "dark" # or light"#;
+        assert_eq!(token_of(line, toml, "dark"), Some(Token::String));
+        assert_eq!(token_of(line, toml, "light"), Some(Token::Comment));
+        assert_ne!(token_of(line, toml, "appearance"), token_of(line, toml, "dark"));
+        assert_eq!(token_of("[theme]", toml, "theme"), Some(Token::Type), "a table's name");
+        for (path, name) in [
+            ("/w/settings.toml", "TOML"),
+            ("/w/src/app.ts", "TypeScript"),
+            ("/w/src/App.tsx", "TypeScriptReact"),
+            ("/w/Dockerfile", "Dockerfile"),
+            ("/w/build.zig", "Zig"),
+            ("/w/flake.nix", "Nix"),
+        ] {
+            assert_eq!(Syntax::for_path(path, "").map(Syntax::name), Some(name), "{path}");
+        }
         Ok(())
     }
 
