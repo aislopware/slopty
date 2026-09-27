@@ -13,6 +13,6 @@ pub use element::{CellMetrics, Prepared, TerminalElement};
 pub(crate) use element::{captions_drawn, family_picks, rows_prepared};
 pub use view::{
     BACK_TO_LIVE, ClearScreen, CloseFind, Copy, CopyLastOutput, FilesHook, Find, FindNext,
-    FindPrev, LinkArrival, NextPrompt, NoteLastBlock, Paste, PlacedImage, PrevPrompt, RerunLast,
-    Selection, TOOK_MIN, TerminalView, TerminalViewEvent, key_bindings, took_label,
+    FindPrev, Guesses, LinkArrival, NextPrompt, NoteLastBlock, Paste, PlacedImage, PrevPrompt,
+    RerunLast, Selection, TOOK_MIN, TerminalView, TerminalViewEvent, key_bindings, took_label,
 };

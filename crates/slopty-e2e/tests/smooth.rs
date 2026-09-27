@@ -57,6 +57,10 @@ mod tests {
         Duration::from_millis(20),
     ];
 
+    /// A measured round trip from which the adaptive policy must draw guesses on any display:
+    /// past half a 60 Hz refresh.
+    const ADAPTIVE_FROM_US: u64 = 8_400;
+
     /// A shell that prints as fast as it can, one varied line at a time: the worker frames it
     /// at its own rate, every visible row changes on every frame, and nothing is typed.
     const LOAD: &[&str] = &[
@@ -467,6 +471,15 @@ mod tests {
                 assert!(latency.echoed >= TYPED_MIN, "{latency:?}");
                 if policy == "always" {
                     assert!(latency.predicted > 0, "no predictions drawn: {latency:?}");
+                }
+                // Past half the slowest refresh (8.3 ms at 60 Hz) the adaptive policy draws
+                // every guess after its warm-up; half the keys leaves room for one miss's mute.
+                if policy == "adaptive" && told.is_some_and(|us| us >= ADAPTIVE_FROM_US) {
+                    assert!(
+                        latency.predicted >= TYPED as u64 / 2,
+                        "adaptive prediction did not engage at {told:?} µs: {latency:?}"
+                    );
+                    assert_eq!(latency.guess_late, 0, "a guess fell behind its frame: {latency:?}");
                 }
             }
         }

@@ -5839,3 +5839,61 @@ cargo build --release -p slopty-ptyd -p slopty-cli
 cargo test -p slopty-workerd --release --test e2e echo_beside_a_followed_conversation \
   -- --ignored --nocapture
 ```
+
+## 2026-09-27 — typing over a shaped link: guesses that look final, and the round trip at link-up
+
+Scenario (d) of the smooth suite through `slopty-shape`'s relay (`typing_over_a_shaped_round_trip_on_the_mac`),
+the same rig as "the prediction threshold over a shaped link": the e2e app build (debug), 60 keys
+at 15/s into zsh with an empty `ZDOTDIR`, `SLOPTY_PREDICT` never, always and adaptive, a 75 Hz
+display. Key → glass, p50 / p95 ms; "link" is the round trip the connection measured.
+
+The earlier note that this test drew no guesses and echoed in 38 ms at 10 ms no longer holds on
+this tree. A diagnostic run at load 60–170 drew 58–59 of 60 guesses with `always` at every round
+trip, with no misses and no late guesses. At 10 ms the unguessed echo was 32.1 ms: 10.8 ms from the
+key to the echo arriving, 0.8 ms in the app (applied → painted → submitted), and 20.4 ms from
+submission to the glass. That last hop is the compositor's floor (about 1.4 refreshes, "keystroke to
+glass, hop by hop"). So the echo is the round trip plus that floor, and no hop of Slopty's own is
+left to cut. What was left:
+
+1. **Adaptive drew 55 of 60 keys, `always` 59.** One key is the warm-up. The other three came
+   before the predictor knew any round trip: the app first read the link's RTT 500 ms after the link
+   came up (`HEARING_TICK`), so `visible` said no. The app now passes the handshake's RTT to the
+   predictors at link-up.
+2. **Every guess was faint and underlined**, so a key looked final only when its echo came, a
+   refresh or more after the guess, and every key changed its look once on the way. A guess now
+   looks like the text it continues. It is marked only on a link of 80 ms or more, while it waits
+   past 250 ms, or after a slow echo or a miss (decisions/terminal.md, "A guess looks like the text
+   it continues"). "Key → final look" below is when the key first shows as it will stay: the echo
+   while guesses were marked, and the guess once they are not. Nothing here marks a guess: every
+   link is under 50 ms, the slowest guess waited 39 ms, and no run had a miss.
+
+| shaped rtt | link | never: echo | adaptive: guesses drawn, before → after | adaptive: guess | key → final look, before → after |
+| --- | --- | --- | --- | --- | --- |
+| 5 ms | 6.0 ms | 27.8 / 35.6 | 31, then 11: the link sits on half a refresh (6.7 ms) either way | 22.9 / 28.3 | — (mostly unguessed) |
+| 10 ms | 11.0 ms | 32.0 / 38.8 | 55 → **58** | 20.8 / 26.3 | 35.3 → **20.8** |
+| 15 ms | 16.3 ms | 37.5 / 43.2 | 55 → **58** | 20.9 / 27.8 | 37.1 → **20.9** |
+| 20 ms | 21.1 ms | 42.3 / 48.3 | 55 → **58** | 20.6 / 28.2 | 42.3 → **20.6** |
+
+The "before" counts come from the diagnostic run (load 60–170). Everything else comes from one run
+at load 7–9. Both final-look columns are from that run: the adaptive echo (35.3, 37.1, 42.3) is when a
+marked guess's key looked final, and the adaptive guess is when an unmarked one does. A
+second run after the change, with the load climbing from 10 to 44 during it, also drew 58 of 60 at
+10, 15 and 20 ms. Its relay's round trips read 12–19 ms at the 5 and 10 ms settings. On loopback
+(`typing_is_timed_with_and_without_the_local_echo_on_the_mac`, load 10) the echo was 23.2 / 29.2
+and `always` drew 59 guesses at 22.2 / 28.5, in line with "keystroke to glass, hop by hop".
+
+The shaped test now also fails when the adaptive policy draws fewer than half the keys, on a
+measured link past half a 60 Hz refresh.
+
+```sh
+cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e
+D=$PWD/target/e2e-typing; mkdir -p $D/run $D/artifacts
+SLOPTY_DATA_DIR=$D SLOPTY_PTYD_SOCKET=$D/run/ptyd.sock SLOPTY_WORKER_SOCKET=$D/run/worker.sock \
+  SLOPTY_E2E_BIN_DIR=$PWD/target/debug SLOPTY_E2E_ARTIFACTS=$D/artifacts SLOPTY_SMOOTH_E2E=1 \
+  RUST_LOG=info,slopty_ui::terminal::view=debug \
+  cargo nextest run -p slopty-e2e --test smooth --no-capture --test-threads 1 \
+  -E 'test(typing_over_a_shaped) | test(typing_is_timed)'
+```
+
+Logs: `target/logs/typing-shaped-diag.log` (before), `target/logs/typing-shaped-after1.log` and
+`target/logs/typing-shaped-after2.log`.

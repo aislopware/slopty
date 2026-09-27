@@ -756,21 +756,39 @@ fn segments(cells: &[Cell]) -> impl Iterator<Item = (u16, &[Cell])> {
     })
 }
 
-/// How a local-echo guess is drawn: faint and underlined, so a guess never reads as the worker's.
+/// How a marked local-echo guess is drawn ([`slopty_predict::Predictor::marked`]): faint and
+/// underlined, apart from the worker's text.
 const PREDICTED: CellStyle =
     CellStyle { flags: StyleFlags::FAINT, underline: Underline::Single, ..CellStyle::DEFAULT };
 
 /// Screen row `row`'s cells with the predictor's guesses for it written in, or `None` when it
 /// has none: the guesses are then shaped, cached and painted as the worker's text is.
-fn predicted_cells(cells: &[Cell], guesses: &VecDeque<Prediction>, row: u16) -> Option<Vec<Cell>> {
+///
+/// A marked guess takes [`PREDICTED`]. An unmarked one looks like the text it continues, as
+/// the program's echo most likely will: the style of the glyph before it, or, after a blank
+/// (the space after a prompt), the style of the cell it covers.
+fn predicted_cells(
+    cells: &[Cell],
+    guesses: &VecDeque<Prediction>,
+    row: u16,
+    marked: bool,
+) -> Option<Vec<Cell>> {
     let mut on_row = guesses.iter().filter(|p| p.row == row).peekable();
     on_row.peek()?;
     let mut cells = cells.to_vec();
     for guess in on_row {
-        if let (Some(cell), Some(ch)) =
-            (cells.get_mut(usize::from(guess.col)), guess.text.chars().next())
-        {
-            *cell = Cell::narrow(ch, PREDICTED);
+        let col = usize::from(guess.col);
+        let style = if marked {
+            PREDICTED
+        } else {
+            let before = col.checked_sub(1).and_then(|c| cells.get(c));
+            before
+                .filter(|cell| !cell.text.as_str().trim().is_empty())
+                .or_else(|| cells.get(col))
+                .map_or(CellStyle::DEFAULT, |cell| cell.style)
+        };
+        if let (Some(cell), Some(ch)) = (cells.get_mut(col), guess.text.chars().next()) {
+            *cell = Cell::narrow(ch, style);
         }
     }
     Some(cells)
@@ -1218,7 +1236,7 @@ impl Element for TerminalElement {
             let palette = &colors;
             let rows_view = state.view();
             let predicted = view.predictions();
-            let cursor = predicted.map_or_else(|| state.cursor(), |(_, c)| c);
+            let cursor = predicted.map_or_else(|| state.cursor(), |guesses| guesses.cursor);
             let view_offset = state.view_offset();
             let modes = state.modes();
             let marked = view.marked();
@@ -1301,8 +1319,9 @@ impl Element for TerminalElement {
                     continue;
                 };
                 // The local-echo guesses on this row are cells like the worker's.
-                let guessed = predicted
-                    .and_then(|(guesses, _)| predicted_cells(&line.cells, guesses, screen_row));
+                let guessed = predicted.and_then(|guesses| {
+                    predicted_cells(&line.cells, guesses.pending, screen_row, guesses.marked)
+                });
                 let cells: &[Cell] = guessed.as_deref().unwrap_or(&line.cells);
                 let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
                 let mut decorations: Vec<Decoration> = Vec::new();
@@ -1566,7 +1585,7 @@ impl Element for TerminalElement {
                 failed_look,
                 overlay,
                 shown: predicted
-                    .map(|(guesses, _)| guesses.iter().map(|p| p.seq).collect())
+                    .map(|guesses| guesses.pending.iter().map(|p| p.seq).collect())
                     .unwrap_or_default(),
                 blinking,
                 images,
@@ -2624,8 +2643,9 @@ mod tests {
         assert_eq!(memo.text_over(&off, navy, black), navy, "off: the colour as it is");
     }
 
-    /// A guess replaces the worker's cell on its row, in the faint, underlined look; other rows
-    /// have none.
+    /// A guess replaces the worker's cell on its row; other rows have none. Marked, it is faint
+    /// and underlined. Unmarked, it looks like the text it continues: the glyph before it, or
+    /// after a blank the cell it covers.
     #[test]
     fn a_guess_is_a_cell_of_its_row() {
         let guesses: VecDeque<Prediction> = [(2, 'x', 1), (3, 'y', 1)]
@@ -2638,14 +2658,27 @@ mod tests {
                 at: Instant::now(),
             })
             .collect();
-        let row = cells("ab");
-        assert_eq!(predicted_cells(&row, &guesses, 1), None, "not on this row");
-        let guessed = predicted_cells(&row, &guesses, 0).expect("guessed");
+        let green = CellStyle { fg: slopty_grid::Color::Palette(2), ..CellStyle::DEFAULT };
+        let row = Line::from_text("ab", 12, green).cells;
+        assert_eq!(predicted_cells(&row, &guesses, 1, true), None, "not on this row");
+        let guessed = predicted_cells(&row, &guesses, 0, true).expect("guessed");
         assert_eq!(guessed[2].text.as_str(), "x");
         assert_eq!(guessed[3].text.as_str(), "y");
-        assert_eq!(guessed[2].style, PREDICTED);
+        assert_eq!((guessed[2].style, guessed[3].style), (PREDICTED, PREDICTED), "marked");
         let words: Vec<_> = segments(&guessed).map(|(col, w)| (col, w.len())).collect();
         assert_eq!(words, vec![(0, 4)], "shaped with the text it continues");
+
+        let guessed = predicted_cells(&row, &guesses, 0, false).expect("guessed");
+        assert_eq!((guessed[2].style, guessed[3].style), (green, green), "as the text before");
+
+        let shaded = CellStyle { bg: slopty_grid::Color::Palette(8), ..CellStyle::DEFAULT };
+        let mut prompt = Line::from_text("$", 12, green).cells;
+        for cell in prompt.iter_mut().skip(1) {
+            cell.style = shaded;
+        }
+        let guessed = predicted_cells(&prompt, &guesses, 0, false).expect("guessed");
+        assert_eq!(guessed[2].style, shaded, "after a blank: the cell it covers");
+        assert_eq!(guessed[3].style, shaded, "and the guess before it from then on");
     }
 
     /// Under a block cursor a glyph takes the cursor-text colour; beside it, or hidden, not.

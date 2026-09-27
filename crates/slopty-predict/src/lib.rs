@@ -12,6 +12,12 @@
 //! display refresh, where a guess reaches the glass a frame ahead of the echo on most keys, and
 //! the recent track record is clean, so a LAN session never sees a wrong glyph.
 //!
+//! A drawn guess looks like the text it continues, so a key looks final as soon as it is
+//! pressed, as it does in a local terminal. It is *marked* (drawn apart from the worker's text)
+//! only when the guess is less certain, as mosh flags its predictions: on a link of
+//! [`MARK_LINK`] or more, while a guess has waited over [`GLITCH`] for its echo, and until
+//! [`GLITCH_REPAIR`] guesses in a row have been echoed promptly after a slow one or a miss.
+//!
 //! Any key that is not a plain printable one (Enter, an arrow, a control chord, ⌥ as Alt) moves
 //! the cursor where the predictor cannot follow: the guesses are dropped and none is made until
 //! the worker acknowledges that key, so the next one lands where the cursor really is. Input the
@@ -58,6 +64,16 @@ pub const MUTE: Duration = Duration::from_secs(2);
 pub const WARMUP_HITS: u32 = 2;
 /// Most predictions kept in flight; beyond this we stop guessing.
 pub const MAX_PENDING: usize = 64;
+/// RTT from which drawn guesses are marked (mosh's `FLAG_TRIGGER_HIGH`)…
+pub const MARK_LINK: Duration = Duration::from_millis(80);
+/// …until the RTT falls under this (mosh's `FLAG_TRIGGER_LOW`), so a link near the line does
+/// not flip the look from key to key.
+pub const UNMARK_LINK: Duration = Duration::from_millis(50);
+/// A guess not echoed within this is a glitch: guesses are marked (mosh's `GLITCH_THRESHOLD`).
+pub const GLITCH: Duration = Duration::from_millis(250);
+/// Guesses echoed within [`GLITCH`] in a row that end the marking after a glitch or a miss
+/// (mosh's `GLITCH_REPAIR_COUNT`).
+pub const GLITCH_REPAIR: u32 = 10;
 
 /// One predicted cell.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -96,6 +112,10 @@ pub struct Predictor {
     /// The cursor's row as the last frame left it: where the next guess lands.
     cursor_line: Option<(u16, Arc<Line>)>,
     rtt: Option<Duration>,
+    /// The link is slow enough that drawn guesses are marked ([`MARK_LINK`]).
+    slow_marks: bool,
+    /// Prompt echoes still owed before guesses stop being marked after a glitch or a miss.
+    unsure: u32,
     /// The refresh period of the display the guesses are drawn on.
     refresh: Duration,
     hits: u32,
@@ -130,6 +150,8 @@ impl Predictor {
             covered: VecDeque::new(),
             cursor_line: None,
             rtt: None,
+            slow_marks: false,
+            unsure: 0,
             refresh: DEFAULT_REFRESH,
             hits: 0,
             total_hits: 0,
@@ -151,8 +173,14 @@ impl Predictor {
     }
 
     /// Latest smoothed RTT from the transport.
-    pub const fn set_rtt(&mut self, rtt: Option<Duration>) {
+    pub fn set_rtt(&mut self, rtt: Option<Duration>) {
         self.rtt = rtt;
+        match rtt {
+            Some(rtt) if rtt >= MARK_LINK => self.slow_marks = true,
+            Some(rtt) if rtt < UNMARK_LINK => self.slow_marks = false,
+            Some(_) => {}
+            None => self.slow_marks = false,
+        }
     }
 
     /// The refresh period of the display the guesses are drawn on (13.3 ms at 75 Hz).
@@ -211,6 +239,17 @@ impl Predictor {
                 rtt >= VERY_SLOW_LINK || (rtt >= self.slow_link() && self.hits >= WARMUP_HITS)
             }
         }
+    }
+
+    /// Whether the guesses drawn now are marked apart from the worker's text: the link is slow,
+    /// the oldest guess has waited past [`GLITCH`], or a glitch or a miss has not yet been
+    /// followed by [`GLITCH_REPAIR`] prompt echoes. Otherwise a guess looks like what it
+    /// continues, and a key looks final the moment it is drawn.
+    #[must_use]
+    pub fn marked(&self, now: Instant) -> bool {
+        self.slow_marks
+            || self.unsure > 0
+            || self.pending.front().is_some_and(|p| now.saturating_duration_since(p.at) > GLITCH)
     }
 
     /// The cursor as it should be drawn: after the last pending prediction on the cursor row.
@@ -316,6 +355,11 @@ impl Predictor {
                 .and_then(|line| line.cells.get(usize::from(front.col)))
                 .map(|cell| &cell.text);
             if cell.is_some_and(|text| text.as_str() == front.text) {
+                if now.saturating_duration_since(front.at) > GLITCH {
+                    self.unsure = GLITCH_REPAIR;
+                } else {
+                    self.unsure = self.unsure.saturating_sub(1);
+                }
                 let _confirmed = self.pending.pop_front();
                 let _uncovered = self.covered.pop_front();
                 self.tentative = false;
@@ -364,6 +408,7 @@ impl Predictor {
     fn miss(&mut self, now: Instant) {
         self.total_misses = self.total_misses.saturating_add(1);
         self.hits = 0;
+        self.unsure = GLITCH_REPAIR;
         self.muted_until = now.checked_add(MUTE);
         self.flush();
     }
@@ -690,6 +735,51 @@ mod tests {
         assert!(p.on_key(&key(9, "e"), cursor(0, 3), 80, modes, t0).is_none(), "8 not acked");
         let _r = p.on_frame(&moved, 8, 0, t0);
         assert!(p.on_key(&key(10, "f"), cursor(0, 3), 80, modes, t0).is_some());
+    }
+
+    /// A guess on a tailnet-like link looks like the text it continues. It is marked on a link
+    /// of 80 ms or more (until the link is under 50 ms), while a guess waits past `GLITCH`, and
+    /// after a slow echo or a miss until ten guesses in a row have been echoed promptly.
+    #[test]
+    fn a_guess_is_marked_only_when_it_is_unsure() {
+        let mut p = Predictor::new(Policy::Always);
+        let t0 = Instant::now();
+        confirmed(&mut p, t0);
+        let echo = |p: &mut Predictor, seq: u64, typed: &str, at: Instant| {
+            let col = u16::try_from(typed.chars().count()).unwrap() - 1;
+            let last = typed.chars().last().unwrap().to_string();
+            let _guess = p.on_key(&key(seq, &last), cursor(0, col), 80, TermModes::empty(), at);
+            p.on_frame(&screen_with(0, typed), seq, 0, at + Duration::from_millis(12))
+        };
+        p.set_rtt(Some(Duration::from_millis(12)));
+        let _a = p.on_key(&key(2, "a"), cursor(0, 0), 80, TermModes::empty(), t0);
+        assert!(p.visible(t0) && !p.marked(t0), "a tailnet round trip: unmarked");
+        assert!(p.marked(t0 + GLITCH + Duration::from_millis(1)), "waiting past GLITCH");
+        let late = t0 + GLITCH + Duration::from_millis(1);
+        assert_eq!(p.on_frame(&screen_with(0, "a"), 2, 0, late).hits, 1);
+        assert!(p.marked(late), "a slow echo marks what follows");
+        let line = "abcdefghijk";
+        for (seq, len) in (3..).zip(2..=line.len()) {
+            let typed: String = line.chars().take(len).collect();
+            assert!(p.marked(late), "{typed}: still repairing");
+            assert_eq!(echo(&mut p, seq, &typed, late).hits, 1);
+        }
+        assert!(!p.marked(late), "ten prompt echoes repair it");
+
+        let _x = p.on_key(&key(13, "x"), cursor(0, 11), 80, TermModes::empty(), late);
+        assert_eq!(p.on_frame(&screen_with(0, "abcdefghijky"), 13, 0, late).misses, 1);
+        let _y = p.on_key(&key(14, "y"), cursor(0, 12), 80, TermModes::empty(), late);
+        assert!(p.marked(late), "a miss marks what follows");
+
+        let mut q = Predictor::new(Policy::Always);
+        q.set_rtt(Some(MARK_LINK));
+        assert!(q.marked(t0), "a slow link");
+        q.set_rtt(Some(Duration::from_millis(60)));
+        assert!(q.marked(t0), "between the two lines: as it was");
+        q.set_rtt(Some(Duration::from_millis(49)));
+        assert!(!q.marked(t0), "under the lower line");
+        q.set_rtt(Some(Duration::from_millis(60)));
+        assert!(!q.marked(t0), "between the two lines: as it was");
     }
 
     #[test]

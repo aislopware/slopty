@@ -451,6 +451,18 @@ fn reduced_motion() -> bool {
     !cfg!(test) && slopty_platform::reduce_motion()
 }
 
+/// The local-echo guesses a frame draws.
+#[derive(Clone, Copy, Debug)]
+pub struct Guesses<'a> {
+    /// The guesses, oldest first.
+    pub pending: &'a VecDeque<Prediction>,
+    /// The cursor after them.
+    pub cursor: Cursor,
+    /// Drawn apart from the worker's text ([`Predictor::marked`]); otherwise in the look of
+    /// the text they continue.
+    pub marked: bool,
+}
+
 /// `SLOPTY_PREDICT=never|adaptive|always` overrides the local-echo policy (testing on fast links).
 fn policy_from_env() -> Policy {
     match std::env::var("SLOPTY_PREDICT").as_deref() {
@@ -1923,17 +1935,22 @@ impl TerminalView {
     }
 
     /// Link RTT, for the prediction policy.
-    pub const fn set_rtt(&mut self, rtt: Option<Duration>) {
+    pub fn set_rtt(&mut self, rtt: Option<Duration>) {
         self.predictor.set_rtt(rtt);
     }
 
-    /// The guesses to draw and the cursor after them, when prediction is showing.
+    /// The guesses to draw, when prediction is showing.
     #[must_use]
-    pub fn predictions(&self) -> Option<(&VecDeque<Prediction>, Cursor)> {
-        if !self.predictor.visible(Instant::now()) || self.state.view_offset() != 0 {
+    pub fn predictions(&self) -> Option<Guesses<'_>> {
+        let now = Instant::now();
+        if !self.predictor.visible(now) || self.state.view_offset() != 0 {
             return None;
         }
-        Some((self.predictor.pending(), self.predictor.cursor(self.state.cursor())))
+        Some(Guesses {
+            pending: self.predictor.pending(),
+            cursor: self.predictor.cursor(self.state.cursor()),
+            marked: self.predictor.marked(now),
+        })
     }
 
     /// Whether a typed key still waits to be seen on screen: the element times the frames it

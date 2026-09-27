@@ -1763,3 +1763,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `fewer_rows_trim_blank_rows_before_scrolling_into_history` (shrink, grow and shrink, and a
   resize of the primary screen under the alternate one). The iOS e2e now asserts the echo is
   still on screen before the columns golden and the Split View golden.
+
+- ✅ **A guess looks like the text it continues, and is marked only when unsure** (2026-09-27),
+  amending (3) of **A guess is a cell**. Every guess was drawn faint and underlined, so a key
+  looked final only when its echo came. Over a 10 ms round trip the guess was on the glass at
+  21 ms and the key as it stays at 35 ms, and every key changed its look once on the way. mosh
+  draws its predictions in the terminal's own style and underlines them only when it flags them.
+  Slopty now does the same (`Predictor::marked`). A guess takes the style of the glyph before it,
+  or, after a blank such as the space after a prompt, the style of the cell it covers. It is marked
+  (faint, underlined) in three cases, with mosh's thresholds: on a link of 80 ms or more, until the
+  link falls under 50 ms (`FLAG_TRIGGER_HIGH` / `LOW`); while a guess has waited past 250 ms
+  (`GLITCH_THRESHOLD`); and after an echo slower than that or a miss, until ten guesses in a row
+  have been echoed within it (`GLITCH_REPAIR_COUNT`). A wrong unmarked guess shows for one round
+  trip, then the miss clears it and mutes the predictor, as before. On the tailnet's 10–60 ms, a
+  key now looks final 21 ms after it is pressed at 10, 15 and 20 ms, where it took 35–42 ms. In
+  the same change the app passes the handshake's round trip to the predictors at link-up rather
+  than 500 ms later, so adaptive prediction draws 58 of 60 keys instead of 55 (MEASUREMENTS,
+  "typing over a shaped link: guesses that look final"). Tests: predict
+  `a_guess_is_marked_only_when_it_is_unsure`; element `a_guess_is_a_cell_of_its_row`; e2e smooth
+  `typing_over_a_shaped_round_trip_on_the_mac`, which now wants the adaptive policy to draw at
+  least half the keys past half a 60 Hz refresh.
