@@ -20,6 +20,11 @@ dependencies. Each fork carries our commits on its default branch, rebased onto 
   is the one for the server, its worker link, the CLI and MCP, and takes seconds. Every case
   runs on this Mac alone: `workers` starts its second worker here, behind a relay shaped like
   the tailnet, so nothing waits on another machine.
+- `cargo xtask fixtures claude [--only <name>]` records the conversation fixtures from a real
+  session (it uses the model and your login), and `cargo xtask fixtures claude-mod` records the
+  mod's against a canned local API with no account. Both run the official Claude Code build
+  that xtask fetches from npm into `target/claude/<version>/`, checked against the registry's
+  sha512; `SLOPTY_CLAUDE` points at another binary of the same pinned version.
 - `cargo xtask run worker|app` to launch; `cargo xtask ios sim [--sim ipad]|device` for the phone/tablet;
   `cargo xtask bundle` builds a signed `Slopty.app` (app + daemons + CLI) under `target/bundle`
   with the icon rendered from `assets/icon.svg` (`cargo xtask icon` previews it);

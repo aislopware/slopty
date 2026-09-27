@@ -1238,8 +1238,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The fallback stays first-class.** Hooks, the transcript and the status line carry the face
     everywhere the mod is not heard:
     - on a Claude Code not recorded;
-    - in the person's daily `claude`, a patched managed launcher whose hooks worker crashes
-      loading any mod;
+    - in the person's daily `claude`, a patched managed launcher that reports 2.1.283 but is
+      another build. Run once with the mod, the hooks switch and two command hooks (2026-09-27),
+      it read the plugin's `hooks.json` and never loaded the module: no hello and no event, while
+      both command hooks fired and the answer came back. So the mod and the switch that a
+      Slopty shell's `claude` function adds leave the relay working there;
     - with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set, which loads the mod but blocks its
       `fetch` (Unix socket included), so no hello ever comes.
     The mod only adds liveness. Every entry, prompt and meter still comes from the fallback
