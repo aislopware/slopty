@@ -735,6 +735,12 @@ impl Workspace {
                 let rtt_wake = std::sync::Arc::clone(&wake);
                 cx.spawn(async move |cx| {
                     let mut hearing = Hearing::new(std::time::Instant::now());
+                    // The handshake has measured the path already: the predictors draw from the
+                    // first key, not from the first tick 500 ms on.
+                    if let Some(link) = rtt_link.upgrade() {
+                        let rtt = link.rtt();
+                        rtt_view.update(cx, |v, cx| v.set_rtt(key, rtt, cx));
+                    }
                     loop {
                         let woken = wait_or_wake(cx, &rtt_wake, workers::HEARING_TICK).await;
                         let Some(link) = rtt_link.upgrade() else {
