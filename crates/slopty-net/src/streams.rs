@@ -10,6 +10,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use noq::{Connection, RecvStream, SendStream};
 use slopty_core::SessionId;
+use slopty_proto::conversation::ConversationEvent;
 use slopty_proto::terminal::TermEvent;
 use slopty_proto::transfer::{BulkHeader, TunnelOpen, UniHead};
 
@@ -38,11 +39,19 @@ pub const TUNNEL_PRIORITY: i32 = -1;
 /// file never queues ahead of a keystroke's echo.
 pub const BULK_PRIORITY: i32 = -2;
 
+/// Send priority of conversation streams, level with tunnels.
+///
+/// Behind video, the terminals and the control stream, since a history of any length may be
+/// on its way; ahead of files, since a person is reading it now.
+pub const CONVERSATION_PRIORITY: i32 = TUNNEL_PRIORITY;
+
 const _: () = assert!(
     BULK_PRIORITY < TUNNEL_PRIORITY
+        && BULK_PRIORITY < CONVERSATION_PRIORITY
+        && CONVERSATION_PRIORITY < AHEAD_OF_DATAGRAMS
         && TUNNEL_PRIORITY < AHEAD_OF_DATAGRAMS
         && AHEAD_OF_DATAGRAMS < ECHO_PRIORITY,
-    "files, then tunnels, then everything that goes ahead of video, then an echo"
+    "files, then tunnels and conversations, then everything that goes ahead of video, then an echo"
 );
 
 /// A session stream's priority, following its frames: at [`ECHO_PRIORITY`] from an echo
@@ -150,6 +159,26 @@ pub async fn open_bulk(conn: &Connection, header: BulkHeader) -> Result<SendStre
     Ok(head.into_inner())
 }
 
+/// Open a followed agent session's conversation stream to a client, at
+/// [`CONVERSATION_PRIORITY`], and write its header, giving up after `wait` as
+/// [`open_session`] does.
+pub async fn open_conversation(
+    conn: &Connection,
+    session: SessionId,
+    wait: Duration,
+) -> Result<FramedSend<ConversationEvent>, NetError> {
+    let open = async {
+        let send = conn.open_uni().await.map_err(|e| NetError::stream(&e))?;
+        send.set_priority(CONVERSATION_PRIORITY).map_err(|e| NetError::stream(&e))?;
+        let mut head = FramedSend::<UniHead>::new(send);
+        head.send(&UniHead::Conversation { session }).await?;
+        Ok(head.retype())
+    };
+    tokio::time::timeout(wait, open)
+        .await
+        .map_err(|_elapsed| NetError::TimedOut("opening a conversation stream"))?
+}
+
 /// Accept the next unidirectional stream the peer opens and read its header.
 ///
 /// The header may be lost and retransmitted; an accept loop that must not wait on one stream's
@@ -166,6 +195,11 @@ pub async fn read_uni(recv: RecvStream) -> Result<Uni, NetError> {
     Ok(match head.recv().await? {
         UniHead::Session { session } => Uni::Session { session, rx: head.retype() },
         UniHead::Bulk(header) => Uni::Bulk { header, rx: head.into_raw() },
+        // Read by a client that follows a conversation, with `FramedRecv<ConversationEvent>`;
+        // no client reads it through here yet.
+        UniHead::Conversation { .. } => {
+            return Err(NetError::Protocol("a conversation stream is not read here"));
+        }
     })
 }
 

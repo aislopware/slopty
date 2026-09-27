@@ -802,8 +802,19 @@ typed entries with tool calls paired to their results, one thread per subagent),
 that types into the same PTY, and approval cards answered through the blocking
 `PermissionRequest` hook (`slopty_agent::permission`). A status-line wrapper
 (`slopty hook statusline`) forwards the context, cost and rate-limit meters and still prints
-the person's own line. Phase 1a (the decoder, the relay and the wrapper) is built; the
-follow stream and the face come in 1b and 2. The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
+the person's own line. The entry types are wire types (`slopty_proto::conversation`), which
+the decoder builds directly. A client follows a session (`ConversationRequest::Follow`); the
+worker then opens a conversation stream for it (`UniHead::Conversation`, at
+`CONVERSATION_PRIORITY`, below the terminals and video) and a task per follow
+(`apps/slopty-worker/src/follow.rs`) reads the transcript and every subagent's file
+(`slopty_agent::conversation::Transcripts`, on the blocking pool, every 250 ms and at each hook)
+and sends the conversation as it stands, then each change, and the meters. Permission prompts go
+to the followers on the control stream (`WorkerMsg::Permission`): the relay's
+`CtlRequest::Permission` is held while someone follows the session
+(`slopty_worker::conversation::Holds`), the first answer is the decision the relay prints, and
+the last follower leaving, the wait running out or the relay going away hands it back
+undecided, so the TUI shows its own dialog. Phases 1a and 1b (the decoder, the relay, the
+wrapper, the wire and the worker) are built; the face comes in 2. The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
 resolved on the worker through the login shell), which, like ⌘N's shell, starts in the active
 terminal's directory when there is one (`WorkspaceView::active_cwd`, the session's OSC 7 cwd as
 the worker last reported it), else the worker's default; the palette's "New agent in <dir>" line

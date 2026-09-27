@@ -8,7 +8,8 @@
 //!   → client, one per attached terminal) carries [`terminal::TermEvent`]s with the same framing;
 //!   input goes back on the control stream so it is never head-of-line blocked behind a large
 //!   frame. A bulk stream (either way, lower priority) carries a file or a large clipboard
-//!   representation as raw bytes.
+//!   representation as raw bytes. A conversation stream (worker → client, one per followed agent
+//!   session, below the session streams) carries [`conversation::ConversationEvent`]s.
 //! * **Tunnel streams** — client-opened bidirectional streams after the control stream, one per
 //!   forwarded TCP connection, opening with [`transfer::TunnelOpen`].
 //! * **Media datagrams** — unreliable QUIC datagrams with a fixed [`media::MediaHeader`] followed
@@ -24,6 +25,7 @@
 
 pub mod agent;
 pub mod codec;
+pub mod conversation;
 pub mod datagram;
 pub mod file;
 pub mod handshake;
@@ -107,6 +109,8 @@ pub enum ClientMsg {
     Clip(transfer::ClipMsg),
     /// File transfer control.
     Xfer(transfer::XferMsg),
+    /// Follow an agent's conversation, answer its permission prompts.
+    Conversation(conversation::ConversationRequest),
 }
 
 impl ClientMsg {
@@ -128,6 +132,7 @@ impl ClientMsg {
             Self::WriteFile { .. } => "WriteFile",
             Self::Clip(_) => "Clip",
             Self::Xfer(_) => "Xfer",
+            Self::Conversation(_) => "Conversation",
         }
     }
 }
@@ -211,6 +216,8 @@ pub enum WorkerMsg {
     /// What the worker can do changed since [`handshake::HelloAck::caps`]: a permission
     /// granted or taken, a display attached, the load moved.
     Caps(server::WorkerCaps),
+    /// A permission prompt of a session this client follows, or its end.
+    Permission(conversation::PermissionEvent),
 }
 
 impl WorkerMsg {
@@ -235,6 +242,7 @@ impl WorkerMsg {
             Self::Ports { .. } => "Ports",
             Self::Path(_) => "Path",
             Self::Caps(_) => "Caps",
+            Self::Permission(_) => "Permission",
         }
     }
 }

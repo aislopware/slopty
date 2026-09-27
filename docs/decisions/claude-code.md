@@ -1127,3 +1127,65 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_wait_for_a_decision_is_bounded`), and the wrapper
   (`the_persons_line_passes_through_unchanged`, `the_meters_are_forwarded_as_a_hook`,
   `a_run_gets_the_status_line_wrapper_in_front_of_the_persons_own`).
+
+- ✅ **A followed conversation streams from the worker; a permission prompt waits for its
+  followers** (2026-09-27, phase 1b of "Claude Code gets a conversation face").
+  - **One definition of an entry.** The entry types (`Entry`, `Body`, `ToolDetail`, `Change`,
+    `Clipped`, `TextRef`, …) and the meters moved from `slopty_agent` to
+    `slopty_proto::conversation`, and the decoder builds them directly (`slopty_agent`
+    re-exports them). A mirror in proto with a conversion at the worker would have been a second
+    copy of forty types to keep in step, and `slopty-agent` already depends on `slopty-proto`.
+    Every entry type has a golden (`golden__conversation__*`), so a changed decoder output that
+    changes the wire shows there too.
+  - **Follow.** `ClientMsg::Conversation(ConversationRequest::Follow { session })` starts it.
+    The worker opens a conversation stream to that client (`UniHead::Conversation`, at
+    `slopty_net::streams::CONVERSATION_PRIORITY`, level with tunnels: below the control stream,
+    the terminals and video, above files) and runs one task per follow on the connection
+    (`apps/slopty-worker/src/follow.rs`). It reads the transcript the agent table names and
+    every subagent file, the ones in `<session>/subagents/` and the ones `SubagentStop` names
+    (`slopty_agent::conversation::Transcripts`), on the blocking pool, every 250 ms and at once
+    when a hook fires in the session (`slopty_worker::conversation::Board`). No lock is held
+    across a read or a send. The stream opens with `Change::Reset` of every thread, then the
+    conversation as it stands in frames of 64 changes, then `ConversationEvent::Current`; after
+    that each change as it is read, and `Meters` when the status line moves them. A new
+    transcript (`/clear`, `/resume`) or a rewritten one starts over the same way. Unfollow,
+    the session closing or the connection ending finishes the stream; only followed sessions
+    are read. `Expand` answers a clipped text whole (up to `EXPAND_CHARS`) on the same stream.
+    Following is per connection: two clients following one session read it twice, which costs
+    a decode each and keeps every stream's snapshot its own.
+  - **Cost.** A session growing at twenty times a real turn's rate, followed on the typing
+    connection, leaves the echo's median where it was and adds 1.2–1.6 ms at p90; an appended
+    answer reaches the follower in p50 26 ms (MEASUREMENTS.md, "an echo beside a followed
+    conversation").
+  - **Held prompts.** The relay's `CtlRequest::Permission(PermissionAsk)` (which replaced the
+    relay's own `RelayRequest`/`RelayReply` copies) goes to `follow::ask`. The state machine is
+    `slopty_worker::conversation::Holds`: with nobody following the session the answer is
+    `Decision::Pass` at once; else the prompt is held under a worker-wide id and sent to the
+    followers on the control stream (`WorkerMsg::Permission(PermissionEvent::Asked)`, only to
+    connections that follow the session, and again to one that follows later or missed the
+    broadcast). The prompt carries the call as the conversation will show it
+    (`slopty_agent::conversation::proposed`, an edit's change as a patch) and the suggested
+    permission updates typed (`Grant::{Rules, Mode, Directories, Other}`). The first
+    `ConversationRequest::Answer` from a follower takes it: allow, allow always (every
+    suggestion handed back as `updatedPermissions`, as Claude Code's own "Yes, and always …"),
+    or deny with a message. The last follower leaving, the wait running out a second before
+    the relay's, or the relay's end closing (it now keeps the socket open while it waits, so its
+    end closes when the relay is gone) hands it back undecided and the TUI's own dialog shows. The followers hear `Settled { Answered | Released | Withdrawn }`. An answer
+    after that, a second answer, one for another session and one from a client that does not
+    follow find nothing to take. Menu digits are never typed.
+  - Tests: `Holds` (`with_no_follower_a_prompt_passes_at_once`, `the_first_answer_wins`,
+    `a_late_or_stray_answer_is_dropped`, `the_last_follower_leaving_mid_hold_releases_it`,
+    `a_disconnect_releases_where_it_was_the_last_follower`,
+    `a_new_follower_is_shown_what_is_waiting`, `the_board_wakes_followers_on_each_hook`),
+    `Transcripts` (`the_first_read_is_the_whole_session_then_only_what_grows`,
+    `another_transcript_starts_over`, `a_rewritten_main_file_reads_the_subagents_again`,
+    `a_clipped_text_is_found_in_its_threads_file`), the prompt
+    (`a_prompt_words_the_call_and_what_always_would_grant`), the socket lines
+    (`a_permission_request_and_its_decision_are_single_json_lines`), the relay
+    (`a_permission_request_prints_the_workers_decision`, which checks the relay's end stays
+    open while it waits), the goldens, and end to end through the real relay run as the test's
+    own child with the captured fixtures
+    (`a_followed_conversation_streams_and_holds_permission_for_the_follower`: the snapshot equals
+    the decoder's own reading, the appended half and the subagent arrive as changes, the meters
+    come, an "always" answer is what the relay prints, a killed relay withdraws, an unfollow
+    releases, and with nobody following the relay is let go at once).

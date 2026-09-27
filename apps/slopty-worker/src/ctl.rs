@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use slopty_agent::Hook;
+use slopty_agent::permission::PermissionAnswer;
 use slopty_proto::WorkerMsg;
 use slopty_worker::ctl::{CtlReply, CtlRequest, Health, Tailscale};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::Daemon;
@@ -40,15 +41,29 @@ async fn serve_inner(daemon: Daemon, path: &Path) -> Result<()> {
 
 async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
     let (rd, mut wr) = stream.into_split();
+    let mut rd = BufReader::new(rd);
     let mut line = String::new();
-    BufReader::new(rd).read_line(&mut line).await?;
+    rd.read_line(&mut line).await?;
     let req: CtlRequest = serde_json::from_str(line.trim())?;
-    let reply = dispatch(&daemon, req).await;
+    let reply = match req {
+        // The relay keeps its end open while it waits; its closing withdraws the question.
+        CtlRequest::Permission(ask) => {
+            let decision = crate::follow::ask(&daemon, ask, closed(rd)).await;
+            CtlReply::Permission(PermissionAnswer { decision })
+        }
+        req => dispatch(&daemon, req).await,
+    };
     let mut out = serde_json::to_vec(&reply)?;
     out.push(b'\n');
     wr.write_all(&out).await?;
     wr.shutdown().await?;
     Ok(())
+}
+
+/// Finishes when the peer closes its end (or it fails); anything more it sends is passed over.
+async fn closed(mut rd: BufReader<tokio::net::unix::OwnedReadHalf>) {
+    let mut scratch = [0_u8; 256];
+    while rd.read(&mut scratch).await.is_ok_and(|n| n > 0) {}
 }
 
 async fn tailscale(api: Option<&slopty_tailnet::LocalApi>) -> Option<Tailscale> {
@@ -92,11 +107,16 @@ async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
             let (live, closed) = daemon.screens.summaries();
             CtlReply::Screens { live, closed }
         }
+        CtlRequest::Permission(ask) => {
+            let decision = crate::follow::ask(daemon, ask, std::future::pending()).await;
+            CtlReply::Permission(PermissionAnswer { decision })
+        }
         CtlRequest::Hook { session, payload } => match Hook::parse(&payload) {
             Ok(hook) => {
                 if daemon.worker.get(session).is_err() {
                     return CtlReply::Error { message: "no such session".to_owned() };
                 }
+                daemon.follows.lock().board.heard(session, &hook);
                 let mut event = daemon.agents.lock().apply(session, &hook);
                 // A blocked or finished agent with nothing to say for itself: the transcript
                 // tail has its last line. Read off the runtime's blocking pool; the table lock

@@ -20,7 +20,6 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::Hook;
@@ -31,56 +30,28 @@ pub const STATUSLINE_EVENT: &str = "Statusline";
 /// The wrapper's words after the `slopty` binary.
 const WRAPPER_WORDS: &str = "hook statusline";
 
-/// What the face shows from the status line.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Meters {
-    /// The model's display name (`Opus`).
-    pub model: Option<String>,
-    /// Its id (`claude-opus-5-5`).
-    pub model_id: Option<String>,
-    /// Share of the context window in use, 0 to 100.
-    pub context_used_pct: Option<f64>,
-    /// The context window, in tokens.
-    pub context_window: Option<u64>,
-    /// The session's cost so far, in US dollars, as Claude Code estimates it.
-    pub cost_usd: Option<f64>,
-    /// The five-hour rate limit (subscribers only).
-    pub five_hour: Option<RateWindow>,
-    /// The seven-day rate limit.
-    pub seven_day: Option<RateWindow>,
-}
+pub use slopty_proto::conversation::{Meters, RateWindow};
 
-/// One rate-limit window.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RateWindow {
-    /// Share used, 0 to 100.
-    pub used_pct: f64,
-    /// When the window resets, in seconds since the Unix epoch.
-    pub resets_at: Option<u64>,
-}
-
-impl Meters {
-    /// The meters in Claude Code's status-line input; what is missing stays `None`.
-    #[must_use]
-    pub fn read(status: &Value) -> Self {
-        let at = |path: &str| status.pointer(path);
-        let text = |path: &str| at(path).and_then(Value::as_str).map(str::to_owned);
-        let window = |name: &str| {
-            let window = at(&format!("/rate_limits/{name}"))?;
-            Some(RateWindow {
-                used_pct: window.get("used_percentage")?.as_f64()?,
-                resets_at: window.get("resets_at").and_then(Value::as_u64),
-            })
-        };
-        Self {
-            model: text("/model/display_name"),
-            model_id: text("/model/id"),
-            context_used_pct: at("/context_window/used_percentage").and_then(Value::as_f64),
-            context_window: at("/context_window/context_window_size").and_then(Value::as_u64),
-            cost_usd: at("/cost/total_cost_usd").and_then(Value::as_f64),
-            five_hour: window("five_hour"),
-            seven_day: window("seven_day"),
-        }
+/// The meters in Claude Code's status-line input; what is missing stays `None`.
+#[must_use]
+pub fn meters(status: &Value) -> Meters {
+    let at = |path: &str| status.pointer(path);
+    let text = |path: &str| at(path).and_then(Value::as_str).map(str::to_owned);
+    let window = |name: &str| {
+        let window = at(&format!("/rate_limits/{name}"))?;
+        Some(RateWindow {
+            used_pct: window.get("used_percentage")?.as_f64()?,
+            resets_at: window.get("resets_at").and_then(Value::as_u64),
+        })
+    };
+    Meters {
+        model: text("/model/display_name"),
+        model_id: text("/model/id"),
+        context_used_pct: at("/context_window/used_percentage").and_then(Value::as_f64),
+        context_window: at("/context_window/context_window_size").and_then(Value::as_u64),
+        cost_usd: at("/cost/total_cost_usd").and_then(Value::as_f64),
+        five_hour: window("five_hour"),
+        seven_day: window("seven_day"),
     }
 }
 
@@ -93,7 +64,7 @@ pub fn hook(status: &Value) -> Hook {
         session_id: text("/session_id"),
         transcript_path: text("/transcript_path"),
         cwd: text("/workspace/current_dir").or_else(|| text("/cwd")),
-        meters: Some(Meters::read(status)),
+        meters: Some(meters(status)),
         ..Hook::default()
     }
 }
@@ -198,7 +169,7 @@ mod tests {
             })
         );
         let early = json!({ "context_window": { "used_percentage": null }, "model": {} });
-        assert_eq!(Meters::read(&early), Meters::default());
+        assert_eq!(meters(&early), Meters::default());
     }
 
     /// The wrapper's command survives the shell, its own is recognised, and the person's

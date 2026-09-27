@@ -10,8 +10,8 @@
 //!
 //! A `PermissionRequest` is the one hook Claude Code waits on (it is registered without
 //! `async`). After posting it, the relay asks the worker for a decision and prints what Claude
-//! Code expects; no decision, which is all a worker that does not answer these gives today,
-//! prints nothing and Claude Code shows its own dialog ([`slopty_agent::permission`]).
+//! Code expects. The worker decides only while a client follows the session; no decision prints
+//! nothing and Claude Code shows its own dialog ([`slopty_agent::permission`]).
 //! `slopty hook statusline` is the status-line wrapper ([`crate::statusline`]).
 
 use std::io::Read as _;
@@ -22,7 +22,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Subcommand, ValueEnum};
 use slopty_agent::HOOK_EVENTS;
 use slopty_agent::hooks::{self, Outcome};
-use slopty_agent::permission::{self, Decision, PermissionAsk, RelayReply, RelayRequest};
+use slopty_agent::permission::{self, Decision, PermissionAsk};
 use slopty_core::SessionId;
 use slopty_worker::ctl::{CtlReply, CtlRequest};
 use slopty_worker::manager::SESSION_ENV;
@@ -170,9 +170,12 @@ fn forwardable(payload: &str) -> Result<(String, String)> {
 /// The worker's decision on a permission request, or [`Decision::Pass`] when it gives none
 /// within `wait`: no reply, a closed connection, an error or anything unreadable.
 async fn decide(socket: &Path, ask: PermissionAsk, wait: Duration) -> Decision {
-    let request = RelayRequest::Permission(ask);
-    match tokio::time::timeout(wait, exchange(socket, &request)).await {
-        Ok(Ok(RelayReply::Permission(answer))) => answer.decision,
+    match tokio::time::timeout(wait, exchange(socket, &CtlRequest::Permission(ask))).await {
+        Ok(Ok(CtlReply::Permission(answer))) => answer.decision,
+        Ok(Ok(other)) => {
+            tracing::debug!(reply = ?other, "no permission decision");
+            Decision::Pass
+        }
         Ok(Err(e)) => {
             tracing::debug!(error = %e, "no permission decision");
             Decision::Pass
@@ -181,16 +184,17 @@ async fn decide(socket: &Path, ask: PermissionAsk, wait: Duration) -> Decision {
     }
 }
 
-/// One line out, one line back, on the control socket.
-async fn exchange(socket: &Path, request: &RelayRequest) -> Result<RelayReply> {
+/// One line out, one line back, on the control socket. The sending half stays open until the
+/// reply is in: the worker reads its closing as Claude Code having given up on the hook.
+async fn exchange(socket: &Path, request: &CtlRequest) -> Result<CtlReply> {
     let stream = UnixStream::connect(socket).await?;
     let (rd, mut wr) = stream.into_split();
     let mut line = serde_json::to_vec(request)?;
     line.push(b'\n');
     wr.write_all(&line).await?;
-    wr.shutdown().await?;
     let mut reply = String::new();
     BufReader::new(rd).read_line(&mut reply).await?;
+    drop(wr);
     if reply.trim().is_empty() {
         bail!("the worker closed without a reply");
     }
@@ -298,6 +302,7 @@ mod tests {
 
     use serde_json::json;
     use slopty_agent::permission::PermissionAnswer;
+    use tokio::io::AsyncReadExt as _;
     use tokio::net::UnixListener;
 
     use super::*;
@@ -346,10 +351,12 @@ mod tests {
     enum Reply {
         /// Answer this line.
         Line(String),
-        /// Close without answering, as today's worker does with a request it cannot read.
+        /// Close without answering, as a worker going down does.
         Close,
         /// Keep the connection and say nothing.
         Hold,
+        /// Check the relay keeps its end open while it waits, then answer this line.
+        Open(String),
     }
 
     /// A worker on a socket in `dir` that answers connections in order and hands back the
@@ -362,10 +369,18 @@ mod tests {
             for reply in replies {
                 let (stream, _) = listener.accept().await.expect("accept");
                 let (rd, mut wr) = stream.into_split();
+                let mut rd = BufReader::new(rd);
                 let mut line = String::new();
-                BufReader::new(rd).read_line(&mut line).await.expect("read");
+                rd.read_line(&mut line).await.expect("read");
                 heard.push(line.trim().to_owned());
                 match reply {
+                    Reply::Open(answer) => {
+                        let mut byte = [0_u8; 1];
+                        let read =
+                            tokio::time::timeout(Duration::from_millis(200), rd.read(&mut byte));
+                        assert!(read.await.is_err(), "the relay closed its end while waiting");
+                        wr.write_all(format!("{answer}\n").as_bytes()).await.expect("answer");
+                    }
                     Reply::Line(answer) => {
                         wr.write_all(format!("{answer}\n").as_bytes()).await.expect("answer");
                     }
@@ -399,8 +414,8 @@ mod tests {
         .to_string()
     }
 
-    /// A permission request is posted as a hook, then waits for the worker's decision, which
-    /// comes out as the hook output Claude Code reads.
+    /// A permission request is posted as a hook, then waits, its end of the socket open, for
+    /// the worker's decision, which comes out as the hook output Claude Code reads.
     #[tokio::test]
     async fn a_permission_request_prints_the_workers_decision() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -409,10 +424,10 @@ mod tests {
         let always = Decision::AllowAlways {
             updated_permissions: suggested.as_array().cloned().unwrap_or_default(),
         };
-        let answer = RelayReply::Permission(PermissionAnswer { decision: always.clone() });
+        let answer = CtlReply::Permission(PermissionAnswer { decision: always.clone() });
         let (socket, heard) = worker(
             dir.path(),
-            vec![ok(), Reply::Line(serde_json::to_string(&answer).expect("json"))],
+            vec![ok(), Reply::Open(serde_json::to_string(&answer).expect("json"))],
         );
         let session = SessionId::new();
         let output = relay_at(&socket, session, &permission_request(), permission::WAIT).await;
@@ -427,7 +442,9 @@ mod tests {
         assert!(
             matches!(serde_json::from_str(hook), Ok(CtlRequest::Hook { session: s, .. }) if s == session)
         );
-        let RelayRequest::Permission(ask) = serde_json::from_str(ask).expect("an ask");
+        let Ok(CtlRequest::Permission(ask)) = serde_json::from_str(ask) else {
+            panic!("an ask: {ask}");
+        };
         assert_eq!((ask.session, ask.wait_ms), (session, 595_000));
         let asked = slopty_agent::Hook::parse(&ask.payload).expect("hook");
         assert_eq!(
@@ -437,8 +454,8 @@ mod tests {
         assert!(asked.permission_suggestions.is_some());
     }
 
-    /// Today's worker does not know the request and closes the connection: no decision, at
-    /// once, and nothing printed, so Claude Code shows its dialog as before.
+    /// A worker that closes the connection without a decision, or answers with an error:
+    /// no decision, at once, and nothing printed, so Claude Code shows its dialog.
     #[tokio::test]
     async fn a_worker_that_does_not_decide_leaves_the_dialog_to_claude_code() {
         let dir = tempfile::tempdir().expect("tempdir");

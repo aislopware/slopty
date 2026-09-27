@@ -1041,3 +1041,418 @@ mod size_report {
         }
     }
 }
+
+/// The conversation face: follow and answer, the prompts, and every entry a conversation
+/// stream carries.
+#[cfg(test)]
+mod conversation {
+    use slopty_core::{ClientId, SessionId};
+    use slopty_proto::conversation::{
+        AgentDetail, AgentRun, Answer, BashDetail, Body, Change, Clipped, Compact,
+        ConversationEvent, ConversationRequest, EditDetail, Entry, GlobDetail, Grant, GrepDetail,
+        Hunk, McpDetail, Meters, Note, NoteKind, Part, Patch, PermissionEvent, PermissionPrompt,
+        Prompt, Question, QuestionDetail, RateWindow, ReadDetail, ResultStatus, Settled,
+        ShellStatus, Suggestion, Task, TaskCreateDetail, TaskUpdateDetail, TextRef, ThreadId,
+        ToolCall, ToolDetail, ToolResult, Verdict, WebFetchDetail, WebSearchDetail, WriteDetail,
+        WriteKind,
+    };
+    use slopty_proto::transfer::UniHead;
+    use slopty_proto::{ClientMsg, WorkerMsg, codec};
+    use uuid::Uuid;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes
+            .chunks(16)
+            .map(|row| row.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[track_caller]
+    fn snap<T: serde::Serialize>(name: &str, msg: &T) {
+        let bytes = codec::encode(msg).expect("encodes");
+        insta::assert_snapshot!(name, hex(&bytes));
+    }
+
+    fn session() -> SessionId {
+        SessionId::from_uuid(Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10))
+    }
+
+    fn text(s: &str) -> Clipped {
+        Clipped { text: s.to_owned(), lines: 1, chars: 3, full: None }
+    }
+
+    fn clipped(s: &str, part: Part) -> Clipped {
+        Clipped { text: s.to_owned(), lines: 900, chars: 40_000, full: Some(reference(part)) }
+    }
+
+    fn reference(part: Part) -> TextRef {
+        TextRef { record: "r1".to_owned(), part }
+    }
+
+    fn patch() -> Patch {
+        Patch {
+            hunks: vec![Hunk {
+                old_start: 3,
+                old_lines: 1,
+                new_start: 3,
+                new_lines: 1,
+                lines: vec!["-a".to_owned(), "+b".to_owned()],
+            }],
+            added: 1,
+            removed: 1,
+            clipped_lines: 2,
+            full: Some(reference(Part::Patch)),
+        }
+    }
+
+    fn entry(id: &str, body: Body) -> Change {
+        Change::Upsert {
+            thread: ThreadId::Main,
+            entry: Entry { id: id.to_owned(), at_ms: 7, body },
+        }
+    }
+
+    fn tool(id: &str, name: &str, detail: ToolDetail, status: ResultStatus) -> Change {
+        let result = ToolResult { status, text: Some(text("out")), at_ms: 9 };
+        entry(
+            id,
+            Body::Tool(Box::new(ToolCall { name: name.to_owned(), detail, result: Some(result) })),
+        )
+    }
+
+    #[test]
+    fn requests() {
+        let session = session();
+        snap("client_follow", &ClientMsg::Conversation(ConversationRequest::Follow { session }));
+        snap(
+            "client_unfollow",
+            &ClientMsg::Conversation(ConversationRequest::Unfollow { session }),
+        );
+        for (name, verdict) in [
+            ("client_answer_allow", Verdict::Allow),
+            ("client_answer_always", Verdict::AllowAlways),
+            ("client_answer_deny", Verdict::Deny { message: "no".to_owned(), interrupt: true }),
+        ] {
+            snap(
+                name,
+                &ClientMsg::Conversation(ConversationRequest::Answer { session, ask: 3, verdict }),
+            );
+        }
+        snap(
+            "client_expand",
+            &ClientMsg::Conversation(ConversationRequest::Expand {
+                session,
+                thread: ThreadId::Agent("a1".to_owned()),
+                reference: reference(Part::Input {
+                    tool_use_id: "t1".to_owned(),
+                    field: "command".to_owned(),
+                }),
+            }),
+        );
+    }
+
+    #[test]
+    fn permissions() {
+        let session = session();
+        let prompt = PermissionPrompt {
+            session,
+            ask: 3,
+            tool: "Edit".to_owned(),
+            detail: ToolDetail::Edit(EditDetail {
+                path: "/w/a.rs".to_owned(),
+                edits: 1,
+                replace_all: false,
+                patch: patch(),
+            }),
+            suggestions: vec![
+                Suggestion {
+                    grant: Grant::Rules {
+                        behavior: "allow".to_owned(),
+                        rules: vec!["Bash(ls:*)".to_owned()],
+                    },
+                    destination: Some("localSettings".to_owned()),
+                },
+                Suggestion {
+                    grant: Grant::Mode { mode: "acceptEdits".to_owned() },
+                    destination: None,
+                },
+                Suggestion {
+                    grant: Grant::Directories { directories: vec!["/w".to_owned()] },
+                    destination: Some("session".to_owned()),
+                },
+                Suggestion {
+                    grant: Grant::Other { kind: "removeRules".to_owned() },
+                    destination: None,
+                },
+            ],
+            mode: Some("default".to_owned()),
+            asked_ms: 1_700_000_000_000,
+            until_ms: 1_700_000_594_000,
+        };
+        snap(
+            "worker_permission_asked",
+            &WorkerMsg::Permission(PermissionEvent::Asked(Box::new(prompt))),
+        );
+        let by = ClientId::from_uuid(Uuid::from_u128(0x42));
+        for (name, outcome) in [
+            ("worker_permission_answered", Settled::Answered { verdict: Verdict::AllowAlways, by }),
+            ("worker_permission_released", Settled::Released),
+            ("worker_permission_withdrawn", Settled::Withdrawn),
+        ] {
+            snap(
+                name,
+                &WorkerMsg::Permission(PermissionEvent::Settled { session, ask: 3, outcome }),
+            );
+        }
+    }
+
+    #[test]
+    fn stream() {
+        snap("uni_conversation", &UniHead::Conversation { session: session() });
+        snap("conversation_current", &ConversationEvent::Current);
+        snap(
+            "conversation_meters",
+            &ConversationEvent::Meters(Meters {
+                model: Some("Opus".to_owned()),
+                model_id: Some("claude-opus-5-5".to_owned()),
+                context_used_pct: Some(8.5),
+                context_window: Some(200_000),
+                cost_usd: Some(0.25),
+                five_hour: Some(RateWindow { used_pct: 23.5, resets_at: Some(1_738_425_600) }),
+                seven_day: None,
+            }),
+        );
+        snap(
+            "conversation_expanded",
+            &ConversationEvent::Expanded {
+                thread: ThreadId::Main,
+                reference: reference(Part::Stdout),
+                text: Some(text("all of it")),
+            },
+        );
+    }
+
+    /// One change of each kind, and an entry of every body and every tool.
+    #[test]
+    fn changes() {
+        let ok = ResultStatus::Ok;
+        let task = Task {
+            id: "1".to_owned(),
+            subject: "Write it".to_owned(),
+            status: "pending".to_owned(),
+        };
+        snap(
+            "conversation_changes",
+            &ConversationEvent::Changes(vec![
+                Change::Reset { thread: None },
+                entry(
+                    "u1",
+                    Body::Prompt(Prompt {
+                        text: clipped("do it", Part::Block { index: 0 }),
+                        images: 1,
+                        command: Some("/compact".to_owned()),
+                    }),
+                ),
+                entry("u2:0", Body::Text(text("yes"))),
+                entry("u2:1", Body::Thinking(text("hmm"))),
+                entry(
+                    "u3",
+                    Body::Compact(Compact {
+                        trigger: Some("auto".to_owned()),
+                        pre_tokens: Some(150_000),
+                        post_tokens: Some(9_000),
+                        summary: Some(text("so far")),
+                    }),
+                ),
+                entry("u4", Body::Interrupted { during_tool: true }),
+                entry("u5", Body::Note(Note { kind: NoteKind::ApiError, text: text("529") })),
+                entry("u6", Body::Note(Note { kind: NoteKind::Command, text: text("ok") })),
+                entry("u7", Body::Note(Note { kind: NoteKind::Info, text: text("fyi") })),
+                Change::Remove { thread: ThreadId::Agent("a1".to_owned()), id: "u0".to_owned() },
+                Change::Tasks { thread: ThreadId::Main, tasks: vec![task.clone()] },
+                Change::Reset { thread: Some(ThreadId::Agent("a1".to_owned())) },
+            ]),
+        );
+        let bash = BashDetail {
+            command: clipped(
+                "cargo test",
+                Part::Input { tool_use_id: "t6".to_owned(), field: "command".to_owned() },
+            ),
+            description: Some("Run tests".to_owned()),
+            background: true,
+            task_id: Some("b1".to_owned()),
+            status: ShellStatus::Failed,
+            exit_code: Some(101),
+            stdout: Some(clipped("…ok", Part::Stdout)),
+            stderr: Some(clipped("…err", Part::Stderr)),
+            output_file: Some("/tmp/b1.out".to_owned()),
+        };
+        snap(
+            "conversation_tools",
+            &ConversationEvent::Changes(vec![
+                tool(
+                    "t1",
+                    "Edit",
+                    ToolDetail::Edit(EditDetail {
+                        path: "/w/a.rs".to_owned(),
+                        edits: 2,
+                        replace_all: true,
+                        patch: patch(),
+                    }),
+                    ok,
+                ),
+                tool(
+                    "t2",
+                    "Write",
+                    ToolDetail::Write(WriteDetail {
+                        path: "/w/b.rs".to_owned(),
+                        lines: 12,
+                        kind: WriteKind::Overwrite,
+                        patch: patch(),
+                    }),
+                    ok,
+                ),
+                tool(
+                    "t3",
+                    "Read",
+                    ToolDetail::Read(ReadDetail {
+                        path: "/w/a.rs".to_owned(),
+                        offset: Some(10),
+                        limit: Some(20),
+                        start_line: Some(10),
+                        lines: Some(20),
+                        total_lines: Some(300),
+                    }),
+                    ok,
+                ),
+                tool(
+                    "t4",
+                    "Grep",
+                    ToolDetail::Grep(GrepDetail {
+                        pattern: "fn".to_owned(),
+                        path: Some("/w".to_owned()),
+                        glob: Some("*.rs".to_owned()),
+                        mode: Some("content".to_owned()),
+                        files: Some(3),
+                        lines: Some(9),
+                    }),
+                    ok,
+                ),
+                tool(
+                    "t5",
+                    "Glob",
+                    ToolDetail::Glob(GlobDetail {
+                        pattern: "**/*.rs".to_owned(),
+                        path: None,
+                        files: Some(40),
+                        truncated: true,
+                    }),
+                    ok,
+                ),
+                tool("t6", "Bash", ToolDetail::Bash(bash), ResultStatus::Error),
+                tool(
+                    "t7",
+                    "WebFetch",
+                    ToolDetail::WebFetch(WebFetchDetail {
+                        url: "https://x.dev".to_owned(),
+                        prompt: Some("sum".to_owned()),
+                        code: Some(200),
+                        bytes: Some(512),
+                    }),
+                    ok,
+                ),
+                tool(
+                    "t8",
+                    "WebSearch",
+                    ToolDetail::WebSearch(WebSearchDetail {
+                        query: "rust".to_owned(),
+                        results: Some(10),
+                    }),
+                    ok,
+                ),
+                tool(
+                    "t9",
+                    "Agent",
+                    ToolDetail::Agent(AgentDetail {
+                        agent_id: Some("a1".to_owned()),
+                        agent_type: Some("Explore".to_owned()),
+                        description: Some("Look".to_owned()),
+                        prompt: text("find it"),
+                        background: false,
+                        status: AgentRun::Completed,
+                        report: Some(text("found")),
+                        tokens: Some(1_200),
+                        tool_uses: Some(4),
+                        duration_ms: Some(3_000),
+                    }),
+                    ok,
+                ),
+                tool(
+                    "t10",
+                    "TaskCreate",
+                    ToolDetail::TaskCreate(TaskCreateDetail {
+                        task_id: Some("1".to_owned()),
+                        subject: "Write it".to_owned(),
+                        description: None,
+                    }),
+                    ok,
+                ),
+                tool(
+                    "t11",
+                    "TaskUpdate",
+                    ToolDetail::TaskUpdate(TaskUpdateDetail {
+                        task_id: "1".to_owned(),
+                        from: Some("pending".to_owned()),
+                        to: Some("completed".to_owned()),
+                        subject: None,
+                        fields: vec!["status".to_owned()],
+                    }),
+                    ok,
+                ),
+                tool("t12", "TodoWrite", ToolDetail::TodoWrite { todos: vec![task] }, ok),
+                tool(
+                    "t13",
+                    "AskUserQuestion",
+                    ToolDetail::Question(QuestionDetail {
+                        questions: vec![Question {
+                            text: "Which?".to_owned(),
+                            header: Some("Pick".to_owned()),
+                            options: vec!["a".to_owned(), "b".to_owned()],
+                            multi_select: false,
+                        }],
+                        answers: vec![Answer {
+                            question: "Which?".to_owned(),
+                            answer: "a".to_owned(),
+                        }],
+                    }),
+                    ok,
+                ),
+                tool(
+                    "t14",
+                    "ExitPlanMode",
+                    ToolDetail::Plan { plan: text("1. do") },
+                    ResultStatus::Rejected,
+                ),
+                tool(
+                    "t15",
+                    "mcp__gh__issue",
+                    ToolDetail::Mcp(McpDetail {
+                        server: "gh".to_owned(),
+                        tool: "issue".to_owned(),
+                        input: text("{}"),
+                    }),
+                    ok,
+                ),
+                tool(
+                    "t16",
+                    "Skill",
+                    ToolDetail::Other {
+                        input: clipped("{\"x\":1}", Part::Result { tool_use_id: "t16".to_owned() }),
+                    },
+                    ok,
+                ),
+            ]),
+        );
+    }
+}

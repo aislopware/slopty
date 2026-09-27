@@ -13,6 +13,7 @@ mod clip;
 mod conn;
 mod ctl;
 mod files;
+pub mod follow;
 mod paths;
 mod ports;
 mod screens;
@@ -143,6 +144,8 @@ pub struct Daemon {
     pub caps: tokio::sync::watch::Receiver<slopty_proto::server::WorkerCaps>,
     /// The daemon's home directory, which a client writes as `~`.
     pub home: String,
+    /// Who follows which agent's conversation, and the permission prompts held for them.
+    pub follows: Arc<parking_lot::Mutex<follow::Follows>>,
 }
 
 impl Daemon {
@@ -165,6 +168,7 @@ impl Daemon {
         // Past the table the session is gone whatever ptyd answered; a failed ptyd close is
         // the caller's to report, but the clients must still hear of it.
         self.agents.lock().forget(session);
+        self.follows.lock().board.forget(session);
         let _sent = self.events.send(slopty_proto::WorkerMsg::SessionClosed { session, reason });
         for delta in self.items.remove_session(session, by) {
             let _sent = self.events.send(slopty_proto::WorkerMsg::Items(delta));
@@ -348,6 +352,7 @@ async fn run() -> Result<()> {
         paths,
         caps,
         home: std::env::var("HOME").unwrap_or_default(),
+        follows: Arc::default(),
     };
     let transfers = Arc::clone(&daemon.transfers);
     tokio::task::spawn_blocking(move || {

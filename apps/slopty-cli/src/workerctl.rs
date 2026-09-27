@@ -95,6 +95,7 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path) -> Resul
             }
         }
         CtlReply::Ok { changed } => println!("{}", if changed { "done" } else { "no change" }),
+        CtlReply::Permission(answer) => bail!("a permission decision nobody asked for: {answer:?}"),
         CtlReply::Error { message } => bail!("{message}"),
     }
     Ok(())

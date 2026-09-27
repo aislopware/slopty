@@ -12,6 +12,7 @@
 pub mod caps;
 pub mod changes;
 pub mod clip;
+pub mod conversation;
 pub mod ctl;
 pub mod file;
 pub mod find;

@@ -33,7 +33,8 @@ mod tests {
             let release = worker.parent().is_some_and(|dir| dir.ends_with("release"));
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
             let mut build = std::process::Command::new(cargo);
-            build.args(["build", "-p", name]);
+            let package = if name == "slopty" { "slopty-cli" } else { name };
+            build.args(["build", "-p", package, "--bin", name]);
             if release {
                 build.arg("--release");
             }
@@ -4048,5 +4049,461 @@ mod tests {
         );
         let close = ClientMsg::Term { session, req: TermRequest::Close };
         worker.tx.send(&close).await.unwrap();
+    }
+
+    /// The fixture transcripts `slopty-agent` pins its decoder with.
+    fn fixture(scenario: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/slopty-agent/tests/fixtures/conversation")
+            .join(scenario)
+    }
+
+    /// Run `slopty hook [args]` as Claude Code would, in `session`, with `payload` on stdin; its
+    /// output. The relay is this test's own child: its home is the test's directory.
+    fn relay(
+        dir: &std::path::Path,
+        session: SessionId,
+        args: &[&str],
+        payload: &serde_json::Value,
+    ) -> Child {
+        use tokio::io::AsyncWriteExt as _;
+        let mut child = Command::new(bin("slopty"))
+            .arg("--data-dir")
+            .arg(dir.join("data"))
+            .arg("hook")
+            .args(args)
+            .env("SLOPTY_SESSION", session.to_string())
+            .env("SLOPTY_WORKER_SOCKET", dir.join("worker.sock"))
+            .env("HOME", dir)
+            .env("CLAUDE_CONFIG_DIR", dir.join("claude-config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("the slopty CLI built alongside the tests");
+        let mut stdin = child.stdin.take().expect("stdin");
+        let bytes = payload.to_string().into_bytes();
+        tokio::spawn(async move {
+            let _written = stdin.write_all(&bytes).await;
+        });
+        child
+    }
+
+    /// What a relay printed for Claude Code, once it exits successfully.
+    async fn printed(child: Child) -> String {
+        let out = tokio::time::timeout(STEP, child.wait_with_output()).await.unwrap().unwrap();
+        assert!(out.status.success(), "the relay exits 0: {:?}", out.status);
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// The next conversation stream the worker opens, past its header.
+    async fn conversation_stream(
+        conn: &slopty_net::Connection,
+    ) -> FramedRecv<slopty_proto::conversation::ConversationEvent> {
+        use slopty_proto::transfer::UniHead;
+        let recv = tokio::time::timeout(STEP, conn.accept_uni()).await.unwrap().unwrap();
+        let mut head = FramedRecv::<UniHead>::new(recv);
+        let header = tokio::time::timeout(STEP, head.recv()).await.unwrap().unwrap();
+        assert!(matches!(header, UniHead::Conversation { .. }), "{header:?}");
+        head.retype()
+    }
+
+    /// A client's copy of a conversation, kept from nothing but the stream.
+    #[derive(Debug, Default, PartialEq)]
+    struct Copy {
+        threads: std::collections::BTreeMap<
+            slopty_proto::conversation::ThreadId,
+            Vec<slopty_proto::conversation::Entry>,
+        >,
+        current: bool,
+        meters: Option<slopty_proto::conversation::Meters>,
+    }
+
+    impl Copy {
+        fn apply(&mut self, event: slopty_proto::conversation::ConversationEvent) {
+            use slopty_proto::conversation::{Change, ConversationEvent};
+            match event {
+                ConversationEvent::Changes(changes) => {
+                    for change in changes {
+                        match change {
+                            Change::Upsert { thread, entry } => {
+                                let list = self.threads.entry(thread).or_default();
+                                match list.iter_mut().find(|e| e.id == entry.id) {
+                                    Some(old) => *old = entry,
+                                    None => list.push(entry),
+                                }
+                            }
+                            Change::Remove { thread, id } => {
+                                self.threads.entry(thread).or_default().retain(|e| e.id != id);
+                            }
+                            Change::Reset { thread: Some(thread) } => {
+                                self.threads.remove(&thread);
+                            }
+                            Change::Reset { thread: None } => {
+                                self.threads.clear();
+                                self.current = false;
+                            }
+                            Change::Tasks { .. } => {}
+                        }
+                    }
+                }
+                ConversationEvent::Current => self.current = true,
+                ConversationEvent::Meters(meters) => self.meters = Some(meters),
+                ConversationEvent::Expanded { .. } => {}
+            }
+        }
+
+        /// Read the stream until `done` holds of the copy.
+        async fn until(
+            &mut self,
+            stream: &mut FramedRecv<slopty_proto::conversation::ConversationEvent>,
+            done: impl Fn(&Self) -> bool,
+        ) {
+            let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+            while !done(self) {
+                let event = tokio::time::timeout_at(deadline, stream.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("the copy never got there: {self:#?}"))
+                    .unwrap();
+                self.apply(event);
+            }
+        }
+    }
+
+    /// The same files decoded here, as the copy should end up.
+    fn decoded(
+        main: &std::path::Path,
+    ) -> std::collections::BTreeMap<
+        slopty_proto::conversation::ThreadId,
+        Vec<slopty_proto::conversation::Entry>,
+    > {
+        let mut transcripts = slopty_agent::conversation::Transcripts::default();
+        transcripts.read(main, &[]);
+        transcripts
+            .conversation()
+            .snapshot()
+            .into_iter()
+            .map(|thread| (thread.id, thread.entries))
+            .collect()
+    }
+
+    /// The conversation face end to end, through the real relay run as Claude Code runs it:
+    /// following sends the conversation as it stands, then what the transcript gains (a
+    /// subagent's thread included) and the status line's meters. A permission prompt is held
+    /// for the follower and its answer is what the relay prints; one the follower leaves is
+    /// released undecided, one whose relay goes away is withdrawn, and with nobody following
+    /// the relay is let go at once. Nothing is typed into the shell: the transcripts are the
+    /// captured fixtures, written here.
+    #[tokio::test]
+    async fn a_followed_conversation_streams_and_holds_permission_for_the_follower() {
+        use slopty_proto::conversation::{
+            ConversationRequest, PermissionEvent, Settled, ToolDetail, Verdict,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let session = open_shell(&mut worker, dir.path()).await;
+
+        // The captured `tools` session, its first half written now and the rest later.
+        let projects = dir.path().join("projects");
+        let main = projects.join("s1.jsonl");
+        let subagents = slopty_agent::conversation::subagents_dir(&main);
+        std::fs::create_dir_all(&subagents).unwrap();
+        let captured = std::fs::read_to_string(fixture("tools").join("transcript.jsonl")).unwrap();
+        let lines: Vec<&str> = captured.lines().collect();
+        let (first, rest) = lines.split_at(lines.len() / 2);
+        std::fs::write(&main, format!("{}\n", first.join("\n"))).unwrap();
+        let transcript = main.to_string_lossy().into_owned();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+            "transcript_path": transcript, "cwd": dir.path(),
+        });
+        assert_eq!(printed(relay(dir.path(), session, &[], &start)).await, "");
+
+        let follow = ConversationRequest::Follow { session };
+        worker.tx.send(&ClientMsg::Conversation(follow.clone())).await.unwrap();
+        let mut stream = conversation_stream(&worker.conn).await;
+        let mut copy = Copy::default();
+        copy.until(&mut stream, |c| c.current).await;
+        assert_eq!(copy.threads, decoded(&main), "the conversation as it stands");
+
+        let mut file = std::fs::OpenOptions::new().append(true).open(&main).unwrap();
+        std::io::Write::write_all(&mut file, format!("{}\n", rest.join("\n")).as_bytes()).unwrap();
+        for agent in std::fs::read_dir(fixture("tools").join("subagents")).unwrap() {
+            let agent = agent.unwrap().path();
+            std::fs::copy(&agent, subagents.join(agent.file_name().unwrap())).unwrap();
+        }
+        let whole = decoded(&main);
+        assert!(whole.len() > 1, "the fixture has a subagent thread");
+        copy.until(&mut stream, |c| c.threads == whole).await;
+
+        let status = serde_json::json!({
+            "session_id": "s1", "transcript_path": transcript,
+            "model": { "id": "claude-haiku-4-5", "display_name": "Haiku" },
+            "context_window": { "context_window_size": 200_000, "used_percentage": 12 },
+        });
+        let line = relay(dir.path(), session, &["statusline", "--command", "true"], &status);
+        assert_eq!(printed(line).await, "", "the person's line (here `true`) is passed through");
+        copy.until(&mut stream, |c| c.meters.is_some()).await;
+        let meters = copy.meters.clone().unwrap();
+        assert_eq!((meters.model.as_deref(), meters.context_used_pct), (Some("Haiku"), Some(12.0)));
+
+        // A prompt, as the `permission` capture's first one, answered "always" from here.
+        let hooks = std::fs::read_to_string(fixture("permission").join("hooks.jsonl")).unwrap();
+        let mut ask: serde_json::Value = hooks
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .map(|l| l["input"].clone())
+            .find(|input| input["hook_event_name"] == "PermissionRequest")
+            .unwrap();
+        ask["transcript_path"] = serde_json::Value::String(transcript.clone());
+        let asked = async |worker: &mut WorkerConn| {
+            next_msg(worker, |m| match m {
+                WorkerMsg::Permission(PermissionEvent::Asked(prompt)) => Some(*prompt),
+                _ => None,
+            })
+            .await
+        };
+        let settled = async |worker: &mut WorkerConn, id: u64| {
+            next_msg(worker, |m| match m {
+                WorkerMsg::Permission(PermissionEvent::Settled { ask, outcome, .. })
+                    if ask == id =>
+                {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .await
+        };
+        let held = relay(dir.path(), session, &[], &ask);
+        let prompt = asked(&mut worker).await;
+        assert_eq!((prompt.session, prompt.tool.as_str()), (session, "Bash"));
+        let ToolDetail::Bash(bash) = &prompt.detail else { panic!("{:?}", prompt.detail) };
+        assert_eq!(bash.command.text, "touch refused.txt");
+        assert_eq!(prompt.suggestions.len(), 2, "a directory and a mode");
+        let answer =
+            ConversationRequest::Answer { session, ask: prompt.ask, verdict: Verdict::AllowAlways };
+        worker.tx.send(&ClientMsg::Conversation(answer.clone())).await.unwrap();
+        let output: serde_json::Value = serde_json::from_str(&printed(held).await).unwrap();
+        let decision = &output["hookSpecificOutput"]["decision"];
+        assert_eq!(decision["behavior"], "allow");
+        assert_eq!(decision["updatedPermissions"], ask["permission_suggestions"]);
+        assert!(matches!(
+            settled(&mut worker, prompt.ask).await,
+            Settled::Answered { verdict: Verdict::AllowAlways, .. }
+        ));
+        // A second answer to the same prompt finds nothing; the next prompt is unaffected.
+        worker.tx.send(&ClientMsg::Conversation(answer)).await.unwrap();
+
+        // The relay goes away while its prompt is held: withdrawn.
+        let mut gone = relay(dir.path(), session, &[], &ask);
+        let prompt = asked(&mut worker).await;
+        gone.start_kill().unwrap();
+        assert_eq!(settled(&mut worker, prompt.ask).await, Settled::Withdrawn);
+
+        // The last follower leaves while a prompt is held: released, and the relay prints
+        // nothing, so Claude Code shows its own dialog. The stream finishes.
+        let released = relay(dir.path(), session, &[], &ask);
+        asked(&mut worker).await;
+        let unfollow = ConversationRequest::Unfollow { session };
+        worker.tx.send(&ClientMsg::Conversation(unfollow)).await.unwrap();
+        assert_eq!(printed(released).await, "", "no decision");
+        let ended = tokio::time::timeout(STEP, stream.recv()).await.unwrap();
+        assert!(ended.is_err(), "the stream finished: {ended:?}");
+
+        // Nobody follows: no prompt is held, the relay is let go at once.
+        let started = std::time::Instant::now();
+        assert_eq!(printed(relay(dir.path(), session, &[], &ask)).await, "");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+
+        worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+        drop(file);
+    }
+
+    /// Erase the line [`exact_echoes`] left in a `cat` session (⌃U) and let its frames pass,
+    /// so the next run starts on an empty line.
+    async fn clear_line(
+        send: &tokio::sync::mpsc::Sender<ClientMsg>,
+        frames: &mut FramedRecv<TermEvent>,
+        session: SessionId,
+    ) {
+        let req = TermRequest::Raw(b"\x15".to_vec());
+        send.send(ClientMsg::Term { session, req }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        while tokio::time::timeout(Duration::from_millis(30), frames.recv()).await.is_ok() {}
+    }
+
+    /// A measurement, not a check: what following a busy agent's conversation costs a key's
+    /// echo on the same connection. Three arms alternate, 200 keys each into `/bin/cat`, five
+    /// rounds: nothing else going on; an agent's transcript growing by a 2 KB answer every 5 ms
+    /// (400 KB/s, with a hook every 50 ms) that nobody follows; and the same, followed. The
+    /// last also reports how long an appended answer took to reach the follower.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "a measurement: cargo test -p slopty-workerd --release --test e2e \
+                echo_beside_a_followed_conversation -- --ignored --nocapture"]
+    async fn echo_beside_a_followed_conversation() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use slopty_proto::conversation::{Body, Change, ConversationEvent, ConversationRequest};
+        use slopty_worker::ctl::CtlRequest;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let agent = open_shell(&mut worker, dir.path()).await;
+        let (session, frames) = open_cat(&mut worker, true).await;
+        let mut frames = frames.unwrap();
+
+        let main = dir.path().join("projects").join("s1.jsonl");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(&main, "").unwrap();
+        let sock = dir.path().join("worker.sock");
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "session_id": "s1",
+            "transcript_path": main, "cwd": dir.path(),
+        });
+        ctl(&sock, &CtlRequest::Hook { session: agent, payload: start.to_string() }).await;
+
+        let WorkerConn { tx, rx, conn, .. } = worker;
+        let (send, mut outbox) = tokio::sync::mpsc::channel::<ClientMsg>(64);
+        let writer = tokio::spawn(async move {
+            let mut tx = tx;
+            while let Some(msg) = outbox.recv().await {
+                tx.send(&msg).await.unwrap();
+            }
+        });
+        let reader = tokio::spawn(async move {
+            let mut rx = rx;
+            while rx.recv().await.is_ok() {}
+        });
+
+        // The agent: answers appended to its transcript, each saying when it was written.
+        let base = std::time::Instant::now();
+        let busy = Arc::new(AtomicBool::new(false));
+        let generator = {
+            let (busy, main, sock) = (Arc::clone(&busy), main.clone(), sock.clone());
+            tokio::spawn(async move {
+                let mut file = std::fs::OpenOptions::new().append(true).open(&main).unwrap();
+                let filler = "lorem ipsum dolor sit amet ".repeat(75);
+                let mut n: u64 = 0;
+                let mut tick = tokio::time::interval(Duration::from_millis(5));
+                loop {
+                    tick.tick().await;
+                    if !busy.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    n = n.saturating_add(1);
+                    let us = base.elapsed().as_micros();
+                    let record = serde_json::json!({
+                        "type": "assistant", "uuid": format!("g{n}"),
+                        "parentUuid": (n > 1).then(|| format!("g{}", n.saturating_sub(1))),
+                        "timestamp": "2026-09-27T03:15:26.000Z",
+                        "message": { "role": "assistant",
+                            "content": [{ "type": "text", "text": format!("t={us} {filler}") }] },
+                    });
+                    std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes()).unwrap();
+                    if n.is_multiple_of(10) {
+                        let hook = serde_json::json!({
+                            "hook_event_name": "PostToolUse", "session_id": "s1",
+                            "tool_name": "Bash", "tool_use_id": format!("t{n}"),
+                            "transcript_path": main,
+                        });
+                        let payload = hook.to_string();
+                        ctl(&sock, &CtlRequest::Hook { session: agent, payload }).await;
+                    }
+                }
+            })
+        };
+
+        let mut rows = Vec::new();
+        let mut lags: Vec<f64> = Vec::new();
+        for round in 1..=5 {
+            eprintln!("round {round}");
+            busy.store(false, Ordering::Relaxed);
+            let quiet = exact_echoes(&send, &mut frames, session, 200).await;
+            clear_line(&send, &mut frames, session).await;
+            busy.store(true, Ordering::Relaxed);
+            let unfollowed = exact_echoes(&send, &mut frames, session, 200).await;
+            clear_line(&send, &mut frames, session).await;
+
+            let follow = ConversationRequest::Follow { session: agent };
+            send.send(ClientMsg::Conversation(follow)).await.unwrap();
+            let mut stream = conversation_stream(&conn).await;
+            let follower = tokio::spawn(async move {
+                let mut lags = Vec::new();
+                let mut changes = 0_usize;
+                // What came before `Current` is the backlog, not live.
+                let mut live = false;
+                while let Ok(event) = stream.recv().await {
+                    let batch = match event {
+                        ConversationEvent::Changes(batch) => batch,
+                        ConversationEvent::Current => {
+                            live = true;
+                            continue;
+                        }
+                        _ => continue,
+                    };
+                    changes = changes.saturating_add(batch.len());
+                    for change in batch {
+                        let Change::Upsert { entry, .. } = change else { continue };
+                        let Body::Text(text) = entry.body else { continue };
+                        let written = text.text.strip_prefix("t=").and_then(|t| {
+                            t.split_once(' ').and_then(|(us, _)| us.parse::<u128>().ok())
+                        });
+                        if let Some(us) = written.filter(|_| live) {
+                            let now = base.elapsed().as_micros();
+                            #[expect(clippy::cast_precision_loss, reason = "micros below 2^53")]
+                            lags.push(now.saturating_sub(us) as f64 / 1e3);
+                        }
+                    }
+                }
+                (lags, changes)
+            });
+            let followed = exact_echoes(&send, &mut frames, session, 200).await;
+            clear_line(&send, &mut frames, session).await;
+            let unfollow = ConversationRequest::Unfollow { session: agent };
+            send.send(ClientMsg::Conversation(unfollow)).await.unwrap();
+            let (lag, changes) = tokio::time::timeout(STEP, follower).await.unwrap().unwrap();
+            eprintln!("round {round}: {changes} changes followed");
+            lags.extend(lag);
+            rows.push((round, quiet, unfollowed, followed));
+        }
+        busy.store(false, Ordering::Relaxed);
+        generator.abort();
+        let mut pooled = [Vec::new(), Vec::new(), Vec::new()];
+        for (_round, quiet, unfollowed, followed) in &rows {
+            for (all, samples) in pooled.iter_mut().zip([quiet, unfollowed, followed]) {
+                all.extend_from_slice(samples);
+            }
+        }
+        for (arm, samples) in ["quiet", "busy, not followed", "busy, followed"].iter().zip(pooled) {
+            let (p50, p99, max) = p50_p99_max(&samples);
+            let (_p50, p90, _max) = quantiles(&mut samples.clone());
+            eprintln!(
+                "all {arm:>19}: p50 {p50:.2} / p90 {p90:.2} / p99 {p99:.2} / max {max:.2} ms over {}",
+                samples.len()
+            );
+        }
+        for (round, quiet, unfollowed, followed) in rows {
+            for (arm, samples) in
+                [("quiet", quiet), ("busy, not followed", unfollowed), ("busy, followed", followed)]
+            {
+                let (p50, p99, max) = p50_p99_max(&samples);
+                let (_p50, p90, _max) = quantiles(&mut samples.clone());
+                eprintln!(
+                    "round {round} {arm:>19}: p50 {p50:.2} / p90 {p90:.2} / p99 {p99:.2} / \
+                     max {max:.2} ms"
+                );
+            }
+        }
+        let (l50, l99, lmax) = p50_p99_max(&lags);
+        let (_l50, l90, _lmax) = quantiles(&mut lags.clone());
+        eprintln!(
+            "append → follower over {} answers: p50 {l50:.1} / p90 {l90:.1} / p99 {l99:.1} / \
+             max {lmax:.1} ms",
+            lags.len()
+        );
+        writer.abort();
+        reader.abort();
     }
 }

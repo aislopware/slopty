@@ -46,19 +46,19 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use slopty_proto::conversation::{
+    AgentDetail, AgentRun, Answer, BashDetail, Body, Cap, Change, Clipped, Compact, EditDetail,
+    Entry, GlobDetail, GrepDetail, Hunk, McpDetail, Note, NoteKind, Origin, Part, Patch, Prompt,
+    Question, QuestionDetail, ReadDetail, ResultStatus, ShellStatus, Task, TaskCreateDetail,
+    TaskUpdateDetail, TextRef, ThreadId, ThreadState, ToolCall, ToolDetail, ToolResult,
+    WebFetchDetail, WebSearchDetail, WriteDetail, WriteKind,
+};
 
 use crate::transcript::Tail;
 
-/// A clipping limit: whichever of the two is reached first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Cap {
-    /// Whole lines kept.
-    pub lines: usize,
-    /// Characters kept.
-    pub chars: usize,
-}
+mod session;
+pub use session::{Transcripts, subagents_dir};
 
 /// Prose: prompts, answers, thinking, plans, subagent reports, compaction summaries. Long enough
 /// for any answer a person reads through, short of a pasted log.
@@ -75,15 +75,6 @@ pub const PATCH_LINES: usize = 400;
 /// that started after the calls would otherwise hold them forever).
 const PENDING_MAX: usize = 512;
 
-/// Which conversation an entry belongs to.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum ThreadId {
-    /// The session's own conversation.
-    Main,
-    /// A subagent's, by its agent id.
-    Agent(String),
-}
-
 /// The thread a transcript file feeds: `…/subagents/agent-<id>.jsonl` is that agent's, any
 /// other file the main conversation.
 #[must_use]
@@ -95,633 +86,6 @@ pub fn thread_of(path: &Path) -> ThreadId {
         Some(id) if in_subagents && !id.is_empty() => ThreadId::Agent(id.to_owned()),
         _ => ThreadId::Main,
     }
-}
-
-/// Where the whole of a clipped text is in the transcript.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TextRef {
-    /// The record's `uuid`.
-    pub record: String,
-    /// Which part of it.
-    pub part: Part,
-}
-
-/// A part of a record that can be long.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Part {
-    /// The message's content block at `index` (a prompt, an answer, thinking, a summary). A
-    /// content that is one string is block 0.
-    Block {
-        /// The block's position in `message.content`.
-        index: u32,
-    },
-    /// A string field of a tool call's input.
-    Input {
-        /// The call.
-        tool_use_id: String,
-        /// The input field.
-        field: String,
-    },
-    /// The text of a tool result the model saw.
-    Result {
-        /// The call.
-        tool_use_id: String,
-    },
-    /// A Bash call's standard output (`toolUseResult.stdout`).
-    Stdout,
-    /// A Bash call's standard error.
-    Stderr,
-    /// An edit's whole diff (`toolUseResult.structuredPatch`), as unified hunks.
-    Patch,
-}
-
-/// A text, cut to a cap when it is longer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Clipped {
-    /// What is shown: all of it, or its head or tail.
-    pub text: String,
-    /// Lines in the whole text.
-    pub lines: u32,
-    /// Characters in the whole text.
-    pub chars: u32,
-    /// Where the whole text is, when `text` is not all of it.
-    pub full: Option<TextRef>,
-}
-
-impl Clipped {
-    /// The first lines of `text` within `cap`.
-    #[must_use]
-    pub fn head(text: &str, cap: Cap, full: Option<TextRef>) -> Self {
-        Self::cut(text, cap, full, false)
-    }
-
-    /// The last lines of `text` within `cap`: what a log ended with.
-    #[must_use]
-    pub fn tail(text: &str, cap: Cap, full: Option<TextRef>) -> Self {
-        Self::cut(text, cap, full, true)
-    }
-
-    /// Whether `text` is less than the whole.
-    #[must_use]
-    pub const fn is_clipped(&self) -> bool {
-        self.full.is_some()
-    }
-
-    fn cut(text: &str, cap: Cap, full: Option<TextRef>, from_end: bool) -> Self {
-        let lines = text.lines().count();
-        let chars = text.chars().count();
-        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-        if lines <= cap.lines && chars <= cap.chars {
-            return Self {
-                text: text.to_owned(),
-                lines: count(lines),
-                chars: count(chars),
-                full: None,
-            };
-        }
-        let kept = if from_end { keep_tail(text, cap) } else { keep_head(text, cap) };
-        Self { text: kept, lines: count(lines), chars: count(chars), full }
-    }
-}
-
-fn keep_head(text: &str, cap: Cap) -> String {
-    let mut out = String::new();
-    let mut used = 0_usize;
-    for line in text.split_inclusive('\n').take(cap.lines) {
-        let n = line.chars().count();
-        if used.saturating_add(n) > cap.chars {
-            out.extend(line.chars().take(cap.chars.saturating_sub(used)));
-            out.push('…');
-            break;
-        }
-        out.push_str(line);
-        used = used.saturating_add(n);
-    }
-    out.truncate(out.trim_end_matches('\n').len());
-    out
-}
-
-fn keep_tail(text: &str, cap: Cap) -> String {
-    let trimmed = text.trim_end_matches('\n');
-    let mut kept: Vec<String> = Vec::new();
-    let mut used = 0_usize;
-    for line in trimmed.split('\n').rev().take(cap.lines) {
-        let n = line.chars().count().saturating_add(1);
-        if used.saturating_add(n) > cap.chars {
-            let room = cap.chars.saturating_sub(used);
-            let skip = line.chars().count().saturating_sub(room);
-            kept.push(format!("…{}", line.chars().skip(skip).collect::<String>()));
-            break;
-        }
-        kept.push(line.to_owned());
-        used = used.saturating_add(n);
-    }
-    kept.reverse();
-    kept.join("\n")
-}
-
-/// One thing in a conversation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Entry {
-    /// Stable id: the `tool_use_id` of a tool call, else the record's `uuid` (with `:<block>`
-    /// for an answer or thinking block).
-    pub id: String,
-    /// When the record was written, in ms since the Unix epoch; 0 when it says nothing.
-    pub at_ms: u64,
-    /// What it is.
-    pub body: Body,
-}
-
-/// What an entry is.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Body {
-    /// Something the person sent.
-    Prompt(Prompt),
-    /// The assistant's answer text.
-    Text(Clipped),
-    /// The assistant's thinking (as Claude Code writes it: a summary, or nothing).
-    Thinking(Clipped),
-    /// A tool call, with its result once it has one.
-    Tool(Box<ToolCall>),
-    /// The conversation was compacted here.
-    Compact(Compact),
-    /// The person pressed Esc.
-    Interrupted {
-        /// It stopped a tool call rather than the model's answer.
-        during_tool: bool,
-    },
-    /// A line from Claude Code itself.
-    Note(Note),
-}
-
-/// A prompt.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Prompt {
-    /// The words, or a command's arguments.
-    pub text: Clipped,
-    /// Images pasted with it.
-    pub images: u32,
-    /// A slash command (`/compact`), or `!` for a shell command typed in bash mode.
-    pub command: Option<String>,
-}
-
-/// A compaction boundary.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Compact {
-    /// `manual` (`/compact`) or `auto`.
-    pub trigger: Option<String>,
-    /// Tokens in the context before.
-    pub pre_tokens: Option<u64>,
-    /// And after.
-    pub post_tokens: Option<u64>,
-    /// The summary the conversation continues from.
-    pub summary: Option<Clipped>,
-}
-
-/// A note from Claude Code.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Note {
-    /// What kind.
-    pub kind: NoteKind,
-    /// What it says.
-    pub text: Clipped,
-}
-
-/// Kinds of [`Note`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NoteKind {
-    /// The API failed or is being retried.
-    ApiError,
-    /// The output of a slash command or of a bash-mode command.
-    Command,
-    /// Something Claude Code wanted to say.
-    Info,
-}
-
-/// A tool call.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolCall {
-    /// The tool's name as the model called it.
-    pub name: String,
-    /// What it was asked to do, and what came of it, typed by tool.
-    pub detail: ToolDetail,
-    /// The result, once it arrived.
-    pub result: Option<ToolResult>,
-}
-
-/// How a call ended.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolResult {
-    /// Whether it worked.
-    pub status: ResultStatus,
-    /// The text the model saw, when the detail does not already carry the output, or on an
-    /// error.
-    pub text: Option<Clipped>,
-    /// When the result was written.
-    pub at_ms: u64,
-}
-
-/// How a call ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ResultStatus {
-    /// It ran.
-    Ok,
-    /// It failed, or a hook or the permission system denied it.
-    Error,
-    /// The person refused it, or pressed Esc while it ran.
-    Rejected,
-}
-
-/// A call's detail, by tool.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ToolDetail {
-    /// `Edit` and `MultiEdit`.
-    Edit(EditDetail),
-    /// `Write`.
-    Write(WriteDetail),
-    /// `Read`.
-    Read(ReadDetail),
-    /// `Grep`.
-    Grep(GrepDetail),
-    /// `Glob`.
-    Glob(GlobDetail),
-    /// `Bash`.
-    Bash(BashDetail),
-    /// `WebFetch`.
-    WebFetch(WebFetchDetail),
-    /// `WebSearch`.
-    WebSearch(WebSearchDetail),
-    /// `Agent` (`Task` in older versions): a subagent.
-    Agent(AgentDetail),
-    /// `TaskCreate`: a task added to the list.
-    TaskCreate(TaskCreateDetail),
-    /// `TaskUpdate`: a task changed.
-    TaskUpdate(TaskUpdateDetail),
-    /// `TodoWrite` (older versions): the whole list at once.
-    TodoWrite {
-        /// The list as written.
-        todos: Vec<Task>,
-    },
-    /// `AskUserQuestion`.
-    Question(QuestionDetail),
-    /// `ExitPlanMode`: a plan for approval.
-    Plan {
-        /// The plan.
-        plan: Clipped,
-    },
-    /// A tool an MCP server provides (`mcp__<server>__<tool>`).
-    Mcp(McpDetail),
-    /// Any other tool: its input, clipped.
-    Other {
-        /// The input as JSON.
-        input: Clipped,
-    },
-}
-
-/// A diff.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Patch {
-    /// Hunks, as `git diff` would cut them.
-    pub hunks: Vec<Hunk>,
-    /// Lines added, over the whole diff.
-    pub added: u32,
-    /// Lines removed.
-    pub removed: u32,
-    /// Diff lines left out of `hunks` past [`PATCH_LINES`].
-    pub clipped_lines: u32,
-    /// Where the whole diff is, when lines were left out.
-    pub full: Option<TextRef>,
-}
-
-/// One hunk of a diff.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Hunk {
-    /// First line in the old file.
-    pub old_start: u32,
-    /// Lines of the old file the hunk spans.
-    pub old_lines: u32,
-    /// First line in the new file.
-    pub new_start: u32,
-    /// Lines of the new file the hunk spans.
-    pub new_lines: u32,
-    /// The lines, each starting with ` `, `-` or `+` (or `\` for "no newline at end").
-    pub lines: Vec<String>,
-}
-
-/// `Edit` / `MultiEdit`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EditDetail {
-    /// The file.
-    pub path: String,
-    /// Replacements asked for (`MultiEdit` asks several).
-    pub edits: u32,
-    /// Every occurrence was replaced.
-    pub replace_all: bool,
-    /// What changed, from the result; empty until it arrives.
-    pub patch: Patch,
-}
-
-/// `Write`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WriteDetail {
-    /// The file.
-    pub path: String,
-    /// Lines written.
-    pub lines: u32,
-    /// Whether the file was new.
-    pub kind: WriteKind,
-    /// For an overwrite, what changed.
-    pub patch: Patch,
-}
-
-/// Whether a `Write` made a file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WriteKind {
-    /// Not known until the result arrives.
-    Unknown,
-    /// A new file.
-    Create,
-    /// An existing file replaced.
-    Overwrite,
-}
-
-/// `Read`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReadDetail {
-    /// The file.
-    pub path: String,
-    /// The line it was asked to start at.
-    pub offset: Option<u64>,
-    /// How many lines it asked for.
-    pub limit: Option<u64>,
-    /// First line read, from the result.
-    pub start_line: Option<u64>,
-    /// Lines read.
-    pub lines: Option<u64>,
-    /// Lines in the file.
-    pub total_lines: Option<u64>,
-}
-
-/// `Grep`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GrepDetail {
-    /// The pattern.
-    pub pattern: String,
-    /// Where it searched.
-    pub path: Option<String>,
-    /// The file filter.
-    pub glob: Option<String>,
-    /// `content`, `files_with_matches` or `count`.
-    pub mode: Option<String>,
-    /// Files that matched.
-    pub files: Option<u64>,
-    /// Matching lines (content mode).
-    pub lines: Option<u64>,
-}
-
-/// `Glob`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GlobDetail {
-    /// The pattern.
-    pub pattern: String,
-    /// Where it looked.
-    pub path: Option<String>,
-    /// Files found.
-    pub files: Option<u64>,
-    /// More matched than were listed.
-    pub truncated: bool,
-}
-
-/// `Bash`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BashDetail {
-    /// The command.
-    pub command: Clipped,
-    /// What the model said it does.
-    pub description: Option<String>,
-    /// Asked to run in the background.
-    pub background: bool,
-    /// The background task's id, once it started.
-    pub task_id: Option<String>,
-    /// Where it stands.
-    pub status: ShellStatus,
-    /// Its exit code, when known.
-    pub exit_code: Option<i32>,
-    /// The end of its standard output.
-    pub stdout: Option<Clipped>,
-    /// The end of its standard error.
-    pub stderr: Option<Clipped>,
-    /// Where a background command's output goes; the worker tails it.
-    pub output_file: Option<String>,
-}
-
-/// Where a shell command stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ShellStatus {
-    /// Running, or running in the background.
-    Running,
-    /// Exited 0.
-    Done,
-    /// Exited otherwise, or could not run.
-    Failed,
-    /// Stopped by Esc.
-    Interrupted,
-    /// A background command that was stopped.
-    Killed,
-}
-
-/// `WebFetch`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WebFetchDetail {
-    /// The address.
-    pub url: String,
-    /// What it asked of the page.
-    pub prompt: Option<String>,
-    /// The HTTP status.
-    pub code: Option<u64>,
-    /// Bytes fetched.
-    pub bytes: Option<u64>,
-}
-
-/// `WebSearch`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WebSearchDetail {
-    /// The query.
-    pub query: String,
-    /// Links found.
-    pub results: Option<u64>,
-}
-
-/// A subagent (`Agent`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentDetail {
-    /// Its id: [`ThreadId::Agent`] of its own thread. Known once it started.
-    pub agent_id: Option<String>,
-    /// `general-purpose`, `Explore`, a custom agent's name.
-    pub agent_type: Option<String>,
-    /// The short description the model gave it.
-    pub description: Option<String>,
-    /// Its brief.
-    pub prompt: Clipped,
-    /// It runs in the background.
-    pub background: bool,
-    /// Where it stands.
-    pub status: AgentRun,
-    /// What it reported back.
-    pub report: Option<Clipped>,
-    /// Tokens it used.
-    pub tokens: Option<u64>,
-    /// Tool calls it made.
-    pub tool_uses: Option<u64>,
-    /// How long it ran.
-    pub duration_ms: Option<u64>,
-}
-
-/// Where a subagent stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AgentRun {
-    /// Working.
-    Running,
-    /// Reported back.
-    Completed,
-    /// Failed.
-    Failed,
-    /// Stopped.
-    Killed,
-}
-
-/// `TaskCreate`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskCreateDetail {
-    /// The new task's id, from the result.
-    pub task_id: Option<String>,
-    /// Its title.
-    pub subject: String,
-    /// Its description.
-    pub description: Option<String>,
-}
-
-/// `TaskUpdate`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskUpdateDetail {
-    /// The task.
-    pub task_id: String,
-    /// Its status before, from the result.
-    pub from: Option<String>,
-    /// Its status after.
-    pub to: Option<String>,
-    /// A new title.
-    pub subject: Option<String>,
-    /// The fields the update changed, from the result.
-    pub fields: Vec<String>,
-}
-
-/// One item of an agent's task list.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Task {
-    /// Its id (`TaskCreate`'s, or the position in a `TodoWrite` list).
-    pub id: String,
-    /// Its title.
-    pub subject: String,
-    /// `pending`, `in_progress`, `completed`.
-    pub status: String,
-}
-
-/// `AskUserQuestion`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QuestionDetail {
-    /// What it asked.
-    pub questions: Vec<Question>,
-    /// What the person picked, once answered.
-    pub answers: Vec<Answer>,
-}
-
-/// One question.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Question {
-    /// The question.
-    pub text: String,
-    /// Its short label.
-    pub header: Option<String>,
-    /// The choices offered.
-    pub options: Vec<String>,
-    /// More than one may be picked.
-    pub multi_select: bool,
-}
-
-/// One answer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Answer {
-    /// The question it answers.
-    pub question: String,
-    /// The answer.
-    pub answer: String,
-}
-
-/// A tool an MCP server provides.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpDetail {
-    /// The server.
-    pub server: String,
-    /// The tool.
-    pub tool: String,
-    /// The input as JSON.
-    pub input: Clipped,
-}
-
-/// What a subagent's thread knows of the call that started it (its file's `agent_metadata`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Origin {
-    /// The `Agent` call in the parent thread.
-    pub tool_use_id: Option<String>,
-    /// The agent's type.
-    pub agent_type: Option<String>,
-    /// The call's description.
-    pub description: Option<String>,
-}
-
-/// One thread as it stands.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadState {
-    /// Which.
-    pub id: ThreadId,
-    /// For a subagent, the call that started it.
-    pub origin: Option<Origin>,
-    /// Its entries, oldest first.
-    pub entries: Vec<Entry>,
-    /// Its task list.
-    pub tasks: Vec<Task>,
-}
-
-/// What a read changed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Change {
-    /// Replace the entry with this id in the thread, or append it when the thread has none.
-    Upsert {
-        /// The thread.
-        thread: ThreadId,
-        /// The entry.
-        entry: Entry,
-    },
-    /// The entry is gone (its branch was abandoned).
-    Remove {
-        /// The thread.
-        thread: ThreadId,
-        /// The entry's id.
-        id: String,
-    },
-    /// The thread's task list is now this.
-    Tasks {
-        /// The thread.
-        thread: ThreadId,
-        /// The whole list.
-        tasks: Vec<Task>,
-    },
-    /// The file started over: drop what the thread held, or every thread when `None`.
-    Reset {
-        /// The thread, or all.
-        thread: Option<ThreadId>,
-    },
 }
 
 #[derive(Debug, Default)]
@@ -1217,7 +581,7 @@ impl Conversation {
         let name = str_at(block, "name").unwrap_or_default();
         let empty = Value::Null;
         let input = block.get("input").unwrap_or(&empty);
-        let detail = detail(name, input, id, ctx.uuid);
+        let detail = detail(name, input, Some((id, ctx.uuid)));
         self.calls.insert(id.to_owned(), ctx.thread.clone());
         let call = ToolCall { name: name.to_owned(), detail, result: None };
         self.add(ctx, id.to_owned(), Body::Tool(Box::new(call)), batch);
@@ -1337,13 +701,96 @@ struct Ctx<'a> {
     made_at: usize,
 }
 
-/// A call's detail from its input alone; the result fills in the rest.
-fn detail(name: &str, input: &Value, id: &str, uuid: &str) -> ToolDetail {
+/// What a call Claude Code asks permission for would do.
+///
+/// Its detail is what the transcript will show, with an edit's or a write's change as a patch,
+/// since no result has made one yet. The input is not in a transcript, so a clipped text has
+/// no [`TextRef`].
+#[must_use]
+pub fn proposed(name: &str, input: &Value) -> ToolDetail {
+    let mut detail = detail(name, input, None);
+    let replacements = |input: &Value| -> Vec<(String, String)> {
+        let pair = |edit: &Value| {
+            (
+                string_at(edit, "old_string").unwrap_or_default(),
+                string_at(edit, "new_string").unwrap_or_default(),
+            )
+        };
+        match input.get("edits").and_then(Value::as_array) {
+            Some(edits) => edits.iter().map(pair).collect(),
+            None => vec![pair(input)],
+        }
+    };
+    match &mut detail {
+        ToolDetail::Edit(edit) => edit.patch = proposed_patch(&replacements(input)),
+        ToolDetail::Write(write) => {
+            let content = string_at(input, "content").unwrap_or_default();
+            write.patch = proposed_patch(&[(String::new(), content)]);
+        }
+        _ => {}
+    }
+    detail
+}
+
+/// A patch of replacements without line numbers (the file is not read): each is one hunk, the
+/// lines it keeps at either end as context around the lines it removes and adds.
+fn proposed_patch(replacements: &[(String, String)]) -> Patch {
+    let mut patch = Patch::default();
+    let mut room = PATCH_LINES;
+    for (old, new) in replacements {
+        let old: Vec<&str> = old.lines().collect();
+        let new: Vec<&str> = new.lines().collect();
+        let same = |(a, b): (&&str, &&str)| a == b;
+        let head = old.iter().zip(&new).take_while(|pair| same(*pair)).count();
+        let rest = old.len().min(new.len()).saturating_sub(head);
+        let tail =
+            old.iter().rev().zip(new.iter().rev()).take(rest).take_while(|p| same(*p)).count();
+        let removed = old.get(head..old.len().saturating_sub(tail)).unwrap_or_default();
+        let added = new.get(head..new.len().saturating_sub(tail)).unwrap_or_default();
+        patch.removed = patch.removed.saturating_add(to_u32(removed.len()));
+        patch.added = patch.added.saturating_add(to_u32(added.len()));
+        let lines: Vec<String> = old
+            .get(..head)
+            .unwrap_or_default()
+            .iter()
+            .map(|l| format!(" {l}"))
+            .chain(removed.iter().map(|l| format!("-{l}")))
+            .chain(added.iter().map(|l| format!("+{l}")))
+            .chain(
+                old.get(old.len().saturating_sub(tail)..)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|l| format!(" {l}")),
+            )
+            .collect();
+        let kept = lines.len().min(room);
+        room = room.saturating_sub(kept);
+        patch.clipped_lines =
+            patch.clipped_lines.saturating_add(to_u32(lines.len().saturating_sub(kept)));
+        if kept > 0 {
+            patch.hunks.push(Hunk {
+                old_start: 0,
+                old_lines: to_u32(old.len()),
+                new_start: 0,
+                new_lines: to_u32(new.len()),
+                lines: lines.into_iter().take(kept).collect(),
+            });
+        }
+    }
+    patch
+}
+
+/// A call's detail from its input alone; the result fills in the rest. `at` is the call's id
+/// and its record's uuid, where a clipped input is found again; `None` for a call not written
+/// yet.
+fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
     let text = |key: &str| string_at(input, key);
     let path = || text("file_path").or_else(|| text("notebook_path")).unwrap_or_default();
-    let input_ref = |field: &str| TextRef {
-        record: uuid.to_owned(),
-        part: Part::Input { tool_use_id: id.to_owned(), field: field.to_owned() },
+    let input_ref = |field: &str| {
+        at.map(|(id, uuid)| TextRef {
+            record: uuid.to_owned(),
+            part: Part::Input { tool_use_id: id.to_owned(), field: field.to_owned() },
+        })
     };
     match name {
         "Edit" | "MultiEdit" => ToolDetail::Edit(EditDetail {
@@ -1384,7 +831,7 @@ fn detail(name: &str, input: &Value, id: &str, uuid: &str) -> ToolDetail {
             command: Clipped::head(
                 str_at(input, "command").unwrap_or_default(),
                 OUTPUT,
-                Some(input_ref("command")),
+                input_ref("command"),
             ),
             description: text("description"),
             background: bool_at(input, "run_in_background"),
@@ -1412,7 +859,7 @@ fn detail(name: &str, input: &Value, id: &str, uuid: &str) -> ToolDetail {
             prompt: Clipped::head(
                 str_at(input, "prompt").unwrap_or_default(),
                 PROSE,
-                Some(input_ref("prompt")),
+                input_ref("prompt"),
             ),
             background: bool_at(input, "run_in_background"),
             status: AgentRun::Running,
@@ -1462,7 +909,7 @@ fn detail(name: &str, input: &Value, id: &str, uuid: &str) -> ToolDetail {
             plan: Clipped::head(
                 str_at(input, "plan").unwrap_or_default(),
                 PROSE,
-                Some(input_ref("plan")),
+                input_ref("plan"),
             ),
         },
         _ => {

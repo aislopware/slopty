@@ -5807,3 +5807,35 @@ background core a twelfth of the time at the fastest cadence.
 SLOPTY_COUNT_REPO=/path/to/repo cargo test -p slopty-worker --release --lib \
   counting_a_repository_costs -- --ignored --nocapture
 ```
+
+## 2026-09-27 — an echo beside a followed conversation
+
+What following a busy agent's conversation costs a key's echo on the same connection
+(`echo_beside_a_followed_conversation`, apps/slopty-worker e2e, release, loopback, mac-studio,
+load 6–7, working tree on 0439797 plus phase 1b). One client connection types into `/bin/cat`,
+200 keys an arm, each timed to the frame that shows it; three arms alternate for five rounds:
+nothing else going on; an agent session whose transcript grows by a 2 KB answer every 5 ms
+(400 KB/s, a hook every 50 ms) that nobody follows; and the same session followed on the same
+connection, its conversation stream drained. That is about twenty times the rate of a real turn.
+Each follow re-sends the backlog first (730 to 3 800 changes by the fifth round).
+
+| run | arm | p50 / p90 / p99 / max, 1 000 keys |
+| --- | --- | --- |
+| 1 | quiet | 0.90 / 2.38 / 7.43 / 14.23 ms |
+| | busy, not followed | 1.00 / 2.74 / 12.74 / 34.94 ms |
+| | busy, followed | 0.94 / 3.98 / 12.11 / 41.80 ms |
+| 2 | quiet | 0.41 / 1.93 / 4.54 / 10.64 ms |
+| | busy, not followed | 0.54 / 2.14 / 6.08 / 12.78 ms |
+| | busy, followed | 0.57 / 3.33 / 11.14 / 29.29 ms |
+
+The median does not move. At that rate the followed arm's p90 is 1.2–1.6 ms higher than the
+unfollowed one, and did not grow with the backlog from round to round (per-round p90s 2.1–4.7 ms
+against 2.1–3.0), so it is the steady decode and send, not the snapshot. An answer appended to
+the transcript reached the follower in p50 26 ms / p90 57–82 ms / p99 420–500 ms (live changes
+only, after `Current`): the 250 ms tick and the hooks between ticks.
+
+```sh
+cargo build --release -p slopty-ptyd -p slopty-cli
+cargo test -p slopty-workerd --release --test e2e echo_beside_a_followed_conversation \
+  -- --ignored --nocapture
+```

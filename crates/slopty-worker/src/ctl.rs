@@ -24,6 +24,11 @@ pub enum CtlRequest {
         /// The hook's stdin, verbatim JSON.
         payload: String,
     },
+    /// The relay waits on a `PermissionRequest` hook it has just posted as [`Self::Hook`]:
+    /// answered with [`CtlReply::Permission`], at once and undecided unless a client follows
+    /// the session, and within `wait_ms` whatever happens. The relay keeps its end open while
+    /// it waits; closing it withdraws the question.
+    Permission(slopty_agent::permission::PermissionAsk),
 }
 
 /// What `slopty worker doctor` shows: the daemon's own view of its permissions and links.
@@ -85,6 +90,8 @@ pub enum CtlReply {
         /// Closed recently, oldest first, with their final counters.
         closed: Vec<crate::screen::ScreenSummary>,
     },
+    /// The decision on a [`CtlRequest::Permission`].
+    Permission(slopty_agent::permission::PermissionAnswer),
     /// Done.
     Ok {
         /// Whether anything changed.
@@ -95,4 +102,37 @@ pub enum CtlReply {
         /// Why.
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use slopty_agent::permission::{Decision, PermissionAnswer, PermissionAsk};
+
+    use super::*;
+
+    /// The relay's lines, as `slopty_agent::permission` documents them, are these variants.
+    #[test]
+    fn a_permission_request_and_its_decision_are_single_json_lines() {
+        let session = SessionId::nil();
+        let ask = CtlRequest::Permission(PermissionAsk {
+            session,
+            payload: "{}".to_owned(),
+            wait_ms: 1_000,
+        });
+        let line =
+            json!({ "cmd": "permission", "session": session, "payload": "{}", "wait_ms": 1_000 });
+        assert_eq!(serde_json::to_value(&ask).ok(), Some(line.clone()));
+        assert_eq!(serde_json::from_value::<CtlRequest>(line).ok(), Some(ask));
+        let reply = CtlReply::Permission(PermissionAnswer {
+            decision: Decision::Deny { message: "no".to_owned(), interrupt: false },
+        });
+        assert_eq!(
+            serde_json::to_value(&reply).ok(),
+            Some(json!({
+                "reply": "permission",
+                "decision": { "kind": "deny", "message": "no", "interrupt": false },
+            }))
+        );
+    }
 }
