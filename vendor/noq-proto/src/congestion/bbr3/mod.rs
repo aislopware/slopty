@@ -1625,6 +1625,11 @@ impl Bbr3 {
 }
 
 impl Bbr3 {
+    /// `BBR.min_rtt`: the windowed minimum round trip the model sizes its window and pacing by.
+    pub fn min_rtt(&self) -> Duration {
+        self.min_rtt
+    }
+
     fn on_packet_sent(&mut self, now: Instant, bytes: u16, pn: u64, space: SpaceKind) {
         self.handle_restart_from_idle(now);
         if self.inflight == 0 {

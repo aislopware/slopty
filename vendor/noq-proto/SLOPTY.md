@@ -1,4 +1,4 @@
-# noq-proto, vendored with six patches
+# noq-proto, vendored with seven patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -62,6 +62,15 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    used `now - P.send_time`, the draft's `RS.rtt` (draft-ietf-ccwg-bbr-06 section 4.1.2.3), and
    the first now does too. Test: `the_first_ack_measures_min_rtt_from_its_own_packet`
    (docs/MEASUREMENTS.md, "one bulk stream over a long round trip").
+
+7. `feat(proto): Expose BBR3's min_rtt`
+
+   `Bbr3::min_rtt` returns `BBR.min_rtt`. Slopty's congestion snapshot reports it beside the
+   path's own measured minimum, so the gate can check the model against the path whatever the
+   machine's load. The rate a bulk stream reaches depends on free cores, and a rate floor
+   failed three gates with another job on every performance core (docs/decisions/testing.md).
+   This crate's own tests do not run in Slopty's gate, so patch 6's unit test cannot guard it
+   there.
 
 Commits 2 and 3 share `VideoSim` in the `bbr3` tests: a screen encoder's frames through one
 bottleneck, paced by noq's token bucket. `video_through_one_bottleneck` (ignored) prints what

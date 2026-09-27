@@ -12,6 +12,7 @@ mod tests {
     use slopty_core::{ClientId, SessionId, WorkerId, XferId};
     use slopty_net::admission::Admission;
     use slopty_net::client::{bind_client, connect};
+    use slopty_net::congestion::{self, Snapshot};
     use slopty_net::streams::{self, Uni};
     use slopty_net::worker::WorkerListener;
     use slopty_net::{ClientMsg, HostAddr, WorkerMsg};
@@ -24,9 +25,9 @@ mod tests {
     const DELAY: Duration = Duration::from_millis(10);
     const WAIT: Duration = Duration::from_secs(60);
 
-    /// Upload `files` files of `size` bytes over a link adding `delay` each way, and time the
-    /// worker's side from `Begin` to the last byte of the last file.
-    async fn upload(files: usize, size: usize, delay: Duration) -> Duration {
+    /// Upload `files` files of `size` bytes over a link adding `delay` each way: the worker's
+    /// time from `Begin` to the last byte of the last file, and the client's congestion picture.
+    async fn upload(files: usize, size: usize, delay: Duration) -> (Duration, Snapshot) {
         let listener =
             WorkerListener::bind(slopty_net::endpoint::any(0), Admission::default()).unwrap();
         let worker_at = SocketAddr::from(([127, 0, 0, 1], listener.local_addr().unwrap().port()));
@@ -62,6 +63,7 @@ mod tests {
         let addr: HostAddr = relay.addr().unwrap().into();
         let hello = Hello { client: ClientId::new(), name: "test".to_owned() };
         let conn = connect(&endpoint, &addr, hello).await.unwrap();
+        let sender = conn.conn.clone();
         let link = WorkerLink::start_forwarding(conn);
         let mut client = tokio::time::timeout(WAIT, accepted).await.unwrap().unwrap();
 
@@ -105,27 +107,37 @@ mod tests {
         );
         assert!(got.iter().all(|&n| n == size), "every file whole");
         relayed.abort();
-        took
+        let snapshot = congestion::snapshot(&sender).unwrap();
+        eprintln!("MEASURE sender {snapshot:?}");
+        (took, snapshot)
     }
 
     /// Waiting on each file's acknowledgement took a round trip per file: 2.16 s for 100 files
-    /// over 20 ms. The bound is a quarter of that.
+    /// over 20 ms. The bound is half of that: a quiet machine takes about 0.3 s, and one with
+    /// every core taken 0.6 s.
     #[tokio::test(flavor = "multi_thread")]
     async fn many_small_files_do_not_wait_a_round_trip_each() {
-        let took = upload(FILES, SIZE, DELAY).await;
+        let (took, _) = upload(FILES, SIZE, DELAY).await;
         let serial = DELAY.saturating_mul(2).saturating_mul(u32::try_from(FILES).unwrap());
         assert!(
-            took < serial.checked_div(4).unwrap(),
+            took < serial.checked_div(2).unwrap(),
             "{took:?} against {serial:?} for a round trip each"
         );
     }
 
-    /// One large file over a 60 ms round trip goes at the link's pace, not at one congestion
-    /// window per round trip: 16 MiB took 13 s (10 Mbit/s) while BBR3 took its first round trip
-    /// from the 5 ms initial estimate, and 1.2 s (114 Mbit/s) since.
+    /// One large file over a 60 ms round trip goes at the link's pace: 16 MiB took 13 s
+    /// (10 Mbit/s) while BBR3 took its first round trip from the 5 ms initial estimate and sized
+    /// its window to a twelfth of the path, and 1.2 s (114 Mbit/s) since on a quiet machine. The
+    /// time depends on the cores free, so the test holds the model: BBR3's `BBR.min_rtt` is the
+    /// path's own minimum, not the initial estimate (`slopty-net`'s `bulk_over_delay` does the
+    /// same for a bare stream).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_large_file_fills_a_long_round_trip() {
-        let took = upload(1, 16 << 20, Duration::from_millis(30)).await;
-        assert!(took < Duration::from_secs(3), "16 MiB over a 60 ms round trip took {took:?}");
+        let (took, s) = upload(1, 16 << 20, Duration::from_millis(30)).await;
+        let (Some(model), Some(path)) = (s.model_min_rtt, s.min_rtt) else {
+            panic!("no BBR3 model or no round trip measured: {s:?}")
+        };
+        let ratio = model.as_secs_f64() / path.as_secs_f64();
+        assert!(ratio >= 0.5, "16 MiB in {took:?}, BBR.min_rtt {ratio:.2}× the path's: {s:?}");
     }
 }

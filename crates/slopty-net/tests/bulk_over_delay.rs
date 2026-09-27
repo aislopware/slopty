@@ -8,6 +8,13 @@
 //! and one stream crawled at 10 Mbit/s over a 60 ms round trip (`vendor/noq-proto/SLOPTY.md`,
 //! patch 6; MEASUREMENTS.md, "one bulk stream over a long round trip").
 //!
+//! The tests hold the model, not the rate: BBR3's `BBR.min_rtt` must be the path's own minimum
+//! round trip (at least half of it), where the stuck value was a twelfth of a 60 ms path. The
+//! rate depends on the cores free (18-27 Mbit/s with another job on every performance core, 100
+//! to 500 unloaded), and a rate floor failed three gates on unchanged code; both minimums come
+//! from the same acknowledgements, so load moves neither. The rates are printed as `MEASURE`
+//! lines.
+//!
 //! `SLOPTY_BULK_TRACE=1` prints the sender's congestion picture every 20 ms; `UP_MS` sets the
 //! one-way delay of `one_way_delay_from_the_environment`.
 
@@ -21,6 +28,7 @@ mod tests {
     use slopty_core::{ClientId, WorkerId, XferId};
     use slopty_net::admission::Admission;
     use slopty_net::client::{bind_client, connect_addr};
+    use slopty_net::congestion::Snapshot;
     use slopty_net::streams::{self, Uni};
     use slopty_net::worker::WorkerListener;
     use slopty_net::{Connection, WorkerMsg, congestion};
@@ -29,14 +37,11 @@ mod tests {
 
     const SIZE: usize = 16 << 20;
     const WAIT: Duration = Duration::from_secs(60);
-    /// Well under what one stream reaches on this machine at each delay tested (100 to 500
-    /// Mbit/s), and far above the 10 Mbit/s a 60 ms round trip got while the minimum was stuck.
-    const FLOOR_MBIT: f64 = 80.0;
     const TRACE_EVERY: Duration = Duration::from_millis(20);
 
     /// Send [`SIZE`] bytes on one bulk stream over a link adding `one_way` each way, and return
-    /// the rate the receiver saw, Mbit/s.
-    async fn rate(one_way: Duration) -> f64 {
+    /// the sender's congestion picture at the end.
+    async fn send(one_way: Duration) -> Snapshot {
         let listener =
             WorkerListener::bind(slopty_net::endpoint::any(0), Admission::default()).unwrap();
         let worker_at = SocketAddr::from(([127, 0, 0, 1], listener.local_addr().unwrap().port()));
@@ -103,12 +108,21 @@ mod tests {
         let took = done.saturating_duration_since(began);
         #[expect(clippy::cast_precision_loss, reason = "16 MiB in bits is far below 2^53")]
         let mbit = (SIZE * 8) as f64 / took.as_secs_f64() / 1e6;
+        let snapshot = congestion::snapshot(&conn.conn).unwrap();
         eprintln!(
-            "MEASURE {} ms each way: {mbit:.0} Mbit/s in {took:.2?}; sender {:?}",
-            one_way.as_millis(),
-            congestion::snapshot(&conn.conn)
+            "MEASURE {} ms each way: {mbit:.0} Mbit/s in {took:.2?}; sender {snapshot:?}",
+            one_way.as_millis()
         );
-        mbit
+        snapshot
+    }
+
+    /// BBR3's `BBR.min_rtt` over the path's measured minimum: about 1 with the model right, and
+    /// 5 ms over the path's round trip with the minimum stuck at the initial estimate.
+    fn model_over_path(s: &Snapshot) -> f64 {
+        let (Some(model), Some(path)) = (s.model_min_rtt, s.min_rtt) else {
+            panic!("no BBR3 model or no round trip measured: {s:?}")
+        };
+        model.as_secs_f64() / path.as_secs_f64()
     }
 
     /// Print the sender's congestion picture and BBR3's model every [`TRACE_EVERY`].
@@ -151,19 +165,29 @@ mod tests {
         out
     }
 
-    /// A 60 ms round trip: BBR3's minimum stuck at the initial RTT held this to 10 Mbit/s.
+    /// A 60 ms round trip: BBR3's minimum stuck at the initial RTT sized the window to a
+    /// twelfth of the path and held this to 10 Mbit/s.
     #[tokio::test(flavor = "multi_thread")]
     async fn one_stream_fills_a_60ms_round_trip() {
-        let mbit = rate(Duration::from_millis(30)).await;
-        assert!(mbit >= FLOOR_MBIT, "{mbit:.0} Mbit/s over a 60 ms round trip");
+        let snapshot = send(Duration::from_millis(30)).await;
+        let ratio = model_over_path(&snapshot);
+        assert!(ratio >= 0.5, "BBR.min_rtt {ratio:.2}× the path's over 60 ms: {snapshot:?}");
     }
 
-    /// Shorter round trips, where the stuck minimum cost less, keep their rate.
+    /// Shorter round trips, where the stuck minimum cost less, keep the model on the path.
+    /// Below 10 ms each way the stuck 5 ms minimum is within a factor of two of the path, so
+    /// those runs are only measured.
     #[tokio::test(flavor = "multi_thread")]
     async fn one_stream_keeps_its_rate_on_short_round_trips() {
         for ms in [0, 5, 10] {
-            let mbit = rate(Duration::from_millis(ms)).await;
-            assert!(mbit >= FLOOR_MBIT, "{mbit:.0} Mbit/s at {ms} ms each way");
+            let snapshot = send(Duration::from_millis(ms)).await;
+            if ms >= 10 {
+                let ratio = model_over_path(&snapshot);
+                assert!(
+                    ratio >= 0.5,
+                    "BBR.min_rtt {ratio:.2}× the path's at {ms} ms: {snapshot:?}"
+                );
+            }
         }
     }
 
@@ -174,6 +198,6 @@ mod tests {
     #[ignore = "a measurement at the delay UP_MS names"]
     async fn one_way_delay_from_the_environment() {
         let ms = std::env::var("UP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-        rate(Duration::from_millis(ms)).await;
+        send(Duration::from_millis(ms)).await;
     }
 }

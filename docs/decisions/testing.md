@@ -260,3 +260,21 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   that, shared by every Mac case. `transfers` keeps 1%: its port is the one the OS picked and its
   upload moves (0.43% between runs). iOS went from 0.3% to 0.05%: the iPad's runs, once 0.06%
   apart with a blinking cursor, now differ by 0.002%.
+
+- ✅ **The bulk-rate tests hold BBR3's model against the path, not a rate** (2026-09-27).
+  `bulk_over_delay` and `upload_rate`'s large file asserted 80 Mbit/s and 3 s. That is a floor on
+  the cores free, not on the congestion model. With another session's job on all eight
+  performance cores they measured 18-27 Mbit/s and failed three gates on code that had passed an
+  hour before. A window-over-bandwidth-delay ratio was tried next, and it failed too (0.73 at
+  load 250): the delivery rate is a ten-second peak while BBR3 sizes by its current estimate, and
+  the two drift apart under load. The bug these tests guard is `BBR.min_rtt` stuck at the 5 ms
+  initial estimate on a 60 ms path. So they now assert exactly that. BBR3's `BBR.min_rtt`
+  (exposed as vendored noq-proto patch 7, `Bbr3::min_rtt`, reported in
+  `congestion::Snapshot::model_min_rtt`) must be at least half the path's own measured minimum.
+  With the model right the two are equal: 0.9 ms to 61 ms at load 150, and they come from the same
+  acknowledgements, so load moves neither. Stuck, the ratio is 0.08 at 60 ms and 0.25 at 10 ms
+  each way. The short-trip test checks from 10 ms each way up. The vendored crate's own tests
+  (patch 6's unit test) do not run in Slopty's gate. The rates stay printed as `MEASURE` lines.
+  The many-small-files bound is now half the one-round-trip-per-file time (1.08 s), not a quarter:
+  it read 0.58 s with every core taken, and the bug took 2.16 s. The nextest override that ran
+  `bulk_over_delay` alone is gone.

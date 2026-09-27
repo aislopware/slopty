@@ -30,7 +30,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use noq::congestion::{Controller, ControllerFactory, ControllerMetrics};
+use noq::congestion::{Bbr3, Controller, ControllerFactory, ControllerMetrics};
 use noq::{Connection, PathId};
 use noq_proto::RttEstimator;
 
@@ -344,6 +344,8 @@ pub struct Snapshot {
     pub delivery_rate: Option<u64>,
     /// The smallest round trip of the last ten seconds.
     pub min_rtt: Option<Duration>,
+    /// BBR3's own `BBR.min_rtt`, which sizes its window: `None` under another controller.
+    pub model_min_rtt: Option<Duration>,
 }
 
 /// The controller's picture of `conn`'s path, `None` once the path is gone.
@@ -353,13 +355,19 @@ pub struct Snapshot {
 pub fn snapshot(conn: &Connection) -> Option<Snapshot> {
     let controller = conn.congestion_state(PathId::ZERO)?;
     let bounded = controller.into_any().downcast::<Bounded>().ok()?;
+    let bounded_window = bounded.window();
+    let Bounded { inner, in_flight, delivery, min_rtt, .. } = *bounded;
+    let (cwnd, inner_cwnd) = (bounded_window, inner.window());
+    let pacing_rate = inner.metrics().pacing_rate;
+    let model_min_rtt = inner.into_any().downcast::<Bbr3>().ok().map(|bbr| bbr.min_rtt());
     Some(Snapshot {
-        cwnd: bounded.window(),
-        inner_cwnd: bounded.inner.window(),
-        in_flight: bounded.in_flight,
-        pacing_rate: bounded.inner.metrics().pacing_rate,
-        delivery_rate: bounded.delivery.max.get(),
-        min_rtt: bounded.min_rtt.get(),
+        cwnd,
+        inner_cwnd,
+        in_flight,
+        pacing_rate,
+        delivery_rate: delivery.max.get(),
+        min_rtt: min_rtt.get(),
+        model_min_rtt,
     })
 }
 
