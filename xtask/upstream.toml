@@ -22,7 +22,7 @@ upstream_branch = "main"
 fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
-base = "452e72f24a183174551fdec3db570997b1e1fc8f"
+base = "5059de47a6560fdbe24e32cd91b45d6aa6849695"
 base_date = "2026-09-27"
 checked = "2026-09-27"
 
