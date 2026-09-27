@@ -31,11 +31,13 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 filter = 'package(slopty-e2e) & (binary(ios) | binary(ios_uikit))'
 slow-timeout = { period = "60s", terminate-after = 5, grace-period = "10s" }
 
-# Echo latency is measured against the frame pace; the rest of the suite competing for the
-# cores is noise in that measurement.
+# Echo latency is measured against the frame pace, and a bulk stream's rate over a shaped
+# round trip against a floor; the rest of the suite competing for the cores is noise in those
+# measurements.
 [[profile.default.overrides]]
 filter = '''
-(package(slopty-worker) & (test(an_echo_beside_a_flood_is_not_held_to_the_frame_pace)
+(package(slopty-net) & binary(bulk_over_delay))
+| (package(slopty-worker) & (test(an_echo_beside_a_flood_is_not_held_to_the_frame_pace)
     | test(a_key_after_a_pause_does_not_wait_for_the_checkpoint)))
 | (package(slopty-workerd) & test(echo_is_not_held_behind_slow_requests))
 | (package(slopty-shape) & test(a_short_wait_ends_when_it_was_asked_to))
