@@ -1645,6 +1645,14 @@ impl GhosttyEngine {
             return Ok(());
         }
         let reflow = size.cols != self.size.cols || size.rows != self.size.rows;
+        if reflow {
+            // A tracked pin keeps its row from ghostty's shrink trim of blank rows
+            // (`PageList.trimTrailingBlankRows`): pinned to the bottom row, the anchor would push
+            // the screen into history instead, rows above the cursor and all. The reflow starts a
+            // new numbering, so the anchors have nothing left to hold.
+            self.anchor = None;
+            self.primary_anchor = None;
+        }
         self.term.resize(
             size.cols,
             size.rows,
@@ -1654,7 +1662,6 @@ impl GhosttyEngine {
         self.size = size;
         self.generation = self.generation.wrapping_add(1);
         if reflow {
-            self.primary_anchor = None;
             self.primary_commands.clear();
             self.primary_marks = None;
             self.bump_epoch();
@@ -2145,6 +2152,36 @@ mod tests {
         assert_eq!(e.epoch, b.epoch + 2, "rows");
         e.resize(TermSize { cols: 21, rows: 5, metrics }).unwrap();
         assert_eq!(e.epoch, b.epoch + 2, "the same size again");
+    }
+
+    /// Fewer rows take blank rows off the bottom first, as every terminal does: a prompt near
+    /// the top stays where it is, on the primary screen and on one parked under the alternate.
+    #[test]
+    fn fewer_rows_trim_blank_rows_before_scrolling_into_history() {
+        let text = |f: &Frame| {
+            let rows = f.updates.iter().map(|u| u.line.text().trim_end().to_owned());
+            rows.filter(|t| !t.is_empty()).collect::<Vec<_>>()
+        };
+        let mut e = engine(20, 8);
+        let rows = |e: &GhosttyEngine, rows| TermSize { rows, ..e.size() };
+        e.write(b"\x1b]133;A\x07~ % \x1b]133;B\x07echo hi\r\n\x1b]133;C\x07hi\r\n");
+        e.write(b"\x1b]133;D;0\x07\x1b]133;A\x07~ % \x1b]133;B\x07");
+        let shown = ["~ % echo hi", "hi", "~ %"];
+        // Shrink, grow and shrink again: the soft keyboard coming and going.
+        for n in [6, 12, 6] {
+            e.resize(rows(&e, n)).unwrap();
+            let f = e.full_frame(0).unwrap();
+            assert_eq!(text(&f), shown, "{n} rows");
+            assert_eq!((f.cursor.row, f.cursor.col), (2, 4), "{n} rows");
+        }
+        e.write(b"\x1b[?1049h\x1b[Hvim");
+        for n in [10, 5] {
+            e.resize(rows(&e, n)).unwrap();
+        }
+        e.write(b"\x1b[?1049l");
+        let f = e.full_frame(0).unwrap();
+        assert_eq!(text(&f), shown, "the primary, resized under the alternate screen");
+        assert_eq!((f.cursor.row, f.cursor.col), (2, 4));
     }
 
     #[test]

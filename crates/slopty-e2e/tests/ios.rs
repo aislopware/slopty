@@ -12,9 +12,9 @@
 mod tests {
     use std::time::Duration;
 
-    use slopty_e2e::harness::{Simulator, Stack, artifacts_dir};
+    use slopty_e2e::harness::{APPEARANCE, Simulator, Stack, artifacts_dir, pinned_settings};
     use slopty_e2e::snapshot::{assert_matches, foreground_fraction};
-    use slopty_e2e::{Command, Driver};
+    use slopty_e2e::{Command, Driver, Dump};
 
     /// Per-step wait.
     const STEP: Duration = Duration::from_secs(30);
@@ -33,6 +33,13 @@ mod tests {
     /// Which device family the app is on, from its viewport: the golden's name prefix.
     fn device(window_width: f32) -> &'static str {
         if window_width >= PHONE_BELOW { "pad" } else { "phone" }
+    }
+
+    /// The first shell still shows its echo: its rows survive the resizes the soft keyboard
+    /// and the columns put it through (fewer rows trim blank rows at the bottom first).
+    fn echo_on_screen(d: &Dump) -> bool {
+        !d.rows_containing("echo ios-").is_empty()
+            && d.rows_containing("ios-42").iter().any(|r| r.trim() == "ios-42")
     }
 
     /// Tap the middle of the `role` node labelled `label`.
@@ -159,12 +166,16 @@ mod tests {
         assert_matches(&name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
         // ⌘N from a hardware keyboard (the same keystroke the socket dispatches) opens a second
-        // shell; ⌘W closes it again.
+        // shell, focused; ⌘W closes the focused tile, that second shell, and gives the focus
+        // back to the first with its echo.
         drv.keys("cmd-n").await.unwrap();
         let dump = drv.wait_for("a second shell", STEP, |d| d.items.len() == 2).await.unwrap();
         assert!(dump.items.iter().any(|i| i.id != term.id && i.active), "{dump:#?}");
         drv.keys("cmd-w").await.unwrap();
-        drv.wait_for("the second shell to close", STEP, |d| d.items.len() == 1).await.unwrap();
+        let dump =
+            drv.wait_for("the second shell to close", STEP, |d| d.items.len() == 1).await.unwrap();
+        assert!(dump.items[0].id == term.id && dump.items[0].active, "{dump:#?}");
+        assert!(echo_on_screen(&dump), "{:#?}", dump.terminals);
 
         // Without a hardware keyboard: the palette from the titlebar's "…", the soft keyboard
         // types into its field, ↩ runs the line.
@@ -183,8 +194,9 @@ mod tests {
         .unwrap();
 
         // The phone has no editor for a file in its sandbox: "Open settings" from the palette
-        // puts `settings.toml` (the commented defaults here) in the in-app editor, ⌘A and the
-        // soft keyboard replace it with one section, ⌘↩ writes the file.
+        // puts `settings.toml` in the in-app editor, ⌘A and the soft keyboard replace it, ⌘↩
+        // writes the file. The new text keeps the harness's pins: without them the cursor goes
+        // back to blinking as the shell asks, and a golden holds it or not by the phase.
         open_palette(drv).await;
         drv.ui_insert_text("open settings").await.unwrap();
         drv.wait_for("one line", STEP, |d| {
@@ -199,7 +211,8 @@ mod tests {
         .await
         .unwrap();
         drv.keys("cmd-a").await.unwrap();
-        drv.ui_insert_text("[terminal]\nbell_alert = false\n").await.unwrap();
+        let settings = format!("{}bell_alert = false\n", pinned_settings(APPEARANCE));
+        drv.ui_insert_text(&settings).await.unwrap();
         drv.keys("cmd-enter").await.unwrap();
         drv.wait_for("the settings editor to close", STEP, |d| {
             d.a11y_node("Dialog", Some("Settings")).is_none()
@@ -208,7 +221,7 @@ mod tests {
         .unwrap();
         let saved =
             std::fs::read_to_string(stack.dir.path().join("app").join("settings.toml")).unwrap();
-        assert!(saved.contains("bell_alert = false"), "{saved}");
+        assert_eq!(saved, settings);
 
         // The phone names a tile the same way: "Name this tile" from the palette puts the
         // field in the focused tile's header, the soft keyboard types into it, ↩ keeps it.
@@ -236,7 +249,11 @@ mod tests {
 
         // The shell and the note side by side, the note focused: columns and their marks,
         // once the take-back offer for the closed shell has gone (it lasts five seconds).
-        drv.wait_for("the undo offer to lapse", STEP, |d| d.notice.is_none()).await.unwrap();
+        let dump =
+            drv.wait_for("the undo offer to lapse", STEP, |d| d.notice.is_none()).await.unwrap();
+        // The soft keyboard came and went with each field, and the note halved the shell's
+        // width: a shell shrunk by rows keeps what it showed.
+        assert!(echo_on_screen(&dump), "{:#?}", dump.terminals);
         golden(drv, &dir, dev, "columns", None).await;
         // The palette as the phone reaches it, from "…".
         open_palette(drv).await;
@@ -307,6 +324,8 @@ mod tests {
             })
             .await
             .unwrap();
+            let split = drv.dump().await.unwrap();
+            assert!(echo_on_screen(&split), "{:#?}", split.terminals);
             golden(drv, &dir, dev, "split", Some((w, h))).await;
         }
         stack.shutdown().await;

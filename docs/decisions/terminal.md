@@ -1750,3 +1750,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   environment is applied. The user's Claude Code settings in the environment
   (`CLAUDE_CODE_USE_BEDROCK` and the like) pass through. Test:
   `a_shell_forgets_the_claude_session_the_daemon_ran_in`.
+
+- ✅ **A terminal with fewer rows trims blank rows before it scrolls into history**
+  (2026-09-27). On the iPad, the soft keyboard going away and coming back (71 rows, then 51 again)
+  left a shell showing only its prompt, with its earlier output pushed into scrollback and the
+  cursor on the top row. Every height shrink on the Mac did the same. Ghostty trims blank rows
+  off the bottom first on a shrink, as every terminal does, but it never trims a row that holds a
+  tracked pin, and the engine kept its line-numbering anchors pinned to the bottom active row.
+  So nothing was trimmed, and the whole screen scrolled up. `GhosttyEngine::resize` now drops
+  both anchors before `term.resize` whenever the size changes. The resize starts a new numbering
+  and pins again afterwards, so the anchors held nothing a resize would keep. Test:
+  `fewer_rows_trim_blank_rows_before_scrolling_into_history` (shrink, grow and shrink, and a
+  resize of the primary screen under the alternate one). The iOS e2e now asserts the echo is
+  still on screen before the columns golden and the Split View golden.
