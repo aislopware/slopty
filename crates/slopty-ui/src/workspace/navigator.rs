@@ -50,13 +50,15 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::items::{Item, ItemKind};
+use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::tailnet::LinkPath;
+use slopty_proto::terminal::RepoChanges;
 use slopty_theme::{Theme, Typography};
 
 use super::actions::ToggleNavigator;
 use super::agents::{Waiting, agent_status_text};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
-use super::tile::{cwd_tail, kind_icon};
+use super::tile::kind_icon;
 use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
@@ -98,13 +100,19 @@ pub(super) enum Mode {
     Drawer,
 }
 
+/// The strip a touch screen keeps beside a docked navigator: an iPad's regular width, room
+/// for a terminal and a column beside it. Narrower, the navigator lays over the strip instead.
+pub(super) const TOUCH_DOCK_STRIP: f32 = 900.0;
+
 /// How the navigator sits in a window `window_w` wide, `width` its own width. A window that
-/// is a phone's gets the drawer; a touch screen (an iPad) or a window that would leave the
-/// strip a phone's width gets the overlay; anything else docks it.
+/// is a phone's gets the drawer; a window that would leave the strip a phone's width, or a
+/// touch screen (an iPad) that would leave it less than [`TOUCH_DOCK_STRIP`], gets the overlay;
+/// anything else docks it.
 pub(super) fn mode(window_w: f32, width: f32, phone_below: f32, touch: bool) -> Mode {
+    let strip = window_w - width;
     if window_w < phone_below {
         Mode::Drawer
-    } else if touch || window_w - width < phone_below {
+    } else if strip < phone_below || (touch && strip < TOUCH_DOCK_STRIP) {
         Mode::Overlay
     } else {
         Mode::Docked
@@ -255,6 +263,35 @@ pub(super) const fn worker_health(status: &WorkerStatus) -> Option<(Status, &'st
     }
 }
 
+/// What is wrong with a worker itself, as its header's warn line says it; nothing when all is
+/// well. A Mac that has not granted Screen Recording cannot share a window, one without
+/// Accessibility cannot take the keys, and a worker of another version may not speak this
+/// client's wire.
+pub(super) fn worker_warning(caps: &WorkerCaps) -> Option<String> {
+    let mac = caps.os == Os::MacOs;
+    let version = (!caps.version.is_empty() && caps.version != env!("CARGO_PKG_VERSION"))
+        .then(|| format!("Version {}", caps.version));
+    let wrong: Vec<String> = [
+        (mac && !caps.can_capture).then(|| "Screen Recording off".to_owned()),
+        (mac && !caps.can_inject).then(|| "Accessibility off".to_owned()),
+        version,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!wrong.is_empty()).then(|| wrong.join(META_SEPARATOR))
+}
+
+/// A worker's machine in a line, as the hosts list reads it: `macOS 26.5 · load 2.1`.
+pub(super) fn host_line(caps: &WorkerCaps) -> String {
+    let os = match caps.os {
+        Os::MacOs => "macOS",
+        Os::Linux => "Linux",
+    };
+    let os = format!("{os} {}", caps.os_version).trim().to_owned();
+    format!("{os}{META_SEPARATOR}load {:.1}", caps.load)
+}
+
 /// How a link's packets travel, as the chrome names it, and whether that is the slow path: a
 /// DERP relay is TCP and often a detour, so it wears the warning tone.
 pub(super) fn path_label(path: &LinkPath) -> (String, bool) {
@@ -274,7 +311,8 @@ pub(super) const fn attention(status: Option<Status>, unseen: bool) -> u8 {
         _ if unseen => 1,
         Some(Status::Done | Status::Failed) => 1,
         Some(Status::Working) => 2,
-        Some(Status::Idle | Status::Away) | None => 3,
+        Some(Status::Running) => 3,
+        Some(Status::Idle | Status::Away) | None => 4,
     }
 }
 
@@ -283,7 +321,7 @@ pub(super) const fn attention(status: Option<Status>, unseen: bool) -> u8 {
 pub(super) const fn status_word(status: Option<Status>) -> Option<Status> {
     match status {
         Some(s @ (Status::NeedsYou | Status::Working | Status::Done | Status::Failed)) => Some(s),
-        Some(Status::Idle | Status::Away) | None => None,
+        Some(Status::Running | Status::Idle | Status::Away) | None => None,
     }
 }
 
@@ -313,6 +351,13 @@ pub(super) fn until_age_changes(age: Duration) -> Duration {
         _ => 86_400,
     };
     Duration::from_secs(unit.saturating_sub(secs.checked_rem(unit).unwrap_or(0)))
+}
+
+/// A working tree's changes as a diff counts them, `+12` and `−3`, for the success and error
+/// tones; nothing for a clean tree.
+pub(super) fn change_words(changes: RepoChanges) -> Option<(String, String)> {
+    (changes.files > 0)
+        .then(|| (format!("+{}", changes.added), format!("\u{2212}{}", changes.removed)))
 }
 
 /// A note's second line: its progress when it has tasks, else its first line after the
@@ -445,6 +490,10 @@ struct NavTile {
     age: Option<String>,
     /// When the age's label next changes.
     age_changes: Option<Duration>,
+    /// How long its command has run, while it runs past [`RUNNING_AFTER`](super::RUNNING_AFTER).
+    running: Option<String>,
+    /// What its repository's working tree has changed, at the end of the second line.
+    changes: Option<(String, String)>,
 }
 
 /// A worker's block as the navigator lists it.
@@ -464,6 +513,8 @@ struct NavHeader {
     relay: Option<String>,
     /// Its round trip, when it is slow enough to name.
     rtt: Option<String>,
+    /// What is wrong with the worker itself, under its name: a permission off, another version.
+    warning: Option<String>,
     linked: bool,
     rollup: Rollup,
     folded: bool,
@@ -687,7 +738,7 @@ impl WorkspaceView {
     /// note's progress or next line. Empty when nothing is worth a line: the worker's name is
     /// its header's, a home directory alone says nothing, and a kind is its icon's. Such a
     /// row is one line.
-    fn tile_meta(
+    pub(super) fn tile_meta(
         &self,
         item: &Item,
         now: SystemTime,
@@ -703,9 +754,8 @@ impl WorkspaceView {
                 let command = agent.is_none().then(|| self.last_command(*session, cx)).flatten();
                 let doing = agent.or(command);
                 let branch = summary.and_then(|s| s.branch.as_deref());
-                let place = summary
-                    .and_then(|s| s.cwd.as_deref())
-                    .map(cwd_tail)
+                let place = self
+                    .session_tail(*session)
                     .filter(|p| p != "~" || doing.is_some() || branch.is_some());
                 let meta = meta_line([doing.as_deref(), place.as_deref(), branch]);
                 (meta, summary.and_then(|s| age_at(s.started_ms, now)))
@@ -753,6 +803,18 @@ impl WorkspaceView {
                     continue;
                 }
                 let kind = kind_icon(item, self.runs_agent(item));
+                let changes = match &item.kind {
+                    ItemKind::Terminal { session } => {
+                        self.summary(*session).and_then(|s| s.changes).and_then(change_words)
+                    }
+                    _ => None,
+                };
+                let running = match (mark, &item.kind) {
+                    (Some(Status::Running), ItemKind::Terminal { session }) => {
+                        self.running_for(*session, cx).map(turn_label)
+                    }
+                    _ => None,
+                };
                 let row = NavTile {
                     tile,
                     kind,
@@ -762,6 +824,8 @@ impl WorkspaceView {
                     meta,
                     age: age.and_then(age_shown),
                     age_changes: age.map(until_age_changes),
+                    running,
+                    changes,
                 };
                 tiles.push((attention(mark, unseen), row));
             }
@@ -787,6 +851,7 @@ impl WorkspaceView {
                 health,
                 relay,
                 rtt,
+                warning: w.caps.as_ref().and_then(worker_warning),
                 linked: w.link.is_some(),
                 rollup,
                 folded,
@@ -805,7 +870,7 @@ impl WorkspaceView {
             .tile
             .and_then(|t| Some(self.card_title(t, self.item(t)?, cx)))
             .unwrap_or_else(|| if words.is_empty() { "Agent".to_owned() } else { words.clone() });
-        let cwd = self.summary(at.session).and_then(|s| s.cwd.as_deref()).map(cwd_tail);
+        let cwd = self.session_tail(at.session);
         let worker = self.worker_name(at.worker);
         let place = meta_line([Some(worker.as_str()), cwd.as_deref()]);
         NavAgent { at, status, title, words, place, since_ms: agent.map_or(0, |a| a.since_ms) }
@@ -979,9 +1044,11 @@ impl WorkspaceView {
     /// second while *Working* ticks, else an age at its next minute (or hour).
     fn schedule_navigator_tick(&mut self, cx: &Context<Self>) {
         let rows = &self.nav.list.rows;
-        let live = rows.iter().any(
-            |r| matches!(r, NavRow::Agent(a) if a.status == Status::Working && a.since_ms > 0),
-        );
+        let live = rows.iter().any(|r| match r {
+            NavRow::Agent(a) => a.status == Status::Working && a.since_ms > 0,
+            NavRow::Tile(t) => t.running.is_some(),
+            _ => false,
+        });
         let now = now_ms();
         let waited = rows.iter().filter_map(|r| match r {
             NavRow::Agent(a) if a.since_ms > 0 => {
@@ -1249,26 +1316,33 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xs))
             .child(title(agent.title.clone(), hsla(s.text)))
             .children(time);
-        // The agent's words, then where it runs, as a tile's second line reads.
+        // The agent's words, then where it runs, as a tile's second line reads: joined by the
+        // same separator, spaces and all, so the two lines space their parts alike.
         let words = (!agent.words.is_empty()).then(|| {
             div()
+                .debug_selector(move || format!("{prefix}-words-{session}"))
                 .flex_none()
-                .flex()
-                .gap(px(theme.spacing.xs))
-                .child(div().text_color(hsla(agent.status.tone(theme))).child(agent.words.clone()))
-                .when(!agent.place.is_empty(), |el| el.child(META_SEPARATOR.trim()))
+                .text_color(hsla(agent.status.tone(theme)))
+                .child(agent.words.clone())
+        });
+        let separator = (!agent.words.is_empty() && !agent.place.is_empty()).then(|| {
+            div()
+                .debug_selector(move || format!("{prefix}-separator-{session}"))
+                .flex_none()
+                .child(META_SEPARATOR)
         });
         let line2 = meta(div(), theme)
             .h(px(second))
             .line_height(px(second))
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xs))
             .overflow_hidden()
             .whitespace_nowrap()
             .children(words)
+            .children(separator)
             .child(
                 div()
+                    .debug_selector(move || format!("{prefix}-place-{session}"))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
@@ -1325,10 +1399,11 @@ impl WorkspaceView {
         let key = worker.key;
         let folded = worker.folded;
         let label = SharedString::from(format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             worker.name,
             worker.health.map(|(_, word)| format!(", {word}")).unwrap_or_default(),
             worker.relay.as_ref().map(|relay| format!(", {relay}")).unwrap_or_default(),
+            worker.warning.as_ref().map(|warning| format!(", {warning}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
         let lead =
@@ -1355,6 +1430,20 @@ impl WorkspaceView {
             .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
             .text_color(hsla(s.text))
             .child(SharedString::from(worker.name.clone()));
+        // Only when something is wrong with the worker itself: a line under its name, in the
+        // warning tone.
+        let name = match worker.warning.clone() {
+            None => name,
+            Some(warning) => div().flex_1().min_w_0().flex().flex_col().child(name).child(
+                meta(div(), theme)
+                    .debug_selector(move || format!("nav-worker-warn-{key}"))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(hsla(s.warn))
+                    .child(warning),
+            ),
+        };
         let group = SharedString::from(format!("nav-worker-group-{key}"));
         // At rest: the readouts on the row's right edge, where the tiles' words end, and
         // before them what a folded worker's tiles add up to. They grow leftwards, so a rollup
@@ -1431,9 +1520,10 @@ impl WorkspaceView {
             .justify_end()
             .child(rest)
             .child(hover);
+        let lines = if worker.warning.is_some() { kit::Row::Two } else { kit::Row::One };
         row(
             theme,
-            kit::Row::One,
+            lines,
             ElementId::Name(format!("nav-worker-{key}").into()),
             format!("nav-worker-{key}"),
             label,
@@ -1493,6 +1583,12 @@ impl WorkspaceView {
             None if t.unseen => {
                 Some(unseen_dot(theme, format!("nav-unseen-{id}"), true).into_any_element())
             }
+            None if t.running.is_some() => t.running.clone().map(|ran| {
+                readout(theme, ran)
+                    .debug_selector(move || format!("nav-running-{id}"))
+                    .text_color(hsla(s.text_secondary))
+                    .into_any_element()
+            }),
             None => t.age.clone().map(|age| {
                 readout(theme, age)
                     .debug_selector(move || format!("nav-age-{id}"))
@@ -1507,15 +1603,36 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xs))
             .child(title(t.title.clone(), hsla(ink)))
             .children(end);
-        let line2 = (!t.meta.is_empty()).then(|| {
+        // The working tree's changes end the line whole, in a diff's tones; the words before
+        // them give way.
+        let changes = t.changes.clone().map(|(added, removed)| {
+            div()
+                .debug_selector(move || format!("nav-changes-{id}"))
+                .flex_none()
+                .flex()
+                .gap(px(theme.spacing.xs))
+                .child(div().text_color(hsla(s.success)).child(added))
+                .child(div().text_color(hsla(s.error)).child(removed))
+        });
+        let line2 = (!t.meta.is_empty() || changes.is_some()).then(|| {
             meta(div(), theme)
-                .debug_selector(move || format!("nav-meta-{id}"))
                 .h(px(second))
                 .line_height(px(second))
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_ellipsis()
-                .child(t.meta.clone())
+                .child(
+                    div()
+                        .debug_selector(move || format!("nav-meta-{id}"))
+                        .flex_initial()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(t.meta.clone()),
+                )
+                .children(changes)
         });
         let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
         let tile = t.tile;

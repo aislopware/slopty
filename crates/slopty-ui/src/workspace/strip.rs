@@ -763,7 +763,13 @@ impl WorkspaceView {
                         .flex_none()
                         .text_color(hsla_alpha(s.text_muted, fade))
                         .child(SharedString::from(count)),
-                );
+                )
+                .child(super::rollup::rollup_slot(
+                    theme,
+                    format!("overview-rollup-{ix}"),
+                    self.workspace_rollup(ix, cx).0,
+                    true,
+                ));
             out.push(block.into_any_element());
             out.push(label.into_any_element());
         }
@@ -773,8 +779,9 @@ impl WorkspaceView {
     /// An empty workspace: what this is, then the three ways to begin, the first shown as the
     /// palette shows the row Enter would run, each with its keys in the palette's plain muted
     /// glyphs where there is a keyboard to press them on; then the workers, each marked only
-    /// where its link is not up. With no worker there is nothing to open, and the page says
-    /// where one comes from. One left edge for all of it, and no art.
+    /// where its link is not up, each opening a shell on itself here. With no worker there is
+    /// nothing to open, and the page says where one comes from. One left edge for all of it,
+    /// and no art.
     fn render_empty(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -829,8 +836,8 @@ impl WorkspaceView {
                 let key = *key;
                 let health = super::navigator::worker_health(&w.status);
                 let label = match health {
-                    Some((_, word)) => format!("{}, {word}", w.name),
-                    None => w.name.clone(),
+                    Some((_, word)) => format!("New terminal on {}, {word}", w.name),
+                    None => format!("New terminal on {}", w.name),
                 };
                 let row = kit::row(theme, kit::Row::One)
                     .id(("empty-worker", ix))
@@ -862,7 +869,9 @@ impl WorkspaceView {
                     }))
                     .child(crate::icons::status_mark(theme, health.map(|(mark, _)| mark), 1.0));
                 crate::a11y::tab_stop(row, s.accent)
-                    .on_click(cx.listener(move |this, _ev, _window, cx| this.go_to_worker(key, cx)))
+                    .on_click(
+                        cx.listener(move |this, _ev, _window, cx| this.new_terminal_on(key, cx)),
+                    )
                     .into_any_element()
             });
             column.child(title(EMPTY_WORKSPACE)).child(begin).child(

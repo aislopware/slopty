@@ -105,7 +105,7 @@ fn link_remote(
         v.add_worker(key, name.to_owned(), cx);
         let remote: Arc<dyn Remote> = Arc::new(Recorder(calls, offset));
         let link = WorkerLink { me, out: tx, open_screen: factory, remote: Some(remote) };
-        v.connect_worker(key, name.to_owned(), link, Vec::new(), cx);
+        v.connect_worker(key, link, hello(name, Vec::new()), cx);
         v.apply_sync(key, ItemSync::Snapshot { version: 0, items: Vec::new() }, cx);
     });
     cx.run_until_parked();
@@ -472,7 +472,7 @@ fn a_promise_is_fetched_over_the_link_the_worker_has_now(cx: &mut TestAppContext
         let link =
             WorkerLink { me: studio.me, out: tx, open_screen: factory, remote: Some(remote) };
         view.update_in(cx, |v, _window, cx| {
-            v.connect_worker(key, "studio".to_owned(), link, Vec::new(), cx);
+            v.connect_worker(key, link, hello("studio", Vec::new()), cx);
         });
         asked
     };

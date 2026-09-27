@@ -2432,3 +2432,62 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   quads between a text's run backgrounds and its glyphs. Slopty draws nothing between the two:
   notes and the file tile paint through gpui-kit, and the terminal paints its own cells. The
   goldens were recorded again on it.
+
+- ✅ **Design review, round two: every surface says what a tile is, where, and how it is
+  doing** (2026-09-27). The second pass over the goldens found chrome that said too little:
+  every shell was "shell", a long command looked idle, the status bar could hold nothing but a
+  round trip, and a worker without Screen Recording failed silently. One change per fact,
+  each feeding every surface that shows it:
+  - **Titles.** A shell's title is, first that says something, the command it runs, a title its
+    program set, its repository or directory, else "Terminal". The shell's own name (`zsh`,
+    the worker's fallback of the program's name), a path and a `user@host:path` prompt are not
+    titles: the place says them better. An agent's shell takes the agent's own title, else the
+    agent's name ("Claude Code"). The header's context says where the shell is less what the
+    title said: named by its repository, the path within it or the branch; otherwise the
+    repository and the path, or the directory.
+  - **Home, exactly.** `HelloAck.home` gives each worker's home, and `cwd_tail` writes `~` for
+    it and only it. The `/Users/<name>` shape is guessed only while no home is known, so a home
+    on another volume reads `~` and someone else's `/Users/x` does not.
+  - **Running.** A shell command past 3 s (`RUNNING_AFTER`) is `Status::Running`: the neutral
+    `text_secondary` tone and lucide's `loader` turned one step a second, beside how long it
+    has run, in the header, the navigator row and the status bar. It is the least of what a
+    rollup shows, under the unseen dot. The calm mark rides the spin clock's own once-a-second
+    lane, which keeps waking its views under Reduce Motion (the mark stands still, the time
+    counts), so a dev server left running costs one frame a second, not twelve.
+  - **The status bar is never empty.** With nothing that says where, it names the worker. On
+    the right it says what the focused tile is: a file's language and `Ln, Col`, a stream's size
+    and painted rate, a page's host, a command's running time. A repository's changes follow
+    its branch as `+12 −3`, in the success and error text tones; the navigator row ends in
+    the same words, whole, after its second line.
+  - **Worker health.** Caps come with the hello, as `WorkerMsg::Caps` and from the server's
+    directory while the worker's own link is down. The navigator's worker header grows a warn
+    line only when something is wrong (Screen Recording or Accessibility off on a Mac, another
+    version); the hosts list reads the machine ("macOS 26.5 · load 2.1"); "Add a window" on a
+    worker that cannot capture says why instead of opening an empty picker.
+  - **Where a new tile goes.** With several workers "+" lists them first, the target checked;
+    choosing one keeps the menu open. The empty workspace's worker rows open a shell on their
+    worker here rather than going to its tiles elsewhere. An empty workspace's tab no longer
+    says "0 tiles".
+  - **Overview covers** show the tile's state (else its kind), one muted line of what its
+    navigator row says, and the worker where there are several; a workspace's name carries its
+    rollup.
+  - **The palette's order** is a tile recency (`recency`, which replaces `shell_recency` and
+    still picks the "run in shell" target): agents waiting on the human first, then the latest
+    used, the focused tile last, since nobody goes where they are.
+  - **First run** says "Looking on your tailnet…" at once, lists every server that answers
+    (best first), and says "Nothing answered on your tailnet" when none does. Workers are not
+    probed yet: that needs a worker probe with the worker's ALPN in `slopty_net::discover`.
+  - **iPad** docks the navigator where the strip keeps a regular width (900 pt beside it:
+    either iPad in landscape), and lays it over the strip below that.
+  - **Fixes.** An agent row joins its words and its place with the one meta separator, spaces
+    and all, as a tile's second line does; it had a gap on each side of a bare dot. The app
+    goldens wait for every link's first round trip before capture, so the status bar's readout
+    is in the frame every run.
+  - Tests: `tests::facts` (titles and context, running, changes, health, the status bar, "+"
+    and the empty workspace, palette order, overview covers), `tiles`
+    `a_place_is_its_last_two_directories_with_home_as_a_tilde`, `frame`
+    `the_navigator_docks_only_where_the_strip_keeps_its_room`, `nav_rows`
+    `a_tile_row_reads_its_age_or_its_state_then_its_place` (the separator), `icons`
+    `a_running_mark_steps_once_a_second_even_under_reduce_motion`, `rollup`, app
+    `the_panel_names_its_host_and_the_server_the_tailnet_found`. The goldens are to be recorded
+    again with this change.

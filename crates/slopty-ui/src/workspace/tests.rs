@@ -16,6 +16,7 @@ use slopty_proto::ClientMsg;
 use slopty_proto::agent::{
     AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent,
 };
+use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::screen::{CaptureTarget, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{
@@ -79,9 +80,8 @@ fn connect(
         v.add_worker(key, name.to_owned(), cx);
         v.connect_worker(
             key,
-            name.to_owned(),
             WorkerLink { me, out: tx, open_screen: factory, remote: None },
-            Vec::new(),
+            hello(name, Vec::new()),
             cx,
         );
         v.apply_sync(key, ItemSync::Snapshot { version: 0, items: Vec::new() }, cx);
@@ -90,6 +90,30 @@ fn connect(
     let mut fake = Fake { key, me, rx };
     fake.drain();
     fake
+}
+
+/// A Mac worker that says all is well: every grant, this build's version.
+fn healthy() -> WorkerCaps {
+    WorkerCaps {
+        os: slopty_proto::server::Os::MacOs,
+        os_version: "26.5".into(),
+        can_capture: true,
+        can_inject: true,
+        load: 2.1,
+        version: env!("CARGO_PKG_VERSION").into(),
+        ..WorkerCaps::default()
+    }
+}
+
+/// What a worker `name` says on a new link: no home, all well, `sessions` alive.
+fn hello(name: &str, sessions: Vec<SessionSummary>) -> HelloAck {
+    HelloAck {
+        worker: slopty_core::WorkerId::new(),
+        name: name.to_owned(),
+        home: String::new(),
+        caps: healthy(),
+        sessions,
+    }
 }
 
 fn summary(session: SessionId, cwd: Option<&str>) -> SessionSummary {
@@ -515,7 +539,7 @@ fn a_lost_worker_keeps_its_tiles_until_its_snapshot_says_otherwise(cx: &mut Test
     let item = view.read_with(cx, |v, _| v.item(kept).cloned()).unwrap();
     view.update_in(cx, |v, _w, cx| {
         let link = WorkerLink { me: studio.me, out: tx, open_screen: factory, remote: None };
-        v.connect_worker(key, "studio".into(), link, Vec::new(), cx);
+        v.connect_worker(key, link, hello("studio", Vec::new()), cx);
         v.apply_sync(key, ItemSync::Snapshot { version: 9, items: vec![item] }, cx);
     });
     cx.run_until_parked();
@@ -984,7 +1008,7 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     assert_ne!(focused(&view, cx), Some(tile));
     cx.simulate_keystrokes("cmd-shift-p");
     cx.run_until_parked();
-    cx.simulate_keystrokes("s h e l l enter");
+    cx.simulate_keystrokes("t e r m i n a l enter");
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(tile), "gone to");
     assert!(terminal_focused(&view, cx, session));
@@ -1177,7 +1201,7 @@ fn the_summaries_seed_the_agents_before_any_event(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _window, cx| {
         v.add_worker(key, "studio".to_owned(), cx);
         let link = WorkerLink { me: ClientId::new(), out: tx, open_screen: factory, remote: None };
-        v.connect_worker(key, "studio".to_owned(), link, sessions, cx);
+        v.connect_worker(key, link, hello("studio", sessions), cx);
         let tile = |session| Item {
             id: ItemId::new(),
             kind: ItemKind::Terminal { session },
@@ -1358,6 +1382,7 @@ mod away;
 mod bars;
 mod bodies;
 mod cwd;
+mod facts;
 mod frame;
 mod measure;
 mod nav_list;

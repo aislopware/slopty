@@ -46,10 +46,16 @@ fn endpoint() -> Result<slopty_net::Endpoint, String> {
     Ok(ENDPOINT.get_or_init(|| bound).clone())
 }
 
-/// The first Slopty server this machine's Tailscale finds on the tailnet, for the first run
-/// to offer; `None` on iOS, where no app can read Tailscale.
-pub async fn find_server() -> Option<slopty_net::discover::Found> {
-    slopty_net::discover::find(&endpoint().ok()?).await
+/// The Slopty servers this machine's Tailscale finds on the tailnet, best first, for the first
+/// run to offer; none while Tailscale is not up here, and none on iOS, where no app can read it.
+pub async fn find_servers() -> Vec<slopty_net::discover::Found> {
+    let (Ok(endpoint), Some(api)) = (endpoint(), slopty_tailnet::LocalApi::find()) else {
+        return Vec::new();
+    };
+    match api.status().await {
+        Ok(status) if status.running() => slopty_net::discover::servers(&endpoint, &status).await,
+        Ok(_) | Err(_) => Vec::new(),
+    }
 }
 
 /// Which app this is, by platform, as workers and the server show it.

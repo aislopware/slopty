@@ -17,7 +17,7 @@ fn relink(
     let (key, me) = (fake.key, fake.me);
     view.update_in(cx, |v, _window, cx| {
         let link = WorkerLink { me, out: tx, open_screen: factory, remote: None };
-        v.connect_worker(key, "studio".to_owned(), link, sessions, cx);
+        v.connect_worker(key, link, hello("studio", sessions), cx);
     });
     cx.run_until_parked();
     fake.rx = rx;

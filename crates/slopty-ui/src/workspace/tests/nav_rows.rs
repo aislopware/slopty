@@ -120,7 +120,7 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     let lines = view.read_with(cx, WorkspaceView::navigator_lines);
     assert!(
         lines.contains(&(
-            "shell".to_owned(),
+            "Claude Code".to_owned(),
             format!("{words} \u{b7} oss/slopty \u{b7} main"),
             Some("5m".into())
         )),
@@ -146,6 +146,34 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
         })
     });
     assert!(!washed, "a row waiting on the human is not washed a second time");
+
+    // Its *Needs you* row joins the agent's words and its place as a tile's second line does:
+    // the one separator, spaces and all, flush against both.
+    let mut part = |name: &str| {
+        cx.debug_bounds(leak(format!("nav-waiting-{name}-{session}")))
+            .unwrap_or_else(|| panic!("the agent row's {name}"))
+    };
+    let (words, separator, place) = (part("words"), part("separator"), part("place"));
+    assert!((separator.left() - words.right()).abs() < px(0.5), "{words:?} {separator:?}");
+    assert!((place.left() - separator.right()).abs() < px(0.5), "{separator:?} {place:?}");
+    let spaced = cx.update(|window, _cx| {
+        let font_size = px(Theme::default().typography.meta());
+        let run = |len| gpui::TextRun {
+            len,
+            font: window.text_style().font(),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let text = rollup::META_SEPARATOR;
+        let dot = "\u{b7}";
+        let shape = |s: &'static str| {
+            window.text_system().shape_line(s.into(), font_size, &[run(s.len())], None).width
+        };
+        (shape(text), shape(dot))
+    });
+    assert!(separator.size.width > spaced.1 + px(1.0), "the spaces stay: {spaced:?}");
 }
 
 /// A note's row says how far its tasks got, not that it is a note.

@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use gpui::Context;
 use slopty_client::directory::{self, Change, Dial, Directory, ServerState};
+use slopty_client::layout::WorkerKey;
 use slopty_client::server::{ServerEvent, ServerTask};
 use slopty_core::WorkerId;
 use slopty_net::HostAddr;
 use slopty_net::server::ServerLink;
-use slopty_proto::server::{Event, FromServer, Liveness, Refusal};
+use slopty_proto::server::{Event, FromServer, Liveness, Refusal, WorkerCaps};
 use slopty_ui::workspace::WorkerStatus;
 
 use crate::net::DialFailed;
@@ -45,7 +46,7 @@ pub struct ServerSlot {
 #[derive(Debug)]
 pub struct Plan {
     /// The worker's key in the workspace.
-    pub key: slopty_client::layout::WorkerKey,
+    pub key: WorkerKey,
     /// Wakes the loop out of a wait.
     pub wake: Arc<tokio::sync::Notify>,
     /// Where to dial: the directory's address, or `None` for the one it was added with.
@@ -233,6 +234,7 @@ impl Workspace {
                     self.directory_change(change, cx);
                 }
                 if listing {
+                    self.directory_caps(cx);
                     self.save_directory();
                 }
             }
@@ -298,6 +300,22 @@ impl Workspace {
                 Event::SessionOpened { .. } => {}
             },
         }
+    }
+
+    /// What the directory says each worker can do, for those whose own link is down: a link
+    /// that is up says so itself, and more recently.
+    fn directory_caps(&self, cx: &mut Context<Self>) {
+        let listed: Vec<(WorkerKey, WorkerCaps)> = self
+            .directory
+            .workers()
+            .filter(|info| self.slot(info.worker).is_some_and(|slot| !slot.linked()))
+            .map(|info| (worker_key(info.worker), info.caps.clone()))
+            .collect();
+        self.view.update(cx, |v, cx| {
+            for (key, caps) in listed {
+                v.set_worker_caps(key, caps, cx);
+            }
+        });
     }
 
     /// Write the directory for the next launch, off the main thread ([`write_cache`]).

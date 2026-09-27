@@ -30,9 +30,11 @@ fn gated() -> bool {
     true
 }
 
-/// Wait until nothing moves: two dumps a frame apart place every tile alike, so a spring
-/// that is still running cannot end up in a golden.
+/// Wait until nothing moves and every link has its round trip: two dumps a frame apart place
+/// every tile alike, so a spring still running cannot end up in a golden, nor a status bar
+/// whose readout is yet to land.
 async fn settled(drv: &mut Driver) -> Dump {
+    drv.wait_for("the first round trip", STEP, Dump::rtt_sampled).await.unwrap();
     let deadline = tokio::time::Instant::now().checked_add(STEP);
     let mut last = drv.dump().await.unwrap();
     loop {

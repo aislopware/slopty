@@ -10,13 +10,13 @@ use gpui::{
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div, px,
 };
 use gpui_kit::component::input::Input;
-use slopty_client::layout::{Placed, TileRef};
+use slopty_client::layout::{Placed, TileRef, WorkerKey};
 use slopty_core::SessionId;
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::AgentSource;
+use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::screen::SourceState;
-use slopty_proto::terminal::{SessionState, TermRequest};
+use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
 use slopty_theme::{Theme, alpha};
 
 use super::actions::{CloseItem, FullscreenTile};
@@ -27,6 +27,7 @@ use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize, Status};
 use crate::kit;
+use crate::terminal::TerminalView;
 
 /// Below this zoom the overview draws a tile as its header and body surfaces only: text a few
 /// points high is mush, and the shapes are what tell tiles apart there.
@@ -195,19 +196,25 @@ pub fn file_dir(path: &str) -> Option<String> {
 }
 
 /// Where a shell is, short: the last two components of `path`, with the home directory as `~`
-/// (`~`, `~/src`, `oss/slopty`). Only the worker knows its home, so a home is recognised by
-/// its shape: `/Users/<name>` on a Mac, `/home/<name>` or `/root` elsewhere.
+/// (`~`, `~/src`, `oss/slopty`). `home` is the worker's, once it has said; until then a home is
+/// recognised by its shape: `/Users/<name>` on a Mac, `/home/<name>` or `/root` elsewhere.
 #[must_use]
-pub fn cwd_tail(path: &str) -> String {
+pub fn cwd_tail(path: &str, home: Option<&str>) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
         return "/".to_owned();
     }
     let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
-    let home = match parts.as_slice() {
-        ["Users" | "home", _, ..] => 2,
-        ["root", ..] => 1,
-        _ => 0,
+    let home = match home.map(|h| h.trim_end_matches('/')).filter(|h| !h.is_empty()) {
+        Some(home) => {
+            let home: Vec<&str> = home.split('/').filter(|p| !p.is_empty()).collect();
+            if parts.starts_with(&home) { home.len() } else { 0 }
+        }
+        None => match parts.as_slice() {
+            ["Users" | "home", _, ..] => 2,
+            ["root", ..] => 1,
+            _ => 0,
+        },
     };
     let (home, rest) = if trimmed.starts_with('/') && home > 0 {
         (true, parts.get(home..).unwrap_or_default())
@@ -222,6 +229,67 @@ pub fn cwd_tail(path: &str) -> String {
         (false, [one]) => (*one).to_owned(),
         (false, []) => "/".to_owned(),
     }
+}
+
+/// What a shell is called with nothing better to say: no command, no title of its program's, no
+/// place but home.
+pub const TERMINAL: &str = "Terminal";
+
+/// An agent's name, what its shell is called before the agent titles it.
+pub(super) const fn agent_name(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::ClaudeCode => "Claude Code",
+    }
+}
+
+/// Whether a title a shell's program set says more than the shell does. Not the program's own
+/// name (the worker's word while nothing set a title) nor a shell's, and not a path or a
+/// `user@host:path` prompt, which the place says better.
+pub(super) fn own_title(title: &str, program: Option<&str>) -> bool {
+    let name = |p: &str| p.rsplit('/').next().unwrap_or(p).trim_start_matches('-').to_owned();
+    let title = title.trim();
+    if title.is_empty() || title.starts_with(['/', '~']) {
+        return false;
+    }
+    let word = if title.contains(char::is_whitespace) { title.to_owned() } else { name(title) };
+    let shell = matches!(word.as_str(), "shell" | "sh" | "zsh" | "bash" | "fish" | "nu" | "login");
+    let prompt =
+        title.split_once(':').is_some_and(|(who, _)| who.contains('@') && !who.contains(' '));
+    !shell && !prompt && program.is_none_or(|p| name(p) != word)
+}
+
+/// `cwd`'s path within `repo`: empty at its root, `None` outside it.
+fn within(cwd: &str, repo: &str) -> Option<String> {
+    let repo = repo.trim_end_matches('/');
+    let rest = cwd.trim_end_matches('/').strip_prefix(repo).filter(|_| !repo.is_empty())?;
+    match rest.strip_prefix('/') {
+        Some(rest) => Some(rest.to_owned()),
+        None => rest.is_empty().then(String::new),
+    }
+}
+
+/// Where a shell is, as the status bar and a header say it: inside a repository, the
+/// repository's name and the path within it (`slopty`, `slopty/crates/ui`); elsewhere the tail.
+#[must_use]
+pub(super) fn repo_place(cwd: &str, repo: Option<&str>, home: Option<&str>) -> String {
+    let named = repo.and_then(|repo| {
+        let name = repo.trim_end_matches('/').rsplit('/').next().filter(|n| !n.is_empty())?;
+        let path = within(cwd, repo)?;
+        Some(if path.is_empty() { name.to_owned() } else { format!("{name}/{path}") })
+    });
+    named.unwrap_or_else(|| cwd_tail(cwd, home))
+}
+
+/// A shell's name from where it is: the repository's last component, else the directory's;
+/// none at the home directory, which says nothing.
+pub(super) fn place_name(cwd: &str, repo: Option<&str>, home: Option<&str>) -> Option<String> {
+    let last = |path: &str| {
+        path.trim_end_matches('/').rsplit('/').next().filter(|n| !n.is_empty()).map(str::to_owned)
+    };
+    repo.and_then(last).or_else(|| {
+        let tail = cwd_tail(cwd, home);
+        (!tail.starts_with('~') || tail.contains('/')).then(|| last(&tail)).flatten()
+    })
 }
 
 /// The in-body state of a tile whose body cannot show what it should: what the pill says and
@@ -297,9 +365,7 @@ impl WorkspaceView {
     /// title is not it, how far a note's tasks got. A window or display has none.
     pub(super) fn tile_place(&self, item: &Item, cx: &App) -> Option<String> {
         match &item.kind {
-            ItemKind::Terminal { session } => {
-                self.summary(*session).and_then(|s| s.cwd.as_deref()).map(cwd_tail)
-            }
+            ItemKind::Terminal { session } => self.shell_context(*session, cx),
             ItemKind::File { path } => file_dir(path),
             ItemKind::Browser { .. } => self.browsers.get(&item.id).and_then(|v| {
                 let v = v.read(cx);
@@ -335,15 +401,70 @@ impl WorkspaceView {
         item.name.clone().unwrap_or_else(|| self.derived_title(item, cx))
     }
 
-    /// A terminal's title: what the shell set, else what the worker last said, else "shell".
+    /// A terminal's title, the first that says something: the command it runs, a title its
+    /// program set (not the shell's own name, a path or a prompt), the repository or
+    /// directory it stands in, else "Terminal". An agent's shell takes the agent's own title, else
+    /// the agent's name.
     #[must_use]
     pub fn terminal_title(&self, session: SessionId, cx: &App) -> String {
-        self.terminals
-            .get(&session)
-            .and_then(|v| v.read(cx).state().title().map(str::to_owned))
-            .or_else(|| self.summary(session).map(|s| s.title.clone()))
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| "shell".to_owned())
+        let view = self.terminals.get(&session).map(|v| v.read(cx));
+        let summary = self.session_on(session);
+        let program = summary.and_then(|(_, s)| s.command.first()).map(String::as_str);
+        let set = view
+            .and_then(TerminalView::title)
+            .or_else(|| summary.map(|(_, s)| s.title.as_str()))
+            .map(str::trim)
+            .filter(|t| own_title(t, program));
+        if let Some(agent) = self.agent_state(session).filter(|a| a.status != AgentStatus::None) {
+            return set.map_or_else(|| agent_name(agent.kind).to_owned(), str::to_owned);
+        }
+        let running = view
+            .and_then(|v| v.state().running_command())
+            .and_then(|c| c.lines().next())
+            .map(str::trim)
+            .filter(|c| !c.is_empty());
+        running
+            .or(set)
+            .map(str::to_owned)
+            .or_else(|| {
+                let (home, s) = summary?;
+                place_name(s.cwd.as_deref()?, s.repo.as_deref(), home)
+            })
+            .unwrap_or_else(|| TERMINAL.to_owned())
+    }
+
+    /// A shell's context after its title: where it is, less what the title already says. A
+    /// shell named by its repository gives the path within it, else its branch; one named by
+    /// its directory gives the path to it; any other gives the repository and the path within
+    /// it, else the directory.
+    fn shell_context(&self, session: SessionId, cx: &App) -> Option<String> {
+        let (home, s) = self.session_on(session)?;
+        let cwd = s.cwd.as_deref()?;
+        let repo = s.repo.as_deref();
+        let named = place_name(cwd, repo, home);
+        if named.is_none_or(|name| name != self.terminal_title(session, cx)) {
+            return Some(repo_place(cwd, repo, home));
+        }
+        match repo {
+            Some(repo) => within(cwd, repo).filter(|p| !p.is_empty()).or_else(|| s.branch.clone()),
+            None => Some(cwd_tail(cwd, home)),
+        }
+    }
+
+    /// The summary of `session`, with its worker's home.
+    pub(super) fn session_on(&self, session: SessionId) -> Option<(Option<&str>, &SessionSummary)> {
+        self.workers.values().find_map(|w| w.sessions.get(&session).map(|s| (w.home.as_deref(), s)))
+    }
+
+    /// `session`'s directory, short, its worker's home written `~` ([`cwd_tail`]).
+    pub(super) fn session_tail(&self, session: SessionId) -> Option<String> {
+        let (home, s) = self.session_on(session)?;
+        Some(cwd_tail(s.cwd.as_deref()?, home))
+    }
+
+    /// `worker`'s home directory, once it has said.
+    pub(super) fn home_of(&self, worker: WorkerKey) -> Option<&str> {
+        self.workers.get(&worker)?.home.as_deref()
     }
 
     /// One tile as the frame places it, `rect` already in the strip's coordinates.
@@ -628,8 +749,26 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xs * k))
             .when(!focused, |el| el.invisible().group_hover(TILE_GROUP, gpui::Styled::visible))
             .children(actions);
+        // How long a command has run, beside its calm mark, while no agent speaks for the shell.
+        let running = match &item.kind {
+            ItemKind::Terminal { session } if agent.is_none() => self.running_for(*session, cx),
+            _ => None,
+        };
+        let running = running.map(|ran| {
+            let text = SharedString::from(super::navigator::turn_label(ran));
+            kit::tabular(div())
+                .id("running")
+                .debug_selector(move || format!("running-{}", id.as_uuid()))
+                .role(Role::Status)
+                .aria_label(text.clone())
+                .flex_none()
+                .text_size(px(theme.typography.small() * k))
+                .text_color(hsla(s.text_secondary))
+                .child(text)
+                .into_any_element()
+        });
         let readouts: Vec<gpui::AnyElement> =
-            badge.into_iter().chain(finished).chain(unseen).collect();
+            badge.into_iter().chain(running).chain(finished).chain(unseen).collect();
         let strip = self.trailing_strip(placed, readouts, k, cx);
         // The title's context: where a shell or a file is, a page's address when the title is
         // not it, how far a note's tasks got. Muted, in the UI face as every header's context
@@ -949,15 +1088,25 @@ impl WorkspaceView {
         }
         // The newest prompt carries the status of the command before it: one lookup in the
         // prompt index, never a walk over the rows.
-        let state = self.terminals.get(&session)?.read(cx).state();
+        let view = self.terminals.get(&session)?.read(cx);
+        let state = view.state();
         if state.command_running() {
-            return None;
+            return self.running_for(session, cx).map(|_| Status::Running);
         }
         let prompt = state.prompt_before(slopty_grid::LineIndex(u64::MAX))?;
         let exit = state.line(prompt)?.mark.exit()?;
         // A failure the grid is showing, washed and barred, is not marked a second time here.
-        let shown = self.terminals.get(&session).is_some_and(|v| v.read(cx).failure_in_view());
+        let shown = view.failure_in_view();
         (exit != 0 && !shown).then_some(Status::Failed)
+    }
+
+    /// How long `session`'s command has run, once that is past [`RUNNING_AFTER`]: what its
+    /// tile's header, its navigator row and the status bar count.
+    ///
+    /// [`RUNNING_AFTER`]: super::RUNNING_AFTER
+    pub(super) fn running_for(&self, session: SessionId, cx: &App) -> Option<std::time::Duration> {
+        let ran = self.terminals.get(&session)?.read(cx).running_for()?;
+        (ran >= self.running_after).then_some(ran)
     }
 
     /// Whether a remote window or display is on its way: asked for and not yet drawn, while
@@ -1441,23 +1590,23 @@ impl WorkspaceView {
         .then(|| {
             // The shapes alone left every tile the same blank card. What each one is goes
             // over it at the chrome's type scale, as the workspace names above the cards
-            // do: its kind's icon and its title, one line, centred.
+            // do: its state (else its kind) and its title, then one muted line of what the
+            // navigator's second line says, and its worker where there are several. Centred.
             let theme = &self.theme;
             let muted = hsla(theme.surfaces.text_muted);
             let agent = matches!(item.kind, ItemKind::Terminal { session } if self.agent_state(session).is_some());
+            let (mark, _) = self.tile_marks(placed.tile, item, cx);
+            let lead =
+                crate::palette::status_slot(theme, kind_icon(item, agent), mark, muted, 1.0);
             let label = div()
                 .debug_selector(move || format!("shapes-label-{}", id.as_uuid()))
                 .max_w_full()
-                .px(px(theme.spacing.sm))
                 .flex()
                 .items_center()
                 .gap(px(theme.spacing.xs))
                 .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(px(theme.typography.small()))
-                .font_family(theme.typography.ui_family.clone())
                 .text_color(hsla(theme.surfaces.text_secondary))
-                .child(crate::icons::icon(theme, kind_icon(item, agent), IconSize::Inline, muted).flex_none())
+                .child(lead)
                 .child(
                     div()
                         .min_w_0()
@@ -1465,15 +1614,34 @@ impl WorkspaceView {
                         .text_ellipsis()
                         .child(SharedString::from(self.card_title(placed.tile, item, cx))),
                 );
+            let worker = (self.workers.len() > 1).then(|| self.worker_name(placed.tile.worker));
+            let (meta, _) = self.tile_meta(item, std::time::SystemTime::now(), cx);
+            let meta = super::rollup::meta_line([Some(meta.as_str()), worker.as_deref()]);
+            let meta = (!meta.is_empty()).then(|| {
+                div()
+                    .debug_selector(move || format!("shapes-meta-{}", id.as_uuid()))
+                    .max_w_full()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(muted)
+                    .child(SharedString::from(meta))
+            });
             div()
                 .debug_selector(move || format!("shapes-{}", id.as_uuid()))
                 .absolute()
                 .inset_0()
+                .px(px(theme.spacing.sm))
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .gap(px(theme.spacing.xxs))
+                .whitespace_nowrap()
+                .text_size(px(theme.typography.small()))
+                .font_family(theme.typography.ui_family.clone())
                 .bg(hsla(theme.terminal.bg))
                 .child(label)
+                .children(meta)
         });
         if pill.is_none() && cover.is_none() {
             return content;

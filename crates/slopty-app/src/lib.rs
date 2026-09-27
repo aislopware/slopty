@@ -191,9 +191,37 @@ struct Adding {
     busy: bool,
     /// Why the last attempt failed.
     error: Option<String>,
-    /// The server the tailnet offered, by name and address, once one answered.
-    found: Option<(String, String)>,
+    /// Where the look for a server on the tailnet stands; `None` where none is made (a worker
+    /// by address, a server already set, iOS, where no app can read Tailscale).
+    search: Option<Search>,
 }
+
+/// The first run's look for servers on the tailnet.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Search {
+    /// Probing the tailnet's nodes.
+    Looking,
+    /// These answered, best first: each by name and address.
+    Found(Vec<(String, String)>),
+    /// None did, or Tailscale is not up here.
+    Nothing,
+}
+
+impl Search {
+    /// What the panel says while there is no server to offer.
+    const fn words(&self) -> Option<&'static str> {
+        match self {
+            Self::Looking => Some(LOOKING),
+            Self::Nothing => Some(NOTHING_ANSWERED),
+            Self::Found(_) => None,
+        }
+    }
+}
+
+/// The panel's word while it probes the tailnet.
+const LOOKING: &str = "Looking on your tailnet\u{2026}";
+/// The panel's word when nothing on the tailnet answered as a server.
+const NOTHING_ANSWERED: &str = "Nothing answered on your tailnet";
 
 /// The window's root view.
 #[derive(Debug)]
@@ -647,7 +675,7 @@ impl Workspace {
                 let remote = Some(link.remote());
                 let worker_link = WorkerLink { me, out: sender, open_screen, remote };
                 let name = ack.name.clone();
-                let sessions = ack.sessions.clone();
+                let sessions = ack.sessions.len();
                 // The slot is checked and the tiles connected in one step: a worker forgotten
                 // while the dial was in flight must not come back as a tile holding this link.
                 let alive = this.update(cx, |ws, cx| {
@@ -655,7 +683,7 @@ impl Workspace {
                     else {
                         return false;
                     };
-                    ws.view.update(cx, |v, cx| v.connect_worker(key, name, worker_link, sessions, cx));
+                    ws.view.update(cx, |v, cx| v.connect_worker(key, worker_link, ack, cx));
                     ws.refresh_menu(cx);
                     true
                 });
@@ -709,7 +737,7 @@ impl Workspace {
                     }
                 })
                 .detach();
-                tracing::debug!(worker = %id, sessions = ack.sessions.len(), "link up; pumping events");
+                tracing::debug!(worker = %id, sessions, "link up; pumping events");
                 // One foreground update per batch, not per event: whatever arrived while the
                 // last batch was applied goes in the next one, so a flood from many sessions
                 // costs one update (and GPUI draws at most once per display frame anyway).
@@ -761,45 +789,59 @@ impl Workspace {
             }
         }));
         address.update(cx, |input, cx| input.focus(window, cx));
-        self.adding = Some(Adding { mode, address, busy: false, error: None, found: None });
-        if mode == Panel::Server && self.server.is_none() {
-            self.offer_tailnet_server(window, cx);
+        let search = (mode == Panel::Server && self.server.is_none() && !cfg!(target_os = "ios"))
+            .then_some(Search::Looking);
+        let looking = search.is_some();
+        self.adding = Some(Adding { mode, address, busy: false, error: None, search });
+        if looking {
+            self.look_on_tailnet(window, cx);
         }
         cx.notify();
     }
 
-    /// Look for a server on the tailnet and put the first that answers in the empty address
-    /// field, named in the blurb. Connecting stays the person's call.
-    fn offer_tailnet_server(&self, window: &Window, cx: &Context<Self>) {
+    /// Look for servers on the tailnet, saying so, and offer those that answer. Connecting
+    /// stays the person's call.
+    fn look_on_tailnet(&self, window: &Window, cx: &Context<Self>) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
-            let _sent = tx.send(net::find_server().await);
+            let _sent = tx.send(net::find_servers().await);
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Some(found)) = rx.await else { return };
+            let found = rx.await.unwrap_or_default();
             let _updated = this.update_in(cx, |ws, window, cx| ws.offer_found(found, window, cx));
         })
         .detach();
     }
 
-    /// The tailnet found `found`: its address goes in the field and it is offered as a row to
-    /// connect to, unless the person has moved on (typed something, switched to a worker, or
-    /// connected).
+    /// The tailnet answered with `found`, best first: each is a row to connect to, and the best
+    /// one's address goes in the field unless the person has moved on (typed something,
+    /// switched to a worker, or connected). An empty answer says nothing answered.
     fn offer_found(
         &mut self,
-        found: slopty_net::discover::Found,
+        found: Vec<slopty_net::discover::Found>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(adding) = &mut self.adding else { return };
-        let empty = adding.address.read(cx).value().trim().is_empty();
-        if adding.mode != Panel::Server || adding.busy || !empty {
+        if adding.search != Some(Search::Looking) {
             return;
         }
-        let at = found.addr.ip().to_string();
-        adding.address.update(cx, |input, cx| input.set_value(at.clone(), window, cx));
-        adding.found = Some((found.name, at));
+        let found: Vec<(String, String)> =
+            found.into_iter().map(|f| (f.name, f.addr.ip().to_string())).collect();
+        let empty = adding.address.read(cx).value().trim().is_empty();
+        if let Some((_, at)) = found.first().filter(|_| empty && !adding.busy) {
+            let at = at.clone();
+            adding.address.update(cx, |input, cx| input.set_value(at, window, cx));
+        }
+        adding.search = Some(if found.is_empty() { Search::Nothing } else { Search::Found(found) });
         cx.notify();
+    }
+
+    /// Connect to a server the tailnet found, at `at`.
+    fn connect_found(&mut self, at: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(adding) = &self.adding else { return };
+        adding.address.update(cx, |input, cx| input.set_value(at.to_owned(), window, cx));
+        self.add_from_panel(cx);
     }
 
     /// Close the panel (only offered while there is somewhere else to be).
@@ -977,15 +1019,35 @@ impl Workspace {
             .id("add-worker-blurb")
             .debug_selector(|| "add-worker-blurb".to_owned())
             .child(blurb);
-        // A server the tailnet found is a row to press, as a nearby device is: its name, where
-        // it was found and its address, which is already in the field below.
-        let found = match (&adding.found, adding.mode) {
-            (Some((name, at)), Panel::Server) => Some(
-                found_row(theme, name, at)
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx))),
-            ),
-            _ => None,
+        // Each server the tailnet found is a row to press, as a nearby device is: its name,
+        // where it was found and its address. While it looks, or when nothing answered, one
+        // quiet line says so.
+        let search = adding.search.as_ref().filter(|_| adding.mode == Panel::Server);
+        let found: Vec<gpui::AnyElement> = match search {
+            Some(Search::Found(found)) => found
+                .iter()
+                .enumerate()
+                .map(|(ix, (name, at))| {
+                    let target = at.clone();
+                    found_row(theme, ix, name, at)
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.connect_found(&target, window, cx);
+                        }))
+                        .into_any_element()
+                })
+                .collect(),
+            _ => Vec::new(),
         };
+        let searching = search.and_then(Search::words).map(|words| {
+            div()
+                .id("add-worker-search")
+                .debug_selector(|| "add-worker-search".to_owned())
+                .role(Role::Status)
+                .aria_label(words)
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(s.text_muted))
+                .child(words)
+        });
         let welcome = self.welcome();
         // The first run is the app's front page: its mark over the heading, as a sign on the
         // door. A dialog over the workspace needs none.
@@ -1074,6 +1136,7 @@ impl Workspace {
                     ),
             )
             .children(found)
+            .children(searching)
             .child(address)
             .when_some(status, |el, (text, tone)| {
                 el.child(
@@ -1568,6 +1631,9 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Path(path)) => {
             view.update(cx, |v, cx| v.set_link_path(key, path, cx));
         }
+        LinkEvent::Control(WorkerMsg::Caps(caps)) => {
+            view.update(cx, |v, cx| v.set_worker_caps(key, caps, cx));
+        }
         LinkEvent::Ports { session, forwards } => {
             view.update(cx, |v, cx| v.ports_changed(session, forwards, cx));
         }
@@ -1643,12 +1709,12 @@ fn brand(theme: &Theme) -> impl IntoElement {
 const APP_NAME: &str = "Slopty";
 
 /// A server the tailnet found, as a row to connect to: its name over where it was found.
-fn found_row(theme: &Theme, name: &str, at: &str) -> gpui::Stateful<gpui::Div> {
+fn found_row(theme: &Theme, ix: usize, name: &str, at: &str) -> gpui::Stateful<gpui::Div> {
     use slopty_ui::icons::{IconName, IconSize, icon};
     let s = theme.surfaces;
     let row = kit::row(theme, kit::Row::Two)
-        .id("add-worker-found")
-        .debug_selector(|| "add-worker-found".to_owned())
+        .id(("add-worker-found", ix))
+        .debug_selector(move || format!("add-worker-found-{ix}"))
         .role(Role::Button)
         .aria_label(SharedString::from(format!("Connect to {name}")))
         .rounded(px(theme.radii.sm))
@@ -2027,8 +2093,9 @@ mod tests {
     }
 
     /// Each panel's field gives an example of its own kind of host, and switching panels
-    /// switches it. A server the tailnet found is a row to connect to under the blurb, its
-    /// address in the field, unless the person has already typed one. The first run carries
+    /// switches it. While it looks on the tailnet it says so; each server that answered is a row
+    /// to connect to under the blurb, the best one's address in the field, and when none did it
+    /// says that. The first run carries
     /// the app's mark over its heading.
     #[gpui::test]
     fn the_panel_names_its_host_and_the_server_the_tailnet_found(cx: &mut TestAppContext) {
@@ -2050,30 +2117,54 @@ mod tests {
         assert_eq!(example(cx).as_deref(), Some(Panel::Server.example()));
         assert_ne!(Panel::Server.example(), Panel::Worker.example());
 
-        let found = |name: &str| slopty_net::discover::Found {
+        // The look is on screen from the start, then each server that answered is a row.
+        let words = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            let shown = cx.debug_bounds("add-worker-search").is_some();
+            let search =
+                ws.read_with(cx, |ws, _| ws.adding.as_ref().and_then(|a| a.search.clone()));
+            search.as_ref().and_then(Search::words).filter(|_| shown).map(str::to_owned)
+        };
+        let looking = |ws: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            ws.update(cx, |ws, cx| {
+                if let Some(adding) = &mut ws.adding {
+                    adding.search = Some(Search::Looking);
+                }
+                cx.notify();
+            });
+        };
+        looking(&ws, cx);
+        assert_eq!(words(cx).as_deref(), Some(LOOKING));
+        let found = |name: &str, last: u8| slopty_net::discover::Found {
             name: name.to_owned(),
-            addr: std::net::SocketAddr::from(([100, 64, 0, 1], 7_000)),
+            addr: std::net::SocketAddr::from(([100, 64, 0, last], 7_000)),
         };
         cx.update(|window, cx| {
-            ws.update(cx, |ws, cx| ws.offer_found(found("home-server"), window, cx));
+            let answered = vec![found("home-server", 1), found("office-server", 2)];
+            ws.update(cx, |ws, cx| ws.offer_found(answered, window, cx));
         });
         cx.run_until_parked();
-        let row = cx.debug_bounds("add-worker-found").expect("a row to connect to");
+        let first = cx.debug_bounds("add-worker-found-0").expect("a row to connect to");
+        let second = cx.debug_bounds("add-worker-found-1").expect("every server a row");
+        assert!(first.bottom() <= second.top(), "best first");
         let field = cx.debug_bounds("add-worker-blurb").expect("the blurb stays");
-        assert!(field.bottom() <= row.top(), "under what the panel is for");
+        assert!(field.bottom() <= first.top(), "under what the panel is for");
         let brand = cx.debug_bounds("app-brand").expect("the first run carries the mark");
         assert!(brand.bottom() <= field.top(), "over the heading");
+        assert_eq!(words(cx), None, "done looking");
         let typed = ws.read_with(cx, |ws, cx| {
             ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())
         });
-        assert_eq!(typed.as_deref(), Some("100.64.0.1"), "its address, ready to connect");
+        assert_eq!(typed.as_deref(), Some("100.64.0.1"), "the best one's address, ready");
 
-        // A second answer does not overwrite what is in the field.
-        cx.update(|window, cx| {
-            ws.update(cx, |ws, cx| ws.offer_found(found("other"), window, cx));
+        // Nothing answering says so, and leaves what is in the field.
+        looking(&ws, cx);
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.offer_found(Vec::new(), window, cx)));
+        assert_eq!(words(cx).as_deref(), Some(NOTHING_ANSWERED));
+        let typed = ws.read_with(cx, |ws, cx| {
+            ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())
         });
-        let named = ws.read_with(cx, |ws, _| ws.adding.as_ref().and_then(|a| a.found.clone()));
-        assert_eq!(named.map(|(name, _)| name).as_deref(), Some("home-server"));
+        assert_eq!(typed.as_deref(), Some("100.64.0.1"));
     }
 
     /// Over the workspace the panel is a dialog: Esc closes it, and so does a click outside

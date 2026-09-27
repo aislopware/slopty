@@ -24,10 +24,10 @@ fn gated() -> bool {
     true
 }
 
-/// Render the frame after two dumps agree on every tile's place, and hold it against
-/// `golden/<name>.png`.
+/// Render the frame after every link has its round trip and two dumps agree on every tile's
+/// place, and hold it against `golden/<name>.png`.
 async fn golden(drv: &mut Driver, stack_dir: &std::path::Path, name: &str) {
-    let mut last = drv.dump().await.unwrap();
+    let mut last = drv.wait_for("the first round trip", STEP, Dump::rtt_sampled).await.unwrap();
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(120)).await;
         let next = drv.dump().await.unwrap();

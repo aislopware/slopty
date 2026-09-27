@@ -55,14 +55,18 @@ fn saved_navigator(cx: &VisualTestContext, path: &std::path::Path) -> Navigator 
     read_layout(path).expect("written").navigator
 }
 
-/// How the navigator sits: docked where the strip keeps a desktop's width beside it, over the
-/// strip on an iPad or a window that would leave the strip a phone's, a drawer on a phone.
+/// How the navigator sits: docked where the strip keeps a desktop's width beside it, and on an
+/// iPad where it keeps a regular width; over the strip on an iPad narrower than that or a
+/// window that would leave the strip a phone's; a drawer on a phone.
 #[test]
 fn the_navigator_docks_only_where_the_strip_keeps_its_room() {
     use navigator::{Mode, mode};
     assert_eq!(mode(1200.0, 248.0, 700.0, false), Mode::Docked);
     assert_eq!(mode(900.0, 248.0, 700.0, false), Mode::Overlay, "the strip would be a phone's");
-    assert_eq!(mode(1366.0, 248.0, 700.0, true), Mode::Overlay, "an iPad");
+    assert_eq!(mode(1376.0, 248.0, 700.0, true), Mode::Docked, "a 13-inch iPad in landscape");
+    assert_eq!(mode(1210.0, 248.0, 700.0, true), Mode::Docked, "an 11-inch iPad in landscape");
+    assert_eq!(mode(1032.0, 248.0, 700.0, true), Mode::Overlay, "a 13-inch iPad upright");
+    assert_eq!(mode(1032.0, 248.0, 700.0, false), Mode::Docked, "a Mac window as wide");
     assert_eq!(mode(390.0, 248.0, 700.0, true), Mode::Drawer, "a phone");
 }
 
@@ -159,7 +163,10 @@ fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) 
     assert!(cx.debug_bounds(waiting_row).is_some());
     let names = labels(&view, cx);
     assert!(names.iter().any(|l| l == "studio"), "a worker that is fine is its name: {names:#?}");
-    assert!(names.iter().any(|l| l == "shell, Needs you"), "the waiting tile's row: {names:#?}");
+    assert!(
+        names.iter().any(|l| l == "Claude Code, Needs you"),
+        "the waiting tile's row: {names:#?}"
+    );
     assert!(names.iter().any(|l| l == "Workspace 1, 2 tiles, 1 needs you"), "{names:#?}");
 
     click(cx, "nav-worker-00000000000000000000000000000001");
@@ -438,7 +445,7 @@ fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppCon
         cx.debug_bounds(dot).expect("the dot"),
     );
     assert!(lane.right() >= at.right() && at.left() > lane.center().x, "on the lane's edge");
-    assert!(labels(&view, cx).iter().any(|l| l == "shell, Failed, unseen"));
+    assert!(labels(&view, cx).iter().any(|l| l == "Terminal, Failed, unseen"));
 
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(built) }, cx);

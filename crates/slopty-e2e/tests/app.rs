@@ -146,6 +146,8 @@ mod tests {
         assert!(cursor[1] >= 2, "cursor moved below the output: {cursor:?}");
         slopty_e2e::harness::check_jetbrains_mono_face(dump.terminals[0].face.as_ref()).unwrap();
 
+        drv.wait_for("the first round trip", STEP, slopty_e2e::Dump::rtt_sampled).await.unwrap();
+
         // The frame the app draws, from its own renderer.
         let frame = drv.render(&render_path).await.unwrap();
         // Panes sit flush on a surface a shade from the title bar's, so what differs from the
@@ -551,6 +553,8 @@ mod tests {
             .await
             .unwrap();
 
+        drv.wait_for("the first round trip", STEP, slopty_e2e::Dump::rtt_sampled).await.unwrap();
+
         let frame = drv.render(&render_path).await.unwrap();
         assert_matches("note", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
@@ -885,6 +889,7 @@ mod tests {
         let dump = drv.dump().await.unwrap();
         assert_eq!(dump.workers.len(), 1, "{dump:#?}");
         assert_eq!(dump.workers[0].status, "connected", "{dump:#?}");
+        drv.wait_for("the first round trip", STEP, slopty_e2e::Dump::rtt_sampled).await.unwrap();
         let frame = drv.render(&stack.path("server-unreachable.png")).await.unwrap();
         assert!(foreground_fraction(&frame) > 0.01, "the degraded frame is blank");
         assert_matches("server-unreachable", &frame, TOLERANCE, &artifacts_dir()).unwrap();

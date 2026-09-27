@@ -908,6 +908,13 @@ pub struct RecoveryInfo {
 }
 
 impl Dump {
+    /// Every connected worker has had its round trip sampled, so the status bar's readout has
+    /// landed: a golden taken before it holds a frame the next run may not.
+    #[must_use]
+    pub fn rtt_sampled(&self) -> bool {
+        self.workers.iter().filter(|w| w.status == "connected").all(|w| w.rtt_us.is_some())
+    }
+
     /// Every visible terminal row that contains `needle`.
     #[must_use]
     pub fn rows_containing(&self, needle: &str) -> Vec<&str> {

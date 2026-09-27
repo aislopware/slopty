@@ -58,6 +58,7 @@ use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentEvent;
 use slopty_proto::items::{Item, ItemOp};
 use slopty_proto::screen::CaptureTarget;
+use slopty_proto::server::WorkerCaps;
 use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::SessionSummary;
 use slopty_theme::Theme;
@@ -91,6 +92,10 @@ pub const AGENT_COMMAND: &str = "claude";
 /// How long a shell command has to run before its end, unwatched, is worth a badge: shorter
 /// commands end before the human has looked away.
 pub const SLOW_COMMAND: Duration = Duration::from_secs(5);
+
+/// How long a shell command runs before its tile marks it running: a quick one ends before the
+/// mark would be read, and a mark that flickers on for it is noise.
+pub const RUNNING_AFTER: Duration = Duration::from_secs(3);
 
 /// How long a closed tile can be taken back (⌘Z) before a shell's session is closed for good.
 const UNDO_CLOSE: Duration = Duration::from_secs(5);
@@ -270,6 +275,11 @@ struct Worker {
     /// How the tailnet carries the link, once the worker has said; never on a loopback or LAN
     /// link.
     path: Option<LinkPath>,
+    /// Its home directory as its hello said, so a path under it reads `~/…`; `None` until a
+    /// link has said, or when the daemon has none.
+    home: Option<String>,
+    /// What it can do and how it is doing, as its link or the server's directory last said.
+    caps: Option<WorkerCaps>,
     /// `slopty hook install` has been offered on this worker once.
     hooks_offered: bool,
     /// The paths the worker was last asked to watch for its file cards, sorted.
@@ -304,6 +314,8 @@ impl Worker {
             sessions: HashMap::new(),
             rtt: None,
             path: None,
+            home: None,
+            caps: None,
             hooks_offered: false,
             watched: Vec::new(),
             titles_requested: false,
@@ -378,6 +390,8 @@ pub type MenuRun = Rc<dyn Fn(&mut Window, &mut App)>;
 /// The sections of the titlebar's menus, in their order, a hairline between each.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum MenuGroup {
+    /// "+": the worker a new tile goes to, where there are several.
+    Target,
     /// "+": what a new tile can be.
     Tiles,
     /// "+": a new workspace.
@@ -490,9 +504,12 @@ pub struct WorkspaceView {
     /// Long shell commands that finished unwatched, by session.
     finished: HashMap<SessionId, Finished>,
     slow_command: Duration,
-    /// Terminal sessions oldest first, moved to the end when one is focused: the "run in
-    /// shell" target is the most recently focused shell, else the newest.
-    shell_recency: Vec<SessionId>,
+    /// How long a command runs before its tile says so ([`RUNNING_AFTER`]).
+    running_after: Duration,
+    /// Tiles by item, least recent first: one moves to the end when it arrives and when it is
+    /// focused. The "run in shell" target is the last shell here; the palette lists tiles from
+    /// the end.
+    recency: Vec<ItemId>,
     /// Holds the device out of idle sleep while an agent works.
     awake: Option<Task<()>>,
     /// Remote tiles off screen since when; their streams go after [`STREAM_GRACE`].
@@ -522,6 +539,9 @@ pub struct WorkspaceView {
     pending_focus_palette: bool,
     /// Which titlebar menu is open.
     menu: Option<titlebar::MenuKind>,
+    /// The worker "+" chose for the next new tile, where there are several; the focused tile's
+    /// worker otherwise.
+    new_on: Option<WorkerKey>,
     /// The workspaces' tabs as last drawn.
     tabs: titlebar::Tabs,
     /// The navigator's state for this run (its width and whether it docks are the layout's).
@@ -665,7 +685,8 @@ impl WorkspaceView {
             server_status: None,
             finished: HashMap::new(),
             slow_command: SLOW_COMMAND,
-            shell_recency: Vec::new(),
+            running_after: RUNNING_AFTER,
+            recency: Vec::new(),
             awake: None,
             unseen: HashMap::new(),
             stream_grace: STREAM_GRACE,
@@ -687,6 +708,7 @@ impl WorkspaceView {
             key_bar_shown: false,
             pending_focus_palette: false,
             menu: None,
+            new_on: None,
             tabs: titlebar::Tabs::default(),
             nav: navigator::NavState::default(),
             bar: statusbar::Bar::default(),
@@ -1088,8 +1110,23 @@ impl WorkspaceView {
         let now = view.read(cx).state().running_command();
         let was = self.running.get(&session).and_then(Option::as_deref);
         if now != was {
+            let started = now.is_some();
             self.running.insert(session, now.map(str::to_owned));
             App::notify(cx, self.chrome.navigator.entity_id());
+            // Still running at the threshold, the tile and its row say so; from then on the
+            // calm mark and the navigator's tick keep the time.
+            if started {
+                let after = self.running_after;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(after).await;
+                    let _gone = this.update(cx, |this, cx| {
+                        if this.running.get(&session).is_some_and(Option::is_some) {
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
         }
     }
 }

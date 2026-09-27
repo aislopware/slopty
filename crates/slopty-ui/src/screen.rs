@@ -199,6 +199,9 @@ pub struct ScreenView {
     focus: FocusHandle,
     bounds: Bounds<Pixels>,
     frames: u64,
+    /// When the painted rate was last worked out, the count then, and the rate: the status bar
+    /// reads it every draw, and it is worked out at most once a second.
+    fps_sample: std::cell::Cell<(Instant, u64, f32)>,
     /// Keys whose press went to the worker, so a release for a locally-handled chord (its press
     /// was eaten by a canvas binding) is not forwarded as a stray key-up.
     held: Vec<KeyCode>,
@@ -550,6 +553,7 @@ impl ScreenView {
             focus: cx.focus_handle(),
             bounds: Bounds::default(),
             frames: 0,
+            fps_sample: std::cell::Cell::new((Instant::now(), 0, 0.0)),
             held: Vec::new(),
             buttons: Vec::new(),
             pointer_at: (0.0, 0.0),
@@ -603,6 +607,21 @@ impl ScreenView {
     #[must_use]
     pub const fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// Pictures painted a second, over the last second or so: what the status bar says of a
+    /// focused stream. A still window paints nothing, and says so.
+    #[must_use]
+    pub fn painted_fps(&self) -> f32 {
+        let (at, frames, fps) = self.fps_sample.get();
+        let elapsed = at.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            return fps;
+        }
+        #[expect(clippy::cast_precision_loss, reason = "frames painted in a second or so")]
+        let fps = self.frames.saturating_sub(frames) as f32 / elapsed.as_secs_f32();
+        self.fps_sample.set((Instant::now(), self.frames, fps));
+        fps
     }
 
     /// Receiver counters.

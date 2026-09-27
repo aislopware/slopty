@@ -21,15 +21,17 @@ use std::time::{Duration, Instant};
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Div, ElementId, InteractiveElement as _, IntoElement as _, MouseButton,
+    App, Context, Div, ElementId, InteractiveElement as _, IntoElement as _, MouseButton,
     ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Task,
     Window, div, px,
 };
 use slopty_client::layout::WorkerKey;
-use slopty_proto::items::ItemKind;
+use slopty_proto::items::{Item, ItemKind};
 use slopty_theme::Theme;
 
-use super::navigator::{Mode, path_label, rtt_label, worker_health};
+use super::navigator::{Mode, host_line, path_label, rtt_label, worker_health};
+use super::rollup::meta_line;
+use super::tile::repo_place;
 use super::{MenuRun, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
@@ -115,23 +117,6 @@ fn counted(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
-/// Where a shell is, as the bar says it: inside a repository, the repository's name and the
-/// path within it (`slopty`, `slopty/crates/ui`); elsewhere the tail the headers print.
-#[must_use]
-fn place(cwd: &str, repo: Option<&str>) -> String {
-    let repo = repo.map(|r| r.trim_end_matches('/')).filter(|r| !r.is_empty());
-    let within = repo.and_then(|repo| {
-        let name = repo.rsplit('/').next().filter(|n| !n.is_empty())?;
-        let rest = cwd.trim_end_matches('/').strip_prefix(repo)?;
-        match rest.strip_prefix('/') {
-            Some(rest) => Some(format!("{name}/{rest}")),
-            None if rest.is_empty() => Some(name.to_owned()),
-            None => None,
-        }
-    });
-    within.unwrap_or_else(|| super::tile::cwd_tail(cwd))
-}
-
 impl WorkspaceView {
     /// The worker the status bar speaks for: the focused tile's, else the one a new tile
     /// would go to.
@@ -182,7 +167,7 @@ impl WorkspaceView {
 
     /// The frame time's readout, worked out at most once a [`FRAME_READOUT_EVERY`]; nothing
     /// before the app's probe has timed a frame.
-    fn frame_readout(&mut self, cx: &gpui::App) -> Option<SharedString> {
+    fn frame_readout(&mut self, cx: &App) -> Option<SharedString> {
         let now = Instant::now();
         let fresh = self
             .bar
@@ -198,6 +183,48 @@ impl WorkspaceView {
         self.bar.frame_text.as_ref().and_then(|(_, text)| text.clone())
     }
 
+    /// What the bar says of the focused tile, by its kind: a file's language and caret, a
+    /// stream's size and rate, a page's host, how long a shell's command has run.
+    pub(super) fn focus_facts(&self, item: &Item, cx: &App) -> Option<String> {
+        match &item.kind {
+            ItemKind::File { .. } => {
+                let file = self.files.get(&item.id)?.read(cx);
+                let (line, col) = file.caret(cx);
+                let caret = format!("Ln {line}, Col {col}");
+                Some(meta_line([file.coloured_as(), Some(caret.as_str())]))
+            }
+            ItemKind::Window { .. } | ItemKind::Display { .. } => {
+                let screen = self.screens.get(&item.id)?.read(cx);
+                let (w, h) = screen.size();
+                (screen.frames() > 0)
+                    .then(|| format!("{w}\u{d7}{h} \u{b7} {:.0} fps", screen.painted_fps()))
+            }
+            ItemKind::Browser { url } => {
+                let url = self
+                    .browsers
+                    .get(&item.id)
+                    .map_or_else(|| url.clone(), |v| v.read(cx).page().url.clone());
+                let host = crate::browser::short_url(&url).split('/').next().unwrap_or_default();
+                (!host.is_empty()).then(|| host.to_owned())
+            }
+            ItemKind::Terminal { session } if self.agent_state(*session).is_none() => self
+                .running_for(*session, cx)
+                .map(|ran| format!("Running {}", super::navigator::turn_label(ran))),
+            ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
+        }
+    }
+
+    /// Whether what the bar says of the focused tile changes with the clock: a command's
+    /// running time, a stream's rate.
+    fn focus_clocked(&self, cx: &App) -> bool {
+        let Some(item) = self.focused().and_then(|t| self.item(t)) else { return false };
+        match item.kind {
+            ItemKind::Window { .. } | ItemKind::Display { .. } => true,
+            ItemKind::Terminal { session } => self.running_for(session, cx).is_some(),
+            _ => false,
+        }
+    }
+
     /// The bar, or nothing before the first worker.
     pub(super) fn render_statusbar(
         &mut self,
@@ -211,7 +238,9 @@ impl WorkspaceView {
             || self.width(window) < self.layout.config().phone_below;
         let stats = self.show_stats && !phone;
         let frame = stats.then(|| self.frame_readout(cx)).flatten();
-        self.bar.tick = stats.then(|| {
+        // The frame time, a command's running time and a stream's rate change with the clock.
+        let clocked = stats || self.focus_clocked(cx);
+        self.bar.tick = clocked.then(|| {
             let bar = self.chrome.statusbar.downgrade();
             cx.spawn(async move |_this, cx| {
                 cx.background_executor().timer(FRAME_READOUT_EVERY).await;
@@ -237,9 +266,19 @@ impl WorkspaceView {
         });
         let worker = self.status_worker();
         let link = worker.and_then(|k| self.workers.get(&k));
-        // With one worker its name says nothing the window does not, until its link is down.
+        let focused_item = (!phone).then(|| self.focused().and_then(|t| self.item(t))).flatten();
+        let session = focused_item.and_then(|item| match item.kind {
+            ItemKind::Terminal { session } => self.summary(session),
+            _ => None,
+        });
+        let cwd = focused_item
+            .filter(|item| matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::File { .. }))
+            .and_then(|item| self.cwd_of(item));
+        // With one worker its name says nothing the window does not, until its link is down
+        // or there is nothing else to say: the bar is never empty.
         let lone = self.workers.len() == 1;
-        let name = link.filter(|w| !lone || !w.status.is_up()).map(|w| {
+        let placed = cwd.is_some() || session.is_some_and(|s| s.branch.is_some());
+        let name = link.filter(|w| !lone || !w.status.is_up() || !placed).map(|w| {
             let away = (!w.status.is_up()).then(|| {
                 state_dot(theme, s.warn_fill).debug_selector(|| "status-worker-away".to_owned())
             });
@@ -251,15 +290,10 @@ impl WorkspaceView {
                 .children(away)
                 .child(SharedString::from(w.name.clone()))
         });
-        let focused_item = (!phone).then(|| self.focused().and_then(|t| self.item(t))).flatten();
-        let session = focused_item.and_then(|item| match item.kind {
-            ItemKind::Terminal { session } => self.summary(session),
-            _ => None,
+        let cwd = cwd.map(|cwd| {
+            let repo = session.and_then(|s| s.repo.as_deref());
+            SharedString::from(repo_place(&cwd, repo, worker.and_then(|k| self.home_of(k))))
         });
-        let cwd = focused_item
-            .filter(|item| matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::File { .. }))
-            .and_then(|item| self.cwd_of(item))
-            .map(|cwd| SharedString::from(place(&cwd, session.and_then(|s| s.repo.as_deref()))));
         let cwd = cwd.map(|cwd| {
             readout("status-cwd", cwd.clone())
                 .flex_initial()
@@ -273,6 +307,20 @@ impl WorkspaceView {
             readout("status-branch", branch.clone())
                 .aria_label(SharedString::from(format!("branch {branch}")))
                 .child(branch)
+        });
+        // What the working tree has changed, after the branch it is on, in the tones of a diff.
+        let changes = session.and_then(|s| s.changes).and_then(|c| {
+            let (added, removed) = super::navigator::change_words(c)?;
+            let label = SharedString::from(format!("{added} {removed}"));
+            Some(
+                readout("status-changes", label)
+                    .flex()
+                    .items_center()
+                    .gap(px(spacing.xs))
+                    .pl(px(spacing.xs))
+                    .child(div().text_color(hsla(s.success)).child(added))
+                    .child(div().text_color(hsla(s.error)).child(removed)),
+            )
         });
         // Worker › directory › branch: one path, its steps a quiet chevron apart.
         let step = || div().flex_none().text_color(muted).child("\u{203a}");
@@ -305,7 +353,8 @@ impl WorkspaceView {
                     .flex()
                     .items_center()
                     .gap(px(spacing.xs))
-                    .children(place_parts),
+                    .children(place_parts)
+                    .children(changes),
             );
 
         let ports = (!phone).then(|| self.forwarded_count()).filter(|n| *n > 0).map(|n| {
@@ -367,12 +416,17 @@ impl WorkspaceView {
                 .child(state_dot(theme, s.accent_fill))
                 .child(tabular(div()).child(text))
         });
+        let facts = focused_item.and_then(|item| self.focus_facts(item, cx)).map(|text| {
+            let text = SharedString::from(text);
+            tabular(readout("status-facts", text.clone())).child(text)
+        });
         let right = div()
             .debug_selector(|| "status-right".to_owned())
             .flex_none()
             .flex()
             .items_center()
             .gap(px(spacing.md))
+            .children(facts)
             .children(ports)
             .children(transfers)
             .children(health)
@@ -531,6 +585,9 @@ impl WorkspaceView {
                 .into_any_element(),
         };
         let path = w.path.as_ref().filter(|_| health.is_none()).map(path_label);
+        // The machine under the name, once the worker has said what it is.
+        let machine = w.caps.as_ref().filter(|c| !c.os_version.is_empty()).map(host_line);
+        let machine_known = machine.is_some();
         let detail = match health {
             Some((mark, word)) => div().text_color(hsla(mark.tone(theme))).child(word),
             None => div()
@@ -601,7 +658,7 @@ impl WorkspaceView {
             .role(Role::Button)
             .aria_label(label)
             .flex_none()
-            .h(px(kit::Row::One.height(theme)))
+            .h(px(if machine_known { kit::Row::Two } else { kit::Row::One }.height(theme)))
             .mx(px(spacing.xs))
             .px(px(spacing.xs))
             .flex()
@@ -623,11 +680,24 @@ impl WorkspaceView {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .flex()
+                    .flex_col()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_color(hsla(s.text))
-                    .child(SharedString::from(w.name.clone())),
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(hsla(s.text))
+                            .child(SharedString::from(w.name.clone())),
+                    )
+                    .children(machine.map(|line| {
+                        meta(div(), theme)
+                            .debug_selector(move || format!("hosts-machine-{key}"))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(line)
+                    })),
             )
             .child(hover_actions)
             .child(div().flex_none().text_size(px(theme.typography.small())).child(detail));
@@ -653,6 +723,7 @@ const fn state_fill(theme: &Theme, status: Status) -> slopty_theme::Rgb {
     match status {
         Status::Idle => s.text_muted,
         Status::Working => s.accent_fill,
+        Status::Running => s.text_secondary,
         Status::NeedsYou | Status::Away => s.warn_fill,
         Status::Done => s.success_fill,
         Status::Failed => s.error_fill,
@@ -708,9 +779,12 @@ mod tests {
     /// Inside a repository the bar names it and the path within; elsewhere, the tail.
     #[test]
     fn a_place_in_a_repository_is_named_by_it() {
-        assert_eq!(place("/w/oss/slopty", Some("/w/oss/slopty")), "slopty");
-        assert_eq!(place("/w/oss/slopty/crates/ui/", Some("/w/oss/slopty")), "slopty/crates/ui");
-        assert_eq!(place("/w/oss/slopty-two", Some("/w/oss/slopty")), "oss/slopty-two");
-        assert_eq!(place("/Users/me/src", None), "~/src");
+        assert_eq!(repo_place("/w/oss/slopty", Some("/w/oss/slopty"), None), "slopty");
+        assert_eq!(
+            repo_place("/w/oss/slopty/crates/ui/", Some("/w/oss/slopty"), None),
+            "slopty/crates/ui"
+        );
+        assert_eq!(repo_place("/w/oss/slopty-two", Some("/w/oss/slopty"), None), "oss/slopty-two");
+        assert_eq!(repo_place("/Users/me/src", None, None), "~/src");
     }
 }

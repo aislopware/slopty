@@ -74,7 +74,9 @@ impl WorkspaceView {
             .collect();
         // Every other tile, by the title its header shows, as the navigator lists them: a
         // tile the palette cannot find is one the human has to hunt for by eye.
-        for tile in self.reading_order() {
+        let mut others: Vec<TileRef> = self.reading_order();
+        others.sort_by_key(|t| self.recency_rank(*t));
+        for tile in others {
             let Some(item) = self.item(tile) else { continue };
             if matches!(item.kind, ItemKind::Terminal { .. }) {
                 continue;
@@ -477,8 +479,18 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Where tile `tile` stands in the lists that go to a tile: the latest used first, the one
+    /// already focused last, since nobody goes where they are.
+    pub(super) fn recency_rank(&self, tile: TileRef) -> usize {
+        if self.focused() == Some(tile) {
+            return usize::MAX;
+        }
+        let back = self.recency.iter().rev().position(|id| *id == tile.item);
+        back.unwrap_or(usize::MAX - 1)
+    }
+
     /// The terminal sessions for the picker and the palette: agents waiting on the human
-    /// first, then other agents, then plain shells; ties in reading order.
+    /// first, then by [`Self::recency_rank`].
     pub(super) fn session_rows(&self, cx: &Context<Self>) -> Vec<SessionRow> {
         // Wall clock, as the worker stamped the start: the summary may be relayed long after.
         let now_ms = super::inbox::wall_ms();
@@ -487,19 +499,14 @@ impl WorkspaceView {
                 .then(|| std::time::Duration::from_millis(now_ms.saturating_sub(started_ms)))
         };
         let order = self.reading_order();
-        let mut rows: Vec<(u8, usize, SessionRow)> = order
+        let mut rows: Vec<((bool, usize), SessionRow)> = order
             .iter()
-            .enumerate()
-            .filter_map(|(at, tile)| {
+            .filter_map(|tile| {
                 let item = self.item(*tile)?;
                 let ItemKind::Terminal { session } = item.kind else { return None };
                 let agent = self.agent_state(session);
                 let needs_you = agent.is_some_and(needs_human);
-                let rank = match agent {
-                    _ if needs_you => 0,
-                    Some(_) => 1,
-                    None => 2,
-                };
+                let rank = (!needs_you, self.recency_rank(*tile));
                 let summary = self.summary(session);
                 let row = SessionRow {
                     session,
@@ -508,13 +515,14 @@ impl WorkspaceView {
                     needs_you,
                     mark: agent.and_then(Status::of_agent),
                     worker: self.worker_label(tile.worker),
-                    cwd: summary.and_then(|s| s.cwd.as_deref()).map(super::tile::cwd_tail),
+                    cwd: self.session_tail(session),
                     age: summary.and_then(|s| session_age(s.started_ms)),
                 };
-                Some((rank, at, row))
+                Some((rank, row))
             })
             .collect();
-        rows.sort_by_key(|(rank, at, _)| (*rank, *at));
-        rows.into_iter().map(|(_, _, row)| row).collect()
+        // Stable: tiles never focused keep their reading order.
+        rows.sort_by_key(|(rank, _)| *rank);
+        rows.into_iter().map(|(_, row)| row).collect()
     }
 }

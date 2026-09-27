@@ -85,11 +85,11 @@ fn finished(command: &str, exit: u8) -> Finished {
 /// A name given wins.
 #[gpui::test]
 fn a_workspace_is_named_by_where_its_first_shell_is(cx: &mut TestAppContext) {
-    use crate::workspace::titlebar::place_name;
-    assert_eq!(place_name("/x/slopty/crates", Some("/x/slopty")).as_deref(), Some("slopty"));
-    assert_eq!(place_name("/Users/me/src/app", None).as_deref(), Some("app"));
-    assert_eq!(place_name("/Users/me", None), None, "home says nothing");
-    assert_eq!(place_name("/", None), None);
+    use crate::workspace::tile::place_name;
+    assert_eq!(place_name("/x/slopty/crates", Some("/x/slopty"), None).as_deref(), Some("slopty"));
+    assert_eq!(place_name("/Users/me/src/app", None, None).as_deref(), Some("app"));
+    assert_eq!(place_name("/Users/me", None, None), None, "home says nothing");
+    assert_eq!(place_name("/", None, None), None);
 
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");

@@ -193,7 +193,10 @@ impl WorkspaceView {
             what,
             word,
             meta: join(&[&crate::terminal::took_label(done.elapsed), worker]),
-            cwd: logged.cwd.as_deref().map(super::tile::cwd_tail),
+            cwd: logged
+                .cwd
+                .as_deref()
+                .map(|cwd| super::tile::cwd_tail(cwd, logged.worker.and_then(|w| self.home_of(w)))),
             age: Some(now.saturating_duration_since(logged.at)),
             unread,
             go: Go::Session(logged.session),
@@ -226,7 +229,7 @@ impl WorkspaceView {
             what,
             word: None,
             meta: join(&[title.as_deref().unwrap_or_default(), worker]),
-            cwd: self.summary(session).and_then(|s| s.cwd.as_deref()).map(super::tile::cwd_tail),
+            cwd: self.session_tail(session),
             age,
             unread: true,
             go: Go::Waiting(waiting),

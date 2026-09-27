@@ -2063,6 +2063,13 @@ impl TerminalView {
         self.state.title()
     }
 
+    /// How long the command the shell runs has run, timed from when this view saw it start;
+    /// `None` at a prompt.
+    #[must_use]
+    pub fn running_for(&self) -> Option<Duration> {
+        self.command_started.filter(|_| self.state.command_running()).map(|at| at.elapsed())
+    }
+
     /// The branch checked out where the shell stands, as the worker resolved it: what the
     /// navigator and the status bar print beside the repository.
     #[must_use]

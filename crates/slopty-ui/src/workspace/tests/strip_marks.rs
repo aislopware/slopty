@@ -297,7 +297,7 @@ fn a_healthy_worker_shows_no_word_in_the_empty_workspace(cx: &mut TestAppContext
         (label, marks)
     };
     let (label, marks) = row(&view, cx);
-    assert_eq!(label, "studio");
+    assert_eq!(label, "New terminal on studio");
     assert!(marks.is_empty(), "no mark for a link that is up: {marks:?}");
 
     let key = fake.key;
@@ -305,6 +305,6 @@ fn a_healthy_worker_shows_no_word_in_the_empty_workspace(cx: &mut TestAppContext
         v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
     });
     let (label, marks) = row(&view, cx);
-    assert_eq!(label, "studio, reconnecting");
+    assert_eq!(label, "New terminal on studio, reconnecting");
     assert_eq!(marks, ["Away"]);
 }

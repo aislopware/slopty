@@ -109,18 +109,6 @@ impl std::fmt::Debug for Tabs {
     }
 }
 
-/// A workspace's name from where a shell is: the repository's last component, else the
-/// directory's; none at the home directory, which says nothing.
-pub(super) fn place_name(cwd: &str, repo: Option<&str>) -> Option<String> {
-    let last = |path: &str| {
-        path.trim_end_matches('/').rsplit('/').next().filter(|n| !n.is_empty()).map(str::to_owned)
-    };
-    repo.and_then(last).or_else(|| {
-        let tail = super::tile::cwd_tail(cwd);
-        (!tail.starts_with('~') || tail.contains('/')).then(|| last(&tail)).flatten()
-    })
-}
-
 /// Whether every column of `strip` is in its view, so the dots would say nothing.
 pub(super) fn all_in_view(strip: &Strip) -> bool {
     let (view_x, view_w) = strip.view;
@@ -166,8 +154,8 @@ impl WorkspaceView {
             let slopty_proto::items::ItemKind::Terminal { session } = self.item(tile)?.kind else {
                 return None;
             };
-            let summary = self.summary(session)?;
-            place_name(summary.cwd.as_deref()?, summary.repo.as_deref())
+            let (home, summary) = self.session_on(session)?;
+            super::tile::place_name(summary.cwd.as_deref()?, summary.repo.as_deref(), home)
         })
     }
 
@@ -456,7 +444,9 @@ impl WorkspaceView {
             None => format!("{name}, {count} {noun}"),
         };
         let meta = match workers {
-            0 | 1 => format!("{count} {noun}"),
+            // An empty workspace says so in its strip; "0 tiles" here would say it twice.
+            0 => String::new(),
+            1 => format!("{count} {noun}"),
             n => format!("{count} {noun} \u{b7} {n} workers"),
         };
         (label.into(), meta.into(), rollup)
@@ -577,7 +567,7 @@ impl WorkspaceView {
                     .text_color(hsla(s.text))
                     .child(SharedString::from(self.workspace_name_at(ix))),
             )
-            .when(wide, |el| el.child(kit::meta(div(), theme).flex_none().child(meta)))
+            .when(wide && !meta.is_empty(), |el| el.child(kit::meta(div(), theme).flex_none().child(meta)))
             .into_any_element()
     }
 
@@ -647,6 +637,38 @@ impl WorkspaceView {
         Some(row)
     }
 
+    /// "+"'s choice of worker, where there are several: a row each, the one a new tile goes to
+    /// checked. Choosing one keeps the menu open on the kinds of tile.
+    fn target_entries(&self, entity: &gpui::WeakEntity<Self>) -> Vec<MenuEntry> {
+        if self.workers.len() < 2 {
+            return Vec::new();
+        }
+        let target = self.new_on.or_else(|| self.context_worker());
+        self.workers
+            .iter()
+            .map(|(key, w)| {
+                let key = *key;
+                let entity = entity.clone();
+                MenuEntry {
+                    group: MenuGroup::Target,
+                    label: w.name.clone().into(),
+                    detail: if target == Some(key) {
+                        "\u{2713}".into()
+                    } else {
+                        SharedString::default()
+                    },
+                    run: Rc::new(move |_window, cx| {
+                        let _gone = entity.update(cx, |this, cx| {
+                            this.new_on = Some(key);
+                            this.menu = Some(MenuKind::New);
+                            cx.notify();
+                        });
+                    }),
+                }
+            })
+            .collect()
+    }
+
     /// The open menu, anchored under its button at the right of the bar.
     pub(super) fn render_menu(
         &self,
@@ -687,30 +709,34 @@ impl WorkspaceView {
         let entries: Vec<MenuEntry> = match which {
             MenuKind::Inbox => Vec::new(),
             // The palette's names for the same actions, which the rows run as the keys do.
-            MenuKind::New => vec![
-                entry(MenuGroup::Tiles, "New terminal", Some(&NewTerminal), |this, w, cx| {
-                    this.new_terminal(&NewTerminal, w, cx);
-                }),
-                entry(MenuGroup::Tiles, "New agent", Some(&NewAgent), |this, w, cx| {
-                    this.new_agent(&NewAgent, w, cx);
-                }),
-                entry(
-                    MenuGroup::Tiles,
-                    "Add a window or display",
-                    Some(&AddWindow),
-                    |this, w, cx| {
-                        this.add_window(&AddWindow, w, cx);
-                    },
-                ),
-                entry(MenuGroup::Tiles, "New note", Some(&NewNote), |this, w, cx| {
-                    this.new_note(&NewNote, w, cx);
-                }),
-                entry(MenuGroup::Workspaces, NEW_WORKSPACE, None, |this, _w, cx| {
-                    // The layout always keeps an empty workspace last.
-                    let last = this.layout.workspaces().len().saturating_sub(1);
-                    this.go_to_workspace(last, cx);
-                }),
-            ],
+            MenuKind::New => self
+                .target_entries(&entity)
+                .into_iter()
+                .chain([
+                    entry(MenuGroup::Tiles, "New terminal", Some(&NewTerminal), |this, w, cx| {
+                        this.new_terminal(&NewTerminal, w, cx);
+                    }),
+                    entry(MenuGroup::Tiles, "New agent", Some(&NewAgent), |this, w, cx| {
+                        this.new_agent(&NewAgent, w, cx);
+                    }),
+                    entry(
+                        MenuGroup::Tiles,
+                        "Add a window or display",
+                        Some(&AddWindow),
+                        |this, w, cx| {
+                            this.add_window(&AddWindow, w, cx);
+                        },
+                    ),
+                    entry(MenuGroup::Tiles, "New note", Some(&NewNote), |this, w, cx| {
+                        this.new_note(&NewNote, w, cx);
+                    }),
+                    entry(MenuGroup::Workspaces, NEW_WORKSPACE, None, |this, _w, cx| {
+                        // The layout always keeps an empty workspace last.
+                        let last = this.layout.workspaces().len().saturating_sub(1);
+                        this.go_to_workspace(last, cx);
+                    }),
+                ])
+                .collect(),
             MenuKind::More => {
                 let mut entries = vec![
                     action("Command palette", &OpenPalette, |this, w, cx| {

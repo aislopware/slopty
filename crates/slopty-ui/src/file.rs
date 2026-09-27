@@ -341,6 +341,13 @@ impl FileView {
         &self.editor
     }
 
+    /// The caret's line and column, 1-based: what the status bar says of a focused file.
+    #[must_use]
+    pub fn caret(&self, cx: &gpui::App) -> (u32, u32) {
+        let at = self.editor.read(cx).cursor_position();
+        (at.line.saturating_add(1), at.character.saturating_add(1))
+    }
+
     /// The caret's line, 1-based.
     #[must_use]
     pub fn reading_line(&self, cx: &gpui::App) -> Option<u32> {

@@ -29,16 +29,23 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
 
 #[test]
 fn a_place_is_its_last_two_directories_with_home_as_a_tilde() {
-    assert_eq!(cwd_tail("/Users/w"), "~");
-    assert_eq!(cwd_tail("/Users/w/"), "~");
-    assert_eq!(cwd_tail("/Users/w/src"), "~/src");
-    assert_eq!(cwd_tail("/Users/w/Workspace/oss/slopty"), "oss/slopty");
-    assert_eq!(cwd_tail("/home/w/src"), "~/src");
-    assert_eq!(cwd_tail("/root"), "~");
-    assert_eq!(cwd_tail("/usr/local/bin"), "local/bin");
-    assert_eq!(cwd_tail("/etc"), "/etc");
-    assert_eq!(cwd_tail("/Users"), "/Users", "the folder of homes is not a home");
-    assert_eq!(cwd_tail("/"), "/");
+    assert_eq!(cwd_tail("/Users/w", None), "~");
+    assert_eq!(cwd_tail("/Users/w/", None), "~");
+    assert_eq!(cwd_tail("/Users/w/src", None), "~/src");
+    assert_eq!(cwd_tail("/Users/w/Workspace/oss/slopty", None), "oss/slopty");
+    assert_eq!(cwd_tail("/home/w/src", None), "~/src");
+    assert_eq!(cwd_tail("/root", None), "~");
+    assert_eq!(cwd_tail("/usr/local/bin", None), "local/bin");
+    assert_eq!(cwd_tail("/etc", None), "/etc");
+    assert_eq!(cwd_tail("/Users", None), "/Users", "the folder of homes is not a home");
+    assert_eq!(cwd_tail("/", None), "/");
+    // Once the worker has named its home, that and nothing else is `~`.
+    let home = Some("/Volumes/Data/w");
+    assert_eq!(cwd_tail("/Volumes/Data/w", home), "~");
+    assert_eq!(cwd_tail("/Volumes/Data/w/src", home), "~/src");
+    assert_eq!(cwd_tail("/Volumes/Data/wx/src", home), "wx/src", "a prefix is not a home");
+    assert_eq!(cwd_tail("/Users/other/src", home), "other/src", "no guess by shape");
+    assert_eq!(cwd_tail("/Users/w/src", Some("/Users/w/")), "~/src");
 }
 
 /// A header is its title, then its context, muted with no separator: a shell's directory, a

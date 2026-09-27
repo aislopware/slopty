@@ -260,12 +260,23 @@ mod tests {
         let [nav_x, _, nav_w, _] = shown.a11y_node("Navigation", Some("Navigator")).unwrap().bounds;
         assert!(nav_x.abs() < 1.0 && nav_w < shown.window.width * 0.9, "{nav_x} {nav_w}");
         golden(drv, &dir, dev, "navigator", None).await;
+        // A shell is titled by what it runs or where it stands, so its row is found by the
+        // title its header shows.
+        let title = shown
+            .a11y
+            .iter()
+            .find_map(|n| {
+                let label = n.label.as_deref().filter(|_| n.role == "Heading")?;
+                let rest = label.strip_prefix("terminal")?;
+                Some(rest.strip_prefix(' ').unwrap_or(label).to_owned())
+            })
+            .unwrap_or_else(|| panic!("the shell's heading: {:#?}", shown.a11y));
         let row = shown
             .a11y
             .iter()
             .find(|n| {
                 n.role == "Button"
-                    && n.label.as_deref().is_some_and(|l| l.starts_with("shell"))
+                    && n.label.as_deref().is_some_and(|l| l.starts_with(title.as_str()))
                     && n.bounds[0] + n.bounds[2] <= nav_x + nav_w + 1.0
             })
             .unwrap_or_else(|| panic!("the shell's row: {:#?}", shown.a11y));

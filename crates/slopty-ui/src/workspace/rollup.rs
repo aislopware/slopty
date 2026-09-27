@@ -1,8 +1,8 @@
 //! What a group of tiles adds up to where their own rows are out of sight: a folded worker in
 //! the navigator or on the rail, a workspace's tab in the title bar. One quiet mark, the most
 //! urgent first: a warn dot (and in the navigator how many wait on the human), else the
-//! working mark, else the unseen dot. The navigator's slot keeps its width whether it holds a
-//! mark or nothing, so what sits beside it never moves.
+//! working mark, else the unseen dot, else the calm mark of a command running. The navigator's slot
+//! keeps its width whether it holds a mark or nothing, so what sits beside it never moves.
 //!
 //! Also the navigator's second line: the words it is made of and when its age starts.
 
@@ -27,6 +27,8 @@ pub(super) struct Rollup {
     pub working: usize,
     /// Tiles with news the human has not looked at.
     pub unseen: usize,
+    /// Tiles whose shell has run a command a while: the least of it.
+    pub running: usize,
 }
 
 impl Rollup {
@@ -36,6 +38,7 @@ impl Rollup {
             Some(Status::NeedsYou) => self.needs_you = self.needs_you.saturating_add(1),
             Some(Status::Working) => self.working = self.working.saturating_add(1),
             _ if unseen => self.unseen = self.unseen.saturating_add(1),
+            Some(Status::Running) => self.running = self.running.saturating_add(1),
             _ => {}
         }
     }
@@ -49,6 +52,8 @@ impl Rollup {
             Some(Shown::Working)
         } else if self.unseen > 0 {
             Some(Shown::Unseen)
+        } else if self.running > 0 {
+            Some(Shown::Running)
         } else {
             None
         }
@@ -60,6 +65,7 @@ impl Rollup {
             Shown::NeedsYou(n) => format!("{n} {}", if n == 1 { "needs you" } else { "need you" }),
             Shown::Working => "working".to_owned(),
             Shown::Unseen => "unseen".to_owned(),
+            Shown::Running => "running".to_owned(),
         })
     }
 }
@@ -73,6 +79,8 @@ pub(super) enum Shown {
     Working,
     /// The accent dot.
     Unseen,
+    /// The calm mark.
+    Running,
 }
 
 /// The slot's width: a mark and a count of two figures beside it.
@@ -122,6 +130,16 @@ pub(super) fn rollup_slot(theme: &Theme, selector: String, rollup: Rollup, compa
             ),
         ),
         Shown::Unseen => slot.child(dot(theme, s.accent_fill, "Unseen")),
+        Shown::Running => slot.child(
+            div().id("rollup-running").role(Role::Image).aria_label(Status::Running.label()).child(
+                status_icon(
+                    theme,
+                    Status::Running,
+                    px(theme.typography.meta()),
+                    hsla(s.text_secondary),
+                ),
+            ),
+        ),
     }
 }
 
@@ -153,7 +171,8 @@ mod tests {
     use super::*;
 
     /// The slot shows the most urgent thing only: one waiting outranks any number at work,
-    /// work outranks news not seen, and a group at rest shows nothing.
+    /// work outranks news not seen, which outranks a command running, and a group at rest
+    /// shows nothing.
     #[test]
     fn a_rollup_shows_what_waits_then_what_works_then_what_is_unseen() {
         let mut r = Rollup::default();
@@ -161,6 +180,9 @@ mod tests {
         r.add(Some(Status::Idle), false);
         r.add(None, false);
         assert_eq!(r.shown(), None, "at rest");
+        r.add(Some(Status::Running), false);
+        assert_eq!(r.shown(), Some(Shown::Running), "the least of it");
+        assert_eq!(r.words().as_deref(), Some("running"));
         r.add(Some(Status::Done), true);
         assert_eq!(r.shown(), Some(Shown::Unseen));
         r.add(Some(Status::Working), false);
@@ -171,7 +193,7 @@ mod tests {
         assert_eq!(r.words().as_deref(), Some("1 needs you"));
         r.add(Some(Status::NeedsYou), false);
         assert_eq!(r.words().as_deref(), Some("2 need you"));
-        assert_eq!(r, Rollup { needs_you: 2, working: 2, unseen: 1 });
+        assert_eq!(r, Rollup { needs_you: 2, working: 2, unseen: 1, running: 1 });
     }
 
     /// Something at work or waiting is not also news: it counts once, as what it is doing.
@@ -180,7 +202,7 @@ mod tests {
         let mut r = Rollup::default();
         r.add(Some(Status::Working), true);
         r.add(Some(Status::NeedsYou), true);
-        assert_eq!(r, Rollup { needs_you: 1, working: 1, unseen: 0 });
+        assert_eq!(r, Rollup { needs_you: 1, working: 1, unseen: 0, running: 0 });
     }
 
     /// An age runs from the session's start on the wall clock; no start is no age, and a start

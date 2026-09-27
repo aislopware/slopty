@@ -80,6 +80,7 @@ gpui_kit::assets::icon_assets!(
         LayoutGrid,
         Link,
         ListFilter,
+        Loader,
         LoaderCircle,
         Maximize2,
         MessageSquareWarning,
@@ -166,8 +167,11 @@ pub fn icon(theme: &Theme, name: IconName, size: IconSize, color: Hsla) -> Svg {
 pub enum Status {
     /// Nothing to say: a shell at its prompt, an agent at rest.
     Idle,
-    /// Busy on its own: an agent thinking or running a tool, a command running.
+    /// Busy on its own: an agent thinking or running a tool, a remote picture on its way.
     Working,
+    /// A shell's command running for a while: busy, but nothing to watch for. The neutral
+    /// tone and the calm mark, beside how long it has run.
+    Running,
     /// Waiting on the human: a permission, a question, an elicitation.
     NeedsYou,
     /// Finished and not yet looked at.
@@ -197,6 +201,7 @@ impl Status {
         match self {
             Self::Idle => IconName::Circle,
             Self::Working => IconName::LoaderCircle,
+            Self::Running => IconName::Loader,
             Self::NeedsYou => IconName::CircleAlert,
             Self::Done => IconName::CircleCheck,
             Self::Failed => IconName::CircleX,
@@ -211,6 +216,7 @@ impl Status {
         match self {
             Self::Idle => s.text_muted,
             Self::Working => s.accent,
+            Self::Running => s.text_secondary,
             Self::NeedsYou | Self::Away => s.warn,
             Self::Done => s.success,
             Self::Failed => s.error,
@@ -223,6 +229,7 @@ impl Status {
         match self {
             Self::Idle => "Idle",
             Self::Working => "Working",
+            Self::Running => "Running",
             Self::NeedsYou => "Needs you",
             Self::Done => "Done",
             Self::Failed => "Failed",
@@ -255,13 +262,31 @@ pub fn status_mark(theme: &Theme, status: Option<Status>, k: f32) -> Stateful<Di
     }
 }
 
-/// `status`'s icon, `side` square, in `color`. [`Status::Working`]'s turns ([`spin_step`]).
+/// `status`'s icon, `side` square, in `color`. [`Status::Working`]'s turns ([`spin_step`]);
+/// [`Status::Running`]'s steps once a second ([`calm_step`]).
 #[must_use]
 pub fn status_icon(theme: &Theme, status: Status, side: Pixels, color: Hsla) -> AnyElement {
-    if status == Status::Working {
-        return Spinner { side, color, inner: None }.into_any_element();
+    match status {
+        Status::Working => Spinner { side, color, calm: false, inner: None }.into_any_element(),
+        Status::Running => Spinner { side, color, calm: true, inner: None }.into_any_element(),
+        _ => icon(theme, status.icon(), IconSize::Inline, color).size(side).into_any_element(),
     }
-    icon(theme, status.icon(), IconSize::Inline, color).size(side).into_any_element()
+}
+
+/// The step the calm mark shows `since` the spin clock started: one a second, a turn in
+/// twelve, and always the first under Reduce Motion.
+#[must_use]
+pub fn calm_step(since: Duration, reduce_motion: bool) -> u32 {
+    if reduce_motion {
+        return 0;
+    }
+    u32::try_from(since.as_secs().checked_rem(u64::from(SPIN_STEPS)).unwrap_or(0)).unwrap_or(0)
+}
+
+/// How long after `since` the calm mark's next step begins: the next whole second.
+#[must_use]
+pub fn until_next_second(since: Duration) -> Duration {
+    Duration::from_secs(1).saturating_sub(Duration::from_nanos(u64::from(since.subsec_nanos())))
 }
 
 /// The steps in one turn of the working mark, which makes one turn a second.
@@ -317,6 +342,12 @@ struct SpinClock {
     hold_until: Option<Instant>,
     /// A step fell due during the hold and waits to be drawn.
     held: bool,
+    /// The views that painted a calm mark since the last whole second. They are woken each
+    /// second even under Reduce Motion, where the mark stands still: how long the thing has run
+    /// is drawn beside it and must keep counting.
+    calm_wake: Vec<EntityId>,
+    /// The next second's timer is out.
+    calm_armed: bool,
 }
 
 /// What an armed timer is for.
@@ -342,6 +373,8 @@ impl SpinClock {
                 timers: 0,
                 hold_until: None,
                 held: false,
+                calm_wake: Vec::new(),
+                calm_armed: false,
             };
             cx.set_global(clock);
         }
@@ -389,6 +422,29 @@ impl SpinClock {
         }
     }
 
+    /// Set the calm lane's timer to fire after `wait`: the views that painted a calm mark draw
+    /// again then, unless a key still waits for its echo, when they wait for the hold's end.
+    fn arm_calm(cx: &mut App, wait: Duration) {
+        Self::get(cx).calm_armed = true;
+        let timer = cx.background_executor().timer(wait);
+        cx.spawn(async move |cx| {
+            timer.await;
+            cx.update(|cx| {
+                let now = cx.background_executor().now();
+                let clock = Self::get(cx);
+                if let Some(until) = clock.hold_until.filter(|until| now < *until) {
+                    Self::arm_calm(cx, until.saturating_duration_since(now));
+                    return;
+                }
+                clock.calm_armed = false;
+                for view in std::mem::take(&mut clock.calm_wake) {
+                    cx.notify(view);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Wake every view that painted a mark since the last step.
     fn wake(cx: &mut App) {
         for view in std::mem::take(&mut Self::get(cx).wake) {
@@ -428,10 +484,13 @@ fn system_reduce_motion() -> bool {
     !cfg!(test) && slopty_platform::reduce_motion()
 }
 
-/// The working mark: [`Status::Working`]'s icon, turned to the spin clock's step when laid out.
+/// The working mark: [`Status::Working`]'s icon, turned to the spin clock's step when laid out;
+/// calm, [`Status::Running`]'s, turned a step a second.
 struct Spinner {
     side: Pixels,
     color: Hsla,
+    /// [`Status::Running`]'s mark: its icon, a step a second.
+    calm: bool,
     inner: Option<AnyElement>,
 }
 
@@ -466,11 +525,16 @@ impl Element for Spinner {
         let now = cx.background_executor().now();
         let clock = SpinClock::get(cx);
         let since = now.saturating_duration_since(clock.epoch);
-        let step = spin_step(since, reduce || clock.reduce_motion);
+        let still = reduce || clock.reduce_motion;
+        let (step, status) = if self.calm {
+            (calm_step(since, still), Status::Running)
+        } else {
+            (spin_step(since, still), Status::Working)
+        };
         #[expect(clippy::cast_precision_loss, reason = "a step under twelve")]
         let turn = step as f32 / SPIN_STEPS as f32;
         let mut inner = svg()
-            .path(Status::Working.icon().path())
+            .path(status.icon().path())
             .flex_shrink_0()
             .size(self.side)
             .text_color(self.color)
@@ -512,6 +576,16 @@ impl Element for Spinner {
         let now = cx.background_executor().now();
         let view = window.current_view();
         let clock = SpinClock::get(cx);
+        if self.calm {
+            if !clock.calm_wake.contains(&view) {
+                clock.calm_wake.push(view);
+            }
+            if !clock.calm_armed {
+                let wait = until_next_second(now.saturating_duration_since(clock.epoch));
+                SpinClock::arm_calm(cx, wait);
+            }
+            return;
+        }
         if reduce || clock.reduce_motion {
             return;
         }
@@ -547,6 +621,7 @@ mod tests {
         let all = [
             Status::Idle,
             Status::Working,
+            Status::Running,
             Status::NeedsYou,
             Status::Done,
             Status::Failed,
@@ -614,6 +689,7 @@ mod tests {
     /// A view that shows a working mark or not, and counts its renders.
     struct Turning {
         shown: bool,
+        status: Status,
         renders: usize,
     }
 
@@ -625,7 +701,7 @@ mod tests {
         ) -> impl IntoElement {
             self.renders = self.renders.saturating_add(1);
             let theme = Theme::default();
-            div().children(self.shown.then(|| status_mark(&theme, Some(Status::Working), 1.0)))
+            div().children(self.shown.then(|| status_mark(&theme, Some(self.status), 1.0)))
         }
     }
 
@@ -643,7 +719,8 @@ mod tests {
     /// is gone; under Reduce Motion it never wakes it.
     #[gpui::test]
     fn a_working_mark_wakes_its_view_only_while_it_shows(cx: &mut gpui::TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, _| Turning { shown: true, renders: 0 });
+        let (view, cx) =
+            cx.add_window_view(|_, _| Turning { shown: true, status: Status::Working, renders: 0 });
         cx.run_until_parked();
         let shown = renders_in_a_second(&view, cx);
         assert!((11..=13).contains(&shown), "{shown} renders in a second");
@@ -661,6 +738,24 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(renders_in_a_second(&view, cx), 0, "Reduce Motion: it stands still");
+    }
+
+    /// The calm mark wakes its view once a second, a twelfth as often as the working mark, and
+    /// keeps doing so under Reduce Motion, where it stands still but what it times goes on.
+    #[gpui::test]
+    fn a_running_mark_steps_once_a_second_even_under_reduce_motion(cx: &mut gpui::TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|_, _| Turning { shown: true, status: Status::Running, renders: 0 });
+        cx.run_until_parked();
+        let shown = renders_over(&view, cx, Duration::from_secs(3));
+        assert!((2..=4).contains(&shown), "{shown} renders in three seconds");
+        cx.update(|_w, cx| cx.set_reduce_motion(true));
+        let still = renders_over(&view, cx, Duration::from_secs(3));
+        assert!((2..=4).contains(&still), "{still} renders in three seconds, standing still");
+        assert_eq!(calm_step(Duration::from_millis(2_500), false), 2);
+        assert_eq!(calm_step(Duration::from_secs(13), false), 1, "a turn in twelve seconds");
+        assert_eq!(calm_step(Duration::from_secs(5), true), 0);
+        assert_eq!(until_next_second(Duration::from_millis(2_300)), Duration::from_millis(700));
     }
 
     /// Renders of `view` while the executor's clock runs `for`, a refresh at a time.
@@ -684,7 +779,8 @@ mod tests {
     /// echo's frame, or for the hold's end, and then the steps go on as before.
     #[gpui::test]
     fn a_held_step_waits_for_the_echo_or_the_end_of_the_hold(cx: &mut gpui::TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, _| Turning { shown: true, renders: 0 });
+        let (view, cx) =
+            cx.add_window_view(|_, _| Turning { shown: true, status: Status::Working, renders: 0 });
         cx.run_until_parked();
         let now =
             |cx: &mut gpui::VisualTestContext| cx.update(|_w, cx| cx.background_executor().now());

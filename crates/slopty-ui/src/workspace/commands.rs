@@ -8,6 +8,7 @@ use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::screen::{CaptureTarget, ScreenRequest};
+use slopty_proto::server::Os;
 use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
 
 use super::actions::{
@@ -47,9 +48,9 @@ impl WorkspaceView {
             self.pending_focus_self = true;
             return;
         };
+        self.note_recent(tile.item);
         match self.item(tile).map(|i| i.kind.clone()) {
             Some(ItemKind::Terminal { session }) => {
-                self.touch_session(session);
                 self.finished.remove(&session);
                 self.pending_focus = Some(session);
             }
@@ -83,13 +84,11 @@ impl WorkspaceView {
         }
     }
 
-    /// Remember that `session` was just focused, so a "run in shell" goes to the shell the
-    /// human was last in rather than whichever opened last.
-    fn touch_session(&mut self, session: SessionId) {
-        if let Some(at) = self.shell_recency.iter().position(|s| *s == session) {
-            let s = self.shell_recency.remove(at);
-            self.shell_recency.push(s);
-        }
+    /// Remember that tile `item` was just focused or just came: a "run in shell" goes to the
+    /// shell the human was last in, and the palette lists tiles from the latest.
+    pub(super) fn note_recent(&mut self, item: ItemId) {
+        self.recency.retain(|r| *r != item);
+        self.recency.push(item);
     }
 
     /// Bring a session's terminal into view, focus it and give it the keyboard (the "go"
@@ -362,7 +361,11 @@ impl WorkspaceView {
 
     /// The shell a fenced block runs in: the most recently focused one, else the newest.
     pub(super) fn run_target(&self) -> Option<SessionId> {
-        self.shell_recency.iter().rev().copied().find(|s| self.is_shell(*s))
+        self.recency.iter().rev().find_map(|id| {
+            let tile = self.tile_of(*id)?;
+            let ItemKind::Terminal { session } = self.item(tile)?.kind else { return None };
+            self.is_shell(session).then_some(session)
+        })
     }
 
     /// Tell every note whether there is a shell to run a fenced block in.
@@ -385,20 +388,40 @@ impl WorkspaceView {
 
     // ----- opening -----------------------------------------------------------------------------
 
-    /// ⌘T: a shell on the focused tile's worker, in the focused shell's directory.
+    /// ⌘T: a shell on the focused tile's worker (or the one "+" chose), in the focused shell's
+    /// directory when it is on that worker.
     pub fn new_terminal(&mut self, _: &NewTerminal, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.context_worker() else { return };
-        let cwd = self.active_cwd();
+        let Some((key, cwd)) = self.new_tile_target() else { return };
         self.open_session_on(key, cwd, Vec::new(), None, cx);
     }
 
     /// ⌘⇧T: a terminal running Claude Code. The bare name resolves on the worker through the
     /// user's login shell.
     pub fn new_agent(&mut self, _: &NewAgent, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.context_worker() else { return };
-        let cwd = self.active_cwd();
+        let Some((key, cwd)) = self.new_tile_target() else { return };
         let command = vec![AGENT_COMMAND.to_owned()];
         self.open_session_on(key, cwd, command, Some(AGENT_COMMAND.to_owned()), cx);
+    }
+
+    /// Where a new tile goes, taking the choice "+" made: the worker, and the focused shell's
+    /// directory when it is on that worker.
+    fn new_tile_target(&mut self) -> Option<(WorkerKey, Option<String>)> {
+        let chosen = self.new_on.take().filter(|k| self.workers.contains_key(k));
+        let key = chosen.or_else(|| self.context_worker())?;
+        let here = self.focused().is_some_and(|t| t.worker == key);
+        Some((key, here.then(|| self.active_cwd()).flatten()))
+    }
+
+    /// A shell on `key`, in the active workspace: the empty workspace's rows, one per worker.
+    /// One out of reach says so.
+    pub(super) fn new_terminal_on(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get(&key) else { return };
+        if w.link.is_none() {
+            let text = format!("{} is {}", w.name, w.status.text());
+            self.show_notice(text, cx);
+            return;
+        }
+        self.open_session_on(key, None, Vec::new(), None, cx);
     }
 
     /// Open a session running `command` (the login shell when empty) on the context worker.
@@ -455,7 +478,7 @@ impl WorkspaceView {
 
     /// ⌘⇧N: an empty note right of the focused column, focused and editing.
     pub fn new_note(&mut self, _: &NewNote, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.context_worker() else { return };
+        let Some((key, _)) = self.new_tile_target() else { return };
         let id = self.put_note(key, String::new(), cx);
         self.pending_focus_note = Some(id);
     }
@@ -488,8 +511,15 @@ impl WorkspaceView {
 
     /// ⌘O: ask the context worker for its windows, and show the picker while it answers.
     pub fn add_window(&mut self, _: &AddWindow, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.context_worker() else { return };
+        let Some((key, _)) = self.new_tile_target() else { return };
         let Some(w) = self.workers.get_mut(&key) else { return };
+        // A Mac that has not granted Screen Recording lists no window worth picking: say why
+        // rather than show an empty picker.
+        if w.caps.as_ref().is_some_and(|c| c.os == Os::MacOs && !c.can_capture) {
+            let text = format!("{} can\u{2019}t share its screen: Screen Recording is off", w.name);
+            self.show_notice(text, cx);
+            return;
+        }
         w.picker_wanted = true;
         w.send(ClientMsg::Screen(ScreenRequest::List));
         // A worker out of reach will not answer; the picker would wait on nothing.

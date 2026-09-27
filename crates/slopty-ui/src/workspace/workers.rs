@@ -1,14 +1,16 @@
 //! Workers coming and going, and what they say: the registry sync that places tiles, the
 //! sessions, the streams and the files behind the tiles.
 
-use gpui::{AppContext as _, Context, Entity, Window};
+use gpui::{App, AppContext as _, Context, Entity, Window};
 use slopty_client::ItemChange;
 use slopty_client::layout::{Placement, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::file::{FileRead, WriteResult};
+use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{ItemKind, ItemSync};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
+use slopty_proto::server::WorkerCaps;
 use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermEvent, TermRequest, TermSize};
 
@@ -31,16 +33,17 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The link to `key` is up: this client's id there, where its messages go, and the
-    /// sessions the worker has. The registry snapshot follows on the link.
+    /// The link to `key` is up: this client's id there and where its messages go, and what the
+    /// worker said on it: its name, home, capabilities and sessions. The registry snapshot
+    /// follows on the link.
     pub fn connect_worker(
         &mut self,
         key: WorkerKey,
-        name: String,
         link: WorkerLink,
-        sessions: Vec<SessionSummary>,
+        ack: HelloAck,
         cx: &mut Context<Self>,
     ) {
+        let HelloAck { name, home, caps, sessions, .. } = ack;
         let known: Vec<SessionId> = self
             .workers
             .get(&key)
@@ -50,16 +53,13 @@ impl WorkspaceView {
         w.name = name;
         w.status = WorkerStatus::Connected;
         w.link = Some(link);
+        w.home = (!home.is_empty()).then_some(home);
+        w.caps = Some(caps);
         w.path = None;
         w.awaiting_snapshot = true;
         w.titles_requested = false;
         w.watched.clear();
         w.pending_opens.clear();
-        for s in &sessions {
-            if !self.shell_recency.contains(&s.id) {
-                self.shell_recency.push(s.id);
-            }
-        }
         let agents: Vec<SessionSummary> =
             sessions.iter().filter(|s| s.agent.is_some()).cloned().collect();
         w.sessions = sessions.into_iter().map(|s| (s.id, s)).collect();
@@ -230,6 +230,16 @@ impl WorkspaceView {
         }
     }
 
+    /// What `key` can do and how it is doing changed: a permission granted, a display attached,
+    /// its load. The link's word and the server directory's land here alike.
+    pub fn set_worker_caps(&mut self, key: WorkerKey, caps: WorkerCaps, cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get_mut(&key) else { return };
+        if w.caps.as_ref() != Some(&caps) {
+            w.caps = Some(caps);
+            cx.notify();
+        }
+    }
+
     /// How the tailnet carries the link to `key`, when its worker has said.
     #[must_use]
     pub fn link_path(&self, key: WorkerKey) -> Option<&LinkPath> {
@@ -306,7 +316,10 @@ impl WorkspaceView {
                     .collect();
                 for item in new {
                     self.layout.open(TileRef { worker: key, item }, Placement::Remote);
+                    self.note_recent(item);
                 }
+                let kept = self.recency.iter().copied().filter(|id| self.tile_of(*id).is_some());
+                self.recency = kept.collect();
                 let gone: Vec<ItemId> = self
                     .notes
                     .keys()
@@ -323,6 +336,7 @@ impl WorkspaceView {
                 let tile = TileRef { worker: key, item: id };
                 let placement = if by_me { Placement::Local } else { Placement::Remote };
                 self.layout.open(tile, placement);
+                self.note_recent(id);
                 // A worker's given shell opens beside the rest and leaves the focus where it
                 // was: a worker coming up must not take the keys someone is typing elsewhere.
                 match (by_me, self.given_pending.remove(&key)) {
@@ -333,6 +347,7 @@ impl WorkspaceView {
             }
             ItemChange::Removed(id) => {
                 self.layout.remove(TileRef { worker: key, item: id });
+                self.recency.retain(|r| *r != id);
                 self.drop_item_views(id);
                 self.after_focus_moved(cx);
             }
@@ -372,9 +387,6 @@ impl WorkspaceView {
         summary: SessionSummary,
         cx: &mut Context<Self>,
     ) {
-        if !self.shell_recency.contains(&summary.id) {
-            self.shell_recency.push(summary.id);
-        }
         self.seed_agents([&summary], cx);
         if let Some(w) = self.workers.get_mut(&key) {
             w.sessions.insert(summary.id, summary);
@@ -391,7 +403,6 @@ impl WorkspaceView {
         self.agents.remove(&session);
         // Its "finished" badge has no tile to clear it by looking: the bell must not keep it.
         self.finished.remove(&session);
-        self.shell_recency.retain(|s| *s != session);
         self.update_awake(cx);
         self.reconcile(cx);
         self.count_needs_you(cx);
@@ -912,6 +923,14 @@ impl WorkspaceView {
                 FileViewEvent::Reload => this.request_file(id),
             }
             cx.notify();
+        })
+        .detach();
+        // The status bar says where the focused file's caret is: it draws again as it moves,
+        // and only for the focused card.
+        cx.observe(&view, move |this, _view, cx| {
+            if this.focused().is_some_and(|t| t.item == id) {
+                App::notify(cx, this.chrome.statusbar.entity_id());
+            }
         })
         .detach();
         if let Some(line) = self.file_focus.remove(&id) {
