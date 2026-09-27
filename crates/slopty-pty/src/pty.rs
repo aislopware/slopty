@@ -120,6 +120,7 @@ impl Pty {
             Some(dir) => cmd.env("TERMINFO", dir),
             None => cmd.env_remove("TERMINFO"),
         };
+        forget_parent_agent(&mut cmd);
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
@@ -276,6 +277,30 @@ fn read_fd(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
 
 fn write_fd(fd: &OwnedFd, data: &[u8]) -> io::Result<usize> {
     rustix::io::write(fd, data).map_err(Into::into)
+}
+
+/// What a Claude Code session sets for the programs it starts, naming itself. A daemon started
+/// from inside one (a developer's session, a test run by an agent) would hand them to every
+/// shell, and a `claude` there then takes itself for that session's child: it saves no
+/// transcript (`CLAUDE_CODE_CHILD_SESSION`) and reports to the parent's inbox.
+const PARENT_AGENT_ENV: [&str; 9] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_PID",
+];
+
+/// Start the child outside any Claude Code session the daemon was started from; a session's own
+/// environment (`SpawnSpec::env`) is applied after, so it can still set any of them.
+fn forget_parent_agent(cmd: &mut std::process::Command) {
+    for name in PARENT_AGENT_ENV {
+        cmd.env_remove(name);
+    }
 }
 
 /// `(program, args, arg0)`: an empty command means the login shell run as a login shell
@@ -477,6 +502,23 @@ mod tests {
         set_size(pty.master(), TermSize { cols: 100, rows: 30, metrics: CellMetrics::default() })
             .unwrap();
         assert_eq!(get_size(pty.master()).unwrap(), (100, 30));
+    }
+
+    /// A shell never inherits the identity of a Claude Code session the daemon ran under, while
+    /// the user's own Claude Code settings in the environment pass through.
+    #[test]
+    fn a_shell_forgets_the_claude_session_the_daemon_ran_in() {
+        let mut cmd = std::process::Command::new("/usr/bin/true");
+        forget_parent_agent(&mut cmd);
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        for name in ["CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDECODE"] {
+            assert!(removed.iter().any(|r| r == name), "{name} kept: {removed:?}");
+        }
+        assert!(!removed.iter().any(|r| r == "CLAUDE_CODE_USE_BEDROCK"), "settings pass");
     }
 
     #[test]

@@ -1739,3 +1739,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_working_tree_is_counted_against_head`, the worker's
     `a_shell_in_a_repository_carries_its_changes` and
     `an_event_the_greeting_carried_is_not_told_again`, and the `worker_session_opened` golden.
+
+- ✅ **A shell forgets the Claude Code session its daemon ran in** (2026-09-27). Claude Code
+  hands the programs it starts variables naming its session: `CLAUDECODE`,
+  `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET` and its
+  token, `CLAUDE_PID` and a few more. A ptyd started from inside a session (a developer's, or a
+  test run by an agent) passed them to every shell. A `claude` started there then took itself
+  for that session's child: it saved no transcript and reported to the parent's inbox. Found
+  while measuring Claude Mods. `slopty_pty` now removes those names before the session's own
+  environment is applied. The user's Claude Code settings in the environment
+  (`CLAUDE_CODE_USE_BEDROCK` and the like) pass through. Test:
+  `a_shell_forgets_the_claude_session_the_daemon_ran_in`.
