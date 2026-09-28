@@ -56,6 +56,8 @@ mod tests {
                 can_inject: true,
                 virtual_displays: false,
                 version: "0.1.0".to_owned(),
+                lan: Vec::new(),
+                wake_on_lan: None,
             },
             load: 0.5,
             last_seen_ms: WallMs::from_millis(1),

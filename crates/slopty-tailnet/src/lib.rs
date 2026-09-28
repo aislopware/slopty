@@ -11,16 +11,20 @@
 //! * [`status`] — the tailnet as the daemon sees it, and the path to each peer.
 //! * [`whois`] — the node and user behind an address, with the grants it carries.
 //! * [`policy`] — which of those Slopty lets in, and in what role.
+//! * [`lan`] — the LAN beneath the tailnet: this machine's interfaces on it, and the magic packet
+//!   that wakes a machine asleep there, which the tailnet cannot reach.
 //!
 //! iOS has no `LocalAPI` a third-party app can reach; an iPhone gets its workers from the Slopty
 //! server and dials them over the tunnel like any other address.
 
-#![forbid(unsafe_code)]
+// `lan` alone reads `getifaddrs(3)`; everything else stays safe.
+#![deny(unsafe_code)]
 #![warn(unreachable_pub)]
 
 mod api;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+pub mod lan;
 pub mod locate;
 pub mod policy;
 pub mod status;

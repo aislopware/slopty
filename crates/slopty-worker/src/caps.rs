@@ -18,6 +18,9 @@ use tokio::sync::watch;
 /// How often permissions and displays are looked at: TCC and display changes come with no
 /// notification a daemon can take.
 const CHECK_PERIOD: Duration = Duration::from_secs(5);
+/// How often "Wake for network access" is read: a child process, and a setting people rarely
+/// touch.
+const WAKE_PERIOD: Duration = Duration::from_mins(1);
 /// How often a load change is reported, and by how much it must have moved.
 const LOAD_PERIOD: Duration = Duration::from_secs(30);
 const LOAD_STEP: f32 = 0.5;
@@ -61,8 +64,9 @@ async fn version_of(program: &str) -> Option<String> {
     text.lines().map(str::trim).rfind(|line| !line.is_empty()).map(str::to_owned)
 }
 
-/// Everything about this worker as it is now; `agents` from [`installed_agents`].
-pub fn probe(agents: &[InstalledAgent]) -> WorkerCaps {
+/// Everything about this worker as it is now; `agents` from [`installed_agents`] and
+/// `wake_on_lan` from [`wake_on_lan`].
+pub fn probe(agents: &[InstalledAgent], wake_on_lan: Option<bool>) -> WorkerCaps {
     let desktop = desktop();
     WorkerCaps {
         os: if cfg!(target_os = "linux") { Os::Linux } else { Os::MacOs },
@@ -78,7 +82,39 @@ pub fn probe(agents: &[InstalledAgent]) -> WorkerCaps {
         can_inject: desktop.can_inject,
         virtual_displays: desktop.virtual_displays,
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        lan: slopty_tailnet::lan::ports(),
+        wake_on_lan,
     }
+}
+
+/// Whether this Mac wakes for a magic packet: `womp` in `pmset -g`, the current power
+/// source's "Wake for network access". `None` where that cannot be read.
+#[cfg(target_os = "macos")]
+pub async fn wake_on_lan() -> Option<bool> {
+    let output = tokio::process::Command::new("/usr/bin/pmset")
+        .arg("-g")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(VERSION_TIMEOUT, output).await.ok()?.ok()?;
+    womp(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Linux says per card whether it wakes for a magic packet, behind `ethtool`'s ioctl; unread.
+#[cfg(not(target_os = "macos"))]
+#[expect(clippy::unused_async, reason = "the macOS reader's shape")]
+pub async fn wake_on_lan() -> Option<bool> {
+    None
+}
+
+/// `womp` in `pmset -g`'s settings: ` womp                 1`.
+#[cfg(any(target_os = "macos", test))]
+fn womp(settings: &str) -> Option<bool> {
+    settings.lines().find_map(|line| {
+        let mut words = line.split_whitespace();
+        (words.next()? == "womp").then(|| words.next()).flatten().map(|value| value != "0")
+    })
 }
 
 /// What this worker offers of its desktop.
@@ -169,12 +205,27 @@ pub async fn watch(
     let mut tick = tokio::time::interval(CHECK_PERIOD);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut load_at = tokio::time::Instant::now();
+    let mut wakes: Option<(tokio::time::Instant, Option<bool>)> = None;
     loop {
         tick.tick().await;
         if caps.is_closed() && load.is_closed() {
             return;
         }
-        let next = probe(&agents);
+        let wake = match wakes {
+            Some((at, wake)) if at.elapsed() < WAKE_PERIOD => wake,
+            _ => {
+                let wake = wake_on_lan().await;
+                if wake == Some(false) && wakes.is_none_or(|(_, was)| was != wake) {
+                    tracing::warn!(
+                        "Wake for network access is off: a client cannot wake this machine \
+                         once it sleeps (`sudo pmset -a womp 1`)"
+                    );
+                }
+                wakes = Some((tokio::time::Instant::now(), wake));
+                wake
+            }
+        };
+        let next = probe(&agents, wake);
         caps.send_if_modified(|current| {
             let changed = *current != next;
             if changed {
@@ -264,10 +315,20 @@ mod tests {
         assert_eq!(os_release(""), "");
     }
 
+    /// `womp` reads from `pmset -g`'s settings; a listing without it says nothing.
+    #[test]
+    fn wake_for_network_access_reads_from_the_settings() {
+        let settings = "System-wide power settings:\nCurrently in use:\n standby              0\n \
+                        networkoversleep     0\n womp                 1\n";
+        assert_eq!(womp(settings), Some(true));
+        assert_eq!(womp(&settings.replace("womp                 1", "womp 0")), Some(false));
+        assert_eq!(womp(" standby 0\n"), None);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn the_probe_reads_this_mac() {
-        let caps = probe(&[]);
+        let caps = probe(&[], None);
         assert!(
             caps.os_version.split('.').next().is_some_and(|major| major.parse::<u32>().is_ok()),
             "{caps:?}"
@@ -277,6 +338,14 @@ mod tests {
         assert_eq!(caps.arch, "aarch64");
         assert!(load() >= 0.0);
         assert_eq!(caps.encoders, [VideoCodec::Hevc, VideoCodec::H264]);
+        assert!(caps.lan.iter().all(|port| port.mac.is_unicast()), "{:?}", caps.lan);
+    }
+
+    /// This Mac says whether it wakes for a magic packet.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn this_mac_says_whether_it_wakes_on_lan() {
+        assert!(wake_on_lan().await.is_some());
     }
 
     #[cfg(target_os = "macos")]

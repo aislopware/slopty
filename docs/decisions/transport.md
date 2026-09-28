@@ -1480,7 +1480,56 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - `Copies::from_env` and `path_trace_period` read the same `Tuning`.
   - Tests: `unset_knobs_are_the_shipped_transport`, `each_knob_reads_its_variable` and
     `the_initial_window_reads_its_flag` (`slopty-net`).
-
+- ✅ **A link that stays on DERP says so** (2026-09-29, product gaps #5). Tailscale v1.102.4
+  (the release in use) fills a peer's `Relay` with its home DERP region whatever the path.
+  `CurAddr` is set only for a trusted direct UDP path and `PeerRelay` (`ip:port:vni:N`) only
+  for a peer relay. `tailscale status` prints `relay "<region>"` when the peer is `Active`
+  (a packet in the last 45 s) and both are empty (`cmd/tailscale/cli/status.go`,
+  `wgengine/magicsock/endpoint.go`). `slopty_tailnet::Node::path` already read it this way,
+  and `WorkerMsg::Path` already carries the result to the client, so nothing on the wire
+  changed.
+  - **Ten seconds before a word** (`slopty_proto::tailnet::DERP_NOTICE_AFTER`). A path starts
+    on DERP while a direct one is found. A direct path whose pongs stopped also reads as DERP
+    for a few seconds (`trustUDPAddrDuration`, 6.5 s), because magicsock sends on both. Only
+    a DERP path that holds is news.
+  - **The worker logs it** once per stretch on DERP, at `warn`, with the client's address
+    and the region (`tailnet::Relayed`).
+  - **The client decides when to show it.** `slopty_client::relay::RelayWatch` takes each
+    `WorkerMsg::Path` with the time it arrived. `notice(now)` gives
+    "Relayed via fra — adds latency" and the fix, but only after ten seconds on DERP.
+    `due(now)` says when to look again. `LinkPath::relay_note` and `LinkPath::relay_fix`
+    hold the wording. The status bar and the screen header, in `slopty-ui`, are the next
+    step.
+  - Tests: `a_link_that_stays_on_derp_is_logged_once` (worker),
+    `derp_is_said_once_it_has_held` and `a_peer_relay_says_nothing` (client),
+    `only_derp_says_it_is_relayed` (proto). The status fixture now spells `PeerRelay` as the
+    daemon does.
+- ✅ **The server's machine as a peer relay: explained, not switched on** (2026-09-29, product
+  gaps #5). Tailscale 1.86+ tries a peer relay in the tailnet before DERP (KB 1591). A relay
+  can run on any OS but iOS, tvOS and Android, and Headscale supports it from 0.29.0. The
+  Slopty server's machine is the one node that is always on, which makes it the natural
+  relay.
+  - Turning it on takes three things:
+    - `tailscale set --relay-server-port=40000` on that machine. This writes
+      `ipn.Prefs.RelayServerPort` and needs `LocalAPI` write access: root, the operator, or
+      the `admin` group on a Mac.
+    - That UDP port open to the tailnet.
+    - A grant in the tailnet policy, `{"src": [...], "dst": ["<relay>"], "app":
+      {"tailscale.com/cap/relay": []}}`, which only a tailnet admin can write.
+  - Slopty cannot write the grant. Setting a pref on the user's Tailscale behind their back
+    is not ours to do either. So Slopty reads and explains:
+    - `LocalApi::relay_server_port` reads `GET /localapi/v0/prefs`, which needs read access
+      only. A missing key means off, since Go's `omitempty` drops a nil `*uint16`, and `0`
+      means a port the daemon picks.
+    - `slopty server relay` prints whether the machine is a relay, the command, the port to
+      open and the grant, filled in with this node's tailnet address.
+    - `slopty server status` and `slopty server install` print one line on it.
+    - `LinkPath::relay_fix` points a DERP notice at `slopty server relay`.
+  - Not verified: whether the App Store and standalone Tailscale apps on macOS will serve as
+    a relay. Their `LocalAPI` sits behind closed code, and the KB names no variant.
+  - Tests: `the_peer_relay_port_reads_from_the_prefs` (`slopty-tailnet`, fake `LocalAPI`),
+    `the_report_says_how_to_turn_the_relay_on` and
+    `the_relay_port_comes_from_the_daemons_prefs` (`slopty-cli`).
 - ✅ **The transport is tested on a simulated network, on tokio's paused clock** (2026-09-29,
   MEASUREMENTS "the transport on a simulated network").
   - `slopty_shape::sim::Net` is an in-memory datagram network whose `Socket` is noq's

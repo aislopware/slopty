@@ -103,6 +103,23 @@ impl LocalApi {
         }
     }
 
+    /// The UDP port this node serves as a Tailscale peer relay on, `None` when it serves as
+    /// none (`ipn.Prefs.RelayServerPort`, nil when off; `0` is a port the daemon picks).
+    ///
+    /// # Errors
+    ///
+    /// When the daemon cannot be reached or answers something else.
+    pub async fn relay_server_port(&self) -> Result<Option<u16>, LocalApiError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct Prefs {
+            #[serde(default)]
+            relay_server_port: Option<u16>,
+        }
+        let body = self.call(Method::GET, "/localapi/v0/prefs").await?;
+        Ok(serde_json::from_slice::<Prefs>(&body)?.relay_server_port)
+    }
+
     /// A disco ping to the node at `ip`: `WireGuard`'s own path, without the IP stack at either
     /// end. Pinging a peer that is idle also makes the daemon find it a path now, so the next
     /// packet does not start on DERP.
@@ -269,6 +286,24 @@ mod tests {
         assert!(
             seen.iter().any(|(p, _)| p == "/localapi/v0/whois?addr=%5Bfd7a:115c:a1e0::4%5D:5000")
         );
+    }
+
+    /// The relay port reads from the prefs: set, a port the daemon picks, and off (the key
+    /// left out, as Go's `omitempty` writes a nil pointer).
+    #[tokio::test]
+    async fn the_peer_relay_port_reads_from_the_prefs() {
+        let answers = [
+            |_: &str| (200, r#"{"WantRunning":true,"RelayServerPort":40000}"#.to_owned()),
+            |_: &str| (200, r#"{"WantRunning":true,"RelayServerPort":0}"#.to_owned()),
+            |_: &str| (200, r#"{"WantRunning":true}"#.to_owned()),
+        ];
+        let mut got = Vec::new();
+        for answer in answers {
+            let (api, seen) = daemon(answer).await;
+            got.push(api.relay_server_port().await.unwrap());
+            assert_eq!(seen.lock()[0].0, "/localapi/v0/prefs");
+        }
+        assert_eq!(got, [Some(40000), Some(0), None]);
     }
 
     /// A refusal says what the daemon said; a mapped IPv4 caller is asked about as IPv4.

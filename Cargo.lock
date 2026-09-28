@@ -6998,6 +6998,7 @@ dependencies = [
  "slopty-pty",
  "slopty-server",
  "slopty-settings",
+ "slopty-tailnet",
  "slopty-tools",
  "tempfile",
  "tokio",
@@ -7360,6 +7361,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
+ "objc2-core-foundation",
  "parking_lot",
  "serde",
  "serde_json",
@@ -7368,6 +7371,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7480,6 +7484,7 @@ dependencies = [
  "slopty-platform",
  "slopty-proto",
  "slopty-pty",
+ "slopty-tailnet",
  "slopty-vdisplay",
  "tempfile",
  "thiserror 2.0.21",

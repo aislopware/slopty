@@ -413,7 +413,7 @@ async fn run(displays: Displays) -> Result<()> {
         move |live| wake.lock().streams(live)
     });
     let paths = tailnet::Paths::spawn(listener.admission().clone());
-    let (caps_tx, caps) = tokio::sync::watch::channel(slopty_worker::caps::probe(&[]));
+    let (caps_tx, caps) = tokio::sync::watch::channel(slopty_worker::caps::probe(&[], None));
     let (load_tx, load) = tokio::sync::watch::channel(slopty_worker::caps::load());
     watch_caps(caps_tx, load_tx, events.clone());
     let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);

@@ -35,6 +35,7 @@ pub mod folder;
 pub mod handshake;
 pub mod input;
 pub mod items;
+pub mod lan;
 pub mod media;
 pub mod orchestration;
 pub mod ptyd;

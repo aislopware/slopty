@@ -9,9 +9,10 @@
 //! Reads come from the worker's terminal engine, never from raw PTY bytes: the rendered screen,
 //! scrollback by absolute line index, and OSC 133 command blocks with their exit codes.
 //!
-//! The server answers [`Verb::Events`] and [`Verb::ForgetWorker`] itself, from its registry:
-//! events are what it heard from every worker, numbered in one sequence, so one long poll
-//! watches the whole fleet.
+//! The server answers [`Verb::Events`], [`Verb::ForgetWorker`] and [`Verb::Wake`] itself, from
+//! its registry: events are what it heard from every worker, numbered in one sequence, so one
+//! long poll watches the whole fleet, and a sleeping worker is woken by whichever machine it
+//! knows on the same LAN.
 //!
 //! A verb that [changes](Verb::changes) something may carry an [`IdempotencyKey`], so a caller
 //! whose answer was lost sends it again without doing it twice.
@@ -427,6 +428,21 @@ pub enum Verb {
         /// What this step does.
         part: UploadPart,
     },
+    /// Wake a worker that sleeps: the server, or an online worker on the same subnet, sends
+    /// the magic packet to its LAN ports ([`crate::server::WorkerCaps::lan`]). Answered by the
+    /// server with [`Outcome::WakeSent`]; the worker registering again is the directory's news.
+    Wake {
+        /// Which.
+        worker: WorkerId,
+    },
+    /// For a worker, from the server: send the magic packet for each of `peer`'s ports from
+    /// this worker's port on the same subnet. Answered with [`Outcome::Done`].
+    WakePeer {
+        /// The worker that sends.
+        worker: WorkerId,
+        /// The sleeping worker's ports that this one shares a subnet with.
+        peer: Vec<crate::lan::LanPort>,
+    },
 }
 
 /// One step of a [`Verb::Upload`].
@@ -492,7 +508,10 @@ impl Verb {
             | Self::ListItems { .. }
             | Self::ListWindows { .. }
             | Self::ReadConversation { .. }
-            | Self::CaptureStill { .. } => false,
+            | Self::CaptureStill { .. }
+            // A second magic packet wakes nothing that the first did not.
+            | Self::Wake { .. }
+            | Self::WakePeer { .. } => false,
         }
     }
 }
@@ -803,6 +822,14 @@ pub enum Outcome {
         width: u32,
         /// Pixels down.
         height: u32,
+    },
+    /// For [`Verb::Wake`]: the magic packet went out. Whether the worker wakes shows when it
+    /// registers again.
+    WakeSent {
+        /// The machine that sent it: the server's name or a worker's.
+        by: String,
+        /// The interfaces of the sleeping worker it was sent for (`en0`).
+        to: Vec<String>,
     },
 }
 

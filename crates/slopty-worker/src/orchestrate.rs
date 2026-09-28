@@ -203,7 +203,8 @@ impl Orchestrator {
             Verb::ListWorkers
             | Verb::ListTerminals { .. }
             | Verb::Events { .. }
-            | Verb::ForgetWorker { .. } => {
+            | Verb::ForgetWorker { .. }
+            | Verb::Wake { .. } => {
                 Err(Failure::new(ErrorCode::Invalid, "the server answers this, not a worker"))
             }
             Verb::OpenTerminal { worker, cwd, command, env, name, size } => {
@@ -374,6 +375,14 @@ impl Orchestrator {
                 self.mine(worker)?;
                 let path = crate::file::expand_home(Path::new(&path));
                 blocking(move || upload::apply(&path, upload, part)).await.map(|()| Outcome::Done)
+            }
+            Verb::WakePeer { worker, peer } => {
+                self.mine(worker)?;
+                let own = blocking(|| Ok(slopty_tailnet::lan::ports())).await?;
+                match slopty_tailnet::lan::wake_peer(&own, &peer).await {
+                    Ok(_sent) => Ok(Outcome::Done),
+                    Err(e) => Err(Failure::new(ErrorCode::Failed, e.to_string())),
+                }
             }
         }
     }

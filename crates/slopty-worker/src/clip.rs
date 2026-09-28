@@ -133,9 +133,9 @@ impl State {
         (was, !self.watchers.is_empty())
     }
 
-    /// Whether `count` is a change to look at, marking it seen.
-    fn advance(&mut self, count: isize) -> bool {
-        !self.watchers.is_empty() && std::mem::replace(&mut self.seen, count) != count
+    /// Whether `count` is a change to look at.
+    fn unseen(&self, count: isize) -> bool {
+        !self.watchers.is_empty() && self.seen != count
     }
 
     /// Announce `reps` as the next offer from `me`, unless they are what was last announced or
@@ -277,10 +277,17 @@ impl<B: Board> Clipboard<B> {
             return None;
         }
         let count = self.board.change_count();
-        if !self.state.lock().advance(count) {
+        if !self.state.lock().unseen(count) {
             return None;
         }
         let types = self.board.types();
+        // A copy clears the pasteboard, which moves the count, and puts the new contents on
+        // after, under that same count. An empty board may be a copy half done, so its count
+        // is left unseen and read again on the next poll.
+        if types.is_empty() {
+            return None;
+        }
+        self.state.lock().seen = count;
         if types.iter().any(|t| t == CONCEALED_TYPE || t == TRANSIENT_TYPE) {
             return None;
         }
@@ -379,13 +386,15 @@ impl<B: Board> Clipboard<B> {
     }
 
     fn commit(&self, items: &[Item], hashes: HashSet<Hash>) -> bool {
+        // Known before the write lands: a poll that reads the new contents before `write`
+        // returns must take them for this write, not a copy to announce back.
+        let before = std::mem::replace(&mut self.state.lock().last, hashes);
         let Some(count) = self.board.write(items) else {
             tracing::warn!("pasteboard write failed");
+            self.state.lock().last = before;
             return false;
         };
-        let mut st = self.state.lock();
-        st.seen = count;
-        st.last = hashes;
+        self.state.lock().seen = count;
         true
     }
 }
@@ -409,14 +418,27 @@ mod tests {
     struct Fake {
         count: AtomicIsize,
         items: Mutex<Vec<Item>>,
+        /// Run once inside the next `write`, after the contents land and before it returns.
+        during_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl Fake {
-        /// Another app copied `reps`.
+        /// Another app copied `reps`: it cleared the pasteboard, then put them on.
         fn copy(&self, reps: &[(&str, &[u8])]) {
+            self.clear();
+            self.put(reps);
+        }
+
+        /// `clearContents`: the board is empty and its count moves.
+        fn clear(&self) {
+            self.items.lock().clear();
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+
+        /// `writeObjects:` after a clear: the contents land under the count the clear left.
+        fn put(&self, reps: &[(&str, &[u8])]) {
             let item = reps.iter().map(|(t, b)| ((*t).to_owned(), b.to_vec())).collect();
             *self.items.lock() = vec![item];
-            self.count.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -446,7 +468,12 @@ mod tests {
 
         fn write(&self, items: &[Item]) -> Option<isize> {
             *self.items.lock() = items.to_vec();
-            Some(self.count.fetch_add(1, Ordering::SeqCst).wrapping_add(1))
+            let count = self.count.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+            let hook = self.during_write.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            Some(count)
         }
     }
 
@@ -482,6 +509,21 @@ mod tests {
         assert!(!*watched.borrow_and_update());
         c.board().copy(&[(&text(), b"three")]);
         assert_eq!(c.poll(), None);
+    }
+
+    /// Another process's copy clears the pasteboard, which moves its count, and puts the new
+    /// contents on after, under that same count. A poll that lands in between finds the board
+    /// empty; the contents are still announced once they are there.
+    #[test]
+    fn contents_put_on_after_a_poll_saw_the_board_cleared_are_announced() {
+        let c = clip();
+        c.watch(next_link(), true);
+        c.board().clear();
+        assert_eq!(c.poll(), None, "nothing on the board yet");
+        c.board().put(&[(&text(), b"landed")]);
+        let offer = c.poll().expect("the contents that landed under the clear's count");
+        assert_eq!(offer.items[0].inline.as_deref(), Some(&b"landed"[..]));
+        assert_eq!(c.poll(), None, "announced once");
     }
 
     #[test]
@@ -603,6 +645,37 @@ mod tests {
         assert_eq!(c.paste(a), Paste::Ready, "written once");
         assert!(!c.write_incoming(a));
         assert_eq!(c.paste(next_link()), Paste::Ready, "a client that offered nothing");
+    }
+
+    /// A poll that reads the worker's own write before `write` has returned takes it for that
+    /// write, not for a copy to announce back to the clients.
+    #[test]
+    fn a_poll_inside_the_workers_own_write_announces_nothing() {
+        let c = std::sync::Arc::new(clip());
+        let (a, watcher) = (next_link(), next_link());
+        c.watch(watcher, true);
+        c.offered(
+            a,
+            Offer {
+                origin: Peer::Client(ClientId::nil()),
+                generation: 3,
+                items: vec![ClipItem {
+                    format: ClipFormat::Text,
+                    size: 4,
+                    hash: digest(b"mine"),
+                    inline: Some(b"mine".to_vec()),
+                }],
+            },
+        );
+        let polled = std::sync::Arc::new(Mutex::new(None));
+        let hook = {
+            let (weak, polled) = (std::sync::Arc::downgrade(&c), std::sync::Arc::clone(&polled));
+            move || *polled.lock() = weak.upgrade().map(|c| c.poll())
+        };
+        *c.board().during_write.lock() = Some(Box::new(hook));
+        assert!(c.write_incoming(a));
+        assert_eq!(*polled.lock(), Some(None), "polled mid-write, and nothing announced");
+        assert_eq!(c.poll(), None, "nor after");
     }
 
     /// A client that copied files offers only their URLs. That offer takes the place of its

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use slopty_net::admission::Admission;
 use slopty_proto::WorkerMsg;
-use slopty_proto::tailnet::LinkPath;
+use slopty_proto::tailnet::{DERP_NOTICE_AFTER, LinkPath};
 use slopty_tailnet::{Path, Status};
 use tokio::sync::{Notify, mpsc, watch};
 
@@ -85,8 +85,12 @@ async fn report(
     out: mpsc::Sender<WorkerMsg>,
 ) {
     let mut told = None;
+    let mut relayed = Relayed::default();
     loop {
         let path = status.borrow_and_update().as_deref().and_then(|s| link_path(s, ip));
+        if let Some(path) = &path {
+            relayed.saw(ip, path, tokio::time::Instant::now());
+        }
         if let Some(path) = path
             && told.as_ref() != Some(&path)
         {
@@ -99,6 +103,37 @@ async fn report(
         if status.changed().await.is_err() {
             return;
         }
+    }
+}
+
+/// How long a client's link has been on DERP, to log once when it stays there.
+#[derive(Debug, Default)]
+struct Relayed {
+    /// Since when, and whether that was logged.
+    since: Option<(tokio::time::Instant, bool)>,
+}
+
+impl Relayed {
+    /// The path read `at`; true when this is the read that finds it on DERP for
+    /// [`DERP_NOTICE_AFTER`], which is logged.
+    fn saw(&mut self, ip: IpAddr, path: &LinkPath, at: tokio::time::Instant) -> bool {
+        let LinkPath::Derp { region } = path else {
+            self.since = None;
+            return false;
+        };
+        let (since, logged) = self.since.get_or_insert((at, false));
+        if *logged || at.duration_since(*since) < DERP_NOTICE_AFTER {
+            return false;
+        }
+        *logged = true;
+        tracing::warn!(
+            %ip,
+            %region,
+            "client relayed through Tailscale DERP for {}s; every packet detours, a peer relay \
+             on the server avoids it",
+            DERP_NOTICE_AFTER.as_secs()
+        );
+        true
     }
 }
 
@@ -184,6 +219,24 @@ mod tests {
         );
         assert!(asked.elapsed() < POLL / 2, "told after {:?}", asked.elapsed());
         reporting.abort();
+    }
+
+    /// A link on DERP is logged once it has stayed there ten seconds, and again only after it
+    /// left and came back.
+    #[test]
+    fn a_link_that_stays_on_derp_is_logged_once() {
+        let ip: IpAddr = "100.64.0.4".parse().unwrap();
+        let derp = LinkPath::Derp { region: "fra".into() };
+        let start = tokio::time::Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let mut relayed = Relayed::default();
+        assert!(!relayed.saw(ip, &derp, at(0)));
+        assert!(!relayed.saw(ip, &derp, at(8)), "a path is still settling");
+        assert!(relayed.saw(ip, &derp, at(10)));
+        assert!(!relayed.saw(ip, &derp, at(12)), "once");
+        assert!(!relayed.saw(ip, &LinkPath::Direct, at(14)));
+        assert!(!relayed.saw(ip, &derp, at(16)));
+        assert!(relayed.saw(ip, &derp, at(26)), "back on DERP, and staying");
     }
 
     /// An address no node has, and one idle node, give no path.

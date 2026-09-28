@@ -14,6 +14,7 @@
 //! cannot do yet says so where it is asked (`docs/decisions/platform.md`, "Linux seams"). The
 //! client's half (the pasteboard, drops, the browser tile, the Dock) is Apple-only.
 
+pub mod continued;
 pub mod dirs;
 #[cfg(target_os = "macos")]
 pub mod drag;
@@ -24,8 +25,11 @@ pub mod fs;
 mod linux;
 #[cfg(target_vendor = "apple")]
 pub mod notify;
+#[cfg(target_os = "ios")]
+pub mod paste_control;
 #[cfg(target_vendor = "apple")]
 pub mod pasteboard;
+pub mod pasteboard_access;
 pub mod privacy;
 #[cfg(target_os = "macos")]
 pub mod proc_files;

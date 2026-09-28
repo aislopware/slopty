@@ -3,7 +3,9 @@
 //! * `slopty workers|terminals|open|send|wait|…` drive workers through the server, one verb each
 //!   (`slopty_proto::orchestration`), as text or `--json`.
 //! * `slopty mcp` is the same verbs as an MCP server on stdio, for an AI agent.
-//! * `slopty server …` runs `slopty-server` as a `LaunchAgent` or a systemd user unit.
+//! * `slopty server …` runs `slopty-server` as a `LaunchAgent` or a systemd user unit, and `slopty
+//!   server relay` says whether its machine is a Tailscale peer relay.
+//! * `slopty wake <worker>` wakes a sleeping worker from its own LAN.
 //! * `slopty worker …` talks to the local `slopty-worker` over its control socket.
 //! * `slopty worker deploy <ssh target>` puts a worker on another machine over `ssh`.
 //! * `slopty hook` is the Claude Code hook relay (`slopty hook install` registers it).
@@ -23,6 +25,7 @@ mod deploy;
 mod hook;
 mod link;
 mod mcp;
+mod relay;
 mod service;
 mod statusline;
 mod verbs;

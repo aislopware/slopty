@@ -13,7 +13,7 @@ use slopty_net::client::bind_client;
 use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{
-    EventFilter, Happening, IdempotencyKey, Input, Size, WaitUntil, Waited,
+    EventFilter, Happening, IdempotencyKey, Input, Outcome, Size, Verb, WaitUntil, Waited,
 };
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::server::Role;
@@ -22,7 +22,7 @@ use slopty_tools::ops::{
     DEFAULT_WAIT_MS, Spec,
 };
 use slopty_tools::resolve::Resolver;
-use slopty_tools::{bulk, view};
+use slopty_tools::{Dispatch as _, ToolError, bulk, view};
 use tokio::io::AsyncReadExt as _;
 
 use crate::link::{self, Link};
@@ -39,6 +39,12 @@ pub enum VerbCmd {
     Workers {
         #[command(subcommand)]
         cmd: Option<WorkersCmd>,
+    },
+    /// Wake a sleeping worker: the server, or an online worker on the same LAN, sends it the
+    /// magic packet (Wake-on-LAN). It shows online in `slopty workers` once it is up.
+    Wake {
+        /// Worker id or name.
+        worker: String,
     },
     /// Terminals on one worker, or on all of them.
     Terminals {
@@ -560,6 +566,7 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
                 println!("forgot {id}");
             }
         }
+        VerbCmd::Wake { worker } => wake(&mut res, &worker, json).await?,
         VerbCmd::Terminals { worker } => {
             let (workers, terminals) = ops::terminals(&mut res, worker.as_deref()).await?;
             if json {
@@ -855,6 +862,41 @@ fn print_term(term: slopty_proto::orchestration::TermRef, json: bool) -> Result<
     }
 }
 
+/// Ask the server to wake `worker`, and say which machine sent the packet.
+async fn wake(res: &mut Resolver<'_, Link>, worker: &str, json: bool) -> Result<()> {
+    let id = res.worker(Some(worker)).await?;
+    let known = res.workers().await?.iter().find(|w| w.worker == id).cloned();
+    let (by, to) = match res.dispatch().call(Verb::Wake { worker: id }).await {
+        Outcome::WakeSent { by, to } => (by, to),
+        other => return Err(ToolError::unexpected(other).into()),
+    };
+    let name = known.as_ref().map_or_else(|| id.to_string(), |w| w.name.clone());
+    let ignores = known.is_some_and(|w| w.caps.wake_on_lan == Some(false));
+    if json {
+        #[derive(Serialize)]
+        struct Sent<'a> {
+            worker: String,
+            by: &'a str,
+            to: &'a [String],
+            wake_on_lan_off: bool,
+        }
+        return print_json(&Sent {
+            worker: id.to_string(),
+            by: &by,
+            to: &to,
+            wake_on_lan_off: ignores,
+        });
+    }
+    println!("{by} sent {name} the wake packet ({}); it shows online once it is up", to.join(", "));
+    if ignores {
+        eprintln!(
+            "{name} said Wake for network access is off, so it may sleep on: turn it on there \
+             (`sudo pmset -a womp 1`)"
+        );
+    }
+    Ok(())
+}
+
 fn print_done(json: bool) -> Result<()> {
     if json { print_json(&view::DONE) } else { Ok(()) }
 }
@@ -982,6 +1024,9 @@ mod tests {
             panic!()
         };
         assert_eq!(worker, "old-mac");
+        let VerbCmd::Wake { worker } = parse(&["wake", "studio"]).unwrap() else { panic!() };
+        assert_eq!(worker, "studio");
+        parse(&["wake"]).unwrap_err();
         let VerbCmd::Cat { offset, length, .. } =
             parse(&["cat", "/f", "--offset", "10", "--length", "4"]).unwrap()
         else {

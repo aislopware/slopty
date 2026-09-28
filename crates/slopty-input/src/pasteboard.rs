@@ -212,8 +212,6 @@ impl Board for MacBoard {
 
     fn write(&self, items: &[Item]) -> Option<isize> {
         let _turn = ONE_AT_A_TIME.lock();
-        let board = self.board();
-        let _previous = board.clearContents();
         let objects: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = items
             .iter()
             .map(|reps| {
@@ -226,7 +224,12 @@ impl Board for MacBoard {
                 ProtocolObject::from_retained(item)
             })
             .collect();
-        board.writeObjects(&NSArray::from_retained_slice(&objects)).then(|| board.changeCount())
+        let objects = NSArray::from_retained_slice(&objects);
+        let board = self.board();
+        // Another process that reads between the clear and the write sees an empty board under
+        // the new count, so the items are built first to keep that gap short.
+        let _previous = board.clearContents();
+        board.writeObjects(&objects).then(|| board.changeCount())
     }
 }
 

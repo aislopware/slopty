@@ -286,6 +286,11 @@ settings:
         # A page's downloads land in Documents; these show them in the Files app.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # A transfer asks to go on off screen as a continued-processing task, one per transfer.
+        BGTaskSchedulerPermittedIdentifiers:
+          - "{BUNDLE_ID}.transfer.*"
+        UIBackgroundModes:
+          - processing
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: {BUNDLE_ID}

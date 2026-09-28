@@ -143,6 +143,25 @@ impl Memory {
         self.order.borrow_mut().retain(|t| t != ORIGIN_TYPE);
     }
 
+    /// The first half of another app's copy (`clearContents`): the count moves and nothing is
+    /// on it yet.
+    pub fn clear(&self) {
+        self.now.borrow_mut().clear();
+        self.order.borrow_mut().clear();
+        self.promised.borrow_mut().clear();
+        self.files.borrow_mut().clear();
+        *self.provide.borrow_mut() = None;
+        self.count.set(self.count.get().saturating_add(1));
+    }
+
+    /// The second half (`writeObjects:`): `data` lands under the count the clear left.
+    pub fn put(&self, data: &[(&str, &[u8])]) {
+        for (uti, bytes) in data {
+            self.order.borrow_mut().push((*uti).to_owned());
+            self.now.borrow_mut().insert((*uti).to_owned(), bytes.to_vec());
+        }
+    }
+
     /// Put file URLs on it as Finder's copy does: one item per file, no origin.
     pub fn copy_files(&self, urls: &[&str]) {
         let first = urls.first().map(|u| u.as_bytes()).unwrap_or_default();

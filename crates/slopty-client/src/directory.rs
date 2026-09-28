@@ -133,6 +133,19 @@ impl Directory {
         self.workers.get(&worker)
     }
 
+    /// Whether to offer to wake `worker` (the palette's "Wake `<worker>`", then
+    /// [`crate::server::ServerCaller::wake`]): the server says it is not online, it reported a
+    /// LAN interface to wake it by, and it did not say it ignores the magic packet.
+    #[must_use]
+    pub fn can_wake(&self, worker: WorkerId) -> bool {
+        self.linked()
+            && self.workers.get(&worker).is_some_and(|w| {
+                w.liveness != Liveness::Online
+                    && !w.caps.lan.is_empty()
+                    && w.caps.wake_on_lan != Some(false)
+            })
+    }
+
     /// Forget every worker (the server was disconnected).
     pub fn clear(&mut self) -> Vec<WorkerId> {
         std::mem::take(&mut self.workers).into_keys().collect()
@@ -279,10 +292,48 @@ mod tests {
                 can_inject: true,
                 virtual_displays: false,
                 version: "0".to_owned(),
+                lan: Vec::new(),
+                wake_on_lan: None,
             },
             load: 0.5,
             last_seen_ms: slopty_core::WallMs::ZERO,
         }
+    }
+
+    /// Wake is offered for a worker that is down, has a LAN port and did not say it ignores
+    /// the packet, and only while the server, which sends it, answers.
+    #[test]
+    fn wake_is_offered_for_a_sleeping_worker_with_a_lan_port() {
+        use slopty_proto::lan::{LanPort, MacAddr};
+        let port = LanPort {
+            interface: "en0".to_owned(),
+            mac: MacAddr([0x3c, 0x22, 0xfb, 1, 2, 3]),
+            addr: std::net::Ipv4Addr::new(192, 168, 1, 20),
+            prefix: 24,
+        };
+        let with = |liveness, lan: Vec<LanPort>, wake_on_lan| {
+            let id = WorkerId::new();
+            let mut worker = info(id, "100.64.0.3:45550", liveness);
+            worker.caps.lan = lan;
+            worker.caps.wake_on_lan = wake_on_lan;
+            (id, worker)
+        };
+        let cases = [
+            with(Liveness::Gone, vec![port.clone()], Some(true)),
+            with(Liveness::Unreachable, vec![port.clone()], None),
+            with(Liveness::Online, vec![port.clone()], Some(true)),
+            with(Liveness::Gone, Vec::new(), Some(true)),
+            with(Liveness::Gone, vec![port], Some(false)),
+        ];
+        let ids = cases.clone().map(|(id, _)| id);
+        let [asleep, unknown, awake, no_lan, womp_off] = ids;
+        let mut dir = linked();
+        dir.apply(FromServer::Directory(cases.into_iter().map(|(_, info)| info).collect()));
+        let offered: Vec<bool> =
+            [asleep, unknown, awake, no_lan, womp_off].map(|w| dir.can_wake(w)).to_vec();
+        assert_eq!(offered, [true, true, false, false, false]);
+        dir.set_server(ServerState::Unreachable { why: "down".to_owned() });
+        assert!(!dir.can_wake(asleep), "no server to send it");
     }
 
     fn linked() -> Directory {

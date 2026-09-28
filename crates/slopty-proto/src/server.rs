@@ -101,6 +101,11 @@ pub struct WorkerCaps {
     pub virtual_displays: bool,
     /// Worker software version.
     pub version: String,
+    /// Its interfaces on a LAN, by which a machine beside it wakes it when it sleeps.
+    pub lan: Vec<crate::lan::LanPort>,
+    /// Whether it wakes for a magic packet (macOS "Wake for network access"), `None` where it
+    /// cannot tell.
+    pub wake_on_lan: Option<bool>,
 }
 
 impl WorkerCaps {
@@ -121,6 +126,8 @@ impl WorkerCaps {
             can_inject: false,
             virtual_displays: false,
             version: String::new(),
+            lan: Vec::new(),
+            wake_on_lan: None,
         }
     }
 }

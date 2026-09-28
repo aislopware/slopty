@@ -361,3 +361,76 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     worker may not have.
   - Goldens: `client_clip_offer`, `worker_clip_data` and `worker_clip_fetch`. Tests:
     `each_format_is_an_apple_uti_and_back` (`slopty-input`).
+- ✅ **Paste on iPhone without the prompt: the system's paste button** (2026-09-29, product
+  gaps C7). iOS asks before an app reads another app's clipboard, unless a paste the person
+  made does the reading. `UIPasteControl` is that paste: UIKit draws it, knows the tap was the
+  person's, and hands its target the clipboard's item providers with no prompt.
+  - **The platform half.** `slopty_platform::paste_control::PasteButton` puts the control in
+    the GPUI view, hidden until `show(Frame)` places it (the view's points, as the browser
+    tile's page) and `hide()` takes it away. Its target is a `UIResponder` subclass whose
+    paste configuration accepts what clipboard sync carries (`accepted_types`: the
+    `ClipFormat` types), so the system dims it for anything else. A tap loads every accepted
+    representation and gives the UI's callback one `Pasted` on the main thread: `text()`,
+    `data(uti)`, and `board()`, an in-memory pasteboard whose reads never ask, for the paths
+    that read one (an offer to a worker, a picture pasted into a shell). Style is the system's
+    control drawn from the theme's colours and radius (`Style`); the label is the system's.
+  - **What stays.** A hardware keyboard's ⌘V keeps the key path. Where the button goes (the
+    key bar over remote tiles and the composer) is the UI's, not decided here.
+  - Proven: builds for iOS and launches in the simulator. A tap cannot be proven by a test:
+    the control refuses synthetic touches by design, which is the point of it.
+- 🔬 **The worker's pasteboard alert: read the state, never the contents, to decide** (2026-09-29,
+  product gaps C7 and risk 1). Since macOS 15.4 a program that reads the general pasteboard's
+  contents without the person pasting raises the paste alert unless it is allowed in System
+  Settings. The worker reads the clipboard on every change to keep it in step, so an alert
+  would stop that silently on first use.
+  - **The check.** `slopty_platform::pasteboard_access::general()` reads
+    `NSPasteboard.accessBehavior`. `NSPasteboard.h` (macOS 27 SDK) describes it as the state
+    and puts the alert on "programmatic pasteboard access", the contents; `Default` is "ask
+    upon programmatic access" until the first alert turns it into `Ask`, and "all other
+    pasteboards default to always allow access", so a named pasteboard never alerts. It maps
+    to `Access::{Allowed, NotAskedYet, Asks, Denied}`; only `Allowed` `reads_freely()`, and
+    `problem()` is the health line naming System Settings ▸ Privacy & Security. Linux and iOS
+    answer `Allowed` (iOS asks per paste, which `Pasteboard::reads_ask` already covers).
+  - **The design for the worker.** Before a read that keeps the clipboard in step, the worker
+    checks `general()`. When reads are not free it reads nothing, offers nothing, and its
+    doctor reports `problem()`, rather than raising an alert on a screen nobody may be
+    watching. `detectPatterns`/`detectMetadata` probe without alerting, but only tell what
+    kind of thing is there, not its bytes, so they cannot build an offer.
+  - **Unverified: whether a LaunchAgent's first read raises the alert on macOS 27.** The live
+    test `pasteboard_access::tests::reading_the_general_pasteboard_is_free_when_it_says_so`
+    (ignored) answers it: the behaviour before and after one read. It must run on a Mac nobody
+    is using, since the alert shows on its screen.
+- ✅ **Transfers that survive pocketing the phone: iOS 26's continued processing**
+  (2026-09-29, product gaps #8). An upload or download started on the phone stops when the app
+  leaves the screen, because the process is suspended and the link with it.
+  `BGContinuedProcessingTask` (iOS 26) runs work a person started "even if a person backgrounds
+  the app", shows its progress in a Live Activity, and lets the person cancel it there.
+  - **API.** `slopty_platform::continued::Work::begin(title, subtitle, expired)`, then
+    `progress(done, total)` and `end(success)`; dropping it ends it as failed. Off iOS it does
+    nothing. `slopty_client::xfer::upload` and `download` begin one each: an upload shows the
+    worker's reported bytes, a download what each file holds (counted once across resumes).
+    A cancel from the Live Activity (the task's expiry) cancels the transfer as the UI's cancel
+    does: its tasks stop at the next chunk and the worker hears `Cancel`, for the attempt a
+    retried download is on now.
+  - **One identifier per work, registered just before it is submitted.** The scheduler refuses
+    a handler for the wildcard itself (Apple DTS, developer forums thread 799126), and a second
+    registration of one identifier kills the app, so each work is
+    `<bundle id>.transfer.<pid>-<n>`. `Info.plist` permits `<bundle id>.transfer.*`.
+  - **One queue.** The launch handler runs on a serial queue of ours, and every message to the
+    scheduler and to a task goes through it, so a task is never touched from two threads. The
+    progress the system hears moves only when the shown thousandth or the total does. A work
+    that ends before the system starts it withdraws its request, and a start that races the
+    withdrawal is completed at once with the work's outcome (`continued::ledger`).
+  - **Bindings by hand for now.** objc2's `objc2-background-tasks` 0.3.2 does bind
+    `BGContinuedProcessingTask`, but it is not a workspace dependency yet; the handful of
+    messages are sent by selector from the SDK headers, each with its rule. Swapping to the
+    crate is a workspace dependency and a mechanical change.
+  - **The floor's submit.** `submitTaskRequest:error:` is deprecated in the iOS 27 SDK for a
+    completion-handler twin that is iOS 27 only, above the floor, so the floor's call stays.
+  - **Needs, outside this change:** `Info.plist` gets `BGTaskSchedulerPermittedIdentifiers =
+    [dev.aislopware.slopty.transfer.*]` and `UIBackgroundModes = [processing]` (xtask's iOS
+    project). The simulator runs no background tasks (`BGTaskSchedulerErrorCodeUnavailable`),
+    so the Live Activity, the run off screen and the cancel from it need a device.
+  - Tests: `continued::ledger::tests` (the state machine), `continued::tests` (what the system
+    hears), `xfer::offscreen::tests` (titles, a cancel stopping the current attempt),
+    `xfer::tests::a_download_counts_what_each_file_holds_once`.

@@ -87,6 +87,8 @@ mod tests {
             can_inject: false,
             virtual_displays: false,
             version: "0".to_owned(),
+            lan: Vec::new(),
+            wake_on_lan: None,
         }
     }
 

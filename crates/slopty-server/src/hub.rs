@@ -12,8 +12,12 @@
 //! dropped and every link gets the directory again without them.
 //!
 //! [`Hub::dispatch`] is the one verb dispatch both front ends call (QUIC links and MCP): the
-//! directory verbs, [`Verb::Events`] and [`Verb::ForgetWorker`] are answered here, the rest go
-//! down the owning worker's link.
+//! directory verbs, [`Verb::Events`], [`Verb::ForgetWorker`] and [`Verb::Wake`] are answered
+//! here, the rest go down the owning worker's link.
+//!
+//! A sleeping worker is woken from its own LAN ([`Verb::Wake`]): by the server when it shares a
+//! subnet with the worker's last reported ports, else by an online worker that does
+//! ([`Verb::WakePeer`]).
 //!
 //! An [`IdempotencyKey`] goes down with the verb it came with: the worker, which does the verb,
 //! keeps the table that does it once per key. The hub keeps its own only for the one effect it
@@ -26,6 +30,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -33,6 +38,7 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::RequestId;
 use slopty_proto::agent::{AgentStatus, SessionAgent};
+use slopty_proto::lan::{LanPort, MacAddr};
 use slopty_proto::orchestration::{
     ErrorCode, EventFilter, Happening, HubEvent, IdempotencyKey, KEY_LIFETIME, Outcome, TermRef,
     Verb,
@@ -70,9 +76,35 @@ pub struct Hub {
     inner: Arc<Inner>,
 }
 
+/// The server machine's own LAN: its ports, and the magic packet sent from one of them.
+pub trait Lan: Send + Sync + std::fmt::Debug {
+    /// This machine's ports now.
+    fn ports(&self) -> Vec<LanPort>;
+    /// Send the magic packet for `macs` from `from`, one of [`Self::ports`].
+    fn wake(&self, from: LanPort, macs: Vec<MacAddr>) -> WakeFuture;
+}
+
+/// What [`Lan::wake`] returns.
+pub type WakeFuture = Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>;
+
+/// The machine's real interfaces ([`slopty_tailnet::lan`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemLan;
+
+impl Lan for SystemLan {
+    fn ports(&self) -> Vec<LanPort> {
+        slopty_tailnet::lan::ports()
+    }
+
+    fn wake(&self, from: LanPort, macs: Vec<MacAddr>) -> WakeFuture {
+        Box::pin(async move { slopty_tailnet::lan::wake(&from, &macs).await })
+    }
+}
+
 #[derive(Debug)]
 struct Inner {
     name: String,
+    lan: Arc<dyn Lan>,
     state: Mutex<State>,
     events: broadcast::Sender<FromServer>,
     persist: watch::Sender<Vec<WorkerInfo>>,
@@ -148,6 +180,13 @@ impl Hub {
     /// workers a previous run persisted, each listed as [`Liveness::Gone`] until it registers.
     #[must_use]
     pub fn new(name: String, known: Vec<WorkerInfo>) -> Self {
+        Self::with_lan(name, known, Arc::new(SystemLan))
+    }
+
+    /// [`Self::new`], waking sleeping workers through `lan` rather than this machine's own
+    /// interfaces.
+    #[must_use]
+    pub fn with_lan(name: String, known: Vec<WorkerInfo>, lan: Arc<dyn Lan>) -> Self {
         let mut state = State::default();
         for mut info in known {
             info.liveness = Liveness::Gone;
@@ -160,7 +199,7 @@ impl Hub {
         let log = Mutex::new(Log { ring: VecDeque::new(), first, next: first });
         let (head, _none) = watch::channel(first);
         let state = Mutex::new(state);
-        Self { inner: Arc::new(Inner { name, state, events, persist, log, head }) }
+        Self { inner: Arc::new(Inner { name, lan, state, events, persist, log, head }) }
     }
 
     /// The server's name.
@@ -314,6 +353,7 @@ impl Hub {
                 self.events(since, timeout_ms, filter).await
             }
             Verb::ForgetWorker { worker } => self.forget_worker(key, worker),
+            Verb::Wake { worker } => self.wake(worker).await,
             other => self.forward(key, other).await,
         }
     }
@@ -408,6 +448,80 @@ impl Hub {
         }
         drop(state);
         Outcome::Done
+    }
+
+    /// Wake a worker that is not online: the server sends the magic packet itself when it
+    /// shares a subnet with one of the worker's last reported ports, else it asks each online
+    /// worker that does, in turn, until one has sent it.
+    async fn wake(&self, worker: WorkerId) -> Outcome {
+        let (name, ports, senders) = {
+            let state = self.inner.state.lock();
+            let Some(entry) = state.workers.get(&worker) else { return unknown_worker(worker) };
+            let name = entry.info.name.clone();
+            if entry.link.is_some() {
+                return Outcome::Error {
+                    code: ErrorCode::Invalid,
+                    message: format!("worker {name} ({worker}) is online, so awake already"),
+                };
+            }
+            if entry.info.caps.lan.is_empty() {
+                return Outcome::Error {
+                    code: ErrorCode::Unsupported,
+                    message: format!(
+                        "worker {name} ({worker}) reported no LAN interface to wake it by"
+                    ),
+                };
+            }
+            let ports = entry.info.caps.lan.clone();
+            let mut senders: Vec<(f32, WorkerId, String, Vec<LanPort>)> = state
+                .workers
+                .values()
+                .filter(|e| e.link.is_some() && e.info.worker != worker)
+                .map(|e| (e.info.load, e.info.worker, e.info.name.clone(), e.info.caps.lan.clone()))
+                .collect();
+            drop(state);
+            // The least loaded first: the one most likely to answer at once.
+            senders.sort_by(|a, b| a.0.total_cmp(&b.0));
+            (name, ports, senders)
+        };
+        let own = self.inner.lan.ports();
+        let mut sent = Vec::new();
+        for (from, targets) in slopty_tailnet::lan::plan(&own, &ports) {
+            let macs = targets.iter().map(|t| t.mac).collect();
+            match self.inner.lan.wake(from.clone(), macs).await {
+                Ok(()) => sent.extend(targets.into_iter().map(|t| t.interface)),
+                Err(e) => tracing::warn!(%worker, from = %from.interface, error = %e, "wake"),
+            }
+        }
+        if !sent.is_empty() {
+            tracing::info!(%worker, %name, to = ?sent, "woke from the server");
+            return Outcome::WakeSent { by: self.inner.name.clone(), to: sent };
+        }
+        for (_, sender, by, lan) in senders {
+            let peer: Vec<LanPort> =
+                slopty_tailnet::lan::plan(&lan, &ports).into_iter().flat_map(|(_, t)| t).collect();
+            if peer.is_empty() {
+                continue;
+            }
+            let to = peer.iter().map(|t| t.interface.clone()).collect();
+            match self.forward(None, Verb::WakePeer { worker: sender, peer }).await {
+                Outcome::Done => {
+                    tracing::info!(%worker, %name, by = %by, "woke through a worker");
+                    return Outcome::WakeSent { by, to };
+                }
+                other => tracing::warn!(%worker, by = %by, ?other, "wake through a worker"),
+            }
+        }
+        let subnets: Vec<String> =
+            ports.iter().map(|p| format!("{}/{}", p.addr, p.prefix)).collect();
+        Outcome::Error {
+            code: ErrorCode::Failed,
+            message: format!(
+                "nothing online shares a LAN with worker {name} ({worker}) to wake it: the \
+                 server and every online worker are off its subnet ({})",
+                subnets.join(", ")
+            ),
+        }
     }
 
     fn terminals(&self, only: Option<WorkerId>) -> Outcome {
@@ -723,7 +837,8 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         Verb::ListWorkers
         | Verb::ListTerminals { .. }
         | Verb::Events { .. }
-        | Verb::ForgetWorker { .. } => None,
+        | Verb::ForgetWorker { .. }
+        | Verb::Wake { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }
         | Verb::ReadFile { worker, .. }
@@ -735,7 +850,8 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::OpenItem { worker, .. }
         | Verb::ListWindows { worker }
         | Verb::CaptureStill { worker, .. }
-        | Verb::Upload { worker, .. } => Some(*worker),
+        | Verb::Upload { worker, .. }
+        | Verb::WakePeer { worker, .. } => Some(*worker),
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } | Verb::PointAt { item } => {
             Some(item.worker)
         }
@@ -814,6 +930,8 @@ pub(crate) mod tests {
             can_inject: true,
             virtual_displays: false,
             version: "0.1.0".to_owned(),
+            lan: Vec::new(),
+            wake_on_lan: None,
         }
     }
 
@@ -1587,5 +1705,139 @@ pub(crate) mod tests {
         let (tx, _rx) = mpsc::channel(8);
         let _second = hub.register(registration(second, Vec::new()), ip(), tx).unwrap();
         assert_eq!(hub.directory().len(), 3);
+    }
+
+    /// A LAN that records what the server would send, and sends nothing.
+    #[derive(Debug, Default)]
+    struct FakeLan {
+        ports: Mutex<Vec<LanPort>>,
+        sent: Mutex<Vec<(LanPort, Vec<MacAddr>)>>,
+    }
+
+    impl Lan for FakeLan {
+        fn ports(&self) -> Vec<LanPort> {
+            self.ports.lock().clone()
+        }
+
+        fn wake(&self, from: LanPort, macs: Vec<MacAddr>) -> WakeFuture {
+            self.sent.lock().push((from, macs));
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
+    fn port(interface: &str, addr: [u8; 4], mac: u8) -> LanPort {
+        LanPort {
+            interface: interface.to_owned(),
+            mac: MacAddr([0x3c, 0x22, 0xfb, 0, 0, mac]),
+            addr: std::net::Ipv4Addr::from(addr),
+            prefix: 24,
+        }
+    }
+
+    /// Register a worker named `name` on `lan`, from its own tailnet address.
+    fn on_lan(
+        hub: &Hub,
+        name: &str,
+        lan: Vec<LanPort>,
+        last: u8,
+    ) -> (WorkerId, Lease, mpsc::Receiver<FromServer>) {
+        let worker = WorkerId::new();
+        let registration = Registration {
+            name: name.to_owned(),
+            caps: WorkerCaps { lan, ..caps() },
+            ..registration(worker, Vec::new())
+        };
+        let (tx, rx) = mpsc::channel(8);
+        let lease = hub.register(registration, IpAddr::from([100, 64, 0, last]), tx).unwrap();
+        (worker, lease, rx)
+    }
+
+    /// With the server off the sleeping worker's subnet, the wake goes to the online worker on
+    /// it, for the port it shares, and not to a worker elsewhere; its answer is who sent it.
+    #[tokio::test]
+    async fn a_wake_is_relayed_to_a_worker_on_the_sleepers_subnet() {
+        let lan = Arc::new(FakeLan::default());
+        *lan.ports.lock() = vec![port("en0", [10, 9, 9, 2], 1)];
+        let hub = Hub::with_lan("server".to_owned(), Vec::new(), Arc::<FakeLan>::clone(&lan));
+        let en0 = port("en0", [192, 168, 1, 20], 20);
+        let far = port("en1", [172, 16, 0, 20], 21);
+        let (sleeper, lease, _rx) = on_lan(&hub, "studio", vec![en0.clone(), far], 20);
+        drop(lease);
+        let (beside, beside_lease, mut beside_rx) =
+            on_lan(&hub, "mini", vec![port("en0", [192, 168, 1, 30], 30)], 30);
+        let (_, _elsewhere, mut elsewhere_rx) =
+            on_lan(&hub, "laptop", vec![port("en0", [10, 0, 0, 5], 5)], 5);
+
+        let asked = tokio::spawn({
+            let hub = hub.clone();
+            async move { hub.dispatch(Verb::Wake { worker: sleeper }).await }
+        });
+        let Some(FromServer::Request { id, verb, .. }) = beside_rx.recv().await else {
+            panic!("no request")
+        };
+        assert_eq!(verb, Verb::WakePeer { worker: beside, peer: vec![en0] });
+        beside_lease.handle(ToServer::Reply { id, outcome: Outcome::Done });
+        assert_eq!(
+            asked.await.unwrap(),
+            Outcome::WakeSent { by: "mini".to_owned(), to: vec!["en0".to_owned()] }
+        );
+        assert!(elsewhere_rx.try_recv().is_err(), "the worker off the subnet is not asked");
+        assert!(lan.sent.lock().is_empty(), "the server is off the subnet");
+    }
+
+    /// A server on the sleeping worker's subnet sends the packet itself, from its port there,
+    /// and asks no worker.
+    #[tokio::test]
+    async fn a_server_on_the_subnet_wakes_the_worker_itself() {
+        let lan = Arc::new(FakeLan::default());
+        let own = port("en0", [192, 168, 1, 2], 2);
+        *lan.ports.lock() = vec![port("en9", [10, 9, 9, 2], 9), own.clone()];
+        let hub = Hub::with_lan("server".to_owned(), Vec::new(), Arc::<FakeLan>::clone(&lan));
+        let en0 = port("en0", [192, 168, 1, 20], 20);
+        let (sleeper, lease, _rx) = on_lan(&hub, "studio", vec![en0.clone()], 20);
+        drop(lease);
+        let (_, _beside, mut beside_rx) =
+            on_lan(&hub, "mini", vec![port("en0", [192, 168, 1, 30], 30)], 30);
+
+        let outcome = hub.dispatch(Verb::Wake { worker: sleeper }).await;
+        assert_eq!(
+            outcome,
+            Outcome::WakeSent { by: "server".to_owned(), to: vec!["en0".to_owned()] }
+        );
+        assert_eq!(*lan.sent.lock(), [(own, vec![en0.mac])]);
+        assert!(beside_rx.try_recv().is_err(), "no worker is asked");
+    }
+
+    /// An online worker, one with no LAN port, one nothing shares a subnet with, and one the
+    /// server does not know each fail with a reason, and nothing is sent.
+    #[tokio::test]
+    async fn a_wake_that_cannot_happen_says_why() {
+        let lan = Arc::new(FakeLan::default());
+        *lan.ports.lock() = vec![port("en0", [10, 9, 9, 2], 1)];
+        let hub = Hub::with_lan("server".to_owned(), Vec::new(), Arc::<FakeLan>::clone(&lan));
+        let (awake, _awake_lease, _rx) =
+            on_lan(&hub, "mini", vec![port("en0", [192, 168, 1, 30], 30)], 30);
+        let (bare, lease, _rx) = on_lan(&hub, "pi", Vec::new(), 40);
+        drop(lease);
+        let (alone, lease, _rx) =
+            on_lan(&hub, "studio", vec![port("en0", [172, 16, 0, 20], 20)], 20);
+        drop(lease);
+        let code = |outcome: Outcome| match outcome {
+            Outcome::Error { code, message } => {
+                assert!(!message.is_empty());
+                code
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(code(hub.dispatch(Verb::Wake { worker: awake }).await), ErrorCode::Invalid);
+        assert_eq!(code(hub.dispatch(Verb::Wake { worker: bare }).await), ErrorCode::Unsupported);
+        let alone = hub.dispatch(Verb::Wake { worker: alone }).await;
+        assert!(
+            matches!(&alone, Outcome::Error { code: ErrorCode::Failed, message } if message.contains("172.16.0.20/24")),
+            "{alone:?}"
+        );
+        let nobody = hub.dispatch(Verb::Wake { worker: WorkerId::new() }).await;
+        assert_eq!(code(nobody), ErrorCode::UnknownWorker);
+        assert!(lan.sent.lock().is_empty());
     }
 }

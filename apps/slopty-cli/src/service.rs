@@ -266,6 +266,8 @@ pub enum ServerCmd {
     Uninstall,
     /// Whether the service is installed and running, and whether the server answers.
     Status,
+    /// Whether this machine serves as a Tailscale peer relay, and why and how to make it one.
+    Relay,
 }
 
 /// `slopty server install` options.
@@ -327,6 +329,10 @@ pub async fn server(cmd: ServerCmd, data_dir: &Path) -> Result<()> {
             server_status().await;
             Ok(())
         }
+        ServerCmd::Relay => {
+            print!("{}", crate::relay::read().await.report());
+            Ok(())
+        }
     }
 }
 
@@ -357,6 +363,7 @@ async fn install_server(opts: &ServerInstallOpts, data_dir: &Path) -> Result<()>
                 if let Some(note) = session.install_note() {
                     println!("{note}");
                 }
+                println!("{}", crate::relay::read().await.line());
                 return Ok(());
             }
             Err(e) if started.elapsed() < START_TIMEOUT => {
@@ -377,6 +384,7 @@ async fn server_status() {
         Ok(name) => println!("{name} answers on UDP {port}"),
         Err(e) => println!("nothing answers on UDP {port}: {e:#}"),
     }
+    println!("{}", crate::relay::read().await.line());
 }
 
 /// Where to take binaries from: `--bin-dir`, else this binary's directory.

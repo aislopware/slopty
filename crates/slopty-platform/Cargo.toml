@@ -129,6 +129,13 @@ objc2-ui-kit = { workspace = true, features = [
     "UIScreen",
     "UIImage",
     "objc2-core-foundation",
+    # The system's paste button, which pastes without the prompt (`paste_control`).
+    "UIControl",
+    "UIPasteControl",
+    "UIPasteConfiguration",
+    "UIPasteConfigurationSupporting",
+    "UIButtonConfiguration",
+    "UIColor",
 ] }
 objc2-web-kit = { workspace = true, features = [
     "block2",

@@ -112,6 +112,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `ClipMsg::Watch(true)`; otherwise the poller sleeps on a watch channel and reads nothing.
     Watching starts from the pasteboard as it is: a change made while nobody watched was made
     on the worker, and announcing it on focus would overwrite the client's clipboard.
+  - An empty pasteboard does not count as seen (2026-09-29). A copy's `clearContents` moves
+    `changeCount` and empties the board, and `writeObjects:` then puts the contents on without
+    moving it again (measured on macOS 26). A poll that fell between the two used to mark the
+    count seen with nothing to offer, and the copy was never announced. That was about 1 run in
+    15 of `the_clipboard_is_announced_fetched_and_pasted_both_ways`. The worker now reads the
+    board again on the next poll, which costs one more pasteboard call per poll while it is
+    empty. Test: `contents_put_on_after_a_poll_saw_the_board_cleared_are_announced`.
   - A change becomes an `Offer`, richest first. Text of at most 64 KiB rides inline. PNG,
     TIFF, RTF, HTML and file URLs are listed with size and BLAKE3 digest and kept for `Fetch`
     until the next change; an answer over 64 KiB goes on a bulk stream. The file URLs of every

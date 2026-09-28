@@ -20,12 +20,25 @@ pub mod store;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-pub use hub::{GONE_AFTER, Hub, Lease, WAIT_CAP_MS};
+pub use hub::{GONE_AFTER, Hub, Lan, Lease, SystemLan, WAIT_CAP_MS};
 pub use mcp::Mcp;
 use slopty_net::admission::Admission;
 use slopty_net::server::ServerListener;
 pub use store::Store;
 use tokio::task::JoinHandle;
+
+/// Log whether this machine serves as a Tailscale peer relay: the server's machine is always
+/// on, which makes it the one to relay links that cannot go direct
+/// (`docs/decisions/transport.md`, "The server's machine as a peer relay").
+async fn say_relay(api: slopty_tailnet::LocalApi) {
+    match api.relay_server_port().await {
+        Ok(Some(port)) => tracing::info!(port, "this machine is a Tailscale peer relay"),
+        Ok(None) => tracing::info!(
+            "this machine is no Tailscale peer relay; `slopty server relay` says why it helps"
+        ),
+        Err(e) => tracing::debug!(error = %e, "tailscale prefs"),
+    }
+}
 
 /// Server errors.
 #[derive(Debug, thiserror::Error)]
@@ -81,6 +94,9 @@ impl Server {
         let mcp = mcp_listener
             .local_addr()
             .map_err(|source| ServerError::Mcp { addr: config.mcp, source })?;
+        if let Some(api) = config.admission.local_api() {
+            tokio::spawn(say_relay(api));
+        }
         let tasks = vec![
             tokio::spawn(store.clone().keep(hub.persisted())),
             tokio::spawn(link::serve(listener.clone(), hub.clone())),

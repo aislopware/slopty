@@ -21,6 +21,8 @@
 //! * [`screen`] — [`screen::ScreenHandle`]: one remote window stream, reassembled, decoded, and
 //!   published as its newest frame plus the worker's cursor position. Apple only: it decodes with
 //!   `VideoToolbox`, so a Linux client (the CLI) has terminals and no screens.
+//! * [`relay`] — [`relay::RelayWatch`]: whether a worker's link has stayed on a Tailscale DERP
+//!   relay long enough to say so, and what to say.
 //! * [`pacing`] — [`pacing::Pacer`]: when a decoded frame goes on screen, and the arrival → present
 //!   numbers the overlay and the tests read.
 
@@ -32,6 +34,7 @@ pub mod items;
 pub mod layout;
 pub mod link;
 pub mod pacing;
+pub mod relay;
 pub mod remote;
 #[cfg(target_vendor = "apple")]
 pub mod screen;

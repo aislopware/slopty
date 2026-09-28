@@ -135,6 +135,12 @@ impl ClipSync {
             return;
         }
         let types = self.board.types();
+        // A copy clears the pasteboard, which moves the count, and puts its contents on after
+        // under that same count: an empty board may be a copy half done, read again next time.
+        if types.is_empty() {
+            self.held = None;
+            return;
+        }
         let has = |uti: &str| types.iter().any(|t| t == uti);
         let skip = self.wrote == Some(count)
             || has(ORIGIN_TYPE)
@@ -396,6 +402,18 @@ mod tests {
         assert_eq!(sync.answer(offer.generation, ClipFormat::Png), Some(png));
         board.copy(&[(TEXT_UTI, b"newer")]);
         assert_eq!(sync.answer(offer.generation, ClipFormat::Png), None, "the clipboard moved on");
+    }
+
+    /// Another app's copy clears the pasteboard, then puts its contents on under the count
+    /// the clear left. A read in between finds it empty; the contents are offered once there.
+    #[test]
+    fn contents_put_on_after_a_read_saw_the_board_cleared_are_offered() {
+        let (board, mut sync, me, studio) = setup();
+        board.clear();
+        assert!(sync.offer_for(studio, me).is_none(), "nothing on it yet");
+        board.put(&[(TEXT_UTI, b"landed")]);
+        let offer = sync.offer_for(studio, me).expect("the contents under the clear's count");
+        assert_eq!(offer.items[0].inline.as_deref(), Some(&b"landed"[..]));
     }
 
     #[test]

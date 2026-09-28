@@ -30,6 +30,8 @@ slopty-platform.workspace = true
 slopty-proto.workspace = true
 slopty-pty.workspace = true
 slopty-settings.workspace = true
+# The server machine's Tailscale peer relay pref (`relay`).
+slopty-tailnet.workspace = true
 slopty-tools.workspace = true
 tokio = { workspace = true, features = [ "io-std" ] }
 tracing.workspace = true
@@ -42,5 +44,6 @@ slopty-capture.workspace = true
 
 [dev-dependencies]
 slopty-server.workspace = true
+slopty-tailnet = { workspace = true, features = [ "fake" ] }
 tempfile.workspace = true
 tokio = { workspace = true, features = [ "test-util" ] }

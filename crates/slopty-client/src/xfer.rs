@@ -8,6 +8,9 @@
 //! they go, checked against the digest in the worker's [`XferMsg::Done`] and renamed when whole.
 //! A cut download fetches again, naming what it holds of each file, and each file resumes from
 //! there ([`download`]).
+//!
+//! Either keeps running while the app is off screen, with the system's progress UI
+//! (`offscreen`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +26,8 @@ use slopty_proto::transfer::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::sync::{Notify, mpsc, oneshot};
+
+mod offscreen;
 
 /// Bytes read from disk per write to a bulk stream.
 const CHUNK: usize = 256 * 1024;
@@ -174,6 +179,9 @@ struct Tables {
     cancelled: std::collections::HashSet<XferId>,
     /// Download attempts being received, by the transfer each fetch named.
     downloads: HashMap<XferId, Attempt>,
+    /// Uploads being sent, shown off screen as the worker reports them received, of how many
+    /// bytes.
+    uploads: HashMap<XferId, (Arc<slopty_platform::continued::Work>, u64)>,
 }
 
 /// One fetch of a download: a first one, or a retry after a cut.
@@ -197,6 +205,8 @@ struct Fetch {
     state: Mutex<FetchState>,
     /// Woken when a digest arrives or a writer ends.
     changed: Notify,
+    /// The download's work off screen, told what has landed.
+    work: Option<Arc<slopty_platform::continued::Work>>,
 }
 
 #[derive(Debug, Default)]
@@ -207,6 +217,24 @@ struct FetchState {
     landed: Vec<PathBuf>,
     /// Streams being written now.
     writing: usize,
+    /// Bytes the worker said the download is; the most any attempt said.
+    total: u64,
+    /// Bytes held of each file named so far, and their sum.
+    held: HashMap<String, u64>,
+    received: u64,
+}
+
+impl Fetch {
+    /// `name` now holds `bytes`; the work off screen hears the whole download's count.
+    fn received(&self, name: &str, bytes: u64) {
+        let Some(work) = &self.work else { return };
+        let mut state = self.state.lock();
+        let before = state.held.insert(name.to_owned(), bytes).unwrap_or_default();
+        state.received = state.received.saturating_sub(before).saturating_add(bytes);
+        let (received, total) = (state.received, state.total);
+        drop(state);
+        work.progress(received, total);
+    }
 }
 
 /// A stream being written into a download; the count drops when it ends.
@@ -301,10 +329,12 @@ impl Table {
                 self.offset(*xfer, name.clone(), *durable);
                 true
             }
-            XferMsg::Begin { xfer, dest: None, files, .. } => {
+            XferMsg::Begin { xfer, dest: None, files, bytes } => {
                 let mut inner = self.inner.lock();
                 if let Some(d) = inner.downloads.get_mut(xfer) {
                     d.expected = Some(*files);
+                    let mut state = d.fetch.state.lock();
+                    state.total = state.total.max(*bytes);
                 }
                 let whole = take_if_whole(&mut inner, *xfer);
                 drop(inner);
@@ -322,6 +352,13 @@ impl Table {
             }
             XferMsg::Failed { xfer, error, .. } => {
                 self.fail_download(*xfer, XferError::Worker(error.clone()))
+            }
+            XferMsg::Progress { xfer, done } => {
+                let shown = self.inner.lock().uploads.get(xfer).map(|(w, t)| (Arc::clone(w), *t));
+                if let Some((work, total)) = shown {
+                    work.progress(*done, total);
+                }
+                false
             }
             _ => false,
         }
@@ -413,7 +450,12 @@ pub async fn upload(
     let bytes = list.iter().fold(0_u64, |sum, e| sum.saturating_add(e.size));
     let count = u32::try_from(list.len()).unwrap_or(u32::MAX);
     send(up, XferMsg::Begin { xfer, dest: Some(dest), files: count, bytes }).await?;
+    let shown = offscreen::upload(&up.table, &up.out, xfer, &list);
+    shown.work().progress(0, bytes);
+    up.table.inner.lock().uploads.insert(xfer, (Arc::clone(shown.work()), bytes));
     let sent = send_all(up, xfer, &list).await;
+    up.table.inner.lock().uploads.remove(&xfer);
+    shown.work().end(sent.is_ok());
     if let Err((entry, error)) = &sent
         && !up.table.cancelled(xfer)
     {
@@ -576,14 +618,30 @@ pub async fn download(
     path: String,
     into: PathBuf,
 ) -> Result<Vec<PathBuf>, XferError> {
-    let fetch = Arc::new(Fetch::default());
+    let current = Arc::new(Mutex::new(xfer));
+    let shown = offscreen::download(&up.table, &up.out, xfer, &path, Arc::clone(&current));
+    let fetch = Arc::new(Fetch { work: Some(Arc::clone(shown.work())), ..Fetch::default() });
+    let landed = attempts(up, xfer, &path, &into, &fetch, &current).await;
+    shown.work().end(landed.is_ok());
+    landed
+}
+
+/// The attempts of [`download`], each under the transfer `current` names.
+async fn attempts(
+    up: &Uplink,
+    xfer: XferId,
+    path: &str,
+    into: &Path,
+    fetch: &Arc<Fetch>,
+    shared: &Mutex<XferId>,
+) -> Result<Vec<PathBuf>, XferError> {
     let mut current = xfer;
     let mut attempt = 0_u32;
     loop {
         attempt = attempt.saturating_add(1);
-        let held = held(&fetch, &into).await;
-        let done = up.table.expect_download(current, into.clone(), Arc::clone(&fetch));
-        send(up, XferMsg::Fetch { xfer: current, path: path.clone(), held }).await?;
+        let held = held(fetch, into).await;
+        let done = up.table.expect_download(current, into.to_path_buf(), Arc::clone(fetch));
+        send(up, XferMsg::Fetch { xfer: current, path: path.to_owned(), held }).await?;
         let error = match done.await.map_err(|_dropped| XferError::LinkClosed)? {
             Ok(()) => return Ok(fetch.state.lock().landed.clone()),
             Err(error) => error,
@@ -595,8 +653,9 @@ pub async fn download(
         tracing::info!(%current, %path, %error, "download cut; fetching the rest");
         up.table.abandon(current);
         send(up, XferMsg::Cancel { xfer: current }).await?;
-        settle(&fetch).await?;
+        settle(fetch).await?;
         current = XferId::new();
+        *shared.lock() = current;
     }
 }
 
@@ -704,6 +763,7 @@ async fn write_file(
     let had = fetch.state.lock().files.get(name).cloned().flatten();
     if header.offset == header.size && had.as_ref() == Some(&target) {
         // Landed on an earlier attempt, and the worker still has that version.
+        fetch.received(name, header.size);
         return match rx.chunk(1).await.map_err(|e| XferError::Cut(e.to_string()))? {
             None => Ok(()),
             Some(_) => Err(XferError::Mismatch(format!("{name}: more than announced"))),
@@ -735,6 +795,7 @@ async fn write_file(
         file.write_all(&chunk).await.map_err(|e| XferError::local(partial.display(), e))?;
         hasher.update(&chunk);
         got = got.saturating_add(n);
+        fetch.received(name, header.offset.saturating_add(got));
     }
     if got != expected {
         return Err(cut_at(got, "the stream ended".to_owned()));
@@ -870,5 +931,24 @@ mod tests {
         assert_eq!(table.digest(xfer, "b"), Some([7; 32]));
         table.arrived(xfer);
         done.try_recv().unwrap().unwrap();
+    }
+
+    /// A download's progress is what each file holds, counted once however often a file is
+    /// resumed, against the most the worker said it is.
+    #[test]
+    fn a_download_counts_what_each_file_holds_once() {
+        let work =
+            slopty_platform::continued::Work::begin("Downloading x", "From the worker", || {});
+        let fetch = Arc::new(Fetch { work: Some(Arc::new(work)), ..Fetch::default() });
+        let table = Table::default();
+        let xfer = XferId::new();
+        let _done = table.expect_download(xfer, PathBuf::from("/tmp"), Arc::clone(&fetch));
+        assert!(table.on_control(&XferMsg::Begin { xfer, dest: None, files: 2, bytes: 40 }));
+        fetch.received("a", 10);
+        fetch.received("a", 30);
+        fetch.received("b", 5);
+        fetch.received("a", 12);
+        let state = fetch.state.lock();
+        assert_eq!((state.received, state.total), (17, 40), "a resumed from 12, and b");
     }
 }

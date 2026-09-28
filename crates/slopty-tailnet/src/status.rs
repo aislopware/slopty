@@ -161,7 +161,7 @@ pub mod tests {
           "Online": true, "UserID": 9, "CurAddr": "192.168.1.20:41641", "Relay": "fra", "Active": true },
         "nodekey:c": { "ID": "n4", "HostName": "far", "DNSName": "far.tail1234.ts.net.",
           "OS": "linux", "TailscaleIPs": ["100.64.0.6"], "Online": false, "UserID": 2,
-          "CurAddr": "", "PeerRelay": "100.64.0.5:40000:7", "Relay": "nyc", "Active": true },
+          "CurAddr": "", "PeerRelay": "100.64.0.5:40000:vni:7", "Relay": "nyc", "Active": true },
         "nodekey:d": { "ID": "n5", "HostName": "localhost", "DNSName": "phone.tail1234.ts.net.",
           "OS": "iOS", "TailscaleIPs": ["100.64.0.7"], "Online": true, "UserID": 2,
           "CurAddr": "", "Relay": "fra", "Active": true }
@@ -181,7 +181,7 @@ pub mod tests {
         let path = |ip: &str| s.node_at(ip.parse().unwrap()).unwrap().path();
         assert_eq!(path("100.64.0.4"), Path::Idle, "nothing flowing, no path yet");
         assert_eq!(path("100.64.0.5"), Path::Direct("192.168.1.20:41641".parse().unwrap()));
-        assert_eq!(path("100.64.0.6"), Path::PeerRelay("100.64.0.5:40000:7".into()));
+        assert_eq!(path("100.64.0.6"), Path::PeerRelay("100.64.0.5:40000:vni:7".into()));
         assert_eq!(path("100.64.0.7"), Path::Derp("fra".into()));
         let me = s.me.as_ref().unwrap();
         assert_eq!(me.name(), "mac-studio.tail1234.ts.net");

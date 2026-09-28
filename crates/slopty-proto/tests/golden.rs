@@ -297,6 +297,8 @@ mod golden {
             can_inject: true,
             virtual_displays: false,
             version: "0.1.0".to_owned(),
+            lan: Vec::new(),
+            wake_on_lan: None,
         };
         snap(
             "worker_hello_ack",
@@ -1080,6 +1082,8 @@ mod golden {
             can_inject: true,
             virtual_displays: false,
             version: "0.1.0".to_owned(),
+            lan: Vec::new(),
+            wake_on_lan: None,
         };
         snap(
             "server_worker_hello",
@@ -1423,6 +1427,38 @@ mod orchestration {
         let finish = Verb::Upload { worker, path, upload, part: finish };
         assert!(finish.changes(), "the finish is the step a key guards");
         snap("server_request_upload_finish", &FromServer::Request { id: 8, key, verb: finish });
+    }
+
+    /// A worker's LAN ports in its caps, a client's wake, the server's ask of a worker on the
+    /// sleeping one's subnet, and the answer.
+    #[test]
+    fn waking_a_sleeping_worker() {
+        use std::net::Ipv4Addr;
+
+        use slopty_proto::lan::{LanPort, MacAddr};
+        use slopty_proto::server::{Os, WorkerCaps};
+
+        let worker = term().worker;
+        let en0 = LanPort {
+            interface: "en0".to_owned(),
+            mac: MacAddr([0x9c, 0x76, 0x0e, 0x37, 0x42, 0x4e]),
+            addr: Ipv4Addr::new(192, 168, 1, 20),
+            prefix: 24,
+        };
+        let caps = WorkerCaps {
+            lan: vec![en0.clone()],
+            wake_on_lan: Some(true),
+            ..WorkerCaps::bare(Os::MacOs)
+        };
+        snap("server_caps_lan", &ToServer::Caps(caps));
+        let wake = Verb::Wake { worker };
+        assert!(!wake.changes(), "a second packet wakes nothing the first did not");
+        snap("server_client_wake", &ToServer::Request { id: 8, key: None, verb: wake });
+        let sender = WorkerId::from_uuid(Uuid::from_u128(0x78));
+        let peer = Verb::WakePeer { worker: sender, peer: vec![en0] };
+        snap("server_request_wake_peer", &request(peer));
+        let sent = Outcome::WakeSent { by: "mac-mini".to_owned(), to: vec!["en0".to_owned()] };
+        snap("server_reply_wake_sent", &FromServer::Reply { id: 8, outcome: sent });
     }
 }
 
@@ -2113,6 +2149,8 @@ mod ctl {
                 can_inject: false,
                 virtual_displays: false,
                 version: "0.1.0".to_owned(),
+                lan: Vec::new(),
+                wake_on_lan: None,
             },
             listen: "[::]:45550".to_owned(),
             allow: vec!["10.0.0.0/8".to_owned()],

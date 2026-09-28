@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The local Tailscale daemon, read through its LocalAPI: peers, paths and who is calling"
+description = "The local Tailscale daemon, read through its LocalAPI: peers, paths and who is calling; and the LAN beneath it, for waking"
 
 [lints]
 workspace = true
@@ -19,14 +19,19 @@ bytes.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = [ "client" ] }
 hyper-util.workspace = true
+# This machine's interfaces and their MACs (`lan`).
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 parking_lot = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The hardware addresses the I/O Registry names, which `getifaddrs` redacts (`lan`).
+objc2-core-foundation = { workspace = true, features = [ "CFData" ] }
 # The App Store Tailscale's LocalAPI is named only by a file its extension holds open.
 slopty-platform.workspace = true
 

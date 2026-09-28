@@ -536,3 +536,62 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     also replace its own worker: the launchd labels are fixed, and this Mac has the worker's
     agents installed. The live proof waits for a second machine or a label of its own for
     tests in `slopty-platform`.
+- ✅ **A sleeping worker is woken from its own LAN** (2026-09-29, product gaps #3). A Mac asleep
+  is off the tailnet, so nothing reaches it through Tailscale. What still reaches it is an
+  Ethernet frame on its own segment: the magic packet, six `0xFF` bytes and then its MAC sixteen
+  times, which wakes it when "Wake for network access" (`pmset womp`) is on.
+  - **Each worker reports its LAN ports in `WorkerCaps`.** `lan` lists every interface that is
+    up and broadcasting, has an Ethernet address and an IPv4 subnet, and is neither loopback
+    nor a tunnel. Each entry is a `slopty_proto::lan::LanPort`: interface name, MAC, address
+    and prefix. `wake_on_lan` carries `womp` from `pmset -g`, read once a minute, and is `None`
+    on Linux, where the card's setting sits behind `ethtool`'s ioctl. The caps travel to the
+    server at registration and on change, and on to every client in the directory and in
+    `WorkerMsg::Caps`. A new DHCP lease is a caps change like any other.
+  - **The MAC comes from the I/O Registry on macOS.** `getifaddrs(3)` gives the flags and the
+    subnet. On macOS 27 its `AF_LINK` entries hold `02:00:00:00:00:00` for every interface when
+    the process is not root, as iOS has long done: this Mac's `ifconfig` shows exactly that
+    while `networksetup -getmacaddress en0` shows the real address. The real one is the
+    `IOMACAddress` of the controller above each `IOEthernetInterface`, which is what `ioreg`
+    reads. The first `SCNetworkInterfaceCopyAll` call took 3.5 to 9 s here, while the I/O
+    Registry walk takes 0.3 to 0.4 ms, so the registry is read. An `AF_LINK` address that is
+    not the redacted one wins, and Linux reads `AF_PACKET`'s `sockaddr_ll`. This is the one
+    `unsafe` in `slopty-tailnet` (`lan`), with the rule for each call beside it.
+  - **Verbs.** A client sends `Verb::Wake { worker }` to the server, which answers it itself.
+    If the worker is online it answers `Invalid`. If the worker reported no port it answers
+    `Unsupported`. Otherwise the server sends the packet itself when one of its own ports is
+    on the sleeping worker's subnet: the server is the machine that is always on. Failing
+    that, it sends `Verb::WakePeer { worker, peer }` down the link of each online worker on
+    that subnet, least loaded first, until one answers `Done`. The answer is
+    `Outcome::WakeSent { by, to }`, naming the machine that sent it and the sleeping
+    interfaces. When nothing online shares the subnet, the answer is `Failed` and lists the
+    subnets. Neither verb `changes()`: a second packet wakes nothing the first did not.
+  - **The packet goes as Jump sends it.** It goes 5 times, 100 ms apart, to UDP 9, as a
+    directed broadcast on the sender's subnet from a socket bound to the sender's address on
+    it, so it leaves by that interface. It is sent once per sleeping port the sender reaches,
+    so a Mac on both Ethernet and Wi-Fi gets both. Tailscale's own PeerAPI `/v0/wol` was not
+    used: it is undocumented, sits behind a peer capability, and needs a Tailscale node on
+    the LAN anyway.
+  - **Surfaces.** `slopty wake <worker>` prints who sent it and warns when the worker said
+    `womp` is off. For the app, `slopty_client::server::ServerTask::caller()` returns a
+    `ServerCaller`, whose `wake(worker)` sends the verb up the client's one server link.
+    That link now also carries `call(verb)`. `Directory::can_wake(worker)` says when to offer
+    the palette's "Wake <worker>": the server is linked, the worker is not online, it has a
+    LAN port, and it did not say `womp` is off. A worker whose `womp` is off logs a warning.
+  - Tests:
+    - `slopty-proto`: `lan::tests` pin the packet's bytes, the subnet arithmetic and MAC
+      parsing.
+    - `slopty-tailnet`: `lan::tests` read a `sockaddr_dl` and a `sockaddr_ll`, choose ports
+      from synthetic entries and replace a redacted address. They list this Mac's own ports
+      and plan which port sends for which. `each_packet_goes_five_times_a_tenth_of_a_second_apart`
+      sends over loopback to the test's own socket, so nothing reaches the LAN.
+    - `slopty-server`: `hub::tests` cover the wake relayed to the worker on the sleeping
+      worker's subnet and not to one elsewhere, the server sending itself through a fake LAN,
+      and the four refusals.
+    - `slopty-worker`: `womp` parsing, plus this Mac's own caps and `womp`.
+    - `slopty-client`: `can_wake`.
+    - Goldens: `server_caps_lan`, `server_client_wake`, `server_request_wake_peer` and
+      `server_reply_wake_sent`. `worker_hello_ack`, `server_worker_hello`,
+      `server_directory` and the ctl doctor golden moved with the two new caps fields.
+  - **Pending.** The palette command in `slopty-ui`, an MCP tool in `slopty-tools`, and
+    `womp` in `slopty worker doctor`'s `Health` (`ctl.rs`). No live wake was sent: a test
+    never puts a magic packet on the LAN, and waking a Mac takes a second one asleep.
