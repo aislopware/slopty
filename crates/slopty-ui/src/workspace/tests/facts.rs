@@ -87,10 +87,17 @@ fn a_shell_is_titled_by_what_it_runs_then_its_own_title_then_where_it_is(cx: &mu
     assert_eq!(said(&view, cx), ("Terminal".into(), Some("~".into())), "home, known exactly");
 
     let repo = "/Volumes/Data/me/oss/slopty";
-    view.update_in(cx, |v, _w, _cx| v.session_moved(session, repo, Some(repo), Some("main")));
+    // As the shell's report of it does: the workspace changed, and the next frame says so.
+    let moved = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, cwd: &str| {
+        view.update_in(cx, |v, _w, cx| {
+            v.session_moved(session, cwd, Some(repo), Some("main"));
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    moved(&view, cx, repo);
     assert_eq!(said(&view, cx), ("slopty".into(), Some("main".into())), "named by its repo");
-    let deeper = format!("{repo}/crates/ui");
-    view.update_in(cx, |v, _w, _cx| v.session_moved(session, &deeper, Some(repo), Some("main")));
+    moved(&view, cx, &format!("{repo}/crates/ui"));
     assert_eq!(said(&view, cx), ("slopty".into(), Some("crates/ui".into())));
 
     // The shell's own name set as a title says nothing; a program's title does.

@@ -413,12 +413,6 @@ impl Element for ChromeText {
     }
 }
 
-/// How many labels the cache holds (tests: a label shaped once serves every item and zoom).
-#[cfg(test)]
-pub fn cached_labels(cx: &App) -> usize {
-    cx.try_global::<ChromeCache>().map_or(0, |cache| cache.lines.len())
-}
-
 #[cfg(test)]
 mod tests {
     use gpui::{FontId, GlyphId};

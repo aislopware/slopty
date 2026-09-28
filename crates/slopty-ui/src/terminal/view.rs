@@ -38,7 +38,8 @@ use crate::terminal::{latency, url};
 
 /// Hits asked for per search; the worker counts every hit regardless.
 const SEARCH_MAX: u32 = 5_000;
-/// While the search bar is open, output refreshes the hits at most this often.
+/// While the search bar is open, output refreshes the hits at most this often, and at the
+/// latest this long after the last search once output came.
 const SEARCH_REFRESH: Duration = Duration::from_millis(300);
 /// How often a selection dragged past the grid's edge scrolls, and the most lines one tick
 /// moves (the pointer's distance past the edge picks the pace, one line per row of distance).
@@ -157,8 +158,11 @@ struct Search {
     matches: Vec<SearchMatch>,
     /// Index into `matches` of the hit the user is on.
     current: Option<usize>,
-    /// When the needle was last sent (output refreshes are throttled).
+    /// When the needle was last sent (output refreshes are throttled), by the executor's
+    /// clock, which the refresh timer runs on.
     sent: Instant,
+    /// The search again that output since [`Self::sent`] waits for.
+    refresh: Option<gpui::Task<()>>,
     /// The next reply should jump to its newest hit (the needle just changed).
     reveal: bool,
     /// The needle is a regular expression.
@@ -417,6 +421,10 @@ pub struct TerminalView {
     /// Only the newest waits: answering it answers every marker before it.
     unsent_reached: Option<u64>,
     reached_task: Option<gpui::Task<()>>,
+    /// Requests the outbound queue had no room for, oldest first, and the wait that sends
+    /// them as room frees (running exactly while `unsent` holds something).
+    unsent: VecDeque<TermRequest>,
+    unsent_task: Option<gpui::Task<()>>,
     /// The top line the last frame drew while scrolled up (`None` while following): a frame
     /// that draws another has scrolled. Output arriving under a view scrolled up moves neither.
     drawn_top: Option<LineIndex>,
@@ -584,6 +592,8 @@ impl TerminalView {
             scrollbar_task: None,
             unsent_reached: None,
             reached_task: None,
+            unsent: VecDeque::new(),
+            unsent_task: None,
             drawn_top: None,
             wheel_remainder: 0.0,
             wheel_gesture: None,
@@ -599,7 +609,7 @@ impl TerminalView {
     /// any paste, so a multi-line block arrives whole), then ↩ as a key, the way the human
     /// would have. Shared by the block menu's "rerun" and the workspace's "run in shell".
     pub fn run_text(&mut self, text: String, cx: &mut Context<Self>) {
-        self.paste(text);
+        self.paste(text, cx);
         if let Ok(enter) = Keystroke::parse("enter") {
             self.press(enter, cx);
         }
@@ -611,8 +621,8 @@ impl TerminalView {
         clippy::same_name_method,
         reason = "the composer's paste; the inherent method wins over `EntityInputHandler::paste`"
     )]
-    pub fn paste(&mut self, text: String) {
-        self.send(TermRequest::Paste(text));
+    pub fn paste(&mut self, text: String, cx: &Context<Self>) {
+        self.send(TermRequest::Paste(text), cx);
     }
 
     /// The worker's word on the agent in this session (`None`: no agent).
@@ -648,7 +658,8 @@ impl TerminalView {
                 total: 0,
                 matches: Vec::new(),
                 current: None,
-                sent: Instant::now(),
+                sent: cx.background_executor().now(),
+                refresh: None,
                 reveal: false,
                 regex: self.search_regex,
                 invalid: None,
@@ -754,14 +765,35 @@ impl TerminalView {
 
     fn send_search(&mut self, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
-        search.sent = Instant::now();
+        search.sent = cx.background_executor().now();
+        search.refresh = None;
         let needle = search.needle.clone();
         if needle.is_empty() {
             cx.notify();
             return;
         }
         let regex = search.regex;
-        self.send(TermRequest::Search { needle, max: SEARCH_MAX, regex });
+        self.send(TermRequest::Search { needle, max: SEARCH_MAX, regex }, cx);
+    }
+
+    /// Output came while the bar is open: search again [`SEARCH_REFRESH`] after the last
+    /// search, once however many frames come meanwhile, so the end of a burst is searched too.
+    fn refresh_search(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        if search.needle.is_empty() || search.refresh.is_some() {
+            return;
+        }
+        let now = cx.background_executor().now();
+        let wait = SEARCH_REFRESH.saturating_sub(now.saturating_duration_since(search.sent));
+        if wait.is_zero() {
+            self.send_search(cx);
+            return;
+        }
+        search.refresh = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            // A gone view has nothing to search.
+            let _gone = this.update(cx, Self::send_search);
+        }));
     }
 
     /// Move `by` hits (wrapping) and scroll the new one into view.
@@ -800,7 +832,7 @@ impl TerminalView {
             let offset = first_visible.saturating_sub(wanted_top);
             for effect in self.state.scroll_to(offset) {
                 if let Effect::Request(req) = effect {
-                    self.send(req);
+                    self.send(req, cx);
                 }
             }
         }
@@ -1268,7 +1300,7 @@ impl TerminalView {
         let (next, rest) = (copy.next, copy.end.0.saturating_sub(copy.next.0).saturating_add(1));
         for effect in self.state.request_lines(next, rest) {
             if let Effect::Request(req) = effect {
-                self.send(req);
+                self.send(req, cx);
             }
         }
     }
@@ -1734,7 +1766,7 @@ impl TerminalView {
     /// ⌘K: the worker drops the history and the shell repaints its prompt at the top.
     pub fn clear_screen(&mut self, _: &ClearScreen, _window: &mut Window, cx: &mut Context<Self>) {
         self.state.scroll_to_bottom();
-        self.send(TermRequest::Clear);
+        self.send(TermRequest::Clear, cx);
         cx.notify();
     }
 
@@ -1795,7 +1827,7 @@ impl TerminalView {
         self.selecting = false;
         for effect in self.state.request_lines(oldest, total.saturating_sub(oldest.0)) {
             if let Effect::Request(req) = effect {
-                self.send(req);
+                self.send(req, cx);
             }
         }
         cx.notify();
@@ -1819,7 +1851,7 @@ impl TerminalView {
     fn jump_to(&mut self, index: LineIndex, cx: &mut Context<Self>) {
         for effect in self.state.scroll_to_line(index) {
             if let Effect::Request(req) = effect {
-                self.send(req);
+                self.send(req, cx);
             }
         }
         cx.notify();
@@ -1851,7 +1883,7 @@ impl TerminalView {
             ClipPaste::Picture { offer } => {
                 self.selection = None;
                 self.state.scroll_to_bottom();
-                self.paste_picture(offer, PasteChord::Command);
+                self.paste_picture(offer, PasteChord::Command, cx);
                 cx.notify();
                 return;
             }
@@ -1865,7 +1897,7 @@ impl TerminalView {
         if self.theme.behaviour.paste_protection && !paste_is_safe(&text, bracketed) {
             self.pending = Some(Pending::Paste(text));
         } else {
-            self.send(TermRequest::Paste(text));
+            self.send(TermRequest::Paste(text), cx);
         }
         cx.notify();
     }
@@ -1873,20 +1905,20 @@ impl TerminalView {
     /// The offer, when the worker has not heard it, and then `chord`, which the worker holds
     /// with the input behind it until its pasteboard holds the picture. Both go on the one
     /// outbound queue, so the offer is ahead on the wire.
-    fn paste_picture(&mut self, offer: Option<ClientMsg>, chord: PasteChord) {
+    fn paste_picture(&mut self, offer: Option<ClientMsg>, chord: PasteChord, cx: &Context<Self>) {
         if let Some(offer) = offer
             && let Err(e) = self.out.try_send(offer)
         {
             tracing::warn!(session = %self.session, error = %e, "outbound queue");
         }
-        self.send(TermRequest::PastePicture(chord));
+        self.send(TermRequest::PastePicture(chord), cx);
     }
 
     /// What waits goes through (↩, or the bar's first button): the paste is sent, the
     /// close is confirmed to the workspace.
     pub fn confirm_pending(&mut self, cx: &mut Context<Self>) {
         match self.pending.take() {
-            Some(Pending::Paste(text)) => self.send(TermRequest::Paste(text)),
+            Some(Pending::Paste(text)) => self.send(TermRequest::Paste(text), cx),
             Some(Pending::Close(_)) => cx.emit(TerminalViewEvent::CloseConfirmed),
             None => return,
         }
@@ -2057,12 +2089,6 @@ impl TerminalView {
         self.latency.stats()
     }
 
-    /// Lifetime prediction hits and misses.
-    #[must_use]
-    pub const fn prediction_stats(&self) -> (u64, u64) {
-        self.predictor.stats()
-    }
-
     /// Arm or disarm Control for the next key; a soft keyboard has no Control key of its own.
     pub fn set_sticky_control(&mut self, on: bool, cx: &mut Context<Self>) {
         self.sticky_control = on;
@@ -2128,7 +2154,7 @@ impl TerminalView {
             if self.state.view_offset() != 0 {
                 self.state.scroll_to_bottom();
             }
-            self.send(TermRequest::Raw(bytes.to_vec()));
+            self.send(TermRequest::Raw(bytes.to_vec()), cx);
             return true;
         }
         let unstuck = std::mem::take(&mut self.sticky_control);
@@ -2158,9 +2184,9 @@ impl TerminalView {
         if is_control_v(&keystroke)
             && let ClipPaste::Picture { offer } = self.clip_paste()
         {
-            self.paste_picture(offer, PasteChord::Control(key));
+            self.paste_picture(offer, PasteChord::Control(key), cx);
         } else {
-            self.send(TermRequest::Key(key));
+            self.send(TermRequest::Key(key), cx);
         }
         unstuck || scrolled || guessing || shows
     }
@@ -2263,12 +2289,8 @@ impl TerminalView {
                 search.current = None;
             }
         }
-        if reconcile
-            && let Some(search) = &self.search
-            && !search.needle.is_empty()
-            && search.sent.elapsed() >= SEARCH_REFRESH
-        {
-            self.send_search(cx);
+        if reconcile {
+            self.refresh_search(cx);
         }
         if reconcile {
             let now = Instant::now();
@@ -2292,7 +2314,7 @@ impl TerminalView {
         for effect in effects {
             match effect {
                 Effect::Request(TermRequest::Reached { marker }) => self.reached(marker, cx),
-                Effect::Request(req) => self.send(req),
+                Effect::Request(req) => self.send(req, cx),
                 Effect::Title(t) => cx.emit(TerminalViewEvent::Title(t)),
                 Effect::Bell => {
                     self.ring(cx);
@@ -2516,7 +2538,7 @@ impl TerminalView {
         self.pending_size = Some(size);
         for effect in self.state.resize(size) {
             if let Effect::Request(req) = effect {
-                self.send(req);
+                self.send(req, cx);
             }
         }
         cx.notify();
@@ -2600,26 +2622,67 @@ impl TerminalView {
     }
 
     /// Ask the worker to make this client the driver: the PTY takes our size from now on.
-    pub fn drive(&self) {
-        self.post(TermRequest::Drive { drive: true });
+    pub fn drive(&mut self, cx: &Context<Self>) {
+        self.post(TermRequest::Drive { drive: true }, cx);
     }
 
-    fn send(&mut self, req: TermRequest) {
+    fn send(&mut self, req: TermRequest, cx: &Context<Self>) {
         // Bytes the predictor never saw as keys (a line-editing chord, a paste) move the
         // cursor where its guesses cannot follow.
         if matches!(req, TermRequest::Raw(_) | TermRequest::Paste(_) | TermRequest::PastePicture(_))
         {
             self.predictor.interrupt();
         }
-        self.post(req);
+        self.post(req, cx);
     }
 
-    /// Queue `req` for the worker; [`Self::send`] for anything typed.
-    fn post(&self, req: TermRequest) {
-        let msg = ClientMsg::Term { session: self.session, req };
-        if let Err(e) = self.out.try_send(msg) {
-            tracing::warn!(session = %self.session, error = %e, "outbound queue");
+    /// Queue `req` for the worker; [`Self::send`] for anything typed. Nothing is dropped: what
+    /// the outbound queue has no room for waits, in order, for room. A pointer move waits
+    /// once the queue is half full, and a newer move replaces it, so a program tracking every
+    /// move never fills the queue ahead of the keys.
+    fn post(&mut self, req: TermRequest, cx: &Context<Self>) {
+        let motion = is_motion(&req);
+        if let Some(last) = self.unsent.back_mut() {
+            if motion && is_motion(last) {
+                *last = req;
+            } else {
+                self.unsent.push_back(req);
+            }
+            return;
         }
+        if motion && self.out.capacity().saturating_mul(2) < self.out.max_capacity() {
+            self.wait_for_room(req, cx);
+            return;
+        }
+        match self.out.try_send(ClientMsg::Term { session: self.session, req }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(ClientMsg::Term { req, .. })) => {
+                self.wait_for_room(req, cx);
+            }
+            Err(e) => tracing::warn!(session = %self.session, error = %e, "outbound queue"),
+        }
+    }
+
+    /// Hold `req` as the first of [`Self::unsent`] and send it, and whatever joins it, as
+    /// the queue frees room.
+    fn wait_for_room(&mut self, req: TermRequest, cx: &Context<Self>) {
+        self.unsent.push_back(req);
+        let out = self.out.clone();
+        self.unsent_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(permit) = out.reserve().await else { return };
+                let more = this.update(cx, |view, _cx| {
+                    if let Some(req) = view.unsent.pop_front() {
+                        permit.send(ClientMsg::Term { session: view.session, req });
+                    }
+                    !view.unsent.is_empty()
+                });
+                // A gone view has nothing left to send.
+                if !more.unwrap_or(false) {
+                    return;
+                }
+            }
+        }));
     }
 
     /// Answer a marker. The worker sends this view no more frames until it hears, so an
@@ -2694,7 +2757,7 @@ impl TerminalView {
             if self.state.view_offset() != 0 {
                 self.state.scroll_to_bottom();
             }
-            self.send(TermRequest::Raw(bytes.to_vec()));
+            self.send(TermRequest::Raw(bytes.to_vec()), cx);
             cx.stop_propagation();
             cx.notify();
             return;
@@ -2811,15 +2874,18 @@ impl TerminalView {
             let (px, py) = m.pixel_at(event.position);
             let rows =
                 i16::try_from(delta.clamp(i64::from(i16::MIN), i64::from(i16::MAX))).unwrap_or(0);
-            self.send(TermRequest::Mouse(MouseEvent {
-                action: MouseAction::Wheel { rows, cols: 0 },
-                button: None,
-                mods: keys::mods(event.modifiers),
-                col,
-                row,
-                px,
-                py,
-            }));
+            self.send(
+                TermRequest::Mouse(MouseEvent {
+                    action: MouseAction::Wheel { rows, cols: 0 },
+                    button: None,
+                    mods: keys::mods(event.modifiers),
+                    col,
+                    row,
+                    px,
+                    py,
+                }),
+                cx,
+            );
             return;
         }
         self.scroll_lines(delta, cx);
@@ -2921,7 +2987,7 @@ impl TerminalView {
         self.selection = None;
         self.program_buttons |= button_bit(button);
         self.reported_cell = Some((col, row));
-        self.report_mouse(MouseAction::Press, Some(button), event.position, event.modifiers);
+        self.report_mouse(MouseAction::Press, Some(button), event.position, event.modifiers, cx);
     }
 
     /// Tell the program of a press, a release or a move at `position` (clamped to the grid:
@@ -2932,17 +2998,23 @@ impl TerminalView {
         button: Option<ProtoButton>,
         position: gpui::Point<Pixels>,
         modifiers: gpui::Modifiers,
+        cx: &Context<Self>,
     ) {
         let Some(m) = self.metrics else { return };
         let (col, row) = m.cell_at_clamped(position);
         let (px, py) = m.pixel_at(position);
         let mods = keys::mods(modifiers);
-        self.send(TermRequest::Mouse(MouseEvent { action, button, mods, col, row, px, py }));
+        self.send(TermRequest::Mouse(MouseEvent { action, button, mods, col, row, px, py }), cx);
     }
 
     /// The pointer moved with `button` down (or none): the program hears of it when it asked
     /// for moves (1002 while a button of its is down, 1003 always) and the cell changed.
-    fn report_motion(&mut self, button: Option<ProtoButton>, event: &MouseMoveEvent) {
+    fn report_motion(
+        &mut self,
+        button: Option<ProtoButton>,
+        event: &MouseMoveEvent,
+        cx: &Context<Self>,
+    ) {
         let modes = self.state.modes();
         let wanted = if self.program_buttons != 0 {
             modes.intersects(TermModes::MOUSE_DRAG | TermModes::MOUSE_MOTION)
@@ -2954,7 +3026,7 @@ impl TerminalView {
         if self.reported_cell.replace(cell) == Some(cell) {
             return;
         }
-        self.report_mouse(MouseAction::Motion, button, event.position, event.modifiers);
+        self.report_mouse(MouseAction::Motion, button, event.position, event.modifiers, cx);
     }
 
     /// The pointer moved over the grid: the hover for the ⌘ underline (a drag is followed by
@@ -2964,7 +3036,7 @@ impl TerminalView {
         // A move with no button down, which a program tracking every move (1003) hears of;
         // ⇧ keeps the pointer the human's.
         if event.pressed_button.is_none() && self.program_buttons == 0 && !event.modifiers.shift {
-            self.report_motion(None, event);
+            self.report_motion(None, event, cx);
         }
         let hover = self.metrics.and_then(|m| m.cell_at(event.position));
         self.set_pointer(hover, event.modifiers, cx);
@@ -3044,7 +3116,7 @@ impl TerminalView {
     pub(super) fn drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         // A drag with a button whose press went to the program is the program's.
         if self.program_buttons != 0 {
-            self.report_motion(event.pressed_button.and_then(proto_button), event);
+            self.report_motion(event.pressed_button.and_then(proto_button), event, cx);
             return;
         }
         if event.pressed_button == Some(MouseButton::Left)
@@ -3069,7 +3141,7 @@ impl TerminalView {
             if offset != self.state.view_offset() {
                 for effect in self.state.scroll_to(offset) {
                     if let Effect::Request(req) = effect {
-                        self.send(req);
+                        self.send(req, cx);
                     }
                 }
                 cx.notify();
@@ -3136,7 +3208,7 @@ impl TerminalView {
     fn scroll_lines(&mut self, lines: i64, cx: &mut Context<Self>) {
         for effect in self.state.scroll(lines) {
             if let Effect::Request(req) = effect {
-                self.send(req);
+                self.send(req, cx);
             }
         }
         cx.notify();
@@ -3171,7 +3243,13 @@ impl TerminalView {
             && self.program_buttons & button_bit(button) != 0
         {
             self.program_buttons &= !button_bit(button);
-            self.report_mouse(MouseAction::Release, Some(button), event.position, event.modifiers);
+            self.report_mouse(
+                MouseAction::Release,
+                Some(button),
+                event.position,
+                event.modifiers,
+                cx,
+            );
             return;
         }
         if event.button != MouseButton::Left {
@@ -3304,7 +3382,7 @@ impl EntityInputHandler for TerminalView {
         if scrolled {
             self.state.scroll_to_bottom();
         }
-        self.send(TermRequest::Raw(text.as_bytes().to_vec()));
+        self.send(TermRequest::Raw(text.as_bytes().to_vec()), cx);
         // As with a typed key: nothing new on screen until the echo, so no frame before it.
         if unmarked || scrolled {
             cx.notify();
@@ -3545,6 +3623,11 @@ const fn proto_button(button: MouseButton) -> Option<ProtoButton> {
         MouseButton::Middle => Some(ProtoButton::Middle),
         MouseButton::Navigate(_) => None,
     }
+}
+
+/// A pointer move reported to the program: the one request a newer one makes stale.
+const fn is_motion(req: &TermRequest) -> bool {
+    matches!(req, TermRequest::Mouse(MouseEvent { action: MouseAction::Motion, .. }))
 }
 
 /// `button`'s bit in [`TerminalView::program_buttons`].
@@ -5067,7 +5150,7 @@ mod tests {
         right_click(cx);
         pick(cx, "rerun");
         assert_eq!(drain_input(&mut rx), ["paste:seq 2", "enter"]);
-        view.update(cx, |view, _cx| view.paste("seq 3".to_owned()));
+        view.update(cx, |view, cx| view.paste("seq 3".to_owned(), cx));
         assert_eq!(drain_input(&mut rx), ["paste:seq 3"], "typed, not run");
 
         let notes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -6224,7 +6307,7 @@ mod tests {
         cx.run_until_parked();
         while rx.try_recv().is_ok() {}
         view.update_in(cx, |view, _window, cx| {
-            view.send(TermRequest::Raw(b"x".to_vec()));
+            view.send(TermRequest::Raw(b"x".to_vec()), cx);
             view.apply(TermEvent::Marker { id: 1 }, cx);
             view.apply(TermEvent::Marker { id: 2 }, cx);
         });
@@ -6237,6 +6320,107 @@ mod tests {
         assert_eq!(sent(), Some(TermRequest::Reached { marker: 2 }));
         cx.run_until_parked();
         assert_eq!(sent(), None, "one answer for both");
+    }
+
+    /// With the find bar open, output searches again at most every [`SEARCH_REFRESH`], and
+    /// output that stops inside the wait is still searched when the wait ends: the hits
+    /// include the last of a burst. Without output, nothing is searched again.
+    #[gpui::test]
+    fn the_find_bar_searches_the_end_of_a_burst(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let mut searches = move || {
+            let mut n = 0;
+            while let Ok(msg) = rx.try_recv() {
+                let search = matches!(msg, ClientMsg::Term { req: TermRequest::Search { .. }, .. });
+                n = usize::from(search).saturating_add(n);
+            }
+            n
+        };
+        searches();
+        view.update_in(cx, |view, window, cx| view.find_with("ok", window, cx));
+        cx.run_until_parked();
+        assert_eq!(searches(), 1, "the needle");
+        view.update_in(cx, |view, _window, cx| view.apply(moved_frame(1, 0, &["ok 1"]), cx));
+        cx.run_until_parked();
+        assert_eq!(searches(), 0, "output inside the wait waits");
+        cx.executor().advance_clock(SEARCH_REFRESH);
+        cx.run_until_parked();
+        assert_eq!(searches(), 1, "the end of the burst is searched");
+        cx.executor().advance_clock(SEARCH_REFRESH.saturating_mul(3));
+        cx.run_until_parked();
+        assert_eq!(searches(), 0, "nothing came since");
+    }
+
+    /// What a typed key costs on its way into the outbound queue, room or not. Run by hand (it
+    /// prints, it does not judge); `docs/MEASUREMENTS.md`.
+    #[gpui::test]
+    #[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
+    fn measure_a_key_into_the_outbound_queue(cx: &mut TestAppContext) {
+        const KEYS: u32 = 100_000;
+        let (tx, mut rx) = mpsc::channel(1024);
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            TerminalView::new(SessionId::new(), TermSize::default(), tx, Theme::default(), cx)
+        });
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        let mut took = Duration::ZERO;
+        view.update_in(cx, |view, _window, cx| {
+            for _ in 0..KEYS / 1_000 {
+                let start = Instant::now();
+                for _ in 0..1_000 {
+                    view.send(TermRequest::Raw(b"x".to_vec()), cx);
+                }
+                took = took.saturating_add(start.elapsed());
+                while rx.try_recv().is_ok() {}
+            }
+        });
+        println!(
+            "MEASURE a key into the outbound queue: {:.1} ns",
+            took.as_secs_f64() * 1e9 / f64::from(KEYS)
+        );
+    }
+
+    /// Keys typed while the outbound queue is full are never dropped: they wait for room and
+    /// go in the order typed. The pointer moves a program tracks meanwhile collapse to the
+    /// newest between two keys, so a stalled link fills with keys, not moves.
+    #[gpui::test]
+    fn keys_wait_for_room_and_pointer_moves_collapse(cx: &mut TestAppContext) {
+        let (tx, mut rx) = mpsc::channel(2);
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            TerminalView::new(SessionId::new(), TermSize::default(), tx, Theme::default(), cx)
+        });
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        let key = |b: &[u8]| TermRequest::Raw(b.to_vec());
+        let motion = |col| {
+            TermRequest::Mouse(MouseEvent {
+                action: MouseAction::Motion,
+                button: None,
+                mods: slopty_proto::input::Mods::empty(),
+                col,
+                row: 0,
+                px: 0,
+                py: 0,
+            })
+        };
+        view.update_in(cx, |view, _window, cx| {
+            for req in [key(b"a"), key(b"b"), motion(1), key(b"c"), motion(2), motion(3)] {
+                view.send(req, cx);
+            }
+            view.send(key(b"d"), cx);
+        });
+        let mut sent = Vec::new();
+        while sent.len() < 6 {
+            cx.run_until_parked();
+            let before = sent.len();
+            while let Ok(ClientMsg::Term { req, .. }) = rx.try_recv() {
+                sent.push(req);
+            }
+            assert!(sent.len() > before, "the queue drains: {sent:?}");
+        }
+        cx.run_until_parked();
+        assert!(rx.try_recv().is_err(), "nothing more");
+        assert_eq!(sent, [key(b"a"), key(b"b"), motion(1), key(b"c"), motion(3), key(b"d")]);
     }
 
     /// An input method previews its composition at the cursor and nothing reaches the worker

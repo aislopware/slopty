@@ -81,7 +81,7 @@ impl WorkspaceView {
             if matches!(item.kind, ItemKind::Terminal { .. }) {
                 continue;
             }
-            let title = self.tile_title(tile, item, cx);
+            let title = self.tile_title(item, cx);
             let line = PaletteItem::item(&title, kind_icon(item, false), item.id)
                 .placed(self.tile_place(item, cx));
             items.push(line.on_worker(self.worker_label(tile.worker)));
@@ -111,7 +111,7 @@ impl WorkspaceView {
         let theme = self.theme.clone();
         let palette = cx.new(|cx| {
             let mut p = CommandPalette::new(items, theme, window, cx);
-            p.set_brief(true);
+            p.set_brief(true, cx);
             p
         });
         self.show_palette(palette, window, cx);
@@ -154,7 +154,7 @@ impl WorkspaceView {
         let seed = self.active_cwd().map_or_else(|| "~/".to_owned(), |cwd| format!("{cwd}/"));
         let palette = cx.new(|cx| {
             let mut p = CommandPalette::new(items, theme, window, cx);
-            p.set_brief(true);
+            p.set_brief(true, cx);
             p.seed(&seed, window, cx);
             p
         });
@@ -436,9 +436,8 @@ impl WorkspaceView {
             .filter_map(|tile| {
                 let (total, run) = self.find_hits.get(&tile.item)?;
                 let item = self.item(tile)?;
-                (*total > 0).then(|| {
-                    PaletteItem::hits(&self.tile_title(tile, item, cx), *total, run.clone())
-                })
+                (*total > 0)
+                    .then(|| PaletteItem::hits(&self.tile_title(item, cx), *total, run.clone()))
             })
             .collect();
         if let Some(palette) = &self.palette {
@@ -558,7 +557,7 @@ impl WorkspaceView {
                 let summary = self.summary(session);
                 let row = SessionRow {
                     session,
-                    title: self.tile_title(*tile, item, cx),
+                    title: self.tile_title(item, cx),
                     status: agent.map(agent_status_text),
                     needs_you,
                     mark: agent.and_then(Status::of_agent),

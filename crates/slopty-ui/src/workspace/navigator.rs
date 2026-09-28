@@ -920,7 +920,7 @@ impl WorkspaceView {
                 let Some(item) = w.doc.get(tile.item) else { continue };
                 let (mark, unseen) = self.tile_marks(tile, item, cx);
                 rollup.add(mark, unseen);
-                let title = self.tile_title(tile, item, cx);
+                let title = self.tile_title(item, cx);
                 let (meta, age) = self.tile_meta(item, now, cx);
                 if !named && !matches(&query, &[&title, &meta]) {
                     continue;
@@ -1013,7 +1013,7 @@ impl WorkspaceView {
             .unwrap_or_default();
         let title = at
             .tile
-            .and_then(|t| Some(self.tile_title(t, self.item(t)?, cx)))
+            .and_then(|t| Some(self.tile_title(self.item(t)?, cx)))
             .unwrap_or_else(|| if words.is_empty() { "Agent".to_owned() } else { words.clone() });
         let cwd = self.session_tail(at.session);
         let worker = self.worker_name(at.worker);

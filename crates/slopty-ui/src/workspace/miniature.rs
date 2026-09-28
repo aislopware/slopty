@@ -88,7 +88,7 @@ impl WorkspaceView {
                     .text_ellipsis()
                     .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                     .text_color(hsla(s.text))
-                    .child(SharedString::from(self.tile_title(placed.tile, item, cx))),
+                    .child(SharedString::from(self.tile_title(item, cx))),
             );
         let worker = (self.workers.len() > 1).then(|| self.worker_name(placed.tile.worker));
         let (meta, _) = self.tile_meta(item, std::time::SystemTime::now(), cx);

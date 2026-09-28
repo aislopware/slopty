@@ -51,7 +51,7 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
         let palette = v.palette.clone().expect("open");
         palette
             .read(cx)
-            .matches(cx)
+            .matches()
             .into_iter()
             .map(|l| (l.section, l.a11y_label(), l.status))
             .collect::<Vec<_>>()
@@ -177,7 +177,7 @@ fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
         let palette = v.palette.clone().expect("open");
         palette
             .read(cx)
-            .matches(cx)
+            .matches()
             .iter()
             .map(|l| (l.section, l.status.is_some()))
             .collect::<Vec<_>>()
@@ -403,10 +403,10 @@ fn the_palette_scrolls_to_the_selected_line(cx: &mut TestAppContext) {
     // Every command with an e in it: past the brief list an empty field shows.
     cx.simulate_input("e");
     cx.run_until_parked();
+    // A line far from the view is not laid out at all: the list draws what it shows.
     let inside = |cx: &mut VisualTestContext, line: &'static str| {
         let list = cx.debug_bounds("palette-list").expect("the list is drawn");
-        let line = cx.debug_bounds(line).expect("the line is laid out");
-        line.top() >= list.top() && line.bottom() <= list.bottom()
+        cx.debug_bounds(line).is_some_and(|l| l.top() >= list.top() && l.bottom() <= list.bottom())
     };
     let far = "palette-item-30";
     assert!(!inside(cx, far), "far down the list at first");

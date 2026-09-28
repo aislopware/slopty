@@ -119,8 +119,6 @@ pub struct Predictor {
     /// The refresh period of the display the guesses are drawn on.
     refresh: Duration,
     hits: u32,
-    total_hits: u64,
-    total_misses: u64,
     muted_until: Option<Instant>,
     epoch: Option<u32>,
     /// The highest key the worker has acknowledged.
@@ -154,8 +152,6 @@ impl Predictor {
             unsure: 0,
             refresh: DEFAULT_REFRESH,
             hits: 0,
-            total_hits: 0,
-            total_misses: 0,
             muted_until: None,
             epoch: None,
             acked: 0,
@@ -200,12 +196,6 @@ impl Predictor {
     #[must_use]
     pub fn slow_link(&self) -> Duration {
         self.refresh.checked_div(2).unwrap_or(self.refresh)
-    }
-
-    /// Lifetime hit / miss counts.
-    #[must_use]
-    pub const fn stats(&self) -> (u64, u64) {
-        (self.total_hits, self.total_misses)
     }
 
     /// Predictions in flight, oldest first.
@@ -365,7 +355,6 @@ impl Predictor {
                 self.tentative = false;
                 out.hits = out.hits.saturating_add(1);
                 self.hits = self.hits.saturating_add(1);
-                self.total_hits = self.total_hits.saturating_add(1);
             } else if cell.is_some() && cell == self.covered.front().and_then(Option::as_ref) {
                 break;
             } else {
@@ -406,7 +395,6 @@ impl Predictor {
     }
 
     fn miss(&mut self, now: Instant) {
-        self.total_misses = self.total_misses.saturating_add(1);
         self.hits = 0;
         self.unsure = GLITCH_REPAIR;
         self.muted_until = now.checked_add(MUTE);
@@ -531,7 +519,6 @@ mod tests {
         assert!(!p.visible(later), "after the mute a slow link must re-warm");
         p.set_rtt(Some(VERY_SLOW_LINK));
         assert!(p.visible(later), "a very slow link draws without warm-up");
-        assert_eq!(p.stats(), (2, 1));
     }
 
     /// A warmed-up link draws its guesses from half the display's refresh on: 8.3 ms until the
@@ -650,7 +637,6 @@ mod tests {
         let r =
             p.on_frame(&screen_with(0, "$ abcX"), 5, 0, quiet + STALE + Duration::from_millis(1));
         assert_eq!(r.misses, 1, "an echo that never comes is a miss once stale");
-        assert_eq!(p.stats(), (3, 2));
     }
 
     /// After Enter the next prompt may not echo (a password): what is typed there is guessed

@@ -60,7 +60,9 @@ pub fn save(path: &Path, text: &str, seen: &mut Seen) -> Result<Loaded, String> 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
-    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+    // Replaced whole: the daemons and the other clients' watchers read this file too.
+    slopty_platform::fs::replace(path, text.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
     seen.0 = Stamp::of(path);
     Ok(loaded)
 }

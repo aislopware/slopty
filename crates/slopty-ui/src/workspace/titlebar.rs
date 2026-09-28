@@ -165,6 +165,22 @@ pub(super) fn all_in_view(strip: &Strip) -> bool {
     strip.columns.iter().all(|(x, w)| *x >= view_x - 1.0 && x + w <= view_x + view_w + 1.0)
 }
 
+/// Which of `strip`'s columns the bar's segments show in view, `None` when it shows none: a
+/// workspace of one column, or every column in view.
+pub(super) fn indicator(strip: &Strip) -> Option<Vec<bool>> {
+    if strip.columns.len() < 2 || all_in_view(strip) {
+        return None;
+    }
+    let (view_x, view_w) = strip.view;
+    Some(
+        strip
+            .columns
+            .iter()
+            .map(|(x, w)| x + w > view_x + 1.0 && *x < view_x + view_w - 1.0)
+            .collect(),
+    )
+}
+
 impl WorkspaceView {
     /// Whether chrome moves now: not under Reduce Motion, nor under the self-test, where a
     /// frame is a step and a dump must see where things land.
@@ -830,20 +846,13 @@ impl WorkspaceView {
     fn render_indicator(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let strip = &self.drawn_strip;
-        let count = strip.columns.len();
-        let covered = matches!(self.nav.drawn, Some(Mode::Overlay | Mode::Drawer));
-        if count < 2 || covered || all_in_view(strip) {
+        if matches!(self.nav.drawn, Some(Mode::Overlay | Mode::Drawer)) {
             return None;
         }
-        let (view_x, view_w) = strip.view;
+        let in_view = indicator(&self.drawn_strip)?;
+        let count = in_view.len();
         let long =
             if count > SEGMENTS_AT_FULL_SIZE { SEGMENT_W - theme.spacing.xs } else { SEGMENT_W };
-        let in_view: Vec<bool> = strip
-            .columns
-            .iter()
-            .map(|(x, w)| x + w > view_x + 1.0 && *x < view_x + view_w - 1.0)
-            .collect();
         let radius = px(theme.radii.xs);
         let marks: Vec<gpui::AnyElement> = in_view
             .iter()

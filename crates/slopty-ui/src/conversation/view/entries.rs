@@ -29,6 +29,7 @@ use crate::conversation::model::Expanded;
 use crate::conversation::rows::{self, Fold, Level, Row, ToolKind};
 use crate::conversation::tools::{self, State};
 use crate::icons::{IconName, IconSize, Status};
+use crate::kit::first_line;
 
 /// The widest the reading column grows, in points at zoom 1: between T3 Code's 768 and Amp's
 /// 672, the measure of a comfortable line at the prose size.
@@ -84,7 +85,7 @@ impl ConversationView {
         let body = match settling {
             Some(generation) if crate::kit::motion(cx) => gpui::AnimationExt::with_animation(
                 div().child(body),
-                ElementId::NamedInteger(format!("settle-{}", row.key()).into(), *generation),
+                ElementId::NamedInteger("settle".into(), row.key().number() ^ *generation),
                 crate::kit::Pace::Settle.animation(),
                 gpui::Styled::opacity,
             )
@@ -556,7 +557,7 @@ impl ConversationView {
                 })
             });
         crate::a11y::tab_stop(line, s.accent)
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key.clone(), cx)))
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key, cx)))
             .into_any_element()
     }
 
@@ -596,7 +597,7 @@ impl ConversationView {
             })
             .id(ElementId::Name(SharedString::from(format!("answer-{id}"))))
             .role(Role::Article)
-            .aria_label(SharedString::from(first_line(shown)))
+            .aria_label(SharedString::from(first_line(shown).to_owned()))
             .group(ANSWER_GROUP)
             .py(self.z(theme.spacing.xs))
             .text_size(self.z(theme.typography.prose()))
@@ -1034,7 +1035,7 @@ impl ConversationView {
                         .child(rule()),
                     s.accent,
                 )
-                .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key.clone(), cx))),
+                .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key, cx))),
             )
             .children(summary)
             .into_any_element()
@@ -1076,7 +1077,7 @@ impl ConversationView {
         };
         let label = match &retry {
             Some(retry) => format!("{} \u{b7} {retry}", first_line(&text)),
-            None => first_line(&text),
+            None => first_line(&text).to_owned(),
         };
         div()
             .id(ElementId::Name(SharedString::from(format!("note-{id}"))))
@@ -1206,7 +1207,7 @@ impl ConversationView {
         &self,
         id: &str,
         parts: TitleParts,
-        key: String,
+        key: rows::RowKey,
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = &self.theme;
@@ -1325,7 +1326,7 @@ impl ConversationView {
                 line.cursor_pointer().hover(move |el| el.bg(hsla(s.raised))),
                 s.accent,
             )
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key.clone(), cx)))
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key, cx)))
             .into_any_element(),
             None => line.into_any_element(),
         }
@@ -1360,7 +1361,7 @@ impl ConversationView {
                 )
                 .into_any_element(),
             LiveKind::Thinking => {
-                let toggle = rows::entry_key(&format!("live-{key}"));
+                let toggle = rows::live_key(id);
                 let open =
                     (self.density == rows::Density::Verbose) != self.toggled.contains(&toggle);
                 div()
@@ -1538,9 +1539,4 @@ pub(super) struct TitleParts {
     pub changes: Option<(u32, u32)>,
     /// `Some(open)` when a click opens or closes it.
     pub expandable: Option<bool>,
-}
-
-/// The first line of a text with something on it.
-pub(super) fn first_line(text: &str) -> String {
-    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_owned()
 }

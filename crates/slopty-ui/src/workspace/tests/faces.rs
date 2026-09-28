@@ -485,7 +485,7 @@ fn a_first_prompt_renumbers_the_agents_that_read_alike(cx: &mut TestAppContext) 
     });
     cx.run_until_parked();
     let titles = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| [first, second].map(|t| v.tile_title(t, v.item(t).unwrap(), cx)))
+        view.read_with(cx, |v, cx| [first, second].map(|t| v.tile_title(v.item(t).unwrap(), cx)))
     };
     assert_eq!(titles(cx), ["Claude Code", "Claude Code 2"]);
     cx.simulate_keystrokes("cmd-j");

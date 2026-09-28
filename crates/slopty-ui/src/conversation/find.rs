@@ -68,7 +68,7 @@ pub fn row_of(rows: &[Row], id: &str) -> Option<usize> {
 /// The key that opens the fold hiding entry `id`: its turn's prompt's, when `id` is work
 /// (not the prompt itself).
 #[must_use]
-pub fn fold_over(thread: &Thread, id: &str) -> Option<String> {
+pub fn fold_over(thread: &Thread, id: &str) -> Option<rows::RowKey> {
     let entries = thread.entries();
     let at = entries.iter().position(|e| e.id == id)?;
     let prompt = entries.get(..at)?.iter().rev().find(|e| matches!(e.body, Body::Prompt(_)))?;
@@ -132,7 +132,7 @@ mod tests {
         };
         let closed = HashSet::new();
         assert_eq!(row_of(&build(input(&closed)), &work.id), None);
-        let open: HashSet<String> = [key].into();
+        let open: HashSet<rows::RowKey> = [key].into();
         assert!(row_of(&build(input(&open)), &work.id).is_some());
     }
 }

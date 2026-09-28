@@ -1036,7 +1036,7 @@ fn a_tile_is_named_from_its_header(cx: &mut TestAppContext) {
     let api = ClientMsg::Items(ItemOp::Rename { id: tile.item, name: Some("api".to_owned()) });
     assert_eq!(sent, vec![api], "the name alone");
     assert!(cx.debug_bounds(selector("rename", tile.item)).is_none(), "and it closed");
-    let title = view.read_with(cx, |v, cx| v.tile_title(tile, v.item(tile).unwrap(), cx));
+    let title = view.read_with(cx, |v, cx| v.tile_title(v.item(tile).unwrap(), cx));
     assert_eq!(title, "api");
 }
 
@@ -1346,7 +1346,7 @@ fn the_worker_list_goes_to_a_worker(cx: &mut TestAppContext) {
     let lines = view.read_with(cx, |v, cx| {
         v.palette.as_ref().map(|p| {
             p.read(cx)
-                .matches(cx)
+                .matches()
                 .iter()
                 .map(|l| (l.label.clone(), l.keys.clone()))
                 .collect::<Vec<_>>()

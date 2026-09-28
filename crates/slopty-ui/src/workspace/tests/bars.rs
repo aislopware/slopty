@@ -137,7 +137,7 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
     click(cx, "status-ports");
     let lines = view.read_with(cx, |v, cx| {
         let palette = v.palette.clone().expect("the ports are listed");
-        palette.read(cx).matches(cx).len()
+        palette.read(cx).matches().len()
     });
     assert_eq!(lines, 4, "a tile and a browser line for each port");
 }

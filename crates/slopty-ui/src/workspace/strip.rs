@@ -11,6 +11,8 @@
 //! that begins over a remote picture which would take a sideways swipe zooms that picture
 //! instead (`screen::zoom`), for the whole of the pinch.
 
+use std::collections::HashSet;
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, Bounds, Context, DispatchPhase, FontWeight,
@@ -402,7 +404,7 @@ impl WorkspaceView {
 
     /// Remote tiles off screen are counted; after the grace their streams go. A timer
     /// comes back for them once the grace is up, since an idle strip draws no frames.
-    fn track_visibility(&mut self, frame: &Frame, cx: &Context<Self>) {
+    fn track_visibility(&mut self, frame: &Frame, window: &Window, cx: &Context<Self>) {
         let (w, h) = self.layout.viewport();
         let screen = Rect { x: 0.0, y: 0.0, w, h };
         let visible: Vec<ItemId> = frame
@@ -412,7 +414,12 @@ impl WorkspaceView {
             .map(|p| p.tile.item)
             .collect();
         self.note_visible(&visible);
-        self.on_screen = visible.into_iter().collect();
+        let on_screen: HashSet<ItemId> = visible.into_iter().collect();
+        if on_screen != self.on_screen {
+            // The status bar counts the agents at work off screen.
+            self.chrome_next_frame(super::Region::Statusbar, window);
+            self.on_screen = on_screen;
+        }
         let waiting = self.unseen.keys().any(|id| !self.parked.contains(id));
         if waiting && !self.park_pending {
             self.park_pending = true;
@@ -584,12 +591,12 @@ impl WorkspaceView {
             // The pointer resting in an edge band keeps the strip scrolling.
             let (x, _) = self.local(window.mouse_position());
             if self.layout.dnd_edge_scroll(x) {
-                window.request_animation_frame();
+                self.next_frame(window);
             }
         }
         let frame = self.layout.frame();
         if frame.animating {
-            window.request_animation_frame();
+            self.next_frame(window);
         }
         frame
     }
@@ -604,7 +611,7 @@ impl WorkspaceView {
         let zooming = frame.overview > 0.0 && frame.overview < 1.0;
         let chrome = Chrome { k: frame.zoom, zooming };
         self.drawn_zoom = frame.zoom;
-        self.track_visibility(frame, cx);
+        self.track_visibility(frame, window, cx);
         let origin = self.viewport.origin;
         let dragged = match &self.drag {
             Some(Drag::Move { tile, moving: true, .. }) => Some(*tile),

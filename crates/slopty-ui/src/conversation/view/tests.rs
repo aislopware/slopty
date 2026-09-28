@@ -11,7 +11,7 @@ use slopty_theme::Theme;
 
 use super::ConversationView;
 use crate::conversation::fixtures;
-use crate::conversation::rows::Density;
+use crate::conversation::rows::{self, Density, Row};
 
 /// A face 800 × 400 points over the recorded session `name`, its composer focused.
 fn face<'a>(
@@ -133,7 +133,10 @@ fn a_subagent_opens_its_own_thread(cx: &mut TestAppContext) {
     });
     let card = format!("subagent-{id}");
     let row = view.read_with(cx, |v, _| {
-        v.rows().iter().position(|r| r.key().contains(&id)).expect("the call has a row")
+        v.rows()
+            .iter()
+            .position(|r| matches!(r, Row::Entry { id: at, .. } if *at == id))
+            .expect("the call has a row")
     });
     view.update(cx, |v, cx| v.scroll_to_row(row, cx));
     cx.run_until_parked();
@@ -180,7 +183,10 @@ fn a_changed_file_opens_the_sessions_changes(cx: &mut TestAppContext) {
     let prompt =
         main_entry(&view, cx, |e| matches!(e.body, slopty_proto::conversation::Body::Prompt(_)));
     let row = view.read_with(cx, |v, _| {
-        v.rows().iter().position(|r| r.key() == format!("c:{}", prompt.id)).expect("changes row")
+        v.rows()
+            .iter()
+            .position(|r| matches!(r, Row::Changes { prompt: at } if *at == prompt.id))
+            .expect("changes row")
     });
     show_row(&view, cx, row);
     let files = view.read_with(cx, |v, _| v.session_files());
@@ -194,11 +200,11 @@ fn a_changed_file_opens_the_sessions_changes(cx: &mut TestAppContext) {
     cx.simulate_click(at, Modifiers::none());
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| *v.pane()), super::Pane::Changes);
-    let rows: Vec<String> = view
-        .read_with(cx, |v, _| v.rows().iter().map(crate::conversation::rows::Row::key).collect());
-    assert_eq!(rows.first(), Some(&format!("file:{}", file.path)));
+    let rows: Vec<Row> = view.read_with(cx, |v, _| v.rows().to_vec());
+    assert_eq!(rows.first(), Some(&Row::File { path: file.path.clone() }));
     let (edit_thread, edit_id) = file.edits.first().expect("an edit").clone();
-    assert!(rows.contains(&format!("edit:{edit_id}")), "{rows:?}");
+    let edit = Row::Edit { thread: edit_thread.clone(), id: edit_id.clone() };
+    assert!(rows.contains(&edit), "{rows:?}");
     assert_eq!(edit_thread, slopty_proto::conversation::ThreadId::Main);
     assert!(cx.debug_bounds(leak(format!("file-{name}"))).is_some());
     assert!(cx.debug_bounds(leak(format!("edit-{edit_id}"))).is_some(), "each edit under it");
@@ -240,7 +246,7 @@ fn cmd_f_finds_words_in_a_folded_turn(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.found()), Some((0, count)), "round again");
     let rows = view.read_with(cx, |v, _| v.rows().to_vec());
     assert!(
-        rows.iter().any(|r| matches!(r, crate::conversation::rows::Row::Fold { open: true, .. })),
+        rows.iter().any(|r| matches!(r, Row::Fold { open: true, .. })),
         "the fold holding the call opened"
     );
     assert!(!view.read_with(cx, |v, _| v.following()), "the list went to the match");
@@ -263,7 +269,7 @@ fn an_answer_copies_its_words(cx: &mut TestAppContext) {
             .iter()
             .enumerate()
             .find_map(|(ix, r)| match r {
-                crate::conversation::rows::Row::Answer { id, end: true } => Some((ix, id.clone())),
+                Row::Answer { id, end: true } => Some((ix, id.clone())),
                 _ => None,
             })
             .expect("a turn's last answer")
@@ -418,9 +424,8 @@ fn thinking_is_a_line_that_opens(cx: &mut TestAppContext) {
     // Thinking shows from the Thinking density on, inside a turn the reader opened.
     cx.simulate_keystrokes("ctrl-o");
     cx.run_until_parked();
-    let fold = view.read_with(cx, |v, _| {
-        v.rows().iter().position(|r| matches!(r, crate::conversation::rows::Row::Fold { .. }))
-    });
+    let fold =
+        view.read_with(cx, |v, _| v.rows().iter().position(|r| matches!(r, Row::Fold { .. })));
     let prompt =
         main_entry(&view, cx, |e| matches!(e.body, slopty_proto::conversation::Body::Prompt(_)));
     show_row(&view, cx, fold.expect("the settled turn folds"));
@@ -438,12 +443,12 @@ fn thinking_is_a_line_that_opens(cx: &mut TestAppContext) {
     let thinking =
         main_entry(&view, cx, |e| matches!(e.body, slopty_proto::conversation::Body::Thinking(_)));
     let row = view.read_with(cx, |v, _| {
-        v.rows().iter().position(|r| r.key() == format!("e:{}", thinking.id))
+        v.rows().iter().position(|r| r.key() == rows::entry_key(&thinking.id))
     });
     show_row(&view, cx, row.expect("a thinking row"));
     let line = cx.debug_bounds(leak(format!("thinking-{}", thinking.id))).expect("its line");
     let open = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, _| v.toggled.contains(&format!("e:{}", thinking.id)))
+        view.read_with(cx, |v, _| v.toggled.contains(&rows::entry_key(&thinking.id)))
     };
     assert!(!open(cx));
     cx.simulate_click(point(line.origin.x + px(24.0), line.center().y), Modifiers::none());
@@ -503,6 +508,36 @@ fn the_prompt_rail_draws_only_when_its_prompts_change(cx: &mut TestAppContext) {
     cx.simulate_click(first.center(), Modifiers::default());
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.anchor()).item_ix, 0, "the list went to it");
+}
+
+/// A streamed word builds no row: only the live row is measured again, its revision following
+/// what was written. A block that starts is a row more, and builds them.
+#[gpui::test]
+fn a_streamed_word_builds_no_row(cx: &mut TestAppContext) {
+    use slopty_proto::conversation::{Live, LiveId, LiveKind, ThreadId};
+
+    let (view, cx) = face(cx, "tools");
+    let id = LiveId { turn: "live".into(), step: 0, block: 0 };
+    let counts = |cx: &VisualTestContext| view.read_with(cx, |v, _| (v.rebuilt, v.grown));
+    let (built, _) = counts(cx);
+    let start = Live::Start { thread: ThreadId::Main, id: id.clone(), kind: LiveKind::Text };
+    feed(&view, cx, vec![ConversationEvent::Live(vec![start])]);
+    let (started, grown) = counts(cx);
+    assert_eq!(started, built.saturating_add(1), "a block that starts is a row more");
+    let live_rev = |cx: &VisualTestContext| {
+        view.read_with(cx, |v, _| {
+            let ix = v.rows().iter().position(|r| matches!(r, Row::Live { .. }));
+            ix.and_then(|ix| v.keys.get(ix)).map(|(_, rev)| *rev)
+        })
+    };
+    let before = live_rev(cx);
+    for text in ["The ", "parser ", "keeps "] {
+        let word = Live::Append { id: id.clone(), text: text.into() };
+        feed(&view, cx, vec![ConversationEvent::Live(vec![word])]);
+    }
+    assert_eq!(counts(cx), (started, grown.saturating_add(3)), "each word grew the live row alone");
+    assert_ne!(live_rev(cx), before, "whose revision follows what was written");
+    assert!(cx.debug_bounds("live-live-0-0").is_some(), "and it is drawn");
 }
 
 /// What a frame of the face costs over the long made-up session while an answer streams, the

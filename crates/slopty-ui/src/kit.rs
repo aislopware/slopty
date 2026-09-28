@@ -316,6 +316,25 @@ pub fn duration(elapsed: std::time::Duration) -> String {
     }
 }
 
+/// A size in bytes as a person reads it: "812 B", "240 KB", "1.2 MB". Whole kilobytes, since a
+/// tenth of one is noise; a tenth of a megabyte is still a size worth telling apart.
+#[must_use]
+pub fn size_label(bytes: u64) -> String {
+    #[expect(clippy::cast_precision_loss, reason = "a label, not arithmetic")]
+    let n = bytes as f64;
+    match bytes {
+        0..1_024 => format!("{bytes} B"),
+        1_024..1_048_576 => format!("{:.0} KB", n / 1_024.0),
+        _ => format!("{:.1} MB", n / 1_048_576.0),
+    }
+}
+
+/// The first line of `text` with something on it, trimmed.
+#[must_use]
+pub fn first_line(text: &str) -> &str {
+    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default()
+}
+
 /// How large an overlay grows on a desktop.
 ///
 /// A phone gets whatever the margins leave. Two sizes, because a list of commands and a file
@@ -467,13 +486,6 @@ pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {
         .font_weight(FontWeight(Typography::STRONG_WEIGHT))
         .text_color(hsla(theme.surfaces.text))
         .child(text.into())
-}
-
-/// How far a framed [`button`]'s words sit in from its edge: its pad and its hairline. A
-/// button whose words line up with text above it starts this much to the left.
-#[must_use]
-pub fn button_text_inset(theme: &Theme) -> f32 {
-    theme.spacing.md + 1.0
 }
 
 /// How loud a [`button`] is. One primary per surface; the rest are secondary, or ghost where
@@ -946,6 +958,23 @@ mod tests {
     use gpui::TestAppContext;
 
     use super::*;
+
+    /// A size reads the one way everywhere (a file tile, a download, a picture): whole
+    /// kilobytes, a tenth of a megabyte.
+    #[test]
+    fn a_size_reads_as_a_person_says_it() {
+        assert_eq!(size_label(812), "812 B");
+        assert_eq!(size_label(245_760), "240 KB");
+        assert_eq!(size_label(1_536), "2 KB");
+        assert_eq!(size_label(1_258_291), "1.2 MB");
+    }
+
+    /// The first line is the first with something on it, trimmed.
+    #[test]
+    fn the_first_line_skips_blank_ones() {
+        assert_eq!(first_line("\n  \n  cargo build  \nnext"), "cargo build");
+        assert_eq!(first_line(""), "");
+    }
 
     /// Chrome text is sentence case, whatever it is doing: a label, a button's accessible name,
     /// a field's placeholder and an empty state are all written the same way. The stream HUD and

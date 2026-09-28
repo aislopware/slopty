@@ -8,6 +8,13 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg_attr(
+    not(feature = "e2e"),
+    expect(
+        dead_code,
+        reason = "only the e2e build serves the self-test socket; linted in every build"
+    )
+)]
 mod e2e;
 pub mod net;
 mod server;
@@ -2477,9 +2484,17 @@ fn layout_path() -> std::path::PathBuf {
 }
 
 /// Whether this launch is `cargo xtask e2e`'s, driven over its socket.
+#[cfg(feature = "e2e")]
 #[must_use]
 pub fn self_test() -> bool {
     std::env::var_os(slopty_e2e::SOCKET_ENV).is_some()
+}
+
+/// Whether this launch is `cargo xtask e2e`'s: never, in a build without the self-test.
+#[cfg(not(feature = "e2e"))]
+#[must_use]
+pub const fn self_test() -> bool {
+    false
 }
 
 /// Open the workspace window and start a link loop per added worker on `handle`'s runtime.
@@ -2615,10 +2630,10 @@ pub fn open_workspace(
         });
     })?;
     // The self-test socket, for `cargo xtask e2e app`; never set for a normal launch.
+    #[cfg(feature = "e2e")]
     if let Some(socket) = std::env::var_os(slopty_e2e::SOCKET_ENV) {
         // The accessibility tree is built only while a screen reader asks for it; a test
         // asks up front so `dump.a11y` has it.
-        #[cfg(feature = "e2e")]
         window.update(cx, |_root, window, _cx| window.set_a11y_active(true))?;
         let runtime = workspace.read(cx).runtime.clone();
         e2e::serve(socket.into(), workspace, window.into(), &runtime, cx);
@@ -2658,8 +2673,7 @@ fn pasteboard() -> Rc<dyn slopty_platform::pasteboard::Pasteboard> {
     use slopty_platform::pasteboard::IosPasteboard;
     let named =
         std::env::var("SLOPTY_PASTEBOARD").ok().filter(|name| !name.is_empty()).or_else(|| {
-            std::env::var_os(slopty_e2e::SOCKET_ENV)
-                .map(|_| format!("com.aislopware.slopty.self-test.{}", std::process::id()))
+            self_test().then(|| format!("com.aislopware.slopty.self-test.{}", std::process::id()))
         });
     if let Some(board) = named.as_deref().and_then(IosPasteboard::named) {
         tracing::info!(name = ?named, "clipboard on a named pasteboard");

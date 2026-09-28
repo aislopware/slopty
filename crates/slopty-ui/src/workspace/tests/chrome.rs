@@ -176,6 +176,89 @@ fn an_echo_leaves_the_chrome_as_it_was_drawn(cx: &mut TestAppContext) {
     assert!(after.iter().zip(before).all(|(a, b)| *a > b), "{before:?} → {after:?}");
 }
 
+/// The overview opening is one change and many frames of motion: the strip draws each frame,
+/// and the chrome, the titles and who needs the human are worked out for the change alone. A
+/// frame that moves which tiles are on screen tells the status bar in the next.
+#[gpui::test]
+fn a_frame_of_motion_is_no_news_for_the_chrome(cx: &mut TestAppContext) {
+    const FRAMES: u64 = 20;
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _sessions = crowd(&view, cx, &studio, 8, 4);
+    view.update(cx, |v, _| v.set_animation(true));
+    let (drawn, chrome, counts) =
+        view.read_with(cx, |v, cx| (v.frames_drawn, v.chrome_renders(cx), v.counts));
+    view.update(cx, |v, cx| {
+        v.tick();
+        v.layout.set_overview(true);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    // The layout's springs run on the wall clock: these frames all fall inside the move.
+    for _ in 0..FRAMES {
+        assert!(view.read_with(cx, |v, _| v.layout.frame().animating), "still moving");
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+    }
+    let drew = view.read_with(cx, |v, _| v.frames_drawn.wrapping_sub(drawn));
+    let (after, took) = view.read_with(cx, |v, cx| (v.chrome_renders(cx), v.counts));
+    assert!(drew > FRAMES, "the change and every frame of motion drawn: {drew}");
+    let once = (counts.0.saturating_add(1), counts.1.saturating_add(1));
+    assert_eq!(took, once, "one change, one working out of the titles");
+    let regions = ["navigator", "title bar", "status bar"];
+    for (region, (now, was)) in regions.iter().zip(after.iter().zip(chrome)) {
+        let redrawn = now.saturating_sub(was);
+        assert!(redrawn <= 2, "the {region} drew {redrawn} times in {drew} frames");
+    }
+    println!(
+        "MEASURE overview opening: {drew} frames drawn, chrome renders {chrome:?} -> {after:?}, \
+         changes and titles worked out {counts:?} -> {took:?}"
+    );
+}
+
+/// What a frame of motion costs beside the chrome: the overview opening and closing over 60
+/// shells and 60 notes with the navigator docked, each frame of the moves timed. Run by hand
+/// (it prints, it does not judge); `docs/MEASUREMENTS.md` has the numbers and the command.
+#[gpui::test]
+#[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
+fn measure_a_frame_of_motion_beside_the_chrome(cx: &mut TestAppContext) {
+    const FRAMES: usize = 400;
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _sessions = crowd(&view, cx, &studio, 60, 60);
+    assert!(cx.debug_bounds("navigator").is_some());
+    view.update(cx, |v, _| v.set_animation(true));
+    let before = renders(&view, cx);
+    let mut took = Vec::with_capacity(FRAMES);
+    let mut moves = 0_u32;
+    while took.len() < FRAMES {
+        if !view.read_with(cx, |v, _| v.layout.frame().animating) {
+            view.update(cx, |v, cx| {
+                v.tick();
+                let open = v.layout.overview_open();
+                v.layout.set_overview(!open);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            moves = moves.saturating_add(1);
+            continue;
+        }
+        let start = Instant::now();
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+        took.push(start.elapsed());
+    }
+    let after = renders(&view, cx);
+    took.sort_unstable();
+    let pct = |p: usize| slopty_client::pacing::percentile(&took, p).as_secs_f64() * 1e3;
+    println!(
+        "MEASURE a frame of motion beside the chrome, 60 shells + 60 notes, {FRAMES} frames over \
+         {moves} moves: p50 {:.3} ms p95 {:.3} ms; chrome renders {before:?} -> {after:?}",
+        pct(50),
+        pct(95)
+    );
+}
+
 /// A program's title is news for the chrome only when the tile's title follows it: the shell's
 /// own name leaves "Terminal 2" as it was, an editor's title renames the tile (and ends the
 /// twin's number). A command starting names its shell and renumbers what read alike, though
@@ -188,7 +271,7 @@ fn a_programs_title_draws_the_chrome_only_when_the_tiles_title_follows(cx: &mut 
     let first = opens(&view, cx, &studio, one, studio.me, 1);
     let second = opens(&view, cx, &studio, two, studio.me, 2);
     let titles = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| [first, second].map(|t| v.tile_title(t, v.item(t).unwrap(), cx)))
+        view.read_with(cx, |v, cx| [first, second].map(|t| v.tile_title(v.item(t).unwrap(), cx)))
     };
     assert_eq!(titles(cx), ["Terminal", "Terminal 2"]);
     let before = renders(&view, cx);

@@ -148,7 +148,7 @@ impl WorkspaceView {
         Some(match what {
             ToastKind::Pointed { name, tile } => {
                 let item = self.item(*tile)?;
-                format!("{name} points at {}", self.tile_title(*tile, item, cx))
+                format!("{name} points at {}", self.tile_title(item, cx))
             }
             ToastKind::Closed { title, .. } => format!("Closed {title}"),
             ToastKind::Said(text) => text.clone(),
@@ -191,7 +191,7 @@ impl WorkspaceView {
     }
 
     pub(super) fn point_at(&mut self, tile: TileRef, cx: &mut Context<Self>) {
-        let Some(title) = self.item(tile).map(|i| self.tile_title(tile, i, cx)) else { return };
+        let Some(title) = self.item(tile).map(|i| self.tile_title(i, cx)) else { return };
         self.send(tile.worker, ClientMsg::Point { item: tile.item });
         self.show_toast(ToastKind::Said(format!("Pointed the others at {title}")), cx);
     }

@@ -765,7 +765,7 @@ fn tiles_that_read_alike_are_numbered(cx: &mut TestAppContext) {
     let other = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
     cx.run_until_parked();
     let titles = view.read_with(cx, |v, cx| {
-        [first, second, other].map(|t| v.tile_title(t, v.item(t).unwrap(), cx))
+        [first, second, other].map(|t| v.tile_title(v.item(t).unwrap(), cx))
     });
     assert_eq!(titles, ["Terminal", "Terminal 2", "Terminal"]);
     let nodes = tree(cx);
@@ -852,7 +852,7 @@ fn a_note_keeps_its_name_and_counts_its_tasks(cx: &mut TestAppContext) {
     let note = arrives(&view, cx, &fake, ItemKind::Note { text }, 1);
     let title = view.update(cx, |v, cx| {
         let item = v.item(note).expect("the note").clone();
-        v.tile_title(note, &item, cx)
+        v.tile_title(&item, cx)
     });
     assert_eq!(title, "Release");
     let nodes = tree(cx);

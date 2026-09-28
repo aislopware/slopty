@@ -152,6 +152,19 @@ impl gpui::Render for ChromeView {
     }
 }
 
+/// The strip, laid out and painted as a view of its own, from the element the workspace built
+/// for it this frame. What only moves the strip (a step of the layout's spring, a working
+/// mark's turn, a tile fading in) asks for a frame by notifying this view rather than the
+/// workspace, whose own notify is news of a change for the chrome and the titles.
+struct StripHost(Option<gpui::AnyElement>);
+
+impl gpui::Render for StripHost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        use gpui::IntoElement as _;
+        self.0.take().unwrap_or_else(|| gpui::Empty.into_any_element())
+    }
+}
+
 /// The chrome's three views.
 struct Chrome {
     navigator: Entity<ChromeView>,
@@ -504,13 +517,19 @@ pub struct WorkspaceView {
     /// to the items: the next frame matches them. Only then, since a frame comes with every
     /// terminal and video update, and the matching walks every item.
     items_dirty: bool,
-    /// Who needs the human, worked out once per frame for everything that frame draws.
+    /// Who needs the human, worked out when the workspace changes, for everything drawn until
+    /// the next change.
     drawn_waiting: Vec<agents::Waiting>,
+    /// The tiles, the faces or the links changed since the faces were last brought in step
+    /// with them: the next frame does it ([`Self::sync_faces`] makes a face with the window).
+    faces_dirty: bool,
     /// The number each unnamed tile that reads like an earlier one of its worker carries after
     /// its title ("Terminal 2"), worked out in the frame after [`Self::titles_dirty`].
     twins: HashMap<ItemId, u32>,
     /// Every item's derived title, as the twins were last worked out from.
     derived: HashMap<ItemId, String>,
+    /// Every item's place ([`Self::tile_place`]), worked out with the titles.
+    places: HashMap<ItemId, Option<String>>,
     /// A title may have changed since the twins were worked out: the workspace changed (its
     /// own notify), a shell's command started or ended, a window was named. A frame another
     /// tile causes (an echo, a video frame) changes no title, and works nothing out.
@@ -521,6 +540,14 @@ pub struct WorkspaceView {
     drawn_strip: slopty_client::layout::Strip,
     /// The navigator, the title bar and the status bar, each a view of its own.
     chrome: Chrome,
+    /// The strip, a view of its own so its motion is not news.
+    strip_host: Entity<StripHost>,
+    /// The workspace changed since the last frame, so the chrome draws in this one anyway.
+    chrome_due: bool,
+    /// How many changes the workspace took and how many times the titles were worked out: the
+    /// proof that a frame of motion is neither.
+    #[cfg(test)]
+    counts: (usize, usize),
     /// The command each shell runs, as its navigator row last said: a change draws it again.
     running: HashMap<SessionId, Option<String>>,
     /// Holds the working marks' steps while a typed key waits for its echo.
@@ -685,13 +712,9 @@ impl WorkspaceView {
             Some(saved) => Layout::restore(saved, LayoutConfig::default()),
             None => Layout::new(LayoutConfig::default()),
         };
-        // Whatever the workspace changes, its chrome may show, and a tile's title may follow;
-        // a terminal's own change (an echo) is not the workspace's, and leaves both as they were.
-        cx.observe_self(|this, cx| {
-            this.titles_dirty = true;
-            this.chrome.notify(cx);
-        })
-        .detach();
+        // A terminal's own change (an echo) is not the workspace's, and a frame of motion
+        // notifies the strip's view instead ([`StripHost`]): neither comes here.
+        cx.observe_self(Self::changed).detach();
         let this = cx.weak_entity();
         let keys = cx.intercept_keystrokes(move |event, window, cx| {
             if event.keystroke.modifiers.platform {
@@ -724,12 +747,18 @@ impl WorkspaceView {
             file_focus: HashMap::new(),
             items_dirty: true,
             drawn_waiting: Vec::new(),
+            faces_dirty: true,
             twins: HashMap::new(),
             derived: HashMap::new(),
+            places: HashMap::new(),
             titles_dirty: true,
             note_facts: HashMap::new(),
             drawn_strip: slopty_client::layout::Strip::default(),
             chrome: Chrome::new(cx),
+            strip_host: gpui::AppContext::new(cx, |_| StripHost(None)),
+            chrome_due: true,
+            #[cfg(test)]
+            counts: (0, 0),
             running: HashMap::new(),
             _keys: keys,
             titles: HashMap::new(),
@@ -942,21 +971,10 @@ impl WorkspaceView {
         self.palette.is_some()
     }
 
-    /// Whether `session` is a terminal here (which worker a banner belongs to).
-    #[must_use]
-    pub fn has_session(&self, session: SessionId) -> bool {
-        self.terminals.contains_key(&session)
-    }
-
     /// The badge a session's last long command left, if the tile has not been looked at since.
     #[must_use]
     pub fn finished(&self, session: SessionId) -> Option<&Finished> {
         self.finished.get(&session)
-    }
-
-    /// How long a command has to run before its unwatched end is badged.
-    pub const fn set_slow_command(&mut self, after: Duration) {
-        self.slow_command = after;
     }
 
     /// Whether moves animate. The self-test turns this off so a dump right after an action
@@ -1164,6 +1182,43 @@ impl WorkspaceView {
         }
     }
 
+    /// The workspace changed (its own notify; never a frame of motion, see [`StripHost`]): the
+    /// chrome may show it and a title may follow it, and who needs the human and which
+    /// worker's clipboard is wanted follow it at once. The faces follow in the next frame.
+    fn changed(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.counts.0 = self.counts.0.saturating_add(1);
+        }
+        self.titles_dirty = true;
+        self.faces_dirty = true;
+        self.drawn_waiting = self.needs_you();
+        self.sync_clipboard_watch();
+        self.chrome.notify(cx);
+        self.chrome_due = true;
+    }
+
+    /// Another frame of the strip's motion, which is no news for the chrome or the titles.
+    fn next_frame(&self, window: &Window) {
+        let host = self.strip_host.entity_id();
+        window.on_next_frame(move |_window, cx| cx.notify(host));
+    }
+
+    /// Draw `region` again in the next frame: what it shows moved with the strip. Not in this
+    /// one: a notify while drawing reaches a cached view only in the frame after. Nothing when
+    /// the chrome draws in this frame anyway.
+    fn chrome_next_frame(&self, region: Region, window: &Window) {
+        if self.chrome_due {
+            return;
+        }
+        let view = match region {
+            Region::Navigator => self.chrome.navigator.entity_id(),
+            Region::Titlebar => self.chrome.titlebar.entity_id(),
+            Region::Statusbar => self.chrome.statusbar.entity_id(),
+        };
+        window.on_next_frame(move |_window, cx| cx.notify(view));
+    }
+
     /// How many times each region of the chrome has drawn: the navigator, the title bar, the
     /// status bar.
     #[cfg(test)]
@@ -1324,18 +1379,24 @@ impl gpui::Render for WorkspaceView {
             self.reconcile_browsers(cx);
         }
         self.frames_drawn = self.frames_drawn.wrapping_add(1);
-        cx.set_global(crate::browser::FrameCount(self.frames_drawn));
-        self.sync_faces(window, cx);
+        if std::mem::take(&mut self.faces_dirty) {
+            self.sync_faces(window, cx);
+        }
         self.apply_pending_focus(window, cx);
-        self.sync_clipboard_watch();
-        // One clock, one frame and one count of who needs the human for everything this
-        // frame draws: the bar's column dots and the strip agree, and none is worked out twice.
+        // One clock and one frame for everything this frame draws: the bar's column marks and
+        // the strip agree.
         let frame = self.frame_at_clock(window);
-        self.drawn_waiting = self.needs_you();
         if std::mem::take(&mut self.titles_dirty) {
             self.number_twins(cx);
+            #[cfg(test)]
+            {
+                self.counts.1 = self.counts.1.saturating_add(1);
+            }
         }
         if self.drawn_strip != frame.strip {
+            if titlebar::indicator(&frame.strip) != titlebar::indicator(&self.drawn_strip) {
+                self.chrome_next_frame(Region::Titlebar, window);
+            }
             self.drawn_strip.clone_from(&frame.strip);
         }
         // First: a docked navigator narrows the title bar and the strip.
@@ -1344,6 +1405,9 @@ impl gpui::Render for WorkspaceView {
             self.ensure_navigator_filter(window, cx);
         }
         let strip = self.render_strip(&frame, window, cx);
+        self.strip_host.update(cx, |host, _| host.0 = Some(strip));
+        self.chrome_due = false;
+        let strip = gpui::IntoElement::into_any_element(self.strip_host.clone());
         let toast = self.render_toast(cx);
         let menu = self.render_menu(window, cx);
         let picker = self.picker.as_ref().map(|(_, p)| p.clone());

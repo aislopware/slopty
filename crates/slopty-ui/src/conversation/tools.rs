@@ -8,6 +8,7 @@ use slopty_proto::conversation::{
 };
 
 use crate::icons::IconName;
+use crate::kit::first_line;
 
 /// How a call is doing, as its title's mark shows it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,11 +50,6 @@ pub fn file_name(path: &str) -> &str {
 #[must_use]
 pub fn count(n: u64, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
-}
-
-/// The first line of `text`, trimmed.
-fn first_line(text: &str) -> &str {
-    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default()
 }
 
 fn state_of(call: &ToolCall) -> State {

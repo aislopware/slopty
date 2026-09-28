@@ -287,7 +287,7 @@ impl WorkspaceView {
         route
             .item
             .map(|item| TileRef { worker: route.worker, item })
-            .and_then(|tile| self.item(tile).map(|i| self.tile_title(tile, i, cx)))
+            .and_then(|tile| self.item(tile).map(|i| self.tile_title(i, cx)))
             .or_else(|| self.workers.get(&route.worker).map(|w| w.name.clone()))
             .unwrap_or_default()
     }

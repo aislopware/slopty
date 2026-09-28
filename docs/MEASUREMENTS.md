@@ -7152,3 +7152,60 @@ session's output taps and checkpoints, queued behind it. ptyd no longer answers 
 the worker sends it like a tap (`a_resize_and_a_checkpoint_wait_for_no_reply`). A checkpoint
 used to be encoded into a buffer that grew by doubling through the megabytes; its frame is now
 a small head written beside the state, and both go to the socket in one `sendmsg`.
+
+## 2026-09-28 — motion that is no news, a palette drawn from its matches, a streamed word that builds nothing
+
+Four changes on the frame path (`.research/code-audit-2026-09-28.md`, findings 2 and 12–15):
+
+- **Motion is no news (12, 13).** The strip is drawn as a view of its own, and a frame of its
+  motion (a spring's step, a working mark's turn, a fade) notifies that view instead of the
+  workspace. The workspace's own notify is still a change: it redraws the chrome and works out
+  the titles, who needs the human and which clipboard is wanted. The faces follow in the next
+  frame. The titles and each tile's place are kept together (finding 3).
+- **The palette (15)** works out its matches as places in its lists when the field, the path
+  lines or the found files change. It draws them in a virtual `gpui::list` (the headings are
+  not a row tall, so not `uniform_list`), so a frame of the plate's glide draws the lines in
+  view. It used to filter, clone and draw all 300.
+- **The face (14)** measures only the live row again when a live block grows. Rows are keyed
+  by a hashed `RowKey`, and outputs by thread and then call, so a lookup allocates nothing.
+- **A typed key (2)** waits in order for room in a full outbound queue instead of being
+  dropped. The fast path is unchanged.
+
+Headless, one test binary per arm, both from the index tree of the day. **A0** is before.
+**A1** is A0 with this change's `crates/slopty-ui/src`. Test profile, mac-studio, load
+average 18–42 from other sessions. The arms ran in turn, three rounds. p50 / p95 in ms, one
+cell per round. Round 2 fell on a load spike: every arm moved together.
+
+| probe | A0 | A1 |
+| --- | --- | --- |
+| a frame of motion (the overview opening and closing), 60 shells + 60 notes, docked navigator, 400 frames | 2.46 / 7.61, 2.20 / 2.31, 2.70 / 5.49 | 0.57 / 0.60, 0.88 / 1.18, 0.59 / 0.69 |
+| chrome renders in those 400 frames (navigator / title bar / status bar), and the moves they took | 405 / 405 / 405 over 5, 3, 5 moves | 1 / 1 / 2 over 1 move, 2 / 2 / 4 over 2, 1 / 1 / 2 over 1 |
+| a frame of the palette's plate glide, 300 lines | 4.32 / 11.72, 3.86 / 4.40, 4.17 / 4.65 | 0.38 / 0.43, 0.63 / 0.91, 0.40 / 0.46 |
+| the face, (h) a word a frame on the tail, 80 turns | 1.36 / 1.72, 1.27 / 1.55, 1.25 / 1.51 | 1.13 / 1.45, 1.97 / 2.49, 1.19 / 1.46 |
+| the face, (i) panning ±40 points twice a word | 1.06 / 2.69, 1.66 / 4.52, 0.97 / 2.62 | 0.90 / 2.39, 1.37 / 4.68, 0.95 / 2.54 |
+| a key into the outbound queue, room left (ns) | 29.1, 43.8, 29.1 | 30.8, 33.5, 32.7 |
+
+- **A frame of motion is 4× cheaper.** Every such frame used to redraw the three chrome
+  regions and derive every title. Now the chrome draws once for each change that starts a
+  move, and the status bar once more when the tiles on screen change.
+- **The glide frame is 10× cheaper.** Rows drawn per glide frame fell from 300 to 28
+  (`a_glide_frame_draws_the_lines_in_view_and_filters_nothing`).
+- **A streamed word builds no row** (`a_streamed_word_builds_no_row`: three words, zero
+  rebuilds, three growths). The face's frame in this probe moves by 0.1–0.2 ms at p50, because
+  the list already drew only the rows in view.
+- **The key's fast path holds at about 30 ns.**
+
+The smooth probe (`cargo xtask e2e smooth`) was not run for this change. It needs two app
+builds and a window on the shared screen, and the load average was 30–40 from other sessions.
+
+```sh
+# one test binary per arm: the index tree exported (git checkout-index -a --prefix=target/ab/ui0/),
+# the measurement tests added to it, built; then this change's crates/slopty-ui/src over it, built
+CARGO_TARGET_DIR=$PWD/target cargo test -p slopty-ui -p workspace-hack --lib --no-run  # in target/ab/ui0
+for r in 1 2 3; do for a in ui0 ui1; do for t in measure_a_frame_of_motion_beside_the_chrome \
+  measure_a_palette_glide_frame measure_a_face_frame_while_an_answer_streams \
+  measure_a_key_into_the_outbound_queue; do
+  (cd target/ab/ui0/crates/slopty-ui && ../../../bin-$a $t --ignored --nocapture); done; done; done
+```
+
+Log: `target/logs/ui-ab.log`.

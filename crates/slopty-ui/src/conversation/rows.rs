@@ -10,11 +10,11 @@
 //! nothing moves under the reader while it grows, and Verbose folds nothing.
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher as _};
 use std::time::Duration;
 
 use slopty_proto::conversation::{
-    Body, Entry, LiveId, LiveKind, NoteKind, ResultStatus, ThreadId, ToolCall, ToolDetail, Turn,
-    WriteKind,
+    Body, Entry, LiveId, LiveKind, ResultStatus, ThreadId, ToolCall, ToolDetail, Turn, WriteKind,
 };
 
 use super::model::{LiveBlock, Pending, Thread};
@@ -284,42 +284,89 @@ pub enum Row {
 impl Row {
     /// What names the row across rebuilds: the list keeps a row that keeps its key.
     #[must_use]
-    pub fn key(&self) -> String {
+    pub fn key(&self) -> RowKey {
         match self {
-            Self::Prompt { id } => format!("p:{id}"),
-            Self::Answer { id, .. } => format!("a:{id}"),
-            Self::Changes { prompt } => format!("c:{prompt}"),
-            Self::File { path } => format!("file:{path}"),
-            Self::Edit { thread, id } => match thread {
-                ThreadId::Main => format!("edit:{id}"),
-                ThreadId::Agent(agent) => format!("edit:{agent}:{id}"),
-            },
+            Self::Prompt { id } => RowKey::of(Kind::Prompt, id),
+            Self::Answer { id, .. } => RowKey::of(Kind::Answer, id),
+            Self::Changes { prompt } => RowKey::of(Kind::Changes, prompt),
+            Self::File { path } => RowKey::of(Kind::File, path),
+            Self::Edit { thread, id } => RowKey::of(Kind::Edit, (thread, id)),
             Self::Fold { id, .. } => fold_key(id),
-            Self::Entry { id, .. } => format!("e:{id}"),
+            Self::Entry { id, .. } => entry_key(id),
             Self::Group { ids, .. } => group_key(ids.first().map_or("", String::as_str)),
-            Self::Live { id } => format!("l:{}:{}:{}", id.turn, id.step, id.block),
-            Self::Working => "w".to_owned(),
-            Self::Pending { index } => format!("q:{index}"),
+            Self::Live { id } => live_key(id),
+            Self::Working => RowKey::of(Kind::Working, ()),
+            Self::Pending { index } => RowKey::of(Kind::Pending, index),
         }
+    }
+}
+
+/// What a [`RowKey`] names.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Kind {
+    Prompt,
+    Answer,
+    Changes,
+    File,
+    Edit,
+    Fold,
+    Entry,
+    Group,
+    Live,
+    Working,
+    Pending,
+}
+
+/// A row's name across rebuilds, and what the reader opened or flipped is remembered by: its
+/// kind and a hash of what it is of, so a rebuild names every row without allocating.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RowKey {
+    kind: Kind,
+    hash: u64,
+}
+
+impl RowKey {
+    fn of(kind: Kind, of: impl Hash) -> Self {
+        let mut hasher = std::hash::DefaultHasher::new();
+        of.hash(&mut hasher);
+        Self { kind, hash: hasher.finish() }
+    }
+
+    /// Whether it names a settled turn's fold.
+    #[must_use]
+    pub fn is_fold(self) -> bool {
+        self.kind == Kind::Fold
+    }
+
+    /// A number for the key, the same for the same key in any run.
+    #[must_use]
+    pub const fn number(self) -> u64 {
+        self.hash
     }
 }
 
 /// The key a turn's fold is opened by.
 #[must_use]
-pub fn fold_key(prompt: &str) -> String {
-    format!("f:{prompt}")
+pub fn fold_key(prompt: &str) -> RowKey {
+    RowKey::of(Kind::Fold, prompt)
 }
 
 /// The key a group is opened by.
 #[must_use]
-pub fn group_key(first: &str) -> String {
-    format!("g:{first}")
+pub fn group_key(first: &str) -> RowKey {
+    RowKey::of(Kind::Group, first)
 }
 
 /// The key a tool call's level is flipped by.
 #[must_use]
-pub fn entry_key(id: &str) -> String {
-    format!("e:{id}")
+pub fn entry_key(id: &str) -> RowKey {
+    RowKey::of(Kind::Entry, id)
+}
+
+/// The key of a live block's row, which also opens a live thinking block.
+#[must_use]
+pub fn live_key(id: &LiveId) -> RowKey {
+    RowKey::of(Kind::Live, (&id.turn, id.step, id.block))
 }
 
 /// What a thread's rows are built from.
@@ -337,7 +384,7 @@ pub struct Input<'a> {
     /// How much shows.
     pub density: Density,
     /// Folds and groups the reader opened and tools whose level they flipped, by key.
-    pub toggled: &'a HashSet<String>,
+    pub toggled: &'a HashSet<RowKey>,
     /// The thread's live blocks, in order.
     pub live: &'a [(&'a LiveId, &'a LiveBlock)],
     /// Messages sent and not recorded (the main thread only).
@@ -602,12 +649,6 @@ pub fn prompts(rows: &[Row]) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
-/// Whether a note is worth a row in Normal density: every kind is, an API error loudest.
-#[must_use]
-pub const fn note_is_error(kind: NoteKind) -> bool {
-    matches!(kind, NoteKind::ApiError)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,9 +661,9 @@ mod tests {
         thread: &ThreadId,
         density: Density,
         live: bool,
-        toggled: &[&str],
+        toggled: &[RowKey],
     ) -> Vec<String> {
-        let toggled: HashSet<String> = toggled.iter().map(|s| (*s).to_owned()).collect();
+        let toggled: HashSet<RowKey> = toggled.iter().copied().collect();
         let t = model.thread(thread).unwrap();
         let rows = build(Input {
             thread: t,
@@ -684,7 +725,7 @@ mod tests {
             words(&model, main, Density::Normal, false, &[]),
             ["prompt", lead, "ExitPlanMode Summary", "answer."]
         );
-        let opened = |density| words(&model, main, density, false, &[fold.as_str()]);
+        let opened = |density| words(&model, main, density, false, &[fold]);
         let work = ["ExitPlanMode Summary", "TodoWrite Title", "Read Summary", "Bash Summary"];
         let open_lead = lead.replacen("fold", "fold+", 1);
         let normal: Vec<String> = ["prompt", open_lead.as_str()]
@@ -767,7 +808,7 @@ mod tests {
             &ThreadId::Main,
             Density::Normal,
             false,
-            &[&fold_key(&prompt), &group_key(&glob), &entry_key("toolu_07")],
+            &[fold_key(&prompt), group_key(&glob), entry_key("toolu_07")],
         );
         assert_eq!(rows.get(1).map(String::as_str).map(|r| r.starts_with("fold+")), Some(true));
         let at = rows.iter().position(|r| r == "group+ Explore 2").unwrap();
@@ -850,10 +891,10 @@ mod tests {
             live: &[],
             pending: &[],
         };
-        let a: Vec<String> = build(input).iter().map(Row::key).collect();
-        let b: Vec<String> = build(input).iter().map(Row::key).collect();
+        let a: Vec<RowKey> = build(input).iter().map(Row::key).collect();
+        let b: Vec<RowKey> = build(input).iter().map(Row::key).collect();
         assert_eq!(a, b);
-        let unique: HashSet<&String> = a.iter().collect();
+        let unique: HashSet<&RowKey> = a.iter().collect();
         assert_eq!(unique.len(), a.len(), "{a:?}");
     }
 }

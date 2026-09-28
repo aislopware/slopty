@@ -45,7 +45,7 @@ use super::approval::Approvals;
 use super::diff::Block;
 use super::figures::{self, FileChange};
 use super::model::Model;
-use super::rows::{self, Density, Input, Row};
+use super::rows::{self, Density, Input, Row, RowKey};
 use super::{CTX, CycleDensity, Interrupt, MESSAGE_PLACEHOLDER, composer};
 use crate::colors::hsla;
 
@@ -170,12 +170,12 @@ pub struct ConversationView {
     agent: Option<AgentEvent>,
     density: Density,
     /// Folds, groups and calls the reader opened or closed, by row key.
-    toggled: HashSet<String>,
+    toggled: HashSet<RowKey>,
     /// The thread on show: the session's own, or a subagent's.
     thread: ThreadId,
     rows: Rc<[Row]>,
     /// Each row's key and revision, as the list holds them.
-    keys: Vec<(String, u64)>,
+    keys: Vec<(RowKey, u64)>,
     /// The prompt rail, and the prompts it was last given, by row and revision.
     rail: gpui::Entity<rail::Rail>,
     rail_drawn: Vec<(usize, u64)>,
@@ -220,10 +220,16 @@ pub struct ConversationView {
     morph: Option<(u64, bool)>,
     /// Rows a fold just opened, by key, with the generation that names their reveal: they
     /// settle in, and leave this once they have.
-    settling: HashMap<String, u64>,
+    settling: HashMap<RowKey, u64>,
     settled_clear: Option<Task<()>>,
     /// Counts reveals and morphs, so each one animates from its start.
     generation: u64,
+    /// How many times the rows were built again, and how many times only the live ones grew:
+    /// the proof that a streamed word builds nothing.
+    #[cfg(test)]
+    rebuilt: usize,
+    #[cfg(test)]
+    grown: usize,
     /// The permission prompt on show and when, by this client's clock, it came: its fallback
     /// counts down from here, whatever the worker's clock says.
     held: Option<(u64, u64)>,
@@ -350,6 +356,10 @@ impl ConversationView {
             morph: None,
             settling: HashMap::new(),
             settled_clear: None,
+            #[cfg(test)]
+            rebuilt: 0,
+            #[cfg(test)]
+            grown: 0,
             generation: 0,
             held: None,
             clock: None,
@@ -548,6 +558,8 @@ impl ConversationView {
                 self.thread = ThreadId::Main;
             }
             self.rebuild(cx);
+        } else if applied.grew && self.pane == Pane::Conversation {
+            self.grow_live(cx);
         }
         if applied.media {
             // A tail grew or a picture came: the rows that show them are measured again.
@@ -737,9 +749,13 @@ impl ConversationView {
 
     /// Build the rows again and splice what changed into the list.
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.rebuilt = self.rebuilt.saturating_add(1);
+        }
         if self.pane == Pane::Changes {
             let rows = rows::changes(&self.session_files());
-            let keys: Vec<(String, u64)> =
+            let keys: Vec<(RowKey, u64)> =
                 rows.iter().map(|row| (row.key(), self.rev(row))).collect();
             self.splice(&keys);
             self.keys = keys;
@@ -765,12 +781,40 @@ impl ConversationView {
             live: &live,
             pending,
         });
-        let keys: Vec<(String, u64)> = rows.iter().map(|row| (row.key(), self.rev(row))).collect();
+        let keys: Vec<(RowKey, u64)> = rows.iter().map(|row| (row.key(), self.rev(row))).collect();
         self.splice(&keys);
         self.keys = keys;
         self.rows = Rc::from(rows);
         self.sync_rail(cx);
         cx.notify();
+    }
+
+    /// Live blocks grew and none started or went: the rows are the ones the list holds, and only
+    /// the live rows (at the foot, before what waits to be recorded) are measured again.
+    fn grow_live(&mut self, cx: &mut Context<Self>) {
+        let rows = Rc::clone(&self.rows);
+        let foot = rows.iter().enumerate().rev().take_while(|(_, row)| {
+            matches!(row, Row::Live { .. } | Row::Working | Row::Pending { .. })
+        });
+        let mut grew = false;
+        for (ix, row) in foot {
+            let Row::Live { .. } = row else { continue };
+            let rev = self.rev(row);
+            if let Some((_, drawn)) = self.keys.get_mut(ix)
+                && *drawn != rev
+            {
+                *drawn = rev;
+                self.list.remeasure_items(ix..ix.saturating_add(1));
+                grew = true;
+            }
+        }
+        if grew {
+            #[cfg(test)]
+            {
+                self.grown = self.grown.saturating_add(1);
+            }
+            cx.notify();
+        }
     }
 
     /// Give the rail the prompts in the rows, their words worked out again only when a prompt
@@ -787,7 +831,7 @@ impl ConversationView {
                     let words = thread
                         .and_then(|t| t.entry(id))
                         .and_then(|e| match &e.body {
-                            Body::Prompt(p) => Some(entries::first_line(&p.text.text)),
+                            Body::Prompt(p) => Some(crate::kit::first_line(&p.text.text)),
                             _ => None,
                         })
                         .unwrap_or_default();
@@ -834,9 +878,9 @@ impl ConversationView {
                 .iter()
                 .fold(u64::from(*open), |acc, id| acc.wrapping_mul(31).wrapping_add(entry_rev(id))),
             Row::Live { id } => {
-                let toggle = rows::entry_key(&format!("live-{}-{}-{}", id.turn, id.step, id.block));
                 let written = self.model.live_block_at(id).map_or(0, |b| b.text.len() as u64);
-                written.wrapping_mul(2).wrapping_add(u64::from(self.toggled.contains(&toggle)))
+                let open = self.toggled.contains(&rows::live_key(id));
+                written.wrapping_mul(2).wrapping_add(u64::from(open))
             }
             // What a settled turn changed stays as it was once the turn settled.
             Row::Working | Row::Pending { .. } | Row::Changes { .. } | Row::File { .. } => 0,
@@ -846,7 +890,7 @@ impl ConversationView {
     /// Splice `keys` into the list over what it holds: the rows before the first key that
     /// moved and after the last stay put (and so does the reader among them); rows that kept
     /// their key but not their revision are measured again.
-    fn splice(&self, keys: &[(String, u64)]) {
+    fn splice(&self, keys: &[(RowKey, u64)]) {
         let old = &self.keys;
         let prefix = old.iter().zip(keys).take_while(|(a, b)| a.0 == b.0).count();
         let room = old.len().min(keys.len()).saturating_sub(prefix);
@@ -878,12 +922,12 @@ impl ConversationView {
     // ----- what the reader does -------------------------------------------------------
 
     /// Open or close the fold, group or call `key`. What a fold opens settles in.
-    fn toggle(&mut self, key: String, cx: &mut Context<Self>) {
-        let opens_fold = key.starts_with("f:") && !self.toggled.contains(&key);
+    fn toggle(&mut self, key: RowKey, cx: &mut Context<Self>) {
+        let opens_fold = key.is_fold() && !self.toggled.contains(&key);
         if !self.toggled.remove(&key) {
             self.toggled.insert(key);
         }
-        let before: HashSet<String> = self.keys.iter().map(|(k, _)| k.clone()).collect();
+        let before: HashSet<RowKey> = self.keys.iter().map(|(k, _)| *k).collect();
         self.rebuild(cx);
         if !opens_fold || !crate::kit::motion(cx) {
             return;
@@ -891,10 +935,7 @@ impl ConversationView {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.settling.extend(
-            self.keys
-                .iter()
-                .filter(|(k, _)| !before.contains(k))
-                .map(|(k, _)| (k.clone(), generation)),
+            self.keys.iter().filter(|(k, _)| !before.contains(k)).map(|(k, _)| (*k, generation)),
         );
         let settle = crate::kit::Pace::Settle.duration();
         self.settled_clear = Some(cx.spawn(async move |this, cx| {

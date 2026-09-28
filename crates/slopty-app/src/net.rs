@@ -84,7 +84,7 @@ pub async fn find_on_tailnet() -> Tailnet {
 }
 
 /// The tailnet as this machine's Tailscale describes it, if one this process can read runs; in
-/// the e2e build, the stand-in the harness names instead ([`slopty_e2e::TAILNET_STATUS_ENV`]).
+/// the e2e build, the stand-in the harness names instead (`slopty_e2e::TAILNET_STATUS_ENV`).
 async fn tailnet_status() -> Option<slopty_tailnet::Status> {
     #[cfg(feature = "e2e")]
     if let Some(path) = std::env::var_os(slopty_e2e::TAILNET_STATUS_ENV) {

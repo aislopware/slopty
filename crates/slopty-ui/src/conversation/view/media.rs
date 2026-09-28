@@ -44,18 +44,6 @@ pub fn thumb_size(image: &Image) -> (f32, f32) {
     (w.max(THUMB_LEAST), h.max(THUMB_LEAST.min(box_h)))
 }
 
-/// A size in bytes as a person reads it: "812 B", "240 KB", "1.2 MB".
-#[must_use]
-pub fn size_label(bytes: u64) -> String {
-    #[expect(clippy::cast_precision_loss, reason = "a label, not arithmetic")]
-    let n = bytes as f64;
-    match bytes {
-        0..1_024 => format!("{bytes} B"),
-        1_024..1_048_576 => format!("{:.0} KB", n / 1_024.0),
-        _ => format!("{:.1} MB", n / 1_048_576.0),
-    }
-}
-
 /// What a picture is, in words: "1600 × 1200 · PNG · 240 KB".
 #[must_use]
 pub fn describe(image: &Image) -> String {
@@ -65,7 +53,7 @@ pub fn describe(image: &Image) -> String {
         parts.push(format!("{} \u{d7} {}", image.width, image.height));
     }
     parts.push(kind);
-    parts.push(size_label(image.bytes));
+    parts.push(kit::size_label(image.bytes));
     parts.join(" \u{b7} ")
 }
 
@@ -253,7 +241,5 @@ mod tests {
             describe(&image(1_600, 1_200, 245_760)),
             "1600 \u{d7} 1200 \u{b7} PNG \u{b7} 240 KB"
         );
-        assert_eq!(size_label(812), "812 B");
-        assert_eq!(size_label(1_258_291), "1.2 MB");
     }
 }

@@ -34,7 +34,7 @@ use slopty_theme::{Theme, alpha};
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight::Syntax;
 use crate::icons::{IconName, IconSize};
-use crate::kit::{ButtonKind, FIND_PLACEHOLDER};
+use crate::kit::{ButtonKind, FIND_PLACEHOLDER, size_label};
 use crate::terminal::{CloseFind, Find, FindNext, FindPrev};
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
@@ -1184,21 +1184,6 @@ pub fn changed_lines(old: &str, new: &str) -> Vec<usize> {
     }
     changed.dedup();
     changed
-}
-
-/// A byte count as a human reads it.
-#[must_use]
-pub fn size_label(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    #[expect(clippy::cast_precision_loss, reason = "a label, not arithmetic")]
-    let b = bytes as f64;
-    if b < KB {
-        format!("{bytes} B")
-    } else if b < KB * KB {
-        format!("{:.1} KB", b / KB)
-    } else {
-        format!("{:.1} MB", b / (KB * KB))
-    }
 }
 
 impl Render for FileView {

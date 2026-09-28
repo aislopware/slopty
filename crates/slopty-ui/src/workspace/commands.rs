@@ -419,7 +419,7 @@ impl WorkspaceView {
             return;
         };
         if let Some(view) = self.terminals.get(&session) {
-            view.read(cx).drive();
+            view.update(cx, |view, cx| view.drive(cx));
         }
         self.focus_tile(tile, cx);
     }
@@ -823,7 +823,7 @@ impl WorkspaceView {
     ) {
         self.closed_seq = self.closed_seq.wrapping_add(1);
         let seq = self.closed_seq;
-        let title = self.tile_title(tile, &item, cx);
+        let title = self.tile_title(&item, cx);
         let at = self.layout.position(tile);
         self.closed.push(ClosedTile { tile, item, at, session, file: None, seq });
         self.propose(tile.worker, ItemOp::Remove(tile.item), cx);

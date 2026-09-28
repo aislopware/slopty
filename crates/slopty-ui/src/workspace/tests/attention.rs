@@ -232,7 +232,7 @@ fn the_look_names_the_tile_and_says_what_the_agent_asks(cx: &mut TestAppContext)
     cx.run_until_parked();
     view.update(cx, |v, cx| {
         let look = v.attention_look(cx);
-        let title = v.item(tiles[0]).map(|i| v.tile_title(tiles[0], i, cx));
+        let title = v.item(tiles[0]).map(|i| v.tile_title(i, cx));
         assert_eq!(look.unread, v.inbox_count(), "the badge is the inbox's count");
         assert_eq!(look.unread, 1, "one agent waits");
         let [asks] = look.asking.as_slice() else { panic!("one agent asks: {look:?}") };

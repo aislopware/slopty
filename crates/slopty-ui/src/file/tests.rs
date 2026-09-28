@@ -382,13 +382,6 @@ fn changed_lines_point_at_inserts_replacements_and_deletions() {
     assert_eq!(changed_lines("a", "a"), Vec::<usize>::new());
 }
 
-#[test]
-fn sizes_read_as_a_human_would() {
-    assert_eq!(size_label(512), "512 B");
-    assert_eq!(size_label(1536), "1.5 KB");
-    assert_eq!(size_label(3 * 1024 * 1024), "3.0 MB");
-}
-
 /// Before the worker answers, the tile is blank for the loading grace, so a read that lands
 /// in time never flashes a word; past it, the tile says it is reading.
 #[gpui::test]

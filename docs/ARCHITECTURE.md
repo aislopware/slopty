@@ -154,7 +154,9 @@ the client takes its cache back, so the history, the prompt marks and the comman
 
 **Search** is a worker request (`TermRequest::Search` → `TermEvent::Matches`): the engine renders
 the retained rows as plain text with libghostty's formatter and maps hits back to cells, so the
-whole 50k-line history is searchable without the client ever holding it. `regex: true` runs the
+whole 50k-line history is searchable without the client ever holding it. A history row is
+formatted once and kept; a later search formats only the rows written since, plus the screen,
+and starts over after a reflow or on the alternate screen. `regex: true` runs the
 needle through the `regex` crate instead of the literal matcher; a bad pattern comes back as
 `TermEvent::SearchInvalid`.
 
@@ -271,7 +273,8 @@ connection, which is the only one ptyd accepts taps from) and replaces the ring 
 `Checkpoint`, the engine's whole state as VT bytes from libghostty-vt's formatter (palette,
 modes, every retained row, margins, cursor): right after adopting, then 500 ms after the last
 output (deferred while the output stands inside an escape sequence) or once 1 MiB has been
-tapped, and after a resize (the size goes to ptyd first, on the same queue). `Attach` returns
+tapped, and after a resize (the size goes to ptyd first, on the same queue, which answers neither a
+resize nor a checkpoint, so the worker never waits on it). `Attach` returns
 the checkpoint and the ring, and the new worker's engine replays them in
 that order, so the screen, the scrollback, the directory and the program's colour changes (the
 checkpoint carries them as the OSC sequences that made them, never a palette dump) survive a

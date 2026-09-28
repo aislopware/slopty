@@ -97,7 +97,7 @@ pub(super) fn work_of(entry: &Entry, now_ms: u64) -> Option<Work> {
                 .description
                 .clone()
                 .filter(|d| !d.trim().is_empty())
-                .unwrap_or_else(|| first_line(&bash.command.text));
+                .unwrap_or_else(|| kit::first_line(&bash.command.text).to_owned());
             let took = match standing {
                 Standing::Running => since(None),
                 _ => bash.finished_ms.and_then(|at| since(Some(at))),
@@ -111,7 +111,10 @@ pub(super) fn work_of(entry: &Entry, now_ms: u64) -> Option<Work> {
                 AgentRun::Failed => (Standing::Failed, "Failed"),
                 AgentRun::Killed => (Standing::Stopped, "Stopped"),
             };
-            let name = agent.description.clone().unwrap_or_else(|| first_line(&agent.prompt.text));
+            let name = agent
+                .description
+                .clone()
+                .unwrap_or_else(|| kit::first_line(&agent.prompt.text).to_owned());
             let took = match standing {
                 Standing::Running => since(None),
                 _ => agent.duration_ms,
@@ -139,10 +142,6 @@ fn bash_standing(bash: &BashDetail) -> (Standing, String) {
         ),
         ShellStatus::Interrupted | ShellStatus::Killed => (Standing::Stopped, "Stopped".to_owned()),
     }
-}
-
-fn first_line(text: &str) -> String {
-    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_owned()
 }
 
 /// A plan's title (its first heading, else its first line) and the Markdown under it.
@@ -191,7 +190,7 @@ impl ConversationView {
         took_ms: Option<u64>,
         open: bool,
         live: bool,
-        key: String,
+        key: rows::RowKey,
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = &self.theme;
@@ -255,7 +254,7 @@ impl ConversationView {
                 )
             });
         let line = crate::a11y::tab_stop(line, s.accent)
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key.clone(), cx)));
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key, cx)));
         let body = open.then(|| {
             div()
                 .pl(self.indent())
@@ -385,7 +384,6 @@ impl ConversationView {
                 tools::count(lines as u64, "line", "lines")
             ));
             let selector = format!("plan-more-{id}");
-            let key = key.clone();
             crate::a11y::tab_stop(
                 div()
                     .id(ElementId::Name(SharedString::from(selector.clone())))
@@ -403,7 +401,7 @@ impl ConversationView {
                     .child(label),
                 s.accent,
             )
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key.clone(), cx)))
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key, cx)))
         });
         let selector = format!("plan-{id}");
         div()
@@ -809,7 +807,7 @@ impl ConversationView {
                         _ => None,
                     })
                 });
-            let report = self.agent_report(&work.id).map(|r| first_line(&r));
+            let report = self.agent_report(&work.id).map(|r| kit::first_line(&r).to_owned());
             let line = if work.standing == Standing::Running { now } else { report.or(now) };
             return (line, None);
         }

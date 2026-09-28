@@ -213,21 +213,6 @@ fn grep_cut(run: &str) -> Option<usize> {
     }
 }
 
-/// The first file path in `text` — a grep hit's `src/a.rs:12:…`, a compiler's
-/// ` --> src/b.rs:3:5` — with its byte range and the line number after it.
-#[must_use]
-pub fn first_path(text: &str) -> Option<(Range<usize>, String, Option<u32>)> {
-    let mut at_word_start = true;
-    for (i, c) in text.char_indices() {
-        let starts_word = at_word_start && !c.is_whitespace();
-        at_word_start = c.is_whitespace();
-        if starts_word && let Some(found) = path_range_at(text, i) {
-            return Some(found);
-        }
-    }
-    None
-}
-
 /// `s` as one word for a POSIX or fish shell: single-quoted, a quote inside spelled out.
 #[must_use]
 pub fn shell_word(s: &str) -> String {
@@ -305,6 +290,20 @@ mod tests {
     use slopty_grid::{Cell, Hyperlink, Style};
 
     use super::*;
+
+    /// The first file path in `text` — a grep hit's `src/a.rs:12:…`, a compiler's
+    /// ` --> src/b.rs:3:5` — with its byte range and the line number after it.
+    fn first_path(text: &str) -> Option<(Range<usize>, String, Option<u32>)> {
+        let mut at_word_start = true;
+        for (i, c) in text.char_indices() {
+            let starts_word = at_word_start && !c.is_whitespace();
+            at_word_start = c.is_whitespace();
+            if starts_word && let Some(found) = path_range_at(text, i) {
+                return Some(found);
+            }
+        }
+        None
+    }
 
     #[test]
     fn the_first_path_of_a_result_line_is_found_with_its_line() {

@@ -241,7 +241,7 @@ impl WorkspaceView {
                     }
                     Step::Paste(text) => {
                         if let Some(view) = this.terminals.get(&session) {
-                            view.update(cx, |v, _| v.paste(text));
+                            view.update(cx, |v, cx| v.paste(text, cx));
                         }
                     }
                     Step::Key(key) => {

@@ -5,7 +5,7 @@
 //! palette is gone and the focus is back where it was, so a terminal's own actions (find,
 //! the prompts) reach the terminal that was focused.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher as _};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -14,8 +14,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Action, AnimationExt as _, App, AppContext as _, Bounds, Context, ElementId, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, ParentElement, Pixels, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
+    ListAlignment, ListSizingBehavior, ListState, MouseButton, ParentElement, Pixels, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_core::SessionId;
@@ -40,6 +40,9 @@ const RECENT: &str = "Recent";
 
 /// How many commands an empty field lists: the ones run last, then the first of the rest.
 pub const RECENT_COMMANDS: usize = 5;
+
+/// How far past its edges the list lays out lines, so a scroll never shows one appear.
+const OVERDRAW: f32 = 256.0;
 
 /// The most of the window's height the palette takes on a desktop, under its ceiling.
 const SHARE: f32 = 0.6;
@@ -876,18 +879,18 @@ impl PaletteItem {
 /// Going to a tile is what the palette is opened for most; the whole command list is one
 /// keystroke away, and scrolling past fifty commands to reach it was the wall GR #5 named.
 #[must_use]
-pub fn brief<'a>(items: Vec<&'a PaletteItem>, recent: &[String]) -> Vec<&'a PaletteItem> {
-    let (commands, mut out): (Vec<&PaletteItem>, Vec<&PaletteItem>) =
-        items.into_iter().partition(|item| item.section == Section::Commands);
-    let mut chosen: Vec<&PaletteItem> = recent
+pub(crate) fn brief<T: Listed>(items: Vec<T>, recent: &[String]) -> Vec<T> {
+    let (commands, mut out): (Vec<T>, Vec<T>) =
+        items.into_iter().partition(|item| item.item().section == Section::Commands);
+    let mut chosen: Vec<T> = recent
         .iter()
-        .filter_map(|label| commands.iter().copied().find(|item| &item.label == label))
+        .filter_map(|label| commands.iter().copied().find(|item| &item.item().label == label))
         .collect();
-    for item in commands.iter().copied().filter(|item| item.is_chord()) {
+    for item in commands.iter().copied().filter(|item| item.item().is_chord()) {
         if chosen.len() >= RECENT_COMMANDS {
             break;
         }
-        if !chosen.iter().any(|c| std::ptr::eq(*c, item)) {
+        if !chosen.iter().any(|c| std::ptr::eq(c.item(), item.item())) {
             chosen.push(item);
         }
     }
@@ -909,7 +912,7 @@ fn group(item: &PaletteItem, recent: &[String]) -> (&'static str, &'static str) 
 /// `items` in the order they are shown and stepped through: grouped by section, the order
 /// within each kept. The files come first when `path_first` (the field spells a path).
 #[must_use]
-pub fn in_sections(items: Vec<&PaletteItem>, path_first: bool) -> Vec<&PaletteItem> {
+pub(crate) fn in_sections<T: Listed>(items: Vec<T>, path_first: bool) -> Vec<T> {
     let rank = |section: Section| match section {
         Section::Files if path_first => 0,
         Section::Tiles => 1,
@@ -918,8 +921,43 @@ pub fn in_sections(items: Vec<&PaletteItem>, path_first: bool) -> Vec<&PaletteIt
         Section::Files => 4,
     };
     let mut items = items;
-    items.sort_by_key(|item| rank(item.section));
+    items.sort_by_key(|item| rank(item.item().section));
     items
+}
+
+/// A line as [`brief`] and [`in_sections`] order it: the item, or the item with where the
+/// palette keeps it.
+pub(crate) trait Listed: Copy {
+    /// The line's item.
+    fn item(&self) -> &PaletteItem;
+}
+
+impl Listed for &PaletteItem {
+    fn item(&self) -> &PaletteItem {
+        self
+    }
+}
+
+impl Listed for (At, &PaletteItem) {
+    fn item(&self) -> &PaletteItem {
+        self.1
+    }
+}
+
+/// Where a match is kept: among the lines a typed path makes, the palette's own items, or the
+/// files the worker found.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum At {
+    Path(usize),
+    Item(usize),
+    Found(usize),
+}
+
+/// One line of the list: a group's heading, or the match at that place in the matches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Line {
+    Heading { heading: &'static str, slug: &'static str },
+    Match(usize),
 }
 
 /// The quiet label over a group of rows ([`crate::kit::label`]) on the one edge grid: the
@@ -1141,14 +1179,23 @@ pub fn files_query(query: &str) -> Option<&str> {
 /// and a directory the shells in it.
 #[must_use]
 pub fn filter<'a>(query: &str, items: &'a [PaletteItem]) -> Vec<&'a PaletteItem> {
-    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    items
-        .iter()
-        .filter(|item| {
-            let text = format!("{} {}", item.label, item.context()).to_lowercase();
-            words.iter().all(|w| text.contains(w.as_str()))
-        })
-        .collect()
+    let words = query_words(query);
+    items.iter().filter(|item| found_by(&haystack(item), &words)).collect()
+}
+
+/// A query's words, lowercase.
+fn query_words(query: &str) -> Vec<String> {
+    query.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// What a query's words are looked for in: the line's label and context, lowercase.
+fn haystack(item: &PaletteItem) -> String {
+    format!("{} {}", item.label, item.context()).to_lowercase()
+}
+
+/// Whether every word is in `haystack`.
+fn found_by(haystack: &str, words: &[String]) -> bool {
+    words.iter().all(|w| haystack.contains(w.as_str()))
 }
 
 /// What the palette decided.
@@ -1165,15 +1212,23 @@ pub enum PaletteEvent {
 /// The palette: a field and the items that match it.
 pub struct CommandPalette {
     items: Vec<PaletteItem>,
+    /// Each item's [`haystack`], lowercased once.
+    hay: Vec<String>,
     /// `Open <path>` when the field spells a path; recomputed on every change.
     path_items: Vec<PaletteItem>,
     /// `Open <path>` for the files the worker found for the field's text; dropped on a change.
     found: Vec<PaletteItem>,
     input: Entity<InputState>,
+    /// The matches ([`Self::matches`]), worked out when the field, the path lines or the found
+    /// files change, never for a frame alone: the plate's glide draws many.
+    matched: Vec<At>,
+    /// The list's lines: the matches, a heading where a group starts.
+    lines: Vec<Line>,
     /// Which match ↑/↓ have selected.
     selected: usize,
-    /// The list's scroll, so the selected row can be brought into view.
-    scroll: ScrollHandle,
+    /// The list's scroll and its lines' heights, so the selected row can be brought into view
+    /// and only the lines in view are drawn.
+    list: ListState,
     /// The selection moved (a step, a new query): the next frame scrolls to it.
     reveal: bool,
     /// A find in every tile: the field's text is a needle, never a path.
@@ -1197,6 +1252,8 @@ pub struct CommandPalette {
     plate: Plate,
     theme: Theme,
     _events: Subscription,
+    /// How many times the matches were worked out, and how many rows were drawn.
+    counts: Cell<(usize, usize)>,
 }
 
 impl std::fmt::Debug for CommandPalette {
@@ -1258,19 +1315,24 @@ impl CommandPalette {
                 let text = this.input.read(cx).value().to_string();
                 this.path_items = if this.finding { Vec::new() } else { path_items(&text) };
                 this.found.clear();
+                this.refresh(cx);
                 cx.emit(PaletteEvent::Changed(text));
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => this.run(cx),
             InputEvent::Focus | InputEvent::Blur => {}
         });
-        Self {
+        let hay = items.iter().map(haystack).collect();
+        let mut palette = Self {
             items,
+            hay,
             path_items: Vec::new(),
             found: Vec::new(),
             input,
+            matched: Vec::new(),
+            lines: Vec::new(),
             selected: 0,
-            scroll: ScrollHandle::new(),
+            list: ListState::new(0, ListAlignment::Top, px(OVERDRAW)).measure_all(),
             reveal: false,
             finding,
             chords: true,
@@ -1282,12 +1344,16 @@ impl CommandPalette {
             plate: Plate::default(),
             theme,
             _events: events,
-        }
+            counts: Cell::default(),
+        };
+        palette.refresh(cx);
+        palette
     }
 
     /// List only the tiles, the workers and a few commands while the field is empty.
-    pub const fn set_brief(&mut self, brief: bool) {
+    pub fn set_brief(&mut self, brief: bool, cx: &App) {
         self.brief = brief;
+        self.refresh(cx);
     }
 
     /// Show as a sheet from the top in a window narrower than `width`.
@@ -1305,11 +1371,13 @@ impl CommandPalette {
     pub fn seed(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
         self.path_items = path_items(text);
+        self.refresh(cx);
     }
 
     /// Replace the lines under the commands (the hits of a find in every tile).
     pub fn set_lines(&mut self, lines: Vec<PaletteItem>, cx: &mut Context<Self>) {
         self.found = lines;
+        self.refresh(cx);
         cx.notify();
     }
 
@@ -1330,28 +1398,84 @@ impl CommandPalette {
                 }
             })
             .collect();
+        self.refresh(cx);
         cx.notify();
     }
 
-    /// The items matching the field, in the order they are shown ([`in_sections`]): a path
+    /// The items matching the field, in the order they are shown, group by group: a path
     /// typed into it (`Open <path>`, or a shell and a conversation in a directory) first, then
     /// the tiles, the workers and the commands the text matches, then the files the worker
     /// found for it.
     ///
     /// A brief palette with nothing typed lists only the tiles, the workers and the commands
-    /// [`brief`] picks.
+    /// run last, then the first of the rest.
     #[must_use]
-    pub fn matches(&self, cx: &App) -> Vec<&PaletteItem> {
+    pub fn matches(&self) -> Vec<&PaletteItem> {
+        self.matched.iter().filter_map(|at| self.at(*at)).collect()
+    }
+
+    /// How many times the matches were worked out, and how many rows were drawn: a frame of
+    /// the plate's glide does neither for the whole list.
+    #[must_use]
+    pub const fn work_done(&self) -> (usize, usize) {
+        self.counts.get()
+    }
+
+    /// The match kept at `at`.
+    fn at(&self, at: At) -> Option<&PaletteItem> {
+        match at {
+            At::Path(ix) => self.path_items.get(ix),
+            At::Item(ix) => self.items.get(ix),
+            At::Found(ix) => self.found.get(ix),
+        }
+    }
+
+    /// Work out the matches and the lines again, after the field, the path lines, the found
+    /// files or the brevity changed.
+    fn refresh(&mut self, cx: &App) {
+        let (refreshed, rows) = self.counts.get();
+        self.counts.set((refreshed.saturating_add(1), rows));
         let query = self.input.read(cx).value();
-        let mut out: Vec<&PaletteItem> = self.path_items.iter().collect();
-        let kept = filter(&query, &self.items);
-        if self.brief && query.trim().is_empty() {
-            out.extend(brief(kept, &recent_commands(cx)));
+        let empty = query.trim().is_empty();
+        let words = query_words(&query);
+        let mut out: Vec<(At, &PaletteItem)> =
+            self.path_items.iter().enumerate().map(|(ix, item)| (At::Path(ix), item)).collect();
+        let kept: Vec<(At, &PaletteItem)> = self
+            .items
+            .iter()
+            .zip(&self.hay)
+            .enumerate()
+            .filter(|(_, (_, hay))| found_by(hay, &words))
+            .map(|(ix, (item, _))| (At::Item(ix), item))
+            .collect();
+        // An empty field's commands are the ones run last, then a few more: the ones from
+        // history sit under a heading of their own, so the list says why they are there.
+        let recent = if self.brief && empty { recent_commands(cx) } else { Vec::new() };
+        if self.brief && empty {
+            out.extend(brief(kept, &recent));
         } else {
             out.extend(kept);
         }
-        out.extend(&self.found);
-        in_sections(out, !self.path_items.is_empty())
+        out.extend(self.found.iter().enumerate().map(|(ix, item)| (At::Found(ix), item)));
+        let out = in_sections(out, !self.path_items.is_empty());
+        let group = |item: &PaletteItem| group(item, &recent);
+        // A heading only where there are two groups to tell apart: a list of workers, of
+        // ports or of hits is one kind already, and the dialog's title names it.
+        let grouped = out.iter().zip(out.iter().skip(1)).any(|(a, b)| group(a.1) != group(b.1));
+        let mut lines = Vec::with_capacity(out.len());
+        let mut section = None;
+        for (ix, (_, item)) in out.iter().enumerate() {
+            let (heading, slug) = group(item);
+            if grouped && section != Some(slug) {
+                section = Some(slug);
+                lines.push(Line::Heading { heading, slug });
+            }
+            lines.push(Line::Match(ix));
+        }
+        let matched = out.into_iter().map(|(at, _)| at).collect();
+        self.matched = matched;
+        self.list.reset(lines.len());
+        self.lines = lines;
     }
 
     /// The selected match's index, clamped to the matches.
@@ -1363,9 +1487,9 @@ impl CommandPalette {
         if self.leaving {
             return;
         }
-        let matches = self.matches(cx);
-        let at = self.selected(matches.len());
-        if let Some(item) = matches.get(at).map(|item| (*item).clone()) {
+        let at = self.selected(self.matched.len());
+        let item = self.matched.get(at).and_then(|at| self.at(*at)).cloned();
+        if let Some(item) = item {
             Self::choose(&item, cx);
         }
     }
@@ -1381,12 +1505,13 @@ impl CommandPalette {
     /// Whether the list, as last laid out, runs on below what it shows: more than its own
     /// padding under the last row is still to come.
     fn runs_on(&self) -> bool {
-        let left = self.scroll.max_offset().y + self.scroll.offset().y;
-        left > px(list_pad(&self.theme) + 0.5)
+        let left =
+            self.list.max_offset_for_scrollbar().y + self.list.scroll_px_offset_for_scrollbar().y;
+        left > px(0.5)
     }
 
     fn step(&mut self, delta: i64, cx: &mut Context<Self>) {
-        let count = i64::try_from(self.matches(cx).len()).unwrap_or(0);
+        let count = i64::try_from(self.matched.len()).unwrap_or(0);
         if count == 0 {
             return;
         }
@@ -1412,6 +1537,8 @@ impl CommandPalette {
         chosen: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
+        let (refreshed, rows) = self.counts.get();
+        self.counts.set((refreshed, rows.saturating_add(1)));
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
@@ -1445,7 +1572,6 @@ impl CommandPalette {
                     .child(SharedString::from(text)),
             );
         }
-        let chosen_item = item.clone();
         let row = crate::kit::row(theme, crate::kit::Row::One)
             .id(ElementId::NamedInteger("palette-item".into(), u64::try_from(ix).unwrap_or(0)))
             .debug_selector(move || format!("palette-item-{ix}"))
@@ -1462,8 +1588,9 @@ impl CommandPalette {
             .on_mouse_move(cx.listener(move |this, _ev, _window, cx| this.point_at(ix, cx)))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _ev, _window, cx| {
-                if !this.leaving {
-                    Self::choose(&chosen_item, cx);
+                let item = this.matched.get(ix).and_then(|at| this.at(*at)).cloned();
+                if let Some(item) = item.filter(|_| !this.leaving) {
+                    Self::choose(&item, cx);
                 }
             }))
             .child(status_slot(theme, item.icon, item.status, hsla(icon_ink), 1.0))
@@ -1503,6 +1630,26 @@ impl CommandPalette {
         if chosen { self.plate.mark(row, ix) } else { row }
     }
 
+    /// Line `ix` of the list: a group's heading, or a match's row.
+    fn line(&self, ix: usize, cx: &Context<Self>) -> gpui::AnyElement {
+        match self.lines.get(ix) {
+            Some(Line::Heading { heading, slug }) => {
+                let name = format!("palette-heading-{slug}");
+                section_heading(&self.theme, ElementId::Name(name.clone().into()), heading)
+                    .debug_selector(move || name)
+                    .into_any_element()
+            }
+            Some(Line::Match(at)) => {
+                let chosen = *at == self.selected(self.matched.len());
+                match self.matched.get(*at).and_then(|place| self.at(*place)) {
+                    Some(item) => self.row(*at, item, chosen, cx).into_any_element(),
+                    None => gpui::Empty.into_any_element(),
+                }
+            }
+            None => gpui::Empty.into_any_element(),
+        }
+    }
+
     /// Stop taking the keys and the pointer and draw the way out: a fade on a desktop, the sheet
     /// back up on a phone, each in three quarters of its way in. How long that takes, for the
     /// owner to keep drawing it before dropping it; nothing under Reduce Motion.
@@ -1532,41 +1679,20 @@ impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let s = theme.surfaces;
-        let matches: Vec<PaletteItem> = self.matches(cx).into_iter().cloned().collect();
-        let chosen = self.selected(matches.len());
-        // An empty field's commands are the ones run last, then a few more: the ones from
-        // history sit under a heading of their own, so the list says why they are there.
-        let recent = if self.brief && self.input.read(cx).value().trim().is_empty() {
-            recent_commands(cx)
-        } else {
-            Vec::new()
-        };
-        let group = |item: &PaletteItem| group(item, &recent);
-        // A heading only where there are two groups to tell apart: a list of workers, of
-        // ports or of hits is one kind already, and the dialog's title names it.
-        let grouped = matches.iter().zip(matches.iter().skip(1)).any(|(a, b)| group(a) != group(b));
-        let mut rows: Vec<gpui::AnyElement> = Vec::new();
-        let mut section = None;
-        for (ix, item) in matches.iter().enumerate() {
-            let (heading, slug) = group(item);
-            if grouped && section != Some(slug) {
-                section = Some(slug);
-                let name = format!("palette-heading-{slug}");
-                let heading =
-                    section_heading(&theme, ElementId::Name(name.clone().into()), heading)
-                        .debug_selector(move || name);
-                rows.push(heading.into_any_element());
-            }
-            if ix == chosen && std::mem::take(&mut self.reveal) {
-                // Its place among the list's children, headings counted.
-                self.scroll.scroll_to_item(rows.len());
-            }
-            rows.push(self.row(ix, item, ix == chosen, cx).into_any_element());
+        let chosen = self.selected(self.matched.len());
+        if std::mem::take(&mut self.reveal)
+            && let Some(line) = self.lines.iter().position(|l| *l == Line::Match(chosen))
+        {
+            self.list.scroll_to_reveal_item(line);
         }
-        let verb = matches.get(chosen).map_or(RETURN_VERB, |item| item.run.verb());
+        let verb = self
+            .matched
+            .get(chosen)
+            .and_then(|at| self.at(*at))
+            .map_or(RETURN_VERB, |item| item.run.verb());
         // A find with nothing typed yet has nothing to report: the field says what it is for.
         let waiting = self.finding && self.input.read(cx).value().trim().is_empty();
-        let nothing = rows.is_empty() && !waiting;
+        let nothing = self.lines.is_empty() && !waiting;
 
         let viewport = window.viewport_size();
         let height = f32::from(viewport.height);
@@ -1639,15 +1765,26 @@ impl Render for CommandPalette {
                         div()
                             .id("palette-list")
                             .debug_selector(|| "palette-list".to_owned())
-                            .track_scroll(&self.scroll)
                             .role(gpui::accesskit::Role::ListBox)
                             .aria_label("Commands")
                             .flex_1()
-                            .overflow_y_scroll()
-                            .py(px(list_pad(&theme)))
-                            .children(rows)
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .when(!self.lines.is_empty(), |el| {
+                                el.child(
+                                    gpui::list(
+                                        self.list.clone(),
+                                        cx.processor(|this, ix, _window, cx| this.line(ix, cx)),
+                                    )
+                                    .with_sizing_behavior(ListSizingBehavior::Infer)
+                                    .flex_1()
+                                    .min_h_0()
+                                    .py(px(list_pad(&theme))),
+                                )
+                            })
                             .when(nothing, |el| {
-                                el.child(quiet_line(
+                                el.py(px(list_pad(&theme))).child(quiet_line(
                                     &theme,
                                     "palette-empty",
                                     NO_COMMAND_MATCHES,
@@ -1872,6 +2009,60 @@ mod tests {
         assert_eq!(plate(&palette, cx), third, "still: on the line at once");
     }
 
+    /// A frame of the plate's glide draws the lines in view and works out no match: the matches
+    /// are worked out when the field changes, and a list of 300 draws the rows it shows.
+    #[gpui::test]
+    fn a_glide_frame_draws_the_lines_in_view_and_filters_nothing(cx: &mut TestAppContext) {
+        const LINES: usize = 300;
+        let (palette, cx) = palette_of(LINES, cx);
+        let counts = |cx: &VisualTestContext| palette.read_with(cx, |p, _| p.work_done());
+        let (refreshed, _) = counts(cx);
+        step(&palette, cx);
+        let (_, before) = counts(cx);
+        // The plate glides on the wall clock: these frames all fall inside the move.
+        let frames = 20;
+        for _ in 0..frames {
+            assert!(palette.read_with(cx, |p, _| p.plate.0.borrow().flight.is_some()), "gliding");
+            cx.update(Window::simulate_next_frame);
+            cx.run_until_parked();
+        }
+        let (now, rows) = counts(cx);
+        assert_eq!(now, refreshed, "no match worked out again");
+        let per_frame = rows.saturating_sub(before) / frames;
+        assert!(per_frame < LINES / 4, "{per_frame} rows a frame, of {LINES}");
+        println!(
+            "MEASURE palette glide over {LINES} lines: {frames} frames, {per_frame} rows a frame"
+        );
+    }
+
+    /// What a frame of the plate's glide costs over 300 lines, each frame timed while the plate
+    /// is on its way. Run by hand (it prints, it does not judge); `docs/MEASUREMENTS.md`.
+    #[gpui::test]
+    #[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
+    fn measure_a_palette_glide_frame(cx: &mut TestAppContext) {
+        const LINES: usize = 300;
+        const FRAMES: usize = 400;
+        let (palette, cx) = palette_of(LINES, cx);
+        let mut took = Vec::with_capacity(FRAMES);
+        while took.len() < FRAMES {
+            if !palette.read_with(cx, |p, _| p.plate.0.borrow().flight.is_some()) {
+                step(&palette, cx);
+                continue;
+            }
+            let start = Instant::now();
+            cx.update(Window::simulate_next_frame);
+            cx.run_until_parked();
+            took.push(start.elapsed());
+        }
+        took.sort_unstable();
+        let pct = |p: usize| slopty_client::pacing::percentile(&took, p).as_secs_f64() * 1e3;
+        println!(
+            "MEASURE palette glide frame over {LINES} lines, {FRAMES} frames: p50 {:.3} ms p95 {:.3} ms",
+            pct(50),
+            pct(95)
+        );
+    }
+
     /// The palette leaves in three quarters of its way in, a fade on a desktop and the sheet on
     /// a phone, and at once under Reduce Motion; once leaving, it runs nothing more.
     #[gpui::test]
@@ -1887,7 +2078,7 @@ mod tests {
         assert_eq!(sheet, Pace::Sheet.duration().mul_f32(0.75), "180 ms");
         cx.update(|_w, cx| cx.set_reduce_motion(true));
         assert_eq!(palette.update(cx, CommandPalette::leave), Duration::ZERO, "at once");
-        let ran: Rc<std::cell::Cell<bool>> = Rc::default();
+        let ran: Rc<Cell<bool>> = Rc::default();
         let sink = Rc::clone(&ran);
         cx.update(|_w, cx| {
             cx.subscribe(&palette, move |_, _ev: &PaletteEvent, _| sink.set(true)).detach();

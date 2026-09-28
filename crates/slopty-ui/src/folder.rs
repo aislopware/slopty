@@ -622,7 +622,7 @@ impl FolderView {
         let detail = if folder {
             entry.items.map(count_label).unwrap_or_default()
         } else if entry.kind == FileKind::File {
-            crate::file::size_label(entry.size)
+            crate::kit::size_label(entry.size)
         } else {
             String::new()
         };

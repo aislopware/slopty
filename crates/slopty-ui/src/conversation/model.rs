@@ -144,8 +144,10 @@ pub struct Pending {
 pub struct Applied {
     /// A thread's entries or tasks: the rows are built again.
     pub threads: bool,
-    /// A live block started, grew or went.
+    /// A live block started or went.
     pub live: bool,
+    /// A live block grew.
+    pub grew: bool,
     /// The meters.
     pub meters: bool,
     /// The conversation as it stands has just arrived in full, the first time or again.
@@ -215,7 +217,7 @@ pub struct Model {
     live: BTreeMap<LiveId, LiveBlock>,
     pending: Vec<Pending>,
     /// What each background command printed last, by thread and call.
-    outputs: HashMap<(ThreadId, String), Output>,
+    outputs: HashMap<ThreadId, HashMap<String, Output>>,
     /// Pictures by digest.
     pictures: HashMap<String, Picture>,
     /// The digest each picture asked for was asked by, by its place.
@@ -245,8 +247,10 @@ impl Model {
                 self.asked.clear();
                 // A new transcript's commands are new calls: the old outputs have no row.
                 let threads = &self.threads;
-                self.outputs.retain(|(thread, call), _| {
-                    threads.get(thread).is_some_and(|t| t.entry(call).is_some())
+                self.outputs.retain(|thread, calls| {
+                    let Some(t) = threads.get(thread) else { return false };
+                    calls.retain(|call, _| t.entry(call).is_some());
+                    !calls.is_empty()
                 });
             }
             ConversationEvent::Meters(meters) => {
@@ -259,13 +263,13 @@ impl Model {
             }
             ConversationEvent::Live(blocks) => {
                 for block in blocks {
-                    self.live_block(block);
+                    self.live_block(block, &mut applied);
                 }
-                applied.live = true;
             }
             ConversationEvent::Output(outputs) => {
                 for output in outputs {
-                    self.outputs.insert((output.thread.clone(), output.call.clone()), output);
+                    let calls = self.outputs.entry(output.thread.clone()).or_default();
+                    calls.insert(output.call.clone(), output);
                 }
                 applied.media = true;
             }
@@ -287,7 +291,7 @@ impl Model {
     /// What the background command `call` of `thread` printed last.
     #[must_use]
     pub fn output(&self, thread: &ThreadId, call: &str) -> Option<&Output> {
-        self.outputs.get(&(thread.clone(), call.to_owned()))
+        self.outputs.get(thread)?.get(call)
     }
 
     /// A picture's bytes, as far as they came.
@@ -343,18 +347,20 @@ impl Model {
         }
     }
 
-    fn live_block(&mut self, block: Live) {
+    fn live_block(&mut self, block: Live, applied: &mut Applied) {
         match block {
             Live::Start { thread, id, kind } => {
                 self.live.insert(id, LiveBlock { thread, kind, text: String::new() });
+                applied.live = true;
             }
             Live::Append { id, text } => {
                 if let Some(block) = self.live.get_mut(&id) {
                     block.text.push_str(&text);
+                    applied.grew = true;
                 }
             }
             Live::Clear { id } => {
-                self.live.remove(&id);
+                applied.live |= self.live.remove(&id).is_some();
             }
         }
     }

@@ -405,10 +405,19 @@ pub(super) const fn kind_name(item: &Item) -> &'static str {
 impl WorkspaceView {
     /// What a tile's title is placed by, the same in its header, its navigator row and its
     /// palette line: where a shell is, the folder a file is in, a page's address when the
-    /// title is not it, how far a note's tasks got. A window or display has none.
+    /// title is not it, how far a note's tasks got. A window or display has none. Kept with
+    /// the titles ([`Self::number_twins`]).
     pub(super) fn tile_place(&self, item: &Item, cx: &App) -> Option<String> {
+        match self.places.get(&item.id) {
+            Some(place) => place.clone(),
+            None => self.derived_place(item, &self.derived_title(item, cx), cx),
+        }
+    }
+
+    /// [`Self::tile_place`] worked out, for an item whose derived title is `title`.
+    fn derived_place(&self, item: &Item, title: &str, cx: &App) -> Option<String> {
         match &item.kind {
-            ItemKind::Terminal { session } => self.shell_context(*session, cx),
+            ItemKind::Terminal { session } => self.shell_context(*session, title),
             ItemKind::File { path } | ItemKind::Folder { path } => file_dir(path),
             // The host alone: the path is the page's business, and the title names the page.
             ItemKind::Browser { .. } => self.browsers.get(&item.id).and_then(|v| {
@@ -446,16 +455,19 @@ impl WorkspaceView {
         }
     }
 
-    /// What a header says: the name the human gave the tile, else its derived title.
+    /// What a header says: the name the human gave the tile, else its derived title, as it
+    /// was last worked out when the workspace changed.
     #[must_use]
-    pub fn tile_title(&self, _tile: TileRef, item: &Item, cx: &App) -> String {
-        item.name.clone().unwrap_or_else(|| {
-            let title = self.derived_title(item, cx);
-            match self.twins.get(&item.id) {
-                Some(n) => format!("{title} {n}"),
-                None => title,
-            }
-        })
+    pub fn tile_title(&self, item: &Item, cx: &App) -> String {
+        if let Some(name) = &item.name {
+            return name.clone();
+        }
+        let derived = self.derived.get(&item.id);
+        let title = derived.map_or_else(|| self.derived_title(item, cx), String::clone);
+        match self.twins.get(&item.id) {
+            Some(n) => format!("{title} {n}"),
+            None => title,
+        }
     }
 
     /// Unnamed tiles of one worker and one kind that would read alike ("Terminal" and
@@ -464,11 +476,19 @@ impl WorkspaceView {
     /// are told apart by their icons: a shell and a folder at one directory both read as it.
     ///
     /// Worked out when a title may have changed ([`Self::titles_dirty`]), not once a frame: it
-    /// derives every item's title. Every item's derived title is kept with the numbers, so a
-    /// program's new title that leaves its tile's as it was is nobody's news ([`Self::retitled`]).
+    /// derives every item's title. Every item's derived title and place are kept with the
+    /// numbers, for every header, row and line to read, and so that a program's new title that
+    /// leaves its tile's as it was is nobody's news ([`Self::retitled`]).
     pub(super) fn number_twins(&mut self, cx: &App) {
         let derived: HashMap<ItemId, String> =
             self.items().map(|(_, item)| (item.id, self.derived_title(item, cx))).collect();
+        let places = self
+            .items()
+            .map(|(_, item)| {
+                let title = derived.get(&item.id).map_or("", String::as_str);
+                (item.id, self.derived_place(item, title, cx))
+            })
+            .collect();
         let mut seen: HashMap<(WorkerKey, &str, &str), u32> = HashMap::new();
         let mut twins = HashMap::new();
         for (worker, item) in self.items().filter(|(_, i)| i.name.is_none()) {
@@ -482,6 +502,7 @@ impl WorkspaceView {
         drop(seen);
         self.twins = twins;
         self.derived = derived;
+        self.places = places;
     }
 
     /// A shell's program set a title. News for the chrome only when the tile's own title
@@ -540,12 +561,12 @@ impl WorkspaceView {
     /// shell named by its repository gives the path within it, else its branch; one named by
     /// its directory gives the path to it; any other gives the repository and the path within
     /// it, else the directory.
-    fn shell_context(&self, session: SessionId, cx: &App) -> Option<String> {
+    fn shell_context(&self, session: SessionId, title: &str) -> Option<String> {
         let (home, s) = self.session_on(session)?;
         let cwd = s.cwd.as_deref()?;
         let repo = s.repo.as_deref();
         let named = place_name(cwd, repo, home);
-        if named.is_none_or(|name| name != self.terminal_title(session, cx)) {
+        if named.is_none_or(|name| name != title) {
             return Some(repo_place(cwd, repo, home));
         }
         match repo {
@@ -584,7 +605,7 @@ impl WorkspaceView {
         let id = item.id;
         let worker_up = self.workers.get(&tile.worker).is_some_and(|w| w.link.is_some());
 
-        let title = self.tile_title(tile, item, cx);
+        let title = self.tile_title(item, cx);
         let label = SharedString::from(title.clone());
         let header = self.render_header(placed, item, title, chrome, cx);
         let body = self.render_body(placed, item, chrome, window, cx);
@@ -737,7 +758,7 @@ impl WorkspaceView {
                 .text_color(hsla(s.text_secondary))
                 .font_family(theme.typography.ui_family.clone())
                 .child(crate::palette::status_slot(theme, kind_icon(item, false), None, muted, k))
-                .child(SharedString::from(self.tile_title(closing.tile, item, cx)))
+                .child(SharedString::from(self.tile_title(item, cx)))
         });
         let ghost = div()
             .debug_selector(move || format!("closing-{}", id.as_uuid()))
@@ -1265,7 +1286,7 @@ impl WorkspaceView {
             let slot =
                 crate::palette::status_slot(theme, kind_icon(item, agent), status, hsla(ink), k)
                     .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
-            let title = self.tile_title(tab, item, cx);
+            let title = self.tile_title(item, cx);
             let label = SharedString::from(title.clone());
             let name = self.header_name(tab, id, title, chrome);
             let close = kit::icon_button_at(
@@ -2183,7 +2204,8 @@ impl WorkspaceView {
             },
             ItemKind::Browser { .. } => match self.browsers.get(&item.id) {
                 Some(view) => {
-                    view.update(cx, |v, _| v.set_alpha(placed.alpha));
+                    let frame = self.frames_drawn;
+                    view.update(cx, |v, _| v.set_drawn(placed.alpha, frame));
                     div()
                         .flex_1()
                         .min_h_0()

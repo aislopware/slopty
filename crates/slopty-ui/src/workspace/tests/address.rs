@@ -61,7 +61,7 @@ fn command_l_opens_the_address_and_return_goes_there(cx: &mut TestAppContext) {
     assert_eq!(fake.drain(), vec![sent], "the address alone, as the item's");
     assert!(cx.debug_bounds(selector("address", tile.item)).is_none(), "and the field closed");
     assert_eq!(url_of(&view, cx, tile), url, "the page goes there");
-    let title = view.read_with(cx, |v, cx| v.tile_title(tile, v.item(tile).unwrap(), cx));
+    let title = view.read_with(cx, |v, cx| v.tile_title(v.item(tile).unwrap(), cx));
     assert_eq!(title, "localhost:3000/docs", "an untitled page is named by its new address");
 }
 

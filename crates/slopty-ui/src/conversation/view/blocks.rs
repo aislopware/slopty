@@ -803,7 +803,7 @@ impl ConversationView {
                     .child(label),
                 s.accent,
             )
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key.clone(), cx)))
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key, cx)))
         });
         let clipped = (level == Level::Full && whole.is_none())
             .then(|| {

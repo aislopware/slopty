@@ -222,7 +222,7 @@ impl WorkspaceView {
             .and_then(|a| agent_ask_line(a).or_else(|| Some(agent_status_word(a))))
             .filter(|w| !w.is_empty())
             .unwrap_or_else(|| Status::NeedsYou.label().to_owned());
-        let title = waiting.tile.and_then(|t| Some(self.tile_title(t, self.item(t)?, cx)));
+        let title = waiting.tile.and_then(|t| Some(self.tile_title(self.item(t)?, cx)));
         let worker = self.workers.get(&waiting.worker).map(|w| w.name.as_str()).unwrap_or_default();
         let age = agent
             .map(|a| a.since_ms)

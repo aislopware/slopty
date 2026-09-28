@@ -187,10 +187,10 @@ impl DownloadRow {
     #[must_use]
     pub fn status(&self) -> String {
         match &self.state {
-            DownloadState::Receiving { done, total: 0 } => crate::file::size_label(*done),
+            DownloadState::Receiving { done, total: 0 } => kit::size_label(*done),
             DownloadState::Receiving { done, total } => {
                 let percent = done.saturating_mul(100).checked_div(*total).unwrap_or(0).min(100);
-                format!("{percent}% of {}", crate::file::size_label(*total))
+                format!("{percent}% of {}", kit::size_label(*total))
             }
             DownloadState::Saved => "Saved".to_owned(),
             DownloadState::Failed(why) => why.clone(),
@@ -253,6 +253,8 @@ pub struct BrowserView {
     drawn: Drawn,
     /// The tile's opacity this frame.
     alpha: f32,
+    /// The workspace's frame drawing it: a body measured in an older one was not drawn in this.
+    frame: u64,
     /// The page's last picture, shown while the page is hidden.
     snapshot: Option<Arc<RenderImage>>,
     theme: Theme,
@@ -294,6 +296,7 @@ impl BrowserView {
             page: PageState { url: url.to_owned(), loading: true, ..PageState::default() },
             drawn: Rc::default(),
             alpha: 1.0,
+            frame: 0,
             snapshot: None,
             theme,
             native: native::Native::default(),
@@ -410,9 +413,10 @@ impl BrowserView {
         self.drawn.get().filter(|(f, _)| *f == frame).map(|(_, b)| b)
     }
 
-    /// The tile's opacity this frame.
-    pub const fn set_alpha(&mut self, alpha: f32) {
+    /// The tile's opacity in the workspace's frame `frame`, which is about to draw it.
+    pub const fn set_drawn(&mut self, alpha: f32, frame: u64) {
         self.alpha = alpha;
+        self.frame = frame;
     }
 
     /// The tile's opacity as last set.
@@ -1049,7 +1053,7 @@ impl Render for BrowserView {
         let s = &theme.surfaces;
         let id = *self.id.as_uuid();
         let drawn = Rc::clone(&self.drawn);
-        let frame = cx.try_global::<FrameCount>().map_or(0, |f| f.0);
+        let frame = self.frame;
         let measure = canvas(
             move |bounds, _window, _cx| drawn.set(Some((frame, bounds))),
             |_bounds, (), _window, _cx| {},
@@ -1308,13 +1312,6 @@ impl BrowserView {
             .collect()
     }
 }
-
-/// The workspace's frame number, bumped every time it draws: a body measured in an older
-/// frame was not drawn in this one.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct FrameCount(pub u64);
-
-impl gpui::Global for FrameCount {}
 
 /// The platform's web view (`WKWebView` on macOS and iOS) behind the tile's API.
 mod native {
