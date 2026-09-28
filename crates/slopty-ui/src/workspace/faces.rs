@@ -39,6 +39,10 @@ pub(super) struct Faces {
     pub focus: HashSet<SessionId>,
     /// What each face asks for.
     pub subscriptions: HashMap<SessionId, gpui::Subscription>,
+    /// Faces that showed when their worker's link dropped. The session's terminal and agent
+    /// state go with the link, but the face stays on its tile, draft and all, saying the
+    /// worker is away, until the worker says again what runs there.
+    pub held: HashSet<SessionId>,
 }
 
 impl WorkspaceView {
@@ -46,6 +50,9 @@ impl WorkspaceView {
     /// phone-width layout and the TUI elsewhere. Only while an agent runs in it.
     #[must_use]
     pub fn face_shown(&self, session: SessionId) -> bool {
+        if self.faces.held.contains(&session) {
+            return true;
+        }
         let agent = self.agent_state(session).is_some_and(|a| a.status != AgentStatus::None);
         agent && self.faces.chosen.get(&session).copied().unwrap_or_else(|| self.layout.is_phone())
     }
@@ -119,7 +126,10 @@ impl WorkspaceView {
         let wanted: Vec<SessionId> = tiled
             .iter()
             .copied()
-            .filter(|s| self.terminals.contains_key(s) && self.face_shown(*s))
+            .filter(|s| {
+                (self.terminals.contains_key(s) || self.faces.held.contains(s))
+                    && self.face_shown(*s)
+            })
             .collect();
         for session in &wanted {
             if !self.faces.views.contains_key(session) {
@@ -185,8 +195,18 @@ impl WorkspaceView {
                 .map(|w| w.name.clone());
             view.update(cx, |v, cx| v.set_away(away, cx));
         }
+        // A held face lets go once its worker has said again what runs in the session, or
+        // once its tile or worker is gone.
+        let held: Vec<SessionId> = self.faces.held.iter().copied().collect();
+        for session in held {
+            let back = self.terminals.contains_key(&session) && self.agent_state(session).is_some();
+            if back || !tiled.contains(&session) || self.worker_of_session(session).is_none() {
+                self.faces.held.remove(&session);
+            }
+        }
         // Faces of sessions that are gone go with them.
-        let live: HashSet<SessionId> = self.terminals.keys().copied().collect();
+        let live: HashSet<SessionId> =
+            self.terminals.keys().chain(&self.faces.held).copied().collect();
         self.faces.views.retain(|s, _| live.contains(s));
         self.faces.subscriptions.retain(|s, _| live.contains(s));
         self.faces.chosen.retain(|s, _| live.contains(s));

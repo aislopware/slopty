@@ -1855,7 +1855,7 @@ mod latency_tests {
             let started = Instant::now();
             let mut buffer = vec![0.0_f32; DEVICE_FRAMES * CHANNELS as usize];
             while output.len() < input.len() + buffer.len() {
-                timed_render(user, &mut buffer);
+                render_once(user, &mut buffer);
                 output.extend_from_slice(&buffer);
             }
             let took = started.elapsed();
@@ -1909,15 +1909,8 @@ mod latency_tests {
         assert_eq!(playout.stats().underruns, 0);
     }
 
-    /// Nanosecond percentiles of `times`: p50, p99, p99.9, max.
-    fn percentiles(times: &mut [u64]) -> [u64; 4] {
-        times.sort_unstable();
-        let at = |q: usize| times[(times.len() * q / 1000).min(times.len() - 1)];
-        [at(500), at(990), at(999), times[times.len() - 1]]
-    }
-
-    /// One call of the render callback on a 512-frame buffer, timed.
-    fn timed_render(user: NonNull<c_void>, buffer: &mut [f32]) -> u64 {
+    /// One call of the render callback on a 512-frame buffer.
+    fn render_once(user: NonNull<c_void>, buffer: &mut [f32]) {
         let mut flags = AudioUnitRenderActionFlags::empty();
         // SAFETY: a plain C struct for which all zeroes is a valid value.
         let mut stamp: AudioTimeStamp = unsafe { std::mem::zeroed() };
@@ -1929,7 +1922,6 @@ mod latency_tests {
                 mData: buffer.as_mut_ptr().cast::<c_void>(),
             }],
         };
-        let start = Instant::now();
         // SAFETY: called as the unit calls it: the ring outlives the call, and the list's one
         // buffer holds the bytes it states.
         let status = unsafe {
@@ -1942,16 +1934,15 @@ mod latency_tests {
                 &raw mut list,
             )
         };
-        let took = u64::try_from(start.elapsed().as_nanos()).unwrap();
         assert_eq!(status, 0);
-        took
     }
 
     /// What the render callback costs on 512-frame buffers: alone, with the decoder's pushes
     /// between renders on the same thread, and with them on a thread of their own that keeps
     /// the ring a few packets ahead of the renders. `docs/MEASUREMENTS.md`, 2026-09-28.
+    /// `cargo xtask bench --filter render_cost` runs it.
     #[test]
-    #[ignore = "a measurement; run in release with --no-capture"]
+    #[ignore = "a measurement; run with `cargo xtask bench`"]
     fn render_cost() {
         const RENDERS: usize = 200_000;
         let epoch = Instant::now();
@@ -1972,8 +1963,9 @@ mod latency_tests {
         };
         let mut buffer = vec![0.0_f32; DEVICE_FRAMES * CHANNELS as usize];
 
+        let bench = slopty_testkit::bench::Bench::new("codec.render_cost");
         let mut playout = Playout::default();
-        let mut times = Vec::with_capacity(RENDERS);
+        let mut same = bench.series("same_thread");
         let mut seq = 1_u32;
         for i in 0..RENDERS {
             while seq as usize * FRAME_SAMPLES as usize <= (i + 3) * DEVICE_FRAMES {
@@ -1981,17 +1973,16 @@ mod latency_tests {
                 seq += 1;
             }
             let user = NonNull::from(&playout.ring).cast::<c_void>();
-            times.push(timed_render(user, &mut buffer));
+            same.time(|| render_once(user, &mut buffer));
         }
-        let [p50, p99, p999, max] = percentiles(&mut times);
-        eprintln!(
-            "same thread: p50 {p50} ns, p99 {p99} ns, p99.9 {p999} ns, max {max} ns; {:?}",
-            playout.stats()
-        );
+        let same = same.report().unwrap();
+        eprintln!("same thread: p99.9 {} ns; {:?}", same.wall.p999, playout.stats());
 
         let Playout { mut feed, ring } = Playout::default();
         let rendered = AtomicUsize::new(0);
-        let mut times = Vec::with_capacity(RENDERS);
+        // The pushes run on their own thread while a render is timed, and the process's
+        // instruction count would be theirs too.
+        let mut beside = bench.series("decoder_thread_beside").wall_only();
         std::thread::scope(|s| {
             s.spawn(|| {
                 let mut seq = 1_u32;
@@ -2010,14 +2001,12 @@ mod latency_tests {
             });
             for i in 0..RENDERS {
                 let user = NonNull::from(&ring).cast::<c_void>();
-                times.push(timed_render(user, &mut buffer));
+                beside.time(|| render_once(user, &mut buffer));
                 rendered.store(i + 1, Ordering::Release);
             }
         });
-        let [p50, p99, p999, max] = percentiles(&mut times);
-        eprintln!(
-            "decoder thread beside: p50 {p50} ns, p99 {p99} ns, p99.9 {p999} ns, max {max} ns"
-        );
+        let beside = beside.report().unwrap();
+        eprintln!("decoder thread beside: p99.9 {} ns", beside.wall.p999);
     }
 
     /// iOS renders 1 024 frames at a time unless the session asks for fewer, twice what a Mac

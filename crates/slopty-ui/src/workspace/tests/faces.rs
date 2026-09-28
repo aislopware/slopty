@@ -505,3 +505,33 @@ fn a_first_prompt_renumbers_the_agents_that_read_alike(cx: &mut TestAppContext) 
     }
     panic!("the recorded session has a prompt");
 }
+
+/// A link that drops under a shown face leaves the face on its tile: the draft stays, the
+/// composer says the worker is away, and no pill is laid over it to say so twice.
+#[gpui::test]
+fn a_face_stays_through_a_dropped_link_with_its_draft(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let (tile, session) = agent_tile(&view, cx, &mut studio);
+    cx.simulate_keystrokes("cmd-j");
+    cx.run_until_parked();
+    cx.simulate_input("half a thought");
+    cx.run_until_parked();
+    let face = view.read_with(cx, |v, _| v.conversation(session).cloned()).expect("a face");
+
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Unreachable, cx);
+    });
+    cx.run_until_parked();
+    assert!(face_shown(&view, cx, session), "the face stays on its tile");
+    assert!(cx.debug_bounds("composer").is_some(), "and is drawn");
+    let kept = view.read_with(cx, |v, _| v.conversation(session).cloned()).expect("kept");
+    assert_eq!(kept.entity_id(), face.entity_id(), "the same face, not a new one");
+    assert_eq!(face.read_with(cx, ConversationView::draft), "half a thought");
+    assert_eq!(face.read_with(cx, |f, _| f.away().map(str::to_owned)), Some("studio".to_owned()));
+    assert!(
+        cx.debug_bounds(selector("state", tile.item)).is_none(),
+        "the composer says it; no pill says it again"
+    );
+}

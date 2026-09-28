@@ -1364,9 +1364,8 @@ mod tests {
         assert_eq!((next.frames_ok, next.frames_fec, next.datagrams_lost), (1, 1, 1));
     }
 
+    // The default config: 256 cases, and `PROPTEST_CASES` scales it (`cargo xtask nightly`).
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
-
         /// Any loss pattern within the parity budget, in any arrival order, recovers the exact
         /// frame.
         #[test]

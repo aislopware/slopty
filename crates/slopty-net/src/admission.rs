@@ -16,11 +16,12 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use slopty_tailnet::{Grant, LocalApi};
+use tokio::time::Instant;
 
 use crate::NetError;
 

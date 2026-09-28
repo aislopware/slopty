@@ -250,7 +250,7 @@ mod tests {
         let dead = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         let endpoint = crate::endpoint::bind_lease("127.0.0.1:0".parse().unwrap()).unwrap();
         let found = |name: &str, addr| Found { name: name.to_owned(), addr };
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let answered = answering(&endpoint, vec![found("dead", dead), found("live", live)]).await;
         assert_eq!(answered, [found("live", live)]);
         assert!(

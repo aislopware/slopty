@@ -1252,6 +1252,60 @@ impl WorkspaceView {
         [&chrome.navigator, &chrome.titlebar, &chrome.statusbar].map(|v| v.read(cx).renders)
     }
 
+    /// The length of every map and list the workspace keeps per tile, session or worker, by
+    /// name: what closing everything that was opened must bring back to where it was.
+    #[cfg(test)]
+    fn footprint(&self) -> Vec<(&'static str, usize)> {
+        let per_worker = |f: fn(&Worker) -> usize| self.workers.values().map(f).sum::<usize>();
+        vec![
+            ("workers", self.workers.len()),
+            ("workers.sessions", per_worker(|w| w.sessions.len())),
+            ("workers.watched", per_worker(|w| w.watched.len())),
+            ("workers.pending_opens", per_worker(|w| w.pending_opens.len())),
+            ("workers.queued", per_worker(|w| w.queued.len())),
+            ("terminals", self.terminals.len()),
+            ("screens", self.screens.len()),
+            ("notes", self.notes.len()),
+            ("files", self.files.len()),
+            ("folders", self.folders.len()),
+            ("probes", self.probes.len()),
+            ("browsers", self.browsers.len()),
+            ("browser_links", self.browser_links.len()),
+            ("file_focus", self.file_focus.len()),
+            ("drawn_waiting", self.drawn_waiting.len()),
+            ("twins", self.twins.len()),
+            ("derived", self.derived.len()),
+            ("places", self.places.len()),
+            ("note_facts", self.note_facts.len()),
+            ("running", self.running.len()),
+            ("titles", self.titles.len()),
+            ("agents", self.agents.len()),
+            ("server_agents", self.server_agents.len()),
+            ("finished", self.finished.len()),
+            ("recency", self.recency.len()),
+            ("unseen", self.unseen.len()),
+            ("parked", self.parked.len()),
+            ("on_screen", self.on_screen.len()),
+            ("find_hits", self.find_hits.len()),
+            ("palette_extra", self.palette_extra.len()),
+            ("more_entries", self.more_entries.len()),
+            ("closed", self.closed.len()),
+            ("placed", self.placed.len()),
+            ("given_shell", self.given_shell.len()),
+            ("given_pending", self.given_pending.len()),
+            ("watching", self.watching.len()),
+            ("uploads", self.uploads.len()),
+            ("ports", self.ports.len()),
+            ("nav.folded", self.nav.folded.len()),
+            ("faces.views", self.faces.views.len()),
+            ("faces.chosen", self.faces.chosen.len()),
+            ("faces.following", self.faces.following.len()),
+            ("faces.focus", self.faces.focus.len()),
+            ("faces.subscriptions", self.faces.subscriptions.len()),
+            ("faces.held", self.faces.held.len()),
+        ]
+    }
+
     /// A shell's running command, as its terminal now has it, against what its navigator row
     /// last said: a change (a command started or ended) draws the navigator again. Everything
     /// else a terminal changes is its own.

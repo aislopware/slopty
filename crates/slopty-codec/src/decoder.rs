@@ -770,22 +770,25 @@ mod tests {
     }
 
     /// What turning one received access unit into a sample buffer costs before VideoToolbox
-    /// sees it. `docs/MEASUREMENTS.md` records runs.
+    /// sees it. `cargo xtask bench --filter access_unit_conversion_cost` runs it;
+    /// `docs/MEASUREMENTS.md` records runs.
     #[test]
-    #[ignore = "a measurement; run with --run-ignored only --no-capture in release"]
+    #[ignore = "a measurement; run with `cargo xtask bench`"]
     fn access_unit_conversion_cost() {
         let unit = keyframe();
         let sets: Vec<Vec<u8>> = WARM_UP_HEVC.iter().map(|s| s.to_vec()).collect();
         let format = format_description(VideoCodec::Hevc, &sets).unwrap();
-        let rounds = 500_u32;
-        let started = std::time::Instant::now();
-        for _ in 0..rounds {
-            let access = AccessUnit::parse(&unit, hevc::is_parameter_set);
-            assert_eq!(access.parameter_sets().len(), 3);
-            let sample = sample_buffer(&access, &format, cf::time_us(0)).unwrap();
-            drop(sample);
+        let mut convert = slopty_testkit::bench::Bench::new("codec.access_unit_conversion_cost")
+            .series("keyframe");
+        for _ in 0..500 {
+            convert.time(|| {
+                let access = AccessUnit::parse(&unit, hevc::is_parameter_set);
+                assert_eq!(access.parameter_sets().len(), 3);
+                let sample = sample_buffer(&access, &format, cf::time_us(0)).unwrap();
+                drop(sample);
+            });
         }
-        let per = started.elapsed() / rounds;
-        eprintln!("keyframe {} B: {per:?} per access unit", unit.len());
+        eprintln!("keyframe {} B", unit.len());
+        convert.report().unwrap();
     }
 }

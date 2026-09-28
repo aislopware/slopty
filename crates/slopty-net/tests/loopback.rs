@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
     use slopty_net::admission::Admission;
@@ -14,6 +14,7 @@ mod tests {
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::terminal::TermEvent;
     use slopty_proto::transfer::{BulkHeader, Purpose};
+    use tokio::time::Instant;
 
     fn hello() -> Hello {
         Hello { client: ClientId::new(), name: "test".to_owned() }

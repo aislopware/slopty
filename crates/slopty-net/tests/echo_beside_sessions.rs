@@ -13,7 +13,7 @@
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_core::{ClientId, SessionId, WorkerId};
     use slopty_net::admission::Admission;
@@ -23,6 +23,7 @@ mod tests {
     use slopty_net::{ClientMsg, WorkerMsg};
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::terminal::{TermEvent, TermRequest};
+    use tokio::time::Instant;
 
     /// The link: 20 Mbit/s, 2 ms each way, a 100 ms bottleneck queue.
     const RATE: u64 = 2_500_000;

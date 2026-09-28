@@ -22,4 +22,6 @@ resvg.workspace = true
 icns.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The daemons' footprint, descriptors and threads for `soak`, and the percentiles.
+slopty-testkit.workspace = true
 toml.workspace = true

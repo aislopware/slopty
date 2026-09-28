@@ -53,13 +53,19 @@ impl WorkerListener {
     /// Listen on `local` (see [`crate::endpoint::bind`]), letting in whom `admission` admits.
     /// Must be called on a tokio runtime: the accept loop runs as a task of its own.
     pub fn bind(local: SocketAddr, admission: Admission) -> Result<Self, NetError> {
-        let endpoint = crate::endpoint::bind(local, true)?;
+        Ok(Self::on(crate::endpoint::bind(local, true)?, admission))
+    }
+
+    /// Listen on an accepting `endpoint` already bound ([`crate::endpoint::bind_on`]), letting
+    /// in whom `admission` admits. Must be called on a tokio runtime.
+    #[must_use]
+    pub fn on(endpoint: Endpoint, admission: Admission) -> Self {
         let hello = |first| match first {
             ClientMsg::Hello(hello) => Some(hello),
             _ => None,
         };
         let rx = crate::listen::spawn(endpoint.clone(), admission.clone(), hello, "client");
-        Ok(Self { endpoint, admission, greeted: Arc::new(Mutex::new(rx)) })
+        Self { endpoint, admission, greeted: Arc::new(Mutex::new(rx)) }
     }
 
     /// The endpoint.

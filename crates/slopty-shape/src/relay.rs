@@ -7,10 +7,11 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc, watch};
+use tokio::time::Instant;
 
 use crate::{Fate, Link, Shaper, Tally};
 

@@ -143,7 +143,7 @@ mod tests {
             let mut arrived = Vec::new();
             let mut buf = [0; ECHO_BYTES];
             while incoming.read_exact(&mut buf).await.is_ok() {
-                arrived.push(Instant::now());
+                arrived.push(tokio::time::Instant::now().into_std());
             }
             arrived
         });
@@ -209,7 +209,7 @@ mod tests {
             }
             let phase = Duration::from_micros(next(&mut seed) % 16_667);
             tokio::time::sleep_until(due.checked_add(phase).unwrap()).await;
-            written.push(Instant::now());
+            written.push(tokio::time::Instant::now().into_std());
             link.echo.write_all(&[0; ECHO_BYTES]).await.unwrap();
         }
         finish(link, &written).await
@@ -228,7 +228,7 @@ mod tests {
         for _ in 0..ECHOES {
             let gap = Duration::from_micros(20_000 + next(&mut seed) % 10_000);
             tokio::time::sleep(gap).await;
-            written.push(Instant::now());
+            written.push(tokio::time::Instant::now().into_std());
             link.echo.write_all(&[0; ECHO_BYTES]).await.unwrap();
         }
         let ms = finish(link, &written).await;

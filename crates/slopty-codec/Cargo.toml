@@ -33,6 +33,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+slopty-testkit.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 # The output device's latency terms, read by the ignored measurement in `tests/audio_latency.rs`.

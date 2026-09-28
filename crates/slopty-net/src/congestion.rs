@@ -389,11 +389,16 @@ mod tests {
     const MTU: u16 = 1200;
     const MS: Duration = Duration::from_millis(1);
 
+    /// Any instant to start from, in the type noq hands its controllers.
+    fn start() -> Instant {
+        tokio::time::Instant::now().into_std()
+    }
+
     fn bounded(initial_window: u64, ceiling: Option<f64>) -> Bounded {
         let mut config = Bbr3Config::default();
         config.initial_window(initial_window);
         let factory = Arc::new(BoundedFactory::new(Arc::new(config), ceiling));
-        *factory.build(Instant::now(), MTU).into_any().downcast::<Bounded>().unwrap()
+        *factory.build(start(), MTU).into_any().downcast::<Bounded>().unwrap()
     }
 
     /// Acknowledge `bytes` every millisecond for `ms`, each packet sent `rtt` before.
@@ -411,7 +416,7 @@ mod tests {
     #[test]
     fn in_flight_follows_what_noq_reports() {
         let mut cc = bounded(38_400, Some(CEILING_BDPS));
-        let now = Instant::now();
+        let now = start();
         cc.on_packet_sent(now, 1_200, 0);
         cc.on_packet_sent(now, 1_200, 1);
         assert_eq!(cc.in_flight, 2_400);
@@ -424,19 +429,19 @@ mod tests {
         let mut cc = bounded(10_000_000, Some(CEILING_BDPS));
         assert_eq!(cc.window(), 10_000_000, "nothing measured yet, so no ceiling");
         // 2.5 MB/s (2 500 B a millisecond) over a 5 ms round trip: a 12.5 kB product.
-        deliver(&mut cc, Instant::now(), 5 * MS, 50, 2_500);
+        deliver(&mut cc, start(), 5 * MS, 50, 2_500);
         let window = cc.window();
         assert!((24_000..=26_000).contains(&window), "twice 12.5 kB, got {window}");
 
         let mut unbounded = bounded(10_000_000, None);
-        deliver(&mut unbounded, Instant::now(), 5 * MS, 50, 2_500);
+        deliver(&mut unbounded, start(), 5 * MS, 50, 2_500);
         assert_eq!(unbounded.window(), 10_000_000, "no ceiling only observes");
     }
 
     #[test]
     fn a_short_round_trip_still_leaves_a_burst() {
         let mut cc = bounded(10_000_000, Some(CEILING_BDPS));
-        deliver(&mut cc, Instant::now(), Duration::from_micros(50), 20, 2_500);
+        deliver(&mut cc, start(), Duration::from_micros(50), 20, 2_500);
         assert_eq!(cc.window(), 16 * 1_200);
     }
 
@@ -444,7 +449,7 @@ mod tests {
     fn a_clump_of_acks_does_not_read_as_a_fast_link() {
         let mut cc = bounded(10_000_000, Some(CEILING_BDPS));
         // A steady 2.5 MB/s for 20 ms, then 50 kB acknowledged at one instant.
-        let now = deliver(&mut cc, Instant::now(), 5 * MS, 20, 2_500);
+        let now = deliver(&mut cc, start(), 5 * MS, 20, 2_500);
         cc.delivery.acked = cc.delivery.acked.saturating_add(50_000);
         cc.on_end_acks(now, 0, false, Some(100));
         let rate = cc.delivery.max.get().unwrap();
@@ -455,7 +460,7 @@ mod tests {
     #[test]
     fn a_recent_best_forgets_after_its_window() {
         let mut min = Recent::new(Ord::min);
-        let start = Instant::now();
+        let start = start();
         assert_eq!(min.get(), None);
         min.update(start, 3_u32);
         min.update(start + Duration::from_secs(1), 9);

@@ -23,7 +23,7 @@ mod tests {
     use std::fmt::Write as _;
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_core::{ClientId, WallMs, WorkerId, XferId};
     use slopty_net::admission::Admission;
@@ -34,6 +34,7 @@ mod tests {
     use slopty_net::{Connection, WorkerMsg, congestion};
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::transfer::{BulkHeader, Purpose};
+    use tokio::time::Instant;
 
     const SIZE: usize = 16 << 20;
     const WAIT: Duration = Duration::from_secs(60);

@@ -124,3 +124,35 @@ under `target/deep/`:
 
 `cargo xtask profile -- <command…>` records a CPU profile of any command with samply into
 `target/profile/<epoch>.json.gz`; `samply load <file>` opens it in the Firefox Profiler.
+
+## Budgets, the bench, the soak and the nightly
+- The allocation budgets are ordinary tests (`tests/allocs.rs` in `slopty-media`,
+  `slopty-engine` and `slopty-grid`), so `cargo gate` runs them. A broken one prints what the
+  path allocated now; a lower number is lowered in the test, a higher one is a finding.
+- `cargo xtask bench [--filter <name>] [--update-budgets] [--wall]` runs every `*_cost`
+  measurement of the crates that take `slopty-testkit` as a dev-dependency, in release, and holds
+  each series' retired instructions per operation to `xtask/budgets.toml` (5 % slack). It fails
+  on a series over budget, one with no budget, and a budget nothing measured. After a change
+  that makes a path cheaper, or a new measurement, `--update-budgets` records the run, and the
+  diff of `xtask/budgets.toml` goes in the commit with the change. `--wall` appends the wall
+  times to `target/nightly/bench.jsonl` and prints how they moved since the last run there.
+  The printed table carries the rows for `docs/MEASUREMENTS.md`.
+- A new measurement is an `#[ignore]`d test named `*_cost` that times its samples with
+  `slopty_testkit::bench::Bench` (one `series` per thing timed, `report()` at the end). A series
+  whose samples run other threads is `wall_only()`: the instruction count is the process's.
+- `cargo xtask soak [--seconds 60] [--interval 2] [--stacks] [--debug] [--out <dir>]` starts the
+  server, ptyd and worker from a temporary HOME and drives open, flood, hook, read and close
+  cycles through the CLI. It fails on footprint growth, a peak over budget, descriptors or
+  threads left behind, or a leak `leaks` finds. The samples, logs, `leaks` reports and
+  `summary.json` go to `target/deep/soak/last`. The daemons it runs are copies under
+  `target/deep/soak/bin`, signed ad hoc for `leaks`; the build's own binaries keep their
+  signature. `--stacks` adds `MallocStackLogging`, so the reports show where a leak came from.
+- `cargo xtask nightly [run] [--only <check>] [--skip <check>] [--soak-minutes 20]
+  [--proptest-cases 4096] [--iterations 50]` runs the heavy lanes one after another under
+  `nice`: `soak`, `bench` (with `--wall`), `proptest`, `gpui-iterations`, `miri`,
+  `sanitize-address`, `sanitize-thread`, `coverage` and `features`. Each writes `<check>.log`
+  and `<check>.json` under `target/nightly/<date>/`, beside a `summary.json`. A check whose tool
+  is missing is skipped and says why. `cargo xtask nightly install` writes and loads the
+  LaunchAgent `dev.aislopware.slopty.nightly`, which runs it at 03:00 at background priority;
+  `cargo xtask nightly uninstall` removes it. A failing seed of `gpui-iterations` replays with
+  `SEED=<n> cargo nextest run -p slopty-ui <test>`.

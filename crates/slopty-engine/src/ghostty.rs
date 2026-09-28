@@ -133,6 +133,10 @@ pub struct GhosttyEngine {
     /// though no cell moved.
     discipline_changed: bool,
     scratch: String,
+    /// A row read and found the same as the one the viewers hold, kept for the next row to be
+    /// read into: a scroll re-reads every row and ships only the few that came in, and a
+    /// fresh line per row was most of what a frame allocated (`tests/allocs.rs`).
+    spare_line: Option<Line>,
     /// Scratch for OSC 8 URIs (`ghostty_grid_ref_hyperlink_uri` wants a caller buffer).
     uri_buf: Vec<u8>,
     /// Watches the bytes for `OSC 133;A` and `133;D`, which libghostty does not surface.
@@ -311,6 +315,7 @@ impl GhosttyEngine {
             line_discipline: None,
             discipline_changed: false,
             scratch: String::with_capacity(16),
+            spare_line: None,
             uri_buf: vec![0; 256],
             osc: osc133::Scanner::default(),
             prompt_redraw: osc133::Redraw::default(),
@@ -768,7 +773,7 @@ impl GhosttyEngine {
                 shown.push(if known { self.shown.take(abs) } else { None });
             }
             if build {
-                let mut line = Line::blank(cols);
+                let mut line = blank_line(self.spare_line.take(), cols);
                 let mut first_semantic = None;
                 let mut first_input = None;
                 // The row flag may be a false positive, but a row without it has no links.
@@ -870,6 +875,8 @@ impl GhosttyEngine {
                 }
                 if full || forced || !same {
                     updates.push(RowUpdate { row: y, line });
+                } else {
+                    self.spare_line = Some(line);
                 }
                 if take != Take::Joiner {
                     row.set_dirty(false)?;
@@ -1441,6 +1448,20 @@ fn ship(
 
 /// A placeholder cell decoded from its wire style and its grapheme cluster (U+10EEEE first,
 /// then the diacritics).
+/// A blank line of `cols` cells, in `spare`'s allocation when it has one of that width.
+fn blank_line(spare: Option<Line>, cols: u16) -> Line {
+    match spare {
+        Some(mut line) if line.cols() == cols => {
+            line.cells.fill(Cell::BLANK);
+            line.flags = LineFlags::empty();
+            line.mark = SemanticMark::Unknown;
+            line.links.clear();
+            line
+        }
+        _ => Line::blank(cols),
+    }
+}
+
 fn placeholder_cell(style: &Style, cluster: &str) -> placeholder::Cell {
     let id = |c: slopty_grid::Color| match c {
         slopty_grid::Color::Palette(i) => placeholder::color_id(Some(i), None),
@@ -3108,6 +3129,7 @@ mod tests {
 #[cfg(test)]
 mod scrollback_tests {
     use slopty_proto::input::CellMetrics;
+    use slopty_testkit::bench::Bench;
 
     use super::*;
 
@@ -3195,9 +3217,8 @@ mod scrollback_tests {
     }
 
     /// What serving one `FetchLines` chunk (4096 rows, the worker's cap) costs from the oldest
-    /// history, plain and coloured rows alike. `cargo nextest run -p slopty-engine --release
-    /// --run-ignored only fetch_lines_cost --no-capture` prints it (MEASUREMENTS.md "history
-    /// fetch").
+    /// history, plain and coloured rows alike. `cargo xtask bench --filter fetch_lines_cost`
+    /// runs it (MEASUREMENTS.md "history fetch").
     #[test]
     #[ignore = "measurement, run by hand"]
     fn fetch_lines_cost() {
@@ -3214,89 +3235,59 @@ mod scrollback_tests {
         }
         e.write(out.as_bytes());
         let oldest = LineIndex(e.base);
-        let mut us = Vec::new();
+        let mut fetch = Bench::new("engine.fetch_lines_cost").series("4096_rows");
         for _ in 0..10 {
-            let t = std::time::Instant::now();
-            let (_, lines) = e.lines(oldest, 4096).unwrap();
-            us.push(t.elapsed().as_micros());
+            let (_, lines) = fetch.time(|| e.lines(oldest, 4096).unwrap());
             assert_eq!(lines.len(), 4096);
         }
-        us.sort_unstable();
-        eprintln!(
-            "fetch_lines_cost: 4096 rows x 80 cols from the oldest: p50 {} us max {} us",
-            us[us.len() / 2],
-            us[us.len() - 1],
-        );
+        fetch.report().unwrap();
     }
 
     /// What one search costs over a full history, as the text search does it today: format the
-    /// whole terminal to plain text, then scan. `cargo nextest run -p slopty-engine search_cost
-    /// --run-ignored all --no-capture` prints it (MEASUREMENTS.md "search").
+    /// whole terminal to plain text, then scan. `cargo xtask bench --filter search_cost` runs it
+    /// (MEASUREMENTS.md "search").
     #[test]
     #[ignore = "measurement, run by hand"]
     fn search_cost() {
+        let bench = Bench::new("engine.search_cost");
         for lines in [1_000_u32, 10_000, 50_000] {
             let mut e = engine(lines);
             write_lines(&mut e, lines);
-            let total = e.total_lines().unwrap();
-            let mut format_us = Vec::new();
-            let mut plain_us = Vec::new();
-            let mut regex_us = Vec::new();
+            let mut format = bench.series(&format!("{lines}_lines.format"));
+            let mut plain = bench.series(&format!("{lines}_lines.plain"));
+            let mut regex = bench.series(&format!("{lines}_lines.regex"));
             for _ in 0..10 {
-                let t = std::time::Instant::now();
-                let text = e.plain_text().unwrap();
-                format_us.push(t.elapsed().as_micros());
+                let text = format.time(|| e.plain_text().unwrap());
                 assert!(!text.is_empty());
-                let t = std::time::Instant::now();
-                let found = e.search("lazy dog", false, 100).unwrap();
-                plain_us.push(t.elapsed().as_micros());
+                let found = plain.time(|| e.search("lazy dog", false, 100).unwrap());
                 assert!(found.total > 0);
-                let t = std::time::Instant::now();
-                let found = e.search("line [0-9]+7 ", true, 100).unwrap();
-                regex_us.push(t.elapsed().as_micros());
+                let found = regex.time(|| e.search("line [0-9]+7 ", true, 100).unwrap());
                 assert!(found.total > 0);
             }
-            format_us.sort_unstable();
-            plain_us.sort_unstable();
-            regex_us.sort_unstable();
-            eprintln!(
-                "search_cost: {total} lines: format p50 {} us, plain p50 {} us max {} us, regex \
-                 p50 {} us max {} us",
-                format_us[format_us.len() / 2],
-                plain_us[plain_us.len() / 2],
-                plain_us[plain_us.len() - 1],
-                regex_us[regex_us.len() / 2],
-                regex_us[regex_us.len() - 1],
-            );
+            for series in [format, plain, regex] {
+                series.report().unwrap();
+            }
         }
     }
 
     /// What a find bar's refresh costs while a program writes: the same needle searched again
-    /// after each 30 lines of output, over a full 50 000-line history. `cargo nextest run -p
-    /// slopty-engine --release --run-ignored only search_after_output_cost --no-capture` prints
-    /// it (MEASUREMENTS.md, "a find bar's refresh under output").
+    /// after each 30 lines of output, over a full 50 000-line history. `cargo xtask bench
+    /// --filter search_after_output_cost` runs it (MEASUREMENTS.md, "a find bar's refresh under
+    /// output").
     #[test]
     #[ignore = "measurement, run by hand"]
     fn search_after_output_cost() {
         let mut e = engine(50_000);
         write_lines(&mut e, 50_000);
         let _first = e.search("lazy dog", false, 100).unwrap();
-        let mut plain_us = Vec::new();
+        let mut refresh = Bench::new("engine.search_after_output_cost").series("plain");
         for round in 0..20_u32 {
             write_lines(&mut e, 30);
             e.write(format!("round {round}\r\n").as_bytes());
-            let t = std::time::Instant::now();
-            let found = e.search("lazy dog", false, 100).unwrap();
-            plain_us.push(t.elapsed().as_micros());
+            let found = refresh.time(|| e.search("lazy dog", false, 100).unwrap());
             assert!(found.total > 0);
         }
-        plain_us.sort_unstable();
-        eprintln!(
-            "search_after_output_cost: {} lines, 30 written between: p50 {} us, max {} us",
-            e.total_lines().unwrap(),
-            plain_us[plain_us.len() / 2],
-            plain_us[plain_us.len() - 1],
-        );
+        refresh.report().unwrap();
     }
 
     #[test]
@@ -3315,6 +3306,7 @@ mod checkpoint_tests {
     use pretty_assertions::assert_eq;
     use slopty_grid::{StyleFlags, TermModes};
     use slopty_proto::input::CellMetrics;
+    use slopty_testkit::bench::Bench;
 
     use super::*;
 
@@ -3477,45 +3469,64 @@ mod checkpoint_tests {
         assert_eq!(all_text(&b), all_text(&a));
     }
 
-    /// `cargo nextest run -p slopty-engine --release --run-ignored only checkpoint_cost
-    /// --no-capture`: how long a checkpoint takes and how big it is at 80x24 with 10 000 lines
-    /// of history, the number behind the checkpoint policy in `slopty_worker::session` (recorded
-    /// in MEASUREMENTS).
     /// What one echoed keystroke costs inside the engine: `write` of one byte, then
     /// `take_frame` for a 60×12 screen (the bench's size) — the "engine+frame" stage of the
-    /// keystroke trace (MEASUREMENTS.md, "the keystroke path, stage by stage"). Run with
-    /// `cargo nextest run -p slopty-engine --release --run-ignored only frame_cost --no-capture`.
+    /// keystroke trace (MEASUREMENTS.md, "the keystroke path, stage by stage").
+    /// `cargo xtask bench --filter frame_cost` runs it.
     #[test]
     #[ignore = "measurement, run by hand"]
     fn frame_cost() {
         let mut e = engine(60, 12, 1_000);
         e.write(b"$ ");
         let _first = e.take_frame(0).unwrap();
-        let mut write_us = Vec::new();
-        let mut frame_us = Vec::new();
+        let bench = Bench::new("engine.frame_cost");
+        let mut write = bench.series("write");
+        let mut take = bench.series("take_frame");
         for i in 0..1_000_u32 {
             let byte = if i % 2 == 0 { b"x" } else { b"y" };
-            let t = std::time::Instant::now();
-            e.write(byte);
-            write_us.push(t.elapsed().as_micros());
-            let t = std::time::Instant::now();
-            let frame = e.take_frame(u64::from(i)).unwrap();
-            frame_us.push(t.elapsed().as_micros());
+            write.time(|| e.write(byte));
+            let frame = take.time(|| e.take_frame(u64::from(i)).unwrap());
             assert!(frame.is_some(), "a typed byte dirties the row");
             if i % 50 == 49 {
                 e.write(b"\r\n");
             }
         }
-        write_us.sort_unstable();
-        frame_us.sort_unstable();
-        let q = |v: &[u128]| (v[v.len() / 2], v[v.len() * 9 / 10], v[v.len() - 1]);
-        eprintln!(
-            "frame_cost: write p50/p90/max {:?} us, take_frame p50/p90/max {:?} us",
-            q(&write_us),
-            q(&frame_us)
-        );
+        write.report().unwrap();
+        take.report().unwrap();
     }
 
+    /// What an Enter at a bottom prompt costs inside the engine: three lines of output and the
+    /// next prompt scroll the screen, and `take_frame` re-reads every row to ship the four that
+    /// came in, on the bench's 80×24 and on a full-screen 200×60.
+    /// `cargo xtask bench --filter scroll_frame_cost` runs it.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn scroll_frame_cost() {
+        let bench = Bench::new("engine.scroll_frame_cost");
+        for (cols, rows) in [(80_u16, 24_u16), (200, 60)] {
+            let mut e = engine(cols, rows, 10_000);
+            for i in 0..u32::from(rows) * 2 {
+                e.write(
+                    format!("-rw-r--r--  1 me  staff  {i:>6} Sep 25 file-{i}.rs\r\n").as_bytes(),
+                );
+            }
+            e.write(b"% ");
+            let _attach = e.full_frame(0).unwrap();
+            let mut take = bench.series(&format!("{cols}x{rows}"));
+            for i in 1..=500_u64 {
+                e.write(
+                    b"ls\r\nCargo.toml  crates  docs\r\napps  vendor  xtask\r\nREADME.md\r\n% ",
+                );
+                let frame = take.time(|| e.take_frame(i).unwrap());
+                assert!(frame.is_some_and(|f| !f.full), "a diff");
+            }
+            take.report().unwrap();
+        }
+    }
+
+    /// How long a checkpoint takes and how big it is at 80x24 with 10 000 lines of history,
+    /// the number behind the checkpoint policy in `slopty_worker::session` (recorded in
+    /// MEASUREMENTS). `cargo xtask bench --filter checkpoint_cost` runs it.
     #[test]
     #[ignore = "measurement, run by hand"]
     fn checkpoint_cost() {
@@ -3530,44 +3541,52 @@ mod checkpoint_tests {
                 .as_bytes(),
             );
         }
-        let start = std::time::Instant::now();
-        for chunk in out.chunks(65_536) {
-            e.write(chunk);
-        }
-        let fill = start.elapsed();
+        let bench = Bench::new("engine.checkpoint_cost");
+        let mut fill = bench.series("fill_engine");
+        fill.time(|| {
+            for chunk in out.chunks(65_536) {
+                e.write(chunk);
+            }
+        });
         let mut raw = Terminal::new(80, 24).unwrap();
         raw.set_scrollback_max_lines(Some(10_000)).unwrap();
-        let start = std::time::Instant::now();
-        for chunk in out.chunks(65_536) {
-            raw.vt_write(chunk);
-        }
-        let raw_fill = start.elapsed();
-        eprintln!("checkpoint_cost: raw libghostty-vt fill {raw_fill:?} vs engine fill {fill:?}");
-        let start = std::time::Instant::now();
-        let bytes = {
+        let mut raw_fill = bench.series("fill_raw_vt");
+        raw_fill.time(|| {
+            for chunk in out.chunks(65_536) {
+                raw.vt_write(chunk);
+            }
+        });
+        let mut format = bench.series("format");
+        let bytes = format.time(|| {
             let mut v = Vec::new();
             e.checkpoint(&mut v).unwrap();
             v
-        };
-        let took = start.elapsed();
-        let start = std::time::Instant::now();
-        let mut b = engine(80, 24, 10_000);
-        b.write(&bytes);
-        let replay = start.elapsed();
-        let start = std::time::Instant::now();
-        let mut c = engine(80, 24, 10_000);
-        for chunk in bytes.chunks(65_536) {
-            c.write(chunk);
-        }
-        let replay_chunked = start.elapsed();
+        });
+        let mut replay = bench.series("replay_one_chunk");
+        let b = replay.time(|| {
+            let mut b = engine(80, 24, 10_000);
+            b.write(&bytes);
+            b
+        });
+        let mut replay_chunked = bench.series("replay_64k_chunks");
+        let c = replay_chunked.time(|| {
+            let mut c = engine(80, 24, 10_000);
+            for chunk in bytes.chunks(65_536) {
+                c.write(chunk);
+            }
+            c
+        });
         assert_eq!(all_text(&b), all_text(&e));
         assert_eq!(all_text(&c), all_text(&e));
         eprintln!(
-            "checkpoint_cost: {} history lines; fill {} bytes in 64 KiB chunks {fill:?}; checkpoint {} bytes, format {took:?}, replay one chunk {replay:?}, replay 64 KiB chunks {replay_chunked:?}",
+            "checkpoint_cost: {} history lines; fill {} bytes in 64 KiB chunks; checkpoint {} bytes",
             e.total_lines().unwrap() - 24,
             out.len(),
             bytes.len()
         );
+        for series in [fill, raw_fill, format, replay, replay_chunked] {
+            series.report().unwrap();
+        }
     }
 
     #[test]

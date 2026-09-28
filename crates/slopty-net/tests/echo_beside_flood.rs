@@ -29,7 +29,7 @@ mod tests {
     use std::process::Stdio;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use bytes::Bytes;
     use parking_lot::Mutex;
@@ -43,6 +43,7 @@ mod tests {
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::terminal::{TermEvent, TermRequest};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::time::Instant;
 
     /// The link: 20 Mbit/s, 2 ms each way, and a bottleneck queue of [`queue_ms`].
     const RATE: u64 = 2_500_000;
@@ -569,7 +570,7 @@ mod tests {
             let sent = Instant::now();
             let req = TermRequest::Raw(vec![key]);
             worker.tx.send(&ClientMsg::Term { session, req }).await.unwrap();
-            let deadline = tokio::time::Instant::from_std(sent.checked_add(STALL).unwrap());
+            let deadline = sent.checked_add(STALL).unwrap();
             loop {
                 let Ok(event) = tokio::time::timeout_at(deadline, echoes.recv()).await else {
                     stalls = stalls.saturating_add(1);

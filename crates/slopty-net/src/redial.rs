@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn a_steady_link_starts_the_backoff_again_and_a_flapping_one_does_not() {
-        let start = Instant::now();
+        let start = tokio::time::Instant::now().into_std();
         let mut redial = Redial::default();
         let failed: Vec<u128> =
             std::iter::repeat_with(|| redial.next(start).as_millis()).take(4).collect();

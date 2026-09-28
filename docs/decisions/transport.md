@@ -1480,3 +1480,68 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - `Copies::from_env` and `path_trace_period` read the same `Tuning`.
   - Tests: `unset_knobs_are_the_shipped_transport`, `each_knob_reads_its_variable` and
     `the_initial_window_reads_its_flag` (`slopty-net`).
+
+- ✅ **The transport is tested on a simulated network, on tokio's paused clock** (2026-09-29,
+  MEASUREMENTS "the transport on a simulated network").
+  - `slopty_shape::sim::Net` is an in-memory datagram network whose `Socket` is noq's
+    `AsyncUdpSocket`. Each direction between two sockets runs the relay's seeded `Link`
+    (delay, jitter, loss, rate, queue). On top of that it adds three faults the relay cannot
+    give: blackouts, which lose what is sent and what is in flight; NAT rebinding, where a
+    socket's peers see it at a new address and the old mapping is gone; and reordering, off by
+    default. `slopty_net::endpoint::bind_on(socket, server, seed)` builds the shipped endpoint
+    and transport config on such a socket, and `WorkerListener::on` listens on it.
+  - noq's `TokioRuntime` reads tokio's clock, so under `start_paused` the whole connection runs
+    in virtual time. A 60 s outage costs milliseconds, and a load on the machine changes what
+    a run costs, never what it measures. `bind_on`'s seed also seeds noq's endpoint generator
+    and BBR3's probe generator (noq-proto patch 9). With the network's seed, a run then repeats
+    to the packet: `a_seed_repeats_its_run` compares two runs' delivery digests. Before the
+    probe seed, a flooded link's echo times differed between two runs of one seed.
+  - `crates/slopty-net/tests/sim.rs` runs a real dial, control stream and session stream. It
+    covers five cases: the handshake at 20 % loss each way; keys typed into a 30 s outage; an
+    outage past the 45 s idle timeout, then a new dial; a NAT rebinding mid-typing; and keys
+    beside a flood on a 2 Mbit/s lossy link. Each checks every key and echo once and in order,
+    on one connection. The gate runs 8 seeds of each plus two pinned seeds (0.6 s). The
+    ignored `every_scenario_holds_across_the_seed_sweep` runs 200 seeds of each at night
+    (about 30 s) and prints the numbers. A scenario still running after 600 simulated seconds
+    fails with its seed, since keep-alives keep a stuck run's clock moving.
+  - Not the relay for this. The relay runs on the real clock between real sockets, so an
+    outage costs its full length, the results move with the machine's load, and it cannot
+    rebind or reorder. It stays the tool for real-time measurements and the e2e lanes.
+  - **The clock.** `slopty-net` and `slopty-shape` time the network on `tokio::time::Instant`:
+    admission's lookup and owner TTLs, the relay's run epoch and timer, and the tests. Each
+    crate has its own `clippy.toml` that disallows `std::time::Instant::now` and `::elapsed`.
+    Clippy reads only the nearest `clippy.toml`, so each file is the root's plus those two
+    entries, and `clippy_config_is_the_workspaces_plus_the_clock` fails when a copy drifts from
+    the root. A read that must be real, the sweep's own cost, carries
+    `#[expect(clippy::disallowed_methods, reason = …)]`. noq still hands congestion
+    controllers `std::time::Instant`, which it derives from tokio's clock. `Redial` still takes
+    its callers' `std::time::Instant` (slopty-cli, slopty-client, slopty-app, slopty-worker),
+    and the rest of the workspace still reads the std clock; each owner moves when it wants its
+    own paused tests.
+  - **Found by it: a lost FINISHED from the worker stranded the client.** The null crypto
+    provider's client sent its `FINISHED` as soon as it read the worker's `HELLO`. The worker
+    finishes on that `FINISHED` and discards its Handshake keys at once, so when its own
+    `FINISHED` (in the same datagram as its `HELLO`) was lost, it could never resend it. The
+    client is connected only by a Handshake packet from the worker, so it waited out its 2 s
+    dial and failed with "no answer": 29 of 200 seeds at 20 % loss. The client now sends its
+    `FINISHED` only after reading the worker's, which is TLS's order. On a clean path both
+    arrive together, so a dial is still two round trips. Tests:
+    `the_client_finishes_only_after_the_server_has` (unit) and
+    `a_handshake_at_a_fifth_lost_each_way_completes` (seed 31 loses that first flight).
+  - **Found by it: a lost PATH_CHALLENGE after a NAT rebinding wedged the worker.** noq kept
+    no validated path to fall back to (an inverted test in `Connection::migrate`). When the
+    worker's one challenge to the client's new address was lost, the path stayed unvalidated
+    for good. noq sends no data on such a path, and its PINGs kept the connection alive, so
+    the worker never sent the client another byte. Fixed as noq-proto patch 10
+    (`vendor/noq-proto/SLOPTY.md`). Test: `a_nat_rebinding_moves_the_connection_without_a_reconnect`
+    (seed 10 loses the first challenge).
+  - **The one-off gate failure is not reproduced.** `typing_through_a_lossy_link_lands_once_in_order`
+    once failed at connect with "connection lost: closed by peer: 0". No seed of the simulation
+    closes a dial that way. Its dials failed only as "no answer", the stranded client above. A
+    relay run can reach that too, since load changes which retransmissions draw the fixed
+    seed's losses. A
+    code-0 close with no reason is noq's implicit close when the worker's last handle to a
+    connection drops. In slopty-net that happens only when `listen::greet` gives up on a peer
+    (10 s without a control stream or a hello, or a failed read). Past the greeting, it
+    happens on the worker app's own error paths in `conn::run`. Those need the worker app on
+    the simulated network to test, and that crate has another owner.

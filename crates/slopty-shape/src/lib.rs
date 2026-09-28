@@ -10,8 +10,13 @@
 //! Time here is elapsed time since the run began, not a clock: the arithmetic stays total, and a
 //! test can name an instant as a number of milliseconds. Every draw comes from a seed, so a run
 //! repeats exactly — a measurement that cannot be repeated cannot be compared.
+//!
+//! The same model runs in two places: [`relay`], between two real UDP sockets on the real
+//! clock, and [`sim`], an in-memory network noq's endpoints sit on directly, on tokio's clock,
+//! where a paused runtime turns a minute's outage into milliseconds.
 
 pub mod relay;
+pub mod sim;
 
 use std::time::Duration;
 
@@ -191,6 +196,28 @@ mod tests {
     /// Milliseconds into the run.
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    /// Clippy reads only the nearest `clippy.toml`, so this crate's copies the workspace's and
+    /// adds the clock: the two must not drift apart.
+    #[test]
+    fn clippy_config_is_the_workspaces_plus_the_clock() {
+        let root = include_str!("../../../clippy.toml");
+        let ours = include_str!("../clippy.toml");
+        let clock = ["std::time::Instant::now", "std::time::Instant::elapsed"];
+        for path in clock {
+            assert!(ours.contains(&format!("path = \"{path}\"")), "{path} is not disallowed");
+        }
+        let rest = ours
+            .lines()
+            .skip_while(|line| line.starts_with('#') || line.is_empty())
+            .filter(|line| !clock.iter().any(|path| line.contains(path)))
+            .fold(String::new(), |mut rest, line| {
+                rest.push_str(line);
+                rest.push('\n');
+                rest
+            });
+        assert_eq!(rest, root, "this crate's clippy.toml is the root's plus the clock entries");
     }
 
     /// A link with a rate and nothing else, so the queue maths stands alone.

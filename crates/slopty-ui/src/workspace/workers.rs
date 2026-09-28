@@ -108,6 +108,9 @@ impl WorkspaceView {
         let items: Vec<ItemId> = w.doc.items().map(|i| i.id).collect();
         self.reset_remote(key, &sessions, cx);
         for session in &sessions {
+            if self.face_shown(*session) && self.faces.views.contains_key(session) {
+                self.faces.held.insert(*session);
+            }
             self.terminals.remove(session);
             self.running.remove(session);
             self.agents.remove(session);
@@ -195,6 +198,12 @@ impl WorkspaceView {
             self.finished.remove(session);
         }
         self.closed.retain(|c| c.tile.worker != key);
+        let workers = &self.workers;
+        self.recency.retain(|id| workers.values().any(|w| w.doc.get(*id).is_some()));
+        // Added again, it is a new worker: an empty registry is given its shell again.
+        self.given_shell.remove(&key);
+        self.given_pending.remove(&key);
+        self.nav.folded.remove(&key);
         self.items_dirty = true;
         self.tick();
         self.layout.retain_worker(key, |_| false);

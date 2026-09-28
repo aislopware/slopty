@@ -69,6 +69,7 @@ mod tests {
         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
     };
     use slopty_codec::annexb::hevc;
+    use slopty_testkit::stats::Spread;
 
     // ---- CoreFoundation plumbing -------------------------------------------------------------
 
@@ -784,9 +785,9 @@ mod tests {
         last.map(|p| (hardware, p))
     }
 
-    fn percentile(sorted: &[Duration], p: f64) -> f64 {
-        let i = ((sorted.len() - 1) as f64 * p).round() as usize;
-        sorted[i].as_secs_f64() * 1e3
+    /// Nanoseconds as milliseconds.
+    fn ms(ns: u64) -> f64 {
+        ns as f64 / 1e6
     }
 
     // ---- The probe -----------------------------------------------------------------------------
@@ -1054,16 +1055,16 @@ mod tests {
                         }
                     }
                 }
-                times.sort_unstable();
+                let spread = Spread::of_durations(&times).unwrap_or_default();
                 let mbps = (bytes * 8) as f64 / ((FRAMES - 30) as f64 / 60.0) / 1e6;
                 eprintln!(
                     "MEASURE encode {w}x{h} mode={:?} chroma_format_idc={chroma:?} frames={} \
                      p50={:.2}ms p95={:.2}ms max={:.2}ms target={}Mbit/s actual={mbps:.1}Mbit/s",
                     mode.name,
                     times.len(),
-                    percentile(&times, 0.5),
-                    percentile(&times, 0.95),
-                    percentile(&times, 1.0),
+                    ms(spread.p50),
+                    ms(spread.p95),
+                    ms(spread.max),
                     bitrate / 1_000_000,
                 );
             }

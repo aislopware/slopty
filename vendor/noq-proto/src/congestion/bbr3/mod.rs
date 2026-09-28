@@ -2034,6 +2034,15 @@ impl Bbr3Config {
         self.initial_window = value;
         self
     }
+
+    /// Seed for the random draws that place each bandwidth probe; `None`, the default, seeds
+    /// every connection from the OS
+    ///
+    /// A fixed seed makes a run on a simulated network repeat exactly.
+    pub fn probe_rng_seed(&mut self, seed: Option<[u8; 16]>) -> &mut Self {
+        self.probe_rng_seed = seed;
+        self
+    }
 }
 
 impl Default for Bbr3Config {

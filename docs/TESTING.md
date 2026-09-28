@@ -91,3 +91,25 @@ ThreadSanitizer/AddressSanitizer builds of the daemons and the codec, `cargo hac
 --each-feature` (every feature alone and together), `cargo llvm-cov` line coverage per crate,
 and `cargo mutants` on one crate to find the lines no test would notice changing. A finding
 there becomes a test in the layer that can hold it. `docs/DEV.md` has the commands.
+
+## Budgets: allocations, instructions, footprint
+Wall time is not a pass or fail on a machine other sessions load, so the budgets are counts:
+- **Allocations**, in the gate. `tests/allocs.rs` in `slopty-media`, `slopty-engine` and
+  `slopty-grid` install `slopty_testkit::alloc::Counting` as the test binary's allocator and
+  count, per thread, what a hot path allocates in steady state. Covered: cutting a frame into
+  datagrams and putting it back together, a keystroke's echo through the engine and its diff,
+  an Enter at a bottom prompt, the echo frame's encoding, a row applied on the client, and one
+  frame or echo handed to eight viewers against one. Each asserts blocks (and bytes where they
+  say something) against a number in the test. Fan-out asserts equality: eight viewers cost
+  exactly what one does.
+- **Retired instructions**, in `cargo xtask bench`. The `*_cost` measurements report each
+  series' instructions per operation (`proc_pid_rusage`, `ri_instructions`), which
+  `xtask/budgets.toml` holds within 5 %. Their wall times are kept only by the nightly run, as a
+  trend.
+- **Footprint, descriptors, threads and leaks**, in `cargo xtask soak`: the real daemons under
+  a scripted load, sampled for `ri_phys_footprint`, open descriptors and threads, with
+  `leaks <pid>` at the end.
+
+`cargo xtask nightly` runs the soak, the bench's wall times, the property tests at
+`PROPTEST_CASES` cases, `slopty-ui`'s tests under `ITERATIONS` scheduler seeds and the deep
+checks, each with a JSON summary under `target/nightly/<date>/`. `docs/DEV.md` has the commands.

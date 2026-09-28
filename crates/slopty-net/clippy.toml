@@ -1,0 +1,60 @@
+# The workspace's clippy.toml, plus the clock: clippy reads the nearest clippy.toml and no other,
+# so this is the root's with the two `std::time::Instant` entries added. A test in this crate
+# (`clippy_config_is_the_workspaces_plus_the_clock`) fails when the two drift.
+
+msrv = "1.98"
+avoid-breaking-exported-api = false
+too-many-arguments-threshold = 6
+type-complexity-threshold = 250
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+doc-valid-idents = [
+    "SkyLight",
+    "objc2",
+    "GPUI",
+    "macOS",
+    "iOS",
+    "iPadOS",
+    "AppKit",
+    "UIKit",
+    "QUIC",
+    "HEVC",
+    "IOSurface",
+    "ScreenCaptureKit",
+    "VideoToolbox",
+    "CoreMedia",
+    "CoreVideo",
+    "CoreFoundation",
+    "WindowServer",
+    "CoreText",
+    "libghostty",
+    "libghostty-vt",
+    "OpenGOP",
+    "LTR",
+    "PTY",
+    "..",
+    "..",
+]
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "time the network on tokio's clock (`tokio::time::Instant`), which a paused runtime simulates (docs/decisions/transport.md)" },
+    { path = "std::time::Instant::elapsed", reason = "time the network on tokio's clock (`tokio::time::Instant`), which a paused runtime simulates (docs/decisions/transport.md)" },
+    { path = "std::mem::forget", reason = "use ManuallyDrop, or a CFRetained handle" },
+    { path = "std::thread::sleep", reason = "no blocking sleeps in library code; use timers" },
+]
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "use parking_lot::Mutex" },
+    { path = "std::sync::RwLock", reason = "use parking_lot::RwLock" },
+]
+# GPUI geometry is f32 underneath; `Pixels` arithmetic cannot overflow in any meaningful sense.
+arithmetic-side-effects-allowed = [ "gpui::Pixels", "gpui::Point", "gpui::Size", "gpui::Bounds" ]
+arithmetic-side-effects-allowed-binary = [
+    [ "gpui::Pixels", "f32" ],
+    [ "gpui::Point", "gpui::Point" ],
+    [ "gpui::Point", "gpui::Pixels" ],
+    [ "gpui::Point<gpui::Pixels>", "gpui::Point<gpui::Pixels>" ],
+    [ "gpui::Point<gpui::Pixels>", "gpui::Pixels" ],
+]

@@ -93,13 +93,18 @@ impl Scrollback {
     /// Record the worker's current line count and oldest retained index.
     pub fn set_extent(&mut self, oldest: LineIndex, total: u64) {
         self.total = total;
-        // Only when the worker actually dropped something: this runs on every frame, and
-        // `split_off` walks and rebuilds the map whether or not anything is below `oldest`.
         if oldest > self.oldest {
             self.oldest = oldest;
-            // Lines the worker dropped are useless; drop them here too.
-            self.lines = self.lines.split_off(&oldest);
-            self.prompts = self.prompts.split_off(&oldest);
+            // Lines the worker dropped are useless; drop them here too. This runs on every
+            // frame of a flood at the history's limit, and the worker drops a few lines each
+            // time: popping them allocates nothing, where `split_off` built new nodes along
+            // the split on every frame (`tests/allocs.rs`).
+            while self.lines.first_key_value().is_some_and(|(index, _)| *index < oldest) {
+                self.lines.pop_first();
+            }
+            while self.prompts.first().is_some_and(|index| *index < oldest) {
+                self.prompts.pop_first();
+            }
         } else {
             self.oldest = oldest;
         }

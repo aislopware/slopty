@@ -7047,6 +7047,7 @@ dependencies = [
  "parking_lot",
  "pretty_assertions",
  "slopty-proto",
+ "slopty-testkit",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -7099,6 +7100,7 @@ dependencies = [
  "slopty-core",
  "slopty-grid",
  "slopty-proto",
+ "slopty-testkit",
  "slopty-theme",
  "thiserror 2.0.21",
  "tracing",
@@ -7112,6 +7114,7 @@ dependencies = [
  "proptest 1.11.0",
  "serde",
  "serde_json",
+ "slopty-testkit",
  "thiserror 2.0.21",
 ]
 
@@ -7163,6 +7166,7 @@ dependencies = [
  "reed-solomon-simd",
  "slopty-core",
  "slopty-proto",
+ "slopty-testkit",
  "thiserror 2.0.21",
  "tracing",
  "zerocopy",
@@ -7341,6 +7345,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "noq",
+ "parking_lot",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -7362,6 +7368,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "slopty-testkit"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -10064,6 +10077,7 @@ dependencies = [
  "resvg 0.48.1",
  "serde",
  "serde_json",
+ "slopty-testkit",
  "toml 1.1.6+spec-1.1.0",
  "xshell",
 ]

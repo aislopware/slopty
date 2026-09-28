@@ -1449,11 +1449,13 @@ mod cost_tests {
 
     /// What reassembling one frame costs on the client's stream worker when every data fragment
     /// arrives: a 62 KB P-frame and a 300 KB keyframe, fed datagram by datagram and taken out
-    /// in decode order. `docs/MEASUREMENTS.md` records runs.
+    /// in decode order. `cargo xtask bench --filter reassemble_cost` runs it;
+    /// `docs/MEASUREMENTS.md` records runs.
     #[test]
-    #[ignore = "a measurement; run with --run-ignored only --no-capture in release"]
+    #[ignore = "a measurement; run with `cargo xtask bench`"]
     fn reassemble_cost() {
-        for (name, len) in [("P-frame", 62_000_usize), ("keyframe", 300_000)] {
+        let bench = slopty_testkit::bench::Bench::new("media.reassemble_cost");
+        for (name, len) in [("p_frame", 62_000_usize), ("keyframe", 300_000)] {
             let data: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect();
             let rounds = 200_u32;
             let mut packetizer = Packetizer::new(StreamId(1));
@@ -1472,19 +1474,21 @@ mod cost_tests {
                 .collect();
             let now = Instant::now();
             let mut rx = Reassembler::new(StreamId(1), Config::default(), now);
-            let started = Instant::now();
+            let mut series = bench.series(name);
             let mut out = 0_usize;
             for datagrams in &frames {
-                for d in datagrams {
-                    let _stored = rx.ingest(d, now);
-                }
-                while let Some(frame) = rx.next_frame() {
-                    out = out.wrapping_add(frame.data.len());
-                }
+                series.time(|| {
+                    for d in datagrams {
+                        let _stored = rx.ingest(d, now);
+                    }
+                    while let Some(frame) = rx.next_frame() {
+                        out = out.wrapping_add(frame.data.len());
+                    }
+                });
             }
-            let per = started.elapsed() / rounds;
             assert_eq!(out, len.saturating_mul(rounds as usize));
-            eprintln!("{name} {len} B, {} datagrams: {per:?} per frame", frames[0].len());
+            eprintln!("{name} {len} B, {} datagrams", frames[0].len());
+            series.report().unwrap();
         }
     }
 }

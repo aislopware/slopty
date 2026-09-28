@@ -2004,7 +2004,14 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let bare = chrome.k < SHAPES_BELOW;
-        let state = self.body_state(placed.tile, item).filter(|_| !bare);
+        // A face held through a dropped link says the worker is away in its own composer.
+        let held = match item.kind {
+            ItemKind::Terminal { session } => self.faces.held.contains(&session),
+            _ => false,
+        };
+        let state = self
+            .body_state(placed.tile, item)
+            .filter(|state| !bare && (!held || !matches!(state, BodyState::Away(_))));
         let content = self.render_content(placed, item, chrome, window, cx);
         if bare {
             return self.render_miniature(placed, item, content, cx);
@@ -2138,9 +2145,10 @@ impl WorkspaceView {
         let well = || div().flex_1().w_full().into_any_element();
         match &item.kind {
             ItemKind::Terminal { session } => match self.terminals.get(session) {
-                Some(_)
-                    if self.face_shown(*session)
-                        && self.body_state(placed.tile, item).is_none() =>
+                _ if self.faces.held.contains(session)
+                    || (self.terminals.contains_key(session)
+                        && self.face_shown(*session)
+                        && self.body_state(placed.tile, item).is_none()) =>
                 {
                     let Some(face) = self.faces.views.get(session) else { return well() };
                     face.update(cx, |v, cx| v.set_layout(k, placed.target.w, cx));

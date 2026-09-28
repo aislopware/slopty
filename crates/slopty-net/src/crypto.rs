@@ -159,7 +159,16 @@ impl crypto::ServerConfig for Server {
 }
 
 /// Where a session stands. Each side sends `HELLO` then `FINISHED`; the server sends its
-/// `HELLO` only after reading the client's.
+/// `HELLO` only after reading the client's, and the client its `FINISHED` only after reading
+/// the server's.
+///
+/// That last order is TLS's, and noq depends on it. The server finishes on the client's
+/// `FINISHED` and throws its Handshake keys away at once, so from then on it can neither resend
+/// its own `FINISHED` nor answer a Handshake packet; the client, for its part, is connected only
+/// by a Handshake packet from the server. A client that sent its `FINISHED` on the server's
+/// `HELLO` alone, as this provider first did, finished the server while the server's `FINISHED`
+/// could still be lost, and then waited out its dial for a packet that would never come (one
+/// dial in seven at a fifth lost each way; `tests/sim.rs`, docs/decisions/transport.md).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Stage {
     /// Nothing sent yet.
@@ -279,12 +288,7 @@ impl crypto::Session for Session {
     }
 
     fn is_handshaking(&self) -> bool {
-        match self.side {
-            // The client has what it needs once its FINISHED is out: noq only calls this after a
-            // Handshake packet from the server, which is the server's FINISHED or its ACK.
-            Side::Client => !matches!(self.stage, Stage::AwaitFinished | Stage::Done),
-            Side::Server => self.stage != Stage::Done,
-        }
+        self.stage != Stage::Done
     }
 
     fn read_handshake(&mut self, buf: &[u8]) -> Result<bool, TransportError> {
@@ -332,6 +336,8 @@ impl crypto::Session for Session {
                 self.stage = Stage::HandshakeKeys;
                 Some(keys())
             }
+            // The server's FINISHED first: see `Stage`.
+            (Side::Client, Stage::HandshakeKeys) if !self.finished => None,
             (_, Stage::HandshakeKeys) => {
                 buf.push(FINISHED);
                 self.stage = if self.finished { Stage::Done } else { Stage::AwaitFinished };
@@ -508,6 +514,34 @@ mod tests {
         server.read_handshake(&out).unwrap();
         assert!(!server.is_handshaking());
         assert!(client.next_1rtt_keys().is_some() && server.next_1rtt_keys().is_some());
+    }
+
+    /// The server's HELLO arrived and its FINISHED was lost: the client has Handshake keys to
+    /// read the resent FINISHED with, and sends its own only once that is in. Sent earlier, it
+    /// would finish the server, which then drops the Handshake keys it would resend with.
+    #[test]
+    fn the_client_finishes_only_after_the_server_has() {
+        let (mut client, mut server) = pair();
+        let mut hello = Vec::new();
+        client.write_handshake(&mut hello);
+        server.read_handshake(&hello).unwrap();
+        let (mut reply, mut fin) = (Vec::new(), Vec::new());
+        server.write_handshake(&mut reply);
+        server.write_handshake(&mut fin);
+
+        assert!(client.read_handshake(&reply).unwrap());
+        let mut out = Vec::new();
+        assert!(client.write_handshake(&mut out).is_some(), "handshake keys");
+        assert!(client.write_handshake(&mut out).is_none(), "no 1-RTT keys yet");
+        assert!(out.is_empty(), "no FINISHED before the server's: {out:?}");
+        assert!(client.is_handshaking());
+
+        client.read_handshake(&fin).unwrap();
+        assert!(client.write_handshake(&mut out).is_some(), "1-RTT keys");
+        assert_eq!(out, [FINISHED]);
+        assert!(!client.is_handshaking());
+        server.read_handshake(&out).unwrap();
+        assert!(!server.is_handshaking());
     }
 
     #[test]

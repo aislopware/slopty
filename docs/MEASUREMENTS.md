@@ -7425,3 +7425,171 @@ Not measured:
   drag would have to be synthetic input.
 - The frame-path cost of the idle check in `Shared::on_packet`. It is one relaxed load of a
   flag per encoded frame, against an encode of about 7 ms.
+
+## 2026-09-29 — allocation budgets and retired-instruction budgets
+
+Mac Studio M1 Max, macOS 27.0. Other sessions were building in the same checkout throughout.
+
+### Allocations on the hot paths
+
+Counted on the test's own thread by `slopty_testkit::alloc::Counting`, in steady state (buffers
+warmed first). The counts are exact and repeat run to run:
+
+```sh
+cargo nextest run -p slopty-media -p slopty-engine -p slopty-grid --test allocs --no-capture
+```
+
+| path | before | after |
+| --- | --- | --- |
+| packetize a 62 KB P-frame, parity 200 ‰ | 5 blocks, 81 576 B | **3 blocks, 78 184 B** |
+| packetize a 300 KB keyframe, parity 200 ‰ | 5 blocks, 391 751 B | **3 blocks, 375 495 B** |
+| packetize, no parity (62 KB / 300 KB) | 3 blocks, 64 753 / 312 714 B | 3 blocks, same |
+| reassemble 64 P-frames of 62 KB | 204 blocks, 4 086 400 B | same (3 a frame) |
+| a key's byte into the engine | 0 | 0 |
+| its diff frame, 80×24 / 200×60 | 4 blocks, 9 536 / 23 072 B | same |
+| an Enter at a bottom prompt, 80×24 | 30 blocks, 109 376 B | **10 blocks, 32 576 B** |
+| an Enter at a bottom prompt, 200×60 | 66 blocks, 618 272 B | **10 blocks, 80 672 B** |
+| the echo frame encoded (228 B on the wire) | 8 blocks, 532 B | 8 blocks (see below) |
+| a row applied on the client (screen and scrollback) | 1 block, 72 B | 1 block |
+| 1 000 lines into a full 10 000-line history | 6 166 blocks, 1 450 080 B | **1 166 blocks, 106 080 B** |
+| a P-frame or an echo to 8 viewers against 1 | equal | equal |
+
+- The packetizer's list of datagrams was sized for the data and grew for the parity, and the
+  parity was first collected into a list of its own. It is now sized for both.
+- On a scroll, libghostty dirties every row and the engine reads each one again. Every row went
+  into a new line, dropped at once when it matched what the viewers held. The row is now read
+  into the allocation of the last one that matched.
+- The client's scrollback cut its index with `split_off` each time the worker's oldest line
+  moved, which is every frame of a flood at the history's limit. It now pops the few lines
+  below the new oldest one.
+- The echo's 8 blocks are `slopty_proto::codec::encode` growing a `Vec` from its 4-byte prefix
+  (4, 8, 16, … 256 bytes). Sizing it first would make that 1; that is `slopty-proto`'s change.
+
+What the fixes cost or saved in instructions, `cargo xtask bench --filter <name>` with the
+change reverted and then restored:
+
+| series | before | after |
+| --- | --- | --- |
+| `engine.scroll_frame_cost.80x24` | 914 438 | 894 562 (−2.2 %) |
+| `engine.scroll_frame_cost.200x60` | 5 430 577 | 5 315 576 (−2.1 %) |
+| `media.packetize_cost.p_frame.parity_200` | 211 956 | 210 037 (−0.9 %) |
+| `media.packetize_cost.keyframe.parity_200` | 1 242 086 | 1 238 330 (−0.3 %) |
+
+The no-parity series, whose code did not change, moved by 0.5-0.6 % between those builds, so
+the packetizer's difference is within the noise of a rebuild. The scroll's is not.
+
+### Instructions per operation, two runs
+
+`cargo xtask bench --update-budgets` recorded `xtask/budgets.toml`, then `cargo xtask bench`
+ran again at once. Instructions are the median per operation, from `ri_instructions` less the
+cost of reading it (calibrated on 201 empty samples). Wall times are from the second run and are
+for reading, not for passing:
+
+| series | run 1 | run 2 | Δ | wall p50 | p99 |
+| --- | --- | --- | --- | --- | --- |
+| `codec.render_cost.same_thread` | 9 317 | 9 242 | −0.8 % | 542 ns | 1 208 ns |
+| `codec.access_unit_conversion_cost.keyframe` | 1 008 616 | 1 008 638 | 0.0 % | 54 us | 71 us |
+| `codec.packet_conversion_cost.p_frame` | 14 237 | 14 312 | +0.5 % | 1 250 ns | 1 708 ns |
+| `codec.packet_conversion_cost.keyframe` | 58 883 | 58 908 | 0.0 % | 5 250 ns | 6 541 ns |
+| `engine.frame_cost.write` | 861 | 886 | +2.9 % | 125 ns | 292 ns |
+| `engine.frame_cost.take_frame` | 38 209 | 38 184 | −0.1 % | 2 500 ns | 24 us |
+| `engine.scroll_frame_cost.80x24` | 894 562 | 895 166 | +0.1 % | 55 us | 58 us |
+| `engine.scroll_frame_cost.200x60` | 5 315 576 | 5 317 539 | 0.0 % | 328 us | 546 us |
+| `engine.osc_scan_cost.per_osc` | 172 | 171 | −0.6 % | 19 ns | 38 ns |
+| `engine.fetch_lines_cost.4096_rows` | 124 790 604 | 124 825 381 | 0.0 % | 8 663 us | 9 775 us |
+| `engine.search_after_output_cost.plain` | 1 877 298 | 1 843 946 | −1.8 % | 135 us | 230 us |
+| `engine.search_cost.50000_lines.plain` | 101 218 349 | 101 110 559 | −0.1 % | 6 351 us | 17 ms |
+| `engine.checkpoint_cost.format` | 45 649 442 | 45 342 517 | −0.7 % | 2 896 us | (one sample) |
+| `engine.checkpoint_cost.fill_engine` | 32 850 996 | 32 295 928 | −1.7 % | 2 558 us | (one sample) |
+| `media.packetize_cost.p_frame.parity_200` | 210 037 | 210 104 | 0.0 % | 15 us | 33 us |
+| `media.packetize_cost.keyframe.parity_200` | 1 238 330 | 1 238 553 | 0.0 % | 88 us | 131 us |
+| `media.reassemble_cost.p_frame` | 46 778 | 46 763 | 0.0 % | 4 125 ns | 10 us |
+| `media.reassemble_cost.keyframe` | 209 982 | 210 029 | 0.0 % | 18 us | 33 us |
+
+All 31 budgeted series held within 5 % on the second run; most moved by 0.1 % or less. The
+wall times of the same runs moved by up to 40× at p95 (`engine.search_cost.50000_lines.format`
+went from 432 ms to 11 ms at p95 between the runs), which is why they are not the budget.
+Printed by the table at the end of `cargo xtask bench`; the full run is in `xtask/budgets.toml`.
+
+## 2026-09-29 — the transport on a simulated network: handshake, outages, rebinding, a flood
+
+`crates/slopty-net/tests/sim.rs` runs a real client and worker (the shipped endpoint, transport
+config, listener and dial) over `slopty_shape::sim`, the in-memory network, on tokio's paused
+clock (docs/decisions/transport.md, "The transport is tested on a simulated network"). Times
+are simulated, so they do not move with the machine's load. They land on whole milliseconds,
+tokio's timer quantum. Real time is what the run cost on this Mac, with other sessions building
+beside it (load average above 100).
+
+```sh
+cargo test -p slopty-net --test sim                                  # the gate: 8 seeds + 2 pinned
+cargo test -p slopty-net --test sim -- --ignored --nocapture         # 200 seeds of each, prints this table
+```
+
+200 seeds of each scenario. "Hop" is 5 ms each way.
+
+| scenario | link | measured | p50 | p99 | max | real |
+| --- | --- | --- | --- | --- | --- | --- |
+| dial | hop, 20 % lost each way | dial to `HelloAck` | 50 ms | 1.008 s | 1.866 s | 0.09 s |
+| 30 s outage | hop, 1 % | path back to last echo | 138 ms | 1.673 s | 1.673 s | 1.4 s |
+| 60 s outage | hop, 1 % | outage start to both ends closed | 45.515 s | 45.546 s | 45.546 s | 0.7 s |
+| dial after it | hop, 1 % | dial to `HelloAck` | 20 ms | 50 ms | 50 ms | (with the row above) |
+| NAT rebinding | hop, 1 % | slowest key's echo | 34 ms | 80 ms | 80 ms | 3.9 s |
+| flood | 2 Mbit/s, 100 ms queue, 10 + 0–2 ms, 5 % | each seed's echo p50 | 49 ms | 59 ms | 60 ms | 22.6 s |
+| flood | same | each seed's echo p99 | 156 ms | 238 ms | 273 ms | (same run) |
+
+- *Dial:* at a fifth lost each way, every seed now connects inside the client's 2 s handshake
+  timeout. Before the client waited for the worker's FINISHED, 29 of the 200 seeds failed at
+  2 s with "no answer". The 171 that connected had p50 40 ms, p90 265 ms, p99 1.482 s and max
+  1.866 s, but the before and after are not the same draws, since noq's own generator was not
+  yet seeded. A dial on a clean hop is two round trips (20 ms), as before.
+- *30 s outage:* 100 keys 20 ms apart, with the outage starting 0.5 s in. Every key reaches the
+  worker once and in order, on the connection it was typed on. The last echo comes within
+  noq's 2 s cap on its probe interval of the path's return.
+- *60 s outage:* both ends end with `TimedOut` 45.5 s after the path goes dark: the 45 s idle
+  timeout from the last packet heard. The next dial after the outage takes one or two round trips.
+- *NAT rebinding:* the client moves 1 s into 2 s of typing. Before noq-proto patch 10, seed 10,
+  whose first PATH_CHALLENGE is lost, never recovered: the worker sent nothing but PINGs until
+  the sweep's 600 s guard. Now it falls back and migrates again, and its slowest key takes
+  under 80 ms like the rest.
+- *Flood:* a session writes a 3,000-byte frame every 8 ms (375 kB/s, 1.5 times the link)
+  beside 200 keys 30 ms apart, echoed on a lifted session stream. Every key and echo arrives
+  once and in order.
+- *Repeatability:* two runs of one seed deliver the same packets at the same simulated times
+  (`a_seed_repeats_its_run`, seeds 3 and 11, all four timed scenarios). Before BBR3's probes
+  were seeded, the flood's echo p50/p99 for seed 3 came out 46/139 ms in one run and 44/124 ms
+  in the next.
+- The gate's six tests take 0.6 s of real time together.
+
+## 2026-09-29 — the first soak: ptyd keeps a descriptor and ~145 KiB per closed session
+
+Mac Studio M1 Max, macOS 27.0, release daemons copied and signed ad hoc for `leaks`, other
+sessions building beside it. `cargo xtask soak` (60 s of load after two warm-up cycles and a
+12 s settle, a sample every 2 s): 156 cycles of open a quiet bash, `seq 1 20000`, two
+`slopty hook report` calls, `output --max 200`, close. A cycle took 382 ms at p50 and 440 ms at
+most.
+
+```sh
+cargo xtask soak            # samples, logs, leaks reports: target/deep/soak/last/
+```
+
+| daemon | footprint, baseline → end | slope over the load | peak | descriptors | threads | `leaks` |
+| --- | --- | --- | --- | --- | --- | --- |
+| server | 4 304 → 4 896 KiB | 173 KiB/min | 4 MiB | 11 → 11 | 11 → 11 | 0 |
+| ptyd | 2 720 → 25 200 KiB | 21 632 KiB/min | 24 MiB | **13 → 169** | 1 → 1 | 0 |
+| worker | 8 000 → 9 248 KiB | 1 096 KiB/min | 28 MiB | 14 → 14 | 14 → 13 | 0 |
+
+- **ptyd** keeps one descriptor for every session closed: 156 cycles, 156 more descriptors,
+  still open after the settle. Its footprint grows by about 145 KiB a session in a straight line
+  (a sample every 6 s: 4 688, 6 960, 9 216, 11 328, 13 648 KiB …). `leaks` finds nothing
+  unreferenced (6 658 blocks, 46 830 KB malloced), so the sessions are still held, not lost.
+  The soak fails on it, as it should.
+- **worker** grows about 8 KiB a session, steadily, with no descriptor or thread left behind.
+  A minute cannot tell a cache still filling from a record kept per session. The nightly's
+  20-minute soak can.
+- **server** grows by less each sample (+96, +64, +48, then +16 KiB every 6 s), which looks
+  like a cache settling. It is still over the 64 KiB/min budget in a 60 s run.
+- An earlier run stopped at one `slopty hook report` that failed with "Socket is not connected
+  (os error 57)". `slopty_platform::service::ask` shuts down its write half after sending, and
+  on macOS `shutdown` fails with `ENOTCONN` once the worker has answered and closed first. The
+  reply is still there to read. The soak now counts failed hook reports as a failure and goes
+  on; none failed in the run above.

@@ -1663,3 +1663,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       mention chips, recall, the model picker, rewind and the unreachable worker;
     - the pure parts: `menu` (tokens, ranking, picks, mentions), `question` (one question at a
       time) and `approval` (the settled lines).
+
+- ✅ **A shown face outlives a dropped link** (2026-09-29). A dropped link takes the session's
+  terminal and agent state with it, and the face went with them, so an unsent draft was lost
+  whenever the network blinked. The workspace now holds a face that showed when the link
+  dropped (`Faces::held`). It stays on its tile with its draft, its composer says the worker is
+  away, and the tile lays no away pill over it. It is let go once the worker has said again
+  what runs in the session, or once its tile or worker is gone. Test:
+  `a_face_stays_through_a_dropped_link_with_its_draft`.

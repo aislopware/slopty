@@ -5816,7 +5816,7 @@ impl Connection {
         // yet. In this case we would never have sent on this path yet and would not be able
         // to send a PATH_CHALLENGE either, which is currently a fire-and-forget affair
         // anyway. So don't store such a path either.
-        if !prev_path_data.validated
+        if prev_path_data.validated
             && let Some(cid) = self.remote_cids.get(&path_id).map(CidQueue::active)
         {
             prev_path_data.pending_challenge = true;

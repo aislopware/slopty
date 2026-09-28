@@ -104,13 +104,18 @@ pub const MAX_STREAMS: u32 = 1024;
 /// (MEASUREMENTS.md, "BBR3's window under bursty video").
 #[must_use]
 pub fn transport_config() -> TransportConfig {
+    seeded_transport_config(None)
+}
+
+/// [`transport_config`] with BBR3's probes drawn from `seed` when there is one.
+fn seeded_transport_config(seed: Option<u64>) -> TransportConfig {
     let mut acks = AckFrequencyConfig::default();
     acks.max_ack_delay(Some(MAX_ACK_DELAY));
     let mut mtu = MtuDiscoveryConfig::default();
     mtu.upper_bound(MTU_UPPER_BOUND);
     let mut config = TransportConfig::default();
     config
-        .congestion_controller_factory(congestion_controller())
+        .congestion_controller_factory(congestion_controller(seed))
         .ack_frequency_config(Some(acks))
         .initial_rtt(INITIAL_RTT)
         .mtu_discovery_config(Some(mtu))
@@ -248,20 +253,27 @@ pub fn lease_client_config() -> noq::ClientConfig {
 
 /// The congestion controller factory [`tuning`] names, bounded by
 /// [`crate::congestion::Bounded`] unless it says otherwise.
-fn congestion_controller() -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync + 'static> {
+fn congestion_controller(
+    seed: Option<u64>,
+) -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync + 'static> {
     let tuning = tuning();
     let ceiling = tuning.bounded.then_some(crate::congestion::CEILING_BDPS);
-    Arc::new(crate::congestion::BoundedFactory::new(noq_controller(tuning), ceiling))
+    Arc::new(crate::congestion::BoundedFactory::new(noq_controller(tuning, seed), ceiling))
 }
 
-/// noq's factory for the controller `tuning` names, at its initial window.
-fn noq_controller(tuning: &Tuning) -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync> {
+/// noq's factory for the controller `tuning` names, at its initial window, with BBR3's probes
+/// drawn from `seed` when there is one.
+fn noq_controller(
+    tuning: &Tuning,
+    seed: Option<u64>,
+) -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync> {
     use noq::congestion::{Bbr3Config, CubicConfig, NewRenoConfig};
     let window = tuning.initial_window();
     match tuning.controller {
         Controller::Bbr3 => {
             let mut config = Bbr3Config::default();
             config.initial_window(window);
+            config.probe_rng_seed(seed.map(spread_seed));
             Arc::new(config)
         }
         Controller::Cubic => {
@@ -308,19 +320,62 @@ fn bind_with(
         socket.set_only_v6(false).map_err(bind_err)?;
     }
     socket.bind(&local.into()).map_err(bind_err)?;
+    let socket =
+        noq::Runtime::wrap_udp_socket(&noq::TokioRuntime, socket.into()).map_err(bind_err)?;
+    endpoint_with(socket, server, transport, crate::crypto::endpoint_config()).map_err(bind_err)
+}
+
+/// [`bind`] on a socket that is not the OS's: `slopty_shape::sim`'s in-memory network, where a
+/// test runs a real connection over a simulated link on tokio's paused clock.
+///
+/// `seed` seeds noq's own draws (skipped packet numbers, the transport parameters' grease,
+/// BBR3's probes), so that with the network's seed a run repeats; `None` draws from the OS as
+/// [`bind`] does.
+pub fn bind_on(
+    socket: Box<dyn noq::AsyncUdpSocket>,
+    server: bool,
+    seed: Option<u64>,
+) -> Result<Endpoint, NetError> {
+    let addr =
+        socket.local_addr().map_or_else(|_| "an abstract socket".to_owned(), |a| a.to_string());
+    let mut config = crate::crypto::endpoint_config();
+    config.rng_seed(seed.map(spread_seed));
+    endpoint_with(socket, server, seeded_transport_config(seed), config)
+        .map_err(|source| NetError::Bind { addr, source })
+}
+
+/// `seed` spread over the `N` bytes of a generator's seed, each eight of them mixed apart.
+fn spread_seed<const N: usize>(seed: u64) -> [u8; N] {
+    let mut bytes = [0_u8; N];
+    for (chunk, word) in bytes.chunks_mut(8).zip(0_u64..) {
+        let mixed = seed ^ word.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for (byte, from) in chunk.iter_mut().zip(mixed.to_le_bytes()) {
+            *byte = from;
+        }
+    }
+    bytes
+}
+
+/// The endpoint on `socket`, on noq's tokio runtime: its clock is tokio's, so a paused runtime
+/// pauses the transport too.
+fn endpoint_with(
+    socket: Box<dyn noq::AsyncUdpSocket>,
+    server: bool,
+    transport: TransportConfig,
+    config: noq::EndpointConfig,
+) -> std::io::Result<Endpoint> {
     let transport = Arc::new(transport);
     let server_config = server.then(|| {
         let mut config = crate::crypto::server_config();
         config.transport_config(Arc::clone(&transport));
         config
     });
-    let endpoint = Endpoint::new(
-        crate::crypto::endpoint_config(),
+    let endpoint = Endpoint::new_with_abstract_socket(
+        config,
         server_config,
-        socket.into(),
+        socket,
         Arc::new(noq::TokioRuntime),
-    )
-    .map_err(bind_err)?;
+    )?;
     let mut client = crate::crypto::client_config();
     client.transport_config(transport);
     endpoint.set_default_client_config(client);

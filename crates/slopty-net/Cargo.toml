@@ -31,3 +31,5 @@ tracing.workspace = true
 slopty-tailnet = { workspace = true, features = [ "fake" ] }
 slopty-shape.workspace = true
 tempfile.workspace = true
+# `start_paused`: the simulated network runs on tokio's paused clock (`tests/sim.rs`).
+tokio = { workspace = true, features = [ "test-util" ] }

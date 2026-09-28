@@ -278,27 +278,20 @@ mod tests {
     }
 
     /// What scanning costs per OSC that is not a mark (titles, OSC 8 links: a `ls
-    /// --hyperlink` or a prompt theme writes one per name). `cargo nextest run -p
-    /// slopty-engine --release --run-ignored only osc_scan_cost --no-capture` prints it
-    /// (MEASUREMENTS.md "OSC 133 scan").
+    /// --hyperlink` or a prompt theme writes one per name). `cargo xtask bench --filter
+    /// osc_scan_cost` runs it (MEASUREMENTS.md "OSC 133 scan").
     #[test]
     #[ignore = "measurement, run by hand"]
     fn osc_scan_cost() {
         let unit = b"\x1b]8;;file:///Users/me/src/slopty/crates/a.rs\x1b\\a.rs\x1b]8;;\x1b\\  \x1b]0;t\x07";
         let buf: Vec<u8> = unit.iter().copied().cycle().take(unit.len() * 10_000).collect();
-        let oscs = 30_000_u32;
-        let mut ns = Vec::new();
+        let oscs = 30_000;
+        let mut scan =
+            slopty_testkit::bench::Bench::new("engine.osc_scan_cost").series("per_osc").ops(oscs);
         for _ in 0..20 {
             let mut s = Scanner::default();
-            let t = std::time::Instant::now();
-            assert_eq!(s.scan(std::hint::black_box(&buf)), None);
-            ns.push(t.elapsed().as_nanos() / u128::from(oscs));
+            assert_eq!(scan.time(|| s.scan(std::hint::black_box(&buf))), None);
         }
-        ns.sort_unstable();
-        eprintln!(
-            "osc_scan_cost: p50 {} ns per OSC, max {} ns",
-            ns[ns.len() / 2],
-            ns[ns.len() - 1]
-        );
+        scan.report().unwrap();
     }
 }

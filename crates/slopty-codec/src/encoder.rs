@@ -1232,22 +1232,23 @@ mod tests {
     }
 
     /// What turning VideoToolbox's output into a packet costs on its callback thread: a 62 KB
-    /// P-frame and a 300 KB keyframe in four slices. `docs/MEASUREMENTS.md` records runs.
+    /// P-frame and a 300 KB keyframe in four slices. `cargo xtask bench --filter
+    /// packet_conversion_cost` runs it; `docs/MEASUREMENTS.md` records runs.
     #[test]
-    #[ignore = "a measurement; run with --run-ignored only --no-capture in release"]
+    #[ignore = "a measurement; run with `cargo xtask bench`"]
     fn packet_conversion_cost() {
-        for (name, len) in [("P-frame", 62_000_usize), ("keyframe", 300_000)] {
+        let bench = slopty_testkit::bench::Bench::new("codec.packet_conversion_cost");
+        for (name, len) in [("p_frame", 62_000_usize), ("keyframe", 300_000)] {
             let body = access_unit(&[len / 4; 4]);
             let sample = sample_of(&body);
-            let rounds = 2_000_u32;
-            let started = std::time::Instant::now();
-            let mut bytes = 0_usize;
-            for _ in 0..rounds {
-                bytes = bytes
-                    .wrapping_add(packet(&sample, VideoCodec::Hevc, false).unwrap().data.len());
+            let mut convert = bench.series(name);
+            let mut bytes = 0;
+            for _ in 0..2_000 {
+                bytes =
+                    convert.time(|| packet(&sample, VideoCodec::Hevc, false).unwrap().data.len());
             }
-            let per = started.elapsed() / rounds;
-            eprintln!("{name} {len} B: {per:?} per packet ({} B out)", bytes / rounds as usize);
+            eprintln!("{name} {len} B: {bytes} B out");
+            convert.report().unwrap();
         }
     }
 }

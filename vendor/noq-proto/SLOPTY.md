@@ -1,4 +1,4 @@
-# noq-proto, vendored with eight patches
+# noq-proto, vendored with ten patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -84,6 +84,30 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    `stream_priority_unpaced_below_the_stream_waits`,
    `stream_priority_unpaced_off_waits_for_the_pacer`. Slopty's gate holds it through
    `an_echo_does_not_wait_for_the_pacer` (`crates/slopty-net/tests/pacer_wait.rs`).
+
+9. `feat(proto): Add Bbr3Config::probe_rng_seed`
+
+   BBR3 draws where each bandwidth probe starts from a generator it seeds from the OS, and the
+   config's seed field had no setter outside the crate's tests. Slopty's simulated network
+   (`slopty_shape::sim`) seeds everything else a run draws, and with the probes left random a
+   flooded link's echo times differed between two runs of one seed. `None` stays the default.
+   Slopty's gate holds it through `a_seed_repeats_its_run` (`crates/slopty-net/tests/sim.rs`).
+
+10. `fix(proto): Keep a validated path to fall back to when a migration's check fails`
+
+   `Connection::migrate` keeps the path it leaves so that a failed validation of the new one
+   can go back to it. Its comment says it keeps that path only if it was validated, but the
+   test was inverted (`!prev_path_data.validated`), so a migration away from a working path
+   kept nothing. When the one PATH_CHALLENGE to the new address was lost, the retry waited on
+   the anti-amplification budget the padded challenge had spent, `PathValidationFailed` fired
+   first and cleared the challenge, and with nothing to go back to the path stayed unvalidated
+   for good. noq sends no data on an unvalidated path, not even ACKs, while PINGs kept the
+   connection from timing out: after a NAT rebinding the worker never sent the client another
+   byte. With the test the right way round, the failed check goes back to the old path, and the
+   client's next packet from its new address starts the migration again. Upstream `main` still
+   has the inverted test (checked 2026-09-29). Slopty's gate holds it through
+   `a_nat_rebinding_moves_the_connection_without_a_reconnect` (`crates/slopty-net/tests/sim.rs`,
+   seed 10 loses the first challenge).
 
 Commits 2 and 3 share `VideoSim` in the `bbr3` tests: a screen encoder's frames through one
 bottleneck, paced by noq's token bucket. `video_through_one_bottleneck` (ignored) prints what

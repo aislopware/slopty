@@ -1444,6 +1444,7 @@ mod facts;
 mod focus_cache;
 mod folders;
 mod frame;
+mod leaks;
 mod measure;
 mod miniatures;
 mod nav_list;

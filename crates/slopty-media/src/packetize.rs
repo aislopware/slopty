@@ -180,7 +180,8 @@ impl Packetizer {
     ///
     /// Every datagram, parity included, is written once into one buffer laid out as the wire
     /// wants it (header, shard, header, shard, …) and handed out as slices of it: the bitstream
-    /// is copied once, and a frame costs one allocation however many datagrams it makes.
+    /// is copied once, and a frame costs three allocations however many datagrams it makes (the
+    /// buffer, its shared handle and the list of slices; `tests/allocs.rs` holds it there).
     pub fn packetize(
         &mut self,
         frame: &EncodedFrame<'_>,
@@ -231,15 +232,9 @@ impl Packetizer {
         }
 
         let data = wire.split().freeze();
-        let slices = |wire: &Bytes, count: usize| -> Vec<Bytes> {
-            (0..count)
-                .map(|i| {
-                    let start = i.saturating_mul(stride);
-                    wire.slice(start..start.saturating_add(stride))
-                })
-                .collect()
-        };
-        let mut datagrams = slices(&data, data_count);
+        // Sized for the parity too, so adding it does not grow the list.
+        let mut datagrams = Vec::with_capacity(count);
+        datagrams.extend(slices(&data, data_count, stride));
         ship(&datagrams);
 
         if parity_count > 0 {
@@ -265,9 +260,8 @@ impl Packetizer {
                 wire.put_slice(header.as_bytes());
                 wire.put_slice(shard);
             }
-            let parity = slices(&wire.freeze(), parity_count);
-            ship(&parity);
-            datagrams.extend(parity);
+            datagrams.extend(slices(&wire.freeze(), parity_count, stride));
+            ship(datagrams.get(data_count..).unwrap_or_default());
         }
 
         self.datagrams_sent = self.datagrams_sent.saturating_add(datagrams.len() as u64);
@@ -299,6 +293,14 @@ impl Packetizer {
         self.datagrams_sent = self.datagrams_sent.saturating_add(out.len() as u64);
         out
     }
+}
+
+/// The first `count` datagrams of `stride` bytes each in `wire`, as slices of it.
+fn slices(wire: &Bytes, count: usize, stride: usize) -> impl Iterator<Item = Bytes> + '_ {
+    (0..count).map(move |i| {
+        let start = i.saturating_mul(stride);
+        wire.slice(start..start.saturating_add(stride))
+    })
 }
 
 const fn frame_flags(frame: &EncodedFrame<'_>) -> u8 {
@@ -605,11 +607,13 @@ mod tests {
     /// What cutting one frame costs on the VideoToolbox callback thread, and how soon its first
     /// datagram is handed on: a 62 KB P-frame and a 300 KB keyframe at the default parity and at
     /// none. Until the data went ahead of the parity the first datagram left only once the whole
-    /// frame was cut, the "per frame" column. `docs/MEASUREMENTS.md` records runs.
+    /// frame was cut. `cargo xtask bench --filter packetize_cost` runs it;
+    /// `docs/MEASUREMENTS.md` records runs.
     #[test]
-    #[ignore = "a measurement; run with --run-ignored only --no-capture in release"]
+    #[ignore = "a measurement; run with `cargo xtask bench`"]
     fn packetize_cost() {
-        for (name, len) in [("P-frame", 62_000_usize), ("keyframe", 300_000)] {
+        let bench = slopty_testkit::bench::Bench::new("media.packetize_cost");
+        for (name, len) in [("p_frame", 62_000_usize), ("keyframe", 300_000)] {
             let data: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect();
             let frame = EncodedFrame {
                 data: &data,
@@ -621,27 +625,23 @@ mod tests {
             for permille in [DEFAULT_PARITY_PERMILLE, 0] {
                 let mut p = Packetizer::new(StreamId(1));
                 p.set_parity_permille(permille);
-                let rounds = 2_000_u32;
-                let mut first = std::time::Duration::ZERO;
-                let started = std::time::Instant::now();
-                let mut datagrams = 0_usize;
-                for _ in 0..rounds {
+                let mut cut = bench.series(&format!("{name}.parity_{permille}"));
+                let mut first = bench.series(&format!("{name}.parity_{permille}.first_datagram"));
+                let mut datagrams = 0;
+                for _ in 0..2_000 {
                     let began = std::time::Instant::now();
                     let mut shipped = None;
-                    let sent = p
-                        .packetize(&frame, 0, |_| {
+                    datagrams = cut.time(|| {
+                        let ship = |_: &[Bytes]| {
                             shipped.get_or_insert_with(|| began.elapsed());
-                        })
-                        .unwrap();
-                    datagrams = datagrams.wrapping_add(sent.datagrams.len());
-                    first = first.saturating_add(shipped.unwrap_or_default());
+                        };
+                        p.packetize(&frame, 0, ship).unwrap().datagrams.len()
+                    });
+                    first.record(shipped.unwrap_or_default());
                 }
-                let per = started.elapsed() / rounds;
-                eprintln!(
-                    "{name} {len} B, parity {permille}‰: {per:?} per frame, first datagram handed on after {:?}, {} datagrams",
-                    first / rounds,
-                    datagrams / rounds as usize
-                );
+                eprintln!("{name} {len} B, parity {permille}‰: {datagrams} datagrams");
+                cut.report().unwrap();
+                first.report().unwrap();
             }
         }
     }

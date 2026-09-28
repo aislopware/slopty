@@ -5,6 +5,7 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "xtask is a CLI; stdout is its UI")]
 
+mod bench;
 mod bundle;
 mod check;
 mod claude;
@@ -17,11 +18,13 @@ mod icon;
 mod ime;
 mod ios;
 mod linux;
+mod nightly;
 mod prune;
 mod release;
 mod run;
 mod setup;
 mod sign;
+mod soak;
 mod tools;
 mod upstream;
 
@@ -93,6 +96,20 @@ enum Cmd {
     Deep {
         #[command(subcommand)]
         cmd: deep::DeepCmd,
+    },
+    /// Run the `*_cost` measurements in release and hold their retired instructions to
+    /// `xtask/budgets.toml` (`--update-budgets` records a run; `--wall` keeps the wall-time
+    /// trend, as the nightly run does).
+    Bench(bench::BenchOpts),
+    /// The daemons under a synthetic load from a temporary HOME, watched for footprint growth,
+    /// descriptors and threads left behind, and leaks (`leaks`) at the end.
+    Soak(soak::SoakOpts),
+    /// The heavy lanes one after another (soak, bench wall time, amplified property and GPUI
+    /// tests, the deep checks), a JSON summary each under `target/nightly/<date>/`; `install`
+    /// runs it at 03:00 from a `LaunchAgent`.
+    Nightly {
+        #[command(subcommand)]
+        cmd: Option<nightly::NightlyCmd>,
     },
     /// Record a CPU profile of a command with samply (pure Rust, Firefox Profiler UI):
     /// `cargo xtask profile -- cargo nextest run -p slopty-ui -E 'test(smooth)'`.
@@ -198,6 +215,9 @@ fn main() -> Result<()> {
             dry_run,
         }),
         Cmd::Deep { cmd } => deep::run(&sh, &cmd),
+        Cmd::Bench(opts) => bench::run(&sh, &opts),
+        Cmd::Soak(opts) => soak::run(&sh, &opts),
+        Cmd::Nightly { cmd } => nightly::run(&sh, cmd.as_ref()),
         Cmd::Profile { cmd } => {
             sh.create_dir("target/profile")?;
             let out = format!(

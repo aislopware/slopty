@@ -317,3 +317,124 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     `slopty-vdisplay`, which still read `SLOPTY_SCREEN_E2E`/`SLOPTY_INPUT_E2E`. Their suites
     are `Kept::Env` in `xtask/src/e2e.rs` until then.
   - Test: `a_suites_filters_the_callers_and_the_capture_rule_all_apply` (`xtask`).
+
+- ✅ **Allocation budgets gate the hot paths** (2026-09-29). Wall time cannot pass or fail a
+  commit on a machine other sessions load, but the allocations a path makes are the same on
+  every run. So `tests/allocs.rs` in `slopty-media`, `slopty-engine` and `slopty-grid` install
+  a counting global allocator (`slopty_testkit::alloc::Counting`, about 40 lines over `System`)
+  and hold each steady-state path to a number of blocks, and to bytes where they say something.
+  The counts are per thread, so the harness's threads do not move them, and each test first
+  checks that the counter is installed, so a budget never passes on zeros. The published
+  counters were not taken: stats_alloc, allocation-counter, assert_no_alloc and cap have had no
+  release since 2021-2023. dhat allows one profiler per process and counts every thread. It
+  stays the tool for finding where the blocks come from, not for asserting them.
+  - Held today: cutting a frame, 3 blocks at any size or parity; putting one back together,
+    3; a key's byte into the engine, 0; its diff frame, 4; an Enter at a bottom prompt, 10 on
+    any screen; the echo frame encoded, 8; a row applied on the client, 1; a line scrolling into
+    a full history, 1.2 at most. A frame or an echo handed to eight viewers costs exactly what
+    one does.
+  - The first run found three extra costs, and all three are fixed. The packetizer grew its
+    datagram list for the parity, 5 blocks a frame where 3 do. The engine read every row of the
+    screen into a new line on a scroll, 30 blocks at 80×24 and 66 at 200×60. The client's
+    scrollback rebuilt its index with `split_off` each time the oldest line moved: 6 blocks
+    and 1.4 KiB a line. MEASUREMENTS, "allocation budgets", has the before and after.
+  - Encoding an echo frame takes 8 blocks because `slopty_proto::codec::encode` grows its
+    buffer from the 4-byte prefix. Sizing it first would make that 1. That is `slopty-proto`'s
+    change, and the budget is lowered when it lands.
+  - Not yet covered: the client's datagram reader, the worker session actor's fan-out, which
+    adds a credit per viewer, and a steady terminal paint in `slopty-ui`. Each belongs in its
+    own crate's `tests/allocs.rs`.
+  - Tests: every test in those three files.
+
+- ✅ **A measurement is held to retired instructions; wall time is a nightly trend**
+  (2026-09-29, audit finding 61). The `*_cost` measurements printed percentiles they computed
+  by hand, with the median code copied into each, and asserted nothing. Now they time their
+  samples with `slopty_testkit::bench`. For each sample it also reads the process's retired
+  instructions (`proc_pid_rusage`, `ri_instructions`: no root, no entitlement) and subtracts
+  what the two readings cost. It then writes one JSON line per series. `cargo xtask bench` runs
+  them in release and holds each series' median instructions per operation to
+  `xtask/budgets.toml`, within 5 %.
+  - Two runs back to back, the second with other sessions building, agreed within 0.1 % on
+    most series and within 3 % on all 31. The 3 % was `frame_cost.write` at 861 instructions,
+    where the calibrated overhead is a large share. MEASUREMENTS has the table.
+  - darwin-kperf needs root or a private entitlement, and callgrind and gungraun have no
+    Apple-silicon macOS port. criterion and divan measure wall time, which is the noise this
+    avoids.
+  - A series that times other threads (the audio render with the decoder pushing beside it) is
+    `wall_only`: the instruction count is the whole process's.
+  - Wall times go to `target/nightly/bench.jsonl` only with `--wall`, which the nightly run
+    passes, and a move of more than 25 % since the last night is called out, never failed.
+  - The bench is not in the gate: its release build with fat LTO is minutes. It runs nightly,
+    and by hand after a change on the input, terminal or frame path.
+  - Tests: `a_budget_holds_within_its_slack`,
+    `the_measured_crates_are_the_ones_that_take_the_testkit`,
+    `budgets_round_trip_through_their_file`, `the_checked_in_budgets_parse` (`xtask`), and
+    `a_series_reports_per_operation_and_as_json` (`slopty-testkit`).
+
+- ✅ **The daemons soak under a scripted load, and `leaks` reads them at the end**
+  (2026-09-29). Nothing ran longer than a scenario, so growth in a daemon went unseen: a map
+  never pruned, a descriptor or task that outlives its session. `cargo xtask soak` starts the
+  server, ptyd and worker from a temporary HOME, the worker registered with the server. It
+  drives cycles through the `slopty` CLI: open a quiet bash, flood it, play a hook through
+  `slopty hook report`, read it back, close it. It samples each daemon's `ri_phys_footprint`,
+  open descriptors and threads. It fails on footprint growth faster than 64 KiB a minute by
+  least squares over the last two thirds of the load, on a peak over the daemon's budget, on
+  descriptors or threads left after a 12 s settle, and on any leak `leaks <pid>` reports.
+  - The footprint is what jetsam and Activity Monitor count, where the resident set is not.
+  - `leaks` cannot read a hardened-runtime binary, and `cargo xtask sign` signs the dev daemons
+    with the hardened runtime. So the soak copies them to `target/deep/soak/bin` and signs the
+    copies ad hoc, without the runtime and with `get-task-allow`. The build tree's signatures,
+    and the TCC grants tied to them, are untouched.
+  - `MallocStackLogging` is off unless `--stacks` is given: it adds its log to the footprint
+    the soak budgets.
+  - No display stream runs. The worker has no switch that puts its synthetic capture behind a
+    stream, and a real capture needs Screen Recording. Nor is the worker restarted mid-soak.
+    Both are next, the first as a test switch in the worker daemon.
+  - The first run found ptyd keeping a descriptor and about 145 KiB for every closed session,
+    and a race in the control socket's client that fails a hook report now and then
+    (MEASUREMENTS, "the first soak"). Those are ptyd's and the platform crate's to fix. The
+    budgets stay where they are, and the soak fails until then.
+  - Test: `the_slope_is_the_least_squares_fit` (`xtask`); the soak itself is the check.
+
+- ✅ **A local nightly runs the heavy lanes** (2026-09-29). The weekly Deep workflow had never
+  produced a result on its schedule, and the soak, the bench's wall times and amplified property
+  tests need this Mac. `cargo xtask nightly` runs them one after another under `nice -n 10`:
+  the soak for 20 minutes, the bench with `--wall`, the property tests at `PROPTEST_CASES=4096`,
+  `slopty-ui`'s tests under `ITERATIONS=50` scheduler seeds, and `deep` miri, address and
+  thread sanitizers, coverage and features. Each writes a log and a JSON result under
+  `target/nightly/<date>/`, beside a summary. A check whose tool is missing is skipped with the
+  reason, not failed. `cargo xtask nightly install` loads a LaunchAgent that runs it at 03:00 at
+  background priority. It is installed only by that command.
+  - `slopty-media`'s pipeline property test used `ProptestConfig::with_cases(256)`, which
+    overrides `PROPTEST_CASES`. Its default config is the same 256 and reads the variable, so it
+    now takes the default.
+  - Tests: `the_launch_agent_runs_the_nightly_at_three` and
+    `every_check_is_named_once_and_the_deep_ones_say_what_they_need` (`xtask`).
+
+- ✅ **Closing anything in the workspace leaves no entity and no map entry behind**
+  (2026-09-29). Views that outlived their tile, and entries that outlived their worker, lasted
+  as long as the app and nothing could see them. `workspace/tests/leaks.rs` has
+  `closes_clean(view, cx, cycle)`. It settles the workspace and records `footprint()`, the length
+  of every map and list `WorkspaceView` keeps. Then it runs the open-and-close cycle once, so
+  whatever is made once per app is made. It takes GPUI's `leak_detector_snapshot()` and runs the
+  cycle again. After each run it lets every wait run out (the undo of a close, the toast, the
+  palette's way out) and draws two frames. It then calls `assert_no_new_leaks` and checks that
+  the footprint is back where it started. `LEAK_BACKTRACE=1` records where each handle was made,
+  though the pinned fork's formatter matches mangled symbol names and prints no frames on macOS.
+  - The cycles close a shell with output, a streaming window, a file with an unsaved edit, a page,
+    a note and a folder. They open and dismiss the palette, the window picker and a tile's name
+    field, and toggle the overview. They show, feed and hide an agent's face, then close its
+    shell. They add and remove a second worker holding a tile of every kind.
+  - Found: a dismissed palette was still held by a strong handle for every frame it had drawn.
+    `cx.on_next_frame` keeps its entity until a frame runs, and a hidden window runs none, so
+    the palette now schedules that check through a weak handle. Removing a worker left its items
+    in the tile recency and its key in `given_shell`, `given_pending` and the navigator's folded
+    set, so a worker added again was never given a shell. `remove_worker` now drops all of them.
+  - A stream view took an `NSProcessInfo` activity that keeps the display awake. Under test it
+    held this Mac's display on, and the first one in a fresh process took about 17 s, so every
+    headless test that opened a stream took 17 to 32 s. Tests no longer take it; GPUI's own
+    hold is what they assert. Those tests now run in about 50 ms.
+  - Tests: `a_closed_terminal_leaves_nothing`, `a_closed_stream_leaves_nothing`,
+    `a_closed_file_with_an_edit_leaves_nothing`, `a_closed_page_note_and_folder_leave_nothing`,
+    `the_overlays_and_the_overview_leave_nothing`, `a_closed_agent_with_its_face_leaves_nothing`
+    and `a_removed_worker_with_open_tiles_leaves_nothing` (`slopty-ui`).

@@ -1747,10 +1747,16 @@ impl Render for CommandPalette {
         // layout's, so the frame after this one checks it again (a list just opened, or
         // narrowed by a query) and draws once more only if it changed.
         self.more_below = self.runs_on();
-        cx.on_next_frame(window, |this, _window, cx| {
-            if this.runs_on() != this.more_below {
-                cx.notify();
-            }
+        // Weakly: `cx.on_next_frame` holds the palette until a frame comes, and a hidden window
+        // draws none, so a dismissed palette would outlive its dismissal by one strong handle
+        // for every frame it drew.
+        let this = cx.weak_entity();
+        window.on_next_frame(move |_window, cx| {
+            let _gone = this.update(cx, |this, cx| {
+                if this.runs_on() != this.more_below {
+                    cx.notify();
+                }
+            });
         });
         let fade = self.more_below.then(|| {
             crate::kit::edge_fade(Edge::Bottom, s.elevated, px(theme.spacing.lg))

@@ -1,0 +1,36 @@
+# Retired instructions per operation of each `*_cost` series, the median of its samples on
+# this Mac in release (`cargo xtask bench`, `xtask/src/bench.rs`). A run more than 5 %
+# over fails; `cargo xtask bench --update-budgets` rewrites this file from a run.
+
+[instructions]
+"codec.access_unit_conversion_cost.keyframe" = 1008616
+"codec.packet_conversion_cost.keyframe" = 58883
+"codec.packet_conversion_cost.p_frame" = 14237
+"codec.render_cost.same_thread" = 9317
+"engine.checkpoint_cost.fill_engine" = 32850996
+"engine.checkpoint_cost.fill_raw_vt" = 27067881
+"engine.checkpoint_cost.format" = 45649442
+"engine.checkpoint_cost.replay_64k_chunks" = 35270833
+"engine.checkpoint_cost.replay_one_chunk" = 35249023
+"engine.fetch_lines_cost.4096_rows" = 124790604
+"engine.frame_cost.take_frame" = 38209
+"engine.frame_cost.write" = 861
+"engine.osc_scan_cost.per_osc" = 172
+"engine.scroll_frame_cost.200x60" = 5315576
+"engine.scroll_frame_cost.80x24" = 894562
+"engine.search_after_output_cost.plain" = 1877298
+"engine.search_cost.10000_lines.format" = 30086990
+"engine.search_cost.10000_lines.plain" = 21561889
+"engine.search_cost.10000_lines.regex" = 17520841
+"engine.search_cost.1000_lines.format" = 3000073
+"engine.search_cost.1000_lines.plain" = 3828584
+"engine.search_cost.1000_lines.regex" = 3085049
+"engine.search_cost.50000_lines.format" = 152761532
+"engine.search_cost.50000_lines.plain" = 101218349
+"engine.search_cost.50000_lines.regex" = 81977057
+"media.packetize_cost.keyframe.parity_0" = 97847
+"media.packetize_cost.keyframe.parity_200" = 1238330
+"media.packetize_cost.p_frame.parity_0" = 22324
+"media.packetize_cost.p_frame.parity_200" = 210037
+"media.reassemble_cost.keyframe" = 209982
+"media.reassemble_cost.p_frame" = 46778
