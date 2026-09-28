@@ -107,7 +107,7 @@ getrandom = { version = "0.4", default-features = false, features = ["std", "sys
 gpui_apple = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
 gpui_macos = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/zed.git", features = ["font-kit", "runtime_shaders", "test-support", "wayland", "x11"] }
-itertools = { version = "0.13" }
+itertools = { version = "0.11" }
 objc2 = { version = "0.6" }
 objc2-app-kit = { version = "0.3" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
@@ -128,7 +128,7 @@ either = { version = "1", default-features = false, features = ["use_std"] }
 errno = { version = "0.3" }
 fastrand = { version = "2", features = ["js"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
-itertools = { version = "0.13" }
+itertools = { version = "0.11" }
 libc = { version = "0.2" }
 once_cell = { version = "1" }
 regex = { version = "1" }

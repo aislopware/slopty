@@ -1632,6 +1632,12 @@ impl CommandPalette {
 
     /// Line `ix` of the list: a group's heading, or a match's row.
     fn line(&self, ix: usize, cx: &Context<Self>) -> gpui::AnyElement {
+        // A list lays each line out on its own, so nothing stretches it to the list's width the
+        // way a column stretches its children: the column is put back around each one.
+        div().w_full().flex().flex_col().child(self.line_content(ix, cx)).into_any_element()
+    }
+
+    fn line_content(&self, ix: usize, cx: &Context<Self>) -> gpui::AnyElement {
         match self.lines.get(ix) {
             Some(Line::Heading { heading, slug }) => {
                 let name = format!("palette-heading-{slug}");
@@ -1990,6 +1996,22 @@ mod tests {
     fn step(palette: &Entity<CommandPalette>, cx: &mut VisualTestContext) {
         palette.update(cx, |p, cx| p.step(1, cx));
         cx.run_until_parked();
+    }
+
+    /// A line fills the list's width whatever its words, so the plate spans the list and a
+    /// chord sits at the right edge, not beside a short label.
+    #[gpui::test]
+    fn a_line_spans_the_list_whatever_its_words(cx: &mut TestAppContext) {
+        let (_palette, cx) = palette_of(3, cx);
+        let list = cx.debug_bounds("palette-list").expect("the list");
+        let line = cx.debug_bounds("palette-item-0").expect("a line");
+        let slack = list.size.width - line.size.width;
+        assert!(
+            slack < px(2. * 16.),
+            "a line {:?} wide in a list {:?} wide",
+            line.size.width,
+            list.size.width
+        );
     }
 
     /// The palette's plate sits under the selected line, and a step draws it first where it
