@@ -1555,6 +1555,25 @@ impl WorkspaceView {
                 {
                     actions.push(button);
                 }
+                // Only while the system's shortcuts go to the worker: this Mac's ⌘Tab not
+                // working is a state to see, and a click here gives it back.
+                if self.screens.get(&id).is_some_and(|v| v.read(cx).system_keys()) {
+                    let toggle = kit::icon_toggle(
+                        theme,
+                        format!("system-keys-{}", id.as_uuid()),
+                        IconName::Command,
+                        super::desktop::SEND_SYSTEM_KEYS,
+                        true,
+                        chrome.k,
+                    );
+                    actions.push(
+                        toggle
+                            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                                this.flip_system_keys(id, cx);
+                            }))
+                            .into_any_element(),
+                    );
+                }
                 if let Some(view) = self.screens.get(&id).map(|v| v.read(cx))
                     && (muted || view.has_audio())
                 {

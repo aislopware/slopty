@@ -3590,3 +3590,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `health::the_health_mark_is_silent_until_something_is_wrong`; figures
     `the_context_figures_say_the_window_the_cost_and_the_limits`; diff
     `a_quote_names_the_lines_and_keeps_their_signs`.
+
+- ✅ **Remote desktops, round five** (2026-09-28).
+  - **A display tile can stream a display made for this device.** On a worker whose caps say
+    `virtual_displays`, the palette offers "Open a display sized to this window" on the focused
+    display tile. The tile's physical stream goes and `OpenDisplay` asks for its body in device
+    pixels at the window's scale and the screen's refresh, with this device's key kept beside
+    `layout.json`. As the tile resizes, `display::Follow` sends the new size once the tile has
+    held it for `display::SETTLE` (300 ms), since a mode change reconfigures the worker's
+    displays. The same command, now "Back to the physical display", undoes it. One key has one
+    display, so a second tile on the same worker takes it over from the first. A worker that
+    streams a physical display instead says why in a notice. The choice lives in this client
+    only, for this run.
+  - **The stats overlay says 4:4:4.** The details' first line is the picture: size, capture
+    scale, "4:4:4" or "4:2:0" read off the decoded picture's format (`xf44` or `444f` is
+    full chroma), and the frame's age. Rate, bitrate and round trip left it, since the plain
+    line above says them.
+  - **The palette finds an agent by what it is about.** A session line matches on its agent's
+    first prompt and the answer of its last turn, as far as the face has read the transcript,
+    2 000 characters of each. The line prints neither.
+  - Tests: client `display::tests::the_display_follows_the_tile_once_it_holds_still`; workspace
+    `desktop::a_display_made_for_this_device_follows_its_tile`,
+    `palette::the_palette_finds_an_agent_by_its_first_prompt_and_last_answer`; screen
+    `the_overlay_says_4_4_4_from_the_decoded_picture`,
+    `hud_shows_age_jitter_hold_present_cadence_and_the_verdict`.

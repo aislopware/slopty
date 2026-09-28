@@ -20,6 +20,10 @@ use crate::picker::{PickerEvent, SessionRow, WindowPicker};
 /// How many of the run-target shell's last commands the palette offers to run again.
 const RERUN_LINES: usize = 5;
 
+/// How much of an agent's first prompt, and of its last answer, the palette searches: enough
+/// for what a task is about, bounded for a transcript that pasted a log.
+const ABOUT_CHARS: usize = 2_000;
+
 impl WorkspaceView {
     /// Every tile in reading order: workspace by workspace, column by column, top to bottom.
     pub(super) fn reading_order(&self) -> Vec<TileRef> {
@@ -70,6 +74,7 @@ impl WorkspaceView {
                     .on_worker(row.worker)
                     .in_dir(row.cwd)
                     .aged(row.age)
+                    .about(self.agent_about(row.session, cx))
             })
             .collect();
         // Every other tile, by the title its header shows, as the navigator lists them: a
@@ -97,8 +102,39 @@ impl WorkspaceView {
             );
         }
         items.extend(super::actions::palette_items());
+        // What the focused remote tile can do beyond its header, only while one has the focus.
+        items.extend(self.screen_lines(cx));
         items.extend(self.palette_extra.iter().cloned());
         items
+    }
+
+    /// What an agent's session is about, for the palette to find it by: its first prompt and
+    /// the answer of its last turn, as far as its face has read the transcript. "the login
+    /// redirect" then finds the agent working on it, whatever it is titled.
+    fn agent_about(&self, session: SessionId, cx: &Context<Self>) -> Option<String> {
+        use slopty_proto::conversation::{Body, ThreadId};
+        let face = self.conversation(session)?.read(cx);
+        let entries = face.model().thread(&ThreadId::Main)?.entries();
+        let clip = |text: &str| text.chars().take(ABOUT_CHARS).collect::<String>();
+        let prompt = entries.iter().find_map(|e| match &e.body {
+            Body::Prompt(prompt) if prompt.command.is_none() => Some(clip(&prompt.text.text)),
+            _ => None,
+        });
+        let last_turn = entries
+            .iter()
+            .rposition(|e| matches!(e.body, Body::Prompt(_)))
+            .and_then(|at| entries.get(at..))
+            .unwrap_or(entries);
+        let answer: Vec<&str> = last_turn
+            .iter()
+            .filter_map(|e| match &e.body {
+                Body::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let answer = (!answer.is_empty()).then(|| clip(&answer.join("\n")));
+        let about: Vec<String> = prompt.into_iter().chain(answer).collect();
+        (!about.is_empty()).then(|| about.join("\n"))
     }
 
     /// ⌘⇧P: the command palette over whatever has the keyboard; the choice runs once it is

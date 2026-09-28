@@ -45,8 +45,8 @@ use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
 use slopty_proto::screen::{
-    CaptureTarget, CursorShape, Quality, RateVerdict, ScreenInput, ScreenRequest, ScrollPhase,
-    SourceState, VideoCodec,
+    CaptureTarget, Chroma, CursorShape, Quality, RateVerdict, ScreenInput, ScreenRequest,
+    ScrollPhase, SourceState, VideoCodec,
 };
 use slopty_theme::Theme;
 use tokio::sync::{Notify, mpsc, watch};
@@ -76,6 +76,16 @@ pub use actions::ToggleTrackpad;
 /// What the header's trackpad control and the palette's command call trackpad mode: one name,
 /// on or off.
 pub const TRACKPAD_MODE: &str = "Trackpad mode";
+
+/// The most of the clipboard "Type the clipboard" types, in bytes: a password or a line for a
+/// field that refuses paste, not a document keyed in at typing speed.
+pub const TYPE_MAX: usize = 1024;
+
+/// Characters typed at once: two events each, well inside the outbox.
+const TYPE_BURST: usize = 64;
+
+/// The wait between bursts of typing: a frame.
+const TYPE_STEP: Duration = Duration::from_millis(16);
 
 /// How long the zoom readout stays before it fades.
 const READOUT_HOLD: Duration = Duration::from_millis(700);
@@ -282,6 +292,9 @@ pub struct ScreenView {
     /// The newest frame's picture. The wrapper holds its own retain on the decoder's buffer, so
     /// the frame it came in needs no keeping.
     latest: Option<CVPixelBuffer>,
+    /// How much colour the newest picture carries, read off its pixel format; `None` before
+    /// the first.
+    chroma: Option<Chroma>,
     /// Stream size in pixels as opened.
     size: (u32, u32),
     /// Native pixel size of the target (stream size at scale 1).
@@ -389,6 +402,12 @@ pub struct ScreenView {
     two_scrolling: bool,
     /// Trackpad mode: the pointer the fingers move, while it is on.
     trackpad: Option<touch::Trackpad>,
+    /// The system's own shortcuts (⌘Tab, ⌘Space, Mission Control) go to the worker while
+    /// this tile has the keyboard: the person turned it on for this tile.
+    system_keys: bool,
+    /// What "Type the clipboard" has still to type, and the task typing it.
+    typing: VecDeque<char>,
+    typer: Option<Task<()>>,
     /// Fingers are the pointer here (see [`TOUCH`]); tests turn it on.
     touch: bool,
     /// The zoom readout while it shows, the generation of the last change, and the timer that
@@ -415,6 +434,8 @@ pub struct HudInput<'a> {
     pub size: (u32, u32),
     /// Capture scale.
     pub scale: f32,
+    /// How much colour the pictures carry, as decoded; `None` before the first.
+    pub chroma: Option<Chroma>,
     /// The rate the stream is asked for, frames a second: its display period.
     pub target_fps: u16,
     /// Decoded frames per second over the last sample period.
@@ -438,11 +459,13 @@ pub struct HudInput<'a> {
 /// The five lines of the stats overlay: what is on screen, how it got there, what the sound
 /// did, when the picture was shown, and how the UI itself keeps up.
 ///
-/// Line one is the picture: size, rate, throughput, round trip and the age of the frame being
-/// shown. Line two is the path: jitter (RFC 3550 interarrival), how long frames waited for
-/// their last fragment (p50 / p95 of the last report), the in-order queue, recovery counts,
-/// stalls and the worker's bitrate verdict. Line three is the audio: packets played, lost and
-/// concealed, the times playback ran dry, how much the jitter buffer trimmed and stretched to
+/// Line one is the picture: its size and capture scale, how much colour it carries (4:4:4 when
+/// the decoder hands back full-chroma pictures, `xf44`, else 4:2:0) and the age of the frame
+/// being shown; its rate, throughput and round trip are the plain line's
+/// (`health::summary`). Line two is the path: jitter (RFC 3550 interarrival), how long frames
+/// waited for their last fragment (p50 / p95 of the last report), the in-order queue, recovery
+/// counts, stalls and the worker's bitrate verdict. Line three is the audio: packets played, lost
+/// and concealed, the times playback ran dry, how much the jitter buffer trimmed and stretched to
 /// hold its depth, and the depth it aims for. Line four is the presentation: how long a
 /// frame takes from the arrival of the datagram that completed it to the paint that shows it
 /// (p50 / p95 / worst of the last `slopty_client::pacing::RING` frames, with the decoder's share
@@ -456,7 +479,7 @@ pub struct HudInput<'a> {
 pub fn hud_lines(input: &HudInput<'_>) -> String {
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     let stats = input.stats;
-    let rtt = input.rtt.map_or_else(|| "rtt –".to_owned(), |d| format!("rtt {:.1} ms", ms(d)));
+    let chroma = input.chroma.map_or("chroma \u{2013}", chroma_label);
     let age =
         input.frame_age.map_or_else(|| "age –".to_owned(), |d| format!("age {:.0} ms", ms(d)));
     let stall = if stats.stalled { "stalled" } else { "flowing" };
@@ -474,7 +497,7 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
     let pacing = input.pacing;
     let ui = crate::frames::hud_line(input.ui);
     format!(
-        "{}×{} @{:.2}  ·  {:.0} fps  ·  {:.2} Mb/s  ·  {rtt}  ·  {age}\n\
+        "{}×{} @{:.2}  ·  {chroma}  ·  {age}\n\
          jitter {:.1} ms  ·  hold {:.1} / {:.1} ms  ·  queue {}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}\n\
          audio {} lost {} concealed {}  ·  dry {}  ·  trimmed {:.0} ms stretched {:.0} ms  ·  target {:.0} ms\n\
          present {:.1} / {:.1} / {:.1} ms (decode {:.1})  ·  every {:.1} ms ±{:.1}  ·  shown {} skip {} repeat {} late {}\n\
@@ -482,8 +505,6 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
         input.size.0,
         input.size.1,
         input.scale,
-        input.fps,
-        input.mbps,
         ms(stats.jitter),
         ms(stats.hold_p50),
         ms(stats.hold_p95),
@@ -512,6 +533,32 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
         pacing.repeats,
         pacing.late,
     )
+}
+
+/// How much colour a decoded picture of CoreVideo pixel format `format` carries: the decoder
+/// hands back bi-planar 4:4:4 (`xf44` at 10 bits, `444f` at 8) only for a stream encoded so.
+#[must_use]
+pub const fn chroma_of(format: u32) -> Chroma {
+    use core_video::pixel_buffer::{
+        kCVPixelFormatType_444YpCbCr8BiPlanarFullRange,
+        kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+    };
+    if format == kCVPixelFormatType_444YpCbCr10BiPlanarFullRange
+        || format == kCVPixelFormatType_444YpCbCr8BiPlanarFullRange
+    {
+        Chroma::Full
+    } else {
+        Chroma::Subsampled
+    }
+}
+
+/// How the overlay names `chroma`.
+#[must_use]
+pub const fn chroma_label(chroma: Chroma) -> &'static str {
+    match chroma {
+        Chroma::Full => "4:4:4",
+        Chroma::Subsampled => "4:2:0",
+    }
 }
 
 /// What the item says while it has no picture yet.
@@ -611,11 +658,7 @@ pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32) -> Quality
         bitrate_bps: prefs.max_bitrate_bps,
         scale,
         codec: VideoCodec::Hevc,
-        chroma: if prefs.sharp_text {
-            slopty_proto::screen::Chroma::Full
-        } else {
-            slopty_proto::screen::Chroma::Subsampled
-        },
+        chroma: if prefs.sharp_text { Chroma::Full } else { Chroma::Subsampled },
     }
 }
 
@@ -670,6 +713,10 @@ impl ScreenView {
             target,
             handle,
             latest: None,
+            chroma: None,
+            system_keys: false,
+            typing: VecDeque::new(),
+            typer: None,
             size,
             native,
             quality,
@@ -1111,6 +1158,7 @@ impl ScreenView {
             let input = HudInput {
                 size: self.size,
                 scale: self.quality.scale,
+                chroma: self.chroma,
                 target_fps: self.quality.fps,
                 fps,
                 mbps,
@@ -1245,6 +1293,7 @@ impl ScreenView {
         #[expect(clippy::cast_possible_truncation, reason = "pixel counts")]
         let size = (buffer.get_width() as u32, buffer.get_height() as u32);
         self.size = size;
+        self.chroma = Some(chroma_of(buffer.get_pixel_format()));
         self.latest = Some(buffer);
         self.frames = self.frames.saturating_add(1);
         if self.frames == 1 {
@@ -1958,6 +2007,92 @@ impl ScreenView {
         true
     }
 
+    /// Type `text` on the worker one key per character, as committed text is, so it lands
+    /// where a paste cannot (a login window, a field that refuses paste). Only the first
+    /// [`TYPE_MAX`] bytes go, as Jump caps it; returns whether the text was cut.
+    ///
+    /// It goes `TYPE_BURST` characters at a time, each burst once the last has left the
+    /// outbox: a kilobyte at once is two thousand events, past what the outbox holds, and
+    /// the presses it drops would be letters missing from a password.
+    pub fn type_text(&mut self, text: &str, cx: &Context<Self>) -> bool {
+        let text = text.replace("\r\n", "\n");
+        let mut end = text.len().min(TYPE_MAX);
+        while !text.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        let (typed, cut) = text.split_at(end);
+        let idle = self.typing.is_empty();
+        self.typing.extend(typed.chars());
+        if idle && !self.typing.is_empty() {
+            self.typer = Some(cx.spawn(async move |this, cx| {
+                while this.update(cx, Self::type_burst).unwrap_or(false) {
+                    cx.background_executor().timer(TYPE_STEP).await;
+                }
+            }));
+        }
+        !cut.is_empty()
+    }
+
+    /// Type the next burst of what waits to be typed, once the outbox has sent the last;
+    /// whether more waits.
+    fn type_burst(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.out.waiting.borrow().is_empty() {
+            let take = self.typing.len().min(TYPE_BURST);
+            let burst: String = self.typing.drain(..take).collect();
+            self.type_keys(&burst, cx);
+        }
+        !self.typing.is_empty()
+    }
+
+    /// One key per character: the worker sees ordinary typing (a single event carrying a whole
+    /// string trips apps that read the key code, not the string).
+    fn type_keys(&mut self, text: &str, cx: &mut Context<Self>) {
+        for c in text.chars() {
+            let key = match c {
+                '\n' | '\r' => "enter".to_owned(),
+                '\t' => "tab".to_owned(),
+                ' ' => "space".to_owned(),
+                _ => c.to_string(),
+            };
+            let key_char = (!c.is_control()).then(|| c.to_string());
+            self.press(Keystroke { modifiers: Modifiers::default(), key, key_char }, cx);
+        }
+    }
+
+    /// Whether the system's shortcuts go to the worker while this tile has the keyboard.
+    #[must_use]
+    pub const fn system_keys(&self) -> bool {
+        self.system_keys
+    }
+
+    /// Send the system's shortcuts to the worker while this tile has the keyboard, or leave
+    /// them to this Mac.
+    pub fn set_system_keys(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.system_keys != on {
+            self.system_keys = on;
+            cx.notify();
+        }
+    }
+
+    /// A system shortcut's key, taken off this Mac for the worker: pressed (or repeated), or
+    /// let go. Its modifiers went already, as the person pressed them; a release whose press
+    /// never went here is dropped, and one still held is let go with the rest when the tile
+    /// loses the keyboard.
+    pub fn system_key(&mut self, code: KeyCode, down: bool, mods: Mods, cx: &mut Context<Self>) {
+        let action = if down {
+            if !self.held.contains(&code) {
+                self.held.push(code);
+            }
+            KeyAction::Press
+        } else {
+            let Some(at) = self.held.iter().position(|k| *k == code) else { return };
+            self.held.remove(at);
+            KeyAction::Release
+        };
+        self.input(ScreenInput::Key { code, action, mods, text: None });
+        cx.notify();
+    }
+
     /// The phone's "paste" key: ⌘V on the worker, this client's clipboard pushed first.
     pub fn paste_key(&mut self, cx: &mut Context<Self>) {
         self.press(chord("v"), cx);
@@ -2381,7 +2516,6 @@ impl ScreenView {
         .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
         .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_hud_details(cx)));
         let lines = open.then(|| {
-            let rest: Vec<&str> = text.lines().skip(1).collect();
             div()
                 .debug_selector(|| "stream-stats-details-lines".to_owned())
                 .pt(px(theme.spacing.xs))
@@ -2391,7 +2525,7 @@ impl ScreenView {
                 .text_size(px(theme.typography.caption()))
                 .text_color(hsla(s.text_muted))
                 .whitespace_nowrap()
-                .child(SharedString::from(rest.join("\n")))
+                .child(SharedString::from(text.to_owned()))
         });
         let panel = kit::tabular(kit::elevate(div(), theme))
             .id("stream-stats")
@@ -2481,16 +2615,7 @@ impl EntityInputHandler for ScreenView {
         cx: &mut Context<Self>,
     ) {
         self.marked = None;
-        for c in text.chars() {
-            let key = match c {
-                '\n' | '\r' => "enter".to_owned(),
-                '\t' => "tab".to_owned(),
-                ' ' => "space".to_owned(),
-                _ => c.to_string(),
-            };
-            let key_char = (!c.is_control()).then(|| c.to_string());
-            self.press(Keystroke { modifiers: Modifiers::default(), key, key_char }, cx);
-        }
+        self.type_keys(text, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -2624,6 +2749,7 @@ mod tests {
         let text = hud_lines(&HudInput {
             size: (1920, 1080),
             scale: 1.0,
+            chroma: Some(Chroma::Full),
             target_fps: 60,
             fps: 59.6,
             mbps: 18.25,
@@ -2638,7 +2764,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "1920×1080 @1.00  ·  60 fps  ·  18.25 Mb/s  ·  rtt 9.4 ms  ·  age 12 ms",
+                "1920×1080 @1.00  ·  4:4:4  ·  age 12 ms",
                 "jitter 1.2 ms  ·  hold 2.0 / 9.0 ms  ·  queue 1  ·  fec 3 lost 1 nack 4 refresh 1  ·  stalls 2 (140 ms) flowing  ·  target 19.2 Mb/s hold (stall) (cwnd)",
                 "audio 50 lost 0 concealed 0  ·  dry 2  ·  trimmed 40 ms stretched 20 ms  ·  target 60 ms",
                 "present 5.4 / 11.9 / 28.0 ms (decode 2.1)  ·  every 16.7 ms ±1.4  ·  shown 1204 skip 2 repeat 7 late 0",
@@ -2648,6 +2774,7 @@ mod tests {
         let blank = hud_lines(&HudInput {
             size: (0, 0),
             scale: 0.5,
+            chroma: None,
             target_fps: 60,
             fps: 0.0,
             mbps: 0.0,
@@ -2658,7 +2785,10 @@ mod tests {
             pacing: &PacingStats::default(),
             ui: None,
         });
-        assert!(blank.contains("rtt –") && blank.contains("age –") && blank.contains("target –"));
+        assert!(
+            blank.contains("chroma –") && blank.contains("age –") && blank.contains("target –"),
+            "{blank}"
+        );
         assert!(blank.contains("present 0.0 / 0.0 / 0.0 ms"), "{blank}");
     }
 
@@ -3916,6 +4046,30 @@ mod tests {
                 t.len()
             );
         }
+    }
+
+    /// The overlay says 4:4:4 once the decoder hands back a full-chroma picture (`xf44`, or
+    /// `444f` at 8 bits), 4:2:0 for NV12, and nothing before the first picture.
+    #[gpui::test]
+    fn the_overlay_says_4_4_4_from_the_decoded_picture(cx: &mut gpui::TestAppContext) {
+        use core_video::pixel_buffer::{
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelFormatType_444YpCbCr8BiPlanarFullRange,
+            kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+        };
+        assert_eq!(chroma_of(kCVPixelFormatType_444YpCbCr8BiPlanarFullRange), Chroma::Full);
+        let (view, _rx) = view(cx);
+        let chroma = |cx: &mut gpui::TestAppContext| view.read_with(cx, |v, _| v.chroma);
+        assert_eq!(chroma(cx), None, "no picture yet");
+        let full =
+            CVPixelBuffer::new(kCVPixelFormatType_444YpCbCr10BiPlanarFullRange, 64, 48, None)
+                .expect("pixel buffer");
+        view.update(cx, |v, cx| v.show_picture(full, cx));
+        assert_eq!(chroma(cx).map(chroma_label), Some("4:4:4"));
+        let nv12 = CVPixelBuffer::new(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, 64, 48, None)
+            .expect("pixel buffer");
+        view.update(cx, |v, cx| v.show_picture(nv12, cx));
+        assert_eq!(chroma(cx).map(chroma_label), Some("4:2:0"));
     }
 
     /// A picture of `w` × `h` for a test to put up.

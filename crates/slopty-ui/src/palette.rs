@@ -592,6 +592,9 @@ pub struct PaletteItem {
     pub place: Option<String>,
     /// How long the tile's session has run.
     pub age: Option<Duration>,
+    /// What the tile is about beyond its title (an agent's first prompt and its last answer):
+    /// a query finds the line by it, and the line never prints it.
+    pub about: Option<String>,
     /// The group it is listed under.
     pub section: Section,
 }
@@ -614,6 +617,7 @@ impl PaletteItem {
             cwd: None,
             place: None,
             age: None,
+            about: None,
             section,
         }
     }
@@ -820,6 +824,13 @@ impl PaletteItem {
     #[must_use]
     pub const fn aged(mut self, age: Option<Duration>) -> Self {
         self.age = age;
+        self
+    }
+
+    /// The same line, found as well by what its tile is `about`.
+    #[must_use]
+    pub fn about(mut self, about: Option<String>) -> Self {
+        self.about = about;
         self
     }
 
@@ -1188,9 +1199,11 @@ fn query_words(query: &str) -> Vec<String> {
     query.split_whitespace().map(str::to_lowercase).collect()
 }
 
-/// What a query's words are looked for in: the line's label and context, lowercase.
+/// What a query's words are looked for in: the line's label, its context and what its tile is
+/// about, lowercase.
 fn haystack(item: &PaletteItem) -> String {
-    format!("{} {}", item.label, item.context()).to_lowercase()
+    let about = item.about.as_deref().unwrap_or_default();
+    format!("{} {} {about}", item.label, item.context()).to_lowercase()
 }
 
 /// Whether every word is in `haystack`.

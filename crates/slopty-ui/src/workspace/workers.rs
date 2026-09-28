@@ -14,7 +14,7 @@ use slopty_proto::server::WorkerCaps;
 use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermEvent, TermRequest, TermSize};
 
-use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView};
+use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView, desktop};
 use crate::file::{FileView, FileViewEvent};
 use crate::note::{NoteView, NoteViewEvent};
 use crate::screen::ScreenView;
@@ -61,6 +61,9 @@ impl WorkspaceView {
         w.titles_requested = false;
         w.watched.clear();
         w.pending_opens.clear();
+        if let Some(sized) = w.sized.as_mut() {
+            sized.lost();
+        }
         let agents: Vec<SessionSummary> =
             sessions.iter().filter(|s| s.agent.is_some()).cloned().collect();
         w.sessions = sessions.into_iter().map(|s| (s.id, s)).collect();
@@ -95,6 +98,9 @@ impl WorkspaceView {
         w.rtt = None;
         w.path = None;
         w.pending_opens.clear();
+        if let Some(sized) = w.sized.as_mut() {
+            sized.lost();
+        }
         w.picker_wanted = false;
         self.probes.retain(|(k, ..)| *k != key);
         w.display_wanted = false;
@@ -653,11 +659,34 @@ impl WorkspaceView {
             self.parked.insert(id);
         }
         let quality = self.quality_for();
+        let key = self.desktop_key();
         let mut keep: Vec<ItemId> = Vec::new();
         for w in self.workers.values_mut() {
             if w.link.is_none() {
                 continue;
             }
+            // A display tile streamed from a display made for this device opens its own way;
+            // one gone from the registry goes back to nothing.
+            let sized = w.sized.as_ref().map(desktop::Sized::item);
+            if let Some(id) = sized {
+                let item = w.doc.items().find(|i| i.id == id);
+                if item.is_none() || key.is_none() {
+                    w.sized = None;
+                } else if item.is_some_and(|i| i.sleeping) || self.parked.contains(&id) {
+                    if let Some(s) = w.sized.as_mut() {
+                        s.lost();
+                    }
+                } else {
+                    keep.push(id);
+                    let open = w.sized.as_mut().zip(key).and_then(|(s, key)| {
+                        (!self.screens.contains_key(&id)).then(|| s.open(key, quality)).flatten()
+                    });
+                    if let Some(open) = open {
+                        w.send(open);
+                    }
+                }
+            }
+            let sized = w.sized.as_ref().map(desktop::Sized::item);
             let untitled = w.doc.items().any(|i| {
                 matches!(i.kind, ItemKind::Window { .. }) && !self.titles.contains_key(&i.id)
             });
@@ -668,7 +697,7 @@ impl WorkspaceView {
             let wanted: Vec<(ItemId, CaptureTarget)> = w
                 .doc
                 .items()
-                .filter(|i| !i.sleeping && !self.parked.contains(&i.id))
+                .filter(|i| !i.sleeping && !self.parked.contains(&i.id) && Some(i.id) != sized)
                 .filter_map(|i| match i.kind {
                     ItemKind::Window { window } => Some((i.id, CaptureTarget::Window(window))),
                     ItemKind::Display { display } => Some((i.id, CaptureTarget::Display(display))),
@@ -718,15 +747,17 @@ impl WorkspaceView {
                     self.show_picker(key, windows, displays, cx);
                 }
             }
-            // This client asks for no display of its own yet (`OpenDisplay`).
-            ScreenEvent::Display { .. } => {}
+            ScreenEvent::Display { stream, key: display_key, display } => {
+                self.display_told(key, stream, display_key, display, cx);
+            }
             ScreenEvent::Opened { stream, target, codec, width, height, .. } => {
                 let theme = self.theme.clone();
                 let quality = self.quality_for();
                 let show_stats = self.show_stats;
                 let Some(w) = self.workers.get_mut(&key) else { return };
                 let Some(link) = w.link.clone() else { return };
-                let Some(id) = w.pending_opens.remove(&target) else {
+                let sized = w.sized.as_mut().and_then(|s| s.opened(stream).then(|| s.item()));
+                let Some(id) = sized.or_else(|| w.pending_opens.remove(&target)) else {
                     tracing::debug!(%stream, ?target, "opened stream nobody asked for; closing");
                     w.send(ClientMsg::Screen(ScreenRequest::Close(stream)));
                     return;
@@ -763,6 +794,13 @@ impl WorkspaceView {
                 self.screens.insert(id, view);
             }
             ScreenEvent::Closed { stream, reason } => {
+                // A display made for this device that ends goes back to the physical one,
+                // rather than being asked for again and again.
+                if let Some(w) = self.workers.get_mut(&key)
+                    && w.sized.as_ref().is_some_and(|s| s.streams(stream))
+                {
+                    w.sized = None;
+                }
                 let gone: Vec<ItemId> = self.streams_of(key, stream, cx);
                 for id in gone {
                     tracing::info!(%stream, %reason, "screen closed by worker");

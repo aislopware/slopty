@@ -31,6 +31,8 @@ pub mod privacy;
 pub mod proc_files;
 pub mod service;
 #[cfg(target_vendor = "apple")]
+pub mod system_keys;
+#[cfg(target_vendor = "apple")]
 pub mod web;
 
 #[cfg(target_os = "linux")]

@@ -42,6 +42,15 @@ actions!(
         ToggleMute,
         /// Show or hide the stream stats overlay on every remote window.
         ToggleStats,
+        /// Type this device's clipboard text into the focused remote window, key by key: for
+        /// a login window or a field that refuses paste.
+        TypeClipboard,
+        /// Stream the focused display tile from a display the worker makes for this device,
+        /// sized to the tile and following it as it resizes; again, back to the physical one.
+        ToggleSizedDisplay,
+        /// Send the system's own shortcuts (⌘Tab, ⌘Space, Mission Control) to the focused
+        /// remote Mac while its tile has the keyboard, or leave them to this Mac.
+        ToggleSystemKeys,
         /// Show or hide the navigator: the workers, what runs on them, and what needs you.
         ToggleNavigator,
         /// Move the keyboard focus to the next control, from anywhere, a terminal included.

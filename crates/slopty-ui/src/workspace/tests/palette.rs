@@ -6,6 +6,7 @@ use slopty_core::{DisplayId, WindowId};
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
 
 use super::*;
+use crate::palette::PaletteRun;
 
 /// The top edge of `selector` in the last frame, if it was drawn.
 fn top(cx: &mut VisualTestContext, selector: &'static str) -> Option<f32> {
@@ -425,4 +426,41 @@ fn the_palette_scrolls_to_the_selected_line(cx: &mut TestAppContext) {
     cx.simulate_input("n");
     cx.run_until_parked();
     assert!(inside(cx, "palette-item-0"), "a new query selects the first line, in view");
+}
+
+/// An agent's line is found by words deep in its first prompt, past what its title shows, and
+/// by the answer of its last turn, once its face has read the transcript; a word in neither
+/// finds nothing.
+#[gpui::test]
+fn the_palette_finds_an_agent_by_its_first_prompt_and_last_answer(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &studio, session, studio.me, 1);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-j");
+    cx.run_until_parked();
+    view.update_in(cx, |v, _w, cx| {
+        for event in crate::conversation::fixtures::events("edit") {
+            v.conversation_event(session, event, cx);
+        }
+    });
+    cx.run_until_parked();
+    let found = |cx: &mut VisualTestContext, query: &str| {
+        view.update(cx, |v, cx| {
+            let lines = v.palette_lines(cx);
+            crate::palette::filter(query, &lines)
+                .iter()
+                .any(|line| matches!(line.run, PaletteRun::Session(s) if s == session))
+        })
+    };
+    let title = view.read_with(cx, |v, cx| v.terminal_title(session, cx));
+    assert!(!title.contains("gamma"), "the title stops short of it: {title}");
+    assert!(found(cx, "gamma delta"), "by the first prompt");
+    assert!(found(cx, "correct step"), "by the last answer");
+    assert!(!found(cx, "login redirect"), "by neither");
 }

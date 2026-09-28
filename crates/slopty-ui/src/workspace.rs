@@ -31,6 +31,7 @@ mod agents;
 pub mod attention;
 mod browsers;
 mod commands;
+mod desktop;
 mod faces;
 mod folders;
 mod inbox;
@@ -317,6 +318,8 @@ struct Worker {
     display_wanted: bool,
     /// Streams requested but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
+    /// The display tile streamed from a display this worker made for this device.
+    sized: Option<desktop::Sized>,
     /// The first snapshot since the link came up has not been applied yet.
     awaiting_snapshot: bool,
     /// What the human did to this worker's items while it was out of reach (or before its
@@ -347,6 +350,7 @@ impl Worker {
             picker_wanted: false,
             display_wanted: false,
             pending_opens: HashMap::new(),
+            sized: None,
             awaiting_snapshot: false,
             queued: Vec::new(),
         }
@@ -627,6 +631,9 @@ pub struct WorkspaceView {
     /// The app's rows in the "…" menu.
     more_entries: Vec<MenuEntry>,
     show_stats: bool,
+    /// The remote desktops' own state: this device's display key, the wait of a display
+    /// following its tile, the system shortcuts.
+    desktop: desktop::Desktop,
     toast: Option<toast::Toast>,
     closed: Vec<ClosedTile>,
     closed_seq: u64,
@@ -815,6 +822,7 @@ impl WorkspaceView {
             inbox: inbox::Inbox::default(),
             more_entries: Vec::new(),
             show_stats: false,
+            desktop: desktop::Desktop::default(),
             toast: None,
             closed: Vec::new(),
             closed_seq: 0,
@@ -1403,6 +1411,8 @@ impl gpui::Render for WorkspaceView {
         // One clock and one frame for everything this frame draws: the bar's column marks and
         // the strip agree.
         let frame = self.frame_at_clock(window);
+        self.follow_sized_displays(&frame, window, cx);
+        self.arm_system_keys(window, cx);
         if std::mem::take(&mut self.titles_dirty) {
             self.number_twins(cx);
             #[cfg(test)]
@@ -1466,6 +1476,9 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::next_attention))
             .on_action(cx.listener(Self::toggle_mute))
             .on_action(cx.listener(Self::toggle_stats))
+            .on_action(cx.listener(Self::type_clipboard))
+            .on_action(cx.listener(Self::toggle_sized_display))
+            .on_action(cx.listener(Self::toggle_system_keys))
             .on_action(cx.listener(Self::toggle_trackpad))
             .on_action(cx.listener(Self::find_in_active))
             .on_action(cx.listener(Self::open_palette))

@@ -448,3 +448,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `window_input_through_any_race_lands_in_order_and_never_goes_back` (500 random races of
   stream delay and copy loss), `window_input_through_a_lossy_link_lands_once_in_order` (the real
   link through a shaper losing a fifth of its packets each way).
+
+- ✅ **System shortcuts go to the remote Mac through a session tap, behind a per-tile toggle**
+  (2026-09-28). macOS acts on ⌘Tab, ⌘Space, ⌃Space, ⌃ with an arrow (Spaces, Mission Control)
+  and ⌘⇧3/4/5 before any app sees them, so the key path GPUI feeds `ScreenView` never gets
+  them. Jump Desktop and Screens 5 send them to a Mac host; Parsec needs its HID mode for it.
+  - *How.* `slopty_platform::system_keys::Tap` is a `CGEventTap` on the session, at the head,
+    for key-downs and key-ups, on the main run loop. While armed it swallows the chords the
+    pure filter (`system_keys::chord`) names and hands them to the workspace, which sends them
+    to the focused tile's worker as `ScreenInput::Key`. The modifiers go the usual way, as
+    GPUI reports them. A taken key's repeats and release are taken with it even after the tile
+    lets go, and `ScreenView::let_go` releases one still held. macOS turns a slow tap off; the
+    callback turns it back on.
+  - *When.* The tap is armed only while the app is frontmost (checked in the callback too), its
+    window is active, no palette is up, and a remote tile with the toggle on has the keyboard.
+    The toggle is per tile and off by default, offered on the Mac for a Mac worker's windows
+    and displays: "Send system shortcuts" in the palette. While on, the header shows it as a
+    pressed control that turns it off. A notice says each change ("System shortcuts go to
+    studio" / "System shortcuts stay on this Mac").
+  - *The way out stays here.* ⌃Tab is not a system chord and still leaves the tile. A click
+    elsewhere or another app disarms the tap. ⌘⌥Esc and ⌃⌘Q are never taken.
+  - *The grant.* An active tap needs Accessibility (`CGPreflightPostEventAccess`). The tap is
+    made only when the person turns the toggle on. Without the grant, `CGRequestPostEventAccess`
+    shows macOS's prompt once, a notice says what to allow, and the tile keeps to this Mac. No
+    test makes a tap or asks: the filter is unit-tested in `slopty-platform`, and the workspace
+    test drives a stand-in `KeyPort`. Research had it on by default once granted; it is off
+    until turned on, since a session tap in a process the person did not ask for one in is
+    the surveillance pattern `CLAUDE.md` rules out.
+  - *Not measured.* A chord passes one run-loop turn in the tap's channel before it reaches the
+    view; no gated test can time a real tap without the grant.
+  - Tests: `system_keys::tests::the_filter_takes_the_system_chords_only`,
+    `system_keys::tests::a_taken_press_takes_its_release`, workspace
+    `desktop::system_shortcuts_go_to_the_remote_mac_per_tile`.
+
+- ✅ **"Type the clipboard" types it key by key, up to 1 KB** (2026-09-28). For a remote login
+  window or a field that refuses paste, where the pasteboard offer cannot land. The palette
+  command, offered while a remote tile has the focus, sends this device's clipboard text as
+  the committed-text path does: one press and release per character, a line break as one ↩.
+  It stops at `screen::TYPE_MAX` bytes on a character boundary, as Jump caps it, and a notice
+  says so. Test: `desktop::the_clipboard_is_typed_into_the_focused_window`.

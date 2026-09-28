@@ -63,6 +63,9 @@ objc2-user-notifications = { workspace = true, features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The session tap that takes system shortcuts for a remote Mac (`system_keys`).
+objc2-core-graphics = { workspace = true, features = [ "CGEvent", "CGEventTypes" ] }
+objc2-core-foundation = { workspace = true, features = [ "CFMachPort", "CFRunLoop" ] }
 objc2-app-kit = { workspace = true, features = [
     "NSPasteboardItem",
     "NSFilePromiseProvider",
@@ -74,6 +77,8 @@ objc2-app-kit = { workspace = true, features = [
     "NSView",
     # The refresh the terminal's guesses are timed against (`display_refresh`).
     "NSScreen",
+    # System shortcuts are taken only while this app is frontmost (`system_keys`).
+    "NSRunningApplication",
     "block2",
     # The browser tile (`web`): its first responder, the key and click watch, the snapshot.
     "NSBitmapImageRep",

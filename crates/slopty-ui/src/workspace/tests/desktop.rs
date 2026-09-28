@@ -1,0 +1,363 @@
+//! A remote window or desktop tile beyond its header, in the headless workspace: the clipboard
+//! typed into it, a display made for this device that follows its tile, and the system's
+//! shortcuts sent to a remote Mac through a stand-in for the session tap (a test never makes a
+//! tap, so it never asks for Accessibility).
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use slopty_core::{DisplayId, WindowId};
+use slopty_proto::input::{KeyAction, KeyCode, Mods};
+use slopty_proto::screen::{DisplayKey, ScreenInput, VideoCodec, VirtualDisplay};
+
+use super::*;
+use crate::workspace::desktop::{
+    BACK_TO_PHYSICAL, Chord, KeyPort, OPEN_SIZED, SEND_SYSTEM_KEYS, TYPE_CLIPBOARD,
+};
+
+/// `target` streams as `stream` on `fake`'s worker, `width` × `height`.
+fn opened(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    fake: &Fake,
+    stream: u32,
+    target: CaptureTarget,
+    (width, height): (u32, u32),
+) {
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        let event = ScreenEvent::Opened {
+            stream: StreamId(stream),
+            target,
+            codec: VideoCodec::Hevc,
+            width,
+            height,
+            scale: 2.0,
+        };
+        v.screen_event(key, event, cx);
+    });
+    cx.run_until_parked();
+}
+
+/// Everything the workspace sent, the outboxes emptied as the channel frees and paced typing
+/// given its frames.
+fn sent(fake: &mut Fake, cx: &VisualTestContext) -> Vec<ClientMsg> {
+    let mut all = Vec::new();
+    let mut quiet = 0_u8;
+    while quiet < 3 {
+        cx.run_until_parked();
+        let more = fake.drain();
+        quiet = if more.is_empty() { quiet.saturating_add(1) } else { 0 };
+        all.extend(more);
+        cx.executor().advance_clock(Duration::from_millis(16));
+    }
+    all
+}
+
+/// The keys the worker was sent, as presses: their code and text.
+fn presses(msgs: &[ClientMsg]) -> Vec<(KeyCode, Option<String>)> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            ClientMsg::Screen(ScreenRequest::Input {
+                input: ScreenInput::Key { code, action: KeyAction::Press, text, .. },
+                ..
+            }) => Some((*code, text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn palette_has(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, label: &str) -> bool {
+    view.update(cx, |v, cx| v.palette_lines(cx).iter().any(|l| l.label == label))
+}
+
+/// "Type the clipboard" types this device's clipboard into the focused window key by key, a
+/// line break as one ↩; a clipboard past 1 KB is cut there and says so, and one with no text
+/// types nothing and says that.
+#[gpui::test]
+fn the_clipboard_is_typed_into_the_focused_window(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let window = WindowId(7);
+    let tile = arrives(&view, cx, &fake, ItemKind::Window { window }, 1);
+    assert!(!palette_has(&view, cx, TYPE_CLIPBOARD), "not before a window has the focus");
+    opened(&view, cx, &fake, 1, CaptureTarget::Window(window), (1280, 800));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    assert!(palette_has(&view, cx, TYPE_CLIPBOARD));
+    sent(&mut fake, cx);
+
+    let type_it = |cx: &mut VisualTestContext| {
+        view.update_in(cx, |v, window, cx| v.type_clipboard(&TypeClipboard, window, cx));
+    };
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("ok\r\nA".to_owned()));
+    type_it(cx);
+    let typed = presses(&sent(&mut fake, cx));
+    assert_eq!(
+        typed,
+        [
+            (KeyCode::O, Some("o".to_owned())),
+            (KeyCode::K, Some("k".to_owned())),
+            (KeyCode::Enter, None),
+            (KeyCode::A, Some("A".to_owned())),
+        ]
+    );
+
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("é".repeat(600)));
+    type_it(cx);
+    let typed = presses(&sent(&mut fake, cx));
+    assert_eq!(typed.len(), 512, "1 KB of two-byte characters, none cut in half");
+    let said = view.read_with(cx, WorkspaceView::toast_text);
+    assert_eq!(said.as_deref(), Some("Typed the first 1 KB of the clipboard"));
+
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+    type_it(cx);
+    assert!(presses(&sent(&mut fake, cx)).is_empty());
+    let said = view.read_with(cx, WorkspaceView::toast_text);
+    assert_eq!(said.as_deref(), Some("The clipboard holds no text"));
+}
+
+/// The body of `tile` in device pixels, as the workspace sizes a display to it.
+fn body_pixels(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    tile: TileRef,
+) -> (u32, u32) {
+    let scale = cx.update(|window, _| window.scale_factor());
+    view.read_with(cx, |v, _| {
+        let frame = v.layout().frame();
+        let placed = frame.tiles.iter().find(|p| p.tile == tile).expect("placed");
+        let header = v.theme.density.header;
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
+        let px = |points: f32| (points * scale).round() as u32;
+        (px(placed.target.w), px(placed.target.h - header))
+    })
+}
+
+/// On a worker that can make one, a display tile is streamed from a display made for this
+/// device at the tile's size and the screen's scale, in place of the physical one; the
+/// display takes the tile's new size once it has held still, and the command again goes back
+/// to the physical display. A worker that cannot is never offered it.
+#[gpui::test]
+fn a_display_made_for_this_device_follows_its_tile(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let dir = tempfile::tempdir().expect("a directory");
+    view.update(cx, |v, _| v.set_layout_path(dir.path().join("layout.json")));
+    let mut fake = connect(&view, cx, 1, "studio");
+    let physical = DisplayId(1);
+    let _shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    let tile = arrives(&view, cx, &fake, ItemKind::Display { display: physical }, 2);
+    opened(&view, cx, &fake, 1, CaptureTarget::Display(physical), (2560, 1440));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    assert!(!palette_has(&view, cx, OPEN_SIZED), "this worker makes no displays");
+
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, WorkerCaps { virtual_displays: true, ..healthy() }, cx);
+    });
+    cx.run_until_parked();
+    assert!(palette_has(&view, cx, OPEN_SIZED));
+    sent(&mut fake, cx);
+    let keyboard = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            let screen = view.read(cx).screen(tile.item).cloned();
+            screen.is_some_and(|s| s.read(cx).focus_handle(cx).is_focused(window))
+        })
+    };
+    cx.update(|window, cx| {
+        let screen = view.read(cx).screen(tile.item).cloned().expect("streaming");
+        window.focus(&screen.read(cx).focus_handle(cx), cx);
+    });
+
+    let toggle = |cx: &mut VisualTestContext| {
+        view.update_in(cx, |v, window, cx| {
+            v.toggle_sized_display(&ToggleSizedDisplay, window, cx);
+        });
+    };
+    toggle(cx);
+    let asked = sent(&mut fake, cx);
+    let body = body_pixels(&view, cx, tile);
+    let scale = cx.update(|window, _| window.scale_factor());
+    let display_key: DisplayKey = asked
+        .iter()
+        .find_map(|m| match m {
+            ClientMsg::Screen(ScreenRequest::OpenDisplay { key, shape, .. }) => {
+                assert_eq!((shape.width, shape.height), body, "sized to the tile's body");
+                assert!((shape.scale - scale).abs() < f32::EPSILON, "at the screen's scale");
+                Some(*key)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a display asked for: {asked:?}"));
+    assert!(
+        asked.iter().any(|m| matches!(m, ClientMsg::Screen(ScreenRequest::Close(StreamId(1))))),
+        "the physical display's stream goes: {asked:?}"
+    );
+    assert!(dir.path().join(slopty_client::screen::display::KEY_FILE).exists(), "key kept");
+
+    let made = DisplayId(9);
+    view.update_in(cx, |v, _w, cx| {
+        let told = ScreenEvent::Display {
+            stream: StreamId(2),
+            key: display_key,
+            display: VirtualDisplay::Made(made),
+        };
+        v.screen_event(key, told, cx);
+    });
+    opened(&view, cx, &fake, 2, CaptureTarget::Display(made), body);
+    let stream = view.read_with(cx, |v, cx| v.screen(tile.item).map(|s| s.read(cx).stream()));
+    assert_eq!(stream, Some(StreamId(2)), "the tile shows the made display");
+    assert!(keyboard(cx), "and its view has the keyboard the physical one had");
+    view.update_in(cx, |v, window, cx| window.focus(&v.focus, cx));
+    assert!(palette_has(&view, cx, BACK_TO_PHYSICAL));
+    sent(&mut fake, cx);
+
+    cx.simulate_keystrokes("cmd-r");
+    cx.run_until_parked();
+    let wider = body_pixels(&view, cx, tile);
+    assert_ne!(wider, body, "the column changed width");
+    let resized = |msgs: &[ClientMsg]| {
+        msgs.iter()
+            .filter_map(|m| match m {
+                ClientMsg::Screen(ScreenRequest::Resize { stream, width, height, scale }) => {
+                    Some((*stream, (*width, *height), *scale))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(resized(&sent(&mut fake, cx)).is_empty(), "not while it may still move");
+    cx.executor().advance_clock(slopty_client::screen::display::SETTLE);
+    cx.run_until_parked();
+    assert_eq!(resized(&sent(&mut fake, cx)), [(StreamId(2), wider, None)], "once it held");
+
+    toggle(cx);
+    let back = sent(&mut fake, cx);
+    assert!(
+        back.iter().any(|m| matches!(m, ClientMsg::Screen(ScreenRequest::Close(StreamId(2))))),
+        "{back:?}"
+    );
+    assert!(
+        back.iter().any(|m| matches!(
+            m,
+            ClientMsg::Screen(ScreenRequest::Open { target: CaptureTarget::Display(d), .. })
+                if *d == physical
+        )),
+        "the physical display again: {back:?}"
+    );
+}
+
+/// A stand-in for the session tap: whether macOS would allow it, what it was armed to, and
+/// where its chords go.
+#[derive(Default)]
+struct Keys {
+    denied: bool,
+    asked: Rc<RefCell<bool>>,
+    armed: Rc<RefCell<Vec<bool>>>,
+    chords: Rc<RefCell<Option<mpsc::UnboundedSender<Chord>>>>,
+}
+
+impl KeyPort for Keys {
+    fn install(&mut self, chords: mpsc::UnboundedSender<Chord>) -> bool {
+        if self.denied {
+            return false;
+        }
+        self.chords.replace(Some(chords));
+        true
+    }
+
+    fn arm(&self, on: bool) {
+        self.armed.borrow_mut().push(on);
+    }
+
+    fn ask(&self) {
+        self.asked.replace(true);
+    }
+}
+
+/// Turned on for one window of a remote Mac, the system's shortcuts are taken while that
+/// window has the keyboard and go to its worker, and are let be the moment another tile has
+/// it; the other window keeps to this Mac, the header shows the state, and turning it off
+/// says so. Without Accessibility the person is asked, and the window keeps to this Mac.
+#[gpui::test]
+fn system_shortcuts_go_to_the_remote_mac_per_tile(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.update(|window, _| window.activate_window());
+    let mut fake = connect(&view, cx, 1, "studio");
+    let (one, two) = (WindowId(7), WindowId(8));
+    let first = arrives(&view, cx, &fake, ItemKind::Window { window: one }, 1);
+    let second = arrives(&view, cx, &fake, ItemKind::Window { window: two }, 2);
+    opened(&view, cx, &fake, 1, CaptureTarget::Window(one), (1280, 800));
+    opened(&view, cx, &fake, 2, CaptureTarget::Window(two), (1280, 800));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    cx.update(|window, cx| {
+        let screen = view.read(cx).screen(first.item).cloned().expect("streaming");
+        window.focus(&screen.read(cx).focus_handle(cx), cx);
+    });
+    cx.run_until_parked();
+    assert!(palette_has(&view, cx, SEND_SYSTEM_KEYS), "a Mac's window offers it");
+
+    let denied = Keys { denied: true, ..Keys::default() };
+    let asked = Rc::clone(&denied.asked);
+    view.update(cx, |v, _| v.set_key_port(Box::new(denied)));
+    let toggle = |cx: &mut VisualTestContext| {
+        view.update_in(cx, |v, window, cx| v.toggle_system_keys(&ToggleSystemKeys, window, cx));
+        cx.run_until_parked();
+    };
+    let on = |cx: &mut VisualTestContext, tile: TileRef| {
+        view.read_with(cx, |v, cx| v.screen(tile.item).is_some_and(|s| s.read(cx).system_keys()))
+    };
+    toggle(cx);
+    assert!(*asked.borrow(), "Accessibility is asked for");
+    assert!(!on(cx, first), "and the window keeps to this Mac");
+    let said = view.read_with(cx, WorkspaceView::toast_text);
+    assert_eq!(said.as_deref(), Some("Allow Slopty in Accessibility to send system shortcuts"));
+
+    let keys = Keys::default();
+    let (armed, chords) = (Rc::clone(&keys.armed), Rc::clone(&keys.chords));
+    view.update(cx, |v, _| v.set_key_port(Box::new(keys)));
+    toggle(cx);
+    assert!(on(cx, first) && !on(cx, second), "per tile");
+    let said = view.read_with(cx, WorkspaceView::toast_text);
+    assert_eq!(said.as_deref(), Some("System shortcuts go to studio"));
+    assert_eq!(armed.borrow().as_slice(), [true], "taken while it has the keyboard");
+    let header = format!("system-keys-{}", first.item.as_uuid());
+    assert!(cx.debug_bounds(Box::leak(header.into_boxed_str())).is_some(), "the header says so");
+    sent(&mut fake, cx);
+
+    let tab = |down| Chord { code: KeyCode::Tab, down, mods: Mods::SUPER };
+    let sender = chords.borrow().clone().expect("tapping");
+    for down in [true, false] {
+        sender.send(tab(down)).expect("the workspace listens");
+    }
+    let keys: Vec<(KeyCode, KeyAction, Mods)> = sent(&mut fake, cx)
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Screen(ScreenRequest::Input {
+                stream: StreamId(1),
+                input: ScreenInput::Key { code, action, mods, .. },
+            }) => Some((code, action, mods)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            (KeyCode::Tab, KeyAction::Press, Mods::SUPER),
+            (KeyCode::Tab, KeyAction::Release, Mods::SUPER)
+        ]
+    );
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(second, cx));
+    cx.run_until_parked();
+    assert_eq!(armed.borrow().as_slice(), [true, false], "let be once another tile has it");
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    cx.run_until_parked();
+    toggle(cx);
+    assert!(!on(cx, first));
+    let said = view.read_with(cx, WorkspaceView::toast_text);
+    assert_eq!(said.as_deref(), Some("System shortcuts stay on this Mac"));
+    assert_eq!(armed.borrow().last(), Some(&false));
+}

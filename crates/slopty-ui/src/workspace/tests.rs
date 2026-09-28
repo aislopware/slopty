@@ -1438,6 +1438,7 @@ mod away;
 mod bars;
 mod bodies;
 mod cwd;
+mod desktop;
 mod faces;
 mod facts;
 mod focus_cache;

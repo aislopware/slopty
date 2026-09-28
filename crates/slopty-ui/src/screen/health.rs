@@ -140,6 +140,7 @@ mod tests {
         HudInput {
             size: (1920, 1080),
             scale: 1.0,
+            chroma: None,
             target_fps: 60,
             fps: 59.6,
             mbps: 18.25,
