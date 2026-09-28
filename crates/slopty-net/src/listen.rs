@@ -26,7 +26,7 @@ const GREETED_DEPTH: usize = 8;
 
 /// A peer that said hello: `H` taken out of its first message `R`, with the stream it came on.
 #[derive(Debug)]
-pub struct Greeted<S, R, H> {
+pub(crate) struct Greeted<S, R, H> {
     pub conn: Connection,
     pub remote: SocketAddr,
     pub hello: H,
@@ -38,7 +38,7 @@ pub struct Greeted<S, R, H> {
 /// Run the accept loop on `endpoint` as a task of its own; the greeted peers come out of the
 /// returned queue. `hello` takes a first message apart, `None` when it is not a hello; `who`
 /// names the peers in the log.
-pub fn spawn<S, R, H>(
+pub(crate) fn spawn<S, R, H>(
     endpoint: Endpoint,
     admission: Admission,
     hello: fn(R) -> Option<H>,

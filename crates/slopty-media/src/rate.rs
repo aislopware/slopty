@@ -52,18 +52,18 @@ use slopty_core::Duration;
 use slopty_proto::screen::{Chroma, RateVerdict, ReceiverReport};
 
 /// Reports per decision.
-pub const DECIDE_EVERY: u32 = 10;
+pub(crate) const DECIDE_EVERY: u32 = 10;
 /// Decisions to wait after a cut before growing again.
-pub const COOLDOWN: u32 = 4;
+pub(crate) const COOLDOWN: u32 = 4;
 /// Reports after a stall whose queue and hold figures are ignored (the release burst).
-pub const SETTLE_REPORTS: u32 = 2;
+pub(crate) const SETTLE_REPORTS: u32 = 2;
 /// Floor for any target; below this the picture is unreadable anyway.
-pub const MIN_BPS: u32 = 1_000_000;
+pub(crate) const MIN_BPS: u32 = 1_000_000;
 /// Where a stream starts when the ceiling is higher: a mesh path sustains this, a LAN grows
 /// out of it in a few seconds.
-pub const START_BPS: u32 = 12_000_000;
+pub(crate) const START_BPS: u32 = 12_000_000;
 /// Smallest growth step.
-pub const STEP_MIN_BPS: u32 = 500_000;
+pub(crate) const STEP_MIN_BPS: u32 = 500_000;
 
 /// GCC's decrease line. Past it parity costs a quarter of the rate and more, and a smaller
 /// picture buys more than further parity does.
@@ -101,10 +101,10 @@ impl PathSample {
 /// A bitrate is a budget per second, and the encoder spends it on however many frames it is given.
 /// At the 1 Mbit/s floor, 60 fps leaves 2 KB a frame: every frame is smeared and none of them is
 /// worth the bandwidth it took. Halving the cadence doubles what each surviving frame gets.
-pub const CADENCE_DROP_BYTES: u32 = 8 * 1024;
+pub(crate) const CADENCE_DROP_BYTES: u32 = 8 * 1024;
 /// Bytes a frame must have to spare before the cadence climbs a rung, so the ladder does not flap
 /// around one threshold: half again as much as leaving demands.
-pub const CADENCE_RAISE_BYTES: u32 = 12 * 1024;
+pub(crate) const CADENCE_RAISE_BYTES: u32 = 12 * 1024;
 /// `rung` when it sits under `ceiling`, and the ceiling itself when it does not: a client that
 /// asked for 30 never hears about 60, and one that asked for 10 stays at 10.
 const fn under(ceiling: u16, rung: u16) -> u16 {

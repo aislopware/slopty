@@ -19,19 +19,19 @@ use crate::InputError;
 
 /// `CGScrollPhase` values (`IOKit/hidsystem/IOLLEvent.h`).
 mod scroll_phase {
-    pub const BEGAN: i64 = 1;
-    pub const CHANGED: i64 = 2;
-    pub const ENDED: i64 = 4;
-    pub const CANCELLED: i64 = 8;
-    pub const MAY_BEGIN: i64 = 128;
+    pub(super) const BEGAN: i64 = 1;
+    pub(super) const CHANGED: i64 = 2;
+    pub(super) const ENDED: i64 = 4;
+    pub(super) const CANCELLED: i64 = 8;
+    pub(super) const MAY_BEGIN: i64 = 128;
 }
 
 /// `CGMomentumScrollPhase` values.
 mod momentum_phase {
-    pub const NONE: i64 = 0;
-    pub const BEGIN: i64 = 1;
-    pub const CONTINUE: i64 = 2;
-    pub const END: i64 = 3;
+    pub(super) const NONE: i64 = 0;
+    pub(super) const BEGIN: i64 = 1;
+    pub(super) const CONTINUE: i64 = 2;
+    pub(super) const END: i64 = 3;
 }
 
 /// Where an event goes.

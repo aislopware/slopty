@@ -8,6 +8,11 @@
 //! chrome is derived from the content"); chrome draws from these tokens and nothing else.
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 use std::collections::BTreeMap;
 
@@ -497,8 +502,6 @@ pub mod alpha {
     pub const SCRIM: f32 = 0.6;
     /// Present but set back: a read row in the inbox.
     pub const STRONG: f32 = 0.7;
-    /// A panel laid over content and read through only barely: the stream HUD.
-    pub const VEIL: f32 = 0.9;
 }
 
 /// WCAG AA for body text: the least contrast chrome text has on any surface it lands on.

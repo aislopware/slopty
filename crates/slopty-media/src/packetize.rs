@@ -20,10 +20,10 @@ pub const MAX_DATA_FRAGMENTS: usize = 32_768;
 /// Most parity fragments in one frame (the header field is a byte).
 pub const MAX_PARITY_FRAGMENTS: usize = 255;
 /// Parity ratio when nothing is known about the link, in thousandths (Sunshine's 20 %).
-pub const DEFAULT_PARITY_PERMILLE: u16 = 200;
+pub(crate) const DEFAULT_PARITY_PERMILLE: u16 = 200;
 /// Frames kept for retransmission. At 60 fps this is about half a second, more than any playout
 /// window a NACK is still worth answering in.
-pub const HISTORY_FRAMES: usize = 32;
+pub(crate) const HISTORY_FRAMES: usize = 32;
 
 /// One encoded frame handed to the packetizer.
 #[derive(Clone, Copy, Debug)]
@@ -52,7 +52,7 @@ pub struct Layout {
 }
 
 /// Smallest payload we will ever cut to; below this the per-datagram overhead dominates.
-pub const MIN_PAYLOAD: usize = 256;
+pub(crate) const MIN_PAYLOAD: usize = 256;
 
 /// Choose fragment count and size for `len` bitstream bytes at `parity_permille` redundancy.
 ///

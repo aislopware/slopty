@@ -4,6 +4,8 @@
 //! type, pinned by snapshot tests. The length prefix lets a reader allocate exactly once and
 //! reject oversize frames before decoding.
 
+use std::cell::RefCell;
+
 use bytes::{Buf as _, Bytes, BytesMut};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -33,12 +35,36 @@ pub enum CodecError {
     },
 }
 
+/// Frames up to this size are serialised in the thread's scratch buffer and copied out at their
+/// exact size, so the thread keeps at most this much. A larger frame becomes the buffer it grew,
+/// uncopied, and the thread's next frame starts a fresh one.
+const SCRATCH_KEEP_BYTES: usize = 64 * 1024;
+
+thread_local! {
+    static SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
 /// Encode one message with its length prefix.
 ///
-/// The message is serialised once, after a reserved prefix, and that buffer becomes the frame
-/// without a copy; a stream takes it as a chunk (`SendStream::write_chunk`).
+/// The message is serialised once, behind a reserved prefix, into a buffer the thread reuses,
+/// then copied out at its exact size. Once that buffer has grown to hold a frame, the frame is
+/// one allocation; a fresh buffer grown per frame took eight for a 230-byte echo. Sizing the
+/// message first would also make it one, but walks the message twice: 58 % more instructions
+/// for a full 200×60 screen (`docs/MEASUREMENTS.md`, "Encoding a frame"). A stream takes the
+/// frame as a chunk (`SendStream::write_chunk`).
 pub fn encode<T: Serialize>(msg: &T) -> Result<Bytes, CodecError> {
-    let mut out = postcard::to_extend(msg, vec![0_u8; PREFIX_BYTES]).map_err(CodecError::Encode)?;
+    SCRATCH.with(|scratch| match scratch.try_borrow_mut() {
+        Ok(mut scratch) => encode_in(&mut scratch, msg),
+        // Only a `Serialize` impl that itself encodes a frame gets here.
+        Err(_) => encode_in(&mut Vec::new(), msg),
+    })
+}
+
+fn encode_in<T: Serialize>(scratch: &mut Vec<u8>, msg: &T) -> Result<Bytes, CodecError> {
+    let mut buf = std::mem::take(scratch);
+    buf.clear();
+    buf.extend_from_slice(&[0; PREFIX_BYTES]);
+    let mut out = postcard::to_extend(msg, buf).map_err(CodecError::Encode)?;
     let len = out.len().saturating_sub(PREFIX_BYTES);
     if len > MAX_FRAME_BYTES {
         return Err(CodecError::TooLarge { len, max: MAX_FRAME_BYTES });
@@ -48,7 +74,12 @@ pub fn encode<T: Serialize>(msg: &T) -> Result<Bytes, CodecError> {
     if let Some(head) = out.get_mut(..PREFIX_BYTES) {
         head.copy_from_slice(&prefix);
     }
-    Ok(Bytes::from(out))
+    if out.capacity() > SCRATCH_KEEP_BYTES {
+        return Ok(Bytes::from(out));
+    }
+    let frame = Bytes::copy_from_slice(&out);
+    *scratch = out;
+    Ok(frame)
 }
 
 /// Encode a message body without a prefix (for datagrams and tests).
@@ -132,6 +163,24 @@ mod tests {
         assert_eq!(try_decode::<u16>(&mut buf).unwrap(), Some(1));
         assert_eq!(try_decode::<u16>(&mut buf).unwrap(), Some(2));
         assert_eq!(try_decode::<u16>(&mut buf).unwrap(), None);
+    }
+
+    /// A frame too big for the thread's scratch buffer leaves with that buffer, and the frames
+    /// after it are encoded in a fresh one, each exactly its own size.
+    #[test]
+    fn frames_around_one_bigger_than_the_scratch_buffer() {
+        let small = vec![7_u8; 100];
+        let big = vec![9_u8; 2 * SCRATCH_KEEP_BYTES];
+        let mut buf = BytesMut::new();
+        for msg in [&small, &big, &small] {
+            let frame = encode(msg).unwrap();
+            assert!(frame.len() > msg.len(), "the prefix and the body");
+            buf.extend_from_slice(&frame);
+        }
+        for msg in [&small, &big, &small] {
+            assert_eq!(try_decode::<Vec<u8>>(&mut buf).unwrap().as_ref(), Some(msg));
+        }
+        assert!(buf.is_empty(), "every frame was consumed");
     }
 
     /// An image's pixels as the wire type held them before: a sequence of `u8`s.

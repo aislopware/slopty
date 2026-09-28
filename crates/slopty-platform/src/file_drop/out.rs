@@ -153,7 +153,7 @@ mod ios {
         static OFFERING: RefCell<Vec<Offering>> = RefCell::default();
     }
 
-    pub struct Ivars {
+    struct Ivars {
         pick: Pick,
         /// Each drag begun, by its session's address, and what was fetched for it.
         drags: RefCell<Vec<(usize, Fetched)>>,
@@ -167,7 +167,7 @@ mod ios {
         #[thread_kind = MainThreadOnly]
         #[name = "SloptyDragOutSource"]
         #[ivars = Ivars]
-        pub struct Source;
+        struct Source;
 
         unsafe impl NSObjectProtocol for Source {}
 

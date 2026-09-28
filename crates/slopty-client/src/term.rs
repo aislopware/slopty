@@ -695,9 +695,9 @@ impl TermState {
         fetch.is_none_or(|f| f.epoch == self.epoch)
     }
 
-    /// Lines asked for and not answered yet (tests and the debug overlay).
-    #[must_use]
-    pub fn lines_in_flight(&self) -> u64 {
+    /// Lines asked for and not answered yet.
+    #[cfg(test)]
+    fn lines_in_flight(&self) -> u64 {
         self.in_flight.iter().map(|f| f.end.0.saturating_sub(f.start.0)).sum()
     }
 

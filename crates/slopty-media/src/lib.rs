@@ -11,6 +11,11 @@
 //! Nothing here touches sockets, codecs or clocks: callers pass `now` and ship the bytes.
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 mod cursor;
 mod heartbeat;

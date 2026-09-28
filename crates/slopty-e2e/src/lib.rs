@@ -13,6 +13,11 @@
 //! rendered frame with a golden PNG and write the diff for a failed one).
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 use serde::{Deserialize, Serialize};
 

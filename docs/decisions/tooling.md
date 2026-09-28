@@ -230,3 +230,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the runners had no `sccache`, so `cargo xtask setup` died before compiling. Both workflows now
   install it (`mozilla-actions/sccache-action`) and cache to the Actions cache
   (`SCCACHE_GHA_ENABLED`), rather than turning the wrapper off, so a runner also shares compiles.
+
+**The pure crates forbid `unsafe`, and every library warns on an unreachable `pub`.** ✅ 2026-09-29
+- Every library and binary with no `unsafe` of its own declares `#![forbid(unsafe_code)]` at its
+  root. New `unsafe` in one of them then shows up in review as the removal of that line.
+  `slopty-proto`'s zerocopy derives build under it, so it needed no `deny`. `slopty-tailnet` is the one `deny`: its IOKit and `getifaddrs` calls sit in one module
+  that expects the lint.
+- Every library crate declares `#![warn(unreachable_pub)]`, which the gate's `-D warnings`
+  makes an error. The workspace keeps the lint at `allow` only because a binary's items are all
+  unreachable by definition. A library item that nothing outside its crate can name is
+  `pub(crate)`, so `dead_code` sees it. A reachable item that nothing uses is invisible to both
+  lints, so the crates were also searched by name across the workspace, and what nothing called
+  was deleted.
+- clippy's nursery `redundant_pub_crate` contradicts it. For an item a private module shares
+  with its crate, that lint asks for `pub` and `unreachable_pub` forbids it. Each crate that turns
+  `unreachable_pub` on allows `redundant_pub_crate` beside it, with that reason, so `pub(crate)`
+  is the one spelling. A module nested deeper shares with its parent as `pub(super)`.
+- A method only its own crate's unit tests call is `#[cfg(test)]` and private (the client's
+  `lines_in_flight`). An item another crate's tests use stays `pub`.
+
+**A frame is encoded in the thread's scratch buffer and copied out at its size.** ✅ 2026-09-29
+- `slopty_proto::codec::encode` serialises into a thread-local `Vec` it reuses and copies the
+  frame into one exactly sized block. An echo went from 8 blocks to 1 and from 6 747 to 4 148
+  instructions (MEASUREMENTS, "Encoding a frame"). The allocation budgets in
+  `crates/slopty-engine/tests/allocs.rs` and `engine.encode_cost` hold it.
+- Sizing the message first (postcard's `Size` flavour) also gives one block, but it serialises
+  twice: 58 % more instructions for a full 200×60 screen. Copying 28 KB costs far less than a
+  second walk over its cells.
+- The buffer is kept only up to 64 KiB, which holds a full 200×60 screen with room to spare, so
+  a thread holds no more than that. A bigger frame, such as a checkpoint, leaves as the buffer
+  it grew, as before. A `Serialize` impl that encodes a frame while it is being encoded gets a
+  fresh buffer instead of a borrow panic.

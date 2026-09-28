@@ -10,6 +10,12 @@
 //! On macOS the owner also serves the main thread ([`park_main`]) and enforces again on every
 //! display reconfiguration ([`on_reconfiguration`]).
 
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 #[cfg(target_os = "macos")]
 mod display;
 mod plan;

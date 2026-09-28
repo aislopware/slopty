@@ -14,6 +14,12 @@
 //! cannot do yet says so where it is asked (`docs/decisions/platform.md`, "Linux seams"). The
 //! client's half (the pasteboard, drops, the browser tile, the Dock) is Apple-only.
 
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 pub mod continued;
 pub mod dirs;
 #[cfg(target_os = "macos")]

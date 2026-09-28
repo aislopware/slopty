@@ -4,6 +4,11 @@
 //! agrees on these types, so they are deliberately few and boring.
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 mod id;
 mod shell;

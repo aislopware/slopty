@@ -11,7 +11,7 @@ use objc2_video_toolbox::{VTSession, VTSessionSetProperty};
 use crate::CodecError;
 
 /// Turn an `OSStatus` into a `Result`.
-pub const fn check(call: &'static str, status: i32) -> Result<(), CodecError> {
+pub(crate) const fn check(call: &'static str, status: i32) -> Result<(), CodecError> {
     if status == 0 { Ok(()) } else { Err(CodecError::Os { call, status }) }
 }
 
@@ -19,7 +19,7 @@ pub const fn check(call: &'static str, status: i32) -> Result<(), CodecError> {
 ///
 /// `session` is the session object viewed as a plain CF type; both session kinds are
 /// `VTSessionRef`s in the C API even though objc2 models them as unrelated opaque types.
-pub fn set_property(
+pub(crate) fn set_property(
     session: &CFType,
     key: &CFString,
     value: &CFType,
@@ -37,24 +37,24 @@ pub fn set_property(
 }
 
 /// A boolean property value.
-pub fn boolean(value: bool) -> &'static CFType {
+pub(crate) fn boolean(value: bool) -> &'static CFType {
     CFBoolean::new(value)
 }
 
 /// An integer property value.
 #[cfg(target_os = "macos")]
-pub fn int(value: i64) -> CFRetained<CFNumber> {
+pub(crate) fn int(value: i64) -> CFRetained<CFNumber> {
     CFNumber::new_i64(value)
 }
 
 /// A float property value.
 #[cfg(target_os = "macos")]
-pub fn float(value: f64) -> CFRetained<CFNumber> {
+pub(crate) fn float(value: f64) -> CFRetained<CFNumber> {
     CFNumber::new_f64(value)
 }
 
 /// A microsecond timestamp as a `CMTime`.
-pub fn time_us(us: u64) -> CMTime {
+pub(crate) fn time_us(us: u64) -> CMTime {
     CMTime {
         value: i64::try_from(us).unwrap_or(i64::MAX),
         timescale: 1_000_000,

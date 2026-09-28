@@ -24,6 +24,12 @@
 //! pointer goes back to the stream's cursor samples ([`PointerWatch`]). [`pasteboard::Board`] is
 //! the clipboard seam.
 
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 #[cfg(target_os = "macos")]
 pub mod backend;
 #[cfg(target_os = "macos")]

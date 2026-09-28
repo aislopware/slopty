@@ -36,7 +36,7 @@ pub fn display_bounds(id: u32) -> Rect {
 /// A display's refresh rate in hertz, as its current mode reports it; `None` when the mode
 /// reports none (some panels answer 0).
 #[must_use]
-pub fn display_refresh_hz(id: u32) -> Option<f64> {
+pub(crate) fn display_refresh_hz(id: u32) -> Option<f64> {
     let mode = objc2_core_graphics::CGDisplayCopyDisplayMode(id)?;
     let hz = objc2_core_graphics::CGDisplayMode::refresh_rate(Some(&mode));
     (hz > 0.0).then_some(hz)
@@ -45,7 +45,7 @@ pub fn display_refresh_hz(id: u32) -> Option<f64> {
 /// The refresh rate of the display a target is drawn on: a display's own, a window's display's
 /// (the first display it touches, when it straddles two).
 #[must_use]
-pub fn target_refresh_hz(target: CaptureTarget) -> Option<f64> {
+pub(crate) fn target_refresh_hz(target: CaptureTarget) -> Option<f64> {
     let display = match target {
         CaptureTarget::Display(id) => id.0,
         CaptureTarget::Window(id) => first_display_under(&window_bounds(id)?)?,

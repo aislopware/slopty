@@ -20,6 +20,10 @@
 // `lan` alone reads `getifaddrs(3)`; everything else stays safe.
 #![deny(unsafe_code)]
 #![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 mod api;
 #[cfg(any(test, feature = "fake"))]

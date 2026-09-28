@@ -6,6 +6,11 @@
 //! heals it. Watching the file for changes is the app's job (`slopty-app`).
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 use std::path::{Path, PathBuf};
 
@@ -473,11 +478,16 @@ mod server_address {
     use slopty_net::endpoint::SERVER_PORT;
 
     #[expect(clippy::ref_option, reason = "serde's `with` hands the field over by reference")]
-    pub fn serialize<S: Serializer>(addr: &Option<HostAddr>, s: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(
+        addr: &Option<HostAddr>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
         s.serialize_str(&addr.as_ref().map(ToString::to_string).unwrap_or_default())
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<HostAddr>, D::Error> {
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<HostAddr>, D::Error> {
         let text = String::deserialize(d)?;
         if text.trim().is_empty() {
             return Ok(None);

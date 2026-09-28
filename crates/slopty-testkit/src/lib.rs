@@ -8,6 +8,12 @@
 //! - [`bench`](mod@bench): a measurement's samples, timed and counted in instructions, printed and
 //!   written as one JSON line for `cargo xtask bench` to hold against its budget.
 
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 pub mod alloc;
 pub mod bench;
 pub mod process;

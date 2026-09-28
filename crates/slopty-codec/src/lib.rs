@@ -13,6 +13,12 @@
 //! Output is delivered on VideoToolbox's own threads through the sink closure given at
 //! construction; sinks must be cheap (hand the packet to a channel).
 
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 pub mod annexb;
 #[cfg(target_vendor = "apple")]
 pub mod audio;

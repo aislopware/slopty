@@ -11,6 +11,11 @@
 //! * [`mcp`] — the MCP front end (Streamable HTTP).
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 pub mod hub;
 pub mod link;

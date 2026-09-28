@@ -438,7 +438,7 @@ unsafe extern "C-unwind" fn output_callback(
     (shared.sink)(Ok(DecodedFrame { image: PixelBuffer(image), pts_us }));
 }
 
-pub fn format_description(
+pub(crate) fn format_description(
     codec: VideoCodec,
     sets: &[Vec<u8>],
 ) -> Result<CFRetained<CMFormatDescription>, CodecError> {

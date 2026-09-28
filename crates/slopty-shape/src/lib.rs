@@ -15,6 +15,13 @@
 //! clock, and [`sim`], an in-memory network noq's endpoints sit on directly, on tokio's clock,
 //! where a paused runtime turns a minute's outage into milliseconds.
 
+#![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 pub mod relay;
 pub mod sim;
 
@@ -43,12 +50,6 @@ impl Link {
     /// A link that carries everything, at once.
     pub const CLEAR: Self =
         Self { delay: Duration::ZERO, jitter: Duration::ZERO, loss: 0.0, rate: 0, queue: 0 };
-
-    /// Whether this link changes anything.
-    #[must_use]
-    pub fn is_clear(&self) -> bool {
-        *self == Self::CLEAR
-    }
 }
 
 /// What the shaper does with one packet.

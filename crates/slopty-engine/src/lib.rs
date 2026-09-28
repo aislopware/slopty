@@ -15,6 +15,11 @@
 //! own rows under an epoch of its own, and leaving it gives the primary its epoch back.
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 pub mod boundary;
 pub mod convert;

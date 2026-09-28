@@ -10,6 +10,12 @@
 //! * [`ssh`] — `ssh` out of a Slopty shell, with the entry installed on the far side.
 //! * [`process`] — the foreground process of a tty, for attributing agent sessions.
 
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 pub mod client;
 pub mod fdpass;
 pub mod process;

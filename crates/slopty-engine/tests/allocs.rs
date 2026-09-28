@@ -24,8 +24,8 @@ mod allocs {
     }
 
     /// An engine whose screen is full of `ls -l`-like output with the cursor at a prompt on the
-    /// bottom row, its attach frame taken and a few echoes behind it, so every buffer the echo
-    /// path reuses has grown.
+    /// bottom row, its attach frame taken and encoded and a few echoes behind it, so every buffer
+    /// the echo path reuses has grown, the encoder's scratch buffer on this thread among them.
     fn at_a_full_prompt(cols: u16, rows: u16) -> GhosttyEngine {
         let size = TermSize { cols, rows, metrics: CellMetrics { cell_width: 8, cell_height: 16 } };
         let mut e = GhosttyEngine::new(EngineConfig { size, scrollback_lines: 10_000 }).unwrap();
@@ -38,7 +38,7 @@ mod allocs {
             e.write(line.as_bytes());
         }
         e.write(prompt());
-        let _attach = e.full_frame(0).unwrap();
+        let _attach = codec::encode(&TermEvent::Frame(e.full_frame(0).unwrap())).unwrap();
         for seq in 1..=8 {
             e.write(b"x");
             let _echo = e.take_frame(seq).unwrap();
@@ -126,17 +126,19 @@ mod allocs {
             let (wire, used) = alloc::measure(|| codec::encode(&event).unwrap());
             eprintln!("{cols}x{rows}: encode {used}; {} B", wire.len());
             assert!(used.blocks <= ENCODE_BLOCKS, "{cols}x{rows}: {used}, budget {ENCODE_BLOCKS}");
-            assert!(
-                used.bytes <= 4 * wire.len() as u64,
+            assert_eq!(
+                used.bytes,
+                wire.len() as u64,
                 "{cols}x{rows}: {used} for {} B on the wire",
                 wire.len()
             );
         }
     }
 
-    /// `codec::encode` grows its buffer from the 4-byte prefix as postcard writes (4, 8, … 256
-    /// bytes for a 230-byte echo): one block would do if the frame's size were known first.
-    const ENCODE_BLOCKS: u64 = 8;
+    /// The frame itself, copied out of the thread's scratch buffer at its exact size. Until
+    /// 2026-09-29 `codec::encode` grew a fresh buffer from the 4-byte prefix as postcard wrote
+    /// (4, 8, … 256 bytes for a 230-byte echo): 8 blocks and 532 bytes.
+    const ENCODE_BLOCKS: u64 = 1;
 
     /// One echo frame goes to every viewer as the same encoded bytes: eight viewers cost what
     /// one does.
@@ -162,5 +164,11 @@ mod allocs {
         let eight = fan_out(8);
         eprintln!("one viewer: {one}; eight viewers: {eight}");
         assert_eq!(eight, one, "eight viewers cost what one does");
+        assert!(one.blocks <= FAN_OUT_BLOCKS, "{one}, budget {FAN_OUT_BLOCKS}");
     }
+
+    /// The echo's take (4), its one encoded frame, and the block the first clone shares it
+    /// through. Until 2026-09-29 it was 12: the encode's 8 blocks (a buffer grown seven times
+    /// from its 4-byte prefix, and the block `Bytes` shared it through) in place of these 2.
+    const FAN_OUT_BLOCKS: u64 = 6;
 }

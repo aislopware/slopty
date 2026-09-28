@@ -52,7 +52,7 @@ mod imp {
     const ARGS_MAX: usize = 64 * 1024;
 
     /// Everything the process table will say about `pid`.
-    pub fn describe(pid: i32) -> Option<Foreground> {
+    pub(super) fn describe(pid: i32) -> Option<Foreground> {
         let info = bsd_info(pid)?;
         let name = c_string(&info.pbi_name).or_else(|| c_string(&info.pbi_comm))?;
         let started = SystemTime::UNIX_EPOCH
@@ -245,7 +245,7 @@ mod imp {
     use super::{Foreground, procfs};
 
     /// Everything `/proc` will say about `pid`.
-    pub fn describe(pid: i32) -> Option<Foreground> {
+    pub(super) fn describe(pid: i32) -> Option<Foreground> {
         let dir = PathBuf::from(format!("/proc/{pid}"));
         let stat = procfs::Stat::parse(&std::fs::read_to_string(dir.join("stat")).ok()?)?;
         let exe = std::fs::read_link(dir.join("exe")).ok();
@@ -279,7 +279,7 @@ mod imp {
     use super::Foreground;
 
     /// No process table to read here; the caller treats `None` as "the platform would not say".
-    pub const fn describe(_pid: i32) -> Option<Foreground> {
+    pub(super) const fn describe(_pid: i32) -> Option<Foreground> {
         None
     }
 }

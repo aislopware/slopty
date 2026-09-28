@@ -17,7 +17,7 @@ use crate::{InputError, PointerWatch, keymap};
 /// ([`Injector::set_bounds`]); this is long enough that a probe late by a slow window-server
 /// answer does not put a read in front of a move, and short enough that an injector nobody
 /// feeds still follows a window that moved.
-pub const BOUNDS_TTL: Duration = Duration::from_millis(250);
+pub(crate) const BOUNDS_TTL: Duration = Duration::from_millis(250);
 
 /// How long an owner found active, or just activated, is taken to stay active. Activation lands
 /// some milliseconds after it is asked for, and the lookup behind the check costs 1–2 ms

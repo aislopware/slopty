@@ -916,7 +916,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    pub fn caps() -> WorkerCaps {
+    pub(crate) fn caps() -> WorkerCaps {
         WorkerCaps {
             os: Os::MacOs,
             os_version: "26.5".to_owned(),
@@ -935,7 +935,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn summary(id: SessionId) -> SessionSummary {
+    pub(crate) fn summary(id: SessionId) -> SessionSummary {
         SessionSummary {
             id,
             title: "zsh".to_owned(),
@@ -953,7 +953,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn registration(worker: WorkerId, sessions: Vec<SessionSummary>) -> Registration {
+    pub(crate) fn registration(worker: WorkerId, sessions: Vec<SessionSummary>) -> Registration {
         let listen = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550));
         Registration { worker, name: "studio".to_owned(), listen, caps: caps(), sessions }
     }

@@ -7633,3 +7633,36 @@ receiver pins until the ring wraps. Both should level off, the ledger at an esti
 2.5–3 MiB; together they account for an estimated 3 KiB of a cycle. The server's
 slope still reads like a cache settling. The soak holds both to its budget, so it still fails on
 them.
+
+## 2026-09-29 — Encoding a frame
+
+Mac Studio M1 Max, macOS 27.0, other sessions building in the same checkout.
+`slopty_proto::codec::encode` grew a fresh `Vec` from its 4-byte prefix as postcard wrote, and
+handed it to `Bytes` with spare capacity, which shares it through a block of its own. It now
+serialises into a scratch buffer the thread keeps (at most 64 KiB) and copies the frame out at its
+exact size. A frame too big for that buffer leaves as the buffer it grew, uncopied.
+
+```sh
+cargo nextest run -p slopty-engine --test allocs --no-capture
+cargo xtask bench --filter encode_cost
+```
+
+Allocations, on the test's own thread with its buffers warmed:
+
+| path | before | after |
+| --- | --- | --- |
+| the echo frame encoded, 80×24 (228 B on the wire) | 8 blocks, 532 B | **1 block, 228 B** |
+| the echo frame encoded, 200×60 (230 B) | 8 blocks, 532 B | **1 block, 230 B** |
+| an echo's take, encode and hand-off, 1 viewer or 8 | 12 blocks, 10 068 B | **6 blocks, 9 788 B** |
+
+Retired instructions per encode, the old `encode` restored for the before column:
+
+| series | before | after |
+| --- | --- | --- |
+| `engine.encode_cost.echo` | 6 747 | 4 148 (−38.5 %) |
+| `engine.encode_cost.full_200x60` (28 133 B) | 1 095 518 | 1 084 187 (−1.0 %) |
+
+Sizing the message first, with postcard's `Size` flavour, and then serialising it into an exact
+`Vec` also makes one block, but it walks the message twice. On a one-off harness with the same
+frames it cost 6 768 instructions for the echo and 1 729 833 for the full screen (+58 %), so it
+was not taken.

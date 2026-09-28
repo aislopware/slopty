@@ -12,6 +12,12 @@
 //! completion handlers and frames arrive on them, and every callback type here is `Send`.
 //! Frames skip the `Idle` status (nothing changed), so an unchanged screen costs nothing.
 
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 #[cfg(target_os = "macos")]
 mod ax;
 #[cfg(target_os = "macos")]

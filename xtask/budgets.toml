@@ -12,6 +12,8 @@
 "engine.checkpoint_cost.format" = 45649442
 "engine.checkpoint_cost.replay_64k_chunks" = 35270833
 "engine.checkpoint_cost.replay_one_chunk" = 35249023
+"engine.encode_cost.echo" = 4148
+"engine.encode_cost.full_200x60" = 1084187
 "engine.fetch_lines_cost.4096_rows" = 124790604
 "engine.frame_cost.take_frame" = 38209
 "engine.frame_cost.write" = 861

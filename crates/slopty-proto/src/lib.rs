@@ -24,6 +24,11 @@
 //! a changed golden is a wire change.
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 pub mod agent;
 pub mod codec;

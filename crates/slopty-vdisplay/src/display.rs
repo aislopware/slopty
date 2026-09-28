@@ -23,13 +23,13 @@ use crate::{DisplayError, Enforced};
 
 /// A class and the instance selectors this crate sends to it.
 #[derive(Clone, Copy, Debug)]
-pub struct Wanted {
+pub(crate) struct Wanted {
     pub class: &'static CStr,
     pub selectors: &'static [&'static CStr],
 }
 
 /// The descriptor, mode, settings and display classes, in that order.
-pub const WANTED: [Wanted; 4] = [
+pub(crate) const WANTED: [Wanted; 4] = [
     Wanted {
         class: c"CGVirtualDisplayDescriptor",
         selectors: &[
@@ -53,7 +53,7 @@ pub const WANTED: [Wanted; 4] = [
 
 /// The four classes, each known to answer every selector [`WANTED`] lists for it.
 #[derive(Clone, Copy, Debug)]
-pub struct Classes {
+pub(crate) struct Classes {
     descriptor: &'static AnyClass,
     mode: &'static AnyClass,
     settings: &'static AnyClass,
@@ -61,11 +61,11 @@ pub struct Classes {
 }
 
 impl Classes {
-    pub fn resolve() -> Result<Self, DisplayError> {
+    pub(crate) fn resolve() -> Result<Self, DisplayError> {
         Self::resolve_from(&WANTED)
     }
 
-    pub fn resolve_from(wanted: &[Wanted; 4]) -> Result<Self, DisplayError> {
+    pub(crate) fn resolve_from(wanted: &[Wanted; 4]) -> Result<Self, DisplayError> {
         let [descriptor, mode, settings, display] = wanted.map(|w| {
             let class = AnyClass::get(w.class).ok_or_else(|| {
                 DisplayError::Unavailable(format!("no class {}", w.class.to_string_lossy()))
@@ -85,7 +85,7 @@ impl Classes {
     }
 
     /// A configured `CGVirtualDisplayDescriptor`. Building one creates no display.
-    pub fn descriptor(self, plan: &Plan) -> Result<Retained<AnyObject>, DisplayError> {
+    pub(crate) fn descriptor(self, plan: &Plan) -> Result<Retained<AnyObject>, DisplayError> {
         let d = &plan.descriptor;
         // SAFETY: `new` on an `NSObject` subclass returns a +1 instance or nil.
         let descriptor: Option<Retained<AnyObject>> = unsafe { msg_send![self.descriptor, new] };
@@ -113,7 +113,7 @@ impl Classes {
     }
 
     /// A `CGVirtualDisplaySettings` offering exactly `mode`. Building one creates no display.
-    pub fn settings(self, mode: &Mode) -> Result<Retained<AnyObject>, DisplayError> {
+    pub(crate) fn settings(self, mode: &Mode) -> Result<Retained<AnyObject>, DisplayError> {
         // SAFETY: `alloc` on a class returns an uninitialised instance for `init…` to consume.
         let allocated: Allocated<AnyObject> = unsafe { msg_send![self.mode, alloc] };
         let refresh = f64::from(mode.refresh_hz);

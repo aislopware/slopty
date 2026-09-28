@@ -351,7 +351,7 @@ mod macos {
 
     use super::{Landing, deliver, root};
 
-    pub struct Ivars {
+    pub(super) struct Ivars {
         host: usize,
         /// Where the promised files are written from, off the main thread, one at a time.
         queue: Retained<NSOperationQueue>,
@@ -366,7 +366,7 @@ mod macos {
         #[thread_kind = MainThreadOnly]
         #[name = "SloptyPromiseDropView"]
         #[ivars = Ivars]
-        pub struct DropView;
+        pub(super) struct DropView;
 
         impl DropView {
             // Clicks and scrolls go to the GPUI view beneath; AppKit finds a drop's
@@ -502,7 +502,7 @@ mod macos {
 
     /// A view over the whole of `host`, beneath its web pages, that takes drops of promised
     /// files and nothing else.
-    pub fn install(host: NonNull<c_void>, key: usize) -> Option<Retained<DropView>> {
+    pub(super) fn install(host: NonNull<c_void>, key: usize) -> Option<Retained<DropView>> {
         let mtm = MainThreadMarker::new()?;
         // SAFETY: `raw_window_handle`'s AppKit rule: the handle is a live `NSView` of the
         // window, valid while the window is; the app installs this once, for the window it
@@ -548,7 +548,7 @@ mod ios {
     use super::out::{DATA_UTI, FOLDER_UTI};
     use super::{Landing, arrive, deliver, root};
 
-    pub struct Ivars {
+    pub(super) struct Ivars {
         host: usize,
     }
 
@@ -560,7 +560,7 @@ mod ios {
         #[thread_kind = MainThreadOnly]
         #[name = "SloptyDropDelegate"]
         #[ivars = Ivars]
-        pub struct Delegate;
+        pub(super) struct Delegate;
 
         unsafe impl NSObjectProtocol for Delegate {}
 
@@ -688,7 +688,7 @@ mod ios {
     }
 
     /// A drop interaction on `host`, whose delegate lands every file of a drop.
-    pub fn install(
+    pub(super) fn install(
         host: NonNull<c_void>,
         key: usize,
     ) -> Option<(Retained<Delegate>, Retained<UIDropInteraction>)> {

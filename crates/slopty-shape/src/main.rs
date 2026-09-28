@@ -12,6 +12,8 @@
 //! slopty-shape --to 192.168.1.10:45560 --delay 60ms --jitter 10ms --rate 600kB --loss 1%
 //! ```
 
+#![forbid(unsafe_code)]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
