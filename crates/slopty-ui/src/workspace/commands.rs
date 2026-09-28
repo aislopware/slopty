@@ -336,6 +336,7 @@ impl WorkspaceView {
                         stream: view.stream(),
                         width,
                         height,
+                        scale: None,
                     }),
                 );
             }

@@ -49,7 +49,7 @@
 //! ceiling of 30 and a ceiling of 120 behave the same way.
 
 use slopty_core::Duration;
-use slopty_proto::screen::{RateVerdict, ReceiverReport};
+use slopty_proto::screen::{Chroma, RateVerdict, ReceiverReport};
 
 /// Reports per decision.
 pub const DECIDE_EVERY: u32 = 10;
@@ -478,6 +478,142 @@ impl RateController {
             capped: self.target_bps < self.wanted_bps,
             window: self.window,
         }
+    }
+}
+
+/// Where a stream that asked for 4:4:4 takes it at the reference size.
+///
+/// The rate at which the 10-bit 4:4:4 stream matches 4:2:0's luma. At 1080p60 on scrolling text
+/// 4:2:0 saturates at 6.9 Mbit/s (53.2 dB luma, chroma pinned at its 29 dB ceiling); 4:4:4 is 47.5
+/// dB luma at that rate and 55.3 dB with 52.8 dB chroma at 11.1, crossing 4:2:0's luma near 10
+/// (MEASUREMENTS.md, "4:4:4 HEVC on the low-latency encoder").
+pub const FULL_CHROMA_ENTER_BPS: u32 = 10_000_000;
+/// Where a 4:4:4 stream falls back to 4:2:0 at the reference size.
+///
+/// Between this and
+/// [`FULL_CHROMA_ENTER_BPS`] 4:4:4 gives up at most a few dB of luma for some 15 dB of chroma,
+/// so a stream already there holds; under it 4:2:0 is the sharper picture. A cut is to 75 %,
+/// so one cut from the enter line lands under this one, and the band is wider than the
+/// eighth a clean window grows by.
+pub const FULL_CHROMA_LEAVE_BPS: u32 = 8_000_000;
+/// Decisions a stream that fell back waits before it may take 4:4:4 again (about five
+/// seconds): every switch is a new encoder session and a keyframe.
+pub const FULL_CHROMA_HOLD: u32 = 10;
+/// Pixels of the picture the thresholds were measured on, 1920×1080.
+const REFERENCE_PIXELS: f64 = 1920.0 * 1080.0;
+/// How the thresholds grow with the picture: the rate a stream saturates at grew as the
+/// pixels to the 0.62 (4:4:4) and 0.66 (4:2:0) between 1080p and 5K on the same content, so
+/// two thirds, which errs towards 4:2:0.
+const SIZE_EXPONENT: f64 = 2.0 / 3.0;
+
+/// The rates a `width`×`height` stream takes 4:4:4 at and falls back from, bits per second.
+#[must_use]
+pub fn full_chroma_band(width: u32, height: u32) -> (u32, u32) {
+    let scale = (f64::from(width) * f64::from(height) / REFERENCE_PIXELS).powf(SIZE_EXPONENT);
+    let at = |bps: u32| {
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
+        let scaled =
+            (f64::from(bps) * scale).round().clamp(f64::from(MIN_BPS), f64::from(u32::MAX)) as u32;
+        scaled
+    };
+    (at(FULL_CHROMA_ENTER_BPS), at(FULL_CHROMA_LEAVE_BPS))
+}
+
+/// Whether a stream carries 4:4:4 or 4:2:0 right now (`docs/decisions/video.md`, "Full chroma
+/// follows the rate").
+///
+/// 4:4:4 is only ever what the client asked for, and only while the rate target is high enough
+/// for it to beat 4:2:0 at the stream's size ([`full_chroma_band`]). It is taken at the enter
+/// line and left under the lower leave line, and a stream that fell back waits
+/// [`FULL_CHROMA_HOLD`] decisions before it takes 4:4:4 again, so a rate hovering near the
+/// line costs one keyframe, not one a decision.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ChromaGate {
+    asked: Chroma,
+    current: Chroma,
+    enter_bps: u32,
+    leave_bps: u32,
+    hold: u32,
+}
+
+impl ChromaGate {
+    /// A stream of `size` asking for `asked`, opening at `target_bps`.
+    #[must_use]
+    pub fn new(asked: Chroma, size: (u32, u32), target_bps: u32) -> Self {
+        let mut gate =
+            Self { asked, current: Chroma::Subsampled, enter_bps: 0, leave_bps: 0, hold: 0 };
+        gate.ask(asked, size, target_bps);
+        gate
+    }
+
+    /// The chroma in force.
+    #[must_use]
+    pub const fn chroma(self) -> Chroma {
+        self.current
+    }
+
+    /// What the client asked for (4:2:0 again after a [`Self::refuse`]).
+    #[must_use]
+    pub const fn asked(self) -> Chroma {
+        self.asked
+    }
+
+    /// The rates this stream takes 4:4:4 at and falls back from, bits per second.
+    #[must_use]
+    pub const fn band(self) -> (u32, u32) {
+        (self.enter_bps, self.leave_bps)
+    }
+
+    /// The client asked again, or the stream is to change size: decide at once, from the band
+    /// for `size`. A new ask or a new size drops the hold, since a new encoder session is being
+    /// built either way and the switch costs nothing extra; the same ask at the same size
+    /// (a client repeating its quality) keeps it.
+    pub fn ask(&mut self, asked: Chroma, size: (u32, u32), target_bps: u32) -> Chroma {
+        let band = full_chroma_band(size.0, size.1);
+        if asked != self.asked || band != self.band() {
+            self.hold = 0;
+        }
+        (self.enter_bps, self.leave_bps) = band;
+        self.asked = asked;
+        self.current = match (asked, self.current) {
+            (Chroma::Full, Chroma::Full) if target_bps >= self.leave_bps => Chroma::Full,
+            (Chroma::Full, Chroma::Full) => {
+                self.hold = FULL_CHROMA_HOLD;
+                Chroma::Subsampled
+            }
+            (Chroma::Full, Chroma::Subsampled)
+                if self.hold == 0 && target_bps >= self.enter_bps =>
+            {
+                Chroma::Full
+            }
+            (Chroma::Subsampled, _) | (Chroma::Full, Chroma::Subsampled) => Chroma::Subsampled,
+        };
+        self.current
+    }
+
+    /// Follow a rate decision; the new chroma when it changes.
+    pub fn update(&mut self, target_bps: u32) -> Option<Chroma> {
+        self.hold = self.hold.saturating_sub(1);
+        let next = match self.current {
+            Chroma::Full if target_bps < self.leave_bps => {
+                self.hold = FULL_CHROMA_HOLD;
+                Chroma::Subsampled
+            }
+            Chroma::Subsampled
+                if self.asked == Chroma::Full && self.hold == 0 && target_bps >= self.enter_bps =>
+            {
+                Chroma::Full
+            }
+            Chroma::Full | Chroma::Subsampled => return None,
+        };
+        self.current = next;
+        Some(next)
+    }
+
+    /// A 4:4:4 session could not be had here: 4:2:0 until the client asks again.
+    pub const fn refuse(&mut self) {
+        self.asked = Chroma::Subsampled;
+        self.current = Chroma::Subsampled;
     }
 }
 
@@ -986,5 +1122,113 @@ mod tests {
         pace.sent(5_000_000, 0);
         assert!(!pace.due(5_500_000, 0));
         assert!(pace.due(6_000_000, 0));
+    }
+
+    const HD: (u32, u32) = (1920, 1080);
+
+    /// The band is the measured one at 1080p, grows with the picture slower than its pixels,
+    /// and never falls under the rate floor.
+    #[test]
+    fn the_full_chroma_band_is_measured_at_1080p_and_scales_with_the_picture() {
+        assert_eq!(full_chroma_band(1920, 1080), (10_000_000, 8_000_000));
+        let (enter_5k, leave_5k) = full_chroma_band(5120, 2880);
+        // 7.1× the pixels: about 3.7× the rate, where 4:4:4 at 5K spent 36 Mbit/s against
+        // 4:2:0's 25.
+        assert!((36_000_000..38_000_000).contains(&enter_5k), "{enter_5k}");
+        assert!(leave_5k < enter_5k);
+        let (enter_720, _) = full_chroma_band(1280, 720);
+        assert!(enter_720 < 10_000_000 && enter_720 > 5_000_000, "{enter_720}");
+        assert_eq!(full_chroma_band(2, 2), (MIN_BPS, MIN_BPS), "floored");
+    }
+
+    /// 4:4:4 is only what the client asked for, and only above the enter line.
+    #[test]
+    fn full_chroma_is_asked_for_and_earned() {
+        let full = |target| ChromaGate::new(Chroma::Full, HD, target).chroma();
+        assert_eq!(full(START_BPS), Chroma::Full, "a 1080p stream opens at 12 Mbit/s");
+        assert_eq!(full(9_000_000), Chroma::Subsampled, "under the enter line");
+        assert_eq!(
+            ChromaGate::new(Chroma::Subsampled, HD, 30_000_000).chroma(),
+            Chroma::Subsampled,
+            "never unasked"
+        );
+        assert_eq!(
+            ChromaGate::new(Chroma::Full, (5120, 2880), START_BPS).chroma(),
+            Chroma::Subsampled,
+            "a 5K stream has not earned it at 12 Mbit/s"
+        );
+        let mut gate = ChromaGate::new(Chroma::Subsampled, HD, 30_000_000);
+        for _ in 0..20 {
+            assert_eq!(gate.update(30_000_000), None, "never unasked, whatever the rate");
+        }
+    }
+
+    /// A 4:4:4 stream holds inside the band and leaves under it; one that left waits out the
+    /// hold before it comes back, even with the rate back over the line.
+    #[test]
+    fn full_chroma_has_hysteresis_and_a_hold() {
+        let mut gate = ChromaGate::new(Chroma::Full, HD, START_BPS);
+        assert_eq!(gate.update(9_000_000), None, "inside the band a 4:4:4 stream holds");
+        assert_eq!(gate.update(8_000_000), None, "the leave line itself holds");
+        assert_eq!(gate.update(7_999_999), Some(Chroma::Subsampled));
+        assert_eq!(gate.update(9_500_000), None, "inside the band a 4:2:0 stream holds too");
+        for decision in 2..FULL_CHROMA_HOLD {
+            assert_eq!(gate.update(20_000_000), None, "held at decision {decision}");
+        }
+        assert_eq!(gate.update(20_000_000), Some(Chroma::Full), "back on the hold's last decision");
+    }
+
+    /// A rate that swings across the whole band every decision switches once per hold, not
+    /// once per decision: each switch is a keyframe.
+    #[test]
+    fn a_swinging_rate_does_not_flap_the_chroma() {
+        let mut gate = ChromaGate::new(Chroma::Full, HD, START_BPS);
+        let switches = (0..110_u32)
+            .filter_map(|i| gate.update(if i.is_multiple_of(2) { 7_000_000 } else { 11_000_000 }))
+            .count();
+        assert!(switches <= 20, "{switches} switches in 110 decisions");
+        // The rate controller's own swing: a cut from just over the line lands under the leave
+        // line, and growing back takes the cooldown plus two clean windows.
+        let mut rate = RateController::new(30_000_000);
+        let mut gate = ChromaGate::new(Chroma::Full, HD, rate.target_bps());
+        let cut = ReceiverReport { frames_lost: 3, ..CLEAN };
+        let mut switched = Vec::new();
+        for i in 0..200_u32 {
+            // Loss whenever the target is over 10.5 Mbit/s: the link's capacity.
+            let report = if rate.target_bps() > 10_500_000 { cut } else { CLEAN };
+            let decision = (0..DECIDE_EVERY).find_map(|_| rate.on_report(&report, 10, None));
+            if let Some(chroma) = decision.and_then(|d| gate.update(d.target_bps)) {
+                switched.push((i, chroma));
+            }
+        }
+        // The sawtooth crosses the leave line about every 33 s (67 decisions), and comes back
+        // once the hold is out and the rate is over the enter line again.
+        assert!(!switched.is_empty(), "a cut from 11.4 Mbit/s lands under the leave line");
+        assert!(switched.len() <= 6, "{switched:?}");
+        assert!(switched.windows(2).all(|w| w[1].0 - w[0].0 > FULL_CHROMA_HOLD), "{switched:?}");
+    }
+
+    /// Asking again decides at once from the band, and a refusal holds until the next ask.
+    #[test]
+    fn an_ask_decides_at_once_and_a_refusal_holds() {
+        let mut gate = ChromaGate::new(Chroma::Full, HD, START_BPS);
+        assert_eq!(gate.ask(Chroma::Full, HD, 9_000_000), Chroma::Full, "in the band, stays");
+        assert_eq!(gate.ask(Chroma::Subsampled, HD, 30_000_000), Chroma::Subsampled);
+        assert_eq!(gate.ask(Chroma::Full, HD, 9_000_000), Chroma::Subsampled, "not earned");
+        assert_eq!(gate.ask(Chroma::Full, HD, 10_000_000), Chroma::Full);
+        assert_eq!(
+            gate.ask(Chroma::Full, (3840, 2160), 10_000_000),
+            Chroma::Subsampled,
+            "a bigger picture needs more for it"
+        );
+        // A client repeating its quality during a hold does not lift it.
+        assert_eq!(gate.ask(Chroma::Full, HD, 10_000_000), Chroma::Full);
+        assert_eq!(gate.ask(Chroma::Full, HD, 7_000_000), Chroma::Subsampled, "fell back");
+        assert_eq!(gate.ask(Chroma::Full, HD, 20_000_000), Chroma::Subsampled, "held");
+        assert_eq!(gate.ask(Chroma::Full, (1280, 720), 20_000_000), Chroma::Full, "resized");
+        gate.refuse();
+        assert_eq!(gate.chroma(), Chroma::Subsampled);
+        assert_eq!(gate.update(30_000_000), None, "refused until asked again");
+        assert_eq!(gate.ask(Chroma::Full, HD, 30_000_000), Chroma::Full);
     }
 }

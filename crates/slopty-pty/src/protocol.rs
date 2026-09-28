@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use serde::ser::SerializeStructVariant as _;
 use serde::{Deserialize, Serialize, Serializer};
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
+use slopty_proto::ptyd::PtydError;
 use slopty_proto::terminal::TermSize;
 
 use crate::PtyError;
@@ -145,9 +146,9 @@ pub enum PtydEvent {
         dropped: u64,
         /// Size of record.
         size: TermSize,
-        /// Milliseconds since the Unix epoch when ptyd spawned the child. ptyd outlives the
-        /// worker, so this is the one place a session's start survives a worker restart.
-        started_ms: u64,
+        /// When ptyd spawned the child. ptyd outlives the worker, so this is the one place a
+        /// session's start survives a worker restart.
+        started_ms: WallMs,
     },
     /// Generic success.
     Ok,
@@ -164,8 +165,8 @@ pub enum PtydEvent {
     Error {
         /// Related session.
         id: Option<SessionId>,
-        /// Message.
-        message: String,
+        /// Why.
+        error: PtydError,
     },
 }
 
@@ -439,7 +440,7 @@ mod tests {
             backlog: vec![b'x'; MAX_BACKLOG_BYTES],
             dropped: u64::MAX,
             size,
-            started_ms: u64::MAX,
+            started_ms: WallMs::from_millis(u64::MAX),
         };
         slopty_proto::codec::encode(&attached).unwrap();
     }

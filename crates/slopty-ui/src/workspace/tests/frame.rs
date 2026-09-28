@@ -5,6 +5,7 @@ use gpui::{AppContext as _, Modifiers, MouseButton};
 use slopty_client::layout::Navigator;
 
 use super::*;
+use crate::workspace::marks;
 
 /// `debug_bounds` wants a static selector; tests may leak a handful.
 fn leak(selector: String) -> &'static str {
@@ -291,11 +292,10 @@ fn the_bell_counts_the_inbox_and_its_rows_go_there(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.inbox_count()), 1, "looked at, it is cleared");
 }
 
-/// The bar runs from the docked navigator's right edge: the toggle, the workspace's name, "+",
-/// then the column dots, each clear of the next and of the bell. A long name is cut at a tab's
-/// widest.
+/// The bar runs from the docked navigator's right edge: the toggle, the workspace's name and
+/// "+", each clear of the next and of the bell. A long name is cut at a tab's widest.
 #[gpui::test]
-fn the_column_dots_keep_clear_of_the_toggle_and_the_tabs(cx: &mut TestAppContext) {
+fn the_bar_keeps_clear_of_the_toggle_and_the_tabs(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let _shells = three_shells(&view, cx, &fake);
@@ -308,44 +308,65 @@ fn the_column_dots_keep_clear_of_the_toggle_and_the_tabs(cx: &mut TestAppContext
         cx.notify();
     });
     cx.run_until_parked();
-    let (navigator, toggle, tab, new, dots, bell) = (
+    let (navigator, toggle, tab, new, bell) = (
         bounds(cx, "navigator"),
         bounds(cx, "navigator-toggle"),
         bounds(cx, "ws-tab-0"),
         bounds(cx, "new-menu"),
-        bounds(cx, "indicator"),
         bounds(cx, "bell"),
     );
     assert!(navigator.right() <= toggle.left(), "the bar starts at the navigator's edge");
     assert!(toggle.right() <= tab.left(), "{toggle:?} {tab:?}");
     assert!(tab.right() <= new.left(), "{tab:?} {new:?}");
-    assert!(new.right() <= dots.left(), "the dots cover +: {new:?} {dots:?}");
-    assert!(dots.right() <= bell.left(), "the dots cover the bell: {dots:?} {bell:?}");
+    assert!(new.right() <= bell.left(), "+ covers the bell: {new:?} {bell:?}");
     let name = bounds(cx, "ws-name-0");
     assert!(f32::from(name.size.width) <= 180.5, "cut at a tab's widest: {name:?}");
 }
 
-/// The dots show only where there is somewhere to go: not while every column is in view, and
-/// not under the navigator laid over the bar.
+/// Where the view is along the strip is a thumb on the strip's bottom edge, never in the title
+/// bar: it shows while the strip scrolls and there is somewhere to go, goes once the strip has
+/// been still a while, and comes back while the pointer is near that edge.
 #[gpui::test]
-fn the_column_dots_show_only_what_is_out_of_view(cx: &mut TestAppContext) {
+fn the_strip_thumb_shows_only_while_the_strip_moves(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
+    view.update(cx, |v, _| v.set_animation(true));
     let fake = connect(&view, cx, 1, "studio");
-    let _first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
-    let _second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
-    let every = view.read_with(cx, |v, _| titlebar::all_in_view(&v.drawn_strip));
-    assert_eq!(cx.debug_bounds("indicator").is_some(), !every, "dots only past the view");
-    let _third = opens(&view, cx, &fake, SessionId::new(), fake.me, 3);
-    let _fourth = opens(&view, cx, &fake, SessionId::new(), fake.me, 4);
-    assert!(!view.read_with(cx, |v, _| titlebar::all_in_view(&v.drawn_strip)), "past the view");
-    assert!(cx.debug_bounds("indicator").is_some(), "now there is somewhere to go");
+    for n in 1..=4 {
+        let _tile = opens(&view, cx, &fake, SessionId::new(), fake.me, n);
+    }
+    assert!(!view.read_with(cx, |v, _| marks::all_in_view(&v.drawn_strip)), "past the view");
+    assert!(cx.debug_bounds("indicator").is_none(), "nothing in the title bar");
+    let strip = cx.debug_bounds("strip").expect("the strip");
+    let track = cx.debug_bounds("strip-marks").expect("the strip moved to the new column");
+    let thumb = cx.debug_bounds("strip-thumb").expect("the view's share");
+    assert!((f32::from(track.size.height) - 3.0).abs() < 0.01, "3 pt: {track:?}");
+    assert!(
+        (f32::from(strip.bottom() - track.bottom()) - 8.0).abs() < 0.5,
+        "a base unit over the strip's bottom edge: {track:?} in {strip:?}"
+    );
+    assert!(thumb.size.width < track.size.width, "the view is a share of the strip");
 
-    cx.simulate_resize(size(px(900.0), px(600.0)));
+    let gone = |cx: &mut VisualTestContext| {
+        cx.executor().advance_clock(marks::MARKS_HOLD);
+        cx.run_until_parked();
+        cx.executor().advance_clock(crate::kit::Pace::Fade.duration());
+        cx.run_until_parked();
+        cx.debug_bounds("strip-marks").is_none()
+    };
+    // The spring steps by the wall clock: land the strip, as the self-test draws it.
+    view.update(cx, |v, _| v.set_animation(false));
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-b");
+    assert!(gone(cx), "still a while, it goes");
+
+    let near = point(strip.center().x, strip.bottom() - px(10.0));
+    cx.simulate_mouse_move(near, None, Modifiers::default());
     cx.run_until_parked();
-    assert!(cx.debug_bounds("navigator-away").is_some(), "laid over the frame");
-    assert!(cx.debug_bounds("indicator").is_none(), "no dot peeks out from under it");
+    assert!(cx.debug_bounds("strip-marks").is_some(), "the pointer near the edge brings it");
+    cx.executor().advance_clock(marks::MARKS_HOLD);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("strip-marks").is_some(), "and keeps it while it stays");
+    cx.simulate_mouse_move(strip.center(), None, Modifiers::default());
+    assert!(gone(cx), "gone a while after the pointer left");
 }
 
 /// A worker whose link is up says nothing about it: no word and no mark in the navigator, the
@@ -522,8 +543,8 @@ impl gpui::Render for Narrow {
 const NARROW: f32 = 500.0;
 
 /// The bars and the navigator fit the workspace's own width, not the window's: laid out in
-/// 500 points of a 1200-point window, the column dots stay beside the buttons, not past the
-/// workspace's edge, and the navigator is a phone's drawer that fits in it.
+/// 500 points of a 1200-point window, "…" stays inside the workspace's edge, and the navigator
+/// is a phone's drawer that fits in it.
 #[gpui::test]
 fn the_frame_fits_the_workspace_not_the_window(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -547,12 +568,11 @@ fn the_frame_fits_the_workspace_not_the_window(cx: &mut TestAppContext) {
     let fake = connect(&view, cx, 1, "studio");
     let _shells = three_shells(&view, cx, &fake);
 
-    let (dots, bell, more) = (
-        cx.debug_bounds("indicator").expect("the column dots are drawn"),
+    let (bell, more) = (
         cx.debug_bounds("bell").expect("the bell is drawn"),
         cx.debug_bounds("more").expect("… is drawn"),
     );
-    assert!(dots.right() <= bell.left(), "the dots run into the bell: {dots:?} {bell:?}");
+    assert!(bell.right() <= more.left(), "the bell runs into …: {bell:?} {more:?}");
     assert!(f32::from(more.right()) <= NARROW, "… is past the edge: {more:?}");
 
     cx.simulate_keystrokes("cmd-b");

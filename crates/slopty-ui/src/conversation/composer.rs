@@ -12,8 +12,9 @@
 //! Claude Code takes one from a terminal: by its path in the prompt. The file goes up to a fresh
 //! directory of the worker's drop directory (`Dest::Attachment`), never the session's working
 //! tree, where a screenshot would show in `git status` and could be committed. A chip in the
-//! composer shows it while it uploads ([`Attachments`]); once it has landed, its path is typed
-//! at the cursor ([`typed_paths`]).
+//! composer stands for it from the paste until the message goes ([`Attachments`]): the draft
+//! never holds a worker's temporary path. Sending types the landed paths after the text
+//! ([`with_paths`]), the same bytes a terminal drop at the end of the draft would have put there.
 
 use std::time::Duration;
 
@@ -40,16 +41,19 @@ pub fn is_command(text: &str) -> bool {
     text.starts_with(['/', '!']) && !text.contains('\n')
 }
 
-/// The steps that send `text` as a message; nothing for text that is only blank.
+/// The steps that send `text` as a message with the attachments landed at `paths`.
+///
+/// Nothing for blank text with nothing attached. Whether it is typed as a command is the
+/// text's call: the attachments' paths start with `/` and must not make a message a command.
 #[must_use]
-pub fn submission(text: &str) -> Vec<Step> {
+pub fn submission(text: &str, paths: &[String]) -> Vec<Step> {
     let text = text.trim_end();
     let text = text.trim_start_matches(['\n', '\r']);
-    if text.trim().is_empty() {
+    if text.trim().is_empty() && paths.is_empty() {
         return Vec::new();
     }
-    let body =
-        if is_command(text) { Step::Type(text.to_owned()) } else { Step::Paste(text.to_owned()) };
+    let message = with_paths(text, paths);
+    let body = if is_command(text) { Step::Type(message) } else { Step::Paste(message) };
     vec![body, Step::Pause(SUBMIT_PAUSE), Step::Key("enter")]
 }
 
@@ -65,16 +69,21 @@ pub fn picture_name(extension: &str) -> String {
     format!("pasted-image.{extension}")
 }
 
-/// What is typed at the cursor for `paths` that landed: each path as a terminal drop types it
-/// (quoted where a shell would need it), then a space, with a space first when the cursor
-/// follows a word.
+/// The message `text` with the attachments that landed at `paths`: the text, then each path
+/// as a terminal drop types it (quoted where a shell would need it), a space apart.
 #[must_use]
-pub fn typed_paths(before: Option<char>, paths: &[String]) -> String {
+pub fn with_paths(text: &str, paths: &[String]) -> String {
+    let text = text.trim_end();
     let typed = slopty_client::xfer::paste_paths(paths);
-    if before.is_some_and(|c| !c.is_whitespace()) { format!(" {typed}") } else { typed }
+    let typed = typed.trim_end();
+    match (text.trim().is_empty(), typed.is_empty()) {
+        (_, true) => text.to_owned(),
+        (true, false) => typed.to_owned(),
+        (false, false) => format!("{text} {typed}"),
+    }
 }
 
-/// One attachment on its way to the worker: its chip in the composer.
+/// One attachment of the draft: its chip in the composer.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Attachment {
     /// Names it to the workspace, which reports its progress and its landing.
@@ -83,10 +92,18 @@ pub struct Attachment {
     pub name: String,
     /// How far along, 0 to 1.
     pub fraction: f32,
+    /// Where it landed on the worker; empty while it uploads.
+    pub paths: Vec<String>,
 }
 
 impl Attachment {
-    /// What the chip says after the name: `↑ 42%`.
+    /// It is on the worker, ready to go with the message.
+    #[must_use]
+    pub const fn landed(&self) -> bool {
+        !self.paths.is_empty()
+    }
+
+    /// What the chip says after the name while it uploads: `↑ 42%`.
     #[must_use]
     pub fn progress(&self) -> String {
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0 to 100")]
@@ -95,7 +112,7 @@ impl Attachment {
     }
 }
 
-/// The attachments still uploading, in the order they were attached.
+/// The draft's attachments, in the order they were attached.
 #[derive(Debug, Default)]
 pub struct Attachments {
     next: u64,
@@ -106,7 +123,7 @@ impl Attachments {
     /// A file called `name` starts to upload: its chip shows, and its id is returned.
     pub fn add(&mut self, name: String) -> u64 {
         self.next = self.next.wrapping_add(1);
-        self.chips.push(Attachment { id: self.next, name, fraction: 0.0 });
+        self.chips.push(Attachment { id: self.next, name, fraction: 0.0, paths: Vec::new() });
         self.next
     }
 
@@ -118,11 +135,48 @@ impl Attachments {
         changed
     }
 
-    /// Attachment `id` is done, landed or not: its chip goes. Whether it was here.
+    /// Attachment `id` landed at `paths`: its chip stays, to go with the message. One that
+    /// landed nowhere goes. Whether its chip changed.
+    pub fn land(&mut self, id: u64, paths: &[String]) -> bool {
+        if paths.is_empty() {
+            return self.end(id);
+        }
+        let Some(chip) = self.chips.iter_mut().find(|c| c.id == id) else { return false };
+        chip.fraction = 1.0;
+        chip.paths = paths.to_vec();
+        true
+    }
+
+    /// Attachment `id` is off the draft: taken off, or it will not land. Whether it was here.
     pub fn end(&mut self, id: u64) -> bool {
         let before = self.chips.len();
         self.chips.retain(|c| c.id != id);
         self.chips.len() != before
+    }
+
+    /// Attachment `id`'s upload is over: a chip that did not land goes, one that landed stays.
+    /// Whether its chip went.
+    pub fn over(&mut self, id: u64) -> bool {
+        let before = self.chips.len();
+        self.chips.retain(|c| c.id != id || c.landed());
+        self.chips.len() != before
+    }
+
+    /// Something is still on its way up.
+    #[must_use]
+    pub fn uploading(&self) -> bool {
+        self.chips.iter().any(|c| !c.landed())
+    }
+
+    /// Where the landed attachments are, in the order they were attached.
+    #[must_use]
+    pub fn paths(&self) -> Vec<String> {
+        self.chips.iter().flat_map(|c| c.paths.iter().cloned()).collect()
+    }
+
+    /// The message went: every chip goes with it.
+    pub fn clear(&mut self) {
+        self.chips.clear();
     }
 
     /// The chips on show.
@@ -140,7 +194,7 @@ mod tests {
     #[test]
     fn a_message_is_pasted_then_entered() {
         assert_eq!(
-            submission("Fix the build\n\nthen run the tests\n\n"),
+            submission("Fix the build\n\nthen run the tests\n\n", &[]),
             [
                 Step::Paste("Fix the build\n\nthen run the tests".to_owned()),
                 Step::Pause(SUBMIT_PAUSE),
@@ -153,25 +207,29 @@ mod tests {
     #[test]
     fn a_command_is_typed() {
         assert_eq!(
-            submission("/compact keep the plan"),
+            submission("/compact keep the plan", &[]),
             [
                 Step::Type("/compact keep the plan".to_owned()),
                 Step::Pause(SUBMIT_PAUSE),
                 Step::Key("enter"),
             ]
         );
-        assert_eq!(submission("!git status").first(), Some(&Step::Type("!git status".to_owned())));
         assert_eq!(
-            submission("/not\na command").first(),
+            submission("!git status", &[]).first(),
+            Some(&Step::Type("!git status".to_owned()))
+        );
+        assert_eq!(
+            submission("/not\na command", &[]).first(),
             Some(&Step::Paste("/not\na command".to_owned())),
             "two lines are a message"
         );
     }
 
-    /// An attachment shows a chip from the paste until it lands; its path is then typed at the
-    /// cursor as a terminal drop types it, apart from a word before it.
+    /// An attachment is a chip from the paste until the message goes: it says how far it got
+    /// while it uploads and stays once it landed; the message then ends with its path as a
+    /// terminal drop types it, and a leading slash never makes it a command.
     #[test]
-    fn an_attachment_is_a_chip_until_its_path_is_typed() {
+    fn an_attachment_stays_a_chip_and_its_path_goes_with_the_message() {
         let mut attached = Attachments::default();
         let shot = attached.add(picture_name("png"));
         let other = attached.add("notes.txt".to_owned());
@@ -180,24 +238,40 @@ mod tests {
         assert!(attached.progress(shot, 0.42));
         assert!(!attached.progress(shot, 0.421), "the chip says the same");
         assert_eq!(attached.chips()[0].progress(), "\u{2191} 42%");
-        assert!(attached.end(shot) && !attached.end(shot));
-        assert_eq!(attached.chips().iter().map(|c| c.id).collect::<Vec<_>>(), [other]);
 
         let path = "/Users/me/.slopty/drop/x/pasted-image.png".to_owned();
-        assert_eq!(typed_paths(None, std::slice::from_ref(&path)), format!("{path} "));
-        assert_eq!(typed_paths(Some(' '), std::slice::from_ref(&path)), format!("{path} "));
-        assert_eq!(typed_paths(Some('t'), std::slice::from_ref(&path)), format!(" {path} "));
+        assert!(attached.land(shot, std::slice::from_ref(&path)));
+        assert!(attached.chips()[0].landed(), "the chip stays once it landed");
+        assert!(attached.uploading(), "notes.txt is still on its way");
+        assert!(!attached.over(shot), "an upload over after landing keeps its chip");
+        assert!(attached.land(other, &[]) && !attached.end(other), "landing nowhere ends it");
+        assert!(!attached.uploading());
+        assert_eq!(attached.paths(), std::slice::from_ref(&path));
+        assert_eq!(with_paths("look at", &attached.paths()), format!("look at {path}"));
+        assert_eq!(with_paths("look at", &[]), "look at");
         assert_eq!(
-            typed_paths(None, &["/tmp/Screen Shot.png".to_owned()]),
-            "'/tmp/Screen Shot.png' ",
+            with_paths("this", &["/tmp/Screen Shot.png".to_owned()]),
+            "this '/tmp/Screen Shot.png'",
             "quoted as a drop on a shell is"
         );
+        assert_eq!(
+            submission("", &attached.paths()).first(),
+            Some(&Step::Paste(path.clone())),
+            "a picture alone is a message, not a command for its leading slash"
+        );
+        assert_eq!(
+            submission("/review", &attached.paths()).first(),
+            Some(&Step::Type(format!("/review {path}"))),
+            "a command takes the path as its argument"
+        );
+        attached.clear();
+        assert!(attached.chips().is_empty());
     }
 
     /// Blank text sends nothing; Esc is the key a person presses to stop.
     #[test]
     fn blank_sends_nothing_and_esc_stops() {
-        assert!(submission("  \n\n ").is_empty());
+        assert!(submission("  \n\n ", &[]).is_empty());
         assert_eq!(interrupt(), Step::Key("escape"));
     }
 }

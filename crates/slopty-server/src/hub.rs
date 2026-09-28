@@ -812,6 +812,7 @@ pub(crate) mod tests {
             agents: Vec::new(),
             can_capture: true,
             can_inject: true,
+            virtual_displays: false,
             version: "0.1.0".to_owned(),
         }
     }

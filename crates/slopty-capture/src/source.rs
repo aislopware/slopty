@@ -120,6 +120,10 @@ pub enum PixelFormat {
     /// 8-bit 4:2:0 bi-planar, full range (`420f`), BT.709 matrix: what the encoder takes and
     /// the client's decoder hands its Metal surface path unconverted.
     Nv12Full,
+    /// 10-bit 4:4:4 bi-planar, full range (`xf44`), BT.709 matrix: what a 4:4:4 encoder takes,
+    /// and the only 4:4:4 format ScreenCaptureKit delivers (`SCStream.h`, macOS 27.0 SDK).
+    /// Each sample is 16 bits, the value in the high 10; the chroma plane is full size.
+    Yuv444Full10,
     /// 8-bit BGRA; for debugging and screenshots.
     Bgra,
 }

@@ -136,6 +136,12 @@ impl Classes {
     }
 }
 
+/// Whether this Mac has every class and selector a virtual display needs. Creates nothing.
+#[must_use]
+pub fn available() -> bool {
+    Classes::resolve().is_ok()
+}
+
 /// A virtual display, alive as long as this value.
 ///
 /// Created on the main thread (`initWithDescriptor:` returns nil anywhere else) and, holding a

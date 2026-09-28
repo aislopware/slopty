@@ -76,6 +76,7 @@ pub fn probe(agents: &[InstalledAgent]) -> WorkerCaps {
         agents: agents.to_vec(),
         can_capture: desktop.can_capture,
         can_inject: desktop.can_inject,
+        virtual_displays: desktop.virtual_displays,
         version: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
@@ -86,6 +87,7 @@ struct Desktop {
     displays: Vec<DisplayInfo>,
     can_capture: bool,
     can_inject: bool,
+    virtual_displays: bool,
 }
 
 /// macOS: both codecs, and the displays and input its grants allow.
@@ -99,6 +101,8 @@ fn desktop() -> Desktop {
         displays: if can_capture { slopty_capture::active_displays() } else { Vec::new() },
         can_capture,
         can_inject: slopty_input::can_post(),
+        // A display made for a client is streamed like any other, so it needs the grant too.
+        virtual_displays: can_capture && slopty_vdisplay::available(),
     }
 }
 
@@ -106,7 +110,13 @@ fn desktop() -> Desktop {
 /// display, no capture and no input, so no client offers any.
 #[cfg(not(target_os = "macos"))]
 const fn desktop() -> Desktop {
-    Desktop { encoders: Vec::new(), displays: Vec::new(), can_capture: false, can_inject: false }
+    Desktop {
+        encoders: Vec::new(),
+        displays: Vec::new(),
+        can_capture: false,
+        can_inject: false,
+        virtual_displays: false,
+    }
 }
 
 /// macOS's product version (`26.5`).

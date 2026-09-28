@@ -127,22 +127,54 @@ fn percent(part: u64, whole: u64) -> u64 {
     part.saturating_mul(100).checked_div(whole).unwrap_or(0)
 }
 
-/// The header's context hint: "Context 34% used · 68k of 200k tokens · $1.24 this session".
+/// A rate limit's share from which it is said in the warning tone.
+pub const LIMIT_WARN_FROM: f64 = 80.0;
+
+/// What the context popover says: how full the window is, what the session cost, and the
+/// account's rate limits, each flagged from [`LIMIT_WARN_FROM`].
+#[derive(Clone, PartialEq, Debug)]
+pub struct ContextFigures {
+    /// Share of the window in use, 0 to 100: the bar's fill.
+    pub used_pct: f64,
+    /// "68.0k of 200k · 34%", or the share alone when the sizes are not known.
+    pub used: String,
+    /// "$1.24 this session".
+    pub cost: Option<String>,
+    /// "5-hour limit 42% · resets 16:30", "7-day limit 11%", and whether each is past its
+    /// threshold.
+    pub limits: Vec<(String, bool)>,
+}
+
+/// The context popover's figures from the status line's `meters` and the last turn's context
+/// size; `None` before the status line says how full the window is.
 #[must_use]
-pub fn context_hint(meters: &Meters, last_context: Option<u64>) -> Option<String> {
-    let used = meters.context_used_pct?;
-    let mut parts = vec![format!("Context {used:.0}% used")];
-    match (last_context, meters.context_window) {
+pub fn context_figures(meters: &Meters, last_context: Option<u64>) -> Option<ContextFigures> {
+    let used_pct = meters.context_used_pct?;
+    let share = format!("{used_pct:.0}%");
+    let used = match (last_context, meters.context_window) {
         (Some(tokens), Some(window)) => {
-            parts.push(format!("{} of {} tokens", tools::tokens(tokens), tools::tokens(window)));
+            format!("{} of {} \u{b7} {share}", tools::tokens(tokens), tools::tokens(window))
         }
-        (None, Some(window)) => parts.push(format!("{} window", tools::tokens(window))),
-        _ => {}
-    }
-    if let Some(cost) = meters.cost_usd.filter(|c| *c > 0.0) {
-        parts.push(format!("${cost:.2} this session"));
-    }
-    Some(parts.join(" \u{b7} "))
+        (None, Some(window)) => format!("{share} of {}", tools::tokens(window)),
+        _ => format!("{share} used"),
+    };
+    let cost = meters.cost_usd.filter(|c| *c > 0.0).map(|c| format!("${c:.2} this session"));
+    let limit = |name: &str, window: &slopty_proto::conversation::RateWindow| {
+        let resets = window
+            .resets_at
+            .and_then(|secs| clock(WallMs::from_millis(secs.saturating_mul(1_000))))
+            .map(|at| format!(" \u{b7} resets {at}"))
+            .unwrap_or_default();
+        (
+            format!("{name} limit {:.0}%{resets}", window.used_pct),
+            window.used_pct >= LIMIT_WARN_FROM,
+        )
+    };
+    let limits = [("5-hour", meters.five_hour.as_ref()), ("7-day", meters.seven_day.as_ref())]
+        .into_iter()
+        .filter_map(|(name, window)| window.map(|w| limit(name, w)))
+        .collect();
+    Some(ContextFigures { used_pct, used, cost, limits })
 }
 
 /// A time of day from ms since the Unix epoch, in this machine's zone: "14:05". `None` for
@@ -448,19 +480,36 @@ mod tests {
         assert_eq!(short_dir("notes.txt"), "");
     }
 
+    /// The popover says how full the window is in tokens and as a share, the session's cost,
+    /// and each rate limit with its reset, flagged from 80 %.
     #[test]
-    fn the_context_hint_says_the_share_the_size_and_the_cost() {
+    fn the_context_figures_say_the_window_the_cost_and_the_limits() {
+        use slopty_proto::conversation::RateWindow;
         let meters = Meters {
             context_used_pct: Some(34.0),
             context_window: Some(200_000),
             cost_usd: Some(1.237),
+            five_hour: Some(RateWindow { used_pct: 84.0, resets_at: None }),
+            seven_day: Some(RateWindow { used_pct: 11.2, resets_at: None }),
             ..Meters::default()
         };
+        let figures = context_figures(&meters, Some(68_000)).expect("the share is known");
+        assert_eq!(figures.used, "68.0k of 200k \u{b7} 34%");
+        assert_eq!(figures.cost.as_deref(), Some("$1.24 this session"));
         assert_eq!(
-            context_hint(&meters, Some(68_000)).as_deref(),
-            Some("Context 34% used \u{b7} 68.0k of 200k tokens \u{b7} $1.24 this session")
+            figures.limits,
+            [("5-hour limit 84%".to_owned(), true), ("7-day limit 11%".to_owned(), false)]
         );
-        assert_eq!(context_hint(&Meters::default(), None), None);
+        let at = 1_790_000_000_u64;
+        let resets = Meters {
+            five_hour: Some(RateWindow { used_pct: 42.0, resets_at: Some(at) }),
+            ..meters
+        };
+        let said = context_figures(&resets, None).expect("known").limits[0].0.clone();
+        let clock = clock(WallMs::from_millis(at * 1_000)).expect("a time");
+        assert_eq!(said, format!("5-hour limit 42% \u{b7} resets {clock}"));
+        assert_eq!(context_figures(&resets, None).map(|f| f.used).as_deref(), Some("34% of 200k"));
+        assert_eq!(context_figures(&Meters::default(), None), None);
     }
 
     /// Thinking took from what it answered to when it was written; a task's times come from

@@ -1048,10 +1048,7 @@ impl Actor {
     /// discipline per read").
     fn read_line_discipline(&mut self) {
         match self.master.line_discipline() {
-            Ok(d) => self.engine.set_line_discipline(slopty_engine::LineDiscipline {
-                echo: d.echo,
-                canonical: d.canonical,
-            }),
+            Ok(discipline) => self.engine.set_line_discipline(discipline),
             Err(e) => tracing::debug!(session = %self.id, error = %e, "line discipline unread"),
         }
     }

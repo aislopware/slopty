@@ -1079,11 +1079,13 @@ pub struct StreamPrefs {
     /// A stream opens with its audio silenced on this client (the title-bar pill still
     /// toggles it).
     pub muted: bool,
+    /// Ask for full-chroma (4:4:4) video, which the worker grants only when the rate carries it.
+    pub sharp_text: bool,
 }
 
 impl Default for StreamPrefs {
     fn default() -> Self {
-        Self { fps: 60, max_bitrate_bps: 30_000_000, muted: false }
+        Self { fps: 60, max_bitrate_bps: 30_000_000, muted: false, sharp_text: false }
     }
 }
 

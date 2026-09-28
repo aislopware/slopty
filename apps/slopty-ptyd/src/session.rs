@@ -3,11 +3,10 @@
 use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use rustix::process::{Pid, Signal};
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
 use slopty_proto::terminal::TermSize;
 use slopty_pty::protocol::SessionInfo;
 use slopty_pty::shell_integration::ShellIntegration;
@@ -32,8 +31,8 @@ pub struct Session {
     id: SessionId,
     /// Child pid.
     pid: u32,
-    /// Milliseconds since the Unix epoch when the child was spawned.
-    started_ms: u64,
+    /// When the child was spawned.
+    started_ms: WallMs,
     /// Slave device.
     tty: PathBuf,
     /// Master, shared with the reader task.
@@ -73,8 +72,8 @@ pub struct Handover {
     pub dropped: u64,
     /// Size of record.
     pub size: TermSize,
-    /// Milliseconds since the Unix epoch when the child was spawned.
-    pub started_ms: u64,
+    /// When the child was spawned.
+    pub started_ms: WallMs,
 }
 
 impl std::fmt::Debug for Session {
@@ -99,9 +98,7 @@ impl Session {
         let tty = pty.slave_path().to_path_buf();
         let mut child = pty.spawn_with(spec, integration)?;
         let pid = child.id().unwrap_or(0);
-        let started_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let started_ms = WallMs::now();
         let master = Arc::new(PtyMaster::new(pty.into_master())?);
         let (pause, _) = watch::channel(false);
         let (parked, _) = watch::channel(false);

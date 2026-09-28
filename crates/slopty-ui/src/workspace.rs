@@ -34,6 +34,7 @@ mod commands;
 mod faces;
 mod folders;
 mod inbox;
+mod marks;
 mod miniature;
 mod navigator;
 mod overlays;
@@ -72,8 +73,8 @@ pub use statusbar::HostActions;
 pub(crate) use strip::{EMPTY_WORKSPACE, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
 #[cfg(test)]
 pub(crate) use tile::{
-    ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, HOOKS, INSTALL_HOOKS, MUTE, MUTED, NOTE, OPENING,
-    PAUSED, READING, RECONNECTING, SESSION_ENDED, SLEEPING, TAKE, TAKE_OVER, UNMUTE,
+    ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, HOOKS, INSTALL_HOOKS, MUTE, NOTE, OPENING, PAUSED,
+    READING, RECONNECTING, SESSION_ENDED, SLEEPING, TAKE, TAKE_OVER,
 };
 pub use tile::{NOTE_TITLE_CHARS, UNTITLED_NOTE, file_title, note_progress, note_title};
 
@@ -539,8 +540,14 @@ pub struct WorkspaceView {
     titles_dirty: bool,
     /// Each note's title and task count, worked out when its text changes.
     note_facts: HashMap<ItemId, tile::NoteFacts>,
-    /// The active workspace's strip as this frame lays it out: the title bar's column dots.
+    /// The active workspace's strip as this frame lays it out: where the strip's thumb sits.
     drawn_strip: slopty_client::layout::Strip,
+    /// Whether the strip's thumb shows ([`marks`]), the pointer is near the strip's bottom
+    /// edge, the timer that takes the thumb down, and the generation of its fade.
+    marks: marks::Marks,
+    marks_near: bool,
+    marks_timer: Option<Task<()>>,
+    marks_gen: u64,
     /// The navigator, the title bar and the status bar, each a view of its own.
     chrome: Chrome,
     /// The strip, a view of its own so its motion is not news.
@@ -759,6 +766,10 @@ impl WorkspaceView {
             titles_dirty: true,
             note_facts: HashMap::new(),
             drawn_strip: slopty_client::layout::Strip::default(),
+            marks: marks::Marks::default(),
+            marks_near: false,
+            marks_timer: None,
+            marks_gen: 0,
             chrome: Chrome::new(cx),
             strip_host: gpui::AppContext::new(cx, |_| StripHost(None)),
             chrome_due: true,
@@ -1400,10 +1411,12 @@ impl gpui::Render for WorkspaceView {
             }
         }
         if self.drawn_strip != frame.strip {
-            if titlebar::indicator(&frame.strip) != titlebar::indicator(&self.drawn_strip) {
-                self.chrome_next_frame(Region::Titlebar, window);
-            }
+            let scrolled = (frame.strip.view.0 - self.drawn_strip.view.0).abs() > f32::EPSILON;
             self.drawn_strip.clone_from(&frame.strip);
+            // Not under the self-test, whose frames are still pictures of where things land.
+            if scrolled && self.animate && marks::thumb(&frame.strip).is_some() {
+                self.strip_scrolled(cx);
+            }
         }
         // First: a docked navigator narrows the title bar and the strip.
         self.place_navigator(window);

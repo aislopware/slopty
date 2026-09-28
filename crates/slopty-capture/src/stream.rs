@@ -21,6 +21,7 @@ use objc2_core_media::{
 };
 use objc2_core_video::{
     CVPixelBuffer, kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
 };
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_screen_capture_kit::{
@@ -44,6 +45,7 @@ impl PixelFormat {
     const fn os_type(self) -> u32 {
         match self {
             Self::Nv12Full => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            Self::Yuv444Full10 => kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
             Self::Bgra => kCVPixelFormatType_32BGRA,
         }
     }
@@ -697,7 +699,7 @@ fn stream_configuration(config: &CaptureConfig) -> Retained<SCStreamConfiguratio
     unsafe {
         c.setPixelFormat(config.format.os_type());
     }
-    if config.format == PixelFormat::Nv12Full {
+    if matches!(config.format, PixelFormat::Nv12Full | PixelFormat::Yuv444Full10) {
         // SCStream.h leaves the YCbCr matrix's default unsaid; the encoder tags BT.709 and the
         // client converts with whatever the stream says, so the capture must be BT.709 too.
         // SAFETY: plain property write on the fresh configuration object; the value is one of
@@ -769,26 +771,32 @@ mod tests {
     use super::*;
 
     /// The video format asked of ScreenCaptureKit is full range with the matrix the encoder
-    /// tags, so nothing between the capture and the client's shader converts or guesses.
+    /// tags, so nothing between the capture and the client's shader converts or guesses; a
+    /// full-chroma stream asks for `xf44` under the same matrix.
     #[test]
     fn the_capture_is_full_range_bt709() {
-        let config = CaptureConfig {
-            width: 64,
-            height: 64,
-            fps: 60,
-            format: PixelFormat::Nv12Full,
-            queue_depth: 2,
-            audio: false,
-            crop: None,
-        };
-        let c = stream_configuration(&config);
-        // SAFETY: plain getter on a valid configuration object.
-        let format = unsafe { c.pixelFormat() };
-        // SAFETY: as above.
-        let matrix = unsafe { c.colorMatrix() };
-        assert_eq!(format, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
-        // SAFETY: framework-provided constant string.
-        let bt709 = unsafe { kCGDisplayStreamYCbCrMatrix_ITU_R_709_2 };
-        assert_eq!(matrix.to_string(), bt709.to_string());
+        for (asked, os_type) in [
+            (PixelFormat::Nv12Full, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+            (PixelFormat::Yuv444Full10, kCVPixelFormatType_444YpCbCr10BiPlanarFullRange),
+        ] {
+            let config = CaptureConfig {
+                width: 64,
+                height: 64,
+                fps: 60,
+                format: asked,
+                queue_depth: 2,
+                audio: false,
+                crop: None,
+            };
+            let c = stream_configuration(&config);
+            // SAFETY: plain getter on a valid configuration object.
+            let format = unsafe { c.pixelFormat() };
+            // SAFETY: as above.
+            let matrix = unsafe { c.colorMatrix() };
+            assert_eq!(format, os_type, "{asked:?}");
+            // SAFETY: framework-provided constant string.
+            let bt709 = unsafe { kCGDisplayStreamYCbCrMatrix_ITU_R_709_2 };
+            assert_eq!(matrix.to_string(), bt709.to_string(), "{asked:?}");
+        }
     }
 }

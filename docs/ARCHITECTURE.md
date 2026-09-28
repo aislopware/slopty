@@ -667,8 +667,21 @@ through CoreGraphics' private `CGVirtualDisplay`, looked up at runtime (decision
 display sized to the client"). `plan` turns the client's pixels, scale and refresh into a fixed
 descriptor and a mode; `VirtualDisplay` is created on the main thread, resized in place with
 `applySettings:`, held to its mode by `enforce` and removed when dropped. Its
-`display_id` is then an ordinary display target for capture and input. It is not wired into
-the worker yet.
+`display_id` is then an ordinary display target for capture and input.
+
+A client asks with `ScreenRequest::OpenDisplay`: its tile's pixels, the backing scale and
+refresh of the screen the tile is on, and a 16-byte key it draws once and keeps beside its
+layout (`slopty_client::screen::display`). The worker's main thread serves the run loop, and
+the daemon runs on a thread beside it, because the displays live on the main queue
+(`slopty_worker::screen::sized`). A stream's task hands create, resize and release over as
+jobs, keyed by the client's key, and waits for the answers. A display is enforced every
+100 ms until it settles and again on every display reconfiguration. Once ScreenCaptureKit
+lists it, it streams through the same `Pipeline` as a physical display. `ScreenEvent::Display`
+goes out before `Opened` to name the display, or the physical one streamed instead and why.
+A later `Resize` carries size and scale. It resizes in place, or remakes an outgrown display,
+and the stream then switches to that display (`Pipeline::switch_display`). The last stream
+of a key releases the display, after its input is let go and its capture stopped. Workers
+advertise `WorkerCaps::virtual_displays`; Linux says no.
 
 ## 4. Workspace
 

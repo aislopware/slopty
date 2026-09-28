@@ -6,9 +6,9 @@
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement as _,
+    AnyElement, Bounds, Context, InteractiveElement as _, IntoElement as _, ObjectFit,
     ParentElement as _, PathBuilder, Pixels, SharedString, StatefulInteractiveElement as _,
-    Styled as _, canvas, div, point, px,
+    Styled as _, StyledImage as _, canvas, div, img, point, px,
 };
 use gpui_kit::component::input::{Input, Textarea};
 use slopty_core::WallMs;
@@ -19,12 +19,16 @@ use super::entries::READING;
 use super::{ConversationView, Pane};
 use crate::colors::hsla;
 use crate::conversation::approval::{self, Outcome};
+use crate::conversation::composer::Attachment;
 use crate::conversation::rows;
 use crate::icons::IconName;
 use crate::kit::{self, ButtonKind};
 
 /// The widest an attachment's chip grows, in points at zoom 1; a longer name is cut short.
 const ATTACHMENT_WIDTH: f32 = 240.0;
+
+/// The side of a pasted picture's chip, in points at zoom 1: a two-line row's height.
+const THUMBNAIL: f32 = 40.0;
 
 impl ConversationView {
     /// Over the list once the reader scrolled up: back to the newest row.
@@ -435,83 +439,154 @@ impl ConversationView {
             .or_else(|| self.model.meters().and_then(|m| m.model.clone()))
     }
 
-    /// The chips of what is attached to the draft and still uploading, in a wrapping row over
-    /// the field: each file's name, how far it got, and a way to take it off the draft. `None`
-    /// while nothing uploads. The chip is the one place the upload is said: the tile's header
-    /// leaves an attachment's out.
+    /// The chips of what is attached to the draft, in a wrapping row over the field: a pasted
+    /// picture as the picture, a file by its name, each with a way to take it off the draft and,
+    /// while it uploads, how far it got. `None` while nothing is attached. The chip is the one
+    /// place the upload is said: the tile's header leaves an attachment's out.
     fn attachment_chips(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let chips = self.attachments();
         if chips.is_empty() {
             return None;
         }
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let k = self.zoom;
         let row = div()
             .id("composer-attachments")
             .debug_selector(|| "composer-attachments".to_owned())
             .flex()
             .flex_wrap()
-            .gap(self.z(theme.spacing.xs))
+            .items_center()
+            .gap(self.z(self.theme.spacing.xs))
             .pl(self.z(kit::FIELD_INSET))
-            .children(chips.iter().map(|chip| {
-                let id = chip.id;
-                let side = (-2.0_f32).mul_add(theme.spacing.xxs, kit::PILL_HEIGHT);
-                let remove = div()
-                    .id(SharedString::from(format!("attachment-remove-{id}")))
-                    .debug_selector(|| "composer-attachment-remove".to_owned())
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(format!("Remove {}", chip.name)))
-                    .flex_none()
-                    .size(self.z(side))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(self.z(theme.radii.xs))
-                    .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.overlay)))
-                    .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _ev, _w, cx| this.detach(id, cx)))
-                    .child(
-                        crate::icons::icon(
-                            theme,
-                            IconName::X,
-                            crate::icons::IconSize::Inline,
-                            hsla(s.text_muted),
-                        )
-                        .size(self.z(theme.typography.small())),
-                    );
-                kit::pill_frame(theme, k)
-                    .id(SharedString::from(format!("attachment-{id}")))
-                    .debug_selector(|| "composer-attachment".to_owned())
-                    .role(Role::Status)
-                    .aria_label(SharedString::from(format!(
-                        "Attaching {}, {}",
-                        chip.name,
-                        chip.progress()
-                    )))
-                    .max_w(self.z(ATTACHMENT_WIDTH))
-                    // The way off sits in the pill's own end, a pad's width from its edge.
-                    .pr(self.z(theme.spacing.xxs))
-                    .bg(hsla(s.raised))
-                    .text_color(hsla(s.text_secondary))
-                    .child(self.icon(IconName::File, s.text_muted))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(SharedString::from(chip.name.clone())),
-                    )
-                    .child(
-                        kit::tabular(div())
-                            .flex_none()
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(chip.progress())),
-                    )
-                    .child(crate::a11y::tab_stop(remove, s.accent))
+            .children(chips.iter().map(|chip| match self.attachment_picture(chip.id) {
+                Some(picture) => self.picture_chip(chip, picture, cx),
+                None => self.file_chip(chip, cx),
             }));
         Some(row.into_any_element())
+    }
+
+    /// What a chip says to a screen reader: its name, and how far it got while it uploads.
+    fn chip_label(chip: &Attachment) -> SharedString {
+        if chip.landed() {
+            SharedString::from(format!("Attached {}", chip.name))
+        } else {
+            SharedString::from(format!("Attaching {}, {}", chip.name, chip.progress()))
+        }
+    }
+
+    /// The way to take attachment `id` off the draft, its ✕ `side` points square.
+    fn chip_remove(&self, chip: &Attachment, side: f32, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let id = chip.id;
+        let remove = div()
+            .id(SharedString::from(format!("attachment-remove-{id}")))
+            .debug_selector(|| "composer-attachment-remove".to_owned())
+            .role(Role::Button)
+            .aria_label(SharedString::from(format!("Remove {}", chip.name)))
+            .flex_none()
+            .size(self.z(side))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.detach(id, cx)))
+            .child(
+                crate::icons::icon(
+                    theme,
+                    IconName::X,
+                    crate::icons::IconSize::Inline,
+                    hsla(s.text_muted),
+                )
+                .size(self.z(theme.typography.meta())),
+            );
+        crate::a11y::tab_stop(remove, s.accent).into_any_element()
+    }
+
+    /// A pasted picture's chip: the picture itself in a small square on the hairline, its ✕ on
+    /// a lifted disc in the top corner, and while it uploads a progress line along its foot.
+    fn picture_chip(
+        &self,
+        chip: &Attachment,
+        picture: std::sync::Arc<gpui::Image>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let disc = theme.typography.icon_large();
+        let remove = kit::elevate(div(), theme)
+            .absolute()
+            .top(self.z(theme.spacing.xxs))
+            .right(self.z(theme.spacing.xxs))
+            .rounded_full()
+            .overflow_hidden()
+            .hover(move |el| el.bg(hsla(s.raised)))
+            .child(self.chip_remove(chip, disc, cx));
+        let progress = (!chip.landed()).then(|| {
+            div()
+                .debug_selector(|| "composer-attachment-progress".to_owned())
+                .absolute()
+                .left_0()
+                .bottom_0()
+                .h(self.z(theme.spacing.xxs))
+                .w(self.z(THUMBNAIL * chip.fraction.clamp(0.0, 1.0)))
+                .bg(hsla(s.accent_fill))
+        });
+        div()
+            .id(SharedString::from(format!("attachment-{}", chip.id)))
+            .debug_selector(|| "composer-attachment".to_owned())
+            .role(Role::Image)
+            .aria_label(Self::chip_label(chip))
+            .relative()
+            .flex_none()
+            .size(self.z(THUMBNAIL))
+            .rounded(self.z(theme.radii.sm))
+            .overflow_hidden()
+            .border_1()
+            .border_color(hsla(s.border_subtle))
+            .bg(hsla(s.raised))
+            .child(img(picture).size_full().object_fit(ObjectFit::Cover))
+            .children(progress)
+            .child(remove)
+            .into_any_element()
+    }
+
+    /// A file's chip: its name on the pill, how far it got while it uploads, and its ✕.
+    fn file_chip(&self, chip: &Attachment, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let side = (-2.0_f32).mul_add(theme.spacing.xxs, kit::PILL_HEIGHT);
+        let progress = (!chip.landed()).then(|| {
+            kit::tabular(div())
+                .flex_none()
+                .text_color(hsla(s.text_muted))
+                .child(SharedString::from(chip.progress()))
+        });
+        kit::pill_frame(theme, self.zoom)
+            .id(SharedString::from(format!("attachment-{}", chip.id)))
+            .debug_selector(|| "composer-attachment".to_owned())
+            .role(Role::Status)
+            .aria_label(Self::chip_label(chip))
+            .max_w(self.z(ATTACHMENT_WIDTH))
+            // The way off sits in the pill's own end, a pad's width from its edge.
+            .pr(self.z(theme.spacing.xxs))
+            .bg(hsla(s.raised))
+            .text_color(hsla(s.text_secondary))
+            .child(self.icon(IconName::File, s.text_muted))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(SharedString::from(chip.name.clone())),
+            )
+            .children(progress)
+            .child(
+                div()
+                    .rounded(self.z(theme.radii.xs))
+                    .hover(move |el| el.bg(hsla(s.overlay)))
+                    .child(self.chip_remove(chip, side, cx)),
+            )
+            .into_any_element()
     }
 
     /// The field that types into the agent's terminal, and under it the permission mode and
@@ -520,9 +595,9 @@ impl ConversationView {
     fn composer_box(&self, cx: &Context<Self>) -> AnyElement {
         let theme = self.theme.clone();
         let s = theme.surfaces;
-        let empty = self.draft(cx).trim().is_empty();
-        let stop = self.working() && empty;
-        let lit = stop || !empty;
+        let empty = self.draft_empty(cx);
+        let stop = self.turn_running() && empty && self.attachments().is_empty();
+        let lit = stop || (!empty && !self.attachments.uploading());
         let (icon, label) =
             if stop { (IconName::Square, "Stop") } else { (IconName::ArrowUp, "Send") };
         let send = div()
@@ -603,6 +678,14 @@ impl ConversationView {
                             .child(SharedString::from(model)),
                     )
             }));
+        let attach = kit::icon_button_at(
+            &theme,
+            "composer-attach",
+            IconName::Paperclip,
+            "Attach files",
+            self.zoom,
+        )
+        .on_click(cx.listener(|_this, _ev, _w, cx| Self::pick_attachments(cx)));
         let face = cx.weak_entity();
         div()
             .debug_selector(|| "composer".to_owned())
@@ -626,8 +709,7 @@ impl ConversationView {
                     .flex()
                     .items_center()
                     .gap(self.z(theme.spacing.xs))
-                    // The words start where the field's do.
-                    .pl(self.z(kit::FIELD_INSET))
+                    .child(attach)
                     .child(setting)
                     .child(div().flex_1())
                     .child(send),
@@ -724,7 +806,7 @@ impl ConversationView {
         let s = theme.surfaces;
         let (name, kind, back_label): (String, Option<String>, &'static str) = match self.pane() {
             Pane::Changes => {
-                let files = self.session_files();
+                let files = self.changed_files();
                 let (added, removed) = files.iter().fold((0_u32, 0_u32), |(a, r), f| {
                     (a.saturating_add(f.added), r.saturating_add(f.removed))
                 });
@@ -798,6 +880,7 @@ impl ConversationView {
                         .text_color(hsla(s.text_muted))
                         .child(SharedString::from(k))
                 }))
+                .when(changes, |el| el.child(div().flex_1()).child(self.scope_switch(cx)))
                 .into_any_element(),
         )
     }
@@ -850,32 +933,34 @@ impl ConversationView {
                 .into_any_element(),
             );
         }
-        let meters = view.model.meters();
-        if let Some(meters) = meters
-            && let Some(used) = meters.context_used_pct
-        {
-            let last = view
-                .model
-                .thread(&ThreadId::Main)
-                .and_then(|t| t.last_turn())
-                .and_then(|t| t.context_tokens);
+        if let Some(used) = view.model.meters().and_then(|m| m.context_used_pct) {
             let words = SharedString::from(format!("Context {used:.0}% used"));
-            let hint = SharedString::from(
-                crate::conversation::figures::context_hint(meters, last)
-                    .unwrap_or_else(|| words.to_string()),
-            );
-            let hint_theme = std::rc::Rc::clone(&view.hint_theme);
+            let (entity, at) = (this.clone(), std::rc::Rc::clone(&view.context_chip));
+            let open = view.context_open;
+            // Where the ring is drawn, for the popover to hang under it.
+            let place = canvas(move |bounds, _window, _cx| at.set(bounds), |_, (), _, _| {})
+                .absolute()
+                .size_full();
             out.push(
-                chip("chip-context")
-                    .aria_label(words)
-                    .tooltip(move |_window, cx| {
-                        let (hint, theme) = (hint.clone(), std::rc::Rc::clone(&hint_theme));
-                        cx.new(|_| kit::Hint::new(hint, "", theme)).into()
-                    })
-                    .text_color(hsla(s.text_muted))
-                    .child(context_ring(theme, used, theme.typography.small() * k))
-                    .child(SharedString::from(format!("{used:.0}%")))
-                    .into_any_element(),
+                crate::a11y::tab_stop(
+                    kit::tabular(chip("chip-context"))
+                        .relative()
+                        .role(Role::Button)
+                        .aria_label(words)
+                        .aria_expanded(open)
+                        .px(px(theme.spacing.xs * k))
+                        .rounded(px(theme.radii.sm * k))
+                        .cursor_pointer()
+                        .when(open, |el| el.bg(hsla(s.raised)))
+                        .hover(move |el| el.bg(hsla(s.raised)))
+                        .text_color(hsla(s.text_muted))
+                        .child(place)
+                        .child(context_ring(theme, used, theme.typography.small() * k))
+                        .child(SharedString::from(format!("{used:.0}%"))),
+                    s.accent,
+                )
+                .on_click(move |_ev, _window, cx| entity.update(cx, Self::toggle_context))
+                .into_any_element(),
             );
         }
         if out.is_empty() {
@@ -894,18 +979,25 @@ impl ConversationView {
     }
 }
 
+/// The tone the share of the context window in use is drawn in: warn past 80 %, error past
+/// 95 %.
+#[must_use]
+pub fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
+    let s = theme.surfaces;
+    match used_pct {
+        p if p >= 95.0 => s.error,
+        p if p >= 80.0 => s.warn,
+        _ => s.text_secondary,
+    }
+}
+
 /// The share of the context window in use as a ring, `side` points round: the track in the
 /// quiet hairline, the used arc in the tone the share calls for (warn past 80 %, error past
 /// 95 %).
 #[must_use]
 pub fn context_ring(theme: &Theme, used_pct: f64, side: f32) -> AnyElement {
     let s = theme.surfaces;
-    let tone: Rgb = match used_pct {
-        p if p >= 95.0 => s.error,
-        p if p >= 80.0 => s.warn,
-        _ => s.text_secondary,
-    };
-    let (track, arc) = (hsla(s.border), hsla(tone));
+    let (track, arc) = (hsla(s.border), hsla(context_tone(theme, used_pct)));
     #[expect(clippy::cast_possible_truncation, reason = "a share on screen")]
     let share = (used_pct / 100.0).clamp(0.0, 1.0) as f32;
     canvas(

@@ -19,7 +19,7 @@ pub mod shell_integration;
 pub mod terminfo;
 
 pub use client::PtydClient;
-pub use pty::{LineDiscipline, Pty, PtyMaster, SpawnSpec};
+pub use pty::{Pty, PtyMaster, SpawnSpec};
 pub use ring::Ring;
 
 /// PTY errors.
@@ -36,7 +36,7 @@ pub enum PtyError {
     },
     /// The daemon answered with an error.
     #[error("ptyd: {0}")]
-    Daemon(String),
+    Daemon(slopty_proto::ptyd::PtydError),
     /// The daemon answered with something unexpected.
     #[error("ptyd: unexpected reply")]
     UnexpectedReply,

@@ -49,9 +49,6 @@ use crate::palette::section_heading;
 /// header, so the frame's two bars do not read as a second row of headers.
 pub(super) const STATUSBAR_H: f32 = 24.0;
 
-/// A round trip slow enough to wear the warning tone: typing lags behind the fingers.
-const RTT_WARN_FROM: Duration = Duration::from_millis(150);
-
 /// What the server being down costs, after its word: workers are reached at the addresses
 /// this client last had for them, and none it has not met.
 const SERVER_DOWN_MEANS: &str = "direct links only";
@@ -478,10 +475,10 @@ impl WorkspaceView {
     }
 
     /// The link to the focused worker: how the tailnet carries it (a DERP relay in the
-    /// warning tone, being the slow path) and its round trip, warning past [`RTT_WARN_FROM`].
-    /// The figure sits in a slot as wide as any it shows, pinned at its right, so a new sample
-    /// moves only its own digits; its unit says what it is, and a screen reader hears the
-    /// words.
+    /// warning tone, being the slow path) and its round trip, warning past
+    /// [`crate::screen::RTT_WARN_FROM`]. The figure sits in a slot as wide as any it shows,
+    /// pinned at its right, so a new sample moves only its own digits; its unit says what it
+    /// is, and a screen reader hears the words.
     fn render_link(&self, path: Option<(String, bool)>, rtt: Option<Duration>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -495,7 +492,7 @@ impl WorkspaceView {
             let text = SharedString::from(rtt_label(rtt));
             tabular(readout("status-rtt", text.clone()))
                 .aria_label(SharedString::from(format!("Round trip {text}")))
-                .when(rtt >= RTT_WARN_FROM, |el| el.text_color(hsla(s.warn)))
+                .when(rtt >= crate::screen::RTT_WARN_FROM, |el| el.text_color(hsla(s.warn)))
                 .child(text)
         });
         div()

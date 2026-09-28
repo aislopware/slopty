@@ -105,6 +105,7 @@ gpui_kit::assets::icon_assets!(
         NotebookPen,
         PanelLeft,
         PanelsTopLeft,
+        Paperclip,
         Pause,
         Pencil,
         Plug,

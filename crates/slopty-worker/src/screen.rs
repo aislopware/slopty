@@ -37,24 +37,25 @@ use slopty_capture::{
 use slopty_codec::{
     AudioEncoder as _, CodecError, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder as _,
 };
-use slopty_core::StreamId;
+use slopty_core::{DisplayId, StreamId};
 use slopty_input::{InputError, InputSink as _, Pointer, PointerWatch};
 pub use slopty_media::PathSample;
 use slopty_media::{
-    Cadence, Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Pace, Packetizer, RateController,
-    Redundancy, audio_datagram, cursor_datagram, heartbeat_datagram,
+    Cadence, ChromaGate, Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Pace, Packetizer,
+    RateController, Redundancy, audio_datagram, cursor_datagram, heartbeat_datagram,
 };
 use slopty_proto::ctl::{LtrStats, Quantiles, ScreenStats, ScreenSummary};
 use slopty_proto::media::MAX_DATAGRAM;
 use slopty_proto::screen::{
-    CaptureTarget, CursorShape, Quality, ReceiverReport, ScreenEvent, ScreenInput, SourceState,
-    VideoCodec,
+    CaptureTarget, Chroma, CursorShape, Quality, ReceiverReport, ScreenEvent, ScreenInput,
+    SourceState, VideoCodec,
 };
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::platform::{Native, Platform};
 
+pub mod sized;
 #[cfg(target_os = "macos")]
 pub mod synthetic;
 
@@ -158,6 +159,12 @@ pub enum ScreenError {
     /// A callback-based framework call never completed.
     #[error("screen pipeline closed")]
     Closed,
+    /// ScreenCaptureKit lists no display to stream.
+    #[error("no display to stream")]
+    NoDisplay,
+    /// Only a display stream moves to another display.
+    #[error("not a display stream")]
+    NotDisplay,
 }
 
 /// Frames' worth of bytes (at the current target rate) QUIC may hold before a captured frame
@@ -973,6 +980,9 @@ struct Shared<P: Platform = Native> {
     packetizer: Mutex<Packetizer>,
     redundancy: Mutex<Redundancy>,
     rate: Mutex<RateController>,
+    /// Whether the stream carries 4:4:4 or 4:2:0, following the rate's decisions; the pipeline
+    /// rebuilds for a change on its geometry tick ([`Pipeline::check_geometry`]).
+    chroma: Mutex<ChromaGate>,
     /// `datagrams_sent` at the previous receiver report.
     sent_at_report: AtomicU64,
     /// `host_now_us()` when the last datagram was queued; the heartbeat clock.
@@ -1061,6 +1071,7 @@ impl<P: Platform> Shared<P> {
             packetizer: Mutex::new(Packetizer::new(id)),
             redundancy: Mutex::new(Redundancy::new()),
             rate: Mutex::new(RateController::new(max_bps)),
+            chroma: Mutex::new(ChromaGate::new(Chroma::Subsampled, (0, 0), 0)),
             sent_at_report: AtomicU64::new(0),
             last_push_us: AtomicU64::new(now::<P>()),
             fps: std::sync::atomic::AtomicU16::new(fps),
@@ -1115,6 +1126,13 @@ impl<P: Platform> Shared<P> {
     /// latest keyframe is on record.
     fn ltr_usable(&self) -> bool {
         self.ltr.lock().usable.is_some()
+    }
+
+    /// Decide the chroma for a session `config` describes, the client asking for `asked`: at
+    /// once, from the rate target under the session's ceiling ([`ChromaGate::ask`]).
+    fn ask_chroma(&self, asked: Chroma, config: &EncoderConfig) -> Chroma {
+        let target = self.rate.lock().target_bps().min(config.bitrate_bps);
+        self.chroma.lock().ask(asked, (config.width, config.height), target)
     }
 
     /// Point the live encoder at the share of `target` the parity leaves it ([`encoder_bps`]);
@@ -1391,7 +1409,13 @@ impl<P: Platform> Shared<P> {
         let outcome = encoder.as_ref().map(|encoder| encoder.encode(&frame.image, pts, &options));
         if let Some(Err(e)) = outcome {
             self.counters.returned(pts, Source::<P>::now_us());
-            tracing::warn!(stream = %self.id, error = %e, "encode failed");
+            if matches!(e, CodecError::NotFullChroma(_)) {
+                // The 4:4:4 session went in before ScreenCaptureKit switched to `xf44`; the
+                // capture is on its way ([`Pipeline::start_rebuild`]).
+                tracing::debug!(stream = %self.id, error = %e, "a 4:2:0 capture ahead of the switch");
+            } else {
+                tracing::warn!(stream = %self.id, error = %e, "encode failed");
+            }
             self.owed.store(true, Ordering::Relaxed);
             let mut pending = self.pending.lock();
             pending.keyframe |= options.force_keyframe;
@@ -1662,6 +1686,12 @@ impl<P: Platform> Shared<P> {
             self.apply_bitrate(decision.target_bps);
             self.apply_cadence(decision.target_bps);
         }
+        let mut gate = self.chroma.lock();
+        if let Some(chroma) = gate.update(decision.target_bps) {
+            let (enter_bps, leave_bps) = gate.band();
+            tracing::info!(stream = %self.id, ?chroma, target_bps = decision.target_bps, enter_bps, leave_bps, "chroma follows the rate");
+        }
+        drop(gate);
         Some(decision)
     }
 
@@ -2115,8 +2145,32 @@ fn configs(
         codec: quality.codec,
         fps,
         bitrate_bps: quality.bitrate_bps.max(100_000),
+        chroma: Chroma::Subsampled,
     };
     (capture, encoder)
+}
+
+/// [`configs`] for a stream carrying `chroma`: a 4:4:4 session is fed the one 4:4:4 format
+/// ScreenCaptureKit delivers.
+const fn carrying(
+    chroma: Chroma,
+    (capture, encoder): (CaptureConfig, EncoderConfig),
+) -> (CaptureConfig, EncoderConfig) {
+    let format = capture_format(chroma);
+    (CaptureConfig { format, ..capture }, EncoderConfig { chroma, ..encoder })
+}
+
+/// The capture format a session of `chroma` takes.
+const fn capture_format(chroma: Chroma) -> PixelFormat {
+    match chroma {
+        Chroma::Subsampled => PixelFormat::Nv12Full,
+        Chroma::Full => PixelFormat::Yuv444Full10,
+    }
+}
+
+/// The chroma a client may have at `quality`: 4:4:4 is an HEVC profile.
+fn asked(quality: &Quality) -> Chroma {
+    if quality.codec == VideoCodec::Hevc { quality.chroma } else { Chroma::Subsampled }
 }
 
 /// One live stream on the platform this build serves.
@@ -2170,6 +2224,8 @@ pub struct Pipeline<P: Platform> {
     /// What tells the connection the stream ended; the crop path calls it when its window
     /// closes, since a display stream does not stop by itself.
     on_stop: Arc<dyn Fn(CaptureError) + Send + Sync>,
+    /// Where the cursor's pictures go; kept for the shape task a display switch restarts.
+    on_event: Arc<dyn Fn(StreamEvent) + Send + Sync>,
     /// `on_stop` has been called.
     stopped: bool,
 }
@@ -2225,6 +2281,7 @@ impl<P: Platform> Pipeline<P> {
             codec: VideoCodec::Hevc,
             fps: 1,
             bitrate_bps: 100_000,
+            chroma: Chroma::Subsampled,
         };
         tokio::task::spawn_blocking(move || P::Video::new(config, |_packet| {}).map(drop))
             .await
@@ -2271,6 +2328,25 @@ impl<P: Platform> Pipeline<P> {
         })
     }
 
+    /// Whether ScreenCaptureKit lists `display`, from an enumeration taken now: one taken
+    /// before a display was made does not have it.
+    pub async fn lists_display(display: DisplayId) -> Result<bool, ScreenError> {
+        *SHAREABLE.lock() = None;
+        let content = Self::shareable().await?;
+        Ok(Source::<P>::displays(&content).iter().any(|d| d.id == display))
+    }
+
+    /// The first display ScreenCaptureKit lists other than `except`: the one a stream shows
+    /// when the display made for its client cannot be had.
+    pub async fn physical_display(except: Option<DisplayId>) -> Result<DisplayId, ScreenError> {
+        let content = Self::shareable().await?;
+        Source::<P>::displays(&content)
+            .into_iter()
+            .map(|d| d.id)
+            .find(|id| Some(*id) != except)
+            .ok_or(ScreenError::NoDisplay)
+    }
+
     /// Set a worker window's size in points ([`resize_window`]).
     pub fn resize_window(
         window: slopty_core::WindowId,
@@ -2307,20 +2383,30 @@ impl<P: Platform> Pipeline<P> {
         let (resolved, path) = resolve::<P>(&content, target)?;
         let native = Source::<P>::pixel_size(&resolved);
         let refresh_hz = Source::<P>::refresh_hz(target);
-        let (mut capture_config, encoder_config) = configs(native, &quality, refresh_hz);
-        capture_config.crop = Source::<P>::crop(&resolved);
-
+        let sized = configs(native, &quality, refresh_hz);
         let shared = Arc::new(Shared::new(
             id,
             sink,
-            encoder_config.bitrate_bps,
-            encoder_config.fps,
+            sized.1.bitrate_bps,
+            sized.1.fps,
             path == WindowPath::DisplayCrop,
         ));
+        let chroma = shared.ask_chroma(asked(&quality), &sized.1);
+        let (mut capture_config, mut encoder_config) = carrying(chroma, sized);
+        capture_config.crop = Source::<P>::crop(&resolved);
         let zoom = f64::from(capture_config.width) / f64::from(native.0);
         shared.zoom.store(zoom.to_bits(), Ordering::Relaxed);
         let t_encoder = Instant::now();
-        let encoder = build_encoder(&Arc::downgrade(&shared), encoder_config).await?;
+        let encoder = match build_encoder(&Arc::downgrade(&shared), encoder_config).await {
+            Err(e) if chroma == Chroma::Full => {
+                tracing::warn!(stream = %id, error = %e, "no 4:4:4 session here: 4:2:0");
+                shared.chroma.lock().refuse();
+                (capture_config, encoder_config) =
+                    carrying(Chroma::Subsampled, (capture_config, encoder_config));
+                build_encoder(&Arc::downgrade(&shared), encoder_config).await?
+            }
+            built => built?,
+        };
         let encoder_built = t_encoder.elapsed();
         retire(shared.install(encoder));
         let start = shared.rate.lock().target_bps();
@@ -2364,10 +2450,11 @@ impl<P: Platform> Pipeline<P> {
             tokio::spawn(cursor_loop(Arc::clone(&shared), point_scale, injector.pointer()));
         let repair = tokio::spawn(repair_loop(Arc::clone(&shared)));
         let lane = tokio::spawn(lane_loop(Arc::clone(&shared)));
-        #[expect(clippy::cast_possible_truncation, reason = "a display scale is 1 to 4")]
-        #[expect(clippy::cast_sign_loss, reason = "a display scale is positive")]
-        let backing = point_scale.round().clamp(1.0, 4.0) as u8;
-        let shape = tokio::spawn(shape_loop(Arc::clone(&shared), backing, Arc::clone(&on_event)));
+        let shape = tokio::spawn(shape_loop(
+            Arc::clone(&shared),
+            backing_of(point_scale),
+            Arc::clone(&on_event),
+        ));
         let hide_watch = hide_watch_for::<P>(id, target, &shared).await;
         #[expect(clippy::cast_possible_truncation, reason = "a small ratio")]
         let scale = (point_scale * zoom) as f32;
@@ -2405,6 +2492,7 @@ impl<P: Platform> Pipeline<P> {
             path,
             transitions: Transitions::default(),
             on_stop,
+            on_event,
             stopped: false,
         };
         Ok((stream, opened))
@@ -2426,6 +2514,12 @@ impl<P: Platform> Pipeline<P> {
     #[must_use]
     pub const fn path(&self) -> WindowPath {
         self.path
+    }
+
+    /// The chroma of the encoder session in force.
+    #[must_use]
+    pub const fn chroma(&self) -> Chroma {
+        self.encoder_config.chroma
     }
 
     /// Counters.
@@ -2463,7 +2557,9 @@ impl<P: Platform> Pipeline<P> {
     ) -> Option<Rebuild<P>> {
         self.quality = *quality;
         let native = pending.as_ref().map_or(self.native, |rebuild| rebuild.native);
-        let (capture_config, encoder_config) = configs(native, quality, self.refresh_hz);
+        let sized = configs(native, quality, self.refresh_hz);
+        let chroma = self.shared.ask_chroma(asked(quality), &sized.1);
+        let (capture_config, encoder_config) = carrying(chroma, sized);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
         let (was, was_config) =
             pending.as_ref().map_or((self.desired, self.encoder_config), |rebuild| {
@@ -2471,7 +2567,11 @@ impl<P: Platform> Pipeline<P> {
             });
         // The rate is the encoder's alone while the capture follows the display's beat.
         let same_rate = encoder_config.fps == was_config.fps;
-        if desired == was && same_rate && encoder_config.codec == was_config.codec {
+        if desired == was
+            && same_rate
+            && encoder_config.codec == was_config.codec
+            && encoder_config.chroma == was_config.chroma
+        {
             if let Some(mut rebuild) = pending {
                 // The session under way is the one wanted; it goes in under the new ceiling.
                 rebuild.config.bitrate_bps = encoder_config.bitrate_bps;
@@ -2528,11 +2628,17 @@ impl<P: Platform> Pipeline<P> {
             self.follow_window(on_screen, crop);
         }
         let Some(native) = self.resize.observe(native, self.native) else {
+            if let Some(rebuild) = self.follow_chroma() {
+                return Some(rebuild);
+            }
             self.apply_desired();
             return None;
         };
         tracing::info!(stream = %self.id, from = ?self.native, to = ?native, "target resized");
-        let (capture_config, encoder_config) = configs(native, &self.quality, self.refresh_hz);
+        let sized = configs(native, &self.quality, self.refresh_hz);
+        let asked = self.shared.chroma.lock().asked();
+        let chroma = self.shared.ask_chroma(asked, &sized.1);
+        let (capture_config, encoder_config) = carrying(chroma, sized);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
         let mut rebuild = self.start_rebuild(native, desired, encoder_config);
         rebuild.resized = true;
@@ -2556,14 +2662,48 @@ impl<P: Platform> Pipeline<P> {
         })
     }
 
+    /// A session the rate's decisions moved to the other chroma ([`ChromaGate::update`]), at the
+    /// size and quality in force: a new encoder session, so a keyframe, and the capture format
+    /// with it.
+    fn follow_chroma(&mut self) -> Option<Rebuild<P>> {
+        let chroma = self.shared.chroma.lock().chroma();
+        if chroma == self.encoder_config.chroma {
+            return None;
+        }
+        tracing::info!(stream = %self.id, ?chroma, "rebuilding for the chroma");
+        let (desired, config) = carrying(chroma, (self.desired, self.encoder_config));
+        Some(self.start_rebuild(self.native, desired, config))
+    }
+
+    /// Start building the session for `config`, to capture as `desired` once it is in.
+    ///
+    /// A 4:4:4 session refuses anything but `xf44`, while a 4:2:0 one takes `xf44` as well
+    /// (MEASUREMENTS.md, "4:4:4 HEVC on the low-latency encoder"), so a switch to 4:4:4 asks
+    /// ScreenCaptureKit for `xf44` now, while the session builds, and a switch back keeps it
+    /// until the 4:2:0 session is in.
     fn start_rebuild(
-        &self,
+        &mut self,
         native: (u32, u32),
         desired: CaptureConfig,
         config: EncoderConfig,
     ) -> Rebuild<P> {
+        if desired.format == PixelFormat::Yuv444Full10 && self.desired.format != desired.format {
+            self.desired.format = desired.format;
+            self.apply_desired();
+        }
         let encoder = start_encoder(&Arc::downgrade(&self.shared), config);
         Rebuild { encoder, native, desired, config, resized: false }
+    }
+
+    /// The session `rebuild` was for could not be made: the stream goes on with the one it has.
+    /// A 4:4:4 session is not asked for again until the client asks, and the capture goes back
+    /// to the format the session in force takes.
+    pub fn rebuild_failed(&mut self, rebuild: &Rebuild<P>) {
+        if rebuild.config.chroma == Chroma::Full {
+            self.shared.chroma.lock().refuse();
+        }
+        self.desired.format = capture_format(self.encoder_config.chroma);
+        self.apply_desired();
     }
 
     /// The window-server reads [`Self::check_geometry`] decides from, as a call to make off the
@@ -2850,6 +2990,55 @@ impl<P: Platform> Pipeline<P> {
         self.shared.nack(frame, fragments);
     }
 
+    /// Stream `display` from now on, in place of the display this stream shows: the display
+    /// made for its client was made anew or changed backing scale. Input and the pointer map
+    /// through the new display's bounds and scale, and the geometry poll then takes its size
+    /// (a rebuild and a `Geometry` event). Nothing happens when it is the display already shown
+    /// at the scale it already has.
+    ///
+    /// # Errors
+    ///
+    /// [`ScreenError::NotDisplay`] for a window stream, else why ScreenCaptureKit would not
+    /// switch; the stream then goes on showing what it showed.
+    pub async fn switch_display(&mut self, display: DisplayId) -> Result<(), ScreenError> {
+        if !matches!(self.target, CaptureTarget::Display(_)) {
+            return Err(ScreenError::NotDisplay);
+        }
+        *SHAREABLE.lock() = None;
+        let content = Self::shareable().await?;
+        let target = CaptureTarget::Display(display);
+        let resolved = Source::<P>::resolve(&content, target)?;
+        let point_scale = f64::from(Source::<P>::point_scale(&resolved));
+        if target == self.target && (point_scale - self.point_scale).abs() < f64::EPSILON {
+            return Ok(());
+        }
+        let (tx, rx) = oneshot::channel();
+        Source::<P>::retarget(&self.capture, &resolved, move |result| {
+            let _receiver_gone = tx.send(result);
+        });
+        rx.await.map_err(|_dropped| ScreenError::Closed)??;
+        tracing::info!(stream = %self.id, from = ?self.target, to = ?target, point_scale, "display switched");
+        self.injector.release_all();
+        self.target = target;
+        self.content = content;
+        self.point_scale = point_scale;
+        self.refresh_hz = Source::<P>::refresh_hz(target);
+        self.injector = P::Input::new(target, point_scale * self.zoom());
+        self.cursor.abort();
+        self.cursor = tokio::spawn(cursor_loop(
+            Arc::clone(&self.shared),
+            point_scale,
+            self.injector.pointer(),
+        ));
+        self.shape.abort();
+        self.shape = tokio::spawn(shape_loop(
+            Arc::clone(&self.shared),
+            backing_of(point_scale),
+            Arc::clone(&self.on_event),
+        ));
+        Ok(())
+    }
+
     /// Stop capturing and tear down.
     pub async fn close(mut self) {
         self.cursor.abort();
@@ -2868,6 +3057,14 @@ impl<P: Platform> Pipeline<P> {
         let stats = self.stats();
         tracing::info!(stream = %self.id, ?stats, "screen stream closed");
     }
+}
+
+/// The cursor pictures' backing scale for a target of `point_scale` pixels a point.
+const fn backing_of(point_scale: f64) -> u8 {
+    #[expect(clippy::cast_possible_truncation, reason = "a display scale is 1 to 4")]
+    #[expect(clippy::cast_sign_loss, reason = "a display scale is positive")]
+    let backing = point_scale.round().clamp(1.0, 4.0) as u8;
+    backing
 }
 
 /// Set a worker window's size in points through the accessibility API.
@@ -3286,7 +3483,7 @@ mod tests {
 
     #[test]
     fn configs_clamp_the_quality_and_keep_even_sides() {
-        let q = Quality { fps: 500, bitrate_bps: 1, scale: 0.3333, codec: VideoCodec::Hevc };
+        let q = Quality { fps: 500, bitrate_bps: 1, scale: 0.3333, ..Quality::default() };
         let (capture, encoder) = configs((1_001, 777), &q, None);
         assert_eq!((capture.width, capture.height), (334, 260), "scaled, rounded up to even");
         assert_eq!(capture.fps, 240, "fps clamped");
@@ -3302,6 +3499,20 @@ mod tests {
         let tiny = Quality { scale: 0.0001, ..q };
         let (capture, _encoder) = configs((10, 10), &tiny, None);
         assert_eq!((capture.width, capture.height), (2, 2), "never below two pixels");
+    }
+
+    /// A 4:4:4 stream captures `xf44` into a 4:4:4 session; 4:4:4 is only ever HEVC.
+    #[test]
+    fn full_chroma_captures_xf44_for_a_444_session() {
+        let full = Quality { chroma: Chroma::Full, ..Quality::default() };
+        let (capture, encoder) = carrying(Chroma::Full, configs((1_920, 1_080), &full, None));
+        assert_eq!(capture.format, PixelFormat::Yuv444Full10);
+        assert_eq!(encoder.chroma, Chroma::Full);
+        let (capture, encoder) = carrying(Chroma::Subsampled, (capture, encoder));
+        assert_eq!((capture.format, encoder.chroma), (PixelFormat::Nv12Full, Chroma::Subsampled));
+        assert_eq!(asked(&full), Chroma::Full);
+        assert_eq!(asked(&Quality { codec: VideoCodec::H264, ..full }), Chroma::Subsampled);
+        assert_eq!(asked(&Quality::default()), Chroma::Subsampled, "4:2:0 unless asked");
     }
 
     /// Known, the display's refresh bounds the rate and the capture follows its beat.
@@ -3643,8 +3854,7 @@ mod tests {
 
     /// A configuration as a transition carries it: `crop` on a 600×400 stream.
     fn config(crop: Option<Crop>) -> CaptureConfig {
-        let quality =
-            Quality { fps: 60, bitrate_bps: 8_000_000, scale: 1.0, codec: VideoCodec::Hevc };
+        let quality = Quality { fps: 60, bitrate_bps: 8_000_000, scale: 1.0, ..Quality::default() };
         CaptureConfig { crop, ..configs((600, 400), &quality, None).0 }
     }
 

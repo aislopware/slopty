@@ -17,8 +17,10 @@
 mod blocks;
 mod entries;
 mod media;
+mod meters;
 mod parts;
 mod rail;
+mod review;
 mod work;
 
 use std::collections::{HashMap, HashSet};
@@ -33,6 +35,7 @@ use gpui::{
     Subscription, Task, Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+pub use review::Scope;
 use slopty_core::{ClientId, SessionId, WallMs};
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::conversation::{
@@ -90,8 +93,14 @@ struct Finder {
 /// the workspace, which knows the link.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum FaceEvent {
-    /// Type this message into the agent's terminal.
-    Submit(String),
+    /// Type this message into the agent's terminal, the attachments landed at `paths` after
+    /// its text.
+    Submit {
+        /// What the composer held.
+        text: String,
+        /// Where the attachments landed on the worker.
+        paths: Vec<String>,
+    },
     /// Stop the agent's turn (Esc in its terminal).
     Interrupt,
     /// Answer the held permission prompt `ask`.
@@ -125,6 +134,8 @@ pub enum FaceEvent {
         /// The chip.
         id: u64,
     },
+    /// Show the system's picker; the files picked are attached as a drop on the face is.
+    PickFiles,
 }
 
 /// What an attachment is before it goes up.
@@ -139,6 +150,17 @@ pub enum Attach {
     },
     /// Files copied here, pasted into the composer.
     Files(Vec<std::path::PathBuf>),
+}
+
+/// The format of a pasted picture named `name` ([`composer::picture_name`]).
+fn picture_format(name: &str) -> Option<gpui::ImageFormat> {
+    match name.rsplit_once('.')?.1 {
+        "png" => Some(gpui::ImageFormat::Png),
+        "jpg" => Some(gpui::ImageFormat::Jpeg),
+        "gif" => Some(gpui::ImageFormat::Gif),
+        "webp" => Some(gpui::ImageFormat::Webp),
+        _ => None,
+    }
 }
 
 /// The extension of a picture Claude Code reads, for a pasted picture in `format`; `None` for
@@ -181,10 +203,10 @@ pub struct ConversationView {
     rail_drawn: Vec<(usize, u64)>,
     list: ListState,
     composer: gpui::Entity<TextareaState>,
-    /// What was attached to the draft and is still uploading, a chip each.
+    /// What was attached to the draft, a chip each until the message goes.
     attachments: composer::Attachments,
-    /// The window the face is in, to type a landed attachment's path into the composer.
-    window: gpui::AnyWindowHandle,
+    /// A pasted picture's chip draws the picture, by attachment.
+    thumbnails: HashMap<u64, std::sync::Arc<gpui::Image>>,
     /// Why a denial is given, typed on the permission card.
     deny: gpui::Entity<InputState>,
     /// The deny field is open on the card.
@@ -196,6 +218,10 @@ pub struct ConversationView {
     diffs: std::cell::RefCell<Coloured>,
     /// What the list shows.
     pane: Pane,
+    /// What the Changes pane covers.
+    scope: Scope,
+    /// Lines of a diff picked to quote into the draft.
+    quote: Option<review::Quote>,
     /// The find bar, while it is open.
     find: Option<Finder>,
     /// The copy button that just copied, by key, and the timer that clears it.
@@ -205,6 +231,10 @@ pub struct ConversationView {
     ask_all: bool,
     /// The task card shows every task.
     tasks_open: bool,
+    /// The context popover is open under the header's ring.
+    context_open: bool,
+    /// Where the header's ring was last drawn, in the window: the popover hangs under it.
+    context_chip: Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>,
     /// The face is in the tile: the list and its clock run only then.
     shown: bool,
     /// The picture open large over the face.
@@ -329,18 +359,22 @@ impl ConversationView {
             list,
             composer,
             attachments: composer::Attachments::default(),
-            window: window.window_handle(),
+            thumbnails: HashMap::new(),
             deny,
             deny_open: false,
             approvals: Approvals::default(),
             me: None,
             diffs: std::cell::RefCell::default(),
             pane: Pane::Conversation,
+            scope: Scope::default(),
+            quote: None,
             find: None,
             copied: None,
             copied_clear: None,
             ask_all: false,
             tasks_open: false,
+            context_open: false,
+            context_chip: Rc::default(),
             shown: false,
             viewing: None,
             pictures: std::cell::RefCell::default(),
@@ -481,6 +515,14 @@ impl ConversationView {
             }
         }
         false
+    }
+
+    /// The agent has a turn to stop: the hooks say it works, or the transcript shows one in
+    /// progress. A hook can lag or be missing, and the tile's mark already says "Working" on the
+    /// transcript's word, so Stop and Esc follow the same word.
+    #[must_use]
+    pub fn turn_running(&self) -> bool {
+        self.working() || self.mid_turn()
     }
 
     /// What the session is about, for a tile the agent has not titled: its first prompt's
@@ -747,7 +789,7 @@ impl ConversationView {
             self.rebuilt = self.rebuilt.saturating_add(1);
         }
         if self.pane == Pane::Changes {
-            let rows = rows::changes(&self.session_files());
+            let rows = rows::changes(&self.changed_files());
             let keys: Vec<(RowKey, u64)> =
                 rows.iter().map(|row| (row.key(), self.rev(row))).collect();
             self.splice(&keys);
@@ -1010,7 +1052,7 @@ impl ConversationView {
     /// Stop the agent's turn: only while it has one, since Esc at an idle prompt is Claude
     /// Code's way into its rewind menu.
     pub fn interrupt(&self, cx: &mut Context<Self>) {
-        if self.working() {
+        if self.turn_running() {
             cx.emit(FaceEvent::Interrupt);
         }
     }
@@ -1050,6 +1092,12 @@ impl ConversationView {
     /// Show `what`'s chip and ask the workspace to send it up.
     pub fn attach(&mut self, what: Attach, cx: &mut Context<Self>) {
         let id = self.attachments.add(attachment_name(&what));
+        if let Attach::Picture { name, bytes } = &what
+            && let Some(format) = picture_format(name)
+        {
+            let picture = gpui::Image::from_bytes(format, bytes.clone());
+            self.thumbnails.insert(id, std::sync::Arc::new(picture));
+        }
         cx.emit(FaceEvent::Attach { id, what });
         cx.notify();
     }
@@ -1060,10 +1108,21 @@ impl ConversationView {
         self.attachments.add(attachment_name(what))
     }
 
-    /// The chips of what is still uploading.
+    /// The chips of what is attached to the draft.
     #[must_use]
     pub fn attachments(&self) -> &[composer::Attachment] {
         self.attachments.chips()
+    }
+
+    /// The picture a pasted picture's chip draws.
+    fn attachment_picture(&self, id: u64) -> Option<std::sync::Arc<gpui::Image>> {
+        self.thumbnails.get(&id).cloned()
+    }
+
+    /// Ask the workspace for files to attach: the system's picker, whose files come back as a
+    /// drop on the face.
+    fn pick_attachments(cx: &mut Context<Self>) {
+        cx.emit(FaceEvent::PickFiles);
     }
 
     /// Attachment `id` is `fraction` of the way up.
@@ -1073,55 +1132,64 @@ impl ConversationView {
         }
     }
 
-    /// Attachment `id` landed at `paths` on the worker: its chip goes, and the paths are typed
-    /// at the composer's cursor, where Claude Code reads them as attached files.
+    /// Attachment `id` landed at `paths` on the worker: its chip stays until the message goes,
+    /// which types the paths after its text, where Claude Code reads them as attached files.
     pub fn attachment_landed(&mut self, id: u64, paths: &[String], cx: &mut Context<Self>) {
-        if !self.attachments.end(id) || paths.is_empty() {
-            return;
+        if self.attachments.land(id, paths) {
+            if paths.is_empty() {
+                self.thumbnails.remove(&id);
+            }
+            cx.notify();
         }
-        cx.notify();
-        let (composer, window, paths) = (self.composer.clone(), self.window, paths.to_vec());
-        // After whatever update delivered this: typing into the field takes its window.
-        cx.defer(move |cx| {
-            let _gone = window.update(cx, |_root, window, cx| {
-                composer.update(cx, |c, cx| {
-                    let value = c.value();
-                    let before = value.get(..c.cursor()).and_then(|b| b.chars().next_back());
-                    c.insert(composer::typed_paths(before, &paths), window, cx);
-                });
-            });
-        });
     }
 
     /// The human takes attachment `id` off the draft: its chip goes at once, and the workspace
-    /// stops its upload, so nothing is typed into the composer when it would have landed.
+    /// stops its upload.
     pub fn detach(&mut self, id: u64, cx: &mut Context<Self>) {
         if self.attachments.end(id) {
+            self.thumbnails.remove(&id);
             cx.emit(FaceEvent::Detach { id });
             cx.notify();
         }
     }
 
-    /// Attachment `id` will not land (a failure, a cancel, the link gone): its chip goes.
+    /// Attachment `id`'s upload is over: landed, its chip stays for the message; not (a
+    /// failure, a cancel, the link gone), its chip goes.
     pub fn attachment_ended(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.attachments.end(id) {
+        if self.attachments.over(id) {
+            self.thumbnails.remove(&id);
             cx.notify();
         }
     }
 
-    /// Send the composer's text.
+    /// Nothing to send: no text, and nothing attached that landed.
+    fn draft_empty(&self, cx: &App) -> bool {
+        self.draft(cx).trim().is_empty() && self.attachments.paths().is_empty()
+    }
+
+    /// Send the composer's text, led by the paths of what was attached. Not while an attachment
+    /// is still on its way up: the message would go without it.
     pub fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.draft(cx);
-        if text.trim().is_empty() || self.approvals.prompt().is_some() {
+        if self.draft_empty(cx) || self.attachments.uploading() || self.approvals.prompt().is_some()
+        {
             return;
         }
+        let (text, paths) = (self.draft(cx), self.attachments.paths());
+        self.attachments.clear();
+        self.thumbnails.clear();
         self.composer.update(cx, |c, cx| c.set_value("", window, cx));
-        self.model.sent(text.trim().to_owned(), self.working(), WallMs::now());
+        self.send(text, paths, cx);
+    }
+
+    /// Show `text` with `paths` as sent, and ask the workspace to type it.
+    fn send(&mut self, text: String, paths: Vec<String>, cx: &mut Context<Self>) {
+        let sent = composer::with_paths(&text, &paths);
+        self.model.sent(sent.trim().to_owned(), self.working(), WallMs::now());
         self.list.scroll_to_end();
         self.list.set_follow_mode(FollowMode::Tail);
         self.rebuild(cx);
         self.run_clock(cx);
-        cx.emit(FaceEvent::Submit(text));
+        cx.emit(FaceEvent::Submit { text, paths });
     }
 
     /// Answer the held prompt.
@@ -1362,6 +1430,8 @@ impl Render for ConversationView {
             .track_focus(&self.focus)
             .role(gpui::accesskit::Role::Group)
             .aria_label("Conversation")
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _ev, _w, cx| this.end_quote_drag(cx)))
+            .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|this, _ev, _w, cx| this.end_quote_drag(cx)))
             .on_action(cx.listener(Self::on_cycle_density))
             .on_action(cx.listener(Self::on_interrupt))
             .on_action(cx.listener(|this, _: &crate::terminal::PrevPrompt, _w, cx| this.step_prompt(-1, cx)))
@@ -1375,10 +1445,12 @@ impl Render for ConversationView {
                 if this.viewing.is_some() {
                     this.view_picture(None, cx);
                     cx.stop_propagation();
+                } else if this.clear_quote(cx) {
+                    cx.stop_propagation();
                 } else if this.find.as_ref().is_some_and(|f| f.field.focus_handle(cx).is_focused(window)) {
                     this.close_find(window, cx);
                     cx.stop_propagation();
-                } else if this.working() && this.approvals.prompt().is_none() {
+                } else if this.turn_running() && this.approvals.prompt().is_none() {
                     this.interrupt(cx);
                     cx.stop_propagation();
                 }
@@ -1396,6 +1468,7 @@ impl Render for ConversationView {
             .child(rows)
             .children(foot)
             .children(self.picture_viewer(window, cx))
+            .children(self.context_popover(window, cx))
     }
 }
 

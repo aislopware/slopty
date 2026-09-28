@@ -322,10 +322,33 @@ impl WorkspaceView {
             }
         }
         #[cfg(not(target_os = "ios"))]
-        {
-            tracing::debug!(?ask, "no Files picker here");
-            self.show_notice("The Files picker is on iPhone and iPad".to_owned(), cx);
+        match ask {
+            FilesAsk::Import(tile) => Self::open_files(*tile, cx),
+            FilesAsk::Export { .. } => {
+                tracing::debug!(?ask, "no Files picker here");
+                self.show_notice("The Files picker is on iPhone and iPad".to_owned(), cx);
+            }
         }
+    }
+
+    /// Show the system's open panel; what is picked goes up to `tile` as a drop on it. The
+    /// files are the person's own, so nothing is deleted after.
+    #[cfg(not(target_os = "ios"))]
+    fn open_files(tile: TileRef, cx: &Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = picked.await
+                && !paths.is_empty()
+            {
+                let _gone = this.update(cx, |this, cx| this.drop_files(tile, &paths, cx));
+            }
+        })
+        .detach();
     }
 
     /// Show the Files picker; what is picked goes up to `tile`.

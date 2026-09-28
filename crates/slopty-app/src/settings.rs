@@ -140,6 +140,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
             defaults.max_bitrate_bps
         },
         muted: remote.muted,
+        sharp_text: remote.sharp_text,
     };
     theme
 }
@@ -409,6 +410,14 @@ mod tests {
         assert!(!stream.muted);
         s.remote.muted = true;
         assert!(theme_for(&s, true).behaviour.stream.muted);
+        assert!(!stream.sharp_text);
+        s.remote.sharp_text = true;
+        let stream = theme_for(&s, true).behaviour.stream;
+        assert_eq!(
+            slopty_ui::screen::quality_of(stream, 1.0).chroma,
+            slopty_proto::screen::Chroma::Full,
+            "sharp text asks the worker for 4:4:4",
+        );
     }
 
     /// The app's own save is not a change for the watcher, so its warnings are not shown twice;

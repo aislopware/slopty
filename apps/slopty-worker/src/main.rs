@@ -175,6 +175,9 @@ pub struct Daemon {
     /// Slopty's Claude Code mod as written under the data dir, and the socket it posts to;
     /// `None` when it could not be written, and agents run without it.
     pub claude_mod: Option<slopty_agent::claude_mod::Installed>,
+    /// The displays made for clients, on the main thread; `None` where none can be made, and
+    /// every `OpenDisplay` then streams a physical display.
+    pub displays: Option<slopty_worker::screen::sized::Displays<slopty_worker::screen::sized::Cg>>,
 }
 
 impl Daemon {
@@ -322,19 +325,55 @@ fn watch_caps(
     });
 }
 
+/// The displays made for clients, as the worker holds them.
+type Displays = Option<slopty_worker::screen::sized::Displays<slopty_worker::screen::sized::Cg>>;
+
 fn main() -> Result<()> {
     // The connections' loops and noq's drivers carry every keystroke and echo: they run at the
     // class of work a person waits on, as the session threads do.
     slopty_platform::user_interactive_thread();
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .on_thread_start(slopty_platform::user_interactive_thread)
         .build()
-        .context("start the runtime")?
-        .block_on(run())
+        .context("start the runtime")?;
+    serve(runtime)
 }
 
-async fn run() -> Result<()> {
+/// macOS: the main thread serves the run loop the displays made for clients live on
+/// (`CGVirtualDisplay` refuses every other thread), and the daemon runs on a thread beside it,
+/// ending the process when it ends.
+#[cfg(target_os = "macos")]
+fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
+    let displays = slopty_worker::screen::sized::on_main_queue();
+    std::thread::Builder::new()
+        .name("slopty-worker".to_owned())
+        .spawn(move || {
+            slopty_platform::user_interactive_thread();
+            let ended = runtime.block_on(run(displays));
+            drop(runtime);
+            if let Err(e) = &ended {
+                tracing::error!(error = ?e, "worker stopped");
+            }
+            #[expect(
+                clippy::exit,
+                reason = "the main thread never returns; this ends the process"
+            )]
+            std::process::exit(i32::from(ended.is_err()));
+        })
+        .context("start the daemon thread")?;
+    slopty_worker::screen::sized::park_main()
+}
+
+/// Elsewhere no display is made, and the daemon runs on the main thread.
+#[cfg(not(target_os = "macos"))]
+fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
+    let ended = runtime.block_on(run(None));
+    drop(runtime);
+    ended
+}
+
+async fn run(displays: Displays) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -412,6 +451,7 @@ async fn run() -> Result<()> {
         home: slopty_platform::dirs::home().to_str().map(str::to_owned).unwrap_or_default(),
         follows: Arc::default(),
         claude_mod,
+        displays,
     };
     let transfers = Arc::clone(&daemon.transfers);
     tokio::task::spawn_blocking(move || {

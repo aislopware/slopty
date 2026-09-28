@@ -24,6 +24,7 @@ fn retina_plan() -> crate::Plan {
 #[test]
 fn the_private_classes_resolve_on_this_mac() {
     Classes::resolve().unwrap();
+    assert!(crate::available());
 }
 
 #[test]

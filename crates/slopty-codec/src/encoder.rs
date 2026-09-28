@@ -46,15 +46,13 @@ use crate::{CodecError, PixelBuffer, annexb};
 /// name and used, never this literal.
 const MAIN_444_10: &str = "HEVC_Main44410_AutoLevel";
 
-impl Chroma {
-    /// The `CVPixelFormatType` a session of this chroma is fed: full-range NV12 (`420f`) for
-    /// 4:2:0, full-range 10-bit bi-planar 4:4:4 (`xf44`) for 4:4:4.
-    #[must_use]
-    pub const fn pixel_format(self) -> u32 {
-        match self {
-            Self::Subsampled => objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-            Self::Full => kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
-        }
+/// The `CVPixelFormatType` a session of `chroma` is fed: full-range NV12 (`420f`) for 4:2:0,
+/// full-range 10-bit bi-planar 4:4:4 (`xf44`) for 4:4:4.
+#[must_use]
+pub const fn pixel_format(chroma: Chroma) -> u32 {
+    match chroma {
+        Chroma::Subsampled => objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        Chroma::Full => kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
     }
 }
 
@@ -117,7 +115,6 @@ pub struct Encoder {
     session: CFRetained<VTCompressionSession>,
     config: EncoderConfig,
     rate_control: RateControl,
-    chroma: Chroma,
     ltr: bool,
     // Declared last so it outlives the session's `Drop` (the callback's refcon points at it).
     _shared: Arc<Shared>,
@@ -137,30 +134,20 @@ impl std::fmt::Debug for Encoder {
         f.debug_struct("Encoder")
             .field("config", &self.config)
             .field("rate_control", &self.rate_control)
-            .field("chroma", &self.chroma)
             .field("ltr", &self.ltr)
             .finish_non_exhaustive()
     }
 }
 
 impl Encoder {
-    /// Create and configure a low-latency session. Packets are delivered to `sink` on
-    /// VideoToolbox's thread.
+    /// Create and configure a low-latency session carrying `config.chroma`. Packets are
+    /// delivered to `sink` on VideoToolbox's thread. A [`Chroma::Full`] session is HEVC only,
+    /// and every picture must then be in the format [`pixel_format`] names for it.
     pub fn new(
         config: EncoderConfig,
         sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
     ) -> Result<Self, CodecError> {
-        Self::with_chroma(config, Chroma::Subsampled, sink)
-    }
-
-    /// A low-latency session carrying `chroma`. [`Chroma::Full`] is HEVC only, and every
-    /// picture must then be in the format [`Chroma::pixel_format`] names for the capture.
-    pub fn with_chroma(
-        config: EncoderConfig,
-        chroma: Chroma,
-        sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
-    ) -> Result<Self, CodecError> {
-        Self::with_rate_control(config, RateControl::LowLatency, chroma, Box::new(sink))
+        Self::with_rate_control(config, RateControl::LowLatency, Box::new(sink))
     }
 
     /// A session in another rate-control mode, for the measurement that compares them.
@@ -170,15 +157,15 @@ impl Encoder {
         rate_control: RateControl,
         sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
     ) -> Result<Self, CodecError> {
-        Self::with_rate_control(config, rate_control, Chroma::Subsampled, Box::new(sink))
+        Self::with_rate_control(config, rate_control, Box::new(sink))
     }
 
     fn with_rate_control(
         config: EncoderConfig,
         rate_control: RateControl,
-        chroma: Chroma,
         sink: Sink,
     ) -> Result<Self, CodecError> {
+        let chroma = config.chroma;
         if chroma == Chroma::Full && config.codec != VideoCodec::Hevc {
             return Err(CodecError::NoFullChroma(config.codec));
         }
@@ -206,7 +193,7 @@ impl Encoder {
             VideoCodec::H264 => kCMVideoCodecType_H264,
         };
         // A 4:4:4 session says what it is fed; a 4:2:0 one takes the capture's NV12 as it comes.
-        let source_format = CFNumber::new_i64(i64::from(chroma.pixel_format()));
+        let source_format = CFNumber::new_i64(i64::from(pixel_format(chroma)));
         let source = (chroma == Chroma::Full).then(|| {
             CFDictionary::<CFString, CFType>::from_slices(
                 // SAFETY: framework-provided constant string.
@@ -237,8 +224,7 @@ impl Encoder {
         };
         // SAFETY: `create` returned a +1 reference.
         let session = unsafe { CFRetained::from_raw(raw) };
-        let mut encoder =
-            Self { session, config, rate_control, chroma, ltr: false, _shared: shared };
+        let mut encoder = Self { session, config, rate_control, ltr: false, _shared: shared };
         encoder.configure()?;
         // SAFETY: the session is fully configured; this only pre-allocates encoder resources.
         let status = unsafe { encoder.session.prepare_to_encode_frames() };
@@ -255,7 +241,7 @@ impl Encoder {
     /// The colour the stream carries.
     #[must_use]
     pub const fn chroma(&self) -> Chroma {
-        self.chroma
+        self.config.chroma
     }
 
     /// True when the encoder accepted long-term references.
@@ -378,7 +364,7 @@ impl Encoder {
                 self.set_optional(key, value, name);
             }
         }
-        let profile: CFRetained<CFString> = match (self.config.codec, self.chroma) {
+        let profile: CFRetained<CFString> = match (self.config.codec, self.config.chroma) {
             (VideoCodec::Hevc, Chroma::Subsampled) => {
                 // SAFETY: framework-provided constant string.
                 unsafe { kVTProfileLevel_HEVC_Main_AutoLevel }.retain()
@@ -489,7 +475,7 @@ impl Encoder {
         options: &FrameOptions,
     ) -> Result<(), CodecError> {
         let format = CVPixelBufferGetPixelFormatType(image);
-        if self.chroma == Chroma::Full && format != Chroma::Full.pixel_format() {
+        if self.config.chroma == Chroma::Full && format != pixel_format(Chroma::Full) {
             return Err(CodecError::NotFullChroma(format));
         }
         let mut keys: Vec<&CFString> = Vec::new();
@@ -961,6 +947,7 @@ mod tests {
             codec: VideoCodec::Hevc,
             fps: 60,
             bitrate_bps: 2_000_000,
+            chroma: Chroma::Subsampled,
         };
         Encoder::new(config, move |packet| {
             let _receiver_gone = tx.send(packet);
@@ -1090,7 +1077,7 @@ mod tests {
                 None,
                 W,
                 H,
-                Chroma::Full.pixel_format(),
+                pixel_format(Chroma::Full),
                 None,
                 NonNull::from(&mut raw),
             )
@@ -1138,8 +1125,9 @@ mod tests {
             codec: VideoCodec::Hevc,
             fps: 60,
             bitrate_bps: 8_000_000,
+            chroma: Chroma::Full,
         };
-        Encoder::with_chroma(config, Chroma::Full, move |packet| {
+        Encoder::new(config, move |packet| {
             let _receiver_gone = tx.send(packet);
         })
         .unwrap()
@@ -1209,7 +1197,7 @@ mod tests {
         }
         let (format, cb) =
             drx.recv_timeout(std::time::Duration::from_secs(60)).expect("a decoded frame");
-        assert_eq!(format, Chroma::Full.pixel_format(), "decoded straight to xf44");
+        assert_eq!(format, pixel_format(Chroma::Full), "decoded straight to xf44");
         let swing = cb.windows(2).map(|w| u32::from(w[0].abs_diff(w[1]))).sum::<u32>()
             / u32::try_from(cb.len() - 1).unwrap();
         assert!(swing > 360, "Cb alternates 256/768 column by column, mean swing {swing}");
@@ -1223,7 +1211,7 @@ mod tests {
         let encoder = full_chroma_encoder(tx);
         let err = encoder.encode(&frame(0), 0, &FrameOptions::default()).unwrap_err();
         assert!(
-            matches!(err, CodecError::NotFullChroma(f) if f == Chroma::Subsampled.pixel_format()),
+            matches!(err, CodecError::NotFullChroma(f) if f == pixel_format(Chroma::Subsampled)),
             "{err}"
         );
     }
@@ -1237,8 +1225,9 @@ mod tests {
             codec: VideoCodec::H264,
             fps: 60,
             bitrate_bps: 2_000_000,
+            chroma: Chroma::Full,
         };
-        let err = Encoder::with_chroma(config, Chroma::Full, |_packet| {}).unwrap_err();
+        let err = Encoder::new(config, |_packet| {}).unwrap_err();
         assert!(matches!(err, CodecError::NoFullChroma(VideoCodec::H264)), "{err}");
     }
 

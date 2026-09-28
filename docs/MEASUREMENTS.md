@@ -7358,3 +7358,31 @@ with 53.2 dB luma and 28.9 dB chroma; the 10-bit 4:4:4 stream reaches 55.3 dB lu
 chroma at 11.1 Mbit/s, about 1.6× the bits for 24 dB more chroma. Below the 4:2:0 saturation
 rate 4:4:4 loses: at 3.4 Mbit/s it is 35 dB luma against 44.5, at 7 Mbit/s 47.5 against 52.9.
 At no rate does 4:2:0 get its chroma above 29 dB, the subsampling ceiling.
+
+## 2026-09-28 — full chroma on the wire: a chroma switch, rebuild to picture
+
+Mac Studio M1 Max, macOS 27.0. `a_full_chroma_stream_arrives_as_444_and_follows_the_rate` in
+`crates/slopty-worker/src/screen/synthetic.rs` streams drawn pictures (no capture) at a quarter
+of the first display, 480×270 here, through the real VideoToolbox encoder, packetizer,
+reassembler and decoder on loopback. It times each chroma switch from the geometry tick that
+starts the rebuild to the first decoded picture in the new format. That span covers the
+session build, the capture's format change, the keyframe and the decoder's rebuild on the new
+SPS.
+
+```sh
+cargo test -p slopty-worker --lib --no-run   # target/debug/deps/slopty_worker-<hash>
+cp target/debug/deps/slopty_worker-<hash> /tmp/worker && cd /tmp
+nice -n 10 ./worker --exact screen::synthetic::tests::a_full_chroma_stream_arrives_as_444_and_follows_the_rate --nocapture
+```
+
+| run | 4:4:4 → 4:2:0 | 4:2:0 → 4:4:4 |
+| --- | --- | --- |
+| 1 | 54.7 ms | 43.1 ms |
+| 2 | 45.4 | 42.4 |
+| 3 | 38.4 | 31.5 |
+| 4 | 97.8 | 35.6 |
+| 5 | 47.5 | 42.6 |
+
+A switch costs 30–100 ms of the old picture held, and a keyframe, once. The hold in
+`ChromaGate` keeps that to about one switch every half a minute on a link that sits at the
+line. Nothing was measured at 1080p or on a real link.

@@ -36,7 +36,7 @@ pub use decoder::{
 #[cfg(all(target_os = "macos", feature = "experiments"))]
 pub use encoder::RateControl;
 #[cfg(target_os = "macos")]
-pub use encoder::{Encoder, VideoToolbox};
+pub use encoder::{Encoder, VideoToolbox, pixel_format};
 pub use video::{AudioEncoder, Chroma, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder};
 
 /// Codec failures. The `OSStatus` codes are VideoToolbox's (`kVT*Err`, negative).

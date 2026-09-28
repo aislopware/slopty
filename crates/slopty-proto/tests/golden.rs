@@ -295,6 +295,7 @@ mod golden {
             agents: Vec::new(),
             can_capture: false,
             can_inject: true,
+            virtual_displays: false,
             version: "0.1.0".to_owned(),
         };
         snap(
@@ -308,7 +309,10 @@ mod golden {
                 sessions: Vec::new(),
             }),
         );
-        snap("worker_caps", &WorkerMsg::Caps(WorkerCaps { can_capture: true, ..caps }));
+        snap(
+            "worker_caps",
+            &WorkerMsg::Caps(WorkerCaps { can_capture: true, virtual_displays: true, ..caps }),
+        );
         snap("worker_load", &WorkerMsg::Load(3.25));
     }
 
@@ -657,6 +661,72 @@ mod golden {
                 stream: StreamId(7),
                 width: 1440,
                 height: 900,
+                scale: None,
+            }),
+        );
+        snap(
+            "client_screen_resize_scale",
+            &ClientMsg::Screen(ScreenRequest::Resize {
+                stream: StreamId(7),
+                width: 2752,
+                height: 2064,
+                scale: Some(2.0),
+            }),
+        );
+    }
+
+    /// A quality that asks for colour at every pixel.
+    #[test]
+    fn screen_quality_full_chroma() {
+        use slopty_proto::screen::{Chroma, Quality, VideoCodec};
+        snap(
+            "client_screen_set_quality_full_chroma",
+            &ClientMsg::Screen(ScreenRequest::SetQuality {
+                stream: StreamId(7),
+                quality: Quality {
+                    fps: 60,
+                    bitrate_bps: 30_000_000,
+                    scale: 1.0,
+                    codec: VideoCodec::Hevc,
+                    chroma: Chroma::Full,
+                },
+            }),
+        );
+    }
+
+    /// A display made for the client: the ask, then what the worker made of it, typed.
+    #[test]
+    fn screen_display() {
+        use slopty_core::DisplayId;
+        use slopty_proto::screen::{
+            DisplayKey, DisplayShape, NoVirtualDisplay, Quality, VirtualDisplay,
+        };
+        let key = DisplayKey(*b"slopty-ipad-pro!");
+        snap(
+            "client_screen_open_display",
+            &ClientMsg::Screen(ScreenRequest::OpenDisplay {
+                key,
+                shape: DisplayShape { width: 2752, height: 2064, scale: 2.0, refresh_hz: 120 },
+                quality: Quality::default(),
+            }),
+        );
+        snap(
+            "worker_screen_display_made",
+            &WorkerMsg::Screen(ScreenEvent::Display {
+                stream: StreamId(7),
+                key,
+                display: VirtualDisplay::Made(DisplayId(0x8000_0003)),
+            }),
+        );
+        snap(
+            "worker_screen_display_physical",
+            &WorkerMsg::Screen(ScreenEvent::Display {
+                stream: StreamId(7),
+                key,
+                display: VirtualDisplay::Physical {
+                    display: DisplayId(1),
+                    why: NoVirtualDisplay::Unlisted,
+                },
             }),
         );
     }
@@ -1008,6 +1078,7 @@ mod golden {
             agents: Vec::new(),
             can_capture: true,
             can_inject: true,
+            virtual_displays: false,
             version: "0.1.0".to_owned(),
         };
         snap(
@@ -1994,6 +2065,7 @@ mod ctl {
                 agents: Vec::new(),
                 can_capture: true,
                 can_inject: false,
+                virtual_displays: false,
                 version: "0.1.0".to_owned(),
             },
             listen: "[::]:45550".to_owned(),

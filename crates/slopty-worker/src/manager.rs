@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::agent::AgentStatus;
+use slopty_proto::ptyd::PtydError;
 use slopty_proto::terminal::{OpenSession, SessionState, SessionSummary, TermSize};
-use slopty_pty::protocol::socket_path;
-use slopty_pty::{PtydClient, SpawnSpec};
+use slopty_pty::protocol::{SessionInfo, socket_path};
+use slopty_pty::{PtyError, PtydClient, SpawnSpec};
 use tokio::sync::mpsc;
 
 use crate::WorkerError;
@@ -26,6 +27,13 @@ pub const SCROLLBACK_LINES: u32 = 50_000;
 /// (`docs/decisions/terminal.md`, "An exited shell stays until it is closed"); this bounds the
 /// ones nobody comes back to. A day outlasts a night and a working day away from the machine.
 pub const EXITED_UNWATCHED: Duration = Duration::from_hours(24);
+
+/// How long a starting worker waits for an older one to let go of a session: that worker is
+/// exiting, and ptyd takes the session back the moment its connection drops.
+const HANDOVER_WAIT: Duration = Duration::from_secs(30);
+
+/// How often a session an older worker holds is asked for again.
+const HANDOVER_POLL: Duration = Duration::from_millis(50);
 
 struct Entry {
     handle: SessionHandle,
@@ -131,11 +139,52 @@ impl Worker {
         tokio::spawn(tap_loop(Arc::downgrade(&worker.inner), tap_rx));
         for info in existing {
             tracing::info!(session = %info.id, pid = info.pid, "adopting session from ptyd");
-            if let Err(e) = worker.adopt(info.id, info.size, Vec::new(), info.exited).await {
-                tracing::warn!(session = %info.id, error = %e, "adopt failed");
-            }
+            worker.adopt_listed(info).await;
         }
         Ok((worker, Reports { exits, port_hints: port_hints_rx, moves: moves_rx }))
+    }
+
+    /// Take over a session ptyd listed. One closed since the listing is let go. One an older
+    /// worker still holds (it is exiting as this one starts) is taken in the background once
+    /// that worker lets go, and announced through [`Reports::moves`] like any changed summary.
+    async fn adopt_listed(&self, info: SessionInfo) {
+        let (id, size, exited) = (info.id, info.size, info.exited);
+        match self.adopt(id, size, Vec::new(), exited).await {
+            Ok(_handle) => {}
+            Err(WorkerError::Pty(PtyError::Daemon(PtydError::NoSuchSession))) => {
+                tracing::debug!(session = %id, "closed before it was adopted");
+            }
+            Err(WorkerError::Pty(PtyError::Daemon(PtydError::AttachedElsewhere))) => {
+                tracing::info!(session = %id, "held by an older worker; adopting once it lets go");
+                let worker = self.clone();
+                tokio::spawn(async move { worker.adopt_when_free(id, size, exited).await });
+            }
+            Err(e) => tracing::warn!(session = %id, error = %e, "adopt failed"),
+        }
+    }
+
+    async fn adopt_when_free(&self, id: SessionId, size: TermSize, exited: Option<i32>) {
+        let asked = tokio::time::Instant::now();
+        loop {
+            tokio::time::sleep(HANDOVER_POLL).await;
+            match self.adopt(id, size, Vec::new(), exited).await {
+                Ok(_handle) => {
+                    tracing::info!(session = %id, "adopted from the older worker");
+                    let _sent = self.inner.moves.send(id);
+                    return;
+                }
+                Err(WorkerError::Pty(PtyError::Daemon(PtydError::AttachedElsewhere)))
+                    if asked.elapsed() < HANDOVER_WAIT => {}
+                Err(WorkerError::Pty(PtyError::Daemon(PtydError::NoSuchSession))) => {
+                    tracing::debug!(session = %id, "closed while an older worker held it");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %e, "adopt failed");
+                    return;
+                }
+            }
+        }
     }
 
     /// The daemon's agent table.
@@ -207,7 +256,7 @@ impl Worker {
             moves: Some(self.inner.moves.clone()),
             touched: Some(self.inner.changes.toucher()),
         })?;
-        let started_ms = WallMs::from_millis(attached.started_ms);
+        let started_ms = attached.started_ms;
         self.inner
             .sessions
             .lock()
@@ -330,8 +379,11 @@ impl Worker {
         let entry = self.inner.sessions.lock().remove(&id).ok_or(WorkerError::NoSuchSession)?;
         self.inner.changes.forget(id);
         entry.handle.close();
-        self.inner.ptyd.lock().await.close(id).await?;
-        Ok(())
+        match self.inner.ptyd.lock().await.close(id).await {
+            // ptyd has already forgotten it: closed is what was asked for.
+            Ok(()) | Err(PtyError::Daemon(PtydError::NoSuchSession)) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -394,7 +446,7 @@ async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
     }
 }
 
-async fn send_tap(ptyd: &mut PtydClient, tap: Tap) -> Result<(), slopty_pty::PtyError> {
+async fn send_tap(ptyd: &mut PtydClient, tap: Tap) -> Result<(), PtyError> {
     match tap {
         Tap::Output(frame) => ptyd.output(&frame).await,
         Tap::Checkpoint { id, state } => ptyd.checkpoint(id, &state).await,

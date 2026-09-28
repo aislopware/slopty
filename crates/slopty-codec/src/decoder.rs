@@ -619,6 +619,7 @@ mod recovery_tests {
             codec: VideoCodec::Hevc,
             fps: 60,
             bitrate_bps: 2_000_000,
+            chroma: crate::Chroma::Subsampled,
         };
         let encoder = Encoder::new(config, move |packet| {
             let _receiver_gone = tx.send(packet);

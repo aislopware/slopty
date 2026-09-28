@@ -4,6 +4,7 @@
 //! cross it. Compiled on every target; each platform implements the traits in a module of its
 //! own (VideoToolbox and `AudioConverter` on macOS).
 
+pub use slopty_proto::screen::Chroma;
 use slopty_proto::screen::VideoCodec;
 
 use crate::CodecError;
@@ -21,19 +22,10 @@ pub struct EncoderConfig {
     pub fps: u16,
     /// Target bitrate, bits per second.
     pub bitrate_bps: u32,
-}
-
-/// How much colour a video stream carries (`docs/decisions/video.md`, "4:4:4 on the
-/// low-latency encoder").
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Chroma {
-    /// 4:2:0, one colour sample per 2×2 pixels: HEVC Main or H.264 High, fed full-range NV12.
-    #[default]
-    Subsampled,
-    /// 4:4:4, colour at every pixel: HEVC Main 4:4:4 10, HEVC only. The encoder is fed
-    /// full-range 10-bit bi-planar 4:4:4 (`xf44`), the one 4:4:4 format ScreenCaptureKit
-    /// delivers, and refuses anything else rather than let the hardware quietly encode 4:2:0.
-    Full,
+    /// The colour the stream carries. [`Chroma::Full`] is HEVC only, and every picture must
+    /// then be full-range 10-bit bi-planar 4:4:4 (`xf44`); the encoder refuses anything else
+    /// rather than let the hardware quietly encode 4:2:0.
+    pub chroma: Chroma,
 }
 
 /// Per-frame requests.

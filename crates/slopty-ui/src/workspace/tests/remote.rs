@@ -490,11 +490,11 @@ fn a_promise_is_fetched_over_the_link_the_worker_has_now(cx: &mut TestAppContext
 }
 
 /// A picture pasted into an agent's composer goes up to a directory of its own on the worker,
-/// with a chip in the composer while it uploads; once it has landed, its path is typed at the
-/// cursor, and nothing goes to the PTY until the message is sent. A file dropped on the face is
-/// attached the same way.
+/// with a chip in the composer from the paste until the message goes; the draft never holds its
+/// path, and nothing goes to the PTY until the message is sent, led by the landed path. A file
+/// dropped on the face, or picked with the paperclip, is attached the same way.
 #[gpui::test]
-fn a_picture_pasted_into_the_composer_uploads_and_its_path_is_typed(cx: &mut TestAppContext) {
+fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let (mut studio, mut calls, _board) = connect_remote(&view, cx);
     let session = SessionId::new();
@@ -540,15 +540,28 @@ fn a_picture_pasted_into_the_composer_uploads_and_its_path_is_typed(cx: &mut Tes
         v.xfer_message(XferMsg::Finished { xfer, paths: vec![landed.clone()] }, cx);
     });
     cx.run_until_parked();
-    assert!(chips(cx).is_empty(), "the chip goes once it landed");
-    assert_eq!(face.read_with(cx, ConversationView::draft), format!("look at {landed} "));
+    assert_eq!(chips(cx).len(), 1, "the chip stays once it landed");
+    assert!(cx.debug_bounds("composer-attachment-progress").is_none(), "done going up");
+    assert_eq!(face.read_with(cx, ConversationView::draft), "look at", "no path in the draft");
     assert!(!file.exists(), "the scratch copy here goes with the upload");
     let typed: Vec<ClientMsg> = studio
         .drain()
         .into_iter()
         .filter(|m| matches!(m, ClientMsg::Term { req, .. } if req.is_input()))
         .collect();
-    assert!(typed.is_empty(), "the path waits in the draft: {typed:?}");
+    assert!(typed.is_empty(), "the chip waits for the message: {typed:?}");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let pasted: Vec<String> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Term { req: TermRequest::Paste(text), .. } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pasted, [format!("look at {landed}")], "the path goes with the message");
+    assert!(chips(cx).is_empty(), "the chip went with it");
 
     let dir = tempfile::tempdir().unwrap();
     let dropped = dir.path().join("design.png");
@@ -570,6 +583,19 @@ fn a_picture_pasted_into_the_composer_uploads_and_its_path_is_typed(cx: &mut Tes
     assert!(matches!(calls.try_recv(), Ok(Call::Cancel(c)) if c == xfer), "and the upload stops");
     let nodes = tree(cx);
     assert!(!nodes.iter().any(|n| n.is("Button", Some("Cancel upload"))), "{nodes:#?}");
+
+    // The paperclip asks for the system's picker, for this tile.
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = std::rc::Rc::clone(&asked);
+    cx.update(|_, cx| {
+        cx.set_global(crate::workspace::folders::FilesSeam(std::rc::Rc::new(
+            move |ask: &crate::workspace::folders::FilesAsk| sink.borrow_mut().push(ask.clone()),
+        )));
+    });
+    let clip = cx.debug_bounds("composer-attach").expect("the paperclip");
+    cx.simulate_click(clip.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(*asked.borrow(), [crate::workspace::folders::FilesAsk::Import(tile)]);
 }
 
 /// Files dropped on a shell go up to its directory; the tile shows how far the upload got,

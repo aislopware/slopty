@@ -1,8 +1,8 @@
 //! The bar across the top, from the navigator's right edge to the window's (from past the
 //! traffic lights when the navigator is hidden): the navigator's toggle, the workspaces as
 //! tabs with "+" after them (a menu of what to open: a terminal, an agent, a window, a note, or
-//! a workspace), and the active workspace's column dots while some column is out of view; the
-//! inbox's bell and "…" on the right. Nothing else: every other action is a key, the
+//! a workspace); the inbox's bell and "…" on the right. Where the view is along the strip is
+//! the strip's own thumb (`marks`), not the bar's. Nothing else: every other action is a key, the
 //! palette, or a tile's own header, and the readouts (the server's state among them) live in
 //! the status bar.
 //!
@@ -35,7 +35,7 @@ use gpui::{
     IntoElement as _, MouseButton, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
-use slopty_client::layout::{Column, Strip, Tile, WorkerKey};
+use slopty_client::layout::{Column, Tile, WorkerKey};
 use slopty_theme::{Motion, Typography};
 
 use super::actions::{
@@ -84,14 +84,6 @@ pub(super) const NEW: &str = "New";
 
 /// Keyboard hints where there is a keyboard with a ⌘ key.
 const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
-
-/// The column marks: a segment's length, thickness and the gap between two, and at most this
-/// many segments at full length before they shorten to fit. Segments, as a page control draws
-/// a scroll position: three dots after "+" were the "…" button's own glyph and read as "more".
-const SEGMENT_W: f32 = 8.0;
-const SEGMENT_H: f32 = 3.0;
-const SEGMENT_GAP: f32 = 3.0;
-const SEGMENTS_AT_FULL_SIZE: usize = 12;
 
 /// How much bigger than the body the phone's workspace name is: the iOS navigation title's
 /// 17 over the body's 15.
@@ -157,28 +149,6 @@ impl std::fmt::Debug for Tabs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tabs").field("drawn", &self.drawn.len()).finish_non_exhaustive()
     }
-}
-
-/// Whether every column of `strip` is in its view, so the dots would say nothing.
-pub(super) fn all_in_view(strip: &Strip) -> bool {
-    let (view_x, view_w) = strip.view;
-    strip.columns.iter().all(|(x, w)| *x >= view_x - 1.0 && x + w <= view_x + view_w + 1.0)
-}
-
-/// Which of `strip`'s columns the bar's segments show in view, `None` when it shows none: a
-/// workspace of one column, or every column in view.
-pub(super) fn indicator(strip: &Strip) -> Option<Vec<bool>> {
-    if strip.columns.len() < 2 || all_in_view(strip) {
-        return None;
-    }
-    let (view_x, view_w) = strip.view;
-    Some(
-        strip
-            .columns
-            .iter()
-            .map(|(x, w)| x + w > view_x + 1.0 && *x < view_x + view_w - 1.0)
-            .collect(),
-    )
 }
 
 impl WorkspaceView {
@@ -336,7 +306,6 @@ impl WorkspaceView {
                     this.toggle_menu(MenuKind::New, window, cx);
                 }))
         });
-        let dots = self.render_indicator(cx);
 
         // Right: the inbox and "…". Who needs you is counted once, on the bell; its rows go to
         // them.
@@ -416,8 +385,7 @@ impl WorkspaceView {
                     .gap(px(spacing.sm))
                     .children(toggle)
                     .children(tabs)
-                    .children(new)
-                    .children(dots),
+                    .children(new),
             )
             .child(buttons)
             .into_any_element()
@@ -832,77 +800,6 @@ impl WorkspaceView {
                     .child(SharedString::from(self.workspace_name_at(ix))),
             )
             .into_any_element()
-    }
-
-    /// One segment per column of the active workspace, a few points apart, the columns in view
-    /// joined into one bar in the muted tone as a scroll bar's thumb, the rest in the hairline's;
-    /// a click on one goes to that column. Nothing where there is nowhere to go: a workspace of
-    /// one column, every column in view, or the navigator laid over the bar.
-    ///
-    /// Segments, not a scaled map of the strip: a track with the view bracketed and the active
-    /// column filled read as a progress bar, the loudest thing in the bar saying the least. Nor
-    /// a bar per column in view: three of them in the title's tone read as "2 of 3 loaded".
-    /// Nor dots: three dots after "+" were the "…" button's glyph.
-    fn render_indicator(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        if matches!(self.nav.drawn, Some(Mode::Overlay | Mode::Drawer)) {
-            return None;
-        }
-        let in_view = indicator(&self.drawn_strip)?;
-        let count = in_view.len();
-        let long =
-            if count > SEGMENTS_AT_FULL_SIZE { SEGMENT_W - theme.spacing.xs } else { SEGMENT_W };
-        let radius = px(theme.radii.xs);
-        let marks: Vec<gpui::AnyElement> = in_view
-            .iter()
-            .enumerate()
-            .map(|(i, &shown)| {
-                let last = i.saturating_add(1) == count;
-                let before = i.checked_sub(1).and_then(|p| in_view.get(p)).copied();
-                let after = in_view.get(i.saturating_add(1)).copied();
-                // A column in view reaches over the gap to the next one in view: the run is
-                // one thumb, its corners only at its ends.
-                let joins = shown && after == Some(true);
-                let starts = !(shown && before == Some(true));
-                let bar = div()
-                    .w(px(if joins { long + SEGMENT_GAP } else { long }))
-                    .h(px(SEGMENT_H))
-                    .bg(hsla(if shown { s.text_muted } else { s.border }))
-                    .when(starts, |el| el.rounded_l(radius))
-                    .when(!joins, |el| el.rounded_r(radius));
-                div()
-                    .id(("column", i))
-                    .debug_selector(move || format!("column-{i}"))
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(format!("Column {}", i.saturating_add(1))))
-                    .flex_none()
-                    .py(px(theme.spacing.sm))
-                    .when(!joins && !last, |el| el.pr(px(SEGMENT_GAP)))
-                    .cursor_pointer()
-                    .child(bar)
-                    .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.tick();
-                        this.layout.focus_column(i);
-                        this.after_focus_moved(cx);
-                        this.layout_touched(cx);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-        let row = div()
-            .id("indicator")
-            .debug_selector(|| "indicator".to_owned())
-            .role(Role::Group)
-            .aria_label("Columns")
-            .flex_none()
-            .flex()
-            .items_center()
-            .children(marks)
-            .into_any_element();
-        Some(row)
     }
 
     /// "+"'s choice of worker, where there are several: a row each, the one a new tile goes to

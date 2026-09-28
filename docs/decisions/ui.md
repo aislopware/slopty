@@ -3525,3 +3525,68 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - A waiting agent's row says the action on its subject, not the tool's name: "Run touch
     notes.txt", "Edit src/main.rs", "Use query from db: users" (`agents::tool_action`). The
     tooltip keeps the exact tool (`agent_ask_text`). Test: `a_bare_tool_is_said_as_what_it_asks`.
+- ✅ **UI wave five, the parts with no wire change** (2026-09-28,
+  `.research/ui-wave5-2026-09-28.md` §1.2, 1.3, 1.6, 1.7, 1.8, 2.1, 2.2, 2.3, 3.1).
+  - **Stop keys off the transcript too.** Stop in the composer and Esc offered themselves only
+    while a hook said the agent worked, so a turn the face saw streaming before any hook had
+    Send and no Stop. Both now follow `turn_running`: the hooks say it works, or the transcript
+    shows a turn in progress. A hook can lag or be missing (the conversation-live render had a
+    calm hook under a streaming call), and the tile's mark already says "Working" on the
+    transcript's word, so Stop and Esc follow the same word.
+  - **An attachment stays a chip until the message goes.** The draft never holds a worker's
+    temporary path. Sending types the landed paths after the text, as a drop at the end of the
+    draft would have. Whether a message is typed as a command is the text's call: a path starts
+    with `/`, and a picture sent alone had gone as a slash command. Send waits while anything
+    still uploads. A pasted picture's chip is the picture, 40 pt square, with its ✕ on a lifted
+    disc and the upload as a 2 pt `accent_fill` line along its foot. A file keeps its pill and
+    says "↑ 42%" only while it uploads. A paperclip "Attach files" leads the composer's foot.
+    It asks the workspace's Files seam, which on the Mac is now the system open panel (it had
+    said the picker was for iPhone and iPad only).
+  - **The stream stats lead with the human numbers.** The overlay is a lifted panel at the
+    picture's top right with one line: fps, time to glass (arrival to present, p50), bitrate
+    and round trip. "To glass" takes the warning tone when its p95 passes two display periods,
+    the round trip from 150 ms (`screen::RTT_WARN_FROM`, now shared with the status bar). The
+    frame rate is never flagged, because a still window sends no frames. The frame's age is
+    not added to "to glass" either: on a still window it grows without bound. "Details" opens
+    the engineering lines two to five in the mono face. The panel keeps its presses from the
+    remote window.
+  - **A screen tile says what is wrong, and only then.** Its header gets a dot and one word:
+    "Stalled" (`error_fill`), "Low bandwidth" (the worker has cut the bitrate for 3 s), or
+    "Frames late" (more than five a second missing the display). A click opens the stats. It
+    is read once a second, and a change is the header's only news.
+  - **Mute is an icon toggle.** One name, "Mute", pressed while muted, `VolumeX` or `Volume2`,
+    beside the trackpad toggle. The muted state is a choice, not a warning, so no `warn`. The
+    palette says "Mute".
+  - **A queued message wears the prompt's bubble, set back** (`raised` at `alpha::STRONG`, the
+    text secondary) with "Queued" or "Sending" under it, not a dashed outline. A queued one's
+    hint says it sends when Claude finishes the step.
+  - **The context ring opens a popover.** It says how full the window is in tokens and as a
+    share over a 4 pt bar in the ring's tone, the session's cost, and the five-hour and
+    seven-day limits with the five-hour reset, each flagged from 80 %. Those limits reached the
+    client and were drawn nowhere. "Compact" types `/compact` as the composer types any
+    command, and only while the agent is idle.
+  - **Where the view is along the strip is the strip's own thumb.** The title bar's column
+    segments are gone, after four forms that each read as a progress bar. A 3 pt thumb sits
+    8 pt over the strip's bottom edge on a faint track. It shows while the strip scrolls or the
+    pointer is within 24 pt of that edge, and fades 800 ms after both stop (at once under
+    Reduce Motion). It is not a control, and it redraws the strip alone, never the chrome.
+    The self-test's frames are still pictures, so a scroll there shows no thumb.
+  - **Diff lines can be quoted into the draft.** A press and a drag over a diff's numbers pick
+    its rows on an accent wash. "Quote in message" floats at the last one and appends "In
+    `path` lines 40–41:" and the lines with their signs as a fenced diff, then shows the
+    conversation with the draft. The Changes pane switches between "This turn" (since the last
+    prompt, across the session's threads) and "Session".
+  - Dropped after checking the code: none of the nine. Two brief details changed on the code's
+    word, both said above: the frame's age stays out of "to glass", and the frame rate is never
+    flagged.
+  - Tests: face `stop_is_offered_while_the_model_streams` (failed before),
+    `the_context_popover_says_the_limits_and_compacts`,
+    `the_changes_pane_scopes_to_this_turn_or_the_session`,
+    `diff_lines_picked_by_their_numbers_are_quoted_into_the_draft`; composer
+    `an_attachment_stays_a_chip_and_its_path_goes_with_the_message`; workspace
+    `remote::a_picture_pasted_into_the_composer_stays_a_chip_until_sent` (the paperclip too),
+    `frame::the_strip_thumb_shows_only_while_the_strip_moves`; screen
+    `health::the_plain_line_leads_with_the_human_numbers_and_flags_trouble`,
+    `health::the_health_mark_is_silent_until_something_is_wrong`; figures
+    `the_context_figures_say_the_window_the_cost_and_the_limits`; diff
+    `a_quote_names_the_lines_and_keeps_their_signs`.

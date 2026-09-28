@@ -153,6 +153,36 @@ pub fn pairs(block: &Block) -> Vec<Pair<'_>> {
     out
 }
 
+/// Lines of a diff quoted into a message: where they are, then the lines as a fenced diff.
+///
+/// Where they are is "In `src/x.rs` lines 12–18:", by the new file's numbers, the old file's
+/// for removals alone. The lines keep their signs, so the model reads what was added and what
+/// went.
+#[must_use]
+pub fn quote(path: &str, lines: &[&Line]) -> String {
+    let numbers = |pick: fn(&Line) -> Option<u32>| {
+        let mut n = lines.iter().filter_map(|l| pick(l));
+        let first = n.next()?;
+        Some(n.fold((first, first), |(lo, hi), x| (lo.min(x), hi.max(x))))
+    };
+    let place = match numbers(|l| l.new).or_else(|| numbers(|l| l.old)) {
+        Some((lo, hi)) if lo == hi => format!(" line {lo}"),
+        Some((lo, hi)) => format!(" lines {lo}\u{2013}{hi}"),
+        None => String::new(),
+    };
+    let body = lines.iter().fold(String::new(), |mut body, l| {
+        body.push(match l.kind {
+            Kind::Added => '+',
+            Kind::Removed => '-',
+            Kind::Context => ' ',
+        });
+        body.push_str(&l.text);
+        body.push('\n');
+        body
+    });
+    format!("In `{path}`{place}:\n```diff\n{body}```\n")
+}
+
 /// How many lines a diff shows before it folds, at the summary level: the change is the point
 /// of an edit, so it shows unasked, and a long one opens on a click.
 pub const SUMMARY_LINES: usize = 12;
@@ -236,5 +266,26 @@ mod tests {
                 (None, Some("e")),
             ]
         );
+    }
+
+    /// A quote names the file and the new file's lines, and keeps each line's sign.
+    #[test]
+    fn a_quote_names_the_lines_and_keeps_their_signs() {
+        let line = |kind, old, new, text: &str| Line {
+            kind,
+            old,
+            new,
+            text: text.to_owned(),
+            spans: None,
+            no_newline: false,
+        };
+        let context = line(Kind::Context, Some(11), Some(12), "fn main() {");
+        let gone = line(Kind::Removed, Some(12), None, "    old();");
+        let came = line(Kind::Added, None, Some(13), "    new();");
+        assert_eq!(
+            quote("src/x.rs", &[&context, &gone, &came]),
+            "In `src/x.rs` lines 12\u{2013}13:\n```diff\n fn main() {\n-    old();\n+    new();\n```\n"
+        );
+        assert_eq!(quote("a.rs", &[&gone]), "In `a.rs` line 12:\n```diff\n-    old();\n```\n");
     }
 }

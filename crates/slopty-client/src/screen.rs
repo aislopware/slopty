@@ -30,6 +30,8 @@ use tokio::task::JoinHandle;
 
 use crate::pacing::{CaptureClock, FrameStamp};
 
+pub mod display;
+
 /// Datagrams buffered per attached stream before the task must drain them.
 const STREAM_DEPTH: usize = 2048;
 /// Datagrams kept for a stream nobody has attached yet.

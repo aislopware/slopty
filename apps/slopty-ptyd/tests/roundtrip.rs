@@ -5,11 +5,12 @@ mod roundtrip {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use slopty_core::SessionId;
+    use slopty_core::{SessionId, WallMs};
     use slopty_proto::input::CellMetrics;
+    use slopty_proto::ptyd::PtydError;
     use slopty_proto::terminal::TermSize;
     use slopty_pty::protocol::{MAX_CHECKPOINT_BYTES, OutputFrame, PtydRequest};
-    use slopty_pty::{PtyMaster, PtydClient, SpawnSpec};
+    use slopty_pty::{PtyError, PtyMaster, PtydClient, SpawnSpec};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     struct Daemon {
@@ -87,7 +88,7 @@ mod roundtrip {
                 match next.attach(id).await {
                     Ok(attached) => break attached,
                     Err(e) => {
-                        assert!(e.to_string().contains("another connection"), "{e}");
+                        assert!(matches!(e, PtyError::Daemon(PtydError::AttachedElsewhere)), "{e}");
                         tokio::time::sleep(Duration::from_millis(20)).await;
                     }
                 }
@@ -130,11 +131,7 @@ mod roundtrip {
         let daemon = start().await;
         let (mut client, mut exits) = PtydClient::connect(&daemon.socket).await.unwrap();
         let id = SessionId::new();
-        let unix_ms = || {
-            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-            u64::try_from(since.unwrap().as_millis()).unwrap()
-        };
-        let before = unix_ms();
+        let before = WallMs::now();
         let pid = client
             .spawn(
                 id,
@@ -152,14 +149,14 @@ mod roundtrip {
             .await
             .unwrap();
         assert!(pid > 0);
-        let after = unix_ms();
+        let after = WallMs::now();
 
         // Give the shell time to print while we're detached, so it lands in the ring.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let attached = client.attach(id).await.unwrap();
         assert_eq!(attached.size, size());
         let started_ms = attached.started_ms;
-        assert!((before..=after).contains(&started_ms), "{before} ≤ {started_ms} ≤ {after}");
+        assert!((before..=after).contains(&started_ms), "{before:?} ≤ {started_ms:?} ≤ {after:?}");
         assert!(
             String::from_utf8_lossy(&attached.backlog).contains("first"),
             "backlog: {:?}",
@@ -199,6 +196,11 @@ mod roundtrip {
         assert_eq!(exited, 0);
         client2.close(id).await.unwrap();
         assert!(client2.list().await.unwrap().is_empty());
+        let gone = client2.attach(id).await.map(drop);
+        assert!(
+            matches!(gone, Err(PtyError::Daemon(PtydError::NoSuchSession))),
+            "a closed session is gone, not busy: {gone:?}"
+        );
         client2.shutdown().await.unwrap();
         // The first connection is gone, so its exit channel is closed or empty; either is fine.
         let _first_conn_exit = exits.try_recv();

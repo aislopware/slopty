@@ -45,6 +45,7 @@ mod tests {
                 agents: Vec::new(),
                 can_capture: false,
                 can_inject: false,
+                virtual_displays: false,
                 version: "0".to_owned(),
             },
             sessions: vec![SessionSummary {

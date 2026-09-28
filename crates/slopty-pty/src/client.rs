@@ -29,8 +29,8 @@ pub struct Attached {
     pub dropped: u64,
     /// Size of record.
     pub size: TermSize,
-    /// Milliseconds since the Unix epoch when ptyd spawned the child.
-    pub started_ms: u64,
+    /// When ptyd spawned the child.
+    pub started_ms: slopty_core::WallMs,
 }
 
 /// A reply, with the fd that rode on it.
@@ -146,7 +146,7 @@ impl PtydClient {
 
     fn unexpected<T>(ev: PtydEvent) -> Result<T, PtyError> {
         match ev {
-            PtydEvent::Error { message, .. } => Err(PtyError::Daemon(message)),
+            PtydEvent::Error { error, .. } => Err(PtyError::Daemon(error)),
             _ => Err(PtyError::UnexpectedReply),
         }
     }

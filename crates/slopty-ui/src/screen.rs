@@ -48,15 +48,17 @@ use slopty_proto::screen::{
     CaptureTarget, CursorShape, Quality, RateVerdict, ScreenInput, ScreenRequest, ScrollPhase,
     SourceState, VideoCodec,
 };
-use slopty_theme::{Theme, alpha};
+use slopty_theme::Theme;
 use tokio::sync::{Notify, mpsc, watch};
 
 use crate::colors::hsla;
 use crate::{keys, kit};
 
+mod health;
 mod touch;
 mod zoom;
 
+pub use health::{Figure, Health, RTT_WARN_FROM};
 pub use zoom::Zoom;
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
@@ -122,6 +124,8 @@ pub enum ScreenViewEvent {
     /// Pressed: the workspace should make this tile active. (The view stops the mouse event,
     /// which keeps it from the tile's own activate handler.)
     Pressed,
+    /// The stream's health changed ([`ScreenView::health`]): the header's mark follows.
+    Health,
     /// A paste of files: the view holds its input, the paste chord first, until
     /// [`ScreenView::release_paste`] once the files are on the worker's pasteboard.
     PasteFiles(crate::clipboard::ClipFiles),
@@ -343,6 +347,13 @@ pub struct ScreenView {
     marked: Option<String>,
     /// The stats overlay (⌘⇧I).
     hud: Option<Hud>,
+    /// The overlay shows its engineering lines under the plain one.
+    hud_details: bool,
+    /// Reads the counters once a second for the header's health mark.
+    probe: health::Probe,
+    /// What is wrong with the stream, as last read.
+    health: Option<Health>,
+    _health: Task<()>,
     /// Decides when a decoded frame goes up and measures arrival → present. The element only
     /// feeds it: a frame on one side, a paint on the other.
     pacer: Pacer,
@@ -393,6 +404,7 @@ pub struct ScreenView {
 struct Hud {
     sampled_at: Instant,
     sample: ScreenStats,
+    summary: Vec<Figure>,
     text: SharedString,
 }
 
@@ -403,6 +415,8 @@ pub struct HudInput<'a> {
     pub size: (u32, u32),
     /// Capture scale.
     pub scale: f32,
+    /// The rate the stream is asked for, frames a second: its display period.
+    pub target_fps: u16,
     /// Decoded frames per second over the last sample period.
     pub fps: f64,
     /// Received megabits per second over the last sample period.
@@ -544,8 +558,11 @@ pub fn past_grace(key: impl Into<gpui::ElementId>, window: &mut Window, cx: &mut
     cx.background_executor().now().saturating_duration_since(since) >= LOADING_GRACE
 }
 
-/// How often the overlay's rates are recomputed.
+/// How often the overlay's rates are recomputed, and the stream's health read.
 const HUD_PERIOD: Duration = Duration::from_millis(1000);
+
+/// The health mark's dot, in points at zoom 1.
+const HEALTH_DOT: f32 = 6.0;
 
 /// The controller's verdict as the overlay words it.
 #[must_use]
@@ -589,7 +606,17 @@ impl Focusable for ScreenView {
 /// The quality a stream is asked for: the settings' rate and ceiling at `scale`.
 #[must_use]
 pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32) -> Quality {
-    Quality { fps: prefs.fps, bitrate_bps: prefs.max_bitrate_bps, scale, codec: VideoCodec::Hevc }
+    Quality {
+        fps: prefs.fps,
+        bitrate_bps: prefs.max_bitrate_bps,
+        scale,
+        codec: VideoCodec::Hevc,
+        chroma: if prefs.sharp_text {
+            slopty_proto::screen::Chroma::Full
+        } else {
+            slopty_proto::screen::Chroma::Subsampled
+        },
+    }
 }
 
 impl ScreenView {
@@ -676,6 +703,10 @@ impl ScreenView {
             sticky: Modifiers::default(),
             marked: None,
             hud: None,
+            hud_details: false,
+            probe: health::Probe::default(),
+            health: None,
+            _health: Self::watch_health(cx),
             rtt: None,
             _awake: awake,
             #[cfg(target_os = "macos")]
@@ -927,9 +958,81 @@ impl ScreenView {
         self.hud = on.then(|| Hud {
             sampled_at: Instant::now(),
             sample: self.handle.stats(),
+            summary: Vec::new(),
             text: SharedString::new_static("…"),
         });
         cx.notify();
+    }
+
+    /// Open or close the overlay's engineering lines.
+    fn toggle_hud_details(&mut self, cx: &mut Context<Self>) {
+        self.hud_details = !self.hud_details;
+        cx.notify();
+    }
+
+    /// Read the stream's health once a second for as long as the view lives.
+    fn watch_health(cx: &Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(HUD_PERIOD).await;
+                if this.update(cx, Self::read_health).is_err() {
+                    return;
+                }
+            }
+        })
+    }
+
+    /// Read the counters; a change of health is the header's news.
+    fn read_health(&mut self, cx: &mut Context<Self>) {
+        let health = self.probe.read(&self.handle.stats(), &self.pacer.stats(), Instant::now());
+        if health != self.health {
+            self.health = health;
+            cx.emit(ScreenViewEvent::Health);
+        }
+    }
+
+    /// What is wrong with the stream, as last read; `None` while all is well.
+    #[must_use]
+    pub const fn health(&self) -> Option<Health> {
+        self.health
+    }
+
+    /// The header's health mark for `view`: a dot and one word, only while something is wrong.
+    /// A click opens the stats overlay.
+    #[must_use]
+    pub fn health_mark(
+        view: &gpui::Entity<Self>,
+        theme: &Theme,
+        k: f32,
+        cx: &App,
+    ) -> Option<gpui::AnyElement> {
+        let this = view.read(cx);
+        let health = this.health?;
+        let s = theme.surfaces;
+        let dot = if health == Health::Stalled { s.error_fill } else { s.warn_fill };
+        let view = view.clone();
+        let mark = div()
+            .id(SharedString::from(format!("health-{}", this.stream.0)))
+            .debug_selector(|| "stream-health".to_owned())
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(SharedString::new_static(health.word()))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs * k))
+            .px(px(theme.spacing.xs * k))
+            .rounded(px(theme.radii.sm * k))
+            .cursor_pointer()
+            .hover(move |el| el.bg(hsla(s.raised)))
+            .text_size(px(theme.typography.small() * k))
+            .text_color(hsla(s.text_secondary))
+            .child(div().flex_none().size(px(HEALTH_DOT * k)).rounded_full().bg(hsla(dot)))
+            .child(health.word());
+        Some(
+            crate::a11y::tab_stop(mark, s.accent)
+                .on_click(move |_ev, _w, cx| view.update(cx, |v, cx| v.set_hud(true, cx)))
+                .into_any_element(),
+        )
     }
 
     /// Whether the stats overlay is showing.
@@ -943,9 +1046,10 @@ impl ScreenView {
         self.rtt = rtt;
     }
 
-    /// The worker's latest bitrate decision, shown in the overlay.
-    pub const fn set_rate(&mut self, target_bps: u32, verdict: RateVerdict, capped: bool) {
+    /// The worker's latest bitrate decision, shown in the overlay and read for health.
+    pub fn set_rate(&mut self, target_bps: u32, verdict: RateVerdict, capped: bool) {
         self.rate = Some((target_bps, verdict, capped));
+        self.probe.verdict(verdict, Instant::now());
     }
 
     /// The worker said which cursor it shows (`ScreenEvent::Cursor`): draw that picture at the
@@ -987,8 +1091,9 @@ impl ScreenView {
         self.rate
     }
 
-    /// Recompute the overlay's rates when a second has passed; returns the text to draw.
-    fn hud_text(&mut self, cx: &App) -> Option<SharedString> {
+    /// Recompute the overlay's rates when a second has passed; returns its plain line and its
+    /// engineering lines.
+    fn hud_text(&mut self, cx: &App) -> Option<(Vec<Figure>, SharedString)> {
         let hud = self.hud.as_mut()?;
         let now = Instant::now();
         let elapsed = now.duration_since(hud.sampled_at);
@@ -1002,23 +1107,26 @@ impl ScreenView {
             let fps = stats.frames.saturating_sub(hud.sample.frames) as f64 / secs;
             #[expect(clippy::cast_precision_loss, reason = "counter deltas over a second")]
             let mbps = stats.bytes.saturating_sub(hud.sample.bytes) as f64 * 8.0 / secs / 1e6;
-            hud.text = hud_lines(&HudInput {
+            let pacing = self.pacer.stats();
+            let input = HudInput {
                 size: self.size,
                 scale: self.quality.scale,
+                target_fps: self.quality.fps,
                 fps,
                 mbps,
                 rtt: self.rtt,
                 frame_age: self.pacer.age(),
                 rate: self.rate,
                 stats: &stats,
-                pacing: &self.pacer.stats(),
+                pacing: &pacing,
                 ui: ui.as_ref(),
-            })
-            .into();
+            };
+            hud.summary = health::summary(&input);
+            hud.text = hud_lines(&input).into();
             hud.sample = stats;
             hud.sampled_at = now;
         }
-        Some(hud.text.clone())
+        Some((hud.summary.clone(), hud.text.clone()))
     }
 
     /// Whether the worker has sent any audio for this stream (the mute control is pointless
@@ -2179,20 +2287,7 @@ impl Render for ScreenView {
                 .child(pill)
         });
 
-        let hud = self.hud_text(cx).map(|text| {
-            div()
-                .absolute()
-                .top(px(self.theme.spacing.xs))
-                .right(px(self.theme.spacing.xs))
-                .px(px(self.theme.spacing.sm))
-                .py(px(self.theme.spacing.xxs))
-                .rounded(px(self.theme.radii.xs))
-                .bg(crate::colors::hsla_alpha(self.theme.surfaces.overlay, alpha::VEIL))
-                .text_size(px(self.theme.typography.caption()))
-                .text_color(hsla(self.theme.surfaces.text_secondary))
-                .font_family(self.theme.typography.ui_family.clone())
-                .child(text)
-        });
+        let hud = self.hud_text(cx).map(|(summary, text)| self.hud_panel(&summary, &text, cx));
         div()
             .id("screen")
             // While the view has the keys, the workspace's own chords stand back (`!Screen`).
@@ -2230,6 +2325,99 @@ impl Render for ScreenView {
             .children(self.cursor_overlay(drawn))
             .children(readout)
             .children(hud)
+    }
+}
+
+impl ScreenView {
+    /// The stats overlay: a lifted panel at the picture's top right with the plain line (a
+    /// figure past its threshold in the warning tone) and, behind "Details", the engineering
+    /// lines in the mono face. It floats: over a remote desktop's own white or black a veil of
+    /// the chrome's grey could vanish, and the lifted surface cannot. A press on it stays here.
+    fn hud_panel(&self, summary: &[Figure], text: &str, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let separator = " \u{b7} ";
+        let mut line = String::new();
+        let mut runs = Vec::new();
+        let font = gpui::font(theme.typography.ui_family.clone());
+        let run = |len: usize, tone| gpui::TextRun {
+            len,
+            font: font.clone(),
+            color: hsla(tone),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        for (ix, figure) in summary.iter().enumerate() {
+            if ix > 0 {
+                line.push_str(separator);
+                runs.push(run(separator.len(), s.text_muted));
+            }
+            line.push_str(&figure.text);
+            runs.push(run(figure.text.len(), if figure.warn { s.warn } else { s.text_secondary }));
+        }
+        let plain = if line.is_empty() {
+            div().text_color(hsla(s.text_muted)).child("\u{2026}").into_any_element()
+        } else {
+            let line = SharedString::from(line);
+            div()
+                .debug_selector(|| "stream-stats-line".to_owned())
+                .whitespace_nowrap()
+                .child(gpui::StyledText::new(line).with_runs(runs))
+                .into_any_element()
+        };
+        let open = self.hud_details;
+        let details = kit::icon_button(
+            theme,
+            "stream-stats-details",
+            if open {
+                crate::icons::IconName::ChevronUp
+            } else {
+                crate::icons::IconName::ChevronDown
+            },
+            "Details",
+        )
+        .aria_expanded(open)
+        .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_hud_details(cx)));
+        let lines = open.then(|| {
+            let rest: Vec<&str> = text.lines().skip(1).collect();
+            div()
+                .debug_selector(|| "stream-stats-details-lines".to_owned())
+                .pt(px(theme.spacing.xs))
+                .border_t_1()
+                .border_color(hsla(s.border_subtle))
+                .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
+                .text_size(px(theme.typography.caption()))
+                .text_color(hsla(s.text_muted))
+                .whitespace_nowrap()
+                .child(SharedString::from(rest.join("\n")))
+        });
+        let panel = kit::tabular(kit::elevate(div(), theme))
+            .id("stream-stats")
+            .debug_selector(|| "stream-stats".to_owned())
+            .role(gpui::accesskit::Role::Status)
+            .aria_label("Stream stats")
+            .flex()
+            .flex_col()
+            .gap(px(theme.spacing.xs))
+            .p(px(theme.spacing.sm))
+            .rounded(px(theme.radii.lg))
+            .cursor(CursorStyle::Arrow)
+            .font_family(theme.typography.ui_family.clone())
+            .text_size(px(theme.typography.meta()))
+            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_ev, _w, cx| cx.stop_propagation())
+            .child(
+                div().flex().items_center().gap(px(theme.spacing.sm)).child(plain).child(details),
+            )
+            .children(lines);
+        div()
+            .absolute()
+            .top(px(theme.spacing.sm))
+            .right(px(theme.spacing.sm))
+            .child(panel)
+            .into_any_element()
     }
 }
 
@@ -2436,6 +2624,7 @@ mod tests {
         let text = hud_lines(&HudInput {
             size: (1920, 1080),
             scale: 1.0,
+            target_fps: 60,
             fps: 59.6,
             mbps: 18.25,
             rtt: Some(Duration::from_micros(9_400)),
@@ -2459,6 +2648,7 @@ mod tests {
         let blank = hud_lines(&HudInput {
             size: (0, 0),
             scale: 0.5,
+            target_fps: 60,
             fps: 0.0,
             mbps: 0.0,
             rtt: None,

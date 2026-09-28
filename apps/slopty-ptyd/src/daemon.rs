@@ -185,7 +185,7 @@ impl Connection {
     }
 
     async fn error(&self, id: Option<SessionId>, error: PtydError) -> Result<()> {
-        self.reply(&PtydEvent::Error { id, message: error.to_string() }, None).await
+        self.reply(&PtydEvent::Error { id, error }, None).await
     }
 
     fn session(&self, id: SessionId) -> Option<Arc<Session>> {

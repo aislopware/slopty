@@ -101,12 +101,8 @@ pub const TAKE_OVER: &str = "Take over";
 pub const HOOKS: &str = "Hooks";
 /// The pill that takes a PTY's size from the client driving it.
 pub const TAKE: &str = "Take";
-/// A remote window's audio pill while it plays here.
+/// A remote window's audio toggle: one name, pressed while this client has silenced it.
 pub const MUTE: &str = "Mute";
-/// The same pill while this client has silenced it.
-pub const MUTED: &str = "Muted";
-/// The muted pill's accessible name: what a press does.
-pub const UNMUTE: &str = "Unmute";
 /// A shell's body while its view attaches.
 pub const ATTACHING: &str = "Attaching…";
 /// A window or display asleep in the registry.
@@ -1548,6 +1544,12 @@ impl WorkspaceView {
             }
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
                 if let Some(view) = self.screens.get(&id)
+                    && let Some(mark) =
+                        crate::screen::ScreenView::health_mark(view, theme, chrome.k, cx)
+                {
+                    actions.push(mark);
+                }
+                if let Some(view) = self.screens.get(&id)
                     && let Some(button) =
                         crate::screen::ScreenView::trackpad_button(view, theme, chrome.k, cx)
                 {
@@ -1556,16 +1558,17 @@ impl WorkspaceView {
                 if let Some(view) = self.screens.get(&id).map(|v| v.read(cx))
                     && (muted || view.has_audio())
                 {
-                    let (label, tone) = if muted {
-                        (MUTED, theme.surfaces.warn)
-                    } else {
-                        (MUTE, theme.surfaces.text_secondary)
-                    };
-                    let pill = pill("mute", id, label, tone, theme, chrome)
-                        .role(Role::Button)
-                        .aria_label(if muted { UNMUTE } else { MUTE });
+                    let icon = if muted { IconName::VolumeX } else { IconName::Volume2 };
+                    let toggle = kit::icon_toggle(
+                        theme,
+                        format!("mute-{}", id.as_uuid()),
+                        icon,
+                        MUTE,
+                        muted,
+                        chrome.k,
+                    );
                     actions.push(
-                        tab_stop(pill, theme.surfaces.accent)
+                        toggle
                             .on_click(cx.listener(move |this, _ev, _w, cx| {
                                 if let Some(view) = this.screens.get(&id) {
                                     view.read(cx).toggle_mute();

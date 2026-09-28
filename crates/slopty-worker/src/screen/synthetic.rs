@@ -426,6 +426,138 @@ mod tests {
         stream.close().await;
     }
 
+    /// The pixel format of the next picture the client decodes whose format `wanted` accepts,
+    /// and whether its input strip read back; `None` when none comes within 30 s.
+    async fn next_picture(
+        frames: &mut tokio::sync::watch::Receiver<Option<Arc<slopty_client::screen::Presentable>>>,
+        wanted: impl Fn(u32) -> bool,
+    ) -> Option<(u32, bool)> {
+        let wait = async {
+            while frames.changed().await.is_ok() {
+                let Some(frame) = frames.borrow_and_update().clone() else { continue };
+                let image = frame.frame.image.as_cv();
+                let format = objc2_core_video::CVPixelBufferGetPixelFormatType(image);
+                if wanted(format) {
+                    return Some((format, inputs_shown(image).is_some()));
+                }
+            }
+            None
+        };
+        tokio::time::timeout(Duration::from_secs(30), wait).await.ok().flatten()
+    }
+
+    /// A stream that asks for 4:4:4 is drawn as `xf44`, encoded as HEVC 4:4:4 and handed to the
+    /// client's surface as the 4:4:4 picture it decoded, the strip still readable; once loss has
+    /// cut the rate under the leave line, the geometry tick moves it to a 4:2:0 session and the
+    /// client's pictures are NV12 again, and clean windows bring it back to 4:4:4 after the
+    /// hold. Drawn, never captured.
+    #[test]
+    fn a_full_chroma_stream_arrives_as_444_and_follows_the_rate() {
+        use objc2_core_video::{
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+        };
+        use slopty_proto::screen::{Chroma, ReceiverReport};
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let ScreenEvent::Listing { displays, .. } = Pipeline::<Drawn>::listing().await.unwrap()
+            else {
+                panic!("no listing")
+            };
+            let display = displays.first().expect("a display");
+            let router = ScreenRouter::new();
+            let wire = Arc::new(Wire { router: router.clone(), line: None });
+            // A quarter of any display up to 6K is smaller than 1080p, whose enter line is
+            // under the 12 Mbit/s a stream opens at.
+            let quality = Quality { scale: 0.25, chroma: Chroma::Full, ..Quality::default() };
+            let (mut stream, opened) = Pipeline::<Drawn>::open(
+                STREAM,
+                CaptureTarget::Display(display.id),
+                quality,
+                wire,
+                |_event| {},
+            )
+            .await
+            .unwrap();
+            let ScreenEvent::Opened { codec, width, height, .. } = opened else {
+                panic!("{opened:?}")
+            };
+            assert_eq!(stream.chroma(), Chroma::Full, "{width}×{height} opens over the line");
+
+            let control = stream.control();
+            let answering = control.clone();
+            // The client's own reports go unheard: the test drives the rate.
+            let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
+            let drain = tokio::spawn(async move { while reports.recv().await.is_some() {} });
+            let uplink = Uplink {
+                control: reports_tx,
+                feedback: Box::new(move |bytes| {
+                    answer(&answering, &bytes);
+                    true
+                }),
+                rtt: Box::new(|| Some(Duration::from_millis(1))),
+            };
+            let handle =
+                spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
+            let mut frames = handle.frames();
+
+            let full = kCVPixelFormatType_444YpCbCr10BiPlanarFullRange;
+            let got = next_picture(&mut frames, |_any| true).await;
+            assert_eq!(got, Some((full, true)), "the first picture is 4:4:4 and reads back");
+
+            // Eight decisions of heavy loss, each a cut to 75 %.
+            let lossy =
+                ReceiverReport { frames_ok: 3, frames_lost: 3, ..ReceiverReport::default() };
+            let targets: Vec<u32> = (0..80)
+                .filter_map(|_| control.report(&lossy, None))
+                .map(|decision| decision.target_bps)
+                .collect();
+            let probe = tokio::task::spawn_blocking(stream.prober()).await.unwrap();
+            let down = Instant::now();
+            let mut rebuild =
+                stream.check_geometry(&probe).expect("the geometry tick rebuilds for the chroma");
+            let encoder = rebuild.built().await.unwrap();
+            assert_eq!(stream.finish_rebuild(rebuild, encoder), None, "the size stays");
+            assert_eq!(stream.chroma(), Chroma::Subsampled, "after cuts to {targets:?}");
+
+            let nv12 = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+            let got = next_picture(&mut frames, |format| format != full).await;
+            assert_eq!(got, Some((nv12, true)), "back on 4:2:0");
+            let down = down.elapsed();
+
+            // Clean windows grow the rate back over the enter line; once the hold is out the
+            // geometry tick moves the stream to a 4:4:4 session again, the capture ahead of it.
+            let clean = ReceiverReport { frames_ok: 3, ..ReceiverReport::default() };
+            let mut decisions = 0;
+            let rebuild = loop {
+                assert!(decisions < 60, "never back on 4:4:4");
+                decisions += 1;
+                let target = (0..10).find_map(|_| control.report(&clean, None));
+                let probe = tokio::task::spawn_blocking(stream.prober()).await.unwrap();
+                let up = Instant::now();
+                if let Some(rebuild) = stream.check_geometry(&probe) {
+                    break (rebuild, target, up);
+                }
+            };
+            let (mut rebuild, target, up) = rebuild;
+            let encoder = rebuild.built().await.unwrap();
+            assert_eq!(stream.finish_rebuild(rebuild, encoder), None);
+            assert_eq!(stream.chroma(), Chroma::Full, "after {decisions} decisions, {target:?}");
+            let got = next_picture(&mut frames, |format| format == full).await;
+            assert_eq!(got, Some((full, true)), "4:4:4 again");
+            eprintln!(
+                "MEASURE chroma switch at {width}×{height}, rebuild → first decoded picture: \
+                 4:4:4 → 4:2:0 {:.1} ms, 4:2:0 → 4:4:4 {:.1} ms",
+                ms(down),
+                ms(up.elapsed())
+            );
+            drop(handle);
+            drain.abort();
+            stream.close().await;
+        });
+    }
+
     /// Capture → glass and input → glass on this Mac, from drawn pictures. Run from a copy of the
     /// test binary off the repository volume (`docs/MEASUREMENTS.md`, "Capture to the glass");
     /// `SLOPTY_GLASS_SECONDS` sets the run length (default 20).

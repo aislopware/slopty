@@ -760,6 +760,11 @@ impl ConversationView {
         let digits = u8::try_from(digits).unwrap_or(u8::MAX);
         let mut left = budget;
         let mut children: Vec<AnyElement> = Vec::new();
+        // Each row drawn, and the lines it shows: what a quote of it says.
+        let mut drawn: Vec<Vec<&Line>> = Vec::new();
+        let picked = self.quoted_rows(thread, id, split);
+        let settled = !self.quote_dragging();
+        let at = DiffAt { thread, id, split, digits };
         for (bx, block) in blocks.iter().enumerate() {
             if left == 0 {
                 break;
@@ -767,16 +772,47 @@ impl ConversationView {
             if bx > 0 {
                 children.push(self.hunk_divider(block));
             }
-            if split {
-                for (l, r) in diff::pairs(block).into_iter().take(left) {
-                    children.push(self.split_line(l, r, digits));
-                    left = left.saturating_sub(1);
-                }
+            let rows: Vec<(Vec<&Line>, diff::Pair<'_>)> = if split {
+                diff::pairs(block)
+                    .into_iter()
+                    .take(left)
+                    .map(|(l, r)| {
+                        let lines = match (l, r) {
+                            (Some(l), Some(r)) if l.kind == Kind::Context => vec![r],
+                            _ => l.into_iter().chain(r).collect(),
+                        };
+                        (lines, (l, r))
+                    })
+                    .collect()
             } else {
-                for line in block.lines.iter().take(left) {
-                    children.push(self.unified_line(line, digits));
-                    left = left.saturating_sub(1);
-                }
+                block.lines.iter().take(left).map(|line| (vec![line], (Some(line), None))).collect()
+            };
+            for (lines, (l, r)) in rows {
+                let ix = drawn.len();
+                let chosen = picked.is_some_and(|(from, to)| (from..=to).contains(&ix));
+                let row = match (split, l) {
+                    (false, Some(line)) => self.unified_line(line, &at, (ix, chosen), cx),
+                    _ => self.split_line(l, r, &at, (ix, chosen), cx),
+                };
+                drawn.push(lines);
+                let last = picked.is_some_and(|(_, to)| to == ix);
+                children.push(if last && settled {
+                    let quoted: Vec<&Line> = picked
+                        .and_then(|(from, to)| drawn.get(from..=to))
+                        .unwrap_or_default()
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .collect();
+                    div()
+                        .relative()
+                        .child(row)
+                        .child(self.quote_button(diff::quote(path, &quoted), cx))
+                        .into_any_element()
+                } else {
+                    row
+                });
+                left = left.saturating_sub(1);
             }
         }
         let shown = budget.min(total);
@@ -971,8 +1007,15 @@ impl ConversationView {
             .child(SharedString::from(n.map(|n| n.to_string()).unwrap_or_default()))
     }
 
-    fn unified_line(&self, line: &Line, digits: u8) -> AnyElement {
+    fn unified_line(
+        &self,
+        line: &Line,
+        at: &DiffAt<'_>,
+        (ix, chosen): (usize, bool),
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let (wash, sign, tone) = self.line_tone(line.kind);
+        let wash = if chosen { Some(self.quote_wash()) } else { wash };
         let theme = &self.theme;
         div()
             .w_full()
@@ -980,16 +1023,27 @@ impl ConversationView {
             .gap(self.z(theme.spacing.sm))
             .px(self.z(theme.spacing.sm))
             .when_some(wash, gpui::Styled::bg)
-            .child(self.number(line.old, digits))
-            .child(self.number(line.new, digits))
+            .child(
+                self.quote_gutter(at.thread, at.id, at.split, ix, cx)
+                    .child(self.number(line.old, at.digits))
+                    .child(self.number(line.new, at.digits)),
+            )
             .child(div().flex_none().text_color(hsla(tone)).child(sign))
             .child(self.line_text(line))
             .into_any_element()
     }
 
-    fn split_line(&self, left: Option<&Line>, right: Option<&Line>, digits: u8) -> AnyElement {
+    fn split_line(
+        &self,
+        left: Option<&Line>,
+        right: Option<&Line>,
+        at: &DiffAt<'_>,
+        (ix, chosen): (usize, bool),
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
+        let digits = at.digits;
         let half = |line: Option<&Line>, old: bool| {
             let base = div()
                 .flex_1()
@@ -1000,8 +1054,19 @@ impl ConversationView {
             match line {
                 Some(line) => {
                     let (wash, sign, tone) = self.line_tone(line.kind);
+                    let wash = if chosen { Some(self.quote_wash()) } else { wash };
+                    let number = self.number(if old { line.old } else { line.new }, digits);
+                    // One gutter a row names the row: the left side's, or the right's where
+                    // the left is empty.
+                    let gutter = if old || left.is_none() {
+                        self.quote_gutter(at.thread, at.id, at.split, ix, cx)
+                            .child(number)
+                            .into_any_element()
+                    } else {
+                        number.into_any_element()
+                    };
                     base.when_some(wash, gpui::Styled::bg)
-                        .child(self.number(if old { line.old } else { line.new }, digits))
+                        .child(gutter)
                         .child(div().flex_none().text_color(hsla(tone)).child(sign))
                         .child(self.line_text(line))
                 }
@@ -1052,6 +1117,14 @@ pub fn parse_patch(text: &str) -> Patch {
         }
     }
     patch
+}
+
+/// Which diff a row is of, how it is laid out, and how wide its numbers are.
+struct DiffAt<'a> {
+    thread: &'a ThreadId,
+    id: &'a str,
+    split: bool,
+    digits: u8,
 }
 
 #[cfg(test)]

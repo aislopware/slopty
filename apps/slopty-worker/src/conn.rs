@@ -1247,6 +1247,22 @@ impl Peer<'_> {
         }
     }
 
+    /// Number a new stream and register it: its id, what its task needs, and its commands.
+    fn new_stream(&mut self) -> (StreamId, crate::screens::Link, mpsc::UnboundedReceiver<Command>) {
+        let id = StreamId(self.next_stream);
+        self.next_stream = self.next_stream.wrapping_add(1).max(1);
+        let (commands, rx) = mpsc::unbounded_channel();
+        self.screens.insert(id, Screen { commands, control: None });
+        let link = crate::screens::Link {
+            daemon: self.daemon.clone(),
+            client: self.client,
+            conn: self.conn.clone(),
+            out: self.out.clone(),
+            told: self.told.clone(),
+        };
+        (id, link, rx)
+    }
+
     fn screen(&mut self, req: ScreenRequest) {
         match req {
             ScreenRequest::List => {
@@ -1262,18 +1278,13 @@ impl Peer<'_> {
                 });
             }
             ScreenRequest::Open { target, quality } => {
-                let id = StreamId(self.next_stream);
-                self.next_stream = self.next_stream.wrapping_add(1).max(1);
-                let (commands, rx) = mpsc::unbounded_channel();
-                self.screens.insert(id, Screen { commands, control: None });
-                let link = crate::screens::Link {
-                    daemon: self.daemon.clone(),
-                    client: self.client,
-                    conn: self.conn.clone(),
-                    out: self.out.clone(),
-                    told: self.told.clone(),
-                };
+                let (id, link, rx) = self.new_stream();
                 self.streams.spawn(crate::screens::run(link, id, target, quality, rx));
+            }
+            ScreenRequest::OpenDisplay { key, shape, quality } => {
+                let (id, link, rx) = self.new_stream();
+                let asked = slopty_worker::screen::sized::Asked { key, shape, quality };
+                self.streams.spawn(crate::screens::run_display(link, id, asked, rx));
             }
             ScreenRequest::Close(id) => {
                 self.screen_order.forget(id);
@@ -1306,8 +1317,8 @@ impl Peer<'_> {
                 self.input(Input::Window(stream, input));
             }
             ScreenRequest::Focus(stream) => self.command(stream, Command::Focus),
-            ScreenRequest::Resize { stream, width, height } => {
-                self.command(stream, Command::Resize { width, height });
+            ScreenRequest::Resize { stream, width, height, scale } => {
+                self.command(stream, Command::Resize { width, height, scale });
             }
         }
     }
@@ -1844,7 +1855,7 @@ mod lossy {
         let (out, mut told) = mpsc::channel(64);
         tokio::spawn(async move { while told.recv().await.is_some() {} });
         let serving = tokio::spawn(async move {
-            serve(&mut stream, ClientId::new(), &mut commanded, &out).await;
+            serve(&mut stream, ClientId::new(), &mut commanded, &out, None).await;
             stream.close().await;
         });
 

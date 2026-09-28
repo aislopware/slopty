@@ -12,8 +12,10 @@ use bytes::Bytes;
 use slopty_core::{ClientId, StreamId};
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput};
-use slopty_worker::platform::Platform;
-use slopty_worker::screen::{Pipeline, Rebuild, Refused, ScreenStream, StreamControl, StreamEvent};
+use slopty_worker::platform::{Native, Platform};
+use slopty_worker::screen::{
+    Pipeline, Rebuild, Refused, ScreenError, ScreenStream, StreamControl, StreamEvent, sized,
+};
 use tokio::sync::mpsc;
 
 use crate::Daemon;
@@ -64,7 +66,7 @@ pub enum Command {
     Input(ScreenInput),
     Focus,
     SetQuality(Quality),
-    Resize { width: u32, height: u32 },
+    Resize { width: u32, height: u32, scale: Option<f32> },
     Close,
 }
 
@@ -93,28 +95,69 @@ pub async fn run(
     id: StreamId,
     target: CaptureTarget,
     quality: Quality,
-    mut commands: mpsc::UnboundedReceiver<Command>,
+    commands: mpsc::UnboundedReceiver<Command>,
 ) {
-    let Link { daemon, client, conn, out, told } = link;
-    let events = out.clone();
-    let on_event = move |e: StreamEvent| {
+    let on_event = on_event(id, link.out.clone());
+    let sink = Arc::new(QuicSink(link.conn.clone()));
+    let opened = ScreenStream::open(id, target, quality, sink, on_event).await;
+    let opened = opened.map(|(stream, opened)| (stream, vec![opened], None));
+    serve_opened(link, id, opened, commands).await;
+}
+
+/// Open a stream of a display made for the client (or, when none can be had, of a physical
+/// display), then serve it as [`run`] does; the display goes when the stream does.
+pub async fn run_display(
+    link: Link,
+    id: StreamId,
+    asked: sized::Asked,
+    commands: mpsc::UnboundedReceiver<Command>,
+) {
+    let on_event = on_event(id, link.out.clone());
+    let sink = Arc::new(QuicSink(link.conn.clone()));
+    let displays = link.daemon.displays.as_ref();
+    let opened = sized::open::<Native, sized::Cg>(displays, id, asked, sink, on_event).await;
+    let opened = opened.map(|(stream, told, sized)| (stream, told.into(), sized));
+    serve_opened(link, id, opened, commands).await;
+}
+
+/// What a stream tells its client outside its commands' answers.
+fn on_event(id: StreamId, events: mpsc::Sender<WorkerMsg>) -> impl Fn(StreamEvent) + Send + Sync {
+    move |e: StreamEvent| {
         let event = match e {
             StreamEvent::Stopped(e) => ScreenEvent::Closed { stream: id, reason: e.to_string() },
             StreamEvent::Cursor(shape) => ScreenEvent::Cursor { stream: id, shape: Some(shape) },
         };
         let _sent = events.try_send(WorkerMsg::Screen(event));
-    };
-    let sink = Arc::new(QuicSink(conn.clone()));
-    let mut stream = match ScreenStream::open(id, target, quality, sink, on_event).await {
-        Ok((stream, opened)) => {
-            tracing::info!(%client, %id, ?target, "screen opened");
+    }
+}
+
+/// A stream as it opened: the stream, what to tell the client first, and for a display made
+/// for the client what serves its resizes.
+type Opened = Result<(ScreenStream, Vec<ScreenEvent>, Option<sized::Sized>), ScreenError>;
+
+/// Tell the client how the stream opened, serve it until it is closed or the connection lets
+/// go of it, and tear it down: input released, capture stopped, then any display made for it
+/// released on the main thread.
+async fn serve_opened(
+    link: Link,
+    id: StreamId,
+    opened: Opened,
+    mut commands: mpsc::UnboundedReceiver<Command>,
+) {
+    let Link { daemon, client, conn, out, told } = link;
+    let (mut stream, mut sized) = match opened {
+        Ok((stream, events, sized)) => {
+            let target = stream.target();
+            tracing::info!(%client, %id, ?target, made = sized.is_some(), "screen opened");
             daemon.screens.insert(&client, target, stream.stats_handle());
             let _told = told.send(Told::Opened(id, stream.control()));
-            let _sent = out.send(WorkerMsg::Screen(opened)).await;
-            stream
+            for event in events {
+                let _sent = out.send(WorkerMsg::Screen(event)).await;
+            }
+            (stream, sized)
         }
         Err(e) => {
-            tracing::warn!(%client, ?target, error = %e, "screen open");
+            tracing::warn!(%client, %id, error = %e, "screen open");
             let event = ScreenEvent::Closed { stream: id, reason: e.to_string() };
             let _sent = out.send(WorkerMsg::Screen(event)).await;
             let _told = told.send(Told::Gone(id));
@@ -122,7 +165,7 @@ pub async fn run(
         }
     };
 
-    let by_client = serve(&mut stream, client, &mut commands, &out).await;
+    let by_client = serve(&mut stream, client, &mut commands, &out, sized.as_mut()).await;
     if by_client {
         tracing::info!(
             %client,
@@ -135,6 +178,7 @@ pub async fn run(
     // waited on ScreenCaptureKit; a lost connection ends here too.
     stream.release_input();
     stream.close().await;
+    drop(sized);
     daemon.screens.remove(&client, id);
     if by_client {
         let event = ScreenEvent::Closed { stream: id, reason: "closed by client".to_owned() };
@@ -151,11 +195,16 @@ pub async fn run(
 /// and what the stream tells the client waits for room in the connection's queue in an arm of
 /// its own, so input for the window never waits on VideoToolbox, the window server or a client
 /// that is slow to read (MEASUREMENTS.md, "input behind a quality change").
+///
+/// A display made for the client (`sized`) takes the stream's resizes, and the stream follows
+/// it to the display it switches to; that switch waits on ScreenCaptureKit (a filter update,
+/// ~20 ms), once per rescale or remake.
 pub async fn serve<P: Platform>(
     stream: &mut Pipeline<P>,
     client: ClientId,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     out: &mpsc::Sender<WorkerMsg>,
+    mut sized: Option<&mut sized::Sized>,
 ) -> bool {
     let mut geometry = tokio::time::interval(GEOMETRY_PERIOD);
     geometry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -172,8 +221,30 @@ pub async fn serve<P: Platform>(
                 Some(Command::SetQuality(quality)) => {
                     rebuilding = stream.set_quality(&quality, rebuilding.take());
                 }
+                Some(Command::Resize { width, height, scale }) if sized.is_some() => {
+                    if let Some(sized) = sized.as_deref() {
+                        (sized.resize)(width, height, scale);
+                    }
+                }
                 Some(command) => apply(stream, client, command),
             },
+            switch = async { sized.as_deref_mut()?.switches.recv().await }, if sized.is_some() => {
+                let key = sized.as_deref().map(|s| s.key);
+                let (Some((display, told)), Some(key)) = (switch, key) else {
+                    sized = None;
+                    continue;
+                };
+                // A read under way is of the display being left.
+                if let Some(probe) = probing.take() {
+                    probe.abort();
+                }
+                match stream.switch_display(display).await {
+                    Ok(()) => {
+                        telling.push(ScreenEvent::Display { stream: stream.id(), key, display: told });
+                    }
+                    Err(e) => tracing::warn!(stream = %stream.id(), error = %e, "display switch"),
+                }
+            }
             probe = async { probing.as_mut()?.await.ok() }, if probing.is_some() => {
                 probing = None;
                 let Some(probe) = probe else { continue };
@@ -197,7 +268,10 @@ pub async fn serve<P: Platform>(
                         }
                         // The stream stays at its old size; a resize is seen again on the next
                         // ticks, and the next quality change asks again.
-                        Err(e) => tracing::warn!(stream = %stream.id(), error = %e, "encoder rebuild"),
+                        Err(e) => {
+                            tracing::warn!(stream = %stream.id(), error = %e, "encoder rebuild");
+                            stream.rebuild_failed(&rebuild);
+                        }
                     }
                 }
             }
@@ -258,7 +332,7 @@ fn apply<P: Platform>(stream: &mut Pipeline<P>, client: ClientId, command: Comma
                 tracing::debug!(%client, stream = %id, error = %e, "focus");
             }
         }
-        Command::Resize { width, height } => {
+        Command::Resize { width, height, .. } => {
             let Some((window, w, h)) = stream.resize_points(width, height) else {
                 tracing::debug!(%client, stream = %id, "resize: not a window stream");
                 return;
@@ -477,6 +551,8 @@ pub mod fake {
     pub static READING: AtomicBool = AtomicBool::new(false);
     /// The widths each capture update asked for: what a new encoder going in asks of the capture.
     pub static UPDATED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    /// The displays the fake enumeration lists.
+    pub static LISTED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
     impl CaptureSource for Still {
         type Content = ();
@@ -498,7 +574,17 @@ pub mod fake {
         }
 
         fn displays((): &()) -> Vec<DisplayInfo> {
-            Vec::new()
+            let listed = LISTED.lock().clone();
+            listed
+                .into_iter()
+                .map(|id| DisplayInfo {
+                    id: slopty_core::DisplayId(id),
+                    w: 800.0,
+                    h: 500.0,
+                    scale: 2.0,
+                    hz: 60.0,
+                })
+                .collect()
         }
 
         fn resolve((): &(), _kind: CaptureTarget) -> Result<(), CaptureError> {
@@ -847,7 +933,7 @@ mod serving {
         let (out, events) = mpsc::channel(depth);
         while full && out.try_send(filler()).is_ok() {}
         let task = tokio::spawn(async move {
-            serve(&mut stream, ClientId::new(), &mut commands, &out).await;
+            serve(&mut stream, ClientId::new(), &mut commands, &out, None).await;
             stream.close().await;
         });
         (commands_tx, events, queued, task)
@@ -1021,5 +1107,226 @@ mod serving {
         }
         drop(commands);
         task.await.unwrap();
+    }
+}
+
+/// A stream of a display made for its client, over the test platform and a factory whose
+/// displays settle at once: nothing here makes a real display.
+#[cfg(test)]
+#[cfg(target_vendor = "apple")]
+mod made {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use parking_lot::Mutex;
+    use slopty_core::{ClientId, DisplayId, StreamId};
+    use slopty_net::WorkerMsg;
+    use slopty_proto::screen::{
+        CaptureTarget, DisplayKey, DisplayShape, NoVirtualDisplay, Quality, ScreenEvent,
+        VirtualDisplay,
+    };
+    use slopty_worker::screen::sized::{
+        self, Asked, DisplayError, Displays, Enforced, Factory, Job, Main, Plan, Registry,
+    };
+    use tokio::sync::mpsc;
+
+    use super::fake::{Fake, Gated, LISTED, Nowhere};
+    use super::{Command, serve};
+
+    /// Displays numbered from 101 that settle at once and hold up to `max` pixels a side; what
+    /// is alive is in `alive`.
+    #[derive(Clone, Default)]
+    struct Instantly {
+        next: u32,
+        max: u32,
+        alive: Arc<Mutex<Vec<u32>>>,
+    }
+
+    struct Made(u32, u32, Arc<Mutex<Vec<u32>>>);
+
+    impl Drop for Made {
+        fn drop(&mut self) {
+            self.2.lock().retain(|id| *id != self.0);
+        }
+    }
+
+    impl Factory for Instantly {
+        type Display = Made;
+
+        fn create(&mut self, _plan: &Plan) -> Result<Made, DisplayError> {
+            self.next = self.next.max(100).saturating_add(1);
+            self.alive.lock().push(self.next);
+            Ok(Made(self.next, self.max, Arc::clone(&self.alive)))
+        }
+
+        fn resize(&mut self, display: &mut Made, plan: &Plan) -> Result<(), DisplayError> {
+            if plan.mode.fits((display.1, display.1)) {
+                Ok(())
+            } else {
+                Err(DisplayError::Outgrown {
+                    wanted: plan.mode.pixels,
+                    max: (display.1, display.1),
+                })
+            }
+        }
+
+        fn enforce(&mut self, _display: &Made) -> Result<Enforced, DisplayError> {
+            Ok(Enforced::Settled)
+        }
+
+        fn id(&self, display: &Made) -> u32 {
+            display.0
+        }
+    }
+
+    struct TaskMain<S>(mpsc::UnboundedSender<Job<S>>);
+
+    impl<S: Send + 'static> Main<S> for TaskMain<S> {
+        fn run(&self, job: Job<S>) {
+            let _gone = self.0.send(job);
+        }
+
+        fn run_after(&self, delay: Duration, job: Job<S>) {
+            let tx = self.0.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _gone = tx.send(job);
+            });
+        }
+    }
+
+    fn displays(factory: Instantly) -> Displays<Instantly> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Job<Registry<Instantly>>>();
+        let mut registry = Registry::new(factory);
+        tokio::spawn(async move {
+            while let Some(job) = rx.recv().await {
+                job(&mut registry);
+            }
+        });
+        Displays::new(Arc::new(TaskMain(tx)), Duration::from_secs(5))
+    }
+
+    const KEY: DisplayKey = DisplayKey(*b"slopty-made-key!");
+
+    fn asked(width: u32, height: u32) -> Asked {
+        Asked {
+            key: KEY,
+            shape: DisplayShape { width, height, scale: 2.0, refresh_hz: 60 },
+            quality: Quality::default(),
+        }
+    }
+
+    async fn open(
+        displays: Option<&Displays<Instantly>>,
+        asked: Asked,
+    ) -> (slopty_worker::screen::Pipeline<Fake<Gated>>, [ScreenEvent; 2], Option<sized::Sized>)
+    {
+        let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+        sized::open::<Fake<Gated>, Instantly>(displays, StreamId(21), asked, sink, |_event| {})
+            .await
+            .unwrap()
+    }
+
+    fn told(event: &ScreenEvent) -> VirtualDisplay {
+        match event {
+            ScreenEvent::Display { key, display, .. } if *key == KEY => *display,
+            other => panic!("not the display event: {other:?}"),
+        }
+    }
+
+    async fn until(what: &str, mut done: impl FnMut() -> bool) {
+        let started = std::time::Instant::now();
+        while !done() {
+            assert!(started.elapsed() < Duration::from_secs(5), "{what}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// The display made for the client is streamed, said so before `Opened`, and released once
+    /// the stream is closed and its sizing dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_made_display_is_streamed_and_released_with_the_stream() {
+        *LISTED.lock() = vec![1, 101];
+        let factory = Instantly { max: 8192, ..Instantly::default() };
+        let alive = Arc::clone(&factory.alive);
+        let displays = displays(factory);
+        let (stream, [display, opened], sized) = open(Some(&displays), asked(2560, 1600)).await;
+        assert_eq!(told(&display), VirtualDisplay::Made(DisplayId(101)));
+        let made = CaptureTarget::Display(DisplayId(101));
+        assert!(matches!(opened, ScreenEvent::Opened { target, .. } if target == made));
+        assert_eq!(stream.target(), made);
+        assert_eq!(*alive.lock(), [101]);
+        stream.close().await;
+        drop(sized);
+        until("the display outlived its stream", || alive.lock().is_empty()).await;
+    }
+
+    /// A worker that makes no display streams a physical one and says why, typed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn without_displays_a_physical_display_is_streamed_and_the_client_told_why() {
+        *LISTED.lock() = vec![1];
+        let (stream, [display, _opened], sized) = open(None, asked(1920, 1080)).await;
+        let physical =
+            VirtualDisplay::Physical { display: DisplayId(1), why: NoVirtualDisplay::Unavailable };
+        assert_eq!(told(&display), physical);
+        assert_eq!(stream.target(), CaptureTarget::Display(DisplayId(1)));
+        assert!(sized.is_none());
+        stream.close().await;
+    }
+
+    /// A display ScreenCaptureKit never lists is given up on and released; the physical one is
+    /// streamed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_display_never_listed_falls_back_and_is_released() {
+        *LISTED.lock() = vec![1];
+        let factory = Instantly { max: 8192, ..Instantly::default() };
+        let alive = Arc::clone(&factory.alive);
+        let displays = displays(factory);
+        let (stream, [display, _opened], sized) = open(Some(&displays), asked(1920, 1080)).await;
+        let physical =
+            VirtualDisplay::Physical { display: DisplayId(1), why: NoVirtualDisplay::Unlisted };
+        assert_eq!(told(&display), physical);
+        assert!(sized.is_none());
+        until("the unlisted display was kept", || alive.lock().is_empty()).await;
+        stream.close().await;
+    }
+
+    /// A resize the display outgrows makes it anew: the stream switches to the new display and
+    /// tells the client which, and the old display is gone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_outgrown_display_is_remade_and_the_stream_follows_it() {
+        *LISTED.lock() = vec![1, 101, 102];
+        let factory = Instantly { max: 3200, ..Instantly::default() };
+        let alive = Arc::clone(&factory.alive);
+        let displays = displays(factory);
+        let (mut stream, _events, sized) = open(Some(&displays), asked(2560, 1600)).await;
+        let mut sized = sized.unwrap();
+        let (commands_tx, mut commands) = mpsc::unbounded_channel();
+        let (out, mut events) = mpsc::channel(64);
+        let task = tokio::spawn(async move {
+            serve(&mut stream, ClientId::new(), &mut commands, &out, Some(&mut sized)).await;
+            let target = stream.target();
+            stream.close().await;
+            drop(sized);
+            target
+        });
+        commands_tx.send(Command::Resize { width: 6016, height: 3384, scale: None }).unwrap();
+        let switched = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Some(WorkerMsg::Screen(event @ ScreenEvent::Display { .. })) => break event,
+                    Some(_) => {}
+                    None => panic!("the stream ended"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(told(&switched), VirtualDisplay::Made(DisplayId(102)));
+        assert_eq!(*alive.lock(), [102], "the outgrown display went first");
+        drop(commands_tx);
+        let target = task.await.unwrap();
+        assert_eq!(target, CaptureTarget::Display(DisplayId(102)));
+        until("the remade display outlived its stream", || alive.lock().is_empty()).await;
     }
 }

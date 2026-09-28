@@ -209,7 +209,9 @@ impl WorkspaceView {
     /// What a face asks for.
     fn face_event(&mut self, session: SessionId, event: FaceEvent, cx: &mut Context<Self>) {
         match event {
-            FaceEvent::Submit(text) => Self::type_into(session, composer::submission(&text), cx),
+            FaceEvent::Submit { text, paths } => {
+                Self::type_into(session, composer::submission(&text, &paths), cx);
+            }
             FaceEvent::Interrupt => Self::type_into(session, vec![composer::interrupt()], cx),
             FaceEvent::Answer { ask, verdict } => {
                 let answer = ConversationRequest::Answer { session, ask, verdict };
@@ -222,6 +224,11 @@ impl WorkspaceView {
             FaceEvent::ShowTerminal => self.show_face(session, false, cx),
             FaceEvent::Attach { id, what } => self.attach_to_face(session, id, what, cx),
             FaceEvent::Detach { id } => self.detach_from_face(session, id, cx),
+            FaceEvent::PickFiles => {
+                if let Some(tile) = self.tile_of_session(session) {
+                    self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
+                }
+            }
         }
     }
 

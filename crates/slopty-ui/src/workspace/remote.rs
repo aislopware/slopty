@@ -325,7 +325,7 @@ impl WorkspaceView {
     }
 
     /// An upload is over, however it ended: a paste waiting on it goes on, an attachment's chip
-    /// goes, and files brought over for it go.
+    /// goes unless it landed, and files brought over for it go.
     fn upload_ended(upload: Upload, cx: &mut Context<Self>) {
         if let Some(view) = upload.paste {
             let _gone = view.update(cx, |v, _cx| v.release_paste());

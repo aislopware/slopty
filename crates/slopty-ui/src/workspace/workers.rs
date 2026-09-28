@@ -718,6 +718,8 @@ impl WorkspaceView {
                     self.show_picker(key, windows, displays, cx);
                 }
             }
+            // This client asks for no display of its own yet (`OpenDisplay`).
+            ScreenEvent::Display { .. } => {}
             ScreenEvent::Opened { stream, target, codec, width, height, .. } => {
                 let theme = self.theme.clone();
                 let quality = self.quality_for();
@@ -750,7 +752,8 @@ impl WorkspaceView {
                 let tile = TileRef { worker: key, item: id };
                 cx.subscribe(&view, move |this, view, event, cx| match event {
                     crate::screen::ScreenViewEvent::Pressed => this.focus_tile(tile, cx),
-                    crate::screen::ScreenViewEvent::Ready => cx.notify(),
+                    crate::screen::ScreenViewEvent::Ready
+                    | crate::screen::ScreenViewEvent::Health => cx.notify(),
                     crate::screen::ScreenViewEvent::PasteFiles(files) => {
                         let view = view.downgrade();
                         this.paste_files_in_window(tile, &view, files.clone(), cx);

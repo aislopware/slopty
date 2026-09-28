@@ -54,13 +54,73 @@ pub enum CaptureTarget {
     Display(DisplayId),
 }
 
+/// A client's own key for the virtual display a worker makes for it.
+///
+/// Sixteen random bytes the client draws once and keeps on the device, so the display has the
+/// same identity every time and macOS finds the arrangement and mode it stored for it last time.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct DisplayKey(pub [u8; 16]);
+
+/// The display a client wants a worker to make for it: the tile's drawable in pixels, the
+/// backing scale of the screen the tile is on, and that screen's fastest refresh.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct DisplayShape {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Backing scale (1 for a standard screen, 2 for Retina, 3 for an iPhone).
+    pub scale: f32,
+    /// The screen's maximum refresh, hertz; 0 when it is not known.
+    pub refresh_hz: u16,
+}
+
+/// What a stream opened with [`ScreenRequest::OpenDisplay`] shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum VirtualDisplay {
+    /// A display made for this client, at its shape.
+    Made(DisplayId),
+    /// A physical display, because no virtual one could be had.
+    Physical {
+        /// The display streamed instead.
+        display: DisplayId,
+        /// Why.
+        why: NoVirtualDisplay,
+    },
+}
+
+/// Why a worker streams a physical display where a client asked for one of its own.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum NoVirtualDisplay {
+    /// This worker cannot make one (not macOS, or macOS without the classes it needs).
+    Unavailable,
+    /// macOS declined to create it or to take its mode.
+    Refused,
+    /// It never settled in its mode.
+    Unsettled,
+    /// ScreenCaptureKit never listed it.
+    Unlisted,
+}
+
 /// Video codec.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum VideoCodec {
-    /// HEVC Main, 8-bit 4:2:0.
+    /// HEVC: Main, 8-bit 4:2:0, or Main 4:4:4 10 for a [`Chroma::Full`] stream.
     Hevc,
     /// H.264 High (fallback only).
     H264,
+}
+
+/// How much colour a video stream carries (`docs/decisions/video.md`, "4:4:4 on the
+/// low-latency encoder").
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+pub enum Chroma {
+    /// 4:2:0, one colour sample per 2×2 pixels: HEVC Main or H.264 High, fed full-range NV12.
+    #[default]
+    Subsampled,
+    /// 4:4:4, colour at every pixel: HEVC Main 4:4:4 10, HEVC only, captured as full-range
+    /// 10-bit bi-planar 4:4:4 (`xf44`), the one 4:4:4 format ScreenCaptureKit delivers.
+    Full,
 }
 
 /// Stream quality request.
@@ -74,11 +134,22 @@ pub struct Quality {
     pub scale: f32,
     /// Preferred codec.
     pub codec: VideoCodec,
+    /// The most colour the client wants. [`Chroma::Full`] is an ask, not an order: the worker
+    /// streams 4:4:4 only while its bitrate target is high enough for 4:4:4 to beat 4:2:0, and
+    /// 4:2:0 below that (`docs/decisions/video.md`, "Full chroma follows the rate"). The client
+    /// learns which from the stream itself: its decoder follows the SPS.
+    pub chroma: Chroma,
 }
 
 impl Default for Quality {
     fn default() -> Self {
-        Self { fps: 60, bitrate_bps: 30_000_000, scale: 1.0, codec: VideoCodec::Hevc }
+        Self {
+            fps: 60,
+            bitrate_bps: 30_000_000,
+            scale: 1.0,
+            codec: VideoCodec::Hevc,
+            chroma: Chroma::Subsampled,
+        }
     }
 }
 
@@ -227,9 +298,10 @@ pub enum ScreenRequest {
     },
     /// Raise/focus the window on the worker.
     Focus(StreamId),
-    /// Give the streamed window this size on the worker, in the stream's native pixels (what
-    /// `Opened` / `Geometry` report). A display stream ignores it; the worker answers, when the
-    /// window did move, with a `Geometry` event from its geometry poll.
+    /// Give the streamed window, or the display made for the client, this size on the worker,
+    /// in the stream's native pixels (what `Opened` / `Geometry` report). A physical display
+    /// stream ignores it; the worker answers, when the target did change, with a `Geometry`
+    /// event from its geometry poll.
     Resize {
         /// Stream.
         stream: StreamId,
@@ -237,6 +309,20 @@ pub enum ScreenRequest {
         width: u32,
         /// Wanted height in native pixels.
         height: u32,
+        /// The backing scale of the screen the tile is on now, for a display made for the
+        /// client; `None` keeps the one it has. A window stream ignores it.
+        scale: Option<f32>,
+    },
+    /// Make a display sized to the client and stream it; the worker answers with
+    /// [`ScreenEvent::Display`] and then `Opened`. Later sizes and scales come as
+    /// [`ScreenRequest::Resize`].
+    OpenDisplay {
+        /// The client's key: one display per key.
+        key: DisplayKey,
+        /// Its size, scale and refresh.
+        shape: DisplayShape,
+        /// How.
+        quality: Quality,
     },
 }
 
@@ -251,6 +337,7 @@ impl ScreenRequest {
             Self::SetQuality { stream, .. } => Some((*stream, true)),
             Self::List
             | Self::Open { .. }
+            | Self::OpenDisplay { .. }
             | Self::Close(_)
             | Self::Report { .. }
             | Self::Focus(_)
@@ -438,5 +525,15 @@ pub enum ScreenEvent {
         verdict: RateVerdict,
         /// The QUIC congestion window, not the verdict, is what holds the target down.
         capped: bool,
+    },
+    /// What a stream opened with [`ScreenRequest::OpenDisplay`] shows: sent before its `Opened`
+    /// (whose target is then that display), and again whenever it changes.
+    Display {
+        /// Stream.
+        stream: StreamId,
+        /// The key the client asked with.
+        key: DisplayKey,
+        /// The display it got.
+        display: VirtualDisplay,
     },
 }

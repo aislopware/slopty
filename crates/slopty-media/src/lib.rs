@@ -25,7 +25,10 @@ pub use packetize::{
     EncodedFrame, Layout, MAX_DATA_FRAGMENTS, MAX_PARITY_FRAGMENTS, Packetizer, SentFrame,
     audio_datagram, layout,
 };
-pub use rate::{Cadence, Decision, Pace, PathSample, RateController, Window as RateWindow, judge};
+pub use rate::{
+    Cadence, ChromaGate, Decision, FULL_CHROMA_ENTER_BPS, FULL_CHROMA_HOLD, FULL_CHROMA_LEAVE_BPS,
+    Pace, PathSample, RateController, Window as RateWindow, full_chroma_band, judge,
+};
 pub use reassemble::{
     Action, Config, FrameInfo, FrameOut, Ignored, Ingest, NackDelay, Reassembler, ReassemblerStats,
     STALL_GAP, StallAttribution,

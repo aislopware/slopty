@@ -7,6 +7,12 @@ use std::rc::Rc;
 use crate::plan::{Mode, Plan};
 use crate::{DisplayError, Enforced};
 
+/// Never: virtual displays exist only on macOS.
+#[must_use]
+pub const fn available() -> bool {
+    false
+}
+
 /// A virtual display; this platform has none.
 #[derive(Debug)]
 #[expect(missing_copy_implementations, reason = "the macOS display owns an object")]

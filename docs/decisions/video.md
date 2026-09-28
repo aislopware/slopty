@@ -1374,3 +1374,90 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_full_chroma_session_refuses_a_subsampled_picture`, `full_chroma_is_hevc_only`,
   `the_sps_says_which_chroma_format_the_stream_is`, and the ignored probes in
   `tests/chroma444.rs`.
+
+- 🔬 **A display sized to the client is wired: the main thread owns the displays, a stream
+  falls back to a physical display, typed** (2026-09-28). `CGVirtualDisplay` only initialises
+  on the main thread, and the descriptor hands it the main queue. The worker's main thread
+  therefore serves the run loop (`slopty_vdisplay::park_main`), and the tokio daemon runs on a
+  thread beside it that ends the process when it ends. Before this the main thread sat in
+  `block_on`, so nothing queued to it ever ran. The displays live there in a registry keyed
+  by the client's `DisplayKey`. Stream tasks hand create, resize, settle and release over as
+  jobs (`screen::sized::Main`) and await the answers, so no display object leaves the main
+  thread and nothing there blocks a task. One key has one display: a second tile of the same
+  device shares it and the last lease releases it. A new or changed display is enforced
+  every 100 ms until `Settled`, for at most 5 s, and on every `CGDisplayRegisterReconfigurationCallback`
+  notice after that. Once settled, ScreenCaptureKit must list it within 2 s, asked with a fresh
+  enumeration every 100 ms because the shared one may predate the display. The client is told
+  what it got before `Opened` (`ScreenEvent::Display`). That is the display made, or the
+  physical one streamed instead with a typed reason: `Unavailable` (no classes, not macOS),
+  `Refused` (nil, rejected settings, a failed configuration), `Unsettled` or `Unlisted`.
+  `Resize` gained an optional scale. A resize that fits stays in place and the geometry poll
+  follows it. An outgrown display is released first, since the new one reuses its identity,
+  then made anew. A change of backing scale moves the stream to the display
+  (`Pipeline::switch_display`: a filter update, input and the cursor remapped). A display lost
+  on the way hands the stream a physical one. Teardown lets input go, stops the capture and
+  then drops the lease, which releases the display on the main queue. `WorkerCaps` carries
+  `virtual_displays` (Screen Recording granted and the classes present), so a client hides the
+  option elsewhere; Linux says no. The lifecycle is tested over a fake factory and a task
+  standing in for the main queue: `a_display_is_enforced_until_it_settles_shared_by_key_and_released_with_its_last_lease`,
+  `a_worker_that_cannot_make_one_says_unavailable_and_a_refusal_says_refused`,
+  `a_display_that_never_settles_is_given_up_on_and_released_with_its_lease`,
+  `a_resize_that_fits_stays_in_place_and_one_that_outgrows_remakes_the_display` and
+  `a_reconfiguration_enforces_every_display_again`. The stream is tested over the test
+  platform: `a_made_display_is_streamed_and_released_with_the_stream`,
+  `without_displays_a_physical_display_is_streamed_and_the_client_told_why`,
+  `a_display_never_listed_falls_back_and_is_released` and
+  `an_outgrown_display_is_remade_and_the_stream_follows_it`. Still unproven live: a real display
+  made by the worker (the opt-in probe has not run), capture and input through its bounds, and
+  the latency of a switch.
+
+- ✅ **Full chroma follows the rate: 4:4:4 is a client's ask, granted above a line that scales
+  with the picture and taken back below a lower one, with a hold** (2026-09-28; MEASUREMENTS.md,
+  "4:4:4 HEVC on the low-latency encoder" and "full chroma on the wire"). This wires (b) and (c)
+  of the 4:4:4 entry above and answers (d) from the numbers already measured. Rulings:
+  1. *The wire says what the client wants, not what it gets.* `screen::Chroma` (`Subsampled`,
+     `Full`) moved to `slopty-proto`, and `Quality` gained `chroma`, 4:2:0 by default (golden
+     `client_screen_set_quality_full_chroma`; `client_screen_open_display` grew its byte).
+     `slopty_codec::EncoderConfig` carries the same field and `Encoder::with_chroma` folded into
+     `Encoder::new`. The client is not told which chroma it gets: its decoder already follows
+     the SPS, and the GPUI fork draws `xf44` as it comes, so the picture says so.
+  2. *4:4:4 only where it is the sharper picture.* On scrolling text at 1080p60, 4:2:0
+     saturates at 6.9 Mbit/s. At that rate 4:4:4 has 5 dB less luma, and it passes 4:2:0's luma
+     only near 10 Mbit/s, where its chroma is 24 dB better. So `slopty_media::rate::ChromaGate`
+     grants 4:4:4 when the client asked, the codec is HEVC and the rate target is at least
+     10 Mbit/s. It takes 4:4:4 back under 8 Mbit/s, where the luma loss outweighs the chroma.
+     Inside the band a stream keeps what it has. One cut (to 75 %) from the enter line lands
+     under the leave line, and the band is wider than a clean window's growth of an eighth.
+  3. *The lines scale with the picture as the pixels to the ⅔.* Between 1080p and 5K the
+     saturation rate grew as the pixels to the 0.62 (4:4:4) and 0.66 (4:2:0), so ⅔ errs towards
+     4:2:0. That puts the enter line near 25 Mbit/s at 4K and 37 at 5K: a 5K stream under the
+     default 30 Mbit/s ceiling never takes 4:4:4, which the 5K numbers (36 against
+     25 Mbit/s spent) support. Frame rate is not in the line; the cadence ladder's rungs sit far
+     below it.
+  4. *A switch is a new session, so it is rationed.* A stream that fell back waits ten decisions
+     (about five seconds) before it may take 4:4:4 again. A link whose capacity sits just over
+     the line then switches about every 33 s, not every decision (test
+     `a_swinging_rate_does_not_flap_the_chroma`). The client asking again, or the stream
+     changing size, decides at once and drops the hold, since a new session is being built
+     either way. A stream that asks for 4:4:4 opens with it when the 12 Mbit/s start clears its
+     line (1080p and smaller).
+  5. *The capture leads on the way up and trails on the way down.* A 4:4:4 session refuses
+     anything but `xf44`, and a 4:2:0 session takes `xf44` as well. So a switch to 4:4:4 asks
+     ScreenCaptureKit for `xf44` while the session builds, and a switch back keeps `xf44` until
+     the 4:2:0 session is in. A `420f` picture that still reaches a 4:4:4 session in the race is
+     logged at debug and retried a frame later. The worker switches on its 100 ms geometry tick,
+     which reads the gate the rate decision moved. A 4:4:4 session that cannot be built
+     (`NoFullChroma`) makes the stream 4:2:0 until the client asks again, at open or on a
+     rebuild.
+  6. *The preference is `[remote] sharp_text`, off by default.* It costs about 1.6× the bits
+     at saturation and its gain is coloured detail, so it stays opt-in.
+  Tests: `the_full_chroma_band_is_measured_at_1080p_and_scales_with_the_picture`,
+  `full_chroma_is_asked_for_and_earned`, `full_chroma_has_hysteresis_and_a_hold`,
+  `a_swinging_rate_does_not_flap_the_chroma` and
+  `an_ask_decides_at_once_and_a_refusal_holds` (policy);
+  `full_chroma_captures_xf44_for_a_444_session` and `the_capture_is_full_range_bt709`
+  (configuration); `the_strip_reads_back_what_was_drawn` (the canvas draws `xf44`); and
+  `a_full_chroma_stream_arrives_as_444_and_follows_the_rate`. That last one runs drawn pictures
+  through the real encoder, packetizer, reassembler and decoder: 4:4:4 at open, 4:2:0 after
+  loss, and 4:4:4 again after clean windows and the hold. Not yet proven: the line on a
+  real link, and iOS/iPadOS decoding 4:4:4.

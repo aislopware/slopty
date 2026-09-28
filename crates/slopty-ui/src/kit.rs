@@ -988,8 +988,6 @@ mod tests {
             crate::workspace::HOOKS,
             crate::workspace::TAKE,
             crate::workspace::MUTE,
-            crate::workspace::MUTED,
-            crate::workspace::UNMUTE,
             crate::workspace::ATTACHING,
             crate::workspace::SLEEPING,
             crate::workspace::PAUSED,

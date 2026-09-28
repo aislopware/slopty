@@ -351,6 +351,13 @@ impl WorkerLink {
         Arc::clone(&self.remote)
     }
 
+    /// Whether the worker can make a display sized to this device
+    /// ([`crate::screen::display::open`]); as it said when the link opened.
+    #[must_use]
+    pub const fn offers_displays(&self) -> bool {
+        self.ack.caps.virtual_displays
+    }
+
     /// The worker's `HelloAck`.
     #[must_use]
     pub const fn ack(&self) -> &HelloAck {

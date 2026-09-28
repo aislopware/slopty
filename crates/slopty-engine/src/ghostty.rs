@@ -20,8 +20,12 @@ use slopty_grid::{
     Cell, CellText, CellWidth, Cursor, CursorShape, Hyperlink, Line, LineFlags, LineIndex,
     RowUpdate, SemanticMark, Style, TermModes,
 };
-use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseEvent};
-use slopty_proto::terminal::{ColorOverrides, Frame, PixelRect, Placement, TermColors, TermSize};
+use slopty_proto::input::{
+    KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseButton, MouseEvent,
+};
+use slopty_proto::terminal::{
+    ColorOverrides, Frame, LineDiscipline, PixelRect, Placement, TermColors, TermSize,
+};
 
 use crate::graphics::{self, ImageUpload, Ledger, Shipped};
 use crate::placeholder::{self, Runs};
@@ -1378,27 +1382,6 @@ fn hyperlink_uri<'b>(
     Ok((n > 0).then(|| buf.get(..n).unwrap_or_default()))
 }
 
-/// The pty's line discipline, as the worker reads it from `termios`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct LineDiscipline {
-    /// `ECHO`: the kernel echoes what is typed. Off at a password prompt.
-    pub echo: bool,
-    /// `ICANON`: input is line-buffered (a shell's plain `read`, not a line editor).
-    pub canonical: bool,
-}
-
-/// `button`'s bit in the set of buttons held.
-const fn button_bit(button: slopty_proto::input::MouseButton) -> u8 {
-    use slopty_proto::input::MouseButton;
-    match button {
-        MouseButton::Left => 1,
-        MouseButton::Right => 1 << 1,
-        MouseButton::Middle => 1 << 2,
-        MouseButton::Back => 1 << 3,
-        MouseButton::Forward => 1 << 4,
-    }
-}
-
 /// A grapheme cluster's text, spelled on the stack: a cluster is almost always far shorter
 /// than the inline buffer, and only a longer one is collected into a string.
 fn cluster_text(chars: &[char]) -> CellText {
@@ -1901,7 +1884,7 @@ impl GhosttyEngine {
                 let press = event.action == MouseAction::Press;
                 // A second press of a held button, or the release of one never pressed, leaves
                 // the set as it was: a count would drift and report a drag after the release.
-                let bit = event.button.map_or(0, button_bit);
+                let bit = event.button.map_or(0, MouseButton::bit);
                 if press {
                     self.buttons_down |= bit;
                 } else {
@@ -2481,7 +2464,7 @@ mod tests {
         e.encode_mouse(&at(MouseAction::Wheel { rows: 0, cols: -1 }, None), &mut out).unwrap();
         assert_eq!(out, b"\x1b[<67;2;2M");
         out.clear();
-        let left = Some(slopty_proto::input::MouseButton::Left);
+        let left = Some(MouseButton::Left);
         e.encode_mouse(&at(MouseAction::Motion, None), &mut out).unwrap();
         assert!(out.is_empty(), "no button down: no motion report");
         e.encode_mouse(&at(MouseAction::Press, left), &mut out).unwrap();
@@ -2498,7 +2481,6 @@ mod tests {
     /// leave a button counted as down.
     #[test]
     fn press_motion_and_release_follow_the_buttons_held() {
-        use slopty_proto::input::MouseButton;
         let at = |action, button| MouseEvent {
             action,
             button,
@@ -2661,7 +2643,7 @@ mod tests {
         e.encode_mouse(
             &MouseEvent {
                 action: MouseAction::Press,
-                button: Some(slopty_proto::input::MouseButton::Left),
+                button: Some(MouseButton::Left),
                 mods: Mods::empty(),
                 col: 2,
                 row: 1,

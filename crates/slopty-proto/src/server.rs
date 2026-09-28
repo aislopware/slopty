@@ -97,6 +97,8 @@ pub struct WorkerCaps {
     pub can_capture: bool,
     /// Input injection is permitted (macOS Accessibility granted).
     pub can_inject: bool,
+    /// It can make a display sized to a client ([`crate::screen::ScreenRequest::OpenDisplay`]).
+    pub virtual_displays: bool,
     /// Worker software version.
     pub version: String,
 }
@@ -117,6 +119,7 @@ impl WorkerCaps {
             agents: Vec::new(),
             can_capture: false,
             can_inject: false,
+            virtual_displays: false,
             version: String::new(),
         }
     }

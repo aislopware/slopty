@@ -5,25 +5,32 @@
 //! [`Mode`]; it is pure and compiles everywhere. On macOS, [`VirtualDisplay`] creates the
 //! display through CoreGraphics' private `CGVirtualDisplay` classes, found at runtime. Elsewhere,
 //! and on a macOS without them, it is [`DisplayError::Unavailable`] and the caller streams a
-//! physical display instead.
+//! physical display instead. [`available()`] says which, creating nothing.
+//!
+//! On macOS the owner also serves the main thread ([`park_main`]) and enforces again on every
+//! display reconfiguration ([`on_reconfiguration`]).
 
 #[cfg(target_os = "macos")]
 mod display;
 mod plan;
+#[cfg(target_os = "macos")]
+mod runloop;
 #[cfg(not(target_os = "macos"))]
 mod unsupported;
 
 #[cfg(target_os = "macos")]
-pub use display::VirtualDisplay;
+pub use display::{VirtualDisplay, available};
 pub use plan::{
     ClientKey, DEFAULT_REFRESH_HZ, Descriptor, MAX_SIDE_PIXELS, MIN_SIDE_POINTS, Mode, NAME, Plan,
     REFRESH_HZ, Request, VENDOR_ID, plan,
 };
+#[cfg(target_os = "macos")]
+pub use runloop::{on_reconfiguration, park_main};
 #[cfg(not(target_os = "macos"))]
-pub use unsupported::VirtualDisplay;
+pub use unsupported::{VirtualDisplay, available};
 
 /// Why a virtual display could not be made or changed.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DisplayError {
     /// The private classes or a selector are missing (or this is not macOS): stream a physical
     /// display instead.

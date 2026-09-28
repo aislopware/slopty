@@ -347,6 +347,7 @@ mod encoder_rate_control {
                 codec: variant.codec,
                 fps: 60,
                 bitrate_bps: 8_000_000,
+                chroma: slopty_codec::Chroma::Subsampled,
             },
             variant.mode,
             move |packet| {
@@ -465,6 +466,7 @@ mod encoder_rate_control {
                     codec: VideoCodec::Hevc,
                     fps: 60,
                     bitrate_bps: 8_000_000,
+                    chroma: slopty_codec::Chroma::Subsampled,
                 },
                 mode,
                 |_packet| {},
@@ -557,6 +559,7 @@ mod encoder_build {
         codec: VideoCodec::Hevc,
         fps: 60,
         bitrate_bps: 20_000_000,
+        chroma: slopty_codec::Chroma::Subsampled,
     };
 
     fn build() {

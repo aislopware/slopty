@@ -65,7 +65,11 @@ impl WorkerError {
     pub fn term_error(&self) -> slopty_proto::terminal::TermError {
         use slopty_proto::terminal::TermError;
         match self {
-            Self::NoSuchSession | Self::SessionClosed => TermError::NoSuchSession,
+            Self::NoSuchSession
+            | Self::SessionClosed
+            | Self::Pty(slopty_pty::PtyError::Daemon(
+                slopty_proto::ptyd::PtydError::NoSuchSession,
+            )) => TermError::NoSuchSession,
             Self::Pty(e) => TermError::Write(e.to_string()),
             Self::Engine(_) | Self::NoSuchItem | Self::Items(_) | Self::Screen(_) => {
                 TermError::Engine(self.to_string())

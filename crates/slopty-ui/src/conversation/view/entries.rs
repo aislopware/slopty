@@ -7,6 +7,7 @@
 //! in the secondary tone, its subject in the text tone at the medium weight, a fact at the far
 //! right. What a call shows under its title starts where the verb does.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::accesskit::Role;
@@ -21,10 +22,10 @@ use slopty_core::WallMs;
 use slopty_proto::conversation::{
     Body, Clipped, Compact, Entry, LiveKind, Note, NoteKind, Prompt, ThreadId, ToolCall,
 };
-use slopty_theme::{Rgb, Typography};
+use slopty_theme::{Rgb, Typography, alpha};
 
 use super::ConversationView;
-use crate::colors::hsla;
+use crate::colors::{hsla, hsla_alpha};
 use crate::conversation::figures;
 use crate::conversation::model::Expanded;
 use crate::conversation::rows::{self, Fold, Level, Row, ToolKind};
@@ -46,6 +47,9 @@ const CHANGED_GROUP: &str = "changed-file";
 /// the prompt's time and copy.
 const BUBBLE: f32 = 0.85;
 
+/// What a queued message's state says under the pointer.
+const QUEUED_HINT: &str = "Sends when Claude finishes this step";
+
 /// The gap between an answer's paragraphs, in points at the prose size.
 const PARAGRAPH: f32 = 10.0;
 
@@ -64,7 +68,7 @@ impl ConversationView {
         _window: &mut Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let rows = std::rc::Rc::clone(&self.rows);
+        let rows = Rc::clone(&self.rows);
         let Some(row) = rows.get(ix) else { return div().into_any_element() };
         let first = ix == 0;
         let body = match row {
@@ -110,10 +114,8 @@ impl ConversationView {
                     .when(found, |el| {
                         // The match the find bar is on: a wash under the whole row, the
                         // selection's hue at its faint step.
-                        el.rounded(self.z(self.theme.radii.sm)).bg(crate::colors::hsla_alpha(
-                            s.accent_fill,
-                            slopty_theme::alpha::FAINT,
-                        ))
+                        let wash = hsla_alpha(s.accent_fill, alpha::FAINT);
+                        el.rounded(self.z(self.theme.radii.sm)).bg(wash)
                     })
                     .child(body),
             )
@@ -430,6 +432,9 @@ impl ConversationView {
             .children(expand)
     }
 
+    /// A message typed while Claude works, until the transcript records it: the prompt
+    /// bubble's own shape, set back, and under it what is happening to it. One border style in
+    /// the face, so no dashed outline.
     fn pending_row(&self, index: usize) -> AnyElement {
         let Some(pending) = self.model.pending().get(index) else {
             return div().into_any_element();
@@ -437,9 +442,31 @@ impl ConversationView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let word = if pending.queued { "Queued" } else { "Sending" };
+        let state = div()
+            .id(ElementId::Name(SharedString::from(format!("pending-state-{index}"))))
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .text_size(self.z(theme.typography.meta()))
+            .text_color(hsla(s.text_muted))
+            .child(self.icon(IconName::Clock, s.text_muted))
+            .child(word);
+        let state = if pending.queued {
+            let hint_theme = Rc::clone(&self.hint_theme);
+            state
+                .tooltip(move |_window, cx| {
+                    let theme = Rc::clone(&hint_theme);
+                    cx.new(|_| crate::kit::Hint::new(QUEUED_HINT, "", theme)).into()
+                })
+                .into_any_element()
+        } else {
+            state.into_any_element()
+        };
         div()
             .w_full()
             .flex()
+            .flex_col()
+            .gap(self.z(theme.spacing.xs))
             .mt(self.z(theme.spacing.lg))
             .child(
                 div()
@@ -449,31 +476,17 @@ impl ConversationView {
                     .aria_label(SharedString::from(format!("{word}: {}", pending.text)))
                     .min_w_0()
                     .max_w(relative(BUBBLE))
-                    .flex()
-                    .flex_col()
-                    .gap(self.z(theme.spacing.xs))
                     .px(self.z(theme.spacing.md))
                     .py(self.z(theme.spacing.sm))
                     .rounded(self.z(theme.radii.lg))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(hsla(s.border))
+                    .bg(hsla_alpha(s.raised, alpha::STRONG))
                     .text_size(self.z(theme.typography.prose()))
                     .text_color(hsla(s.text_secondary))
                     .child(
                         div().whitespace_normal().child(SharedString::from(pending.text.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(self.z(theme.spacing.xs))
-                            .text_size(self.z(theme.typography.meta()))
-                            .text_color(hsla(s.text_muted))
-                            .child(self.icon(IconName::Clock, s.text_muted))
-                            .child(word),
                     ),
             )
+            .child(state)
             .into_any_element()
     }
 
@@ -551,9 +564,9 @@ impl ConversationView {
                     .child(SharedString::from(meta))
             }))
             .when_some(hint, |el, hint| {
-                let theme = std::rc::Rc::clone(&self.hint_theme);
+                let theme = Rc::clone(&self.hint_theme);
                 el.tooltip(move |_window, cx| {
-                    let (hint, theme) = (hint.clone(), std::rc::Rc::clone(&theme));
+                    let (hint, theme) = (hint.clone(), Rc::clone(&theme));
                     cx.new(|_| crate::kit::Hint::new(hint, "", theme)).into()
                 })
             });
@@ -735,7 +748,7 @@ impl ConversationView {
     fn file_row(&self, path: &str, first: bool) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let file = self.session_files().into_iter().find(|f| f.path == path);
+        let file = self.changed_files().into_iter().find(|f| f.path == path);
         let (added, removed) = file.as_ref().map_or((0, 0), |f| (f.added, f.removed));
         let dir = figures::short_dir(path);
         div()

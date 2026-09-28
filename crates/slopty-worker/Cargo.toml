@@ -31,10 +31,16 @@ slopty-media.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true
 slopty-pty.workspace = true
+slopty-vdisplay.workspace = true
 thiserror.workspace = true
 rustix.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+# The main queue the virtual displays live on (`screen::sized`).
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2.workspace = true
+objc2.workspace = true
 
 [dev-dependencies]
 # The encoder's measurement surface (VBV mode, property probes) for `tests/screen.rs`.

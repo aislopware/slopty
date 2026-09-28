@@ -41,6 +41,7 @@ slopty-settings = { path = "crates/slopty-settings" }
 slopty-server = { path = "crates/slopty-server" }
 slopty-tools = { path = "crates/slopty-tools" }
 slopty-tailnet = { path = "crates/slopty-tailnet" }
+slopty-vdisplay = { path = "crates/slopty-vdisplay" }
 slopty-e2e = { path = "crates/slopty-e2e", default-features = false }
 
 # core

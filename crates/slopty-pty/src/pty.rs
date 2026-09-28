@@ -12,7 +12,8 @@ use rustix::io::FdFlags;
 use rustix::pty::OpenptFlags;
 use rustix::termios::Winsize;
 use serde::{Deserialize, Serialize};
-use slopty_proto::terminal::TermSize;
+use slopty_core::shell_quote;
+use slopty_proto::terminal::{LineDiscipline, TermSize};
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
@@ -173,17 +174,6 @@ pub fn get_size(fd: impl AsFd) -> Result<(u16, u16), PtyError> {
     Ok((ws.ws_col, ws.ws_row))
 }
 
-/// How the tty's line discipline treats input right now: what a client needs to know before it
-/// draws a keystroke it has not seen echoed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct LineDiscipline {
-    /// `ECHO`: the tty echoes what is typed. Off at a password prompt.
-    pub echo: bool,
-    /// `ICANON`: input is edited a line at a time (a shell's `read`, `cat`), not handed to the
-    /// program key by key.
-    pub canonical: bool,
-}
-
 /// The line discipline of the tty behind `fd`.
 ///
 /// On a master this is the slave's: the two ends share one termios, which is how a program's
@@ -323,9 +313,9 @@ fn resolve_command(command: &[String]) -> (String, Vec<String>, Option<String>) 
     (shell, Vec::new(), Some(format!("-{base}")))
 }
 
-/// The shell of a user with neither `$SHELL` nor a passwd entry: what each system gives a new
-/// account.
-const FALLBACK_SHELL: &str = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" };
+/// The shell of a user with neither `$SHELL` nor a passwd entry: the one every POSIX system
+/// has, where a guess at the system's default for new accounts may not be installed.
+const FALLBACK_SHELL: &str = "/bin/sh";
 
 /// `$SHELL`, else the account's shell from the passwd database (a `LaunchAgent` or a systemd
 /// user unit gets no `SHELL`), else [`FALLBACK_SHELL`].
@@ -375,16 +365,6 @@ fn on_path(program: &str) -> bool {
                 .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
     })
-}
-
-/// Single-quote a word for a POSIX or fish shell.
-fn shell_quote(word: &str) -> String {
-    if !word.is_empty()
-        && word.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./=:@%+,".contains(&b))
-    {
-        return word.to_owned();
-    }
-    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// The user's home directory, by the rule of `slopty_platform::dirs::home`: `$HOME` when set
@@ -558,9 +538,8 @@ mod tests {
         let fish = || Some("/usr/bin/fish".to_owned());
         assert_eq!(choose_shell(Some("/bin/sh".to_owned()), fish), "/bin/sh");
         assert_eq!(choose_shell(Some(String::new()), fish), "/usr/bin/fish");
-        assert_eq!(choose_shell(None, || Some(String::new())), FALLBACK_SHELL);
-        let system = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" };
-        assert_eq!(choose_shell(None, || None), system);
+        assert_eq!(choose_shell(None, || Some(String::new())), "/bin/sh");
+        assert_eq!(choose_shell(None, || None), "/bin/sh");
     }
 
     #[test]
@@ -569,12 +548,5 @@ mod tests {
         assert_eq!(p, login_shell());
         assert_eq!(a, vec!["-lic".to_owned(), "slopty-no-such-tool 'it'\\''s'".to_owned()]);
         assert_eq!(arg0, None);
-    }
-
-    #[test]
-    fn shell_quote_leaves_plain_words_alone() {
-        assert_eq!(shell_quote("--flag=1"), "--flag=1");
-        assert_eq!(shell_quote("a b"), "'a b'");
-        assert_eq!(shell_quote(""), "''");
     }
 }

@@ -3,9 +3,10 @@
 //! It is the instrument for timing the frame path end to end where ScreenCaptureKit cannot run.
 //! A worker a test starts from a shell has no Screen Recording grant, and nothing may ask for
 //! one. [`Canvas`] stands in for every active display (CoreGraphics lists them without a grant).
-//! On the display's beat it hands the stream an `IOSurface`-backed full-range NV12 picture of the
-//! size asked for, stamped on the host time clock ScreenCaptureKit stamps with, into the same
-//! sink a real capture feeds. Nothing in the product names it: only a stream built on it draws.
+//! On the display's beat it hands the stream an `IOSurface`-backed full-range picture of the
+//! size and format asked for (NV12, or 10-bit 4:4:4 for a full-chroma stream), stamped on the
+//! host time clock ScreenCaptureKit stamps with, into the same sink a real capture feeds. Nothing
+//! in the product names it: only a stream built on it draws.
 //!
 //! The picture is a dark desktop with a window of text scrolling in its middle, so every frame
 //! changes as a scrolling page does. A strip of [`MARK_BITS`] blocks along the top spells how
@@ -22,9 +23,10 @@ use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
     CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeightOfPlane,
-    CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-    CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
+    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
     kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
 };
 use parking_lot::Mutex;
 use slopty_codec::PixelBuffer;
@@ -33,8 +35,8 @@ use slopty_proto::screen::{CaptureTarget, CursorShape, DisplayInfo, WindowInfo};
 
 use crate::geometry;
 use crate::source::{
-    AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop, Rect,
-    TargetWindow, Went, WindowState,
+    AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop,
+    PixelFormat, Rect, TargetWindow, Went, WindowState,
 };
 use crate::stream::host_now_us;
 
@@ -63,6 +65,66 @@ const SLOTS: usize = 12;
 /// The beat when the display reports no refresh rate.
 const FALLBACK_HZ: f64 = 60.0;
 
+/// How a canvas picture lays its samples out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Samples {
+    /// Full-range NV12 (`420f`): a byte a sample, chroma at half size.
+    Nv12,
+    /// Full-range 10-bit bi-planar 4:4:4 (`xf44`): 16 bits a sample, the value in the high 10,
+    /// chroma at full size.
+    Xf44,
+}
+
+impl Samples {
+    const fn of(format: PixelFormat) -> Self {
+        match format {
+            PixelFormat::Yuv444Full10 => Self::Xf44,
+            PixelFormat::Nv12Full | PixelFormat::Bgra => Self::Nv12,
+        }
+    }
+
+    const fn os_type(self) -> u32 {
+        match self {
+            Self::Nv12 => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            Self::Xf44 => kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+        }
+    }
+
+    fn from_os_type(os_type: u32) -> Option<Self> {
+        [Self::Nv12, Self::Xf44].into_iter().find(|samples| samples.os_type() == os_type)
+    }
+
+    /// Bytes a sample takes.
+    const fn width(self) -> usize {
+        match self {
+            Self::Nv12 => 1,
+            Self::Xf44 => 2,
+        }
+    }
+
+    /// An 8-bit level as one sample: the byte itself, or the level in the high byte of a
+    /// little-endian 16-bit sample (CoreVideo keeps the 10 bits in the high bits).
+    const fn put(self, sample: &mut [u8], level: u8) {
+        match (self, sample) {
+            (Self::Nv12, [byte]) => *byte = level,
+            (Self::Xf44, [low, high]) => (*low, *high) = (0, level),
+            _other => {}
+        }
+    }
+
+    /// A sample's 8-bit level: its high byte.
+    fn level(self, sample: &[u8]) -> Option<u8> {
+        sample.get(self.width().checked_sub(1)?).copied()
+    }
+
+    /// Set every sample of `bytes` to `level`.
+    fn fill(self, bytes: &mut [u8], level: u8) {
+        for sample in bytes.chunks_exact_mut(self.width()) {
+            self.put(sample, level);
+        }
+    }
+}
+
 /// Inputs this process has taken, all canvases together.
 static INPUTS: AtomicU64 = AtomicU64::new(0);
 
@@ -78,7 +140,8 @@ pub fn inputs_taken() -> u64 {
 }
 
 /// The input count a canvas picture spells in its strip, modulo `2^MARK_BITS`; `None` when the
-/// buffer is too small to carry a strip or its planes cannot be read.
+/// buffer is too small to carry a strip, is in neither of the canvas's formats, or its planes
+/// cannot be read.
 #[must_use]
 pub fn inputs_shown(buffer: &CVPixelBuffer) -> Option<u16> {
     // SAFETY: CoreVideo rule: the base address may only be read between a lock and its unlock;
@@ -96,6 +159,7 @@ pub fn inputs_shown(buffer: &CVPixelBuffer) -> Option<u16> {
 
 /// The strip's bits off a locked buffer.
 fn read_strip(buffer: &CVPixelBuffer) -> Option<u16> {
+    let samples = Samples::from_os_type(CVPixelBufferGetPixelFormatType(buffer))?;
     let width = CVPixelBufferGetWidthOfPlane(buffer, 0);
     let height = CVPixelBufferGetHeightOfPlane(buffer, 0);
     let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0);
@@ -110,7 +174,8 @@ fn read_strip(buffer: &CVPixelBuffer) -> Option<u16> {
     let mut shown = 0_u16;
     for bit in 0..MARK_BITS {
         let x = layout.mark_centre(bit)?;
-        if *line.get(x)? > MARK_THRESHOLD {
+        let at = x.checked_mul(samples.width())?;
+        if samples.level(line.get(at..at.checked_add(samples.width())?)?)? > MARK_THRESHOLD {
             shown |= 1_u16.checked_shl(bit)?;
         }
     }
@@ -160,6 +225,7 @@ struct Slot {
 /// What the beat draws with.
 struct Painter {
     layout: Layout,
+    samples: Samples,
     /// The page's text, twice the window's height, scrolled through a frame at a time.
     text: Vec<u8>,
     slots: Vec<Slot>,
@@ -167,11 +233,12 @@ struct Painter {
 }
 
 impl Painter {
-    fn new(width: u32, height: u32) -> Option<Self> {
+    fn new(width: u32, height: u32, format: PixelFormat) -> Option<Self> {
         let layout = Layout::new(usize::try_from(width).ok()?, usize::try_from(height).ok()?)?;
         let (_, _, page_w, page_h) = layout.page;
         Some(Self {
             layout,
+            samples: Samples::of(format),
             text: text(page_w, page_h.checked_mul(2)?),
             slots: Vec::new(),
             frame: 0,
@@ -190,11 +257,11 @@ impl Painter {
             return None;
         }
         if !slot.ready {
-            fill_plane(&buffer, 0, DESKTOP);
-            fill_plane(&buffer, 1, GREY);
+            fill_plane(&buffer, self.samples, 0, DESKTOP);
+            fill_plane(&buffer, self.samples, 1, GREY);
             slot.ready = true;
         }
-        let drawn = draw(&buffer, &self.layout, &self.text, self.frame, inputs);
+        let drawn = draw(&buffer, self, inputs);
         // SAFETY: matches the lock above.
         let _unlocked =
             unsafe { CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::empty()) };
@@ -211,7 +278,8 @@ impl Painter {
         if self.slots.len() >= SLOTS {
             return None;
         }
-        let buffer = PixelBuffer::from_retained(surface(self.layout.width, self.layout.height)?);
+        let (width, height) = (self.layout.width, self.layout.height);
+        let buffer = PixelBuffer::from_retained(surface(width, height, self.samples)?);
         self.slots.push(Slot { buffer, ready: false });
         Some(self.slots.len().saturating_sub(1))
     }
@@ -253,11 +321,9 @@ fn text(width: usize, rows: usize) -> Vec<u8> {
     page
 }
 
-/// An `IOSurface`-backed full-range NV12 buffer, as ScreenCaptureKit delivers.
-fn surface(width: usize, height: usize) -> Option<CFRetained<CVPixelBuffer>> {
-    let format = CFNumber::new_i32(i32::from_ne_bytes(
-        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange.to_ne_bytes(),
-    ));
+/// An `IOSurface`-backed full-range buffer in `samples`' format, as ScreenCaptureKit delivers.
+fn surface(width: usize, height: usize, samples: Samples) -> Option<CFRetained<CVPixelBuffer>> {
+    let format = CFNumber::new_i32(i32::from_ne_bytes(samples.os_type().to_ne_bytes()));
     let attrs = CFDictionary::<CFString, CFType>::from_slices(
         &[
             // SAFETY: framework-provided constant string.
@@ -274,7 +340,7 @@ fn surface(width: usize, height: usize) -> Option<CFRetained<CVPixelBuffer>> {
             None,
             width,
             height,
-            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            samples.os_type(),
             Some(attrs.as_opaque()),
             NonNull::from(&mut raw),
         )
@@ -305,41 +371,42 @@ fn with_plane<R>(
     Some(write(bytes, stride))
 }
 
-fn fill_plane(buffer: &CVPixelBuffer, plane: usize, value: u8) {
-    let _filled = with_plane(buffer, plane, |bytes, _stride| bytes.fill(value));
+fn fill_plane(buffer: &CVPixelBuffer, samples: Samples, plane: usize, level: u8) {
+    let _filled = with_plane(buffer, plane, |bytes, _stride| samples.fill(bytes, level));
 }
 
-/// The page scrolled to `frame`, and the strip spelling `inputs`. `false` when the planes
-/// could not be read.
-fn draw(buffer: &CVPixelBuffer, layout: &Layout, text: &[u8], frame: usize, inputs: u64) -> bool {
-    with_plane(buffer, 0, |luma, stride| draw_luma(luma, stride, layout, text, frame, inputs))
-        .is_some()
+/// The painter's page scrolled to its frame, and the strip spelling `inputs`. `false` when the
+/// planes could not be read.
+fn draw(buffer: &CVPixelBuffer, painter: &Painter, inputs: u64) -> bool {
+    with_plane(buffer, 0, |luma, stride| draw_luma(luma, stride, painter, inputs)).is_some()
 }
 
-fn draw_luma(
-    luma: &mut [u8],
-    stride: usize,
-    layout: &Layout,
-    text: &[u8],
-    frame: usize,
-    inputs: u64,
-) {
+fn draw_luma(luma: &mut [u8], stride: usize, painter: &Painter, inputs: u64) {
+    let Painter { layout, samples, text, frame, .. } = painter;
+    let samples = *samples;
     let (x0, y0, page_w, page_h) = layout.page;
     let text_rows = text.len().checked_div(page_w).unwrap_or(0);
     let scrolled = frame.saturating_mul(SCROLL_ROWS);
     for (y, row) in luma.chunks_exact_mut(stride).enumerate().skip(y0).take(page_h) {
         let from = y.saturating_sub(y0).wrapping_add(scrolled).checked_rem(text_rows).unwrap_or(0);
         let source = from.checked_mul(page_w).and_then(|at| text.get(at..at.checked_add(page_w)?));
-        if let (Some(source), Some(dest)) = (source, row.get_mut(x0..x0.saturating_add(page_w))) {
-            dest.copy_from_slice(source);
+        let span = |x: usize| x.saturating_mul(samples.width());
+        if let (Some(source), Some(dest)) =
+            (source, row.get_mut(span(x0)..span(x0.saturating_add(page_w))))
+        {
+            for (sample, &level) in dest.chunks_exact_mut(samples.width()).zip(source) {
+                samples.put(sample, level);
+            }
         }
     }
     for row in luma.chunks_exact_mut(stride).take(layout.strip_h) {
         for bit in 0..MARK_BITS {
             let on = inputs.checked_shr(bit).unwrap_or(0) & 1 == 1;
             let start = layout.mark_w.saturating_mul(usize::try_from(bit).unwrap_or(0));
-            if let Some(block) = row.get_mut(start..start.saturating_add(layout.mark_w)) {
-                block.fill(if on { MARK_ON } else { MARK_OFF });
+            let span = |x: usize| x.saturating_mul(samples.width());
+            if let Some(block) = row.get_mut(span(start)..span(start.saturating_add(layout.mark_w)))
+            {
+                samples.fill(block, if on { MARK_ON } else { MARK_OFF });
             }
         }
     }
@@ -492,7 +559,7 @@ impl CaptureSource for Canvas {
         let period_us = (1e6 / hz.clamp(1.0, 240.0)).round() as u64;
         let beat = Arc::new(Beat {
             stopped: AtomicBool::new(false),
-            painter: Mutex::new(Painter::new(config.width, config.height)),
+            painter: Mutex::new(Painter::new(config.width, config.height, config.format)),
             period_us,
             sink: Box::new(sink),
         });
@@ -518,9 +585,9 @@ impl CaptureSource for Canvas {
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) {
         let beat = Arc::clone(&stream.beat);
-        let (width, height) = (config.width, config.height);
+        let (width, height, format) = (config.width, config.height, config.format);
         stream.queue.exec_async(move || {
-            *beat.painter.lock() = Painter::new(width, height);
+            *beat.painter.lock() = Painter::new(width, height, format);
             done(Ok(()));
         });
     }
@@ -621,19 +688,27 @@ impl CaptureSource for Canvas {
 mod tests {
     use super::*;
 
-    /// A picture spells the input count in its strip, and the reader gets it back; a picture too
-    /// small for a strip reads as none.
+    /// A picture spells the input count in its strip, and the reader gets it back, in either
+    /// format the canvas draws; a picture too small for a strip reads as none.
     #[test]
     fn the_strip_reads_back_what_was_drawn() {
-        let mut painter = Painter::new(640, 360).unwrap();
-        for inputs in [0_u64, 1, 0x5a5a, 0xffff, 0x1_0003] {
-            let picture = painter.paint(inputs).unwrap();
-            assert_eq!(
-                inputs_shown(picture.as_cv()),
-                Some(u16::try_from(inputs & 0xffff).unwrap())
-            );
+        for format in [PixelFormat::Nv12Full, PixelFormat::Yuv444Full10] {
+            let mut painter = Painter::new(640, 360, format).unwrap();
+            for inputs in [0_u64, 1, 0x5a5a, 0xffff, 0x1_0003] {
+                let picture = painter.paint(inputs).unwrap();
+                assert_eq!(
+                    CVPixelBufferGetPixelFormatType(picture.as_cv()),
+                    Samples::of(format).os_type(),
+                    "{format:?}"
+                );
+                assert_eq!(
+                    inputs_shown(picture.as_cv()),
+                    Some(u16::try_from(inputs & 0xffff).unwrap()),
+                    "{format:?}"
+                );
+            }
         }
-        let tiny = surface(8, 8).unwrap();
+        let tiny = surface(8, 8, Samples::Nv12).unwrap();
         assert_eq!(inputs_shown(&tiny), None, "8 px has no room for 16 blocks");
     }
 
@@ -641,7 +716,7 @@ mod tests {
     /// and once all are held the beat drops its frame instead of tearing one.
     #[test]
     fn a_held_picture_is_never_drawn_over() {
-        let mut painter = Painter::new(320, 180).unwrap();
+        let mut painter = Painter::new(320, 180, PixelFormat::Nv12Full).unwrap();
         let first = painter.paint(1).unwrap();
         let second = painter.paint(2).unwrap();
         assert!(!ptr::eq(first.as_cv(), second.as_cv()), "the held picture was reused");
@@ -659,7 +734,7 @@ mod tests {
     /// motion on every beat rather than a still desktop.
     #[test]
     fn the_page_moves_every_frame() {
-        let mut painter = Painter::new(320, 180).unwrap();
+        let mut painter = Painter::new(320, 180, PixelFormat::Nv12Full).unwrap();
         let row = |p: &CVPixelBuffer| {
             // SAFETY: CoreVideo rule: read between a lock and its unlock.
             let locked =

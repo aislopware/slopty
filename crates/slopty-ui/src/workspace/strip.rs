@@ -167,6 +167,8 @@ impl WorkspaceView {
     }
 
     fn mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        let (top, height) = (self.viewport.top(), self.viewport.size.height);
+        self.pointer_over_strip(f32::from(ev.position.y - top), f32::from(height), cx);
         if self.drag.is_none() {
             return;
         }
@@ -688,6 +690,7 @@ impl WorkspaceView {
             .children(handles)
             .children(hint)
             .children(empty)
+            .children(self.render_marks())
             .into_any_element()
     }
 

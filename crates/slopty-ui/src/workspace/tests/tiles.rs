@@ -909,53 +909,6 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     assert!(rows.iter().any(|r| r == "New workspace"), "{rows:?}");
 }
 
-/// The column marks are short segments, not dots (dots after "+" read as the "…" button's
-/// glyph), and the columns in view are one thumb in the muted tone, not a bar per column: three
-/// of those in the title's tone read as "2 of 3 loaded".
-#[gpui::test]
-fn the_columns_in_view_are_one_thumb(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    let _shells = three_shells(&view, cx, &fake);
-    let marks: Vec<Bounds<Pixels>> =
-        ["column-0", "column-1", "column-2"].iter().filter_map(|m| cx.debug_bounds(m)).collect();
-    assert_eq!(marks.len(), 3, "a mark per column");
-    for pair in marks.windows(2) {
-        assert!((pair[1].left() - pair[0].right()).abs() < px(0.5), "one run of targets");
-    }
-    let indicator = cx.debug_bounds("indicator").expect("the marks");
-    let theme = Theme::default();
-    let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-    let bars: Vec<&gpui::Quad> = quads
-        .iter()
-        .filter(|q| {
-            let (y, h) = (q.bounds.origin.y.0 / scale, q.bounds.size.height.0 / scale);
-            (h - 3.0).abs() < 0.1
-                && f32::from(indicator.top()) <= y
-                && y <= f32::from(indicator.bottom())
-        })
-        .collect();
-    let paint = |c| gpui::Background::from(crate::colors::hsla(c));
-    let thumbs = bars.iter().filter(|q| q.background == paint(theme.surfaces.text_muted)).count();
-    let rest = bars.iter().filter(|q| q.background == paint(theme.surfaces.border)).count();
-    let shown = view.read_with(cx, |v, _| {
-        let (x, w) = v.drawn_strip.view;
-        let columns = &v.drawn_strip.columns;
-        columns.iter().filter(|(at, wide)| at + wide > x + 1.0 && *at < x + w - 1.0).count()
-    });
-    assert!((1..3).contains(&shown), "some column is out of view: {shown}");
-    assert_eq!(
-        (thumbs, rest),
-        (shown, 3_usize.saturating_sub(shown)),
-        "a quad per column: {bars:#?}"
-    );
-    let joined = bars.iter().filter(|q| q.background == paint(theme.surfaces.text_muted));
-    let widths: Vec<f32> = joined.map(|q| q.bounds.size.width.0 / scale).collect();
-    let run = widths.iter().sum::<f32>();
-    let expected: f32 = (0..shown).map(|i| if i == 0 { 8.0 } else { 8.0 + 3.0 }).sum();
-    assert!((run - expected).abs() < 0.5, "the columns in view reach over their gaps: {widths:?}");
-}
-
 /// Chrome moves where it may: a tab grows in, the active fill slides between tabs, a menu
 /// drops in, a notice rises in and fades when its time is up, and a closing tile fades where
 /// it stood. Under Reduce Motion each lands at once.
