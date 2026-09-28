@@ -82,7 +82,7 @@ pub(super) const HANDLE_W: f32 = 12.0;
 pub(super) const RAIL_W: f32 = 40.0;
 
 /// What an open worker with no tile says under its name.
-pub const NO_TILES: &str = "No tiles";
+pub(super) const NO_TILES: &str = "No tiles";
 
 /// How many rows *Working* lists before "Show N more".
 const WORKING_SHOWN: usize = 4;
@@ -724,12 +724,6 @@ impl WorkspaceView {
             }
             Mode::Docked | Mode::Overlay => self.navigator_width(),
         }
-    }
-
-    /// What the navigator's filter holds.
-    #[must_use]
-    pub fn navigator_filter(&self) -> &str {
-        &self.nav.filter.query
     }
 
     /// A row was chosen: the inbox closes, and over the strip the navigator gets out of the
@@ -2005,6 +1999,12 @@ fn header_actions_width(theme: &Theme) -> f32 {
 
 #[cfg(test)]
 impl WorkspaceView {
+    /// What the navigator's filter holds.
+    #[must_use]
+    pub(super) fn navigator_filter(&self) -> &str {
+        &self.nav.filter.query
+    }
+
     /// Every tile row the navigator lists, as drawn: its title, its second line and its age.
     pub(super) fn navigator_lines(&self, cx: &gpui::App) -> Vec<(String, String, Option<String>)> {
         self.nav_listing(cx)

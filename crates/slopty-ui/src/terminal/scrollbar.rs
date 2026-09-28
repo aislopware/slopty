@@ -6,13 +6,13 @@
 use std::time::{Duration, Instant};
 
 /// How long the bar stays after the last reason to show it ended (Zed's hide delay).
-pub const LINGER: Duration = Duration::from_secs(1);
+pub(super) const LINGER: Duration = Duration::from_secs(1);
 /// How long it takes to fade out (Zed's hide duration).
-pub const FADE: Duration = Duration::from_millis(400);
+pub(super) const FADE: Duration = Duration::from_millis(400);
 
 /// The bar's reasons to show.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Visibility {
+pub(super) struct Visibility {
     /// The pointer is near the grid's right edge.
     near_edge: bool,
     /// The thumb is held by the pointer.
@@ -24,12 +24,12 @@ pub struct Visibility {
 
 impl Visibility {
     /// The viewport moved.
-    pub const fn scrolled(&mut self, now: Instant) {
+    pub(super) const fn scrolled(&mut self, now: Instant) {
         self.woke = Some(now);
     }
 
     /// The pointer is (or is not) near the right edge. True when that changed.
-    pub const fn pointer(&mut self, near: bool, now: Instant) -> bool {
+    pub(super) const fn pointer(&mut self, near: bool, now: Instant) -> bool {
         if self.near_edge == near {
             return false;
         }
@@ -41,7 +41,7 @@ impl Visibility {
     }
 
     /// The thumb was taken or let go.
-    pub const fn hold(&mut self, held: bool, now: Instant) {
+    pub(super) const fn hold(&mut self, held: bool, now: Instant) {
         if self.held && !held {
             self.woke = Some(now);
         }
@@ -55,7 +55,7 @@ impl Visibility {
 
     /// How much of the bar shows at `now`, 0 (hidden) to 1.
     #[must_use]
-    pub fn opacity(&self, now: Instant, reduce_motion: bool) -> f32 {
+    pub(super) fn opacity(&self, now: Instant, reduce_motion: bool) -> f32 {
         if self.pinned() {
             return 1.0;
         }
@@ -72,7 +72,7 @@ impl Visibility {
     /// How long until the linger ends and the fade starts; `None` while pinned, at rest or
     /// already fading. The caller wakes then to draw the fade.
     #[must_use]
-    pub fn linger_left(&self, now: Instant) -> Option<Duration> {
+    pub(super) fn linger_left(&self, now: Instant) -> Option<Duration> {
         if self.pinned() {
             return None;
         }

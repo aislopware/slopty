@@ -1086,7 +1086,7 @@ impl ConversationView {
 /// Unified hunks as text (what [`slopty_proto::conversation::Part::Patch`] expands to) read
 /// back into a patch.
 #[must_use]
-pub fn parse_patch(text: &str) -> Patch {
+pub(super) fn parse_patch(text: &str) -> Patch {
     let mut patch = Patch::default();
     for line in text.lines() {
         if let Some(header) = line.strip_prefix("@@") {

@@ -41,8 +41,8 @@ use slopty_core::{DisplayId, StreamId};
 use slopty_input::{InputError, InputSink as _, Pointer, PointerChanges, PointerWatch};
 pub use slopty_media::PathSample;
 use slopty_media::{
-    Cadence, ChromaGate, Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Pace, Packetizer,
-    RateController, Redundancy, audio_datagram, cursor_datagram, heartbeat_datagram,
+    Cadence, ChromaGate, Decision, EncodedFrame, EncoderWatch, HEARTBEAT_AFTER, MediaError, Pace,
+    Packetizer, RateController, Redundancy, audio_datagram, cursor_datagram, heartbeat_datagram,
 };
 use slopty_proto::ctl::{LtrStats, Quantiles, ScreenStats, ScreenSummary};
 use slopty_proto::media::MAX_DATAGRAM;
@@ -832,8 +832,9 @@ impl Counters {
         in_flight.push_back((pts_us, now));
     }
 
-    /// The encoder returned the frame with `pts_us` at `now`: record its encode latency.
-    fn returned(&self, pts_us: u64, now: u64) {
+    /// The encoder returned the frame with `pts_us` at `now`: record its encode latency, and
+    /// return it when the frame's submission is on record.
+    fn returned(&self, pts_us: u64, now: u64) -> Option<u64> {
         let submitted = {
             let mut in_flight = self.in_flight.lock();
             let at = in_flight.iter().position(|&(pts, _)| pts == pts_us);
@@ -841,9 +842,9 @@ impl Counters {
             drop(in_flight);
             found
         };
-        if let Some(at) = submitted {
-            self.encode.lock().push(now.saturating_sub(at));
-        }
+        let took = now.saturating_sub(submitted?);
+        self.encode.lock().push(took);
+        Some(took)
     }
 
     fn snapshot(&self) -> ScreenStats {
@@ -1003,8 +1004,11 @@ struct Shared<P: Platform = Native> {
     /// The cadence rung in force: how many of the captures reach the encoder, and the frame rate
     /// the held-bytes limit is computed from.
     fps: std::sync::atomic::AtomicU16,
-    /// The cadence the client asked for; the ladder never climbs past it.
+    /// The cadence the client asked for, or the rung the encoder was seen to keep up with when
+    /// that is lower ([`Shared::watch_encoder`]); the ladder never climbs past it.
     fps_ceiling: std::sync::atomic::AtomicU16,
+    /// Frames in a row the encoder returned late for the rung in force ([`EncoderWatch`]).
+    encoder_late: std::sync::atomic::AtomicU32,
     /// The presentation time of the last frame handed to the encoder; the next must be later.
     last_encoded_us: AtomicU64,
     /// The cadence gate's next slot ([`Pace::next_us`]); read and moved under `held`.
@@ -1099,6 +1103,7 @@ impl<P: Platform> Shared<P> {
             last_push_us: AtomicU64::new(now::<P>()),
             fps: std::sync::atomic::AtomicU16::new(fps),
             fps_ceiling: std::sync::atomic::AtomicU16::new(fps),
+            encoder_late: std::sync::atomic::AtomicU32::new(0),
             last_encoded_us: AtomicU64::new(0),
             pace_us: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
@@ -1262,6 +1267,23 @@ impl<P: Platform> Shared<P> {
             tracing::warn!(stream = %self.id, fps, error = %e, "set frame rate");
         }
         tracing::debug!(stream = %self.id, fps, bps, "cadence");
+    }
+
+    /// A frame spent `encode_us` in the encoder. After a run of frames queueing inside it at
+    /// the rung in force, the ceiling steps down a rung and the cadence with it: the encoder
+    /// cannot turn frames out that fast, and a queue in it is latency on every frame
+    /// ([`EncoderWatch`]). The ceiling stays down until the next encoder session.
+    fn watch_encoder(&self, encode_us: u64) {
+        let fps = self.fps.load(Ordering::Relaxed);
+        let mut watch = EncoderWatch::resume(self.encoder_late.load(Ordering::Relaxed));
+        let slower = watch.returned(encode_us, fps);
+        self.encoder_late.store(watch.late(), Ordering::Relaxed);
+        let Some(ceiling) = slower else { return };
+        let ceiling = ceiling.min(self.fps_ceiling.load(Ordering::Relaxed));
+        self.fps_ceiling.store(ceiling, Ordering::Relaxed);
+        let target = self.rate.lock().target_bps();
+        self.apply_cadence(target);
+        tracing::info!(stream = %self.id, fps, ceiling, encode_us, "encoder behind: fewer frames");
     }
 
     /// Hand `datagrams` to the transport now, in one call; what it took.
@@ -1464,7 +1486,7 @@ impl<P: Platform> Shared<P> {
         self.counters.submitted(pts, now);
         let outcome = encoder.as_ref().map(|encoder| encoder.encode(&frame.image, pts, &options));
         if let Some(Err(e)) = outcome {
-            self.counters.returned(pts, Source::<P>::now_us());
+            let _failed = self.counters.returned(pts, Source::<P>::now_us());
             if matches!(e, CodecError::NotFullChroma(_)) {
                 // The 4:4:4 session went in before ScreenCaptureKit switched to `xf44`; the
                 // capture is on its way ([`Pipeline::start_rebuild`]).
@@ -1608,7 +1630,9 @@ impl<P: Platform> Shared<P> {
     /// VideoToolbox produced an access unit.
     fn on_packet(&self, packet: &EncodedPacket) {
         let now = now::<P>();
-        self.counters.returned(packet.pts_us, now);
+        if let Some(took) = self.counters.returned(packet.pts_us, now) {
+            self.watch_encoder(took);
+        }
         let latency = now.saturating_sub(packet.pts_us);
         let encoded = self.counters.encoded.fetch_add(1, Ordering::Relaxed);
         // The quiet geometry probe learns the source draws again from this, not its backstop.
@@ -2680,6 +2704,17 @@ impl<P: Platform> Pipeline<P> {
             }
             return None;
         }
+        if pending.is_none()
+            && desired == was
+            && encoder_config.codec == was_config.codec
+            && encoder_config.chroma == was_config.chroma
+        {
+            // Only the rate moved (the client's view went to a screen of another refresh), and
+            // the capture already follows the display's beat: the session takes the new rate as
+            // it takes a rung, with no rebuild and no keyframe.
+            self.set_rate_in_place(encoder_config);
+            return None;
+        }
         let resized = pending.as_ref().is_some_and(|rebuild| rebuild.resized);
         if let Some(superseded) = pending {
             superseded.abandon();
@@ -2688,6 +2723,26 @@ impl<P: Platform> Pipeline<P> {
         let mut rebuild = self.start_rebuild(native, desired, encoder_config);
         rebuild.resized = resized;
         Some(rebuild)
+    }
+
+    /// Take a new frame rate ceiling (and bitrate ceiling) on the encoder session in force.
+    fn set_rate_in_place(&mut self, encoder_config: EncoderConfig) {
+        let target = {
+            let mut rate = self.shared.rate.lock();
+            rate.set_max(encoder_config.bitrate_bps);
+            rate.target_bps()
+        };
+        self.shared.apply_bitrate(target);
+        self.shared.fps_ceiling.store(encoder_config.fps, Ordering::Relaxed);
+        self.shared.fps.store(encoder_config.fps, Ordering::Relaxed);
+        self.shared.encoder_late.store(0, Ordering::Relaxed);
+        let result =
+            self.shared.encoder.read().as_ref().map(|e| e.set_frame_rate(encoder_config.fps));
+        if let Some(Err(e)) = result {
+            tracing::warn!(stream = %self.shared.id, error = %e, "set frame rate");
+        }
+        self.shared.apply_cadence(target);
+        self.encoder_config = encoder_config;
     }
 
     /// Follow the target: a window the user resized on the worker gets a stream of its new
@@ -3030,6 +3085,7 @@ impl<P: Platform> Pipeline<P> {
         // in force answered a bitrate the client has just replaced.
         self.shared.fps_ceiling.store(encoder_config.fps, Ordering::Relaxed);
         self.shared.fps.store(encoder_config.fps, Ordering::Relaxed);
+        self.shared.encoder_late.store(0, Ordering::Relaxed);
         self.shared.apply_cadence(target);
         self.map_at(desired.width, native.0);
         self.desired = desired;
@@ -3878,6 +3934,31 @@ mod tests {
         assert_eq!(shared.fps.load(Ordering::Relaxed), 15, "2 KB a frame at 60 is not a picture");
         shared.apply_cadence(30_000_000);
         assert_eq!(shared.fps.load(Ordering::Relaxed), 60);
+    }
+
+    /// An encoder that keeps returning frames three periods late at 120 fps takes the ceiling
+    /// and the cadence to 60, where the same latency is on time, and a new ceiling from the
+    /// client starts the watch again. One slow frame changes nothing.
+    #[test]
+    fn an_encoder_behind_its_rung_takes_the_ceiling_down() {
+        let (shared, _wire) = shared_for_frames();
+        shared.fps_ceiling.store(120, Ordering::Relaxed);
+        shared.apply_cadence(30_000_000);
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 120);
+        shared.watch_encoder(97_000);
+        shared.watch_encoder(8_000);
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 120, "a lone slow frame");
+        for _ in 0..12 {
+            shared.watch_encoder(80_000);
+        }
+        assert_eq!(shared.fps_ceiling.load(Ordering::Relaxed), 60);
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 60);
+        for _ in 0..12 {
+            shared.watch_encoder(25_000);
+        }
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 60, "25 ms is on time at 60");
+        shared.apply_cadence(30_000_000);
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 60, "the rate does not climb past it");
     }
 
     /// Captures keep arriving on the display's beat whatever the cadence is; the gate is what

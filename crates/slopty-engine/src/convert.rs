@@ -7,6 +7,7 @@ use libghostty_vt::screen::{CellSemanticContent, CellWide, RowSemanticPrompt};
 use libghostty_vt::style::{self, StyleColor, Underline as VtUnderline};
 use slopty_grid::{CellWidth, Color, CursorShape, SemanticMark, Style, StyleFlags, Underline};
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton};
+use slopty_proto::terminal::PointerShape;
 
 macro_rules! key_code_map {
     ($($name:ident),* $(,)?) => {
@@ -163,6 +164,51 @@ pub const fn cursor_shape(s: CursorVisualStyle) -> CursorShape {
         CursorVisualStyle::Underline => CursorShape::Underline,
         CursorVisualStyle::BlockHollow => CursorShape::BlockHollow,
         _ => CursorShape::Block,
+    }
+}
+
+/// The pointer a program asked for (`OSC 22`) as the wire names it.
+///
+/// `default` itself, and a shape libghostty adds later until it is named here, read as
+/// [`PointerShape::Default`].
+#[must_use]
+pub const fn pointer(shape: mouse::Shape) -> PointerShape {
+    use mouse::Shape as S;
+    match shape {
+        S::Text => PointerShape::Text,
+        S::ContextMenu => PointerShape::ContextMenu,
+        S::Help => PointerShape::Help,
+        S::Pointer => PointerShape::Pointer,
+        S::Progress => PointerShape::Progress,
+        S::Wait => PointerShape::Wait,
+        S::Cell => PointerShape::Cell,
+        S::Crosshair => PointerShape::Crosshair,
+        S::VerticalText => PointerShape::VerticalText,
+        S::Alias => PointerShape::Alias,
+        S::Copy => PointerShape::Copy,
+        S::Move => PointerShape::Move,
+        S::NoDrop => PointerShape::NoDrop,
+        S::NotAllowed => PointerShape::NotAllowed,
+        S::Grab => PointerShape::Grab,
+        S::Grabbing => PointerShape::Grabbing,
+        S::AllScroll => PointerShape::AllScroll,
+        S::ColResize => PointerShape::ColResize,
+        S::RowResize => PointerShape::RowResize,
+        S::NResize => PointerShape::NResize,
+        S::EResize => PointerShape::EResize,
+        S::SResize => PointerShape::SResize,
+        S::WResize => PointerShape::WResize,
+        S::NeResize => PointerShape::NeResize,
+        S::NwResize => PointerShape::NwResize,
+        S::SeResize => PointerShape::SeResize,
+        S::SwResize => PointerShape::SwResize,
+        S::EwResize => PointerShape::EwResize,
+        S::NsResize => PointerShape::NsResize,
+        S::NeswResize => PointerShape::NeswResize,
+        S::NwseResize => PointerShape::NwseResize,
+        S::ZoomIn => PointerShape::ZoomIn,
+        S::ZoomOut => PointerShape::ZoomOut,
+        _ => PointerShape::Default,
     }
 }
 

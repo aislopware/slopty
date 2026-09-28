@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Autocapitalize, Bounds, Context, CursorStyle, Entity, EntityInputHandler,
+    App, AppContext as _, Autocapitalize, Bounds, Context, CursorStyle, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, Keystroke, LongPressEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, TextInputAction,
     TextInputConfiguration, TouchPhase, UTF16Selection, Window, anchored, deferred, div, point, px,
-    size,
+    relative, size,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::term::{BlockHead, CommandBlock, TermImage};
@@ -24,7 +24,8 @@ use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{
-    PasteChord, Placement, SearchMatch, TermEvent, TermRequest, TermSize,
+    PasteChord, Placement, PointerShape, ProgressState, SearchMatch, TermEvent, TermRequest,
+    TermSize,
 };
 use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
@@ -48,7 +49,7 @@ const AUTOSCROLL_TICK: Duration = Duration::from_millis(50);
 /// outside bracketed paste a newline runs whatever precedes it, inside it the end sequence
 /// closes the bracket and the rest is typed. Either waits for a confirmation.
 #[must_use]
-pub fn paste_is_safe(text: &str, bracketed: bool) -> bool {
+pub(super) fn paste_is_safe(text: &str, bracketed: bool) -> bool {
     if bracketed { !text.contains("\x1b[201~") } else { !text.contains(['\n', '\r']) }
 }
 
@@ -116,9 +117,9 @@ mod actions {
 }
 pub use actions::{
     ClearScreen, CloseFind, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt,
-    NoteLastBlock, Paste, PrevPrompt, RerunLast, ScrollPageDown, ScrollPageUp, ScrollToBottom,
-    ScrollToTop, SelectAll,
+    NoteLastBlock, Paste, PrevPrompt, RerunLast,
 };
+use actions::{ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll};
 
 /// Key bindings for the terminal context.
 #[must_use]
@@ -468,6 +469,15 @@ pub struct TerminalView {
     /// The tile shows a pill of its own at the body's foot (the worker away, the program
     /// exited), which says more than the lines below and takes their pill's place.
     covered: bool,
+    /// When the progress bar's sweep began (the executor's clock), while it sweeps.
+    sweep_since: Option<Instant>,
+    /// Wakes the view for each step of the sweep.
+    sweep_task: Option<gpui::Task<()>>,
+    /// The sweep was drawn since the last step woke the view: a view not drawn (scrolled off,
+    /// covered by the face) is not woken again until it is.
+    sweep_drawn: bool,
+    /// The person ran the restored session's command again or put its chip away.
+    restored_seen: bool,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -516,7 +526,7 @@ fn predictor() -> Predictor {
 }
 
 impl Focusable for TerminalView {
-    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus.clone()
     }
 }
@@ -602,6 +612,10 @@ impl TerminalView {
             search_regex: false,
             pending: None,
             covered: false,
+            sweep_since: None,
+            sweep_task: None,
+            sweep_drawn: false,
+            restored_seen: false,
         }
     }
 
@@ -1067,17 +1081,22 @@ impl TerminalView {
         )
     }
 
-    /// The pointer's shape over the grid: an I-beam over text, a hand over the link ⌘ would
-    /// open, and an arrow while a program has the mouse (⇧ takes it back, as a click does).
+    /// The pointer's shape over the grid: a hand over the link ⌘ would open, the I-beam while
+    /// ⇧ takes the mouse back from a program (as a click does), then the shape the program
+    /// asked for (`OSC 22`), an arrow while a program has the mouse, and the I-beam over text.
     #[must_use]
     pub fn pointer(&self) -> CursorStyle {
         if self.link_highlight().is_some() {
             return CursorStyle::PointingHand;
         }
-        if self.state.modes().contains(TermModes::MOUSE_TRACKING) && !self.shift_held {
-            return CursorStyle::Arrow;
+        let tracking = self.state.modes().contains(TermModes::MOUSE_TRACKING);
+        if tracking && self.shift_held {
+            return CursorStyle::IBeam;
         }
-        CursorStyle::IBeam
+        match self.state.pointer() {
+            PointerShape::Text if tracking => CursorStyle::Arrow,
+            shape => cursor_style(shape),
+        }
     }
 
     /// Pointer position and modifier state changed; repaint only when the underline or the
@@ -1949,8 +1968,9 @@ impl TerminalView {
     }
 
     /// The paste waiting for a confirmation, when there is one.
+    #[cfg(test)]
     #[must_use]
-    pub fn pending_paste(&self) -> Option<&str> {
+    fn pending_paste(&self) -> Option<&str> {
         match &self.pending {
             Some(Pending::Paste(text)) => Some(text),
             _ => None,
@@ -1981,8 +2001,9 @@ impl TerminalView {
     }
 
     /// Whether the close of this shell waits on a confirmation.
+    #[cfg(test)]
     #[must_use]
-    pub const fn close_asked(&self) -> bool {
+    const fn close_asked(&self) -> bool {
         matches!(self.pending, Some(Pending::Close(_)))
     }
 
@@ -2375,7 +2396,150 @@ impl TerminalView {
                 }
             }
         }
+        self.sweep(cx);
         cx.notify();
+    }
+
+    /// Start or stop the progress bar's sweep: it moves while the report has no measure and
+    /// motion is allowed.
+    fn sweep(&mut self, cx: &Context<Self>) {
+        if !self.sweeping(cx) {
+            self.sweep_since = None;
+            self.sweep_task = None;
+            return;
+        }
+        if self.sweep_task.is_some() {
+            return;
+        }
+        self.sweep_since = Some(cx.background_executor().now());
+        self.sweep_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(crate::icons::SPIN_STEP).await;
+                let more = this.update(cx, Self::sweep_tick).unwrap_or(false);
+                if !more {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn sweeping(&self, cx: &App) -> bool {
+        self.state.progress().state == ProgressState::Indeterminate && crate::kit::motion(cx)
+    }
+
+    /// A step of the sweep fell due. False ends the loop.
+    ///
+    /// A key waiting for its echo lets the step pass: the echo's frame draws the sweep where it
+    /// has got to, and a frame drawn for the step alone just before it would hold the echo back
+    /// a refresh.
+    fn sweep_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.sweeping(cx) {
+            self.sweep_since = None;
+            self.sweep_task = None;
+            cx.notify();
+            return false;
+        }
+        if self.sweep_drawn && !self.latency.waiting() {
+            self.sweep_drawn = false;
+            cx.notify();
+        }
+        true
+    }
+
+    /// The command a restored session was opened to run, as it would be typed; `None` for a
+    /// login shell, which has nothing to run again.
+    fn restored_command(&self) -> Option<String> {
+        let restored = self.state.restored()?;
+        (!restored.command.is_empty()).then(|| {
+            let words: Vec<String> =
+                restored.command.iter().map(|w| slopty_core::shell_quote(w)).collect();
+            words.join(" ")
+        })
+    }
+
+    /// Run the restored session's command again, as typed: only ever from the person's click
+    /// on its chip, never on the restore itself. The chip goes with it.
+    fn run_restored(&mut self, cx: &mut Context<Self>) {
+        let Some(command) = self.restored_command() else { return };
+        self.restored_seen = true;
+        self.run_text(command, cx);
+        cx.notify();
+    }
+
+    fn dismiss_restored(&mut self, cx: &mut Context<Self>) {
+        self.restored_seen = true;
+        cx.notify();
+    }
+
+    /// The chip at the top-right of a session reopened after its shell was lost: "Restored",
+    /// and what it was opened to run offered again, until the person runs it or puts the chip
+    /// away.
+    fn render_restored(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+        if self.restored_seen || self.state.restored().is_none() {
+            return None;
+        }
+        let theme = &self.theme;
+        let (s, spacing, radii) = (&theme.surfaces, theme.spacing, theme.radii);
+        let k = self.zoom;
+        let run = self.restored_command().map(|command| {
+            let label = SharedString::from(format!("Run again: {command}"));
+            let button = div()
+                .id("terminal-run-again")
+                .debug_selector(|| "terminal-run-again".to_owned())
+                .role(gpui::accesskit::Role::Button)
+                .aria_label(label.clone())
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .px(px(spacing.xs * k))
+                .rounded(px(radii.xs * k))
+                .cursor_pointer()
+                .text_color(hsla(s.accent))
+                .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
+                .child(label)
+                .on_click(cx.listener(|this, _ev, _window, cx| this.run_restored(cx)));
+            crate::a11y::tab_stop(button, s.accent)
+        });
+        let dismiss = div()
+            .id("terminal-restored-dismiss")
+            .debug_selector(|| "terminal-restored-dismiss".to_owned())
+            .role(gpui::accesskit::Role::Button)
+            .aria_label("Dismiss")
+            .flex_none()
+            .px(px(spacing.xs * k))
+            .rounded(px(radii.xs * k))
+            .cursor_pointer()
+            .text_color(hsla(s.text_muted))
+            .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)).text_color(hsla(s.text)))
+            .child("✕")
+            .on_click(cx.listener(|this, _ev, _window, cx| this.dismiss_restored(cx)));
+        Some(
+            crate::kit::pill_frame(theme, k)
+                .debug_selector(|| "terminal-restored".to_owned())
+                .absolute()
+                .top(px(spacing.xs * k))
+                .right(px(spacing.xs * k))
+                .max_w(relative(0.6))
+                .occlude()
+                .pr(px(spacing.xxs * k))
+                .map(|el| crate::kit::elevate(el, theme))
+                .font_family(theme.typography.ui_family.clone())
+                .child(div().flex_none().text_color(hsla(s.text_secondary)).child("Restored"))
+                .children(run)
+                .child(crate::a11y::tab_stop(dismiss, s.accent)),
+        )
+    }
+
+    /// The program's progress along the top edge (`OSC 9;4`).
+    fn render_progress(&mut self, cx: &App) -> Option<gpui::Div> {
+        let step = self.sweep_since.map(|since| {
+            super::progress::sweep_step(
+                cx.background_executor().now().saturating_duration_since(since),
+            )
+        });
+        let fill = super::progress::fill(&self.theme, self.state.progress(), step);
+        self.sweep_drawn |= step.is_some() && fill.is_some();
+        super::progress::bar(&self.theme, fill)
     }
 
     /// Lines between the bottom of the view and the newest output: 0 while following it.
@@ -2540,8 +2704,9 @@ impl TerminalView {
     }
 
     /// Textures currently made (tests).
+    #[cfg(test)]
     #[must_use]
-    pub fn texture_count(&self) -> usize {
+    fn texture_count(&self) -> usize {
         self.textures.len()
     }
 
@@ -3621,6 +3786,8 @@ impl Render for TerminalView {
                 }
                 el.child(grid)
             })
+            .children(self.render_progress(cx))
+            .children(self.render_restored(cx))
             .children(hovered)
             .children(header)
             .children(search)
@@ -3628,6 +3795,35 @@ impl Render for TerminalView {
             .children(self.render_confirm(cx))
             .children(self.render_lines_below(cx))
             .children(self.block_menu.as_ref().map(|m| self.render_block_menu(m, cx)))
+    }
+}
+
+/// The nearest pointer GPUI draws for a program's `OSC 22` shape; the arrow where the
+/// platform has nothing like it.
+const fn cursor_style(shape: PointerShape) -> CursorStyle {
+    use PointerShape as P;
+    match shape {
+        P::Text => CursorStyle::IBeam,
+        P::VerticalText => CursorStyle::IBeamCursorForVerticalLayout,
+        P::Pointer => CursorStyle::PointingHand,
+        P::ContextMenu => CursorStyle::ContextualMenu,
+        P::Crosshair | P::Cell => CursorStyle::Crosshair,
+        P::Grab | P::Move | P::AllScroll => CursorStyle::OpenHand,
+        P::Grabbing => CursorStyle::ClosedHand,
+        P::Alias => CursorStyle::DragLink,
+        P::Copy => CursorStyle::DragCopy,
+        P::NoDrop | P::NotAllowed => CursorStyle::OperationNotAllowed,
+        P::ColResize => CursorStyle::ResizeColumn,
+        P::RowResize => CursorStyle::ResizeRow,
+        P::EwResize => CursorStyle::ResizeLeftRight,
+        P::NsResize => CursorStyle::ResizeUpDown,
+        P::NResize => CursorStyle::ResizeUp,
+        P::SResize => CursorStyle::ResizeDown,
+        P::EResize => CursorStyle::ResizeRight,
+        P::WResize => CursorStyle::ResizeLeft,
+        P::NeswResize | P::NeResize | P::SwResize => CursorStyle::ResizeUpRightDownLeft,
+        P::NwseResize | P::NwResize | P::SeResize => CursorStyle::ResizeUpLeftDownRight,
+        P::Default | P::Help | P::Progress | P::Wait | P::ZoomIn | P::ZoomOut => CursorStyle::Arrow,
     }
 }
 
@@ -3764,7 +3960,7 @@ pub const TOOK_MIN: Duration = Duration::from_secs(1);
 /// A command block as a note: the command as a heading and a runnable `sh` fence, the
 /// output as a plain fence under it; either half alone when the block has only that.
 #[must_use]
-pub fn block_note(block: &CommandBlock) -> String {
+pub(super) fn block_note(block: &CommandBlock) -> String {
     let mut text = String::new();
     if let Some(command) = &block.command {
         text.push_str("# ");
@@ -3882,7 +4078,7 @@ mod tests {
                         .enumerate()
                         .map(|(row, (text, mark))| RowUpdate {
                             row: u16::try_from(row).unwrap(),
-                            line: marked(text, *mark),
+                            line: marked(text, *mark).into(),
                         })
                         .collect(),
                 }),
@@ -4118,7 +4314,7 @@ mod tests {
                         .enumerate()
                         .map(|(row, (text, mark))| RowUpdate {
                             row: u16::try_from(row).unwrap(),
-                            line: marked(text, *mark),
+                            line: marked(text, *mark).into(),
                         })
                         .collect(),
                 }),
@@ -4375,7 +4571,7 @@ mod tests {
                     .enumerate()
                     .map(|(row, text)| RowUpdate {
                         row: u16::try_from(row).unwrap(),
-                        line: Line::from_text(text, 10, Style::DEFAULT),
+                        line: Line::from_text(text, 10, Style::DEFAULT).into(),
                     })
                     .collect(),
             })
@@ -4450,7 +4646,8 @@ mod tests {
                 let mut l = Line::from_text(text, 30, Style::DEFAULT);
                 l.links = links;
                 l
-            },
+            }
+            .into(),
         };
         view.update_in(cx, |view, _window, cx| {
             view.apply(
@@ -4575,7 +4772,7 @@ mod tests {
                 total_lines: 3,
                 input_ack: 0,
                 images: Vec::new(),
-                updates: vec![RowUpdate { row: 0, line: Line::from_text("hi", 10, style) }],
+                updates: vec![RowUpdate { row: 0, line: Line::from_text("hi", 10, style).into() }],
             })
         };
         let phase = |cx: &mut VisualTestContext| {
@@ -4656,7 +4853,7 @@ mod tests {
                 images: Vec::new(),
                 updates: vec![RowUpdate {
                     row: 0,
-                    line: Line::from_text("$ ", 10, Style::DEFAULT),
+                    line: Line::from_text("$ ", 10, Style::DEFAULT).into(),
                 }],
             })
         };
@@ -4830,7 +5027,7 @@ mod tests {
                     .map(|(row, (text, mark))| {
                         let mut line = Line::from_text(text, 10, Style::DEFAULT);
                         line.mark = *mark;
-                        RowUpdate { row: u16::try_from(row).unwrap(), line }
+                        RowUpdate { row: u16::try_from(row).unwrap(), line: line.into() }
                     })
                     .collect(),
             })
@@ -5049,7 +5246,7 @@ mod tests {
                     total_lines: 9,
                     input_ack: 0,
                     images: Vec::new(),
-                    updates: vec![RowUpdate { row: 2, line: marked("$ ", failed) }],
+                    updates: vec![RowUpdate { row: 2, line: marked("$ ", failed).into() }],
                 }),
                 cx,
             );
@@ -5244,7 +5441,7 @@ mod tests {
                         .enumerate()
                         .map(|(row, text)| RowUpdate {
                             row: u16::try_from(row).unwrap(),
-                            line: marked(text, SemanticMark::Output),
+                            line: marked(text, SemanticMark::Output).into(),
                         })
                         .collect(),
                 }),
@@ -5385,10 +5582,10 @@ mod tests {
                 images: Vec::new(),
                 updates: vec![RowUpdate {
                     row: 0,
-                    line: Line::from_text("$ ", 20, Style::DEFAULT),
+                    line: Line::from_text("$ ", 20, Style::DEFAULT).into(),
                 }],
             };
-            frame.updates[0].line.mark = prompt;
+            Arc::make_mut(&mut frame.updates[0].line).mark = prompt;
             view.apply(TermEvent::Frame(frame), cx);
         });
         assert_eq!(view.read_with(cx, |v, _| v.took(LineIndex(4))), None, "a new epoch forgets");
@@ -5469,7 +5666,7 @@ mod tests {
                         .enumerate()
                         .map(|(row, text)| RowUpdate {
                             row: u16::try_from(row).unwrap(),
-                            line: Line::from_text(text, 10, Style::DEFAULT),
+                            line: Line::from_text(text, 10, Style::DEFAULT).into(),
                         })
                         .collect(),
                 }),
@@ -5509,7 +5706,7 @@ mod tests {
         let (view, _rx, cx) = terminal(cx);
         let mut f = history_frame(100, &["say   rain", "bow abcdef", "fgh"]);
         if let TermEvent::Frame(frame) = &mut f {
-            frame.updates[1].line.flags |= LineFlags::WRAPPED;
+            Arc::make_mut(&mut frame.updates[1].line).flags |= LineFlags::WRAPPED;
         }
         view.update_in(cx, |view, _window, cx| {
             view.apply(f, cx);
@@ -5543,7 +5740,7 @@ mod tests {
         let mut f = history_frame(100, &["", "", ""]);
         if let TermEvent::Frame(frame) = &mut f {
             // `ab日本語x` and a spacer head, wrapped onto `文 d`; then `日　本`.
-            let first = &mut frame.updates[0].line.cells;
+            let first = &mut Arc::make_mut(&mut frame.updates[0].line).cells;
             first[0] = Cell::narrow('a', Style::DEFAULT);
             first[1] = Cell::narrow('b', Style::DEFAULT);
             first[2..4].clone_from_slice(&wide("日"));
@@ -5551,11 +5748,11 @@ mod tests {
             first[6..8].clone_from_slice(&wide("語"));
             first[8] = Cell::narrow('x', Style::DEFAULT);
             first[9] = Cell { width: CellWidth::SpacerHead, ..Cell::BLANK };
-            let second = &mut frame.updates[1].line;
+            let second = Arc::make_mut(&mut frame.updates[1].line);
             second.flags |= LineFlags::WRAPPED;
             second.cells[0..2].clone_from_slice(&wide("文"));
             second.cells[3] = Cell::narrow('d', Style::DEFAULT);
-            let third = &mut frame.updates[2].line.cells;
+            let third = &mut Arc::make_mut(&mut frame.updates[2].line).cells;
             third[0..2].clone_from_slice(&wide("日"));
             third[2..4].clone_from_slice(&wide("\u{3000}"));
             third[4..6].clone_from_slice(&wide("本"));
@@ -5600,7 +5797,7 @@ mod tests {
                 .enumerate()
                 .map(|(row, text)| RowUpdate {
                     row: u16::try_from(row).unwrap_or(0),
-                    line: Line::from_text(text, 10, Style::DEFAULT),
+                    line: Line::from_text(text, 10, Style::DEFAULT).into(),
                 })
                 .collect(),
         })
@@ -5796,9 +5993,10 @@ mod tests {
         let (view, mut rx, cx) = terminal(cx);
         let mut f = history_frame(0, &["out", "$ abcdef", ""]);
         if let TermEvent::Frame(frame) = &mut f {
-            frame.updates[1].line.mark = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
-            frame.updates[2].line.mark = SemanticMark::Input;
-            frame.updates[2].line.flags |= LineFlags::WRAPPED;
+            Arc::make_mut(&mut frame.updates[1].line).mark =
+                SemanticMark::Prompt { exit: Some(0), input: Some(2) };
+            Arc::make_mut(&mut frame.updates[2].line).mark = SemanticMark::Input;
+            Arc::make_mut(&mut frame.updates[2].line).flags |= LineFlags::WRAPPED;
             frame.cursor = Cursor { row: 1, col: 8, visible: true, ..Cursor::default() };
         }
         view.update_in(cx, |view, _window, cx| view.apply(f, cx));
@@ -5826,7 +6024,8 @@ mod tests {
         if let TermEvent::Frame(frame) = &mut alt_screen {
             frame.seq = 2;
             frame.modes = TermModes::ALT_SCREEN;
-            frame.updates[1].line.mark = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
+            Arc::make_mut(&mut frame.updates[1].line).mark =
+                SemanticMark::Prompt { exit: Some(0), input: Some(2) };
             frame.cursor = Cursor { row: 1, col: 8, visible: true, ..Cursor::default() };
         }
         view.update_in(cx, |view, _window, cx| view.apply(alt_screen, cx));
@@ -6556,7 +6755,7 @@ mod tests {
                     images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
-                        line: Line::from_text("wrote out/report.pdf", 30, Style::DEFAULT),
+                        line: Line::from_text("wrote out/report.pdf", 30, Style::DEFAULT).into(),
                     }],
                 }),
                 cx,
@@ -6599,7 +6798,8 @@ mod tests {
                     images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
-                        line: Line::from_text("error: src/main.rs:12:5 bad", 30, Style::DEFAULT),
+                        line: Line::from_text("error: src/main.rs:12:5 bad", 30, Style::DEFAULT)
+                            .into(),
                     }],
                 }),
                 cx,
@@ -6665,7 +6865,7 @@ mod tests {
                     images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
-                        line: Line::from_text("src/  target/  a.rs", 30, Style::DEFAULT),
+                        line: Line::from_text("src/  target/  a.rs", 30, Style::DEFAULT).into(),
                     }],
                 }),
                 cx,
@@ -6724,7 +6924,8 @@ mod tests {
                                 let mut l = Line::from_text("$ cargo build", 30, Style::DEFAULT);
                                 l.mark = SemanticMark::Prompt { exit: None, input: Some(2) };
                                 l
-                            },
+                            }
+                            .into(),
                         },
                         RowUpdate {
                             row: 1,
@@ -6732,7 +6933,8 @@ mod tests {
                                 "error: src/main.rs:12:5 bad",
                                 30,
                                 Style::DEFAULT,
-                            ),
+                            )
+                            .into(),
                         },
                     ],
                 }),
@@ -6774,11 +6976,11 @@ mod tests {
                     updates: vec![
                         RowUpdate {
                             row: 0,
-                            line: Line::from_text("http://a.b", 10, Style::DEFAULT),
+                            line: Line::from_text("http://a.b", 10, Style::DEFAULT).into(),
                         },
                         RowUpdate {
                             row: 1,
-                            line: Line::from_text("http://c.d", 10, Style::DEFAULT),
+                            line: Line::from_text("http://c.d", 10, Style::DEFAULT).into(),
                         },
                     ],
                 }),
@@ -6838,7 +7040,8 @@ mod tests {
                     images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
-                        line: Line::from_text("error: src/main.rs:12:5 bad", 30, Style::DEFAULT),
+                        line: Line::from_text("error: src/main.rs:12:5 bad", 30, Style::DEFAULT)
+                            .into(),
                     }],
                 }),
                 cx,
@@ -6898,7 +7101,10 @@ mod tests {
                     total_lines: 3,
                     input_ack: 0,
                     images: Vec::new(),
-                    updates: vec![RowUpdate { row: 0, line: Line::from_text("abc", 10, style) }],
+                    updates: vec![RowUpdate {
+                        row: 0,
+                        line: Line::from_text("abc", 10, style).into(),
+                    }],
                 }),
                 cx,
             );
@@ -6970,7 +7176,7 @@ mod tests {
             frame.total_lines = 9;
             frame.cursor = cursor;
             if let Some(last) = frame.updates.last_mut() {
-                last.line.mark = prompt;
+                Arc::make_mut(&mut last.line).mark = prompt;
             }
             view.apply(TermEvent::Frame(frame), cx);
         });
@@ -7046,7 +7252,7 @@ mod tests {
             frame.cursor = cursor;
             frame.input_ack = view.key_seq;
             if let Some(last) = frame.updates.last_mut() {
-                last.line.mark = prompt;
+                Arc::make_mut(&mut last.line).mark = prompt;
             }
             view.apply(TermEvent::Frame(frame), cx);
         });
@@ -7158,7 +7364,7 @@ mod tests {
         let (view, _rx, cx) = terminal(cx);
         let mut f = history_frame(0, &["> https://", "a.b/cd", "next"]);
         if let TermEvent::Frame(frame) = &mut f {
-            frame.updates[1].line.flags |= LineFlags::WRAPPED;
+            Arc::make_mut(&mut frame.updates[1].line).flags |= LineFlags::WRAPPED;
         }
         view.update_in(cx, |view, _window, cx| view.apply(f, cx));
         cx.run_until_parked();
@@ -7373,7 +7579,7 @@ mod tests {
                 .enumerate()
                 .map(|(row, text)| RowUpdate {
                     row: u16::try_from(row).unwrap(),
-                    line: Line::from_text(text, cols, Style::DEFAULT),
+                    line: Line::from_text(text, cols, Style::DEFAULT).into(),
                 })
                 .collect(),
         })
@@ -7537,7 +7743,7 @@ mod tests {
                     if at == 0 { format!("$ run {block}") } else { text[usize::from(row)].clone() };
                 let mut line = Line::from_text(&text, 100, Style::DEFAULT);
                 line.mark = mark;
-                RowUpdate { row, line }
+                RowUpdate { row, line: line.into() }
             })
             .collect();
         view.update_in(cx, |view, _window, cx| {
@@ -7671,7 +7877,9 @@ mod tests {
             let updates = changed
                 .map(|row| RowUpdate {
                     row: u16::try_from(row).unwrap(),
-                    line: pool[first.wrapping_add(row).checked_rem(pool.len()).unwrap()].clone(),
+                    line: pool[first.wrapping_add(row).checked_rem(pool.len()).unwrap()]
+                        .clone()
+                        .into(),
                 })
                 .collect();
             TermEvent::Frame(Frame {
@@ -7733,6 +7941,178 @@ mod tests {
              screen a frame {replaced} · every cell on a background, unchanged {backed} · \
              words shaped {shaped}"
         );
+    }
+
+    /// The program's `OSC 22` shape is the pointer over the grid, under a link's hand, and ⇧
+    /// under mouse reporting still takes the I-beam back.
+    #[gpui::test]
+    fn the_programs_pointer_shape_is_the_pointer_over_the_grid(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let pointer = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.pointer());
+        assert_eq!(pointer(cx), CursorStyle::IBeam, "text until the program asks");
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(TermEvent::Pointer(PointerShape::ColResize), cx);
+        });
+        assert_eq!(pointer(cx), CursorStyle::ResizeColumn);
+        view.update_in(cx, |view, _window, cx| {
+            let mut frame = screen_of(1, 10, &["a".to_owned(), String::new(), String::new()]);
+            if let TermEvent::Frame(f) = &mut frame {
+                f.modes = TermModes::MOUSE_TRACKING;
+            }
+            view.apply(frame, cx);
+        });
+        assert_eq!(pointer(cx), CursorStyle::ResizeColumn, "asked for, over mouse reporting");
+        view.update(cx, |view, _| view.shift_held = true);
+        assert_eq!(pointer(cx), CursorStyle::IBeam, "⇧ takes the mouse back");
+        view.update(cx, |view, _| view.shift_held = false);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(TermEvent::Pointer(PointerShape::Text), cx);
+        });
+        assert_eq!(
+            pointer(cx),
+            CursorStyle::Arrow,
+            "the I-beam asked for, a program has the mouse"
+        );
+        assert_eq!(cursor_style(PointerShape::Pointer), CursorStyle::PointingHand);
+        assert_eq!(cursor_style(PointerShape::Wait), CursorStyle::Arrow, "nothing like it");
+    }
+
+    fn progress_fill(cx: &mut VisualTestContext) -> Option<(f32, f32)> {
+        let bar = cx.debug_bounds("terminal-progress")?;
+        let fill = cx.debug_bounds("terminal-progress-fill")?;
+        let (width, left) = (f32::from(bar.size.width), f32::from(fill.origin.x - bar.origin.x));
+        Some((left / width, f32::from(fill.size.width) / width))
+    }
+
+    fn report(
+        view: &Entity<TerminalView>,
+        cx: &mut VisualTestContext,
+        state: ProgressState,
+        percent: Option<u8>,
+    ) {
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Progress(slopty_proto::terminal::Progress { state, percent }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    /// A report draws its share along the top edge, full width, and goes when it is removed.
+    #[gpui::test]
+    fn a_progress_report_fills_its_share_of_the_top_edge(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        assert!(cx.debug_bounds("terminal-progress").is_none(), "no report, no bar");
+        report(&view, cx, ProgressState::Set, Some(40));
+        let bar = cx.debug_bounds("terminal-progress").expect("the bar");
+        let grid = cx.debug_bounds("terminal").expect("the terminal");
+        assert_eq!(
+            (bar.origin.y, bar.size.width),
+            (grid.origin.y, grid.size.width),
+            "the top edge"
+        );
+        let (start, width) = progress_fill(cx).unwrap();
+        assert!(start.abs() < 1e-3 && (width - 0.4).abs() < 1e-3, "{start} {width}");
+        report(&view, cx, ProgressState::Error, None);
+        let (_, width) = progress_fill(cx).unwrap();
+        assert!((width - 1.0).abs() < 1e-3, "a failure with no figure fills the edge: {width}");
+        report(&view, cx, ProgressState::None, None);
+        assert!(cx.debug_bounds("terminal-progress").is_none(), "removed");
+    }
+
+    /// An indeterminate report sweeps a step at a time, redrawing the view per step, and a key
+    /// waiting for its echo lets a step pass; under Reduce Motion it stands over the whole edge
+    /// and wakes nothing.
+    #[gpui::test]
+    fn an_indeterminate_report_sweeps_unless_motion_is_reduced(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let renders = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.renders());
+        report(&view, cx, ProgressState::Indeterminate, None);
+        let before = renders(cx);
+        let mut spans = Vec::new();
+        for _ in 0..4 {
+            cx.background_executor.advance_clock(crate::icons::SPIN_STEP);
+            cx.run_until_parked();
+            spans.push(progress_fill(cx).unwrap());
+        }
+        assert_eq!(renders(cx), before.saturating_add(4), "a frame a step");
+        assert!(spans.windows(2).all(|w| w[1].0 + w[1].1 > w[0].0 + w[0].1), "it moves: {spans:?}");
+
+        // A typed key is out and its echo has not come: the steps due meanwhile wake nothing,
+        // and the echo's frame draws the sweep where it has got to.
+        cx.simulate_keystrokes("a");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.latency.waiting()), "the key waits for its echo");
+        let before = renders(cx);
+        cx.background_executor.advance_clock(crate::icons::SPIN_STEP.saturating_mul(3));
+        cx.run_until_parked();
+        assert_eq!(renders(cx), before, "no frame of its own ahead of the echo");
+
+        report(&view, cx, ProgressState::None, None);
+        cx.update(|_w, cx| cx.set_reduce_motion(true));
+        report(&view, cx, ProgressState::Indeterminate, None);
+        let still = progress_fill(cx).unwrap();
+        assert!(still.0.abs() < 1e-3 && (still.1 - 1.0).abs() < 1e-3, "the whole edge: {still:?}");
+        let before = renders(cx);
+        cx.background_executor.advance_clock(crate::icons::SPIN_STEP.saturating_mul(6));
+        cx.run_until_parked();
+        assert_eq!(renders(cx), before, "nothing moves, nothing is drawn");
+    }
+
+    fn restore(view: &Entity<TerminalView>, cx: &mut VisualTestContext, command: &[&str]) {
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Restored(slopty_proto::terminal::Restored {
+                    saved_ms: slopty_core::WallMs::from_millis(1_790_000_000_000),
+                    command: command.iter().map(|w| (*w).to_owned()).collect(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    /// A restored session says so, and offers what it ran again: typed and run only on the
+    /// person's click, after which the chip goes.
+    #[gpui::test]
+    fn a_restored_session_runs_its_command_again_only_on_a_click(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        drain_words(&mut rx);
+        restore(&view, cx, &["claude", "--resume"]);
+        assert!(cx.debug_bounds("terminal-restored").is_some(), "the chip");
+        assert!(drain_words(&mut rx).is_empty(), "nothing runs on the restore");
+        let pasted = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|msg| match msg {
+                    ClientMsg::Term { req: TermRequest::Paste(text), .. } => Some(text),
+                    ClientMsg::Term { req: TermRequest::Key(key), .. } => {
+                        Some(format!("{:?}", key.code))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let at = cx.debug_bounds("terminal-run-again").expect("the action").center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(pasted(&mut rx), ["claude --resume", "Enter"], "typed, then ↩");
+        assert!(cx.debug_bounds("terminal-restored").is_none(), "the chip goes");
+    }
+
+    /// A login shell restored has nothing to run again: the chip says so and can be put away.
+    #[gpui::test]
+    fn a_restored_login_shell_has_nothing_to_run_and_is_dismissed(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        restore(&view, cx, &[]);
+        assert!(cx.debug_bounds("terminal-restored").is_some());
+        assert!(cx.debug_bounds("terminal-run-again").is_none(), "nothing to run");
+        let at = cx.debug_bounds("terminal-restored-dismiss").expect("dismiss").center();
+        drain_words(&mut rx);
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-restored").is_none(), "put away");
+        assert!(drain_words(&mut rx).is_empty(), "and nothing typed");
     }
 
     /// Every message the worker received that types or clears, oldest first, as one word each.

@@ -15,11 +15,11 @@
 "engine.encode_cost.echo" = 4148
 "engine.encode_cost.full_200x60" = 1084187
 "engine.fetch_lines_cost.4096_rows" = 124790604
-"engine.frame_cost.take_frame" = 38209
+"engine.frame_cost.take_frame" = 34324
 "engine.frame_cost.write" = 861
 "engine.osc_scan_cost.per_osc" = 172
-"engine.scroll_frame_cost.200x60" = 5315576
-"engine.scroll_frame_cost.80x24" = 894562
+"engine.scroll_frame_cost.200x60" = 5301643
+"engine.scroll_frame_cost.80x24" = 881550
 "engine.search_after_output_cost.plain" = 1877298
 "engine.search_cost.10000_lines.format" = 30086990
 "engine.search_cost.10000_lines.plain" = 21561889

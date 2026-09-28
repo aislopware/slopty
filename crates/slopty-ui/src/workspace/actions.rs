@@ -48,6 +48,9 @@ actions!(
         /// Stream the focused display tile from a display the worker makes for this device,
         /// sized to the tile and following it as it resizes; again, back to the physical one.
         ToggleSizedDisplay,
+        /// Show the focused remote window or display in a window of its own on this Mac, the
+        /// same stream going on; again, or closing that window, puts it back in its tile.
+        ToggleOwnWindow,
         /// Send the system's own shortcuts (⌘Tab, ⌘Space, Mission Control) to the focused
         /// remote Mac while its tile has the keyboard, or leave them to this Mac.
         ToggleSystemKeys,
@@ -199,6 +202,9 @@ const FACE: Option<&str> = Some(crate::conversation::CTX);
 const FACE_INPUT: Option<&str> = Some("Conversation > Input");
 /// A folder tile with the keyboard.
 const FOLDER: Option<&str> = Some(crate::folder::CTX);
+/// A tile's window of its own ([`super::popout`]): its picture takes every chord but the one
+/// that puts it back.
+const POP_OUT: Option<&str> = Some(super::popout::CTX);
 /// A focused page that does not hold the keyboard: a page that does keeps ⌘← and ⌘→ for its
 /// own fields.
 const PAGE: Option<&str> = Some("Workspace && Page && !Screen");
@@ -217,6 +223,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-a", NextAttention, CTX),
         KeyBinding::new("cmd-shift-m", ToggleMute, CTX),
         KeyBinding::new("cmd-shift-i", ToggleStats, CTX),
+        KeyBinding::new("ctrl-cmd-n", ToggleOwnWindow, CTX),
+        KeyBinding::new("ctrl-cmd-n", ToggleOwnWindow, POP_OUT),
         KeyBinding::new("cmd-b", ToggleNavigator, CTX),
         KeyBinding::new("cmd-f", crate::terminal::Find, CTX),
         // Tab is the shell's; ⌃Tab enters the control ring from a terminal, then Tab walks it.

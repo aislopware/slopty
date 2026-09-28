@@ -7692,6 +7692,98 @@ A session is written at most once every 10 s (`restore::KEEP_EVERY`), and the ne
 replaces one still waiting. Twenty busy sessions at full scrollback cost the writer about 60 ms
 of I/O every 10 s, on no thread a key or a frame waits on.
 
+## 2026-09-29 — 120 fps against 60
+
+Mac Studio M1 Max, macOS 27.0, a 75 Hz panel. Other sessions were building in the same
+checkout, with a load average of 8–21, which is printed per row. Two instruments open no
+window and capture nothing.
+
+**The encoder, fed in real time.** `frame_rate_120_against_60` in
+`crates/slopty-codec/tests/chroma444.rs` sets the shipped session up as the worker does
+(low-latency hardware HEVC Main 4:2:0, real time, no reordering, LTR) and sets
+`ExpectedFrameRate`. It then submits the synthetic code-editor picture on a real-time beat
+without waiting for the last frame, as the capture callback does, for 3 s. The scroll is
+960 rows a second at both rates: 16 rows a frame at 60 and 8 at 120. Each row gives submit →
+callback per frame, frames the encoder dropped, the rate spent after the first second, and
+the mean luma PSNR of the last 10 decoded pictures against their sources (hardware decoder).
+
+```sh
+cargo test -p slopty-codec --test chroma444 --no-run      # target/debug/deps/chroma444-<hash>
+cp target/debug/deps/chroma444-<hash> /tmp/chroma444 && cd /tmp
+nice -n 10 ./chroma444 --ignored --nocapture --test-threads=1 --exact tests::frame_rate_120_against_60
+```
+
+Second run (the first agreed within its noise; p50 / p95 ms):
+
+| size | fps | target | encode p50 / p95 | dropped | spent | a frame | PSNR y |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1920×1080 | 60 | 4 Mbit/s | 9.1 / 16.2 | 16/180 | 3.98 | 8.1 KiB | 47.40 |
+| 1920×1080 | 120 | 4 Mbit/s | 8.1 / 17.5 | 4/360 | 3.79 | 3.9 KiB | 44.58 |
+| 1920×1080 | 60 | 8 Mbit/s | 9.9 / 14.6 | 0 | 7.07 | 14.4 KiB | 52.83 |
+| 1920×1080 | 120 | 8 Mbit/s | 8.0 / 9.2 | 1/360 | 7.89 | 8.0 KiB | 53.28 |
+| 1920×1080 | 60 | 16 Mbit/s | 8.4 / 16.0 | 0 | 6.91 | 14.1 KiB | 53.18 |
+| 1920×1080 | 120 | 16 Mbit/s | 8.1 / 12.7 | 0 | 8.12 | 8.3 KiB | 53.46 |
+| 1920×1080 | 60 | 32 Mbit/s | 10.1 / 17.7 | 0 | 6.86 | 13.9 KiB | 53.73 |
+| 1920×1080 | 120 | 32 Mbit/s | 8.1 / 13.0 | 0 | 8.15 | 8.3 KiB | 53.47 |
+| 2560×1440 | 60 | 32 Mbit/s | 11.3 / 16.4 | 0 | 8.52 | 17.3 KiB | 53.39 |
+| 2560×1440 | 120 | 32 Mbit/s | 11.2 / 19.2 | 0 | 11.30 | 11.5 KiB | 53.26 |
+| 3024×1964 | 60 | 32 Mbit/s | **82.8 / 99.0** | 0 | 13.39 | 27.2 KiB | 53.33 |
+| 3024×1964 | 120 | 32 Mbit/s | **77.0 / 78.3** | 0 | 17.52 | 17.8 KiB | 53.23 |
+| 3840×2160 | 60 | 32 Mbit/s | 22.0 / 30.6 | 0 | 18.04 | 36.7 KiB | 53.23 |
+| 3840×2160 | 120 | 32 Mbit/s | 21.8 / 28.8 | 1/360 | 21.90 | 22.3 KiB | 53.45 |
+
+What it says:
+
+- **120 costs 1.2–1.3× the bits of 60 for the same motion, at the same PSNR.** Above about
+  8 Mbit/s the picture, not the target, sets the rate: 8.1 against 6.9 Mbit/s at 1080p, 11.3
+  against 8.5 at 1440p, 21.9 against 18.0 at 4K. A frame at 120 changes half as much as one
+  at 60.
+- **At 8 Mbit/s, 120 is as sharp as 60.** Its 8.0 KiB frames score 53.3 dB against 60's
+  14.4 KiB at 52.8. At 4 Mbit/s both drop frames, and 120's 3.9 KiB frames lose 2.8 dB. The
+  cadence ladder's 8 KB bar falls between the two rows, which is where 120 should give way to
+  60.
+- **The encoder's latency does not grow with the rate while it keeps up**: 8 ms at 1080p and
+  22 ms at 4K, at either rate.
+- **When it does not keep up, frames queue.** At 3024 × 1964 every frame was 77 ms late at
+  120, a steady queue with p95 78 ms. In this run 60 was 83 ms late too. In the first run,
+  60 at that size was 20 ms and only 120 queued (79 ms). 3840 × 2160 has 40 % more pixels and
+  held 22 ms, so the slow size is the odd one: 1964 is not a multiple of 16. This is what the
+  worker's encoder watch reacts to.
+
+**The frame path at a 120 Hz beat.** `capture_and_input_to_glass_at_120` in
+`crates/slopty-worker/src/screen/synthetic.rs` is the glass measurement of 2026-09-28, with
+the canvas drawing at 120 Hz (`slopty_capture::synthetic::set_beat`) and the stream asked for
+60 or 120. The canvas now scrolls 180 rows a second, set in time, where it used to scroll 3
+rows a beat. That makes it lighter at 75 Hz than in the rows of 2026-09-28. The wire rate
+counts every datagram after the 1 s warm-up. Each case runs 20 s:
+
+```sh
+cargo test -p slopty-worker --lib --no-run      # target/debug/deps/slopty_worker-<hash>
+cp target/debug/deps/slopty_worker-<hash> /tmp/slopty-fps/slopty_worker && cd /tmp/slopty-fps
+./slopty_worker --ignored --exact screen::synthetic::tests::capture_and_input_to_glass_at_120 --nocapture
+```
+
+| 1920×1080, 120 Hz beat (p50 / p95 ms) | loopback 60 | loopback 120 | shaped 60 | shaped 120 |
+| --- | --- | --- | --- | --- |
+| **input sent → shown** (pacer) | 26.0 / 35.3 | 24.4 / 36.0 | 38.6 / 53.7 | **28.3 / 38.7** |
+| **input at the worker → the capture showing it** | 8.9 / 15.9 | **4.9 / 10.2** | 9.6 / 17.1 | **3.6 / 7.8** |
+| capture → painted | 17.5 / 20.4 | 17.3 / 26.7 | 20.1 / 34.0 | 17.3 / 24.1 |
+| worker encode | 7.7 / 10.6 | 8.4 / 13.3 | 7.7 / 10.3 | 7.6 / 8.6 |
+| capture → decoded | 9.7 / 14.8 | 11.4 / 20.4 | 17.1 / 26.4 | 16.2 / 17.6 |
+| frames encoded / s | 60.0 | 108.2 | 60.0 | 119.7 |
+| on the wire | 1.40 Mbit/s | 1.87 Mbit/s | 1.40 Mbit/s | 2.00 Mbit/s |
+
+Shaped is 5 ms each way with 3 % of datagrams lost. No frame was lost, and none failed to
+decode. The shaped runs repaired 87 and 125 frames through parity. At 120 the wait for the
+next frame the gate lets through halves, and that is the whole gain in input → capture. The
+loopback 120 run encoded 108 frames a second because the canvas's beat skipped under load
+(2376 captures in 21 s). Capture → painted is the encoder's floor plus the paint timer's
+phase at either rate.
+
+Not measured: a physical display above 60 Hz (this panel runs at 75), and a `CGVirtualDisplay`
+at 120 Hz (making one is gated on `SLOPTY_VDISPLAY_E2E`). Rulings: `docs/decisions/video.md`,
+"The stream follows the screen's refresh".
+
 ## 2026-09-29 — ghostty `12752b2ac`
 
 The engine's `*_cost` series before and after moving libghostty-vt from ghostty `6301810a4` to
@@ -7724,3 +7816,46 @@ moved less than 2 %. The checkpoint series are one sample each: the first run af
 read 1–2 % higher, and two reruns landed on either side of the budget, so that was noise. The
 budgets stay as they are. None of the 31 commits touches the parser's print path or the page
 list. The OSC integer parser and the wuffs zlib decoder are off these paths.
+
+## 2026-09-29 — Rows shared between the frame and the record
+
+Audit finding 17: each changed row was read into a new line on the worker, then copied into the
+record of what the viewers hold (`Shown`), and the client wrapped each arriving row in a new
+`Arc`. `RowUpdate.line` is now an `Arc<Line>` that both sides share, and the worker reads a
+changed row into the allocation of the line it replaces. mac-studio, other sessions building.
+
+Allocation counts are exact, from the counting allocator on the test's own thread:
+
+```sh
+cargo test -p slopty-engine --test allocs -p slopty-grid --test allocs -p workspace-hack -- --nocapture
+```
+
+| path | before | after |
+| --- | --- | --- |
+| echo `take_frame`, 80×24 | 4 blocks, 9536 B | 1 block, 128 B |
+| echo `take_frame`, 200×60 | 4 blocks, 23072 B | 1 block, 128 B |
+| Enter at the bottom `take_frame`, 80×24 | 10 blocks, 32576 B | 8 blocks, 11936 B |
+| Enter at the bottom `take_frame`, 200×60 | 10 blocks, 80672 B | 8 blocks, 29216 B |
+| echo to one or eight viewers (take, encode, share) | 6 blocks, 9788 B | 3 blocks, 380 B |
+| an echo row applied on the client | 1 block, 72 B | 0 blocks |
+
+Instructions per operation, in release:
+
+```sh
+cargo xtask bench --filter frame_cost
+```
+
+| series | before | after |
+| --- | --- | --- |
+| `engine.frame_cost.take_frame` (60×12) | 37951 | 34324 (−10.1 %) |
+| `engine.frame_cost.write` | 861 | 861 |
+| `engine.scroll_frame_cost.80x24` | 894380 | 881550 (−1.4 %) |
+| `engine.scroll_frame_cost.200x60` | 5315825 | 5301643 (−0.2 %) |
+
+The flood (one line scrolled in per frame at 200×60, built and encoded, 500 frames:
+`cargo test --release -p slopty-engine --test wire_bytes -- --nocapture`) took 348 µs before
+and 350 µs after, which is within run-to-run noise. The rows are still read cell by cell, and
+that read is most of the cost, so the flood moved by less than the noise. The wire bytes did
+not change: 228 B for an echo, 653 B for an Enter, and 505 B per scrolled frame.
+`xtask/budgets.toml` records the three cheaper series. Ruling: `docs/decisions/terminal.md`,
+"A frame's rows are shared, not copied".

@@ -59,6 +59,10 @@ pub const fn pixel_format(chroma: Chroma) -> u32 {
 /// Which rate-control mode a session runs in. The worker only ever runs the low-latency one;
 /// the other exists for the measurement that rejected it (`experiments` feature).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(
+    not(feature = "experiments"),
+    expect(unreachable_pub, reason = "re-exported only for the rate-control experiments")
+)]
 pub enum RateControl {
     /// `EnableLowLatencyRateControl` in the encoder specification (infinite GOP, no
     /// reordering, LTR available) with `AverageBitRate` + `DataRateLimits`: the ruled mode.

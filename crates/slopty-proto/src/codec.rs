@@ -298,7 +298,10 @@ mod tests {
                 total_lines: 60,
                 input_ack: 0,
                 updates: (0..rows)
-                    .map(|row| RowUpdate { row, line: Line::from_text(&text, 200, Style::DEFAULT) })
+                    .map(|row| RowUpdate {
+                        row,
+                        line: Line::from_text(&text, 200, Style::DEFAULT).into(),
+                    })
                     .collect(),
                 images: Vec::new(),
             })

@@ -453,7 +453,7 @@ mod mac {
 
     /// This Mac, its networking runtime and the data directory the worker keeps.
     #[derive(Debug)]
-    pub struct Native {
+    pub(super) struct Native {
         /// Where installs, reads and dials run.
         pub runtime: tokio::runtime::Handle,
         /// The worker's data directory: its settings, sockets and copied binaries.

@@ -177,15 +177,6 @@ fn body_pixels(rect: Rect, header: f32, scale: f32) -> (u32, u32) {
     (px(rect.w), px(rect.h - header))
 }
 
-/// The refresh of the screen the app draws on, hertz; 0 when it is not known.
-fn refresh_hz() -> u16 {
-    slopty_platform::display_refresh().filter(|period| !period.is_zero()).map_or(0, |period| {
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "≤ 240")]
-        let hz = (1.0 / period.as_secs_f64()).round() as u16;
-        hz
-    })
-}
-
 /// Why a worker streamed a physical display where this device asked for its own, as a notice
 /// says it.
 const fn why_physical(why: NoVirtualDisplay) -> &'static str {
@@ -239,6 +230,7 @@ impl WorkspaceView {
         {
             lines.push(line(TYPE_CLIPBOARD, IconName::Clipboard, Box::new(TypeClipboard)));
         }
+        lines.extend(self.own_window_line(item, &bindings));
         if let Some(view) = self.screens.get(&item.id)
             && self.desktop.keys.is_some()
             && self.worker_is_mac(tile.worker)
@@ -416,7 +408,7 @@ impl WorkspaceView {
         let Some(placed) = frame.tiles.iter().find(|p| p.tile == tile) else { return };
         let scale = window.scale_factor();
         let pixels = body_pixels(placed.target, self.theme.density.header, scale);
-        let shape = display::shape(pixels, scale, refresh_hz());
+        let shape = display::shape(pixels, scale, crate::screen::main_refresh_hz());
         if let Some(w) = self.workers.get_mut(&tile.worker) {
             w.sized = Some(Sized::new(tile.item, shape));
         }
@@ -483,6 +475,10 @@ impl WorkspaceView {
         let mut due: Option<Instant> = None;
         for w in self.workers.values_mut() {
             let Some(sized) = w.sized.as_mut() else { continue };
+            // A tile in a window of its own keeps the display it had.
+            if self.popouts.holds(sized.item) {
+                continue;
+            }
             let Some(placed) = frame.tiles.iter().find(|p| p.tile.item == sized.item) else {
                 continue;
             };

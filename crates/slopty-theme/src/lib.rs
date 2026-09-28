@@ -1075,7 +1075,8 @@ impl CursorBlink {
 /// not this).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StreamPrefs {
-    /// Frames per second.
+    /// The most frames per second a stream asks for: it asks for the refresh of the screen its
+    /// view is on, up to this.
     pub fps: u16,
     /// The bitrate ceiling, bits per second.
     pub max_bitrate_bps: u32,
@@ -1088,7 +1089,7 @@ pub struct StreamPrefs {
 
 impl Default for StreamPrefs {
     fn default() -> Self {
-        Self { fps: 60, max_bitrate_bps: 30_000_000, muted: false, sharp_text: false }
+        Self { fps: 120, max_bitrate_bps: 30_000_000, muted: false, sharp_text: false }
     }
 }
 

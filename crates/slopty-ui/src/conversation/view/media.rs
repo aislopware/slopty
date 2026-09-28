@@ -32,7 +32,7 @@ const THUMB_LEAST: f32 = 48.0;
 /// A thumbnail's size for `image`: its own shape inside [`THUMB`], a square when its header
 /// gave no size.
 #[must_use]
-pub fn thumb_size(image: &Image) -> (f32, f32) {
+pub(super) fn thumb_size(image: &Image) -> (f32, f32) {
     let (box_w, box_h) = THUMB;
     if image.width == 0 || image.height == 0 {
         return (box_h, box_h);
@@ -46,7 +46,7 @@ pub fn thumb_size(image: &Image) -> (f32, f32) {
 
 /// What a picture is, in words: "1600 × 1200 · PNG · 240 KB".
 #[must_use]
-pub fn describe(image: &Image) -> String {
+pub(super) fn describe(image: &Image) -> String {
     let kind = image.media_type.strip_prefix("image/").unwrap_or(&image.media_type).to_uppercase();
     let mut parts = Vec::new();
     if image.width > 0 && image.height > 0 {

@@ -227,12 +227,6 @@ pub fn editor_command(path: &str, line: Option<u32>) -> String {
     format!("${{EDITOR:-vi}} {at}{}", shell_word(path))
 }
 
-/// The URL in `text` that covers byte `offset`.
-#[must_use]
-pub fn url_at(text: &str, offset: usize) -> Option<&str> {
-    text.get(url_range_at(text, offset)?)
-}
-
 /// Byte range of the URL in `text` that covers byte `offset`.
 fn url_range_at(text: &str, offset: usize) -> Option<Range<usize>> {
     if offset >= text.len() {
@@ -283,6 +277,13 @@ fn trim_trailing(mut s: &str) -> &str {
         }
         s = s.strip_suffix(last).unwrap_or(s);
     }
+}
+
+/// The URL in `text` that covers byte `offset`.
+#[cfg(test)]
+#[must_use]
+fn url_at(text: &str, offset: usize) -> Option<&str> {
+    text.get(url_range_at(text, offset)?)
 }
 
 #[cfg(test)]

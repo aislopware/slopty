@@ -293,3 +293,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     only when it draws its own border, which is still just tinted, so no field changes.
   - Everything else: chart appear motion, `text` anchor summaries, `gpui_web`, `gpui_wgpu`, and
     the editor, agent and git crates. None of it is on a path Slopty builds.
+
+**The app, the UI and the tools warn on an unreachable `pub` too.** ✅ 2026-09-29
+- `slopty-app`, `slopty-ui` and `slopty-tools` declare `#![warn(unreachable_pub)]` with the
+  `redundant_pub_crate` allow beside it, as the other libraries do. `slopty-app` already forbids
+  `unsafe`; `slopty-ui` cannot, because `screen` wraps a `CVPixelBuffer`.
+- In `slopty-ui`, `screen` and `workspace` expect `unreachable_pub` for now. Narrowing them
+  meant editing `screen/{health,touch,zoom}.rs` and `workspace/{desktop,tile}.rs`, which the
+  streaming work was changing at the same time. The `expect` fails once nothing there trips
+  the lint, so it cannot outlive that work. Everything else in the crate is linted, and the
+  non-streaming files under `workspace/` are already narrowed.
+- The CLI and the other binaries stay without it. Nothing outside a binary can name its items,
+  so `dead_code` already sees every one of them, and the lint would only respell `pub` as
+  `pub(crate)`.
+- A view accessor only its own crate's tests read is `#[cfg(test)]` and private, or
+  `pub(super)` when the tests sit in a sibling module (`toast_texts`, `navigator_filter`,
+  `palette_open`, `relay_notice`, `url_at` and others).
+- The accessors the self-test socket reads (`toast_text`, `reading_line`, `live_page`,
+  `upload_on`, `tile_bounds`, `pick_window`, …) stay in every build. `slopty-app` compiles its
+  `e2e` module in every build so that the gate's clippy, which runs on default features, lints
+  it. Gating the accessors on the `e2e` feature would mean gating that module too, and then no
+  gate lane would compile it. Without the feature, nothing calls them and the linker strips
+  them.
+- The token lint-as-tests in `kit.rs` read each file up to its first `#[cfg(test)]`. So one
+  test-only accessor high in a file hid the rest of that file from them: 61 of the 7,755 lines of
+  `terminal/view.rs` were read, and 73 of `workspace.rs`. They now stop only at a
+  `#[cfg(test)]` over a `mod`, which reads 59,433 lines of the UI and the app where they read
+  46,594. The added lines all passed.

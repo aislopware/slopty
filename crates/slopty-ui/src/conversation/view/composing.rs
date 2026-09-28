@@ -59,7 +59,7 @@ pub(super) enum MenuRows {
 impl MenuRows {
     /// Rows it holds.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         match self {
             Self::Commands(commands) => commands.len(),
             Self::Paths(paths) => paths.as_ref().map_or(0, Vec::len),
@@ -69,7 +69,7 @@ impl MenuRows {
 
     /// Whether it holds nothing.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }

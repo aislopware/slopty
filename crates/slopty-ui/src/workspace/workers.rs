@@ -4,7 +4,6 @@
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use slopty_client::ItemChange;
 use slopty_client::layout::{Placement, TileRef, WorkerKey};
-use slopty_client::relay::RelayNotice;
 use slopty_core::{ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::file::{FileRead, WriteResult};
@@ -261,12 +260,6 @@ impl WorkspaceView {
         if changed {
             cx.notify();
         }
-    }
-
-    /// What to say of `key`'s link having stayed on a DERP relay, once it has held.
-    #[must_use]
-    pub fn relay_notice(&self, key: WorkerKey, cx: &App) -> Option<RelayNotice> {
-        self.workers.get(&key)?.relay.notice(cx.background_executor().now())
     }
 
     /// What `key` can do changed: a permission granted, a display attached. The link's word
@@ -665,10 +658,12 @@ impl WorkspaceView {
         self.terminals.insert(session, view);
     }
 
-    /// Requested quality for a new stream: the settings' rate, ceiling and depth at full
-    /// scale; the view then asks for a scale matching the width it paints at.
-    const fn quality_for(&self) -> Quality {
-        crate::screen::quality_of(self.theme.behaviour.stream, 1.0)
+    /// Requested quality for a new stream: the settings' ceilings and depth at full scale, at
+    /// the main screen's refresh; the view then asks for a scale matching the width it paints
+    /// at, and for the refresh of the screen it is drawn on.
+    fn quality_for(&self) -> Quality {
+        let refresh = crate::screen::main_refresh_hz();
+        crate::screen::quality_of(self.theme.behaviour.stream, 1.0, refresh)
     }
 
     /// Open streams for remote tiles that should have one and lack it; let go of the rest.
@@ -1086,7 +1081,8 @@ impl WorkspaceView {
             .collect();
         let mut changed = false;
         for id in remote {
-            if visible.contains(&id) {
+            // A tile shown in a window of its own is on screen there.
+            if visible.contains(&id) || self.popouts.holds(id) {
                 self.unseen.remove(&id);
                 changed |= self.parked.remove(&id);
             } else {
@@ -1099,5 +1095,18 @@ impl WorkspaceView {
         if changed || due {
             self.reconcile_screens();
         }
+    }
+}
+
+#[cfg(test)]
+impl WorkspaceView {
+    /// What to say of `key`'s link having stayed on a DERP relay, once it has held.
+    #[must_use]
+    pub(super) fn relay_notice(
+        &self,
+        key: WorkerKey,
+        cx: &App,
+    ) -> Option<slopty_client::relay::RelayNotice> {
+        self.workers.get(&key)?.relay.notice(cx.background_executor().now())
     }
 }

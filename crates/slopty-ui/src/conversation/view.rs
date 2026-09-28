@@ -47,10 +47,9 @@ use slopty_theme::Theme;
 
 use super::approval::Approvals;
 use super::diff::Block;
-use super::figures::{self, FileChange};
 use super::model::Model;
 use super::rows::{self, Density, Input, Row, RowKey};
-use super::{CTX, CycleDensity, Interrupt, MESSAGE_PLACEHOLDER, composer};
+use super::{CTX, CycleDensity, Interrupt, MESSAGE_PLACEHOLDER, composer, figures};
 use crate::colors::hsla;
 
 /// Diffs coloured once, by thread, entry id and revision.
@@ -497,8 +496,9 @@ impl ConversationView {
 
     /// Every file the session changed, in the order each was first changed, across its
     /// threads.
+    #[cfg(test)]
     #[must_use]
-    pub fn session_files(&self) -> Vec<FileChange> {
+    fn session_files(&self) -> Vec<figures::FileChange> {
         let mut entries: Vec<(&ThreadId, &slopty_proto::conversation::Entry)> = self
             .model
             .threads()

@@ -354,8 +354,13 @@ pub struct ScreenView {
     /// The modifier keys as last reported, so a change forwards the key that moved.
     modifiers: Modifiers,
     /// Focus leaving the view and the window going inactive each release what is held on the
-    /// worker (registered at the first render: the constructor has no window).
-    let_go: Option<[Subscription; 2]>,
+    /// worker, and the window moving to another screen asks for that screen's refresh. They are
+    /// registered with the window the view renders in (the constructor has none), and again
+    /// when it renders in another: a tile popped out into a window of its own.
+    let_go: Option<(gpui::AnyWindowHandle, [Subscription; 3])>,
+    /// The screen the view's window is on, and its refresh in hertz (0 when it does not say);
+    /// `None` until the view renders.
+    screen: Option<(Option<u32>, u16)>,
     /// Input-method composition in progress (nothing is sent until it commits).
     marked: Option<String>,
     /// The stats overlay (⌘⇧I).
@@ -652,11 +657,54 @@ impl Focusable for ScreenView {
     }
 }
 
-/// The quality a stream is asked for: the settings' rate and ceiling at `scale`.
+/// The frame rate asked for when the screen's refresh is not known: what nearly every display
+/// runs at.
+const UNKNOWN_REFRESH_HZ: u16 = 60;
+
+/// The frames a second a stream asks for.
+///
+/// That is the refresh of the screen its view is on, up to the settings' `ceiling`
+/// (`docs/decisions/video.md`, "The stream follows the screen's refresh"). A screen that does
+/// not say (`refresh_hz` 0) counts as 60 Hz.
 #[must_use]
-pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32) -> Quality {
+pub const fn stream_fps(ceiling: u16, refresh_hz: u16) -> u16 {
+    let screen = if refresh_hz == 0 { UNKNOWN_REFRESH_HZ } else { refresh_hz };
+    let fps = if screen < ceiling { screen } else { ceiling };
+    if fps == 0 { 1 } else { fps }
+}
+
+/// A refresh period as whole hertz; 0 for none.
+fn hz_of(period: Option<Duration>) -> u16 {
+    period.filter(|period| !period.is_zero()).map_or(0, |period| {
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "≤ 240")]
+        let hz = (1.0 / period.as_secs_f64()).round().min(f64::from(u16::MAX)) as u16;
+        hz
+    })
+}
+
+/// The refresh of the main screen (the one with the key window), hertz; 0 when it is not
+/// known. What a stream opens at before its view is drawn in a window of its own.
+#[must_use]
+pub fn main_refresh_hz() -> u16 {
+    hz_of(slopty_platform::display_refresh())
+}
+
+/// The CoreGraphics id of the screen `window` is on; `None` when GPUI knows of none.
+fn window_screen(window: &Window, cx: &App) -> Option<u32> {
+    window.display(cx).and_then(|display| u32::try_from(u64::from(display.id())).ok())
+}
+
+/// The refresh of `screen`, hertz; 0 when it is not known.
+fn screen_refresh_hz(screen: Option<u32>) -> u16 {
+    screen.map_or_else(main_refresh_hz, |id| hz_of(slopty_platform::display_refresh_of(id)))
+}
+
+/// The quality a stream is asked for: the settings' ceiling on the rate, at the refresh of the
+/// screen the view is on ([`stream_fps`]), and their bitrate ceiling at `scale`.
+#[must_use]
+pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32, refresh_hz: u16) -> Quality {
     Quality {
-        fps: prefs.fps,
+        fps: stream_fps(prefs.fps, refresh_hz),
         bitrate_bps: prefs.max_bitrate_bps,
         scale,
         codec: VideoCodec::Hevc,
@@ -672,7 +720,7 @@ impl ScreenView {
         if self.theme == theme {
             return;
         }
-        let wanted = quality_of(theme.behaviour.stream, self.quality.scale);
+        let wanted = quality_of(theme.behaviour.stream, self.quality.scale, self.refresh_hz());
         if wanted != self.quality {
             self.quality = wanted;
             self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
@@ -683,6 +731,38 @@ impl ScreenView {
         }
         self.theme = theme;
         cx.notify();
+    }
+
+    /// Ask for the refresh of the screen `window` is on when it is not the one asked for: the
+    /// view drew on another screen, or its window moved to one. Only the rate changes.
+    fn follow_screen(&mut self, window: &Window, cx: &App) {
+        let screen = window_screen(window, cx);
+        if self.screen.is_some_and(|(on, _)| on == screen) {
+            return;
+        }
+        self.on_screen(screen, screen_refresh_hz(screen));
+    }
+
+    /// The view is drawn on `screen`, which refreshes at `hz` (0 when it does not say): the
+    /// stream asks for that rate, up to the settings' ceiling, when it is not the one it has.
+    fn on_screen(&mut self, screen: Option<u32>, hz: u16) {
+        self.screen = Some((screen, hz));
+        let fps = stream_fps(self.theme.behaviour.stream.fps, hz);
+        if fps != self.quality.fps {
+            self.quality.fps = fps;
+            self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
+        }
+    }
+
+    /// The refresh of the screen the view is drawn on, hertz; 0 when it is not known.
+    fn refresh_hz(&self) -> u16 {
+        self.screen.map_or(0, |(_, hz)| hz)
+    }
+
+    /// The frames a second this stream asks for now.
+    #[must_use]
+    pub const fn fps(&self) -> u16 {
+        self.quality.fps
     }
 
     /// Wrap an opened stream.
@@ -747,6 +827,7 @@ impl ScreenView {
             pointer_at: (0.0, 0.0),
             modifiers: Modifiers::default(),
             let_go: None,
+            screen: None,
             paste_hook: None,
             paste_hold: (0, Vec::new()),
             sticky: Modifiers::default(),
@@ -2291,14 +2372,22 @@ const fn proto_button(button: MouseButton) -> ProtoButton {
 
 impl Render for ScreenView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.let_go.is_none() {
+        let here = window.window_handle();
+        if self.let_go.as_ref().is_none_or(|(at, _)| *at != here) {
+            // A view moved to another window lets go of what it held in the last.
+            if self.let_go.is_some() {
+                self.let_go(cx);
+            }
             let blur = cx.on_blur(&self.focus, window, |this, _window, cx| this.let_go(cx));
             let inactive = cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
                     this.let_go(cx);
                 }
             });
-            self.let_go = Some([blur, inactive]);
+            let moved =
+                cx.observe_window_bounds(window, |this, window, cx| this.follow_screen(window, cx));
+            self.let_go = Some((here, [blur, inactive, moved]));
+            self.follow_screen(window, cx);
         }
         self.renders = self.renders.wrapping_add(1);
         // Whatever asked for this render, it draws the pointer as it is now: a change that
@@ -2851,6 +2940,52 @@ mod tests {
         view.update(cx, |v, cx| v.set_theme(theme, cx));
         assert!(!muted(cx), "the pill's toggle stands");
         assert!(!sent(&mut rx).is_empty(), "fps change asked");
+    }
+
+    /// The stream asks for the refresh of the screen it is drawn on, up to the settings'
+    /// ceiling, whenever its view lands on a screen of another rate; a screen that does not
+    /// say counts as 60 Hz.
+    #[test]
+    fn the_rate_follows_the_screen_up_to_the_ceiling() {
+        assert_eq!(stream_fps(120, 120), 120, "a ProMotion screen");
+        assert_eq!(stream_fps(120, 60), 60);
+        assert_eq!(stream_fps(120, 144), 120, "the ceiling holds");
+        assert_eq!(stream_fps(60, 120), 60);
+        assert_eq!(stream_fps(120, 0), 60, "a screen that does not say");
+        assert_eq!(stream_fps(30, 0), 30);
+        let prefs = slopty_theme::StreamPrefs::default();
+        assert_eq!(prefs.fps, 120, "the default follows any screen");
+        assert_eq!(quality_of(prefs, 1.0, 120).fps, 120);
+        assert_eq!(hz_of(Some(Duration::from_micros(8_333))), 120);
+        assert_eq!(hz_of(Some(Duration::from_micros(16_667))), 60);
+        assert_eq!(hz_of(None), 0);
+    }
+
+    #[gpui::test]
+    fn a_view_on_a_screen_of_another_rate_asks_for_it(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx) = view(cx);
+        let fps = |asked: &[ScreenRequest]| -> Vec<u16> {
+            asked
+                .iter()
+                .filter_map(|r| match r {
+                    ScreenRequest::SetQuality { quality, .. } => Some(quality.fps),
+                    _ => None,
+                })
+                .collect()
+        };
+        view.update(cx, |v, _| v.on_screen(Some(1), 120));
+        assert_eq!(fps(&sent(&mut rx)), [120], "a ProMotion screen");
+        view.update(cx, |v, _| v.on_screen(Some(2), 120));
+        assert!(sent(&mut rx).is_empty(), "another screen at the same rate asks nothing");
+        view.update(cx, |v, _| v.on_screen(Some(3), 60));
+        assert_eq!(fps(&sent(&mut rx)), [60]);
+        let mut theme = Theme::default();
+        theme.behaviour.stream.fps = 30;
+        view.update(cx, |v, cx| v.set_theme(theme, cx));
+        assert_eq!(fps(&sent(&mut rx)), [30], "the ceiling came down");
+        view.update(cx, |v, _| v.on_screen(Some(1), 120));
+        assert!(sent(&mut rx).is_empty(), "no screen takes it past the ceiling");
+        assert_eq!(view.read_with(cx, |v, _| v.fps()), 30);
     }
 
     /// The worker's cursor picture replaces the drawn arrow at the pointer, its hotspot on

@@ -3649,3 +3649,38 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `composing::an_unreachable_worker_keeps_the_draft` (Reconnect); `paste_key::tests` for the
     placement and the colours. The UIKit button itself is not driven by a test: a tap on it is
     the person's by design.
+
+- ✅ **A remote tile pops out into a window of its own** (2026-09-29).
+  - **The view moves and the stream does not.** "Open in its own window" (⌃⌘N, in the palette
+    on a focused window or display tile) opens a native GPUI window whose root
+    (`workspace::popout::PopOutView`) draws the tile's own `ScreenView`. The workspace keeps
+    the entity, so the stream, its decoder, the paste hook and the pointer are the same ones,
+    and the worker hears no `Close` or `Open`. The tile draws "In its own window" in its body
+    instead, and a click there brings the window forward. A popped tile counts as on screen,
+    so it is never parked. After a reconnect the window draws the tile's new view.
+  - **The view follows the window it is drawn in.** `ScreenView` registers its blur,
+    deactivation and bounds observers with the window it renders in, and again when that
+    window changes. Moving between windows lets go of held keys and buttons first. The bounds
+    observer is what asks for a new screen's refresh ("The stream follows the screen's
+    refresh", video).
+  - **Sized to the remote window.** The window opens one stream pixel to a device pixel, scaled
+    down whole to 90 % of the screen, at the target's aspect. It has an ordinary title bar
+    with the tile's title, so ⌘Tab's window list and Mission Control name it like a local
+    app's window. Resizing it asks a remote window to take the new size (`Resize`, once the
+    size has held for 250 ms), as widening a tile does. A remote window resized on the worker
+    resizes the window back. A display letterboxes, and a display made for this device keeps
+    its shape while it is out.
+  - **Keys, clipboard, focus.** The picture takes the keyboard when the window opens. Every
+    chord goes to the worker except ⌃⌘N, which puts the tile back, in the `PopOut` context,
+    the way ⌃Tab stays the way out of a tile. While the window has the keyboard its tile is
+    the focused one, and the worker's clipboard is watched for it even though the workspace
+    window is not frontmost. Closing the window, the command again, or the tile going away
+    returns the picture to its tile.
+  - **Not done.** The system-shortcut tap arms only in the workspace window. The popped state
+    is not saved in the layout, so a relaunch opens every tile in the workspace. iPad is
+    skipped: a second window there is a second `UIWindowScene`, which the gpui iOS fork does
+    not make, so the command is not offered on iOS.
+  - Tests: `workspace::tests::popout::a_tile_pops_out_into_its_own_window_and_back` (the same
+    view in a new window with the keyboard, the tile's placeholder, the palette's two
+    labels, nothing reopened, and back), and
+    `popout::tests::a_window_opens_at_the_remote_size_fitted_to_the_screen`.

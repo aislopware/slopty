@@ -1023,7 +1023,7 @@ impl ConversationView {
 /// The tone the share of the context window in use is drawn in: warn past 80 %, error past
 /// 95 %.
 #[must_use]
-pub fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
+pub(super) fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
     let s = theme.surfaces;
     match used_pct {
         p if p >= 95.0 => s.error,
@@ -1036,7 +1036,7 @@ pub fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
 /// quiet hairline, the used arc in the tone the share calls for (warn past 80 %, error past
 /// 95 %).
 #[must_use]
-pub fn context_ring(theme: &Theme, used_pct: f64, side: f32) -> AnyElement {
+pub(super) fn context_ring(theme: &Theme, used_pct: f64, side: f32) -> AnyElement {
     let s = theme.surfaces;
     let (track, arc) = (hsla(s.border), hsla(context_tone(theme, used_pct)));
     #[expect(clippy::cast_possible_truncation, reason = "a share on screen")]
@@ -1080,7 +1080,7 @@ pub fn context_ring(theme: &Theme, used_pct: f64, side: f32) -> AnyElement {
 /// less: "Falls back to the terminal in 4 min". The minutes count on the worker's own
 /// window, counted from `since_ms`, when this client saw it.
 #[must_use]
-pub fn wait_left(
+pub(super) fn wait_left(
     prompt: &slopty_proto::conversation::PermissionPrompt,
     since_ms: WallMs,
     now_ms: WallMs,

@@ -91,7 +91,7 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
 /// A tool call is "Working": the word names the state, and which tool is the line's to say.
 /// "Needs you" is not among them; it heads the section that groups the three waiting words.
 #[must_use]
-pub fn agent_status_word(agent: &AgentEvent) -> String {
+pub(super) fn agent_status_word(agent: &AgentEvent) -> String {
     match &agent.status {
         AgentStatus::None => String::new(),
         AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt) => "Idle".to_owned(),
@@ -112,7 +112,7 @@ pub fn agent_status_word(agent: &AgentEvent) -> String {
 /// leads with the tool's own name or a shell's `$` ("Edit src/main.rs", "$ cargo test"), which
 /// the tool before the dot already says.
 #[must_use]
-pub fn agent_ask_text(agent: &AgentEvent) -> Option<String> {
+pub(super) fn agent_ask_text(agent: &AgentEvent) -> Option<String> {
     let detail = agent.detail.as_deref().map(str::trim).filter(|d| !d.is_empty());
     match &agent.status {
         AgentStatus::Blocked(BlockReason::Permission { tool }) => {
@@ -135,7 +135,7 @@ pub fn agent_ask_text(agent: &AgentEvent) -> Option<String> {
 /// ([`tool_statement`]). A row says what is asked; the tool's own name is left to the tooltip
 /// ([`agent_ask_text`]).
 #[must_use]
-pub fn agent_ask_line(agent: &AgentEvent) -> Option<String> {
+pub(super) fn agent_ask_line(agent: &AgentEvent) -> Option<String> {
     let ask = agent_ask_text(agent)?;
     let AgentStatus::Blocked(BlockReason::Permission { tool }) = &agent.status else {
         return Some(ask);
@@ -150,7 +150,7 @@ pub fn agent_ask_line(agent: &AgentEvent) -> Option<String> {
 /// Using `tool` on `subject`, said as the action: "Run cargo test", "Edit src/main.rs", "Use
 /// query from db: users".
 #[must_use]
-pub fn tool_action(tool: &str, subject: &str) -> String {
+pub(super) fn tool_action(tool: &str, subject: &str) -> String {
     let verb = match tool {
         "Bash" => "Run",
         "Edit" | "MultiEdit" | "NotebookEdit" => "Edit",
@@ -177,7 +177,7 @@ pub fn tool_action(tool: &str, subject: &str) -> String {
 /// The card names Claude and the file ("Claude wants to edit main.rs"); a row that knows only
 /// the tool says the kind of thing, and its meta says whose agent asks.
 #[must_use]
-pub fn tool_statement(tool: &str) -> String {
+pub(super) fn tool_statement(tool: &str) -> String {
     let what = match tool {
         "Bash" => "run a command",
         "Edit" | "MultiEdit" | "NotebookEdit" => "edit a file",

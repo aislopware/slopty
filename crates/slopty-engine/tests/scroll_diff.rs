@@ -26,7 +26,7 @@ mod diffs {
         fn apply(&mut self, frame: &Frame) {
             let first = frame.first_visible_line.0;
             for u in &frame.updates {
-                self.held.insert((frame.epoch, first + u64::from(u.row)), u.line.clone());
+                self.held.insert((frame.epoch, first + u64::from(u.row)), Line::clone(&u.line));
             }
             self.rows_sent += frame.updates.len();
         }

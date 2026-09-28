@@ -61,12 +61,6 @@ impl Section {
         }
     }
 
-    /// A page that shows what is, with no key of the file on it.
-    #[must_use]
-    pub const fn sets_nothing(self) -> bool {
-        matches!(self, Self::Keyboard | Self::About)
-    }
-
     /// Its place in [`Self::ALL`].
     #[must_use]
     pub fn index(self) -> usize {
@@ -408,6 +402,15 @@ pub fn figure(value: f64, step: f64) -> String {
 #[must_use]
 pub fn number(value: f64, step: f64, integer: bool) -> String {
     if integer { format!("{value:.0}") } else { format!("{value:.*}", decimals(step).max(1)) }
+}
+
+#[cfg(test)]
+impl Section {
+    /// A page that shows what is, with no key of the file on it.
+    #[must_use]
+    const fn sets_nothing(self) -> bool {
+        matches!(self, Self::Keyboard | Self::About)
+    }
 }
 
 #[cfg(test)]

@@ -162,12 +162,13 @@ impl WorkspaceView {
     }
 
     /// The worker whose clipboard matters now: the focused tile's, while it is a terminal or a
-    /// remote window and the app is frontmost.
+    /// remote window and the app is frontmost, or the tile whose own window has the keyboard.
     fn clipboard_worker(&self) -> Option<WorkerKey> {
-        if !self.app_active {
-            return None;
-        }
-        let tile = self.focused()?;
+        let tile = match self.popouts.active() {
+            Some(item) => self.tile_of(item)?,
+            None if self.app_active => self.focused()?,
+            None => return None,
+        };
         let item = self.item(tile)?;
         let remote = matches!(
             item.kind,

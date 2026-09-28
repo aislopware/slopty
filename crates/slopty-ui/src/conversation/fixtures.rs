@@ -11,7 +11,7 @@ use slopty_proto::conversation::{
 
 /// What a follower of the recorded session `name` is sent: its every thread from the start,
 /// then `Current`.
-pub fn events(name: &str) -> Vec<ConversationEvent> {
+pub(crate) fn events(name: &str) -> Vec<ConversationEvent> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../slopty-agent/tests/fixtures/conversation")
         .join(name);
@@ -32,14 +32,14 @@ pub fn events(name: &str) -> Vec<ConversationEvent> {
 
 /// A 1600 × 1000 PNG's header, base64 as a transcript holds a picture: enough for the decoder
 /// to describe it, which is all a face needs until it asks for the bytes.
-pub const PICTURE: &str = "iVBORw0KGgoAAAANSUhEUgAABkAAAAPoCAYAAAA=";
+pub(super) const PICTURE: &str = "iVBORw0KGgoAAAANSUhEUgAABkAAAAPoCAYAAAA=";
 
 /// A session made up to show the work a turn does beyond words, laid out in `dir` as Claude
 /// Code keeps it: a prompt with a pasted picture, the model's thinking, a plan the person
 /// approved, a task list under way, a `Read` of a screenshot, and a build started in the
 /// background that is still printing. Returns what a follower is sent: the conversation, the
 /// build's last lines, `Current`.
-pub fn work(dir: &Path) -> Vec<ConversationEvent> {
+pub(super) fn work(dir: &Path) -> Vec<ConversationEvent> {
     use serde_json::{Value, json};
     let main = dir.join("s1.jsonl");
     let tasks = dir.join("tasks");
@@ -177,7 +177,7 @@ pub fn work(dir: &Path) -> Vec<ConversationEvent> {
 /// the app's frame probe draws: each turn a prompt, thinking, a Markdown answer with a list and
 /// a fenced block, a 30-line test run, an edit with its diff, a read and a closing line, every
 /// assistant record with a model and usage. Returns what a follower is sent.
-pub fn long(dir: &Path, turns: usize) -> Vec<ConversationEvent> {
+pub(super) fn long(dir: &Path, turns: usize) -> Vec<ConversationEvent> {
     use serde_json::{Value, json};
     let main = dir.join("s1.jsonl");
     let mut records = Vec::new();
@@ -284,7 +284,7 @@ pub fn long(dir: &Path, turns: usize) -> Vec<ConversationEvent> {
 }
 
 /// A recorded session applied as a follower receives it.
-pub fn scenario(name: &str) -> super::model::Model {
+pub(super) fn scenario(name: &str) -> super::model::Model {
     let mut model = super::model::Model::default();
     for event in events(name) {
         model.apply(event);
@@ -293,7 +293,7 @@ pub fn scenario(name: &str) -> super::model::Model {
 }
 
 /// Claude Code asking to run `npm test` in `session`, with a rule to grant always.
-pub fn bash_prompt(session: SessionId, ask: u64) -> PermissionPrompt {
+pub(crate) fn bash_prompt(session: SessionId, ask: u64) -> PermissionPrompt {
     let command = "npm test";
     PermissionPrompt {
         session,

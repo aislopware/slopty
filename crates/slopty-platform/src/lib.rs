@@ -213,6 +213,38 @@ pub fn display_refresh() -> Option<std::time::Duration> {
     std::time::Duration::from_secs(1).checked_div(fps)
 }
 
+/// The refresh period of the screen with the CoreGraphics display id `display`.
+///
+/// That is the screen a window is on, as GPUI names it (`Window::display`). It is read from the
+/// screen's most frames a second, as [`display_refresh`] reads the main screen. iOS has one
+/// screen per scene and reads [`display_refresh`]. Main thread only; `None` off it and for a
+/// screen no longer attached.
+#[cfg(target_vendor = "apple")]
+#[cfg_attr(target_os = "ios", expect(unused_variables, reason = "one screen a scene"))]
+#[must_use]
+pub fn display_refresh_of(display: u32) -> Option<std::time::Duration> {
+    #[cfg(target_os = "macos")]
+    {
+        let mtm = objc2::MainThreadMarker::new()?;
+        // `<AppKit/NSScreen.h>`, `deviceDescription`: the screen's `CGDirectDisplayID` sits under
+        // this key, which the SDK exports no constant for.
+        let key = objc2_foundation::ns_string!("NSScreenNumber");
+        let screen = objc2_app_kit::NSScreen::screens(mtm).iter().find(|screen| {
+            screen
+                .deviceDescription()
+                .objectForKey(key)
+                .and_then(|number| number.downcast::<objc2_foundation::NSNumber>().ok())
+                .is_some_and(|number| number.unsignedIntValue() == display)
+        })?;
+        let fps = u32::try_from(screen.maximumFramesPerSecond()).ok()?;
+        std::time::Duration::from_secs(1).checked_div(fps)
+    }
+    #[cfg(target_os = "ios")]
+    {
+        display_refresh()
+    }
+}
+
 /// Whether the ⌥ key down in the event being handled is the right one.
 ///
 /// AppKit's `modifierFlags` carry the device-dependent side bits GPUI drops; read off the

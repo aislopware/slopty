@@ -1319,13 +1319,14 @@ mod native {
 
     use gpui::Window;
     use slopty_client::layout::Rect;
-    pub use slopty_platform::web::{Dialog, DialogKind, Download, WebEvent as Event};
+    pub use slopty_platform::web::{Dialog, DialogKind};
+    pub(super) use slopty_platform::web::{Download, WebEvent as Event};
 
     use super::PageState;
 
     /// The page, once it is open.
     #[derive(Default)]
-    pub struct Native {
+    pub(super) struct Native {
         view: Option<slopty_platform::web::WebView>,
     }
 
@@ -1339,12 +1340,17 @@ mod native {
     }
 
     impl Native {
-        pub const fn open(&self) -> bool {
+        pub(super) const fn open(&self) -> bool {
             self.view.is_some()
         }
 
         /// Open the page in `window`'s view; `false` when the platform has none to give.
-        pub fn create(&mut self, window: &Window, url: &str, sink: Rc<dyn Fn(Event)>) -> bool {
+        pub(super) fn create(
+            &mut self,
+            window: &Window,
+            url: &str,
+            sink: Rc<dyn Fn(Event)>,
+        ) -> bool {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             let host = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
                 Ok(RawWindowHandle::AppKit(handle)) => handle.ns_view,
@@ -1355,27 +1361,27 @@ mod native {
             self.view.is_some()
         }
 
-        pub fn place(&self, clip: Rect, at: Rect, alpha: f32) {
+        pub(super) fn place(&self, clip: Rect, at: Rect, alpha: f32) {
             if let Some(view) = &self.view {
                 view.place(frame(clip), frame(at), f64::from(alpha));
             }
         }
 
-        pub fn hide(&self) {
+        pub(super) fn hide(&self) {
             if let Some(view) = &self.view {
                 view.hide();
             }
         }
 
-        pub fn shown(&self) -> bool {
+        pub(super) fn shown(&self) -> bool {
             self.view.as_ref().is_some_and(slopty_platform::web::WebView::shown)
         }
 
-        pub fn focused(&self) -> bool {
+        pub(super) fn focused(&self) -> bool {
             self.view.as_ref().is_some_and(slopty_platform::web::WebView::focused)
         }
 
-        pub fn page(&self) -> Option<PageState> {
+        pub(super) fn page(&self) -> Option<PageState> {
             self.view.as_ref().map(|v| {
                 let p = v.page();
                 PageState {
@@ -1389,79 +1395,79 @@ mod native {
             })
         }
 
-        pub fn snapshot(&self) {
+        pub(super) fn snapshot(&self) {
             if let Some(view) = &self.view {
                 view.snapshot();
             }
         }
 
-        pub fn load(&self, url: &str) {
+        pub(super) fn load(&self, url: &str) {
             if let Some(view) = &self.view {
                 view.load(url);
             }
         }
 
-        pub fn back(&self) {
+        pub(super) fn back(&self) {
             if let Some(view) = &self.view {
                 view.back();
             }
         }
 
-        pub fn forward(&self) {
+        pub(super) fn forward(&self) {
             if let Some(view) = &self.view {
                 view.forward();
             }
         }
 
-        pub fn reload(&self) {
+        pub(super) fn reload(&self) {
             if let Some(view) = &self.view {
                 view.reload();
             }
         }
 
-        pub fn focus(&self) {
+        pub(super) fn focus(&self) {
             if let Some(view) = &self.view {
                 view.focus();
             }
         }
 
-        pub fn release(&self) {
+        pub(super) fn release(&self) {
             if let Some(view) = &self.view {
                 view.release();
             }
         }
 
-        pub fn press(&self, key: &str, command: bool, shift: bool) -> bool {
+        pub(super) fn press(&self, key: &str, command: bool, shift: bool) -> bool {
             self.view.as_ref().is_some_and(|v| v.press(key, command, shift))
         }
 
-        pub fn find(&self, text: &str, backwards: bool) {
+        pub(super) fn find(&self, text: &str, backwards: bool) {
             if let Some(view) = &self.view {
                 view.find(text, backwards);
             }
         }
 
-        pub fn count(&self, text: &str) {
+        pub(super) fn count(&self, text: &str) {
             if let Some(view) = &self.view {
                 view.count(text);
             }
         }
 
-        pub fn inspect(&self) -> bool {
+        pub(super) fn inspect(&self) -> bool {
             self.view.as_ref().is_some_and(slopty_platform::web::WebView::inspect)
         }
 
-        pub fn set_zoom(&self, zoom: f64) {
+        pub(super) fn set_zoom(&self, zoom: f64) {
             if let Some(view) = &self.view {
                 view.set_zoom(zoom);
             }
         }
 
-        pub fn received(&self, id: u64) -> Option<(u64, u64)> {
+        pub(super) fn received(&self, id: u64) -> Option<(u64, u64)> {
             self.view.as_ref()?.received(id)
         }
 
-        pub fn cancel_download(&self, id: u64) {
+        pub(super) fn cancel_download(&self, id: u64) {
             if let Some(view) = &self.view {
                 view.cancel_download(id);
             }
@@ -1470,13 +1476,13 @@ mod native {
 
     /// Show a saved download in the Finder.
     #[cfg(target_os = "macos")]
-    pub fn reveal(path: &std::path::Path) {
+    pub(super) fn reveal(path: &std::path::Path) {
         slopty_platform::web::reveal(path);
     }
 
     /// The Files app is the way to a download on iOS, and no row offers this.
     #[cfg(target_os = "ios")]
-    pub const fn reveal(_path: &std::path::Path) {}
+    pub(super) const fn reveal(_path: &std::path::Path) {}
 }
 
 #[cfg(test)]

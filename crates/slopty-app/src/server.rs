@@ -25,18 +25,18 @@ use crate::workers::{WorkerSlot, worker_key};
 use crate::{Workspace, net};
 
 /// The status bar's word while the server does not answer.
-pub const UNREACHABLE: &str = "Server unreachable";
+pub(crate) const UNREACHABLE: &str = "Server unreachable";
 /// The titlebar's line while the server turns this app away: the tailnet policy grants this
 /// device no client role there.
-pub const NOT_GRANTED: &str = "Server access not granted by the tailnet policy";
+pub(crate) const NOT_GRANTED: &str = "Server access not granted by the tailnet policy";
 
 /// A worker the server says is away is still dialled this often: the server's view of it can
 /// be wrong (its path to the worker broken while this client's works).
-pub const HOLD_RETRY: Duration = Duration::from_secs(10);
+pub(crate) const HOLD_RETRY: Duration = Duration::from_secs(10);
 
 /// The server this app is using.
 #[derive(Debug)]
-pub struct ServerSlot {
+pub(crate) struct ServerSlot {
     /// Where it is.
     address: HostAddr,
     /// The link once it is started; dropping it ends the link and its redials.
@@ -45,7 +45,7 @@ pub struct ServerSlot {
 
 /// What a worker's connect loop does next.
 #[derive(Debug)]
-pub struct Plan {
+pub(crate) struct Plan {
     /// The worker's key in the workspace.
     pub key: WorkerKey,
     /// Wakes the loop out of a wait.
@@ -88,13 +88,13 @@ const fn refused_status(why: Refusal) -> &'static str {
 }
 
 /// Where the cached directory lives: the client's data directory.
-pub fn cache_path() -> std::path::PathBuf {
+pub(crate) fn cache_path() -> std::path::PathBuf {
     slopty_platform::dirs::data_dir().join(directory::CACHE_FILE)
 }
 
 /// What the cached directory should hold next.
 #[derive(Clone, Debug)]
-pub enum Cache {
+pub(crate) enum Cache {
     /// This server's directory.
     Keep(HostAddr, Directory),
     /// Nothing: the server was disconnected, so the file goes.
@@ -108,7 +108,10 @@ pub enum Cache {
 /// second failed, and an older directory could land last. Here each write finishes before the
 /// next starts, and a burst of changes costs the one write of the latest. The value the
 /// channel starts with is never written.
-pub async fn write_cache(path: std::path::PathBuf, mut next: tokio::sync::watch::Receiver<Cache>) {
+pub(crate) async fn write_cache(
+    path: std::path::PathBuf,
+    mut next: tokio::sync::watch::Receiver<Cache>,
+) {
     while next.changed().await.is_ok() {
         let cache = next.borrow_and_update().clone();
         let path = path.clone();

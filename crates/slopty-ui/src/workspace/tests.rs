@@ -211,7 +211,7 @@ fn frame(rows: &[&str]) -> TermEvent {
             .enumerate()
             .map(|(row, text)| RowUpdate {
                 row: u16::try_from(row).unwrap(),
-                line: Line::from_text(text, 80, Style::DEFAULT),
+                line: Line::from_text(text, 80, Style::DEFAULT).into(),
             })
             .collect(),
     })
@@ -237,7 +237,7 @@ fn marked_frame(seq: u64, rows: &[(&str, SemanticMark)], cursor_row: u16) -> Ter
             .map(|(row, (text, mark))| {
                 let mut line = Line::from_text(text, 80, Style::DEFAULT);
                 line.mark = *mark;
-                RowUpdate { row: u16::try_from(row).unwrap(), line }
+                RowUpdate { row: u16::try_from(row).unwrap(), line: line.into() }
             })
             .collect(),
     })
@@ -1453,6 +1453,7 @@ mod niri_keys;
 mod overlays;
 mod page_chrome;
 mod palette;
+mod popout;
 mod remote;
 mod save_copy;
 mod shell_drag;

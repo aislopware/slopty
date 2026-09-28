@@ -33,7 +33,7 @@ pub(super) struct Rollup {
 
 impl Rollup {
     /// Count one tile: its status and whether it has news not yet seen.
-    pub const fn add(&mut self, status: Option<Status>, unseen: bool) {
+    pub(super) const fn add(&mut self, status: Option<Status>, unseen: bool) {
         match status {
             Some(Status::NeedsYou) => self.needs_you = self.needs_you.saturating_add(1),
             Some(Status::Working) => self.working = self.working.saturating_add(1),
@@ -45,7 +45,7 @@ impl Rollup {
 
     /// The one thing the slot shows: what waits on the human outranks what works, which
     /// outranks what finished unseen.
-    pub const fn shown(self) -> Option<Shown> {
+    pub(super) const fn shown(self) -> Option<Shown> {
         if self.needs_you > 0 {
             Some(Shown::NeedsYou(self.needs_you))
         } else if self.working > 0 {
@@ -60,7 +60,7 @@ impl Rollup {
     }
 
     /// What the slot says to a screen reader, to follow a label after a comma.
-    pub fn words(self) -> Option<String> {
+    pub(super) fn words(self) -> Option<String> {
         self.shown().map(|shown| match shown {
             Shown::NeedsYou(n) => format!("{n} {}", if n == 1 { "needs you" } else { "need you" }),
             Shown::Working => "working".to_owned(),

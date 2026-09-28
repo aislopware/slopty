@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use slopty_grid::{
-    CellWidth, Cursor, Line, LineFlags, LineIndex, Screen, Scrollback, SemanticMark, TermModes,
+    CellWidth, Cursor, Line, LineFlags, LineIndex, RowUpdate, Screen, Scrollback, SemanticMark,
+    TermModes,
 };
 use slopty_proto::terminal::{
-    ColorOverrides, Frame, IMAGE_CACHE_BYTES, MAX_FETCH_LINES, Placement, Progress, Restored,
-    SearchMatch, TermEvent, TermRequest, TermSize,
+    ColorOverrides, Frame, IMAGE_CACHE_BYTES, MAX_FETCH_LINES, Placement, PointerShape, Progress,
+    Restored, SearchMatch, TermEvent, TermRequest, TermSize,
 };
 
 /// Lines kept client-side; the worker retains 50k. Past it the lines farthest from the view
@@ -121,6 +122,8 @@ pub struct TermState {
     colors: ColorOverrides,
     /// The program's progress report (`OSC 9;4`).
     progress: Progress,
+    /// The pointer shape the program asked for (`OSC 22`).
+    pointer: PointerShape,
     /// The session was reopened after its shell was lost.
     restored: Option<Restored>,
     /// The primary screen's lines while the alternate screen is up, to take back if the
@@ -226,6 +229,7 @@ impl TermState {
             placements: Vec::new(),
             colors: ColorOverrides::default(),
             progress: Progress::default(),
+            pointer: PointerShape::Text,
             restored: None,
             parked: None,
             superseded: 0,
@@ -316,6 +320,14 @@ impl TermState {
     #[must_use]
     pub const fn progress(&self) -> Progress {
         self.progress
+    }
+
+    /// The pointer shape the program asked for over the grid (`OSC 22`); [`PointerShape::Text`]
+    /// until it asks. Changes arrive with no [`Effect`] of their own: read it after
+    /// [`Self::apply`].
+    #[must_use]
+    pub const fn pointer(&self) -> PointerShape {
+        self.pointer
     }
 
     /// Whether the session was reopened after its shell was lost (a reboot, ptyd ending),
@@ -471,6 +483,10 @@ impl TermState {
                 self.restored = Some(restored);
                 Vec::new()
             }
+            TermEvent::Pointer(pointer) => {
+                self.pointer = pointer;
+                Vec::new()
+            }
         }
     }
 
@@ -519,11 +535,11 @@ impl TermState {
         }
         for update in frame.updates {
             let index = self.first_visible.offset(u64::from(update.row));
-            // One allocation held twice: the screen row and its scrollback entry are the same
-            // line, so a row that scrolls into history is never copied.
-            let line = Arc::new(update.line);
-            self.scrollback.insert_shared(index, Arc::clone(&line));
-            if let Err(e) = self.screen.apply_shared(update.row, line) {
+            // The allocation the row was decoded into, held twice: the screen row and its
+            // scrollback entry are the same line, so a row that scrolls into history is never
+            // copied.
+            self.scrollback.insert_shared(index, Arc::clone(&update.line));
+            if let Err(e) = self.screen.apply(update) {
                 tracing::debug!(error = %e, "row update rejected");
             }
         }
@@ -580,7 +596,7 @@ impl TermState {
                 .shared(index)
                 .filter(|l| l.cols() == cols)
                 .unwrap_or_else(|| Arc::new(Line::blank(cols)));
-            if let Err(e) = self.screen.apply_shared(row, line) {
+            if let Err(e) = self.screen.apply(RowUpdate { row, line }) {
                 tracing::debug!(error = %e, "row not re-adopted");
             }
         }
@@ -1142,7 +1158,7 @@ const fn input_start(line: &Line) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
-    use slopty_grid::{Cell, RowUpdate, Style};
+    use slopty_grid::{Cell, Style};
     use slopty_proto::terminal::TermError;
 
     use super::*;
@@ -1190,7 +1206,7 @@ mod tests {
                 .iter()
                 .map(|(row, text)| RowUpdate {
                     row: *row,
-                    line: Line::from_text(text, 10, Style::DEFAULT),
+                    line: Line::from_text(text, 10, Style::DEFAULT).into(),
                 })
                 .collect(),
         }
@@ -1233,6 +1249,17 @@ mod tests {
         state.apply(TermEvent::Exited { status: 0 });
         assert_eq!(state.progress(), Progress::default(), "the exit ends the report");
         assert_eq!(state.restored(), Some(&restored));
+    }
+
+    /// The program's pointer shape is kept from its report, the I-beam until one comes.
+    #[test]
+    fn the_programs_pointer_shape_is_kept() {
+        let mut state = TermState::new(size());
+        assert_eq!(state.pointer(), PointerShape::Text);
+        assert_eq!(state.apply(TermEvent::Pointer(PointerShape::Pointer)), vec![]);
+        assert_eq!(state.pointer(), PointerShape::Pointer);
+        state.apply(TermEvent::Pointer(PointerShape::Text));
+        assert_eq!(state.pointer(), PointerShape::Text);
     }
 
     #[test]
@@ -1307,7 +1334,7 @@ mod tests {
     fn a_prompt_with_a_wide_glyph_keeps_the_commands_first_letter() {
         let mut state = TermState::new(size());
         let mut f = frame(1, true, 0, 0, 3, &[(0, "  > ls")]);
-        let line = &mut f.updates[0].line;
+        let line = Arc::make_mut(&mut f.updates[0].line);
         line.cells[0] = Cell::wide("マ", Style::DEFAULT);
         line.cells[1] = Cell::spacer_tail(Style::DEFAULT);
         line.mark = SemanticMark::Prompt { exit: None, input: Some(4) };
@@ -1332,12 +1359,12 @@ mod tests {
         };
         // An empty prompt: nothing runs.
         let mut f = frame(1, true, 0, 0, 3, &[(0, "$ ")]);
-        f.updates[0].line.mark = prompt(None);
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
         assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
         assert!(!state.command_running());
         // Typed but not entered: the cursor is still on the prompt row.
         let mut f = frame(2, false, 0, 0, 3, &[(0, "$ sleep 9")]);
-        f.updates[0].line.mark = prompt(None);
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
         assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
         // Enter: the cursor left the command's rows.
         let f = frame(3, false, 0, 0, 3, &[(1, "")]);
@@ -1351,7 +1378,7 @@ mod tests {
         assert!(state.command_running());
         // The next prompt carries the status.
         let mut f = frame(5, false, 0, 0, 3, &[(2, "$ ")]);
-        f.updates[0].line.mark = prompt(Some(1));
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(Some(1));
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 2)))),
             vec![Effect::CommandFinished {
@@ -1365,10 +1392,10 @@ mod tests {
         // first row, a lower index than the one it replaces. The command typed there is
         // finished by the prompt below it as usual.
         let mut f = frame(6, true, 0, 0, 3, &[(0, "$ "), (1, ""), (2, "")]);
-        f.updates[0].line.mark = prompt(None);
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
         assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
         let mut f = frame(7, false, 0, 0, 3, &[(0, "$ sleep 2")]);
-        f.updates[0].line.mark = prompt(None);
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
         assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
         let f = frame(8, false, 0, 0, 3, &[(1, "")]);
         assert_eq!(
@@ -1376,7 +1403,7 @@ mod tests {
             vec![Effect::CommandStarted("sleep 2".to_owned())]
         );
         let mut f = frame(9, false, 0, 0, 3, &[(1, "$ ")]);
-        f.updates[0].line.mark = prompt(Some(0));
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(Some(0));
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 1)))),
             vec![Effect::CommandFinished {
@@ -1387,8 +1414,8 @@ mod tests {
         );
         // A new epoch forgets which prompt was newest, so its first prompt ends nothing.
         let mut f = frame(10, true, 1, 0, 3, &[(0, "$ vim"), (1, "$ ")]);
-        f.updates[0].line.mark = prompt(None);
-        f.updates[1].line.mark = prompt(Some(0));
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
+        Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(0));
         assert!(commands(state.apply(TermEvent::Frame(at(f, 1)))).is_empty());
     }
 
@@ -1411,21 +1438,21 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let mut f = frame(1, true, 0, 0, 3, &[(0, "$ sleep 9"), (1, ""), (2, "")]);
-        f.updates[0].line.mark = prompt(None);
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 1)))),
             vec![Effect::CommandStarted("sleep 9".to_owned())]
         );
         // Reflowed: the same block, one row further down, still the newest.
         let mut f = frame(2, true, 1, 0, 3, &[(0, ""), (1, "$ sleep 9"), (2, "")]);
-        f.updates[1].line.mark = prompt(None);
+        Arc::make_mut(&mut f.updates[1].line).mark = prompt(None);
         assert!(commands(state.apply(TermEvent::Frame(at(f, 2)))).is_empty());
         assert!(state.command_running(), "runs on under the new numbers");
         assert_eq!(state.running.as_ref().map(|(p, _)| *p), Some(LineIndex(1)));
         // Reflowed again, and this time the shell has printed the next prompt.
         let mut f = frame(3, true, 2, 0, 3, &[(0, "$ sleep 9"), (1, "$ "), (2, "")]);
-        f.updates[0].line.mark = prompt(None);
-        f.updates[1].line.mark = prompt(Some(3));
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
+        Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(3));
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 1)))),
             vec![Effect::CommandFinished {
@@ -1438,14 +1465,14 @@ mod tests {
         // A command whose prompt scrolled out of the rows held here still finishes; the
         // caption has no row to land on.
         let mut f = frame(4, true, 3, 0, 3, &[(0, "$ make"), (1, ""), (2, "")]);
-        f.updates[0].line.mark = prompt(None);
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 1)))),
             vec![Effect::CommandStarted("make".to_owned())]
         );
         let mut f = frame(5, true, 4, 10, 13, &[(0, "out"), (1, "$ "), (2, "")]);
-        f.updates[0].line.mark = SemanticMark::Output;
-        f.updates[1].line.mark = prompt(Some(0));
+        Arc::make_mut(&mut f.updates[0].line).mark = SemanticMark::Output;
+        Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(0));
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 1)))),
             vec![Effect::CommandFinished {
@@ -1462,9 +1489,9 @@ mod tests {
         let mut state = TermState::new(size());
         // Screen 6..=8, then history 0..=5 into the cache.
         let mut f = frame(1, true, 0, 6, 9, &[(0, "2"), (1, ""), (2, "$ ")]);
-        f.updates[0].line.mark = SemanticMark::Output;
-        f.updates[1].line.mark = SemanticMark::Output;
-        f.updates[2].line.mark = prompt(Some(0));
+        Arc::make_mut(&mut f.updates[0].line).mark = SemanticMark::Output;
+        Arc::make_mut(&mut f.updates[1].line).mark = SemanticMark::Output;
+        Arc::make_mut(&mut f.updates[2].line).mark = prompt(Some(0));
         state.apply(TermEvent::Frame(f));
         state.apply(TermEvent::Lines {
             start: LineIndex(0),
@@ -1538,9 +1565,9 @@ mod tests {
         let screen = |state: &mut TermState, newest: Option<u8>, modes: TermModes| {
             let mut f = frame(2, true, 0, 6, 9, &[(0, "2"), (1, ""), (2, "$ ")]);
             f.modes = modes;
-            f.updates[0].line.mark = SemanticMark::Output;
-            f.updates[1].line.mark = SemanticMark::Output;
-            f.updates[2].line.mark = prompt(newest);
+            Arc::make_mut(&mut f.updates[0].line).mark = SemanticMark::Output;
+            Arc::make_mut(&mut f.updates[1].line).mark = SemanticMark::Output;
+            Arc::make_mut(&mut f.updates[2].line).mark = prompt(newest);
             state.apply(TermEvent::Frame(f));
         };
         screen(&mut state, Some(0), TermModes::empty());
@@ -1579,9 +1606,9 @@ mod tests {
         // A status on the first prompt says a command failed before any block was drawn.
         let mut state = TermState::new(size());
         let mut f = frame(1, true, 0, 0, 3, &[(0, "junk"), (1, "$ x"), (2, "y")]);
-        f.updates[0].line.mark = SemanticMark::Output;
-        f.updates[1].line.mark = prompt(Some(1));
-        f.updates[2].line.mark = SemanticMark::Output;
+        Arc::make_mut(&mut f.updates[0].line).mark = SemanticMark::Output;
+        Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(1));
+        Arc::make_mut(&mut f.updates[2].line).mark = SemanticMark::Output;
         state.apply(TermEvent::Frame(f));
         assert_eq!(runs(&state), [], "the junk over the first prompt is no block's");
     }
@@ -1593,9 +1620,9 @@ mod tests {
         let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
         let mut state = TermState::new(size());
         let mut f = frame(1, true, 0, 0, 3, &[(0, "$ for x"), (1, "do echo"), (2, "$ ")]);
-        f.updates[0].line.mark = prompt(None);
-        f.updates[1].line.mark = SemanticMark::Input;
-        f.updates[2].line.mark = prompt(Some(0));
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
+        Arc::make_mut(&mut f.updates[1].line).mark = SemanticMark::Input;
+        Arc::make_mut(&mut f.updates[2].line).mark = prompt(Some(0));
         state.apply(TermEvent::Frame(f));
         let head = state.block_head(LineIndex(0)).expect("the loop's head");
         assert_eq!(head.command.as_deref(), Some("for x\ndo echo"));
@@ -1609,12 +1636,12 @@ mod tests {
         let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
         let mut state = TermState::new(size());
         let mut f = frame(1, true, 0, 0, 3, &[(0, "out"), (1, "$ ab\u{4f60}ccd"), (2, "efg")]);
-        f.updates[1].line.mark = prompt(Some(0));
+        Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(0));
         // `from_text` knows no widths: the CJK character takes the two cells at 4 and 5.
-        f.updates[1].line.cells[4] = Cell::wide("\u{4f60}", Style::DEFAULT);
-        f.updates[1].line.cells[5] = Cell::spacer_tail(Style::DEFAULT);
-        f.updates[2].line.mark = SemanticMark::Input;
-        f.updates[2].line.flags |= LineFlags::WRAPPED;
+        Arc::make_mut(&mut f.updates[1].line).cells[4] = Cell::wide("\u{4f60}", Style::DEFAULT);
+        Arc::make_mut(&mut f.updates[1].line).cells[5] = Cell::spacer_tail(Style::DEFAULT);
+        Arc::make_mut(&mut f.updates[2].line).mark = SemanticMark::Input;
+        Arc::make_mut(&mut f.updates[2].line).flags |= LineFlags::WRAPPED;
         f.cursor = Cursor { row: 1, col: 4, visible: true, ..Cursor::default() };
         state.apply(TermEvent::Frame(f.clone()));
         let at = |state: &TermState, row, col| state.cursor_path_to(LineIndex(row), col);
@@ -1634,7 +1661,7 @@ mod tests {
 
         // A hard continuation (a `for` typed over two rows) is a row step.
         let mut hard = f.clone();
-        hard.updates[2].line.flags = LineFlags::empty();
+        Arc::make_mut(&mut hard.updates[2].line).flags = LineFlags::empty();
         state.apply(TermEvent::Frame(hard));
         assert_eq!(
             at(&state, 2, 1),
@@ -1662,7 +1689,8 @@ mod tests {
     fn output_from_the_first_line_is_the_last_commands_whole_output() {
         let mut state = TermState::new(size());
         let mut f = frame(1, true, 0, 0, 3, &[(0, "a"), (1, "b"), (2, "$ ")]);
-        f.updates[2].line.mark = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
+        Arc::make_mut(&mut f.updates[2].line).mark =
+            SemanticMark::Prompt { exit: Some(0), input: Some(2) };
         state.apply(TermEvent::Frame(f));
         assert_eq!(state.last_command_output(), Some("a\nb".to_owned()));
     }

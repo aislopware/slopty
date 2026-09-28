@@ -2185,6 +2185,20 @@ impl WorkspaceView {
             },
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
                 match self.screens.get(&item.id) {
+                    Some(_) if self.popouts.holds(item.id) => {
+                        let id = item.id;
+                        let wait = Wait::Lasting(super::popout::IN_OWN_WINDOW.into());
+                        div()
+                            .id(SharedString::from(format!("popped-{}", id.as_uuid())))
+                            .flex_1()
+                            .w_full()
+                            .flex()
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.raise_popped(id, cx);
+                            }))
+                            .child(self.waiting_body(item, wait, k, window, cx))
+                            .into_any_element()
+                    }
                     Some(view) => {
                         let painted = placed.rect.w * window.scale_factor();
                         view.update(cx, |v, cx| v.set_painted_width(painted, cx));

@@ -384,10 +384,12 @@ impl Default for TerminalSettings {
 #[serde(default)]
 #[schemars(title = "Remote windows and desktops")]
 pub struct RemoteSettings {
-    /// What the worker captures and encodes at.
+    /// The most frames a second a stream asks for; under it, the screen's own refresh.
     ///
-    /// Frames per second the worker captures and encodes at.
-    #[schemars(title = "Frame rate", range(min = *bounds::FPS.start(), max = *bounds::FPS.end()), extend("x-step" = 15, "x-unit" = "fps"))]
+    /// The most frames per second the worker captures and encodes a stream at. A stream
+    /// follows the refresh of the screen its tile is on (120 on a 120 Hz Mac or iPad, 60 on
+    /// most external displays) and never asks for more than this; 120 follows any screen.
+    #[schemars(title = "Highest frame rate", range(min = *bounds::FPS.start(), max = *bounds::FPS.end()), extend("x-step" = 15, "x-unit" = "fps"))]
     pub fps: u16,
     /// The most one stream may take; it grows toward it as the link allows.
     ///
@@ -416,7 +418,7 @@ pub struct RemoteSettings {
 
 impl Default for RemoteSettings {
     fn default() -> Self {
-        Self { fps: 60, max_bitrate_mbps: 30, muted: false, sharp_text: false }
+        Self { fps: 120, max_bitrate_mbps: 30, muted: false, sharp_text: false }
     }
 }
 
@@ -652,7 +654,9 @@ confirm_close = {confirm_close}
 natural_editing = {natural_editing}
 
 [remote]
-# Frames per second a remote window or display is captured at (15 to 120).
+# The most frames a second a remote window or display streams at (15 to 120).
+# Under it a stream follows the refresh of the screen its tile is on, so 120
+# follows any screen: 120 on a ProMotion Mac or iPad, 60 on most displays.
 fps = {fps}
 # Ceiling for one stream in megabits per second (1 to 200); the worker grows
 # towards it as the link allows.
@@ -937,7 +941,7 @@ mod tests {
         assert!(d.terminal.hide_pointer_while_typing, "as Terminal.app");
         assert_eq!(d.terminal.scroll_multiplier, 1.0, "one for one");
         assert!(d.font.ligatures, "the font's own");
-        assert_eq!((d.remote.fps, d.remote.max_bitrate_mbps), (60, 30));
+        assert_eq!((d.remote.fps, d.remote.max_bitrate_mbps), (120, 30));
     }
 
     #[test]

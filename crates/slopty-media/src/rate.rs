@@ -194,6 +194,73 @@ impl Cadence {
     }
 }
 
+/// How long a frame may spend in the encoder, in periods of the rung in force, before it counts as
+/// late. The hardware encoder's own latency is about one 120 fps period at 1080p and stays there
+/// at 120 fps; frames that queue inside it come back later and later, 80 ms at 3024 × 1964
+/// (MEASUREMENTS.md, "120 fps against 60").
+pub(crate) const ENCODER_LATE_PERIODS: u64 = 3;
+/// Late frames in a row that say the encoder cannot keep the rung: a tenth of a second at 120
+/// fps. A lone slow frame (the first keyframe, a rebuild) is not a run.
+pub(crate) const ENCODER_LATE_RUN: u32 = 12;
+
+/// The rung under `fps` on the ladder (60, 30, 15); `fps` itself at the bottom.
+#[must_use]
+pub const fn slower_rung(fps: u16) -> u16 {
+    if fps > 60 {
+        60
+    } else if fps > 30 {
+        30
+    } else if fps > 15 {
+        15
+    } else {
+        fps
+    }
+}
+
+/// Whether the encoder keeps up with the rung in force.
+///
+/// A rung the link carries can still be one the encoder cannot: a frame a period is only a
+/// frame a period if the encoder turns one out that fast. When it cannot, frames queue inside
+/// VideoToolbox and every one of them waits behind the others, so the picture falls behind by
+/// the queue, tens of milliseconds, for as long as the rung stands. Dropping to the next rung is
+/// the cheaper loss (`docs/decisions/video.md`, "The stream follows the screen's refresh").
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct EncoderWatch {
+    /// Late frames in a row.
+    late: u32,
+}
+
+impl EncoderWatch {
+    /// Pick the watch back up with `late` frames late in a row.
+    #[must_use]
+    pub const fn resume(late: u32) -> Self {
+        Self { late }
+    }
+
+    /// Late frames in a row, to store and [`Self::resume`] from.
+    #[must_use]
+    pub const fn late(self) -> u32 {
+        self.late
+    }
+
+    /// A frame came back from the encoder `encode_us` after it went in, at `fps`. The ceiling
+    /// the encoder can keep when this frame ends a run of twelve late ones: the
+    /// rung under `fps`. The run starts again from there.
+    pub const fn returned(&mut self, encode_us: u64, fps: u16) -> Option<u16> {
+        if encode_us <= period_us(fps).saturating_mul(ENCODER_LATE_PERIODS) {
+            self.late = 0;
+            return None;
+        }
+        self.late = self.late.saturating_add(1);
+        if self.late < ENCODER_LATE_RUN {
+            return None;
+        }
+        self.late = 0;
+        let slower = slower_rung(fps);
+        if slower < fps { Some(slower) } else { None }
+    }
+}
+
 /// One frame's period at `fps`, microseconds; a second at 0.
 const fn period_us(fps: u16) -> u64 {
     match 1_000_000_u64.checked_div(fps as u64) {
@@ -1045,6 +1112,47 @@ mod tests {
         assert_eq!(c.update(6_000_000), Some(60), "12 KB × 120 × 8 is 11.8 Mbit/s");
         assert_eq!(c.update(3_000_000), Some(30));
         assert_eq!(c.update(20_000_000), Some(120));
+    }
+
+    /// A link that cannot carry 120 takes the stream to 60 before any picture gets thinner:
+    /// 120 stands while a frame gets 8 KB, which the measured 1080p text scroll holds at the
+    /// same PSNR as 60 does with 14 KB, and below that the next rung is 60, not 30.
+    #[test]
+    fn a_link_short_of_120_drops_to_60_first() {
+        let mut c = Cadence::new(120);
+        assert_eq!(c.update(8_000_000), None, "8.1 KB a frame at 120 holds the rung");
+        assert_eq!(c.update(7_500_000), Some(60), "7.6 KB at 120; 15.3 KB at 60");
+        assert_eq!(c.update(11_000_000), None, "11.2 KB at 120 is under the climb's 12");
+        assert_eq!(c.update(12_000_000), Some(120));
+    }
+
+    /// The encoder is let off a rung only after a run of frames queueing inside it, never for
+    /// one slow frame; then it steps down one rung at a time, and the bottom rung stays.
+    #[test]
+    fn an_encoder_that_falls_behind_takes_the_ceiling_down_a_rung() {
+        let period_120 = period_us(120);
+        let late = period_120 * ENCODER_LATE_PERIODS + 1;
+        let mut w = EncoderWatch::default();
+        assert_eq!(w.returned(97_000, 120), None, "a lone slow first frame");
+        assert_eq!(w.returned(8_000, 120), None, "back in time: the run is over");
+        assert_eq!(w.late(), 0);
+        for _ in 1..ENCODER_LATE_RUN {
+            assert_eq!(w.returned(late, 120), None);
+        }
+        assert_eq!(w.returned(80_000, 120), Some(60), "80 ms at 3024 × 1964 and 120 fps");
+        assert_eq!(w.late(), 0, "the run starts again at the new rung");
+        // 25 ms is late at 120 and on time at 60.
+        let mut w = EncoderWatch::resume(ENCODER_LATE_RUN - 1);
+        assert_eq!(w.returned(late, 60), None, "three 120 fps periods is one and a half at 60");
+        assert_eq!(w.late(), 0);
+        for _ in 0..ENCODER_LATE_RUN {
+            let _step = w.returned(60_000, 60);
+        }
+        assert_eq!(w.late(), 0, "a run at 60 went to 30 and started over");
+        let mut w = EncoderWatch::resume(ENCODER_LATE_RUN - 1);
+        assert_eq!(w.returned(1_000_000, 15), None, "nothing under the bottom rung");
+        assert_eq!([slower_rung(120), slower_rung(75), slower_rung(60)], [60, 60, 30]);
+        assert_eq!([slower_rung(30), slower_rung(15), slower_rung(10)], [15, 15, 10]);
     }
 
     /// The encoded frames a steady stream of captures `beat_us` apart makes through the gate at

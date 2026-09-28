@@ -29,7 +29,7 @@ use crate::folder::{FolderView, FolderViewEvent, UploadFromFiles};
 
 /// What the Files picker is asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FilesAsk {
+pub(super) enum FilesAsk {
     /// Files picked there go up to this tile, as a drop on it.
     Import(TileRef),
     /// This worker file comes down, and is saved where the person chooses.
@@ -45,7 +45,7 @@ pub enum FilesAsk {
 
 /// Takes the Files picker's asks in place of the system's picker, which no test may show.
 #[derive(Clone)]
-pub struct FilesSeam(pub Rc<dyn Fn(&FilesAsk)>);
+pub(super) struct FilesSeam(pub Rc<dyn Fn(&FilesAsk)>);
 
 impl gpui::Global for FilesSeam {}
 

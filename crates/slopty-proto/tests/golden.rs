@@ -229,7 +229,10 @@ mod golden {
             first_visible_line: slopty_grid::LineIndex(0),
             total_lines: 2,
             input_ack: 0,
-            updates: vec![RowUpdate { row: 0, line: Line::from_text("$ x", 8, Style::DEFAULT) }],
+            updates: vec![RowUpdate {
+                row: 0,
+                line: Line::from_text("$ x", 8, Style::DEFAULT).into(),
+            }],
             images: Vec::new(),
         });
         let body = codec::encode_body(&event).expect("encodes");
@@ -980,7 +983,7 @@ mod golden {
                 first_visible_line: slopty_grid::LineIndex(10),
                 total_lines: 12,
                 input_ack: 7,
-                updates: vec![RowUpdate { row: 0, line }],
+                updates: vec![RowUpdate { row: 0, line: line.into() }],
                 images: vec![Placement {
                     image: 9,
                     generation: 4,
@@ -1173,6 +1176,14 @@ mod golden {
                 command: vec!["claude".to_owned()],
             }),
         );
+    }
+
+    /// `OSC 22`: the pointer a program asks for over the grid.
+    #[test]
+    fn pointer_shape() {
+        use slopty_proto::terminal::PointerShape;
+        snap("worker_term_pointer", &TermEvent::Pointer(PointerShape::Pointer));
+        snap("worker_term_pointer_zoom_out", &TermEvent::Pointer(PointerShape::ZoomOut));
     }
 }
 
@@ -1496,11 +1507,12 @@ mod size_report {
     fn size_report() {
         for (cols, rows) in [(80_u16, 24_u16), (200, 60)] {
             let blank: Vec<RowUpdate> =
-                (0..rows).map(|row| RowUpdate { row, line: Line::blank(cols) }).collect();
+                (0..rows).map(|row| RowUpdate { row, line: Line::blank(cols).into() }).collect();
             let text: Vec<RowUpdate> = (0..rows)
                 .map(|row| RowUpdate {
                     row,
-                    line: Line::from_text(&"x".repeat(usize::from(cols)), cols, Style::DEFAULT),
+                    line: Line::from_text(&"x".repeat(usize::from(cols)), cols, Style::DEFAULT)
+                        .into(),
                 })
                 .collect();
             // Every row a prompt with a status: the worst case for the per-row mark.
@@ -1508,7 +1520,7 @@ mod size_report {
                 .map(|row| {
                     let mut line = Line::blank(cols);
                     line.mark = slopty_grid::SemanticMark::Prompt { exit: Some(1), input: Some(2) };
-                    RowUpdate { row, line }
+                    RowUpdate { row, line: line.into() }
                 })
                 .collect();
             for (name, updates) in [("blank", blank), ("text", text), ("prompts", prompts)] {

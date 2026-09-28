@@ -44,7 +44,7 @@ use crate::{Workspace, net};
 type Request = (Command, oneshot::Sender<Reply>);
 
 /// Start serving `socket` for `workspace` in `window`. Call once, after the window is open.
-pub fn serve(
+pub(crate) fn serve(
     socket: PathBuf,
     workspace: Entity<Workspace>,
     window: AnyWindowHandle,
@@ -261,7 +261,7 @@ mod uikit {
     /// # Errors
     ///
     /// Names a modifier GPUI does not have.
-    pub fn modifier_flags(modifiers: &str) -> Result<u32, String> {
+    pub(super) fn modifier_flags(modifiers: &str) -> Result<u32, String> {
         let mut flags = 0;
         for name in modifiers.split('-').filter(|m| !m.is_empty()) {
             flags |= match name {
@@ -337,7 +337,7 @@ mod uikit {
     /// Off iOS (or without the `e2e` feature) nothing sits at a UIKit boundary.
     #[cfg(not(all(target_os = "ios", feature = "e2e")))]
     #[expect(clippy::needless_pass_by_value, reason = "the iOS twin consumes it")]
-    pub fn inject(command: Command) -> Result<(), String> {
+    pub(super) fn inject(command: Command) -> Result<(), String> {
         let _ = modifier_flags;
         Err(format!("{command:?}: UIKit injection is iOS only (with the e2e feature)"))
     }

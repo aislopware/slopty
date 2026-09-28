@@ -7,6 +7,10 @@
 //! stream in hardware. Then it times encodes at 1080p and 5K and prices a synthetic coloured
 //! text frame in bits and PSNR. It opens no window and captures nothing. `MEASURE` lines go to
 //! stderr; `docs/MEASUREMENTS.md` ("4:4:4 HEVC on the low-latency encoder") records a run.
+//!
+//! The same sessions also price a frame rate: the shipped 4:2:0 encoder fed the text picture
+//! in real time at 60 and at 120 frames a second, the same scroll speed in both, at several
+//! target rates (`frame_rate_120_against_60`, MEASUREMENTS "120 fps against 60").
 
 #![cfg(target_os = "macos")]
 
@@ -517,6 +521,8 @@ mod tests {
         _tx: Box<mpsc::Sender<(Instant, Option<Sample>)>>,
         /// `EnableLTR`'s status: 0 when the encoder took long-term references.
         ltr: i32,
+        /// Frames a second the presentation stamps count in, and the rate the encoder expects.
+        fps: i32,
     }
 
     impl Drop for Session {
@@ -585,7 +591,7 @@ mod tests {
             let raw = NonNull::new(raw).filter(|_| status == 0).ok_or(("create", status))?;
             // SAFETY: +1 reference from the create call.
             let session = unsafe { CFRetained::from_raw(raw) };
-            let mut this = Self { vt: session, rx, _tx: tx, ltr: 0 };
+            let mut this = Self { vt: session, rx, _tx: tx, ltr: 0, fps: 60 };
             let s: &CFType = &this.vt;
             // SAFETY: framework-provided constant strings.
             unsafe {
@@ -618,6 +624,31 @@ mod tests {
             Ok(this)
         }
 
+        /// Stamp frames at `fps` and tell the encoder so, as the worker's `set_frame_rate` does.
+        fn set_fps(&mut self, fps: i32) -> i32 {
+            self.fps = fps;
+            let rate = CFNumber::new_i64(i64::from(fps));
+            // SAFETY: framework-provided constant string.
+            set(&self.vt, unsafe { kVTCompressionPropertyKey_ExpectedFrameRate }, &rate)
+        }
+
+        /// Submit one picture without waiting for it; the status.
+        fn submit(&self, image: &CVPixelBuffer, index: i64) -> i32 {
+            let pts =
+                CMTime { value: index, timescale: self.fps, flags: CMTimeFlags::Valid, epoch: 0 };
+            // SAFETY: a valid image and session; no per-frame properties or refcon.
+            unsafe {
+                self.vt.encode_frame(
+                    image,
+                    pts,
+                    kCMTimeInvalid,
+                    None,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            }
+        }
+
         fn hardware(&self) -> Option<bool> {
             // SAFETY: framework-provided constant string.
             copy_bool(&self.vt, unsafe {
@@ -627,19 +658,8 @@ mod tests {
 
         /// Encode one picture and wait for it: the submit → callback time and the sample.
         fn encode(&self, image: &CVPixelBuffer, index: i64) -> (Duration, Option<Sample>) {
-            let pts = CMTime { value: index, timescale: 60, flags: CMTimeFlags::Valid, epoch: 0 };
             let submitted = Instant::now();
-            // SAFETY: a valid image and session; no per-frame properties or refcon.
-            let status = unsafe {
-                self.vt.encode_frame(
-                    image,
-                    pts,
-                    kCMTimeInvalid,
-                    None,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            };
+            let status = self.submit(image, index);
             if status != 0 {
                 return (Duration::ZERO, None);
             }
@@ -724,6 +744,21 @@ mod tests {
         output: u32,
         require_hardware: bool,
     ) -> Result<(Option<bool>, Pixels), (&'static str, i32)> {
+        let (hardware, mut tail) = decode_tail(samples, output, require_hardware, 1)?;
+        tail.pop().map(|p| (hardware, p)).ok_or(("no picture", 0))
+    }
+
+    /// Whether the hardware decoder was in use, and the last pictures it gave back.
+    type Tail = (Option<bool>, Vec<Pixels>);
+
+    /// Decode `samples` into `output` format; `(hardware in use, the last `keep` pictures)`, or
+    /// the failing status.
+    fn decode_tail(
+        samples: &[Sample],
+        output: u32,
+        require_hardware: bool,
+        keep: usize,
+    ) -> Result<Tail, (&'static str, i32)> {
         let first = samples.first().ok_or(("no samples", 0))?;
         // SAFETY: a valid sample buffer.
         let format = unsafe { first.0.format_description() }.ok_or(("format", 0))?;
@@ -759,7 +794,9 @@ mod tests {
         let hardware = copy_bool(&session, unsafe {
             kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder
         });
-        let mut last = Err(("no picture", 0));
+        let mut tail: std::collections::VecDeque<Pixels> =
+            std::collections::VecDeque::with_capacity(keep + 1);
+        let mut failed = None;
         for sample in samples {
             // SAFETY: a valid sample and session; synchronous decode, no refcon.
             let status = unsafe {
@@ -771,18 +808,32 @@ mod tests {
                 )
             };
             if status != 0 {
-                last = Err(("decode", status));
+                failed = Some(("decode", status));
                 break;
             }
-            last = match rx.recv_timeout(Duration::from_secs(10)) {
-                Ok(Ok(p)) => Ok(p),
-                Ok(Err(s)) => Err(("output", s)),
-                Err(_) => Err(("timeout", 0)),
-            };
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Ok(p)) => {
+                    tail.push_back(p);
+                    if tail.len() > keep {
+                        tail.pop_front();
+                    }
+                }
+                Ok(Err(s)) => {
+                    failed = Some(("output", s));
+                    break;
+                }
+                Err(_) => {
+                    failed = Some(("timeout", 0));
+                    break;
+                }
+            }
         }
         // SAFETY: invalidation stops callbacks before `tx` is dropped.
         unsafe { session.invalidate() }
-        last.map(|p| (hardware, p))
+        match failed {
+            Some(failure) => Err(failure),
+            None => Ok((hardware, tail.into())),
+        }
     }
 
     /// Nanoseconds as milliseconds.
@@ -1130,6 +1181,138 @@ mod tests {
                         "MEASURE quality mode={:?} target={mbps}Mbit/s decode failed {call} {status}",
                         mode.name
                     ),
+                }
+            }
+        }
+    }
+    /// The one-minute load average, as `uptime` prints it.
+    fn load_average() -> String {
+        std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "vm.loadavg"])
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|text| text.split_whitespace().nth(1).map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// The shipped encoder fed in real time at 60 and at 120 frames a second: the text picture
+    /// scrolling at 960 pixel rows a second in both (16 a frame at 60, 8 at 120), at several
+    /// target rates. For each: submit → callback per frame with the encoder pipelined as the
+    /// worker runs it (the next picture goes in on its beat whether or not the last came back),
+    /// frames it dropped, the rate it spent, and the mean luma PSNR of the last pictures the
+    /// hardware decoder gives back against their sources.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn frame_rate_120_against_60() {
+        const SECONDS: u32 = 3;
+        const SCROLL_PER_S: usize = 960;
+        const SCORED: usize = 10;
+        let sizes: &[(usize, usize, &[i64])] = &[
+            (1920, 1080, &[4, 8, 12, 16, 32]),
+            (2560, 1440, &[16, 32]),
+            (3024, 1964, &[8, 16, 32, 60]),
+            (3840, 2160, &[32]),
+        ];
+        for &(w, h, rates) in sizes {
+            for fps in [60_i32, 120] {
+                let step = SCROLL_PER_S / fps as usize;
+                // One text line (16 rows) of distinct pictures, cycled.
+                let pictures: Vec<Picture> =
+                    (0..(96 / step)).map(|i| picture(w, h, i * step)).collect();
+                let images: Vec<_> = pictures
+                    .iter()
+                    .map(|p| fill(p, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
+                    .collect();
+                for &mbps in rates {
+                    let Ok(mut session) = Session::new(
+                        w,
+                        h,
+                        Spec::LowLatencyHardware,
+                        None,
+                        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                        mbps * 1_000_000,
+                    ) else {
+                        eprintln!("MEASURE fps {w}x{h} fps={fps} {mbps}Mbit/s refused");
+                        continue;
+                    };
+                    let rate_status = session.set_fps(fps);
+                    let frames = (fps as u32 * SECONDS) as usize;
+                    let period = Duration::from_secs(1) / fps as u32;
+                    let mut submitted = Vec::with_capacity(frames);
+                    let mut back: Vec<(Instant, Option<Sample>)> = Vec::with_capacity(frames);
+                    let load = load_average();
+                    let start = Instant::now();
+                    for i in 0..frames {
+                        let due = start + period * i as u32;
+                        if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                            #[expect(
+                                clippy::disallowed_methods,
+                                reason = "a measurement's real-time beat, on its own thread"
+                            )]
+                            std::thread::sleep(wait);
+                        }
+                        submitted.push(Instant::now());
+                        let status = session.submit(&images[i % images.len()], i as i64);
+                        assert_eq!(status, 0, "submit");
+                        while let Ok(got) = session.rx.try_recv() {
+                            back.push(got);
+                        }
+                    }
+                    while back.len() < frames {
+                        match session.rx.recv_timeout(Duration::from_secs(5)) {
+                            Ok(got) => back.push(got),
+                            Err(_) => break,
+                        }
+                    }
+                    let times: Vec<Duration> = back
+                        .iter()
+                        .zip(&submitted)
+                        .map(|((at, _), sent)| at.saturating_duration_since(*sent))
+                        .collect();
+                    let dropped = back.iter().filter(|(_, s)| s.is_none()).count();
+                    // The first second settles the rate controller.
+                    let settled = fps as usize;
+                    let bytes: usize = back
+                        .iter()
+                        .skip(settled)
+                        .filter_map(|(_, s)| s.as_ref().map(|s| sample_bytes(&s.0)))
+                        .sum();
+                    let spent = (bytes * 8) as f64 / f64::from(SECONDS - 1) / 1e6;
+                    let per_frame = bytes as f64 / (frames - settled) as f64 / 1024.0;
+                    // Which picture each sample the encoder kept was made from.
+                    let (sources, samples): (Vec<usize>, Vec<Sample>) = back
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(i, (_, s))| s.map(|s| (i % pictures.len(), s)))
+                        .unzip();
+                    let psnr_y = match decode_tail(
+                        &samples,
+                        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                        true,
+                        SCORED,
+                    ) {
+                        Ok((_, tail)) if !tail.is_empty() => {
+                            let first = sources.len() - tail.len();
+                            let sum: f64 = tail
+                                .iter()
+                                .zip(&sources[first..])
+                                .map(|(p, &source)| psnr(&pictures[source], &p.0).0)
+                                .sum();
+                            sum / tail.len() as f64
+                        }
+                        _ => f64::NAN,
+                    };
+                    let spread = Spread::of_durations(&times).unwrap_or_default();
+                    eprintln!(
+                        "MEASURE fps {w}x{h} fps={fps} target={mbps}Mbit/s load={load} \
+                         expected_rate_status={rate_status} encode p50={:.2}ms p95={:.2}ms \
+                         max={:.2}ms dropped={dropped}/{frames} spent={spent:.2}Mbit/s \
+                         per_frame={per_frame:.1}KiB psnr_y={psnr_y:.2}dB",
+                        ms(spread.p50),
+                        ms(spread.p95),
+                        ms(spread.max),
+                    );
                 }
             }
         }

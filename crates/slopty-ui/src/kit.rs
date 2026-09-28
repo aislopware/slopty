@@ -1066,8 +1066,9 @@ mod tests {
         }
     }
 
-    /// The chrome under `dir`, without its test modules: every line of Rust up to the first
-    /// `#[cfg(test)]`, with its file and one-based line number.
+    /// The chrome under `dir`, without its test modules: every line of Rust up to a
+    /// `#[cfg(test)]` over a `mod`, with its file and one-based line number. A test-only
+    /// accessor gated on its own does not end the file's scan.
     fn chrome_lines(dir: &str) -> Vec<(String, usize, String)> {
         fn walk(dir: &std::path::Path, out: &mut Vec<(String, usize, String)>) {
             let entries = std::fs::read_dir(dir).expect("the crate's sources are readable");
@@ -1083,11 +1084,13 @@ mod tests {
                 } else if path.extension().is_some_and(|e| e == "rs") {
                     let text = std::fs::read_to_string(&path).expect("a source file reads");
                     let name = path.display().to_string();
-                    for (ix, line) in text.lines().enumerate() {
-                        if line.contains("#[cfg(test)]") {
+                    let lines: Vec<&str> = text.lines().collect();
+                    for (ix, line) in lines.iter().enumerate() {
+                        let next = lines.get(ix.saturating_add(1)).copied().unwrap_or_default();
+                        if line.trim() == "#[cfg(test)]" && next.trim_start().starts_with("mod ") {
                             break;
                         }
-                        out.push((name.clone(), ix.saturating_add(1), line.to_owned()));
+                        out.push((name.clone(), ix.saturating_add(1), (*line).to_owned()));
                     }
                 }
             }

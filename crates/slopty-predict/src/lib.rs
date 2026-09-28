@@ -471,7 +471,7 @@ mod tests {
                 *cell = Cell::narrow(ch, slopty_grid::Style::DEFAULT);
             }
         }
-        screen.apply(RowUpdate { row, line }).unwrap();
+        screen.apply(RowUpdate { row, line: line.into() }).unwrap();
         screen
     }
 
@@ -622,7 +622,7 @@ mod tests {
         spun.cursor_mut().col = 4;
         spun.apply(RowUpdate {
             row: 3,
-            line: screen_with(3, "⠋ building").line(3).unwrap().clone(),
+            line: Arc::clone(&screen_with(3, "⠋ building").lines()[3]),
         })
         .unwrap();
         let later = t0 + Duration::from_millis(40);

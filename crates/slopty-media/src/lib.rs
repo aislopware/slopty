@@ -31,8 +31,9 @@ pub use packetize::{
     audio_datagram, layout,
 };
 pub use rate::{
-    Cadence, ChromaGate, Decision, FULL_CHROMA_ENTER_BPS, FULL_CHROMA_HOLD, FULL_CHROMA_LEAVE_BPS,
-    Pace, PathSample, RateController, Window as RateWindow, full_chroma_band, judge,
+    Cadence, ChromaGate, Decision, EncoderWatch, FULL_CHROMA_ENTER_BPS, FULL_CHROMA_HOLD,
+    FULL_CHROMA_LEAVE_BPS, Pace, PathSample, RateController, Window as RateWindow,
+    full_chroma_band, judge, slower_rung,
 };
 pub use reassemble::{
     Action, Config, FrameInfo, FrameOut, Ignored, Ingest, NackDelay, Reassembler, ReassemblerStats,

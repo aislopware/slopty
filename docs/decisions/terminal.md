@@ -2111,3 +2111,74 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     upstream has no open issue or PR on it.
   - Cost: the engine's `*_cost` series held within 1 % (MEASUREMENTS 2026-09-29, "ghostty
     `12752b2ac`"); the budgets are unchanged.
+- ✅ **A frame's rows are shared, not copied** (2026-09-29, audit finding 17). `RowUpdate.line`
+  is an `Arc<Line>`. Serde writes the line itself (`rc`), so the wire is unchanged, and every
+  golden passed without a new snapshot.
+  - **Worker.** The engine keeps a record of the rows its viewers hold (`Shown`), and a
+    frame's changed row went into it as a second copy of its cells. Both now hold one
+    allocation. Once the frame is encoded and dropped, the record is that row's only holder.
+    When the row changes again, the new line moves into the old allocation (`Arc::get_mut`),
+    and the old cells become the next row's read. The record's list of rows is reused from
+    frame to frame too. A row still held elsewhere, such as a joiner's frame in flight, gets
+    a fresh allocation and nothing shared is written.
+  - **Client.** `TermState` puts the decoded allocation on the screen and in the scrollback
+    as it came. `Screen::apply_shared` is gone because `Screen::apply` now takes the shared
+    line.
+  - Cost: an echo's `take_frame` fell from 4 blocks to 1 and from 9.5 KB (80×24) or 23 KB
+    (200×60) to 128 B. An Enter at the bottom fell from 10 blocks to 8. Echo fan-out fell
+    from 6 blocks to 3. Applying a row on the client fell from 1 block to 0. `take_frame`
+    fell 10 % in instructions. MEASUREMENTS 2026-09-29, "Rows shared between the frame and
+    the record". The budgets in `slopty-engine/tests/allocs.rs`, `slopty-grid/tests/allocs.rs`
+    and `xtask/budgets.toml` are tightened to match.
+- ✅ **The program's pointer shape (`OSC 22`) is session state on the wire** (2026-09-29).
+  Programs ask for a pointer over their UI with `OSC 22` (a hand over a clickable span, a
+  splitter's resize arrows). libghostty-vt tracks it, and the binding fork reads it as
+  `Terminal::mouse_shape()`.
+  - **An event, not a frame field.** The ghostty bump's note had the shape travelling in the
+    frame. It travels as `TermEvent::Pointer(PointerShape)` instead, like the colours and the
+    progress. The event is sent when the shape changes and on attach while it is not the
+    I-beam. `OSC 22` dirties no row, so a frame field would need a frame built for it, and it
+    would add a byte to every frame for a value that changes a few times a session.
+  - **Read after a write that could change it.** libghostty has no callback for it. The engine
+    reads it where it already checks the colours: after a write carrying an OSC or a reset,
+    and once more after that, for a sequence split across two writes. That is one extra FFI
+    read on those writes and none on plain output.
+  - **The wire carries every W3C name** (34 of them), so the worker never decides what a
+    client can draw. `PointerShape::Text` is the default because the terminal starts there.
+    A shape a newer libghostty adds reads as `Default` until it is named.
+  - **The view picks the pointer in this order.** A hand over the link ⌘ would open comes
+    first. Then the I-beam while ⇧ takes the mouse back from a program. Then the program's
+    shape, if it is not the I-beam. Then the arrow while a program reports the mouse, and the
+    I-beam otherwise. Shapes GPUI has no match for (`help`, `progress`, `wait`, zoom) draw the
+    arrow.
+  - Tests: `a_pointer_shape_is_reported_when_it_changes` (engine),
+    `the_programs_pointer_shape_is_kept` (client),
+    `the_programs_pointer_shape_is_the_pointer_over_the_grid` (view). Goldens:
+    `worker_term_pointer`, `worker_term_pointer_zoom_out`.
+- ✅ **The terminal draws its program's progress and the restored chip itself** (2026-09-29).
+  - **Progress.** A bar `spacing.xxs` tall runs along the terminal view's top edge, over the
+    grid's first pixels, rather than in the tile header, which the streaming work owns. It
+    takes the state's tone: the accent while it runs, `warn` paused, `error` failed. A figure
+    sets the share filled, and a report without one fills the edge. An indeterminate report
+    sweeps a segment across at the working mark's pace (`SPIN_STEP`, twelve steps a second).
+    It steps rather than glides. Under Reduce Motion it stands still over the whole edge,
+    set back to `alpha::STRONG`.
+  - **The sweep never delays an echo.** Its timer lives in the view, so a step redraws the
+    terminal (a child entity would not help, because GPUI marks every ancestor of a notified
+    view dirty). The step is computed from the clock at render time. A step that falls due
+    while a typed key waits for its echo wakes nothing, and the echo's frame draws the sweep
+    where it has got to. A view that was not drawn since the last step (scrolled off, or
+    under the face) is not woken until it is drawn again. This mirrors the working mark's
+    `hold_steps`. The mark's clock is private to `icons.rs`, so the bar keeps its own.
+  - **Restored.** A session reopened after its shell was lost shows a chip at the terminal's
+    top right. The chip says "Restored" and, when the session ran a command, offers "Run
+    again: <command>" with each word shell-quoted. The command is typed and run only when the
+    person clicks. The chip goes once it is used or dismissed. A login shell has nothing to
+    run, so its chip only says "Restored".
+  - Not done here: a Dock badge for progress. It needs the app's Dock tile and the workspace,
+    which other work owns.
+  - Tests: `progress::tests` (tones, shares, the sweep, Reduce Motion),
+    `a_progress_report_fills_its_share_of_the_top_edge`,
+    `an_indeterminate_report_sweeps_unless_motion_is_reduced`,
+    `a_restored_session_runs_its_command_again_only_on_a_click` and
+    `a_restored_login_shell_has_nothing_to_run_and_is_dismissed`.

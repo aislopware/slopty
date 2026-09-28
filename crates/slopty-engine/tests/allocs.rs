@@ -82,9 +82,10 @@ mod allocs {
         );
     }
 
-    /// The row read, the copy the viewers' ledger keeps, the frame's list of rows and the
-    /// ledger's list.
-    const TAKE_BLOCKS: u64 = 4;
+    /// The frame's list of rows. The row is read into the cells of the line it replaces, which
+    /// the viewers' record and the frame then share, and the record's list is last frame's.
+    /// Until 2026-09-29 it was 4: the row read, the copy the record kept, and both lists.
+    const TAKE_BLOCKS: u64 = 1;
 
     /// An Enter at a bottom prompt ships the rows that came in and nothing else, so its blocks
     /// do not grow with the screen's height.
@@ -111,9 +112,10 @@ mod allocs {
         );
     }
 
-    /// Four rows read and kept, the two lists, and a spare row: until 2026-09-29 every row of
-    /// the screen was read into a new line, 30 blocks at 80×24 and 66 at 200×60.
-    const ENTER_BLOCKS: u64 = 10;
+    /// The four rows that came in, each read and shared with the record, and the frame's list.
+    /// Until 2026-09-29 every row of the screen was read into a new line (30 blocks at 80×24
+    /// and 66 at 200×60), and then each row sent was copied for the record (10).
+    const ENTER_BLOCKS: u64 = 8;
 
     /// An echo frame is encoded for the wire in a few blocks, whatever the screen.
     #[test]
@@ -167,8 +169,9 @@ mod allocs {
         assert!(one.blocks <= FAN_OUT_BLOCKS, "{one}, budget {FAN_OUT_BLOCKS}");
     }
 
-    /// The echo's take (4), its one encoded frame, and the block the first clone shares it
+    /// The echo's take (1), its one encoded frame, and the block the first clone shares it
     /// through. Until 2026-09-29 it was 12: the encode's 8 blocks (a buffer grown seven times
-    /// from its 4-byte prefix, and the block `Bytes` shared it through) in place of these 2.
-    const FAN_OUT_BLOCKS: u64 = 6;
+    /// from its 4-byte prefix, and the block `Bytes` shared it through) in place of these 2,
+    /// and then 6, with a take of 4.
+    const FAN_OUT_BLOCKS: u64 = 3;
 }

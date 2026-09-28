@@ -126,12 +126,6 @@ impl WorkspaceView {
         inbox.log.push_back(Logged { seq, session, worker, cwd, done, at });
     }
 
-    /// Whether the inbox shows its history rather than only what is unread.
-    #[must_use]
-    pub const fn inbox_shows_all(&self) -> bool {
-        self.inbox.all
-    }
-
     /// Show the history (`true`) or only what is unread.
     pub fn show_inbox_all(&mut self, all: bool, cx: &mut Context<Self>) {
         self.inbox.all = all;
@@ -549,6 +543,12 @@ fn never_held(theme: &Theme) -> gpui::Stateful<Div> {
 
 #[cfg(test)]
 impl WorkspaceView {
+    /// Whether the inbox shows its history rather than only what is unread.
+    #[must_use]
+    pub(super) const fn inbox_shows_all(&self) -> bool {
+        self.inbox.all
+    }
+
     /// Where the inbox's view plate was drawn in the last frame.
     pub(super) fn inbox_plate(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
         self.inbox.plate.drawn()

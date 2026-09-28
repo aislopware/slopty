@@ -12,7 +12,7 @@
 
 /// The paint of one shape.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Ink {
+pub(super) enum Ink {
     /// The cell's text colour.
     Fg,
     /// The text colour at this opacity: the shades `░▒▓`.
@@ -21,7 +21,7 @@ pub enum Ink {
 
 /// One primitive of a cell's sprite, in points from the cell's top-left corner.
 #[derive(Clone, PartialEq, Debug)]
-pub enum Shape {
+pub(super) enum Shape {
     /// An axis-aligned box; `round` makes it a disc (a Braille dot).
     Rect { x: f32, y: f32, w: f32, h: f32, ink: Ink, round: bool },
     /// A polyline stroked at `thickness`: a diagonal.
@@ -35,7 +35,7 @@ pub enum Shape {
 
 /// Whether the cell's text is drawn here rather than by the font.
 #[must_use]
-pub fn is_sprite(text: &str) -> bool {
+pub(super) fn is_sprite(text: &str) -> bool {
     let mut chars = text.chars();
     match (chars.next(), chars.next()) {
         (Some(c), None) => is_sprite_char(c),
@@ -177,7 +177,7 @@ const fn dashes(c: char) -> Option<u32> {
 /// The geometry a cell of `w`×`h` points needs, with the light line `thickness` and the
 /// device `scale` positions snap to.
 #[derive(Clone, Copy, Debug)]
-pub struct Cell {
+pub(super) struct Cell {
     /// Cell width, points.
     pub w: f32,
     /// Row height, points.
@@ -226,7 +226,7 @@ impl Cell {
 
 /// The shapes of `c` in a cell, or `None` when the font draws it.
 #[must_use]
-pub fn shapes(c: char, cell: Cell) -> Option<Vec<Shape>> {
+pub(super) fn shapes(c: char, cell: Cell) -> Option<Vec<Shape>> {
     let n = u32::from(c);
     if let Some(arms) = box_arms(c) {
         return Some(lines(arms, dashes(c), cell));
@@ -250,7 +250,7 @@ pub fn shapes(c: char, cell: Cell) -> Option<Vec<Shape>> {
 /// fills the atlas tile edge to edge and a one-pixel line stays one pixel. Everything is
 /// black; the shades are its opacity. `None` when the font draws `c`.
 #[must_use]
-pub fn svg(c: char, w: u16, h: u16, thickness: f32) -> Option<String> {
+pub(super) fn svg(c: char, w: u16, h: u16, thickness: f32) -> Option<String> {
     let cell = Cell { w: f32::from(w), h: f32::from(h), thickness, scale: 1.0 };
     let opacity = |ink: Ink| match ink {
         Ink::Fg => String::new(),

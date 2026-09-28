@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
@@ -25,8 +26,8 @@ use slopty_proto::input::{
     KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseButton, MouseEvent,
 };
 use slopty_proto::terminal::{
-    ColorOverrides, Frame, LineDiscipline, PixelRect, Placement, Progress, ProgressState,
-    TermColors, TermSize,
+    ColorOverrides, Frame, LineDiscipline, PixelRect, Placement, PointerShape, Progress,
+    ProgressState, TermColors, TermSize,
 };
 
 use crate::graphics::{self, ImageUpload, Ledger, Shipped};
@@ -140,6 +141,9 @@ pub struct GhosttyEngine {
     /// read into: a scroll re-reads every row and ships only the few that came in, and a
     /// fresh line per row was most of what a frame allocated (`tests/allocs.rs`).
     spare_line: Option<Line>,
+    /// The record's list of rows before the last frame replaced it, emptied, for the next
+    /// frame's record to be built in.
+    spare_rows: Vec<Option<Arc<Line>>>,
     /// Scratch for OSC 8 URIs (`ghostty_grid_ref_hyperlink_uri` wants a caller buffer).
     uri_buf: Vec<u8>,
     /// Watches the bytes for `OSC 133;A` and `133;D`, which libghostty does not surface.
@@ -181,6 +185,8 @@ pub struct GhosttyEngine {
     overrides: ColorOverrides,
     /// The program's progress report as last reported, shared with libghostty's callback.
     progress: Rc<std::cell::Cell<Progress>>,
+    /// The pointer shape the program asked for (`OSC 22`) as last reported.
+    pointer: PointerShape,
 }
 
 /// The primary screen's numbering, parked while a program has the alternate screen.
@@ -200,12 +206,16 @@ struct PrimaryMarks {
 /// not already held at its absolute index; the client moves the rest up itself. The lines
 /// themselves are kept, not a hash of them: comparing costs less than hashing every cell
 /// did (MEASUREMENTS 2026-09-25, "a scroll ships the rows it moved"), and it is exact.
+///
+/// A row is held as the allocation the frame carried, so the record costs no copy: once the
+/// frame is encoded and dropped the record is its only holder, and the next change of that
+/// row is read into it in place.
 #[derive(Debug, Default)]
 struct Shown {
     epoch: u32,
     cols: u16,
     first: u64,
-    rows: Vec<Option<Line>>,
+    rows: Vec<Option<Arc<Line>>>,
 }
 
 impl Shown {
@@ -217,19 +227,19 @@ impl Shown {
             && self.rows.len() == usize::from(rows)
     }
 
-    fn slot(&mut self, line: u64) -> Option<&mut Option<Line>> {
+    fn slot(&mut self, line: u64) -> Option<&mut Option<Arc<Line>>> {
         let i = usize::try_from(line.checked_sub(self.first)?).ok()?;
         self.rows.get_mut(i)
     }
 
     /// The line held at absolute `line`.
-    fn at(&self, line: u64) -> Option<&Line> {
+    fn at(&self, line: u64) -> Option<&Arc<Line>> {
         let i = usize::try_from(line.checked_sub(self.first)?).ok()?;
         self.rows.get(i)?.as_ref()
     }
 
     /// The line held at absolute `line`, moved out for the next frame's record.
-    fn take(&mut self, line: u64) -> Option<Line> {
+    fn take(&mut self, line: u64) -> Option<Arc<Line>> {
         self.slot(line)?.take()
     }
 
@@ -323,6 +333,7 @@ impl GhosttyEngine {
             discipline_changed: false,
             scratch: String::with_capacity(16),
             spare_line: None,
+            spare_rows: Vec::new(),
             uri_buf: vec![0; 256],
             osc: osc133::Scanner::default(),
             prompt_redraw: osc133::Redraw::default(),
@@ -341,6 +352,7 @@ impl GhosttyEngine {
             graphics_gen: 0,
             overrides: ColorOverrides::default(),
             progress,
+            pointer: PointerShape::Text,
         };
         engine.reanchor()?;
         Ok(engine)
@@ -755,7 +767,8 @@ impl GhosttyEngine {
         let first = self.base.saturating_add(scrollback);
         let mut updates = Vec::with_capacity(if full { usize::from(rows) } else { 8 });
         // What the viewers following the diffs hold once this frame is applied.
-        let mut shown = Vec::with_capacity(usize::from(rows));
+        let mut shown = std::mem::take(&mut self.spare_rows);
+        shown.reserve(usize::from(rows));
         let known = self.shown.holds(self.epoch, cols, rows);
 
         let mut row_iter = self.rows_iter.update(&snapshot)?;
@@ -875,21 +888,45 @@ impl GhosttyEngine {
                         first_input,
                     )
                 });
-                let held = if known { self.shown.at(abs) } else { None };
-                let same = held.is_some_and(|l| *l == line);
                 if take == Take::Joiner {
                     // The joiner holds this line as it is now, the others as they were sent
                     // it: a line changed and changed back since then is theirs to be sent.
-                    if held.is_some() && !same {
-                        self.shown.forget(abs);
-                    }
-                } else {
-                    shown.push(if same { self.shown.take(abs) } else { Some(line.clone()) });
-                }
-                if full || forced || !same {
+                    let line = match if known { self.shown.at(abs) } else { None } {
+                        Some(held) if **held == line => {
+                            self.spare_line = Some(line);
+                            Arc::clone(held)
+                        }
+                        Some(_) => {
+                            self.shown.forget(abs);
+                            Arc::new(line)
+                        }
+                        None => Arc::new(line),
+                    };
                     updates.push(RowUpdate { row: y, line });
                 } else {
-                    self.spare_line = Some(line);
+                    let held = if known { self.shown.take(abs) } else { None };
+                    let same = held.as_deref().is_some_and(|l| *l == line);
+                    let line = match held {
+                        Some(held) if same => {
+                            self.spare_line = Some(line);
+                            held
+                        }
+                        Some(mut held) => match Arc::get_mut(&mut held) {
+                            // No frame still holds the row the viewers were sent (it was
+                            // encoded and dropped): the new line moves into its allocation, and
+                            // the old one's cells become the next row's read.
+                            Some(slot) => {
+                                self.spare_line = Some(std::mem::replace(slot, line));
+                                held
+                            }
+                            None => Arc::new(line),
+                        },
+                        None => Arc::new(line),
+                    };
+                    if full || forced || !same {
+                        updates.push(RowUpdate { row: y, line: Arc::clone(&line) });
+                    }
+                    shown.push(Some(line));
                 }
                 if take != Take::Joiner {
                     row.set_dirty(false)?;
@@ -930,10 +967,14 @@ impl GhosttyEngine {
                 // viewers: from here on the ledger is those, and whatever else the others hold
                 // is shipped again when it is placed again.
                 self.ledger.clear();
+                self.spare_rows = shown;
                 self.placed_if(graphics_gen, runs)?
             }
             Take::Everyone | Take::Diff => {
-                self.shown = Shown { epoch: self.epoch, cols, first, rows: shown };
+                let record = Shown { epoch: self.epoch, cols, first, rows: shown };
+                let mut spare = std::mem::replace(&mut self.shown, record).rows;
+                spare.clear();
+                self.spare_rows = spare;
                 if forcing {
                     // A forced row that is no longer on the screen has nothing left to say.
                     self.forced_rows.clear();
@@ -1669,9 +1710,9 @@ fn overrides(term: &Terminal<'_, '_>) -> Result<ColorOverrides, EngineError> {
     Ok(ColorOverrides { fg, bg, cursor, palette })
 }
 
-/// Whether `bytes` may change the colours: they are set by OSC sequences (4, 10-12, 104,
-/// 110-112, 21) and reset by RIS (`ESC c`).
-fn may_touch_colours(bytes: &[u8]) -> bool {
+/// Whether `bytes` may change the colours or the pointer shape: OSC sequences set them (the
+/// colours 4, 10-12, 104, 110-112 and 21, the pointer 22) and RIS (`ESC c`) resets the colours.
+fn may_touch_osc_state(bytes: &[u8]) -> bool {
     memchr::memchr_iter(0x1b, bytes)
         .any(|at| matches!(bytes.get(at.saturating_add(1)), Some(b']' | b'c')))
 }
@@ -1688,14 +1729,21 @@ impl GhosttyEngine {
             rest = tail;
         }
         self.feed(rest);
-        // libghostty has no colour-change callback. The current set against the defaults is
-        // eight reads and two palette copies, so it is looked at only after a write that could
-        // have changed it, and once more after that for a sequence split across two writes.
-        let touched = may_touch_colours(bytes);
+        // libghostty has no colour-change or pointer-change callback. The current colours
+        // against the defaults are eight reads and two palette copies, so they and the pointer
+        // are looked at only after a write that could have changed them, and once more after
+        // that for a sequence split across two writes.
+        let touched = may_touch_osc_state(bytes);
         if !touched && !std::mem::replace(&mut self.colours_touched, false) {
             return;
         }
         self.colours_touched = touched;
+        if let Ok(shape) = self.term.mouse_shape().map(convert::pointer)
+            && shape != self.pointer
+        {
+            self.pointer = shape;
+            self.events.borrow_mut().push(EngineEvent::Pointer(shape));
+        }
         if let Ok(now) = overrides(&self.term)
             && now != self.overrides
         {
@@ -2451,8 +2499,33 @@ mod tests {
             _ => None,
         });
         assert_eq!(colours.and_then(|c| c.bg), Some([0x12, 0x34, 0x56]));
-        assert!(may_touch_colours(b"x\x1bc"));
-        assert!(!may_touch_colours(b"plain \x1b[31m text"));
+        assert!(may_touch_osc_state(b"x\x1bc"));
+        assert!(!may_touch_osc_state(b"plain \x1b[31m text"));
+    }
+
+    /// `OSC 22` is reported when the shape changes, split across writes too, and an unknown
+    /// name keeps the last.
+    #[test]
+    fn a_pointer_shape_is_reported_when_it_changes() {
+        let pointers = |e: &GhosttyEngine| -> Vec<PointerShape> {
+            e.drain_events()
+                .into_iter()
+                .filter_map(|ev| match ev {
+                    EngineEvent::Pointer(p) => Some(p),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut e = engine(10, 3);
+        e.write(b"\x1b]22;pointer\x07");
+        assert_eq!(pointers(&e), [PointerShape::Pointer]);
+        e.write(b"\x1b]22;pointer\x07\x1b]22;no-such-shape\x07");
+        assert_eq!(pointers(&e), [], "the same shape, then an unknown one: no change");
+        e.write(b"\x1b]22;col-res");
+        e.write(b"ize\x1b\\");
+        assert_eq!(pointers(&e), [PointerShape::ColResize], "split across two writes");
+        e.write(b"\x1b]22;text\x07");
+        assert_eq!(pointers(&e), [PointerShape::Text], "the I-beam asked for again");
     }
 
     #[test]
@@ -3271,7 +3344,7 @@ mod scrollback_tests {
                 .as_bytes(),
         );
         let shown = e.full_frame(0).unwrap();
-        let row = shown.updates.iter().find(|u| u.row == 0).expect("row 0").line.clone();
+        let row = Line::clone(&shown.updates.iter().find(|u| u.row == 0).expect("row 0").line);
         let index = shown.first_visible_line;
         write_lines(&mut e, 100);
         let (start, lines) = e.lines(index, 1).unwrap();

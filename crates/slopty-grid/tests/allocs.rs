@@ -35,30 +35,27 @@ mod allocs {
         history.set_extent(LineIndex(total - u64::try_from(HISTORY).unwrap()), total);
         history.set_view(LineIndex(top), LineIndex(top));
         for row in 0..ROWS {
-            let shared = history.shared(LineIndex(top + u64::from(row))).unwrap();
-            screen.apply_shared(row, shared).unwrap();
+            let line = history.shared(LineIndex(top + u64::from(row))).unwrap();
+            screen.apply(RowUpdate { row, line }).unwrap();
         }
         (screen, history, top)
     }
 
-    /// An echo's row replaces the one on screen and in the scrollback: one block, the shared
-    /// line, whatever the size of either.
+    /// An echo's row replaces the one on screen and in the scrollback without a block: the
+    /// line arrives shared, and both hold the allocation it was decoded into, whatever the size
+    /// of either. Until 2026-09-29 the row came as a plain line and was wrapped here, 1 block.
     #[test]
-    fn applying_an_echo_row_is_one_block() {
+    fn applying_an_echo_row_allocates_nothing() {
         assert!(alloc::installed(), "the counting allocator is this binary's");
         let (mut screen, mut history, top) = full();
         let row = ROWS - 1;
-        let update = RowUpdate { row, line: line(7) };
+        let update = RowUpdate { row, line: Arc::new(line(7)) };
         let ((), used) = alloc::measure(|| {
-            let shared = Arc::new(update.line);
-            screen.apply_shared(update.row, Arc::clone(&shared)).unwrap();
-            history.insert_shared(LineIndex(top + u64::from(row)), shared);
+            history.insert_shared(LineIndex(top + u64::from(row)), Arc::clone(&update.line));
+            screen.apply(update).unwrap();
         });
         eprintln!("an echo row applied: {used}");
-        assert_eq!(used.blocks, 1, "{used}");
-        let plain = RowUpdate { row, line: line(8) };
-        let ((), used) = alloc::measure(|| screen.apply(plain).unwrap());
-        assert_eq!(used.blocks, 1, "Screen::apply: {used}");
+        assert_eq!(used.blocks, 0, "{used}");
     }
 
     /// Lines scrolling into a full history cost their shared line and, now and then, a node of

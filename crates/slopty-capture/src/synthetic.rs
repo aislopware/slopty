@@ -16,7 +16,7 @@
 
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
 use dispatch2::{DispatchQoS, DispatchQueue, DispatchQueueAttr, DispatchRetained, DispatchTime};
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType, Type as _};
@@ -53,8 +53,10 @@ const MARK_OFF: u8 = 20;
 const MARK_THRESHOLD: u8 = 128;
 /// Neutral chroma.
 const GREY: u8 = 128;
-/// Rows the page scrolls each frame.
-const SCROLL_ROWS: usize = 3;
+/// Pixel rows the page scrolls a second: three a frame at 60 Hz. The speed is set in time, not
+/// per beat, so a faster beat draws the same motion in smaller steps, as an application's own
+/// scroll does on a faster display.
+const SCROLL_PX_PER_S: u64 = 180;
 /// A character cell of the page, in pixels.
 const CELL_W: usize = 8;
 const CELL_H: usize = 16;
@@ -127,6 +129,23 @@ impl Samples {
 
 /// Inputs this process has taken, all canvases together.
 static INPUTS: AtomicU64 = AtomicU64::new(0);
+
+/// The beat every canvas stands in for, hertz; 0 follows each display's own refresh.
+static BEAT_HZ: AtomicU16 = AtomicU16::new(0);
+
+/// Draw every canvas started from now on at `hz`; `None` goes back to the displays' own refresh.
+///
+/// Every display is listed as refreshing at it too. A measurement sets it to time a 120 Hz
+/// source on a Mac whose panels run slower.
+pub fn set_beat(hz: Option<u16>) {
+    BEAT_HZ.store(hz.unwrap_or(0), Ordering::Release);
+}
+
+/// The beat set by [`set_beat`], if any.
+fn beat_hz() -> Option<f64> {
+    let hz = BEAT_HZ.load(Ordering::Acquire);
+    (hz > 0).then(|| f64::from(hz))
+}
 
 /// Take one input: every picture drawn from now on counts it. Returns the new count.
 pub fn take_input() -> u64 {
@@ -226,10 +245,13 @@ struct Slot {
 struct Painter {
     layout: Layout,
     samples: Samples,
-    /// The page's text, twice the window's height, scrolled through a frame at a time.
+    /// The page's text, twice the window's height, scrolled through at [`SCROLL_PX_PER_S`].
     text: Vec<u8>,
     slots: Vec<Slot>,
-    frame: usize,
+    /// When the first picture was drawn, host microseconds: the scroll counts from it.
+    origin_us: Option<u64>,
+    /// Pixel rows the page is scrolled by in the picture being drawn.
+    scrolled: usize,
 }
 
 impl Painter {
@@ -241,12 +263,18 @@ impl Painter {
             samples: Samples::of(format),
             text: text(page_w, page_h.checked_mul(2)?),
             slots: Vec::new(),
-            frame: 0,
+            origin_us: None,
+            scrolled: 0,
         })
     }
 
-    /// Draw the next picture, counting `inputs`; `None` when every picture is still held.
-    fn paint(&mut self, inputs: u64) -> Option<PixelBuffer> {
+    /// Draw the picture shown at `at_us` (host microseconds), counting `inputs`; `None` when
+    /// every picture is still held.
+    fn paint(&mut self, inputs: u64, at_us: u64) -> Option<PixelBuffer> {
+        let origin = *self.origin_us.get_or_insert(at_us);
+        let elapsed = at_us.saturating_sub(origin);
+        self.scrolled =
+            usize::try_from(elapsed.saturating_mul(SCROLL_PX_PER_S) / 1_000_000).unwrap_or(0);
         let slot = self.free_slot()?;
         let slot = self.slots.get_mut(slot)?;
         let buffer = slot.buffer.as_cv().retain();
@@ -265,7 +293,6 @@ impl Painter {
         // SAFETY: matches the lock above.
         let _unlocked =
             unsafe { CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::empty()) };
-        self.frame = self.frame.wrapping_add(1);
         drawn.then(|| PixelBuffer::from_retained(buffer))
     }
 
@@ -375,18 +402,18 @@ fn fill_plane(buffer: &CVPixelBuffer, samples: Samples, plane: usize, level: u8)
     let _filled = with_plane(buffer, plane, |bytes, _stride| samples.fill(bytes, level));
 }
 
-/// The painter's page scrolled to its frame, and the strip spelling `inputs`. `false` when the
+/// The painter's page scrolled to its time, and the strip spelling `inputs`. `false` when the
 /// planes could not be read.
 fn draw(buffer: &CVPixelBuffer, painter: &Painter, inputs: u64) -> bool {
     with_plane(buffer, 0, |luma, stride| draw_luma(luma, stride, painter, inputs)).is_some()
 }
 
 fn draw_luma(luma: &mut [u8], stride: usize, painter: &Painter, inputs: u64) {
-    let Painter { layout, samples, text, frame, .. } = painter;
+    let Painter { layout, samples, text, scrolled, .. } = painter;
     let samples = *samples;
     let (x0, y0, page_w, page_h) = layout.page;
     let text_rows = text.len().checked_div(page_w).unwrap_or(0);
-    let scrolled = frame.saturating_mul(SCROLL_ROWS);
+    let scrolled = *scrolled;
     for (y, row) in luma.chunks_exact_mut(stride).enumerate().skip(y0).take(page_h) {
         let from = y.saturating_sub(y0).wrapping_add(scrolled).checked_rem(text_rows).unwrap_or(0);
         let source = from.checked_mul(page_w).and_then(|at| text.get(at..at.checked_add(page_w)?));
@@ -454,7 +481,7 @@ impl Beat {
         }
         // The picture exists from here on, as a display time does for ScreenCaptureKit's.
         let shown_us = host_now_us();
-        let picture = self.painter.lock().as_mut().and_then(|p| p.paint(inputs_taken()));
+        let picture = self.painter.lock().as_mut().and_then(|p| p.paint(inputs_taken(), shown_us));
         if let Some(image) = picture {
             let now_us = host_now_us();
             let age_us = now_us.saturating_sub(shown_us);
@@ -493,7 +520,15 @@ impl CaptureSource for Canvas {
     }
 
     fn enumerate(done: impl FnOnce(Result<Vec<DisplayInfo>, CaptureError>) + Send + 'static) {
-        done(Ok(geometry::active_displays()));
+        let mut displays = geometry::active_displays();
+        if let Some(hz) = beat_hz() {
+            for display in &mut displays {
+                #[expect(clippy::cast_possible_truncation, reason = "a u16 rate")]
+                let hz = hz as f32;
+                display.hz = hz;
+            }
+        }
+        done(Ok(displays));
     }
 
     fn windows(_content: &Vec<DisplayInfo>) -> Vec<WindowInfo> {
@@ -551,7 +586,9 @@ impl CaptureSource for Canvas {
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) -> Result<CanvasStream, CaptureError> {
         let hz = if config.fps == 0 {
-            geometry::display_refresh_hz(target.display).unwrap_or(FALLBACK_HZ)
+            beat_hz()
+                .or_else(|| geometry::display_refresh_hz(target.display))
+                .unwrap_or(FALLBACK_HZ)
         } else {
             f64::from(config.fps)
         };
@@ -615,7 +652,7 @@ impl CaptureSource for Canvas {
     }
 
     fn refresh_hz(target: CaptureTarget) -> Option<f64> {
-        geometry::target_refresh_hz(target)
+        beat_hz().or_else(|| geometry::target_refresh_hz(target))
     }
 
     fn window_state(_id: WindowId) -> Option<WindowState> {
@@ -695,7 +732,7 @@ mod tests {
         for format in [PixelFormat::Nv12Full, PixelFormat::Yuv444Full10] {
             let mut painter = Painter::new(640, 360, format).unwrap();
             for inputs in [0_u64, 1, 0x5a5a, 0xffff, 0x1_0003] {
-                let picture = painter.paint(inputs).unwrap();
+                let picture = painter.paint(inputs, 0).unwrap();
                 assert_eq!(
                     CVPixelBufferGetPixelFormatType(picture.as_cv()),
                     Samples::of(format).os_type(),
@@ -717,21 +754,22 @@ mod tests {
     #[test]
     fn a_held_picture_is_never_drawn_over() {
         let mut painter = Painter::new(320, 180, PixelFormat::Nv12Full).unwrap();
-        let first = painter.paint(1).unwrap();
-        let second = painter.paint(2).unwrap();
+        let first = painter.paint(1, 0).unwrap();
+        let second = painter.paint(2, 0).unwrap();
         assert!(!ptr::eq(first.as_cv(), second.as_cv()), "the held picture was reused");
         assert_eq!(inputs_shown(first.as_cv()), Some(1), "drawing the second changed the first");
         let mut held = vec![first, second];
-        while let Some(p) = painter.paint(3) {
+        while let Some(p) = painter.paint(3, 0) {
             held.push(p);
         }
         assert_eq!(held.len(), SLOTS);
         drop(held.pop());
-        assert!(painter.paint(4).is_some(), "a picture let go of is drawn into again");
+        assert!(painter.paint(4, 0).is_some(), "a picture let go of is drawn into again");
     }
 
     /// The scrolling page changes every frame, as a scrolling window does, so the encoder sees
-    /// motion on every beat rather than a still desktop.
+    /// motion on every beat rather than a still desktop; the scroll is set in time, so a
+    /// 120 Hz beat moves it half as far a frame as a 60 Hz one.
     #[test]
     fn the_page_moves_every_frame() {
         let mut painter = Painter::new(320, 180, PixelFormat::Nv12Full).unwrap();
@@ -747,10 +785,14 @@ mod tests {
                 unsafe { CVPixelBufferUnlockBaseAddress(p, CVPixelBufferLockFlags::empty()) };
             bytes.chunks_exact(stride).skip(45).take(90).flatten().copied().collect::<Vec<u8>>()
         };
-        let a = painter.paint(0).unwrap();
+        let a = painter.paint(0, 1_000).unwrap();
         let before = row(a.as_cv());
         drop(a);
-        let b = painter.paint(0).unwrap();
+        let b = painter.paint(0, 1_000 + 8_334).unwrap();
         assert_ne!(before, row(b.as_cv()), "the page did not scroll");
+        assert_eq!(painter.scrolled, 1, "a 120 Hz beat scrolls one row");
+        drop(b);
+        let _c = painter.paint(0, 1_000 + 16_667).unwrap();
+        assert_eq!(painter.scrolled, 3, "a 60 Hz beat scrolls three");
     }
 }

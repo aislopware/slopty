@@ -405,7 +405,7 @@ fn cursor_span(line: Option<&slopty_grid::Line>, col: u16) -> u16 {
 /// the terminal foreground, faint. A head after output needs none, as the band's own top edge
 /// is the boundary. A failed block says so with its own bar and wash ([`FailedLook`]).
 #[must_use]
-pub fn separator_color(theme: &Theme) -> Hsla {
+pub(super) fn separator_color(theme: &Theme) -> Hsla {
     hsla_alpha(theme.terminal.fg, alpha::FAINT)
 }
 
@@ -413,7 +413,7 @@ pub fn separator_color(theme: &Theme) -> Hsla {
 /// step off the content that is not the header's `panel`, so an unfocused tile's header and
 /// its first head do not read as two headers.
 #[must_use]
-pub fn head_color(theme: &Theme) -> Hsla {
+pub(super) fn head_color(theme: &Theme) -> Hsla {
     hsla(theme.surfaces.band)
 }
 
@@ -442,7 +442,7 @@ fn head_runs(
 /// the block's left edge and a faint wash of it over the block, edge to edge as its rules
 /// run, so the band never runs past them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct FailedLook {
+pub(super) struct FailedLook {
     /// Over the block's rows, edge to edge.
     pub wash: Hsla,
     /// Down the element's left edge, in the inset beside the text.
@@ -454,7 +454,7 @@ pub struct FailedLook {
 impl FailedLook {
     /// The look at `zoom`.
     #[must_use]
-    pub fn new(theme: &Theme, zoom: f32) -> Self {
+    pub(super) fn new(theme: &Theme, zoom: f32) -> Self {
         Self {
             wash: hsla_alpha(theme.surfaces.error_fill, alpha::FAINT),
             bar: hsla(theme.surfaces.error_fill),
@@ -2138,7 +2138,7 @@ fn paint_placed(window: &mut Window, image: &PreparedImage) {
 /// show (an empty source or size).
 #[expect(clippy::cast_precision_loss, reason = "pixel counts and cell positions, far below 2^24")]
 #[must_use]
-pub fn placement_bounds(
+pub(super) fn placement_bounds(
     metrics: &CellMetrics,
     placement: &Placement,
     image: (u32, u32),
@@ -2261,7 +2261,11 @@ fn paint_decorations(window: &mut Window, m: &CellMetrics, row: &PreparedRow, la
 /// grid's height; the thumb's share of it is the screen's share of the whole (screen plus
 /// history), at least `THUMB_MIN_ROWS` tall; its top sits where the viewport is in the whole.
 #[must_use]
-pub fn scrollbar_thumb(m: &CellMetrics, history: u64, offset: u64) -> Option<Bounds<Pixels>> {
+pub(super) fn scrollbar_thumb(
+    m: &CellMetrics,
+    history: u64,
+    offset: u64,
+) -> Option<Bounds<Pixels>> {
     if history == 0 || m.rows == 0 {
         return None;
     }
@@ -2284,7 +2288,7 @@ pub fn scrollbar_thumb(m: &CellMetrics, history: u64, offset: u64) -> Option<Bou
 /// Whether `at` is where the pointer brings the scrollbar up: level with the grid, within
 /// `SCROLLBAR_REACH_CELLS` of its right edge or anywhere right of it (the tile's inset).
 #[must_use]
-pub fn near_scrollbar(m: &CellMetrics, at: Point<Pixels>) -> bool {
+pub(super) fn near_scrollbar(m: &CellMetrics, at: Point<Pixels>) -> bool {
     let right = m.origin.x + m.cell_width * f32::from(m.cols);
     let bottom = m.origin.y + m.line_height * f32::from(m.rows);
     at.x >= right - m.cell_width * SCROLLBAR_REACH_CELLS && at.y >= m.origin.y && at.y < bottom
@@ -2293,7 +2297,7 @@ pub fn near_scrollbar(m: &CellMetrics, at: Point<Pixels>) -> bool {
 /// The viewport offset (lines from the bottom) that puts the thumb's top at `y`: the inverse
 /// of [`scrollbar_thumb`], clamped to the track.
 #[must_use]
-pub fn offset_for_thumb(m: &CellMetrics, history: u64, y: Pixels) -> u64 {
+pub(super) fn offset_for_thumb(m: &CellMetrics, history: u64, y: Pixels) -> u64 {
     let Some(thumb) = scrollbar_thumb(m, history, 0) else { return 0 };
     let travel = f64::from(f32::from(m.line_height))
         .mul_add(f64::from(m.rows), -f64::from(f32::from(thumb.size.height)));
@@ -2315,7 +2319,7 @@ pub fn offset_for_thumb(m: &CellMetrics, history: u64, y: Pixels) -> u64 {
 /// How many rows past the grid's top (positive) or bottom (negative) a pointer at `y` is;
 /// zero inside the grid.
 #[must_use]
-pub fn rows_past_edge(m: &CellMetrics, y: Pixels) -> i64 {
+pub(super) fn rows_past_edge(m: &CellMetrics, y: Pixels) -> i64 {
     let line = f32::from(m.line_height).max(1.0);
     let top = f32::from(m.origin.y);
     let bottom = top + line * f32::from(m.rows);
@@ -2332,44 +2336,44 @@ pub fn rows_past_edge(m: &CellMetrics, y: Pixels) -> i64 {
 
 /// How many shaped words the cache holds (tests: a word shaped once serves every row).
 #[cfg(test)]
-pub fn cached_words(cx: &App) -> usize {
+pub(super) fn cached_words(cx: &App) -> usize {
     cx.try_global::<ShapeCache>().map_or(0, |cache| cache.words.len())
 }
 
 /// How many words were shaped since the app started (tests: a word seen before shapes nothing).
 #[cfg(test)]
-pub fn shaped_words(cx: &App) -> usize {
+pub(super) fn shaped_words(cx: &App) -> usize {
     cx.try_global::<Probe>().map_or(0, |probe| probe.shaped)
 }
 
 /// How many sprite masks were written since the app started (tests: once per character and
 /// cell, not per frame).
 #[cfg(test)]
-pub fn sprite_masks(cx: &App) -> usize {
+pub(super) fn sprite_masks(cx: &App) -> usize {
     cx.try_global::<Probe>().map_or(0, |probe| probe.sprite_masks)
 }
 
 /// How many times the installed fonts were listed (tests: once for every view of the app).
 #[cfg(test)]
-pub fn family_picks(cx: &App) -> usize {
+pub(crate) fn family_picks(cx: &App) -> usize {
     cx.try_global::<Probe>().map_or(0, |probe| probe.picks)
 }
 
 /// How many rows the last prepaint built (tests: only the rows inside the clip).
 #[cfg(test)]
-pub fn rows_prepared(cx: &App) -> usize {
+pub(crate) fn rows_prepared(cx: &App) -> usize {
     cx.try_global::<Probe>().map_or(0, |probe| probe.rows_prepared)
 }
 
 /// How many rows the last prepaint built from their cells, the rest taken from the row cache.
 #[cfg(test)]
-pub fn rows_built(cx: &App) -> usize {
+pub(super) fn rows_built(cx: &App) -> usize {
     cx.try_global::<Probe>().map_or(0, |probe| probe.rows_built)
 }
 
 /// The "took" captions the last prepaint drew, top row first (tests).
 #[cfg(test)]
-pub fn captions_drawn(cx: &App) -> Vec<String> {
+pub(crate) fn captions_drawn(cx: &App) -> Vec<String> {
     cx.try_global::<Probe>().map_or_else(Vec::new, |probe| probe.captions.clone())
 }
 
@@ -3031,7 +3035,7 @@ mod tests {
                 .zip(0_u16..)
                 .map(|(text, row)| RowUpdate {
                     row,
-                    line: Line::from_text(text, 10, Style::DEFAULT),
+                    line: Line::from_text(text, 10, Style::DEFAULT).into(),
                 })
                 .collect(),
         });

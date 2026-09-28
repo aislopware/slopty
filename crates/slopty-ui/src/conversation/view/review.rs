@@ -42,7 +42,7 @@ pub(super) struct Quote {
 
 impl Quote {
     /// The rows picked, first to last.
-    pub fn range(&self) -> (usize, usize) {
+    pub(super) fn range(&self) -> (usize, usize) {
         (self.from.min(self.to), self.from.max(self.to))
     }
 }

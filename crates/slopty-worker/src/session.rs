@@ -15,8 +15,8 @@ use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, Text
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
 use slopty_proto::codec;
 use slopty_proto::terminal::{
-    ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, Progress,
-    ProgressState, Restored, TermColors, TermError, TermEvent, TermRequest, TermSize,
+    ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, PointerShape,
+    Progress, ProgressState, Restored, TermColors, TermError, TermEvent, TermRequest, TermSize,
 };
 use slopty_pty::PtyMaster;
 use slopty_pty::protocol::OutputFrame;
@@ -723,6 +723,9 @@ struct Actor {
     program_colors: ColorOverrides,
     /// The program's progress report (OSC 9;4): broadcast, and sent to a late attach.
     progress: Progress,
+    /// The pointer shape the program asked for (`OSC 22`): broadcast, and sent to a late
+    /// attach.
+    pointer: PointerShape,
     /// See [`SessionStart::restored`].
     restored: Option<Restored>,
     /// [`crate::repo::root_of`] of `cwd`, resolved when the shell reports a directory and when
@@ -848,13 +851,14 @@ impl Actor {
         // now would land in a shell that is not asking). The title, the directory and the
         // program's colours are what the first attach is told.
         let (mut title, mut cwd, mut program_colors) = (None, None, ColorOverrides::default());
-        let mut progress = Progress::default();
+        let (mut progress, mut pointer) = (Progress::default(), PointerShape::default());
         for ev in engine.drain_events() {
             match ev {
                 EngineEvent::Title(t) => title = Some(t),
                 EngineEvent::Cwd(c) => cwd = Some(c),
                 EngineEvent::Colors(c) => program_colors = c,
                 EngineEvent::Progress(p) => progress = p,
+                EngineEvent::Pointer(p) => pointer = p,
                 EngineEvent::PtyWrite(_)
                 | EngineEvent::Bell
                 | EngineEvent::Notification { .. }
@@ -884,6 +888,7 @@ impl Actor {
             cwd,
             program_colors,
             progress,
+            pointer,
             restored: start.restored,
             repo,
             branch,
@@ -1273,6 +1278,10 @@ impl Actor {
                     self.progress = progress;
                     self.broadcast(&TermEvent::Progress(progress));
                 }
+                EngineEvent::Pointer(pointer) => {
+                    self.pointer = pointer;
+                    self.broadcast(&TermEvent::Pointer(pointer));
+                }
                 // A prompt that sets the title on every draw repeats it; the viewers already
                 // hold it.
                 EngineEvent::Title(t) if self.title.as_ref() == Some(&t) => {}
@@ -1656,8 +1665,8 @@ impl Actor {
     }
 
     /// What a viewer joining is told: the title, the directory, the program's colours, its
-    /// progress, whether the session was restored, every row with the images on them (now if
-    /// it has room, else when it has), and the exit if the child is gone.
+    /// progress and pointer shape, whether the session was restored, every row with the images
+    /// on them (now if it has room, else when it has), and the exit if the child is gone.
     fn introduce(&mut self, client: ClientId) {
         if let Some(t) = self.title.clone() {
             self.send_to(client, &TermEvent::Title(t));
@@ -1671,6 +1680,9 @@ impl Actor {
         }
         if self.progress.state != ProgressState::None {
             self.send_to(client, &TermEvent::Progress(self.progress));
+        }
+        if self.pointer != PointerShape::default() {
+            self.send_to(client, &TermEvent::Pointer(self.pointer));
         }
         if let Some(restored) = self.restored.clone() {
             self.send_to(client, &TermEvent::Restored(restored));

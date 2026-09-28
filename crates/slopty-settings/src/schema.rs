@@ -292,7 +292,7 @@ mod tests {
             })
         );
         assert!(matches!(&field("remote", "fps").kind, Kind::Number(n) if n.integer));
-        assert_eq!(field("remote", "fps").default, Value::Number(60.0));
+        assert_eq!(field("remote", "fps").default, Value::Number(120.0));
         let sharp = field("remote", "sharp_text");
         assert_eq!((sharp.title.as_str(), &sharp.kind), ("Sharp text", &Kind::Switch));
         assert_eq!(sharp.default, Value::Bool(false));

@@ -271,6 +271,7 @@ impl WorkspaceView {
             }
         }))
         .on_action(cx.listener(Self::inspect_page))
+        .on_action(cx.listener(Self::toggle_own_window))
     }
 
     /// A width change: the layout's, then the remote windows of the column asked to take the

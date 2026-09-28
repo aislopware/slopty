@@ -1461,3 +1461,61 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   through the real encoder, packetizer, reassembler and decoder: 4:4:4 at open, 4:2:0 after
   loss, and 4:4:4 again after clean windows and the hold. Not yet proven: the line on a
   real link, and iOS/iPadOS decoding 4:4:4.
+
+- ✅ **The stream follows the screen's refresh; a link or an encoder short of 120 drops the
+  rate to 60 before the picture thins** (2026-09-29, MEASUREMENTS "120 fps against 60").
+  1. *The client asks for its screen's rate.* `[remote] fps` is now a ceiling, 120 by default,
+     which follows any screen. A stream asks for `min(ceiling, refresh)`
+     (`slopty_ui::screen::stream_fps`), with the refresh read from the screen the view's window
+     is on: `NSScreen.maximumFramesPerSecond`, matched by its `NSScreenNumber` to the display
+     GPUI puts the window on (`slopty_platform::display_refresh_of`), so a ProMotion panel
+     reads 120 whatever it idles at. On iOS it is the scene's screen. A screen that does not
+     say counts as 60. A stream opens at the main screen's rate. Once its view is drawn in a
+     window, it asks again whenever that window lands on a screen of another rate, through
+     the window's bounds observer. It sends the ordinary `SetQuality` with the new `fps`, so
+     there is no wire change. The worker already capped the rate at the target display's
+     refresh and captured at the display's own beat.
+  2. *A new rate alone is taken in place.* A `SetQuality` that moves only `fps` used to
+     rebuild the encoder, which meant a keyframe on every move between screens. The capture
+     already runs at the display's beat, so the worker now sets the ceiling, resets the
+     cadence, and sends `ExpectedFrameRate` to the session it has. There is no rebuild and no
+     keyframe (`Pipeline::set_rate_in_place`).
+  3. *The link: the ladder's thresholds stand, and its first step from 120 is 60.* Measured
+     on the shipped encoder with a 1080p text scroll at the same speed at both rates, 120 fps
+     spent 1.2× the bits of 60 at the same PSNR: 8.1 against 6.9 Mbit/s, 53.4 dB against
+     53.1–53.7. At 1440p the ratio was 1.3× and at 4K 1.2×. At an 8 Mbit/s target, 120 gives
+     8.0 KiB a frame and 53.3 dB, as good as 60's 14 KiB frames. At 4 Mbit/s, 120 drops frames
+     and loses 2.8 dB against 60. The ladder's 8 KB bar already sits at that line. 120 stands
+     while the target is at least 7.9 Mbit/s, and below that the stream goes to 60, where each
+     frame gets twice the bytes, before anything reaches 30. Climbing back to 120 takes 12 KB
+     a frame, 11.8 Mbit/s. On the tailnet-shaped synthetic link (5 ms each way, 3 % loss),
+     120 cut input sent → shown from 38.6 to 28.3 ms p50 and input at the worker → the capture
+     showing it from 9.6 to 3.6 ms, for 2.0 against 1.4 Mbit/s on the wire. Test:
+     `a_link_short_of_120_drops_to_60_first`.
+  4. *The encoder: a rung it cannot keep costs a queue, so it is given up.* The hardware
+     encoder's own latency is about 8 ms at 1080p at either rate, a 120 fps period. When
+     frames come faster than it turns them out, they queue inside VideoToolbox. At
+     3024 × 1964, a MacBook Pro's native size and a height that is not a multiple of 16, every
+     frame came back 77–87 ms late at 120 fps, and in one run 70–86 ms at 60. At 3840 × 2160
+     it held 22 ms at 120. A fixed pixel-rate budget cannot describe that, and it would differ
+     on every chip, so the worker watches instead (`slopty_media::EncoderWatch`). A frame
+     back more than three periods of the rung in force after it went in is late. Twelve late
+     in a row (a tenth of a second at 120) take the stream's ceiling down one rung, 120 → 60 →
+     30 → 15, and the cadence with it. One slow frame, such as the first keyframe at 40–97 ms,
+     is not a run. The ceiling stays down until the next encoder session (a resize or a new
+     quality). Probing back up would pay the queue again to learn what was already seen.
+     Tests: `an_encoder_that_falls_behind_takes_the_ceiling_down_a_rung`,
+     `an_encoder_behind_its_rung_takes_the_ceiling_down`.
+  5. *What was not measured.* A physical display above 60 Hz, since this Mac's panel runs at
+     75 Hz. A `CGVirtualDisplay` at 120 Hz, since making one is gated on
+     `SLOPTY_VDISPLAY_E2E` and was not run. The virtual display is already planned at the
+     client's refresh (30–120 Hz). Whether macOS paces its frames at 120 is still open. The
+     synthetic canvas drew at a 120 Hz beat (`synthetic::set_beat`). Its scroll is now set in
+     time (180 rows a second) rather than per beat, so a faster beat draws the same motion in
+     smaller steps.
+  Tests: `the_rate_follows_the_screen_up_to_the_ceiling`,
+  `a_view_on_a_screen_of_another_rate_asks_for_it`, `a_new_frame_rate_alone_is_taken_in_place`,
+  `remote_settings_ride_on_the_theme` (default 120), `the_page_moves_every_frame` (the scroll in
+  time). Follow-up the numbers point at: 3024 × 1964 was the slow size at both rates, while
+  3840 × 2160 was not. Rounding a stream's sides to a multiple of 16 rather than 2 may be worth
+  more than any rate policy at a MacBook's native size. That needs its own measurement.

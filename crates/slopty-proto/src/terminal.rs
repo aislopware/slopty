@@ -550,6 +550,53 @@ pub enum TermEvent {
     /// The session was reopened after its shell was lost. Sent on attach for the session's
     /// whole life.
     Restored(Restored),
+    /// The program asked for another pointer shape over the grid (`OSC 22`). Sent on attach
+    /// while it is not the I-beam, like the title.
+    Pointer(PointerShape),
+}
+
+/// The pointer a program asks for over the grid with `OSC 22`, by its W3C cursor name.
+///
+/// A clickable span in a TUI, a splitter it resizes. The terminal starts at [`Self::Text`]. A
+/// client draws the nearest shape its platform has; hovering a link keeps its own pointer.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[expect(missing_docs, reason = "each variant is its W3C cursor name")]
+pub enum PointerShape {
+    #[default]
+    Text,
+    Default,
+    ContextMenu,
+    Help,
+    Pointer,
+    Progress,
+    Wait,
+    Cell,
+    Crosshair,
+    VerticalText,
+    Alias,
+    Copy,
+    Move,
+    NoDrop,
+    NotAllowed,
+    Grab,
+    Grabbing,
+    AllScroll,
+    ColResize,
+    RowResize,
+    NResize,
+    EResize,
+    SResize,
+    WResize,
+    NeResize,
+    NwResize,
+    SeResize,
+    SwResize,
+    EwResize,
+    NsResize,
+    NeswResize,
+    NwseResize,
+    ZoomIn,
+    ZoomOut,
 }
 
 /// What a program reports of its progress with `OSC 9;4`, a sequence from the `ConEmu`

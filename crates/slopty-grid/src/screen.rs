@@ -41,8 +41,10 @@ pub struct Cursor {
 pub struct RowUpdate {
     /// Row index within the visible screen.
     pub row: u16,
-    /// The new contents.
-    pub line: Line,
+    /// The new contents, shared: the worker keeps the same allocation as the row its viewers
+    /// hold, and a client puts it on the screen and in the scrollback as it arrived. Serde
+    /// writes the line itself, so the wire is what a plain `Line` made.
+    pub line: Arc<Line>,
 }
 
 /// Errors from applying updates.
@@ -153,26 +155,14 @@ impl Screen {
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
     }
 
-    /// Replace one row.
-    pub fn apply(&mut self, update: RowUpdate) -> Result<(), ScreenError> {
-        let got = update.line.cols();
-        if got != self.cols {
-            return Err(ScreenError::WidthMismatch { got, cols: self.cols });
-        }
-        let slot = self
-            .lines
-            .get_mut(usize::from(update.row))
-            .ok_or(ScreenError::RowOutOfRange { row: update.row, rows: self.rows })?;
-        *slot = Arc::new(update.line);
-        Ok(())
-    }
-
-    /// [`Self::apply`] for a row the caller already shares with the scrollback.
+    /// Replace one row with the update's line, kept as it came (the caller may share it with
+    /// the scrollback).
     ///
     /// # Errors
     ///
-    /// As [`Self::apply`]: a width mismatch or a row past the bottom.
-    pub fn apply_shared(&mut self, row: u16, line: Arc<Line>) -> Result<(), ScreenError> {
+    /// A line whose width is not the screen's, or a row past the bottom.
+    pub fn apply(&mut self, update: RowUpdate) -> Result<(), ScreenError> {
+        let RowUpdate { row, line } = update;
         let got = line.cols();
         if got != self.cols {
             return Err(ScreenError::WidthMismatch { got, cols: self.cols });
@@ -207,9 +197,9 @@ mod tests {
     #[test]
     fn apply_rejects_bad_geometry() {
         let mut s = Screen::new(10, 3);
-        let row_err = s.apply(RowUpdate { row: 3, line: Line::blank(10) }).unwrap_err();
+        let row_err = s.apply(RowUpdate { row: 3, line: Arc::new(Line::blank(10)) }).unwrap_err();
         assert_eq!(row_err, ScreenError::RowOutOfRange { row: 3, rows: 3 });
-        let width_err = s.apply(RowUpdate { row: 0, line: Line::blank(9) }).unwrap_err();
+        let width_err = s.apply(RowUpdate { row: 0, line: Arc::new(Line::blank(9)) }).unwrap_err();
         assert_eq!(width_err, ScreenError::WidthMismatch { got: 9, cols: 10 });
     }
 
@@ -221,14 +211,14 @@ mod tests {
         assert_eq!(s.modes(), TermModes::ALT_SCREEN | TermModes::BRACKETED_PASTE);
 
         let row = Arc::new(Line::from_text("shared", 7, Style::DEFAULT));
-        s.apply_shared(1, Arc::clone(&row)).unwrap();
+        s.apply(RowUpdate { row: 1, line: Arc::clone(&row) }).unwrap();
         assert!(Arc::ptr_eq(&s.lines()[1], &row), "the same allocation is kept");
         assert_eq!(
-            s.apply_shared(0, Arc::new(Line::blank(6))).unwrap_err(),
+            s.apply(RowUpdate { row: 0, line: Arc::new(Line::blank(6)) }).unwrap_err(),
             ScreenError::WidthMismatch { got: 6, cols: 7 }
         );
         assert_eq!(
-            s.apply_shared(2, Arc::new(Line::blank(7))).unwrap_err(),
+            s.apply(RowUpdate { row: 2, line: Arc::new(Line::blank(7)) }).unwrap_err(),
             ScreenError::RowOutOfRange { row: 2, rows: 2 }
         );
 

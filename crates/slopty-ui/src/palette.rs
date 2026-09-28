@@ -1439,13 +1439,6 @@ impl CommandPalette {
         self.matched.iter().filter_map(|at| self.at(*at)).collect()
     }
 
-    /// How many times the matches were worked out, and how many rows were drawn: a frame of
-    /// the plate's glide does neither for the whole list.
-    #[must_use]
-    pub const fn work_done(&self) -> (usize, usize) {
-        self.counts.get()
-    }
-
     /// The match kept at `at`.
     fn at(&self, at: At) -> Option<&PaletteItem> {
         match at {
@@ -1927,6 +1920,16 @@ fn leave_scrim(scrim: gpui::Div, cx: &App) -> gpui::AnyElement {
     scrim
         .with_animation("palette-scrim-out", leaving(Pace::Sheet), |el, t| el.opacity(1.0 - t))
         .into_any_element()
+}
+
+#[cfg(test)]
+impl CommandPalette {
+    /// How many times the matches were worked out, and how many rows were drawn: a frame of
+    /// the plate's glide does neither for the whole list.
+    #[must_use]
+    const fn work_done(&self) -> (usize, usize) {
+        self.counts.get()
+    }
 }
 
 #[cfg(test)]

@@ -162,18 +162,6 @@ impl WorkspaceView {
         self.toast_line(&shown.what, cx)
     }
 
-    /// The texts of every notice up now, oldest first.
-    #[must_use]
-    pub fn toast_texts(&self, cx: &gpui::App) -> Vec<String> {
-        self.toast.as_ref().map_or_else(Vec::new, |t| {
-            t.shown
-                .iter()
-                .filter(|s| !s.leaving)
-                .filter_map(|s| self.toast_line(&s.what, cx))
-                .collect()
-        })
-    }
-
     /// The "closed" toast goes with its offer: `seq` for one closing, `None` for any.
     pub(super) fn dismiss_closed_toast(&mut self, seq: Option<u64>) {
         self.drop_toasts(|shown| match shown.what {
@@ -340,5 +328,20 @@ impl WorkspaceView {
                 .with_priority(crate::palette::Layer::Toast.priority())
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+impl WorkspaceView {
+    /// The texts of every notice up now, oldest first.
+    #[must_use]
+    pub(super) fn toast_texts(&self, cx: &gpui::App) -> Vec<String> {
+        self.toast.as_ref().map_or_else(Vec::new, |t| {
+            t.shown
+                .iter()
+                .filter(|s| !s.leaving)
+                .filter_map(|s| self.toast_line(&s.what, cx))
+                .collect()
+        })
     }
 }

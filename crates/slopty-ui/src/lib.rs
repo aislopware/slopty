@@ -23,6 +23,12 @@
 //! * [`shown`] — work timed at the instant a paint reached the display.
 //! * [`fonts`] — bundled `JetBrains Mono` + Nerd symbols, registered at startup.
 
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 pub mod a11y;
 pub mod browser;
 
@@ -43,9 +49,17 @@ pub mod note;
 pub mod palette;
 pub mod paste_key;
 pub mod picker;
+#[expect(
+    unreachable_pub,
+    reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"
+)]
 pub mod screen;
 pub mod settings_editor;
 pub mod settings_form;
 pub mod shown;
 pub mod terminal;
+#[expect(
+    unreachable_pub,
+    reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"
+)]
 pub mod workspace;

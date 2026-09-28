@@ -39,6 +39,7 @@ mod marks;
 mod miniature;
 mod navigator;
 mod overlays;
+mod popout;
 pub mod remote;
 mod rollup;
 mod statusbar;
@@ -689,6 +690,8 @@ pub struct WorkspaceView {
     clip: Option<Rc<std::cell::RefCell<crate::clipboard::ClipSync>>>,
     /// The app is frontmost.
     app_active: bool,
+    /// Remote tiles shown in windows of their own.
+    popouts: popout::PopOuts,
     /// Workers told this client wants their clipboard.
     watching: std::collections::HashSet<WorkerKey>,
     /// Uploads in flight.
@@ -857,6 +860,7 @@ impl WorkspaceView {
             given_pending: HashMap::new(),
             clip: None,
             app_active: true,
+            popouts: popout::PopOuts::default(),
             watching: std::collections::HashSet::new(),
             uploads: HashMap::new(),
             drop_landing: None,
@@ -998,8 +1002,9 @@ impl WorkspaceView {
     }
 
     /// Whether the palette is up.
+    #[cfg(test)]
     #[must_use]
-    pub const fn palette_open(&self) -> bool {
+    const fn palette_open(&self) -> bool {
         self.palette.is_some()
     }
 

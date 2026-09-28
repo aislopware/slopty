@@ -119,11 +119,28 @@ mod tests {
     struct Wire {
         router: ScreenRouter,
         line: Option<mpsc::UnboundedSender<(Instant, Vec<Bytes>)>>,
+        /// Bytes of every datagram sent: data, parity, retransmits, cursor and heartbeats.
+        bytes: std::sync::atomic::AtomicU64,
+    }
+
+    impl Wire {
+        fn new(
+            router: ScreenRouter,
+            line: Option<mpsc::UnboundedSender<(Instant, Vec<Bytes>)>>,
+        ) -> Self {
+            Self { router, line, bytes: std::sync::atomic::AtomicU64::new(0) }
+        }
+
+        fn bytes(&self) -> u64 {
+            self.bytes.load(std::sync::atomic::Ordering::Relaxed)
+        }
     }
 
     impl DatagramSink for Wire {
         fn send(&self, datagrams: &[Bytes]) -> Result<(), Refused> {
             let now = Instant::now();
+            let sent: usize = datagrams.iter().map(Bytes::len).sum();
+            self.bytes.fetch_add(sent as u64, std::sync::atomic::Ordering::Relaxed);
             match &self.line {
                 None => self.router.route_many(datagrams.iter().cloned(), now),
                 Some(line) => {
@@ -191,10 +208,11 @@ mod tests {
     }
 
     /// One run: the canvas streamed through the real encoder and packetizer into the client's
-    /// reassembler and decoder, `one_way` each way with `loss_permille` of the datagrams lost,
-    /// a click every 80–150 ms, and a paint on the display's beat.
+    /// reassembler and decoder at `fps` frames a second at most, `one_way` each way with
+    /// `loss_permille` of the datagrams lost, a click every 80–150 ms, and a paint on the
+    /// display's beat.
     #[expect(clippy::too_many_lines, reason = "one measurement, read top to bottom")]
-    async fn run(label: &str, one_way: Duration, loss_permille: u32, seconds: u64) {
+    async fn run(label: &str, fps: u16, one_way: Duration, loss_permille: u32, seconds: u64) {
         let ScreenEvent::Listing { displays, .. } = Pipeline::<Drawn>::listing().await.unwrap()
         else {
             panic!("no listing")
@@ -210,12 +228,12 @@ mod tests {
             let router = router.clone();
             delay_line(one_way, move |datagrams: Vec<Bytes>, at| router.route_many(datagrams, at))
         });
-        let wire = Arc::new(Wire { router: router.clone(), line });
+        let wire = Arc::new(Wire::new(router.clone(), line));
         let (mut stream, opened) = Pipeline::<Drawn>::open(
             STREAM,
             CaptureTarget::Display(display.id),
-            Quality::default(),
-            wire,
+            Quality { fps, ..Quality::default() },
+            Arc::<Wire>::clone(&wire),
             |_event| {},
         )
         .await
@@ -277,6 +295,8 @@ mod tests {
         let (mut to_arrival, mut to_decoded, mut decode, mut to_paint, mut to_glass) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut reach_to_capture = Vec::new();
+        // Bytes and frames at the end of the warm-up, so the rates cover the measured seconds.
+        let mut settled: Option<(u64, u64)> = None;
         let click = ScreenInput::Button {
             button: MouseButton::Left,
             down: true,
@@ -289,6 +309,9 @@ mod tests {
             let delivery = in_flight.front().map_or(deadline, |(due, _)| *due);
             tokio::select! {
                 _tick = paint.tick() => {
+                    if settled.is_none() && tokio::time::Instant::now() > started + warm_up {
+                        settled = Some((wire.bytes(), stream.stats().encoded));
+                    }
                     if let Some(stamp) = pacer.painted() {
                         let at = Instant::now();
                         pacer.shown(stamp, at);
@@ -350,7 +373,7 @@ mod tests {
         let stats = handle.stats();
         let worker = stream.stats();
         eprintln!(
-            "MEASURE glass {label}: {width}×{height} {codec:?} at {hz:.0} Hz, one way {:.1} ms, loss {:.1} %",
+            "MEASURE glass {label}: {width}×{height} {codec:?} at {hz:.0} Hz, {fps} fps asked, one way {:.1} ms, loss {:.1} %",
             ms(one_way),
             f64::from(loss_permille) / 10.0
         );
@@ -413,11 +436,17 @@ mod tests {
                 format!("{:.1}({verdict:?}×{})", f64::from(bps) / 1e6, run.len())
             })
             .collect();
+        let (bytes0, encoded0) = settled.unwrap_or_default();
+        let measured = seconds as f64;
+        let encoded = worker.encoded.saturating_sub(encoded0) as f64;
+        let wire_bytes = wire.bytes().saturating_sub(bytes0) as f64;
         eprintln!(
-            "  rate: {} → encoder at {:.1} Mbit/s, {:.1} frames/s encoded",
+            "  rate: {} → encoder at {:.1} Mbit/s, {:.1} frames/s encoded, {:.2} Mbit/s on the wire, {:.1} KiB a frame",
             verdicts.join(" "),
             worker.bitrate_bps as f64 / 1e6,
-            worker.encoded as f64 / (warm_up.as_secs_f64() + seconds as f64)
+            encoded / measured,
+            wire_bytes * 8.0 / measured / 1e6,
+            wire_bytes / encoded.max(1.0) / 1024.0,
         );
         assert!(glass.capture.count > 0, "no frame was timed from its capture");
         assert!(glass.input.count > 0, "no input reached the glass");
@@ -467,7 +496,7 @@ mod tests {
             };
             let display = displays.first().expect("a display");
             let router = ScreenRouter::new();
-            let wire = Arc::new(Wire { router: router.clone(), line: None });
+            let wire = Arc::new(Wire::new(router.clone(), None));
             // A quarter of any display up to 6K is smaller than 1080p, whose enter line is
             // under the 12 Mbit/s a stream opens at.
             let quality = Quality { scale: 0.25, chroma: Chroma::Full, ..Quality::default() };
@@ -558,6 +587,50 @@ mod tests {
         });
     }
 
+    /// A quality change that moves only the frame rate (the client's view went to a screen of
+    /// another refresh) is taken by the encoder in place: no rebuild, the ceiling and the rung
+    /// at the new rate, and the stream keeps sending.
+    #[test]
+    fn a_new_frame_rate_alone_is_taken_in_place() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            // A known beat: a panel that reports no refresh would have the capture throttled
+            // to the rate, and a new rate would be a new capture.
+            slopty_capture::synthetic::set_beat(Some(120));
+            let ScreenEvent::Listing { displays, .. } = Pipeline::<Drawn>::listing().await.unwrap()
+            else {
+                panic!("no listing")
+            };
+            let display = displays.first().expect("a display");
+            let router = ScreenRouter::new();
+            let wire = Arc::new(Wire::new(router, None));
+            let quality = Quality { fps: 60, scale: 0.25, ..Quality::default() };
+            let (mut stream, _opened) = Pipeline::<Drawn>::open(
+                STREAM,
+                CaptureTarget::Display(display.id),
+                quality,
+                Arc::<Wire>::clone(&wire),
+                |_event| {},
+            )
+            .await
+            .unwrap();
+            slopty_capture::synthetic::set_beat(None);
+            let ceiling = |stream: &Pipeline<Drawn>| {
+                stream.shared.fps_ceiling.load(std::sync::atomic::Ordering::Relaxed)
+            };
+            assert_eq!(ceiling(&stream), 60);
+            let rebuild = stream.set_quality(&Quality { fps: 120, ..quality }, None);
+            assert!(rebuild.is_none(), "a new rate alone builds nothing");
+            assert_eq!(ceiling(&stream), 120);
+            assert_eq!(stream.shared.fps.load(std::sync::atomic::Ordering::Relaxed), 120);
+            let sent = wire.bytes();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(wire.bytes() > sent, "the stream keeps flowing");
+            stream.close().await;
+        });
+    }
+
     /// Capture → glass and input → glass on this Mac, from drawn pictures. Run from a copy of the
     /// test binary off the repository volume (`docs/MEASUREMENTS.md`, "Capture to the glass");
     /// `SLOPTY_GLASS_SECONDS` sets the run length (default 20).
@@ -574,8 +647,34 @@ mod tests {
         let seconds: u64 =
             std::env::var("SLOPTY_GLASS_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
         runtime.block_on(async {
-            run("loopback", Duration::ZERO, 0, seconds).await;
-            run("tailnet-shaped", Duration::from_millis(5), 30, seconds).await;
+            run("loopback", 60, Duration::ZERO, 0, seconds).await;
+            run("tailnet-shaped", 60, Duration::from_millis(5), 30, seconds).await;
         });
+    }
+
+    /// The same on a 120 Hz beat, as a 120 Hz Mac or external display gives:
+    /// a stream asked for 60 against one asked for 120, on loopback and tailnet-shaped. The
+    /// canvas scrolls at the same speed on either beat (`docs/MEASUREMENTS.md`, "120 fps
+    /// against 60"). `SLOPTY_GLASS_SECONDS` sets the run length (default 20).
+    #[test]
+    #[ignore = "measurement"]
+    fn capture_and_input_to_glass_at_120() {
+        slopty_platform::user_interactive_thread();
+        slopty_capture::synthetic::set_beat(Some(120));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .on_thread_start(slopty_platform::user_interactive_thread)
+            .build()
+            .unwrap();
+        let seconds: u64 =
+            std::env::var("SLOPTY_GLASS_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+        runtime.block_on(async {
+            run("loopback", 60, Duration::ZERO, 0, seconds).await;
+            run("loopback", 120, Duration::ZERO, 0, seconds).await;
+            run("tailnet-shaped", 60, Duration::from_millis(5), 30, seconds).await;
+            run("tailnet-shaped", 120, Duration::from_millis(5), 30, seconds).await;
+        });
+        slopty_capture::synthetic::set_beat(None);
     }
 }

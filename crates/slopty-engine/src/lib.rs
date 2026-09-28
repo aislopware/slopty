@@ -31,7 +31,7 @@ pub mod search;
 
 pub use ghostty::GhosttyEngine;
 pub use graphics::ImageUpload;
-use slopty_proto::terminal::{ColorOverrides, Progress, TermSize};
+use slopty_proto::terminal::{ColorOverrides, PointerShape, Progress, TermSize};
 
 /// Engine failure. libghostty-vt reports out-of-memory and invalid arguments; both are bugs or
 /// resource exhaustion, never a consequence of PTY output, so the session is torn down.
@@ -77,6 +77,8 @@ pub enum EngineEvent {
     /// The program's progress report changed (`OSC 9;4`), or was dropped because the shell
     /// printed its next prompt.
     Progress(Progress),
+    /// The program asked for another pointer shape over the grid (`OSC 22`).
+    Pointer(PointerShape),
 }
 
 /// Configuration for a new engine.

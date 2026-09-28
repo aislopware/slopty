@@ -398,7 +398,7 @@ mod tests {
     fn remote_settings_ride_on_the_theme() {
         let mut s = Settings::default();
         let stream = theme_for(&s, true).behaviour.stream;
-        assert_eq!((stream.fps, stream.max_bitrate_bps), (60, 30_000_000));
+        assert_eq!((stream.fps, stream.max_bitrate_bps), (120, 30_000_000));
         s.remote.fps = 30;
         s.remote.max_bitrate_mbps = 8;
         let stream = theme_for(&s, true).behaviour.stream;
@@ -406,7 +406,11 @@ mod tests {
         s.remote.fps = 0;
         s.remote.max_bitrate_mbps = 500;
         let stream = theme_for(&s, true).behaviour.stream;
-        assert_eq!((stream.fps, stream.max_bitrate_bps), (60, 30_000_000), "typos read as default");
+        assert_eq!(
+            (stream.fps, stream.max_bitrate_bps),
+            (120, 30_000_000),
+            "typos read as default"
+        );
         assert!(!stream.muted);
         s.remote.muted = true;
         assert!(theme_for(&s, true).behaviour.stream.muted);
@@ -414,7 +418,7 @@ mod tests {
         s.remote.sharp_text = true;
         let stream = theme_for(&s, true).behaviour.stream;
         assert_eq!(
-            slopty_ui::screen::quality_of(stream, 1.0).chroma,
+            slopty_ui::screen::quality_of(stream, 1.0, 60).chroma,
             slopty_proto::screen::Chroma::Full,
             "sharp text asks the worker for 4:4:4",
         );

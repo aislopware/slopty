@@ -1163,7 +1163,7 @@ const EMPTY_W: f32 = 400.0;
 const RECENT_PLACES: usize = 5;
 
 /// The empty workspace's section of directories shells stand in.
-pub const RECENT: &str = "Recent";
+pub(super) const RECENT: &str = "Recent";
 
 /// A directory a shell stands in on a worker: where the empty workspace offers another shell.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1208,14 +1208,14 @@ pub(super) fn overview_words(
 }
 
 /// What the empty workspace says.
-pub const EMPTY_WORKSPACE: &str = "Empty workspace";
-pub const NO_WORKERS: &str = "No workers yet";
-pub const NO_WORKERS_NEXT: &str = "Add a worker from the command palette.";
+pub(crate) const EMPTY_WORKSPACE: &str = "Empty workspace";
+pub(crate) const NO_WORKERS: &str = "No workers yet";
+pub(crate) const NO_WORKERS_NEXT: &str = "Add a worker from the command palette.";
 const NEW_TERMINAL: &str = "New terminal";
 const NEW_AGENT: &str = "New agent";
 const ADD_WINDOW: &str = "Add a window or display";
 /// The overview's place for a new workspace.
-pub const NEW_WORKSPACE: &str = "New workspace";
+pub(crate) const NEW_WORKSPACE: &str = "New workspace";
 
 /// The keys of the three ways to begin, read once from the workspace's bindings.
 pub(super) static BEGIN_KEYS: std::sync::LazyLock<[String; 3]> = std::sync::LazyLock::new(|| {

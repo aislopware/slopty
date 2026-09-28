@@ -20,7 +20,7 @@ use crate::colors::{hsla, hsla_alpha};
 use crate::kit;
 
 /// How long the thumb stays once the strip is still and the pointer has left the edge.
-pub const MARKS_HOLD: Duration = Duration::from_millis(800);
+pub(super) const MARKS_HOLD: Duration = Duration::from_millis(800);
 
 /// How near the strip's bottom edge the pointer brings the thumb, in points.
 const NEAR_EDGE: f32 = 24.0;
