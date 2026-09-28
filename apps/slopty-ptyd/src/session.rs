@@ -41,10 +41,22 @@ pub struct Session {
     state: Mutex<State>,
     /// Exit status once known.
     exited: watch::Sender<Option<i32>>,
-    /// `true` = reader must stay out of the fd.
-    pause: watch::Sender<bool>,
+    /// What the reader is to do. It lives in the session it reads for, so it never closes: a
+    /// stop is the only way out of a pause.
+    reader: watch::Sender<Reader>,
     /// Reader acknowledges it is out of the fd (or finished) by setting this to `true`.
     parked: watch::Sender<bool>,
+}
+
+/// What a session's reader is to do with the master.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Reader {
+    /// Drain it into the ring.
+    Drain,
+    /// Stay out of it: a worker holds it.
+    Pause,
+    /// Let go of the session: it is closed.
+    Stop,
 }
 
 /// A session's state that the connections share: one lock, so an attach sees a checkpoint and
@@ -100,7 +112,7 @@ impl Session {
         let pid = child.id().unwrap_or(0);
         let started_ms = WallMs::now();
         let master = Arc::new(PtyMaster::new(pty.into_master())?);
-        let (pause, _) = watch::channel(false);
+        let (reader, _) = watch::channel(Reader::Drain);
         let (parked, _) = watch::channel(false);
         let state = State {
             size: spec.size,
@@ -116,7 +128,7 @@ impl Session {
             master,
             state: Mutex::new(state),
             exited: watch::Sender::new(None),
-            pause,
+            reader,
             parked,
         });
 
@@ -139,21 +151,30 @@ impl Session {
         Ok(session)
     }
 
-    /// Drain the master into the ring whenever not paused.
+    /// Drain the master into the ring whenever not paused, until stopped or the child's side
+    /// is gone. The task holds the session, master included, until this returns.
     async fn read_loop(&self) {
-        let mut pause_rx = self.pause.subscribe();
+        let mut mode = self.reader.subscribe();
         let mut buf = vec![0_u8; 64 << 10];
         loop {
-            if *pause_rx.borrow_and_update() {
-                self.parked.send_replace(true);
-                if pause_rx.changed().await.is_err() {
+            let now = *mode.borrow_and_update();
+            match now {
+                Reader::Stop => {
+                    self.parked.send_replace(true);
                     return;
                 }
-                continue;
+                Reader::Pause => {
+                    self.parked.send_replace(true);
+                    if mode.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                Reader::Drain => {}
             }
             self.parked.send_replace(false);
             tokio::select! {
-                changed = pause_rx.changed() => {
+                changed = mode.changed() => {
                     if changed.is_err() {
                         return;
                     }
@@ -198,7 +219,13 @@ impl Session {
     /// Stop the reader and wait until it is out of the fd, then take the backlog with the
     /// checkpoint it follows and the size.
     pub async fn hand_over(&self) -> Handover {
-        self.pause.send_replace(true);
+        self.reader.send_if_modified(|mode| {
+            let pause = *mode == Reader::Drain;
+            if pause {
+                *mode = Reader::Pause;
+            }
+            pause
+        });
         let mut parked = self.parked.subscribe();
         while !*parked.borrow_and_update() {
             if parked.changed().await.is_err() {
@@ -248,9 +275,31 @@ impl Session {
         tokio::time::timeout(grace, exited.wait_for(Option::is_some)).await.is_ok_and(|w| w.is_ok())
     }
 
-    /// Let the reader drain again.
+    /// Let the reader drain again, unless the session is closed.
     pub fn resume_reader(&self) {
-        self.pause.send_replace(false);
+        self.reader.send_if_modified(|mode| {
+            let resume = *mode == Reader::Pause;
+            if resume {
+                *mode = Reader::Drain;
+            }
+            resume
+        });
+    }
+
+    /// The session is closed: the reader lets go of it now, whoever holds the master, and the
+    /// child is hung up, then killed if it has not exited within `grace`. Once the child is
+    /// reaped nothing holds the session, so its master, ring and checkpoint go.
+    pub fn close(self: Arc<Self>, grace: std::time::Duration) {
+        self.reader.send_replace(Reader::Stop);
+        if self.exited.borrow().is_some() {
+            return;
+        }
+        let _hup = self.signal(Signal::HUP);
+        tokio::spawn(async move {
+            if !self.exits_within(grace).await {
+                let _kill = self.signal(Signal::KILL);
+            }
+        });
     }
 
     /// The master fd.

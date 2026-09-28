@@ -553,21 +553,33 @@ impl Layout {
 /// One request line to a daemon's control socket at `socket`, and its one reply line.
 ///
 /// The request is a line of JSON, newline included. Its side is shut once it is written, the
-/// reply side kept open until the answer: a question the daemon holds (a permission the worker
-/// waits on) stands while the caller waits.
+/// reply side kept open until the answer. The daemon answers from the request's line, so it may
+/// answer and close before that side is shut; the answer is read all the same.
 ///
 /// # Errors
 ///
-/// When nothing listens there, or the exchange breaks off.
+/// When nothing listens there, or the exchange breaks off before an answer.
 pub async fn ask(socket: &Path, request: &[u8]) -> io::Result<String> {
+    ask_on(tokio::net::UnixStream::connect(socket).await?, request).await
+}
+
+/// [`ask`] on a connected `stream`.
+async fn ask_on(stream: tokio::net::UnixStream, request: &[u8]) -> io::Result<String> {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-    let stream = tokio::net::UnixStream::connect(socket).await?;
     let (rd, mut wr) = stream.into_split();
-    wr.write_all(request).await?;
-    wr.shutdown().await?;
+    // A peer that has answered and closed fails the write (`EPIPE`) or the shutdown
+    // (`ENOTCONN` on macOS), whichever its close beats; its answer is in our receive buffer.
+    let sent = async {
+        wr.write_all(request).await?;
+        wr.shutdown().await
+    }
+    .await;
     let mut reply = String::new();
-    BufReader::new(rd).read_line(&mut reply).await?;
-    Ok(reply.trim().to_owned())
+    let read = BufReader::new(rd).read_line(&mut reply).await;
+    match sent {
+        Err(e) if reply.trim().is_empty() => Err(e),
+        _ => read.map(|_| reply.trim().to_owned()),
+    }
 }
 
 /// How the worker runs.
@@ -1150,6 +1162,32 @@ mod tests {
             "{:?}",
             session.file(SERVER)
         );
+    }
+
+    /// A daemon that answers from the request's first line may close before the asker has
+    /// finished sending: macOS then fails the asker's write (`EPIPE`) or its shutdown
+    /// (`ENOTCONN`), depending on where the close lands. The answer is still there to read. The
+    /// peer here has answered and closed before the ask starts; an empty request reaches the
+    /// shutdown with nothing written.
+    #[tokio::test]
+    async fn an_answer_from_a_peer_that_already_closed_is_read() {
+        use tokio::io::AsyncWriteExt as _;
+        for request in [&b""[..], b"{\"status\":null}\n"] {
+            let (asker, mut daemon) = tokio::net::UnixStream::pair().unwrap();
+            daemon.write_all(b"{\"ok\":true}\n").await.unwrap();
+            drop(daemon);
+            let reply = ask_on(asker, request).await;
+            assert_eq!(reply.unwrap(), r#"{"ok":true}"#, "request {request:?}");
+        }
+    }
+
+    /// A peer that closes without an answer is an error, not an empty answer, once the request
+    /// could not be sent.
+    #[tokio::test]
+    async fn a_peer_gone_without_an_answer_is_an_error() {
+        let (asker, daemon) = tokio::net::UnixStream::pair().unwrap();
+        drop(daemon);
+        ask_on(asker, b"{}\n").await.unwrap_err();
     }
 
     #[test]

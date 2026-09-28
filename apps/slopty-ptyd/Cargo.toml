@@ -27,4 +27,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+slopty-testkit.workspace = true
 tempfile.workspace = true

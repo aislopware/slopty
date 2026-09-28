@@ -394,6 +394,61 @@ mod roundtrip {
         last.shutdown().await.unwrap();
     }
 
+    /// Spawn a sleeper, take its master when `attach` (ptyd's reader then stays out of it),
+    /// close it and wait for its child's exit. The session's id.
+    async fn open_and_close(
+        client: &mut PtydClient,
+        exits: &mut tokio::sync::mpsc::UnboundedReceiver<(SessionId, i32)>,
+        attach: bool,
+    ) -> SessionId {
+        let id = SessionId::new();
+        let spec = SpawnSpec {
+            command: vec!["/bin/sh".into(), "-c".into(), "sleep 60".into()],
+            cwd: None,
+            env: Vec::new(),
+            size: size(),
+        };
+        client.spawn(id, spec).await.unwrap();
+        if attach {
+            drop(client.attach(id).await.unwrap().master);
+        }
+        client.close(id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while exits.recv().await.expect("ptyd is up").0 != id {}
+        })
+        .await
+        .expect("a closed session's child exits");
+        id
+    }
+
+    /// A closed session gives back everything ptyd held for it, attached or not when it closed:
+    /// after many opens and closes the daemon holds the descriptors it held before, and lists
+    /// nothing.
+    #[tokio::test]
+    async fn a_closed_session_gives_back_its_descriptor() {
+        const CYCLES: usize = 16;
+        let daemon = start().await;
+        let pid = i32::try_from(daemon.child.id()).unwrap();
+        let (mut client, mut exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        // The first child also starts the runtime's child reaping, whose descriptors stay.
+        for attach in [false, true] {
+            open_and_close(&mut client, &mut exits, attach).await;
+        }
+        let before = slopty_testkit::process::open_fds(pid).unwrap();
+        for n in 0..CYCLES {
+            open_and_close(&mut client, &mut exits, n % 2 == 0).await;
+        }
+        assert!(client.list().await.unwrap().is_empty(), "no session outlives its close");
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+        let mut after = slopty_testkit::process::open_fds(pid).unwrap();
+        while after > before && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            after = slopty_testkit::process::open_fds(pid).unwrap();
+        }
+        assert!(after <= before, "{CYCLES} sessions opened and closed: {before} fds → {after}");
+        client.shutdown().await.unwrap();
+    }
+
     /// The worker learns that ptyd is gone: its channel of exits ends.
     #[tokio::test]
     async fn the_exit_channel_ends_when_ptyd_goes() {

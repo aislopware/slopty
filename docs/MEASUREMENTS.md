@@ -7593,3 +7593,43 @@ cargo xtask soak            # samples, logs, leaks reports: target/deep/soak/las
   on macOS `shutdown` fails with `ENOTCONN` once the worker has answered and closed first. The
   reply is still there to read. The soak now counts failed hook reports as a failure and goes
   on; none failed in the run above.
+
+## 2026-09-29 — ptyd gives back a closed session; the soak again
+
+The first soak's ptyd growth had one cause. A session closed while a worker held its master
+kept its reader task: the reader was parked waiting for its pause flag to change, the flag's
+sender lived in the session itself, so nothing ever woke it, and the task held the session.
+That kept the master's descriptor, the 64 KiB read buffer and the ring (the ~145 KiB a
+session). A close now stops the reader outright (`Reader::Stop` in
+`apps/slopty-ptyd/src/session.rs`); once the child is reaped nothing holds the session.
+`roundtrip::a_closed_session_gives_back_its_descriptor` opens and closes 16 sessions, half of
+them attached, and reads ptyd's descriptors through `proc_pidinfo`: 12 → 20 before the fix
+(one per attached close), 12 → 12 after.
+
+```sh
+cargo nextest run -p slopty-ptyd a_closed_session
+cargo xtask soak --out target/deep/soak/ptyd-fix
+```
+
+| daemon | footprint, baseline → end | slope over the load | peak | descriptors | threads | `leaks` |
+| --- | --- | --- | --- | --- | --- | --- |
+| server | 4 400 → 4 928 KiB | 228 KiB/min | 4 MiB | 11 → 11 | 11 → 11 | 0 |
+| ptyd | 2 576 → 3 376 KiB | −159 KiB/min | 3 MiB | 11 → 11 | 1 → 1 | 0 |
+| worker | 8 176 → 8 512 KiB | 939 KiB/min | 27 MiB | 14 → 14 | 14 → 14 | 0 |
+
+158 cycles; a cycle took 380 ms at p50 and 435 ms at most. ptyd was 13 → 169 descriptors and
+2 720 → 25 200 KiB (21 632 KiB/min) in the first soak. No hook report failed:
+`slopty_platform::service::ask` now reads the answer when the daemon answered and closed before
+the asker's write or shutdown (`EPIPE`, `ENOTCONN`), which
+`service::tests::an_answer_from_a_peer_that_already_closed_is_read` plays deterministically on a
+socket pair.
+
+The worker's growth, about 6 KiB a cycle over the load (8 KiB in the first soak), is not the
+same class. Read from the code, not yet measured apart: nothing keyed by session outlives the
+close verb, and two capped stores are still filling at 158 cycles: the
+idempotency ledger (4 keyed verbs a cycle, up to 4 096 keys, and lapsed keys are swept only
+once it is full) and the 1 024-message event broadcast, whose payloads the never-read `_keep`
+receiver pins until the ring wraps. Both should level off, the ledger at an estimated
+2.5–3 MiB; together they account for an estimated 3 KiB of a cycle. The server's
+slope still reads like a cache settling. The soak holds both to its budget, so it still fails on
+them.

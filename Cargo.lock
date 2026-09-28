@@ -7280,6 +7280,7 @@ dependencies = [
  "slopty-core",
  "slopty-proto",
  "slopty-pty",
+ "slopty-testkit",
  "tempfile",
  "tokio",
  "tracing",

@@ -271,14 +271,7 @@ impl Connection {
                     return self.error(Some(id), PtydError::NoSuchSession).await;
                 };
                 self.attached.remove(&id);
-                if session.info().exited.is_none() {
-                    let _hup = session.signal(Signal::HUP);
-                    tokio::spawn(async move {
-                        if !session.exits_within(HANGUP_GRACE).await {
-                            let _kill = session.signal(Signal::KILL);
-                        }
-                    });
-                }
+                session.close(HANGUP_GRACE);
                 self.reply(&PtydEvent::Ok, None).await
             }
             PtydRequest::List => {
