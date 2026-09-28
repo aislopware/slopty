@@ -7,7 +7,9 @@ use anyhow::{Context as _, Result};
 use slopty_agent::Hook;
 use slopty_core::SessionId;
 use slopty_proto::WorkerMsg;
-use slopty_proto::ctl::{CtlReply, CtlRequest, Health, PermissionAnswer, Tailscale};
+use slopty_proto::ctl::{
+    CtlReply, CtlRequest, Health, PasteboardAccess, PermissionAnswer, Tailscale,
+};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -105,6 +107,17 @@ fn tailscale_of(status: &slopty_tailnet::Status) -> Tailscale {
     }
 }
 
+/// What the doctor says of reading the pasteboard clipboard sync keeps in step.
+const fn pasteboard_access(access: slopty_platform::pasteboard_access::Access) -> PasteboardAccess {
+    use slopty_platform::pasteboard_access::Access;
+    match access {
+        Access::Allowed => PasteboardAccess::Allowed,
+        Access::NotAskedYet => PasteboardAccess::NotAskedYet,
+        Access::Asks => PasteboardAccess::Asks,
+        Access::Denied => PasteboardAccess::Denied,
+    }
+}
+
 async fn doctor(daemon: &Daemon) -> Health {
     let caps = daemon.caps.borrow().clone();
     Health {
@@ -114,6 +127,7 @@ async fn doctor(daemon: &Daemon) -> Health {
         listen: daemon.listen.to_string(),
         allow: daemon.listener.admission().ranges().iter().map(ToString::to_string).collect(),
         tailscale: tailscale(daemon.listener.admission().local_api().as_ref()).await,
+        pasteboard: pasteboard_access(daemon.clip.access()),
         clients: daemon.wake.lock().counts().0,
         sessions: daemon.worker.session_count(),
         uptime_secs: daemon.started_at.elapsed().as_secs(),

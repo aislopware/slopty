@@ -390,6 +390,8 @@ pub enum PaletteRun {
     Item(slopty_core::ItemId),
     /// Go to this worker's tiles, or give it a shell when it has none.
     Worker(slopty_client::layout::WorkerKey),
+    /// Wake this worker from sleep, as the app offers for it.
+    Wake(slopty_client::layout::WorkerKey),
     /// Open a file tile for the path the field holds (relative to the active shell, `~` the
     /// worker's home), landing on `line`.
     OpenFile {
@@ -448,7 +450,7 @@ impl PaletteRun {
     #[must_use]
     pub const fn verb(&self) -> &'static str {
         match self {
-            Self::Action(_) | Self::Rerun { .. } => "Run",
+            Self::Action(_) | Self::Rerun { .. } | Self::Wake(_) => "Run",
             Self::Session(_)
             | Self::Item(_)
             | Self::Worker(_)
@@ -471,6 +473,7 @@ impl Clone for PaletteRun {
             Self::Session(session) => Self::Session(*session),
             Self::Item(item) => Self::Item(*item),
             Self::Worker(worker) => Self::Worker(*worker),
+            Self::Wake(worker) => Self::Wake(*worker),
             Self::OpenFile { path, line, found } => {
                 Self::OpenFile { path: path.clone(), line: *line, found: *found }
             }
@@ -499,6 +502,7 @@ impl std::fmt::Debug for PaletteRun {
             Self::Session(session) => f.debug_tuple("Session").field(session).finish(),
             Self::Item(item) => f.debug_tuple("Item").field(item).finish(),
             Self::Worker(worker) => f.debug_tuple("Worker").field(worker).finish(),
+            Self::Wake(worker) => f.debug_tuple("Wake").field(worker).finish(),
             Self::OpenFile { path, line, found } => f
                 .debug_struct("OpenFile")
                 .field("path", path)
@@ -665,6 +669,13 @@ impl PaletteItem {
         )
     }
 
+    /// `Wake <worker>` for a worker that sleeps.
+    #[must_use]
+    pub fn wake(name: &str, worker: slopty_client::layout::WorkerKey) -> Self {
+        let run = PaletteRun::Wake(worker);
+        Self::line(format!("Wake {name}"), String::new(), run, IconName::Power, Section::Commands)
+    }
+
     /// An item in the workspace by its title; its icon says what it is.
     #[must_use]
     pub fn item(title: &str, icon: IconName, item: slopty_core::ItemId) -> Self {
@@ -753,6 +764,7 @@ impl PaletteItem {
             PaletteRun::OpenFolder { .. } => IconName::Folder,
             PaletteRun::Action(_)
             | PaletteRun::Worker(_)
+            | PaletteRun::Wake(_)
             | PaletteRun::OpenShell { .. }
             | PaletteRun::OpenAgent { .. }
             | PaletteRun::OpenUrl(_)

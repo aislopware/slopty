@@ -3614,3 +3614,38 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `palette::the_palette_finds_an_agent_by_its_first_prompt_and_last_answer`; screen
     `the_overlay_says_4_4_4_from_the_decoded_picture`,
     `hud_shows_age_jitter_hold_present_cadence_and_the_verdict`.
+
+- ✅ **A DERP relay that holds, waking a worker, Reconnect, and paste on iOS** (2026-09-29).
+  - **A relay is news only once it holds.** Each worker keeps a
+    `slopty_client::relay::RelayWatch`, fed every `WorkerMsg::Path` on the executor's clock.
+    Until `DERP_NOTICE_AFTER` (10 s) on DERP nothing says it except the path itself under the
+    pointer. Then the status bar shows "Relayed via fra — adds latency" for the focused worker
+    in the muted tone, with the fix (`LinkPath::relay_fix`) in its tooltip and accessible
+    description, and the navigator names the relay beside the worker, muted too. It was in the
+    warning tone from the first DERP message before, which flagged every path still settling. A
+    timer at `due(now)` draws the chrome again when the notice comes due. A direct path, or the
+    link going, takes it away.
+  - **Wake.** `HostActions` gained `wake`. The palette lists "Wake <worker>" (the `Power` icon,
+    under commands) for each worker the app offers it for, and the hosts row shows a Wake
+    beside Connect and Forget. A line or button that needs the app's window closure queues it
+    in `pending_runs`, which the next frame runs with the window.
+  - **Reconnect.** The conversation face's "<worker> is unreachable · your draft is kept" line
+    ends in a Link button, Reconnect. It emits `FaceEvent::Reconnect`, and the workspace runs
+    the app's `connect` for that worker: the same dial-now as the hosts popover's Connect.
+  - **Paste on iPhone and iPad through the system's button.** The key bar's Paste (a shell's,
+    when nothing is selected, and a remote window's) has the system's `UIPasteControl` over it
+    (`slopty_ui::paste_key::PasteKey`). It is drawn from the caps' tokens: the text colour on
+    the raised plate, the small radius, the word alone. A canvas in the cap places it while the
+    whole cap is in the row's view. The render hides it first, so a frame without the cap
+    leaves no button behind. A theme change makes a new one. A tap's `Pasted` goes to
+    `WorkspaceView::paste_made`. That hands the pasted board to `ClipSync::pasted` as the read
+    of the clipboard at its current change count, then pastes as the cap would: the text into
+    the shell, a picture as the offer ahead of the picture chord, ⌘V into a window. So nothing
+    reads the general pasteboard and no alert shows. Where the button cannot be made, the cap
+    under it pastes as before.
+  - Tests: workspace `bars::a_link_that_stays_on_derp_is_said_once_it_has_held`,
+    `bars::a_sleeping_worker_is_woken_from_the_palette_and_its_hosts_row`,
+    `remote::a_paste_through_the_system_button_reads_the_clipboard_no_further`; face
+    `composing::an_unreachable_worker_keeps_the_draft` (Reconnect); `paste_key::tests` for the
+    placement and the colours. The UIKit button itself is not driven by a test: a tap on it is
+    the person's by design.

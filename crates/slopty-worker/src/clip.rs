@@ -4,6 +4,10 @@
 //!   worker's changes ([`Clipboard::watch`]); [`Clipboard::watched`] wakes the poller. A change
 //!   made while nobody watched is not announced when someone starts to: it was made on the worker,
 //!   not by anyone at a client.
+//! - **Read only when reads are free.** macOS asks the person before a program reads the general
+//!   pasteboard unless they allowed it ([`Access`]), and a poll is no paste of theirs, so while
+//!   reads are not free nothing is read or announced (`docs/decisions/platform.md`, "The worker's
+//!   pasteboard alert"). A paste from a client still writes: writing never asks.
 //! - **Announce.** [`Clipboard::poll`] turns a change into an [`Offer`]: plain text of at most
 //!   [`INLINE_CLIP_BYTES`] inline, every other representation listed with its size and digest and
 //!   kept here for [`Clipboard::fetch`]. Concealed and transient contents are skipped.
@@ -24,6 +28,7 @@ use parking_lot::Mutex;
 use slopty_input::pasteboard::{
     Board, CONCEALED_TYPE, Item, ORIGIN_TYPE, TRANSIENT_TYPE, board_type,
 };
+use slopty_platform::pasteboard_access::Access as ReadAccess;
 use slopty_proto::transfer::{
     ClipFormat, ClipItem, Hash, INLINE_CLIP_BYTES, Offer, Peer, origin_bytes, parse_origin,
 };
@@ -57,6 +62,31 @@ fn file_url(path: &Path) -> String {
         }
     }
     url
+}
+
+/// How reading a board's contents goes for this process, asked before every poll.
+pub trait Access {
+    /// Whether a read the person did not make goes through, and if not, why.
+    fn access(&self) -> ReadAccess;
+}
+
+/// The general pasteboard asks as macOS says; a named one always lets this process read it.
+#[cfg(target_os = "macos")]
+impl Access for slopty_input::pasteboard::MacBoard {
+    fn access(&self) -> ReadAccess {
+        if self.name().is_some() {
+            ReadAccess::Allowed
+        } else {
+            slopty_platform::pasteboard_access::general()
+        }
+    }
+}
+
+/// Nothing to read, and nothing that asks.
+impl Access for slopty_input::pasteboard::Unsupported {
+    fn access(&self) -> ReadAccess {
+        ReadAccess::Allowed
+    }
 }
 
 /// What a client's paste chord needs before it can go to the window.
@@ -230,7 +260,7 @@ impl State {
     }
 }
 
-impl<B: Board> Clipboard<B> {
+impl<B: Board + Access> Clipboard<B> {
     /// Sync over `board` on behalf of `me`.
     pub fn new(board: B, me: Peer) -> Self {
         Self { board, me, state: Mutex::default(), watched: watch::Sender::new(false) }
@@ -270,10 +300,16 @@ impl<B: Board> Clipboard<B> {
         self.state.lock().incoming.remove(&client);
     }
 
+    /// How reading the pasteboard goes now, for the doctor.
+    pub fn access(&self) -> ReadAccess {
+        self.board.access()
+    }
+
     /// The pasteboard's change since the last poll or write, as an offer to announce; `None`
-    /// when nobody watches, nothing changed, or the change is not to be announced.
+    /// when nobody watches, reads would ask the person, nothing changed, or the change is not
+    /// to be announced.
     pub fn poll(&self) -> Option<Offer> {
-        if self.state.lock().watchers.is_empty() {
+        if self.state.lock().watchers.is_empty() || !self.board.access().reads_freely() {
             return None;
         }
         let count = self.board.change_count();
@@ -420,6 +456,20 @@ mod tests {
         items: Mutex<Vec<Item>>,
         /// Run once inside the next `write`, after the contents land and before it returns.
         during_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// Reading asks the person first, as the general pasteboard does until they allow it.
+        asks: std::sync::atomic::AtomicBool,
+        /// Reads of the contents so far.
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Access for Fake {
+        fn access(&self) -> ReadAccess {
+            if self.asks.load(Ordering::SeqCst) {
+                ReadAccess::NotAskedYet
+            } else {
+                ReadAccess::Allowed
+            }
+        }
     }
 
     impl Fake {
@@ -448,11 +498,13 @@ mod tests {
         }
 
         fn types(&self) -> Vec<String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             let items = self.items.lock();
             items.first().map(|i| i.iter().map(|(t, _b)| t.clone()).collect()).unwrap_or_default()
         }
 
         fn data(&self, kind: &str) -> Option<Vec<u8>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             let items = self.items.lock();
             items.first()?.iter().find(|(t, _b)| t == kind).map(|(_t, b)| b.clone())
         }
@@ -509,6 +561,39 @@ mod tests {
         assert!(!*watched.borrow_and_update());
         c.board().copy(&[(&text(), b"three")]);
         assert_eq!(c.poll(), None);
+    }
+
+    /// While reading the pasteboard would raise macOS's paste alert, a change is neither read
+    /// nor announced, and a client's paste is still written; once reads are allowed the
+    /// clipboard is announced again.
+    #[test]
+    fn nothing_is_read_while_reads_would_ask_the_person() {
+        let c = clip();
+        let a = next_link();
+        c.watch(a, true);
+        c.board().asks.store(true, Ordering::SeqCst);
+        assert_eq!(c.access(), ReadAccess::NotAskedYet);
+        c.board().copy(&[(&text(), b"secret")]);
+        let before = c.board().reads.load(Ordering::SeqCst);
+        assert_eq!(c.poll(), None);
+        assert_eq!(c.board().reads.load(Ordering::SeqCst), before, "the contents were not read");
+        let offer = Offer {
+            origin: Peer::Client(ClientId::nil()),
+            generation: 1,
+            items: vec![ClipItem {
+                format: ClipFormat::Text,
+                size: 5,
+                hash: digest(b"typed"),
+                inline: Some(b"typed".to_vec()),
+            }],
+        };
+        c.offered(a, offer);
+        assert_eq!(c.paste(a), Paste::Ready);
+        assert_eq!(c.board().data(&text()).unwrap(), b"typed", "a paste still writes");
+        c.board().asks.store(false, Ordering::SeqCst);
+        c.board().copy(&[(&text(), b"allowed now")]);
+        let offer = c.poll().expect("reads are free again");
+        assert_eq!(offer.items[0].inline.as_deref(), Some(&b"allowed now"[..]));
     }
 
     /// Another process's copy clears the pasteboard, which moves its count, and puts the new

@@ -110,6 +110,7 @@ gpui_kit::assets::icon_assets!(
         Pencil,
         Plug,
         Plus,
+        Power,
         RotateCw,
         Save,
         Scissors,

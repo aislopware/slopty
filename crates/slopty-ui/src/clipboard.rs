@@ -134,7 +134,21 @@ impl ClipSync {
         if self.held.as_ref().is_some_and(|h| h.count == count) {
             return;
         }
-        let types = self.board.types();
+        let board = Rc::clone(&self.board);
+        self.hold(board.as_ref(), count, me);
+    }
+
+    /// A paste the person made where reading the clipboard asks them first (the system's paste
+    /// button on iOS): `pasted` holds what the clipboard holds now, so it stands for a read of
+    /// it, and the paste that follows reads nothing more.
+    pub fn pasted(&mut self, pasted: &dyn Pasteboard, me: ClientId) {
+        let count = self.board.change_count();
+        self.hold(pasted, count, me);
+    }
+
+    /// Take `board`'s contents as the clipboard's at change `count`.
+    fn hold(&mut self, board: &dyn Pasteboard, count: i64, me: ClientId) {
+        let types = board.types();
         // A copy clears the pasteboard, which moves the count, and puts its contents on after
         // under that same count: an empty board may be a copy half done, read again next time.
         if types.is_empty() {
@@ -146,7 +160,7 @@ impl ClipSync {
             || has(ORIGIN_TYPE)
             || has(CONCEALED_UTI)
             || has(TRANSIENT_UTI);
-        let urls = if skip { Vec::new() } else { self.board.file_urls() };
+        let urls = if skip { Vec::new() } else { board.file_urls() };
         let reps: Vec<(ClipFormat, Vec<u8>)> = if skip {
             Vec::new()
         } else if !urls.is_empty() {
@@ -155,7 +169,7 @@ impl ClipSync {
             SYNCED
                 .into_iter()
                 .filter(|&format| has(uti_of(format)))
-                .filter_map(|format| self.board.data(uti_of(format)).map(|bytes| (format, bytes)))
+                .filter_map(|format| board.data(uti_of(format)).map(|bytes| (format, bytes)))
                 .collect()
         };
         let items: Vec<ClipItem> = reps

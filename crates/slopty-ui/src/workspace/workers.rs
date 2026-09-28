@@ -4,6 +4,7 @@
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use slopty_client::ItemChange;
 use slopty_client::layout::{Placement, TileRef, WorkerKey};
+use slopty_client::relay::RelayNotice;
 use slopty_core::{ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::file::{FileRead, WriteResult};
@@ -56,7 +57,8 @@ impl WorkspaceView {
         w.home = (!home.is_empty()).then_some(home);
         w.caps = Some(caps);
         w.load = Some(load);
-        w.path = None;
+        w.relay.reset();
+        w.relay_due = None;
         w.awaiting_snapshot = true;
         w.titles_requested = false;
         w.watched.clear();
@@ -96,7 +98,8 @@ impl WorkspaceView {
         w.status = status;
         w.link = None;
         w.rtt = None;
-        w.path = None;
+        w.relay.reset();
+        w.relay_due = None;
         w.pending_opens.clear();
         if let Some(sized) = w.sized.as_mut() {
             sized.lost();
@@ -242,13 +245,28 @@ impl WorkspaceView {
     }
 
     /// How the tailnet carries the link to `key`, as its worker last said; the link that
-    /// brings it is the one it describes, so it goes with the link.
+    /// brings it is the one it describes, so it goes with the link. A DERP relay is said once
+    /// it has held ([`slopty_client::relay::RelayWatch`]), so the chrome draws again then.
     pub fn set_link_path(&mut self, key: WorkerKey, path: LinkPath, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
         let Some(w) = self.workers.get_mut(&key).filter(|w| w.link.is_some()) else { return };
-        if w.path.as_ref() != Some(&path) {
-            w.path = Some(path);
+        let changed = w.relay.path() != Some(&path);
+        w.relay.observe(path, now);
+        w.relay_due = w.relay.due(now).map(|at| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(at.saturating_duration_since(now)).await;
+                let _gone = this.update(cx, |_this, cx| cx.notify());
+            })
+        });
+        if changed {
             cx.notify();
         }
+    }
+
+    /// What to say of `key`'s link having stayed on a DERP relay, once it has held.
+    #[must_use]
+    pub fn relay_notice(&self, key: WorkerKey, cx: &App) -> Option<RelayNotice> {
+        self.workers.get(&key)?.relay.notice(cx.background_executor().now())
     }
 
     /// What `key` can do changed: a permission granted, a display attached. The link's word
@@ -281,7 +299,7 @@ impl WorkspaceView {
     /// How the tailnet carries the link to `key`, when its worker has said.
     #[must_use]
     pub fn link_path(&self, key: WorkerKey) -> Option<&LinkPath> {
-        self.workers.get(&key)?.path.as_ref()
+        self.workers.get(&key)?.relay.path()
     }
 
     /// A registry snapshot, delta or pointing from `key`.

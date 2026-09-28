@@ -111,12 +111,17 @@ impl ConversationView {
         )
     }
 
-    /// While the worker is out of reach: that it is, and that the draft waits for it.
-    fn away_line(&self) -> Option<AnyElement> {
+    /// While the worker is out of reach: that it is, that the draft waits for it, and the way
+    /// to dial it now.
+    fn away_line(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let name = self.away.as_deref()?;
         let theme = &self.theme;
         let s = theme.surfaces;
         let text = SharedString::from(format!("{name} is unreachable \u{b7} your draft is kept"));
+        let reconnect = kit::button(theme, "composer-reconnect", "Reconnect", ButtonKind::Link)
+            .on_click(cx.listener(|_this, _ev, _w, cx| {
+                cx.emit(crate::conversation::FaceEvent::Reconnect);
+            }));
         Some(
             div()
                 .id("composer-away")
@@ -131,6 +136,7 @@ impl ConversationView {
                 .text_color(hsla(s.text_secondary))
                 .child(self.icon(IconName::WifiOff, s.warn))
                 .child(div().flex_1().min_w_0().child(text))
+                .child(reconnect)
                 .into_any_element(),
         )
     }
@@ -147,7 +153,7 @@ impl ConversationView {
         let tasks = self.tasks_card(cx);
         let tray = self.tray(cx);
         let settled = self.settled_line(cx);
-        let away = self.away_line();
+        let away = self.away_line(cx);
         let asking = self.approvals.prompt().is_some();
         let inside = match (asking, self.answering.is_some()) {
             (true, true) => self.question_card(cx),

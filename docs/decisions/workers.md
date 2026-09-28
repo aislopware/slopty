@@ -595,3 +595,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Pending.** The palette command in `slopty-ui`, an MCP tool in `slopty-tools`, and
     `womp` in `slopty worker doctor`'s `Health` (`ctl.rs`). No live wake was sent: a test
     never puts a magic packet on the LAN, and waking a Mac takes a second one asleep.
+
+- ✅ **Waking a worker from the app, an agent and the doctor; clipboard reads that would ask
+  wait** (2026-09-29, finishing the pending half of the wake above and the pasteboard alert in
+  `platform.md`).
+  - **The app.** A worker whose `Directory::can_wake` holds gets "Wake <worker>" in the
+    palette's commands and a Wake in its row of the status bar's hosts popover. Both run the
+    app's `wake_worker`, which sends `ServerCaller::wake` on the runtime and shows a notice:
+    "<by> sent <worker> a wake; it shows online once it is up", or "Could not wake <worker>:
+    <why>". The offer follows the directory, since the hosts' actions are rebuilt on every
+    server message.
+  - **Agents.** The MCP tool `wake_worker` (31 tools now) takes a worker's name or id and
+    answers `by`, `to` and `wake_on_lan_off`, as `slopty wake --json` does
+    (`slopty_tools::ops::wake`).
+  - **The doctor.** `Health` gained `pasteboard`
+    (`slopty_proto::ctl::PasteboardAccess`: allowed, not asked yet, asks, denied). `slopty
+    worker doctor` prints "✔ Clipboard reads" or the `Access::problem` text with what the
+    worker does meanwhile. It prints "Wake for network access" from `caps.wake_on_lan` when the
+    worker could read it, with the `pmset` fix when it is off.
+  - **The worker reads nothing while reads would ask.** `Clipboard::poll` asks the board's
+    `clip::Access` first and returns before reading any contents unless reads are free. The
+    general pasteboard answers with `pasteboard_access::general()`. A named pasteboard (the
+    tests', `--pasteboard`) always allows, as `NSPasteboard.h` says, so the e2e runs are
+    unaffected by this Mac's setting. Writing a client's paste never asks, so it still
+    lands. Once reads are allowed, the next change is announced as usual.
+  - Tests: worker `clip::tests::nothing_is_read_while_reads_would_ask_the_person`; tools
+    `a_worker_is_woken_by_name`; app `server::tests::a_wake_says_who_sent_it_or_why_none_went`;
+    workspace `bars::a_sleeping_worker_is_woken_from_the_palette_and_its_hosts_row`; CLI
+    `doctor_report_names_the_binary_and_flags_missing_permissions`; goldens
+    `ctl_health_pasteboard_asks_and_no_wake` and `ctl_pasteboard_access`, with the ctl
+    doctor goldens moved by the new field.

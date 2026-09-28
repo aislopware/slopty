@@ -343,4 +343,10 @@ fn an_unreachable_worker_keeps_the_draft(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(seen.borrow().iter().all(|e| !matches!(e, FaceEvent::Submit { .. })));
     assert_eq!(draft(&view, cx), "keep me");
+
+    let at = cx.debug_bounds("composer-reconnect").expect("a way to dial it now");
+    cx.simulate_click(at.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(seen.borrow().last(), Some(&FaceEvent::Reconnect));
+    assert_eq!(draft(&view, cx), "keep me", "the draft stays");
 }

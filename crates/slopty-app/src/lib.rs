@@ -394,6 +394,10 @@ pub struct Workspace {
     /// stay up for what arrives just after the phone is pocketed.
     #[cfg(target_os = "ios")]
     grace: Option<slopty_platform::notify::BackgroundGrace>,
+    /// The system's paste button over the key bar's Paste, made with the first key bar, so a
+    /// paste there needs no permission alert.
+    #[cfg(target_os = "ios")]
+    paste_key: Option<Rc<slopty_ui::paste_key::PasteKey>>,
 }
 
 impl Workspace {
@@ -459,6 +463,8 @@ impl Workspace {
             heard_terminals: std::collections::HashMap::new(),
             #[cfg(target_os = "ios")]
             grace: None,
+            #[cfg(target_os = "ios")]
+            paste_key: None,
         }
     }
 
@@ -787,8 +793,9 @@ impl Workspace {
         self.refresh_hosts(cx);
     }
 
-    /// What the status bar's hosts popover can do to each worker: dial it now, and forget
-    /// one added by address; and its way to add a worker.
+    /// What the status bar's hosts popover can do to each worker: dial it now, wake one the
+    /// server can send a magic packet to (the palette offers that too), and forget one added
+    /// by address; and its way to add a worker.
     fn refresh_hosts(&self, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
         let hosts = self
@@ -809,7 +816,14 @@ impl Workspace {
                     });
                     run
                 });
-                (slot.key, HostActions { connect: Some(connect), forget })
+                let wake = self.directory.can_wake(id).then(|| {
+                    let this = this.clone();
+                    let run: MenuRun = Rc::new(move |_window, cx| {
+                        let _gone = this.update(cx, |ws, cx| ws.wake_worker(id, cx));
+                    });
+                    run
+                });
+                (slot.key, HostActions { connect: Some(connect), forget, wake })
             })
             .collect();
         let add: MenuRun = Rc::new(move |window, cx| {
@@ -2014,6 +2028,34 @@ impl Workspace {
             .on_click(move |_ev, window, cx| on_click(window, cx))
     }
 
+    /// The system's paste button, made once a key bar can show and made again for a theme
+    /// that changed; hidden until a Paste cap drawn this frame puts it over itself.
+    #[cfg(target_os = "ios")]
+    fn ready_paste_key(&mut self, window: &Window, cx: &Context<Self>) {
+        let stale = self.paste_key.as_ref().is_some_and(|key| !key.drawn_as(&self.theme));
+        if stale || (self.paste_key.is_none() && key_bar_visible(TOUCH, self.hardware_keyboard)) {
+            let workspace = self.view.downgrade();
+            self.paste_key =
+                slopty_ui::paste_key::PasteKey::new(window, &self.theme, workspace, cx)
+                    .map(Rc::new);
+        }
+        if let Some(key) = &self.paste_key {
+            key.hide();
+        }
+    }
+
+    /// What puts the system's paste button over a Paste cap: an element as large as the cap,
+    /// whose paint places the button while the cap is wholly in the row's view.
+    #[cfg(target_os = "ios")]
+    fn paste_key_spot(&self) -> Option<gpui::AnyElement> {
+        let key = Rc::clone(self.paste_key.as_ref()?);
+        let spot = gpui::canvas(
+            |_bounds, _window, _cx| {},
+            move |bounds, (), window, _cx| key.place(bounds, window.content_mask().bounds),
+        );
+        Some(spot.absolute().inset_0().into_any_element())
+    }
+
     /// The bar over a remote window: chords and arrows, copy and paste through the worker.
     fn screen_key_bar(
         &self,
@@ -2060,6 +2102,8 @@ impl Workspace {
         let paste = self.bar_key("skey-paste".to_owned(), "Paste", false, move |_w, cx| {
             target.update(cx, ScreenView::paste_key);
         });
+        #[cfg(target_os = "ios")]
+        let paste = paste.children(self.paste_key_spot());
         keys.push(("Paste", paste.into_any_element()));
         self.key_row_of(keys, width).into_any_element()
     }
@@ -2111,6 +2155,10 @@ impl Workspace {
             .role(Role::Button)
             .aria_label(clip_label)
             .child(clip_label);
+        // Copy is this app's own; only a paste reads another's clipboard.
+        #[cfg(target_os = "ios")]
+        let clipboard =
+            clipboard.children((!has_selection).then(|| self.paste_key_spot()).flatten());
         let clipboard = tab_stop(clipboard, accent).on_click(move |_ev, window, cx| {
             target.update(cx, |t, cx| {
                 if has_selection {
@@ -2189,6 +2237,8 @@ impl Render for Workspace {
         // Notch / Dynamic Island, home indicator and the soft keyboard on iOS; zero on macOS.
         // The workspace keeps the top and the sides clear itself.
         let insets = window.insets().effective();
+        #[cfg(target_os = "ios")]
+        self.ready_paste_key(window, cx);
         let key_bar = key_bar_visible(TOUCH, self.hardware_keyboard)
             .then(|| self.view.read(cx).active_key_target())
             .flatten()

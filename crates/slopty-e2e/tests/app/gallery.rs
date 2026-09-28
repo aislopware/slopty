@@ -148,6 +148,7 @@ fn this_mac_report(screen_recording: bool) -> String {
             node: "studio.tail1234.ts.net".to_owned(),
             ip: Some(std::net::IpAddr::from([100, 64, 0, 3])),
         },
+        pasteboard: slopty_proto::ctl::PasteboardAccess::Allowed,
         clients: 0,
         sessions: 0,
         uptime_secs: 1,

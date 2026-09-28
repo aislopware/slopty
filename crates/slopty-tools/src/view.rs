@@ -897,6 +897,28 @@ pub fn opened(term: TermRef) -> OpenedView {
     OpenedView { term: term_string(term), worker: term.worker, session: term.session }
 }
 
+/// A wake sent to a sleeping worker, for JSON.
+#[derive(Debug, Serialize)]
+pub struct WokenView<'a> {
+    worker: WorkerId,
+    /// The machine that sent the magic packet.
+    by: &'a str,
+    /// The sleeping worker's interfaces it went to.
+    to: &'a [String],
+    /// The worker said it sleeps through a magic packet (Wake for network access is off).
+    wake_on_lan_off: bool,
+}
+
+/// The wake [`crate::ops::wake`] sent.
+pub fn woken(woken: &crate::ops::Woken) -> WokenView<'_> {
+    WokenView {
+        worker: woken.worker,
+        by: &woken.by,
+        to: &woken.to,
+        wake_on_lan_off: woken.wake_on_lan_off,
+    }
+}
+
 /// Short handles for text output: the worker's name where it is unique (its id otherwise), and
 /// the shortest session-id prefix no other listed session shares.
 struct ShortTerms {

@@ -2111,8 +2111,8 @@ mod ctl {
     use serde::de::DeserializeOwned;
     use slopty_core::{DisplayId, SessionId, WallMs, WindowId, WorkerId};
     use slopty_proto::ctl::{
-        CtlReply, CtlRequest, Decision, Health, LtrStats, PermissionAnswer, PermissionAsk,
-        Quantiles, ScreenStats, ScreenSummary, Tailscale,
+        CtlReply, CtlRequest, Decision, Health, LtrStats, PasteboardAccess, PermissionAnswer,
+        PermissionAsk, Quantiles, ScreenStats, ScreenSummary, Tailscale,
     };
     use slopty_proto::screen::{CaptureTarget, VideoCodec};
     use slopty_proto::server::{Os, WorkerCaps};
@@ -2158,6 +2158,7 @@ mod ctl {
                 node: "mac-studio.tail1234.ts.net".to_owned(),
                 ip: Some(IpAddr::from([100, 64, 0, 7])),
             },
+            pasteboard: PasteboardAccess::Allowed,
             clients: 2,
             sessions: 5,
             uptime_secs: 86_400,
@@ -2319,5 +2320,22 @@ mod ctl {
     fn outcomes() {
         snap("ctl_reply_ok", &CtlReply::Ok { changed: true });
         snap("ctl_reply_error", &CtlReply::Error { message: "no such session".to_owned() });
+    }
+
+    /// What the doctor says of a worker whose clipboard reads wait on the person, and of one
+    /// that sleeps through a magic packet.
+    #[test]
+    fn pasteboard_access_and_wake_for_network_access() {
+        let mut health = health();
+        health.pasteboard = PasteboardAccess::NotAskedYet;
+        health.caps.wake_on_lan = Some(false);
+        snap("ctl_health_pasteboard_asks_and_no_wake", &health);
+        let every = [
+            PasteboardAccess::Allowed,
+            PasteboardAccess::NotAskedYet,
+            PasteboardAccess::Asks,
+            PasteboardAccess::Denied,
+        ];
+        snap("ctl_pasteboard_access", &every.to_vec());
     }
 }

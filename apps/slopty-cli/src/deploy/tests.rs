@@ -119,6 +119,7 @@ fn health() -> Health {
         listen: "[::]:45550".to_owned(),
         allow: Vec::new(),
         tailscale: Tailscale::Up { node: "studio.tail1234.ts.net".to_owned(), ip: None },
+        pasteboard: slopty_proto::ctl::PasteboardAccess::Allowed,
         clients: 0,
         sessions: 0,
         uptime_secs: 1,

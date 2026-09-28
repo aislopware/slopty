@@ -530,6 +530,7 @@ mod tests {
                 listen: "[::]:45550".to_owned(),
                 allow: Vec::new(),
                 tailscale: slopty_proto::ctl::Tailscale::Absent,
+                pasteboard: slopty_proto::ctl::PasteboardAccess::Allowed,
                 clients: 0,
                 sessions: 0,
                 uptime_secs,

@@ -159,6 +159,7 @@ mod tests {
                 "upload_file",
                 "download_file",
                 "forget_worker",
+                "wake_worker",
             ]
         );
         let wait = &listed["result"]["tools"][8];
@@ -299,7 +300,7 @@ mod tests {
         // another test's listener bound to `127.0.0.1` on the same port would answer instead.
         let inside = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
         let listed = rpc(inside, 1, "tools/list", None, json!({})).await;
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 30);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 31);
         serving.abort();
     }
 }

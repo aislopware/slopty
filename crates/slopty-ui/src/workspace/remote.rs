@@ -19,8 +19,8 @@ use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
 use slopty_proto::transfer::{ClipFormat, ClipMsg, Dest, XferMsg};
 
-use super::WorkspaceView;
 use super::actions::{ListPorts, SaveCopy};
+use super::{KeyTarget, WorkspaceView};
 use crate::clipboard::{ClipFiles, ClipSync, file_url_paths, provider};
 use crate::conversation::{Attach, ConversationView};
 use crate::palette::{CommandPalette, PaletteItem};
@@ -125,6 +125,26 @@ impl WorkspaceView {
     /// the app, a named one under the self-test).
     pub fn set_pasteboard(&mut self, board: Rc<dyn Pasteboard>) {
         self.clip = Some(Rc::new(RefCell::new(ClipSync::new(board))));
+    }
+
+    /// The person pasted with the system's paste button (iOS), which handed over `pasted`, the
+    /// clipboard as it is, with no prompt. It goes where the key bar's Paste goes, the focused
+    /// shell or remote window, and stands for the read of the clipboard that paste would make.
+    pub fn paste_made(&self, pasted: &dyn Pasteboard, cx: &mut Context<Self>) {
+        let Some(tile) = self.focused() else { return };
+        if let (Some(me), Some(clip)) = (self.me(tile.worker), self.clip.as_ref()) {
+            clip.borrow_mut().pasted(pasted, me);
+        }
+        match self.active_key_target() {
+            Some(KeyTarget::Terminal(terminal)) => {
+                let text = pasted
+                    .data(slopty_platform::pasteboard::TEXT_UTI)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+                terminal.update(cx, |t, cx| t.paste_made(text, cx));
+            }
+            Some(KeyTarget::Screen(screen)) => screen.update(cx, ScreenView::paste_key),
+            None => {}
+        }
     }
 
     /// The app is frontmost or not: a worker's clipboard is watched only while it is.

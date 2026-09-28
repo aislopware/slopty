@@ -282,6 +282,14 @@ struct ForgetWorkerArgs {
     idempotency_key: Option<String>,
 }
 
+/// `wake_worker`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WakeWorkerArgs {
+    /// Worker name or id.
+    worker: String,
+}
+
 /// `write_file`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -795,6 +803,14 @@ pub fn list() -> Vec<Tool> {
              for a machine retired or set up again elsewhere. An online worker is refused.",
             Kind::Destroy,
         ),
+        tool::<WakeWorkerArgs>(
+            "wake_worker",
+            "Wake a worker that sleeps: the server, or an online worker on the same LAN, sends \
+             it a magic packet. Returns `by` (the machine that sent it), `to` (the sleeping \
+             worker's interfaces) and `wake_on_lan_off` (it said it sleeps through one). It \
+             shows online in list_workers once it is up; wait for that with events.",
+            Kind::Write,
+        ),
     ]
 }
 
@@ -998,6 +1014,10 @@ async fn run<D: Dispatch>(
             let a: ForgetWorkerArgs = args(arguments)?;
             ops::forget_worker(&mut res, &a.worker, checked_key(a.idempotency_key)?).await?;
             json(&view::DONE)
+        }
+        "wake_worker" => {
+            let a: WakeWorkerArgs = args(arguments)?;
+            json(&view::woken(&ops::wake(&mut res, &a.worker).await?))
         }
         "list_items" => {
             let a: WorkerArgs = args(arguments)?;
@@ -1218,6 +1238,9 @@ mod tests {
                 Verb::CaptureStill { .. } => {
                     Outcome::Still { png: b"\x89PNG".to_vec(), width: 640, height: 400 }
                 }
+                Verb::Wake { .. } => {
+                    Outcome::WakeSent { by: "server".to_owned(), to: vec!["en0".to_owned()] }
+                }
                 _ => Outcome::Done,
             }
         }
@@ -1271,6 +1294,7 @@ mod tests {
                 "upload_file",
                 "download_file",
                 "forget_worker",
+                "wake_worker",
             ]
         );
         for t in &tools {
@@ -1564,5 +1588,27 @@ mod tests {
         let (failed, text) = call_json(&server, "download_file", down).await;
         assert!(failed && text.contains("(Unsupported)"), "{text}");
         assert!(server.verbs().is_empty(), "nothing was sent");
+    }
+
+    /// A worker is woken by its name, and the answer says who sent the packet and where.
+    #[tokio::test]
+    async fn a_worker_is_woken_by_name() {
+        let fake = Fake::default();
+        let (failed, text) =
+            call_json(&fake, "wake_worker", json!({ "worker": "mac-studio" })).await;
+        assert!(!failed, "{text}");
+        let woken: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            woken,
+            json!({
+                "worker": studio().to_string(),
+                "by": "server",
+                "to": ["en0"],
+                "wake_on_lan_off": false,
+            })
+        );
+        assert_eq!(fake.verbs().pop(), Some(Verb::Wake { worker: studio() }));
+        let (failed, text) = call_json(&fake, "wake_worker", json!({})).await;
+        assert!(failed && text.contains("worker"), "a worker is named: {text}");
     }
 }

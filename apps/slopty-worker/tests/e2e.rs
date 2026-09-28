@@ -175,14 +175,22 @@ mod tests {
         }
     }
 
-    /// A fresh endpoint (new client id) dialing `addr`: a cold QUIC connection.
+    /// A fresh endpoint (new client id) dialing `addr`: a cold QUIC connection. A dial that
+    /// gets no answer within its short handshake limit is dialed again within the step, as the
+    /// client's redial does: on a machine loaded by the rest of the suite a worker that has
+    /// just started can miss the first one.
     async fn dial(addr: SocketAddr) -> (slopty_net::Endpoint, WorkerConn) {
         let endpoint = bind_client().unwrap();
         let hello = Hello { client: ClientId::new(), name: "e2e".to_owned() };
-        let worker = tokio::time::timeout(STEP, connect_addr(&endpoint, addr, hello))
-            .await
-            .unwrap()
-            .unwrap();
+        let dialing = async {
+            loop {
+                match connect_addr(&endpoint, addr, hello.clone()).await {
+                    Err(slopty_net::NetError::Connect(why)) if why.ends_with("no answer") => {}
+                    other => break other,
+                }
+            }
+        };
+        let worker = tokio::time::timeout(STEP, dialing).await.unwrap().unwrap();
         (endpoint, worker)
     }
 

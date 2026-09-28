@@ -15,6 +15,7 @@
 //!   drops go up into it.
 //! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
 //! * [`picker`] — the "add a window" chooser.
+//! * [`paste_key`] — the system's paste button over the iOS key bar's Paste.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
 //! * [`colors`] — theme tokens → GPUI colours.
 //! * [`kit`] — gpui-kit's theme kept on the same tokens.
@@ -40,6 +41,7 @@ pub mod kit;
 pub mod markdown;
 pub mod note;
 pub mod palette;
+pub mod paste_key;
 pub mod picker;
 pub mod screen;
 pub mod settings_editor;

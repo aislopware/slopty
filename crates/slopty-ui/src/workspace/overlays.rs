@@ -54,6 +54,22 @@ impl WorkspaceView {
         })
     }
 
+    /// "Wake `<worker>`" for each worker the app can wake from sleep.
+    fn wake_lines(&self) -> impl Iterator<Item = PaletteItem> + '_ {
+        self.workers
+            .iter()
+            .filter(|(key, _)| self.host_actions(**key).is_some_and(|a| a.wake.is_some()))
+            .map(|(key, w)| PaletteItem::wake(&w.name, *key))
+    }
+
+    /// Run the app's wake for `worker`, on the next frame.
+    fn wake_worker(&mut self, worker: WorkerKey, cx: &mut Context<Self>) {
+        if let Some(run) = self.host_actions(worker).and_then(|a| a.wake.clone()) {
+            self.pending_runs.push(run);
+            cx.notify();
+        }
+    }
+
     /// Every line the palette offers: the sessions to go to (agents waiting on the human
     /// first), every other tile, the workers, the last few commands of the shell a "run" would
     /// go to, then every action, then the app's own. The palette groups them into its sections.
@@ -92,6 +108,7 @@ impl WorkspaceView {
             items.push(line.on_worker(self.worker_label(tile.worker)));
         }
         items.extend(self.worker_lines());
+        items.extend(self.wake_lines());
         // The shell a "run" would go to: its last few commands, to run again.
         if let Some(shell) = self.run_target()
             && let Some(view) = self.terminals.get(&shell)
@@ -321,6 +338,7 @@ impl WorkspaceView {
                     this.palette_return = None;
                     this.go_to_worker(*worker, cx);
                 }
+                PaletteEvent::Run(PaletteRun::Wake(worker)) => this.wake_worker(*worker, cx),
                 PaletteEvent::Run(PaletteRun::OpenUrl(url)) => {
                     tracing::info!(%url, "opening a forwarded port");
                     slopty_platform::open_url(url);

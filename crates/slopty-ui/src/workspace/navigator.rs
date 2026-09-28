@@ -916,6 +916,7 @@ impl WorkspaceView {
         let query = self.nav.filter.query.trim().to_lowercase();
         let order = self.reading_order();
         let now = SystemTime::now();
+        let clock = cx.background_executor().now();
         let mut out = Vec::new();
         for (key, w) in &self.workers {
             let key = *key;
@@ -973,13 +974,14 @@ impl WorkspaceView {
             let tiles = tiles.into_iter().map(|(_, t)| t).collect();
             let health = worker_health(&w.status);
             let rtt = health.is_none().then(|| slow_rtt(w.rtt)).flatten();
-            // Like the round trip, the path is named here only when it is worth a look.
+            // Like the round trip, the path is named here only when it is worth a look: a DERP
+            // relay that has held, never one a direct path is still being found beside.
             let relay = w
-                .path
-                .as_ref()
+                .relay
+                .notice(clock)
+                .and_then(|_| w.relay.path())
                 .filter(|_| health.is_none())
-                .map(path_label)
-                .and_then(|(text, slow)| slow.then_some(text));
+                .map(|path| path_label(path).0);
             let folded = query.is_empty() && self.nav.folded.contains(&key);
             let header = NavHeader {
                 key,
@@ -1765,9 +1767,7 @@ impl WorkspaceView {
                 .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r, false)))
                 .children(worker.health.map(|(_, word)| readout(theme, word)))
                 .children(worker.relay.clone().map(|relay| {
-                    readout(theme, relay)
-                        .debug_selector(move || format!("nav-path-{key}"))
-                        .text_color(hsla(s.warn))
+                    readout(theme, relay).debug_selector(move || format!("nav-path-{key}"))
                 }))
                 .children(worker.rtt.clone().map(|rtt| {
                     readout(theme, rtt).debug_selector(move || format!("nav-rtt-{key}"))

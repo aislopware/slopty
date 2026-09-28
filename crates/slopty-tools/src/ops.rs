@@ -323,6 +323,36 @@ pub async fn forget_worker<D: Dispatch>(
     Ok(worker)
 }
 
+/// A magic packet sent to a sleeping worker.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Woken {
+    /// The worker it was sent for.
+    pub worker: WorkerId,
+    /// The machine that sent it: the server, or a worker on the same LAN.
+    pub by: String,
+    /// The sleeping worker's interfaces it went to.
+    pub to: Vec<String>,
+    /// The worker said it sleeps through a magic packet, so it may not wake.
+    pub wake_on_lan_off: bool,
+}
+
+/// Wake a sleeping worker. The worker coming online is the directory's news, not this answer's.
+pub async fn wake<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    worker: &str,
+) -> Result<Woken, ToolError> {
+    let worker = res.worker(Some(worker)).await?;
+    let wake_on_lan_off = res
+        .workers()
+        .await?
+        .iter()
+        .any(|w| w.worker == worker && w.caps.wake_on_lan == Some(false));
+    match res.dispatch().call(Verb::Wake { worker }).await {
+        Outcome::WakeSent { by, to } => Ok(Woken { worker, by, to, wake_on_lan_off }),
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+
 /// Replace a file.
 pub async fn write_file<D: Dispatch>(
     res: &mut Resolver<'_, D>,

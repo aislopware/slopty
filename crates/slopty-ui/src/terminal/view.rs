@@ -1872,7 +1872,24 @@ impl TerminalView {
     /// paths are typed. A picture with no text goes to the worker's pasteboard, and then an
     /// empty paste tells the program to read it there.
     pub fn paste_clipboard(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
-        match self.clip_paste() {
+        let paste = self.clip_paste();
+        let text = matches!(paste, ClipPaste::Text)
+            .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+            .flatten();
+        self.paste_as(paste, text, cx);
+    }
+
+    /// A paste the person made with the system's paste button (iOS), which handed over the
+    /// clipboard's `text`: as ⌘V, with no read of the clipboard's text here, which would ask
+    /// them again.
+    pub fn paste_made(&mut self, text: Option<String>, cx: &mut Context<Self>) {
+        let paste = self.clip_paste();
+        self.paste_as(paste, text, cx);
+    }
+
+    /// Paste what the clipboard holds as `paste` says, `text` being its text.
+    fn paste_as(&mut self, paste: ClipPaste, text: Option<String>, cx: &mut Context<Self>) {
+        match paste {
             ClipPaste::Files(files) => {
                 self.selection = None;
                 self.state.scroll_to_bottom();
@@ -1889,8 +1906,7 @@ impl TerminalView {
             }
             ClipPaste::Text => {}
         }
-        let Some(item) = cx.read_from_clipboard() else { return };
-        let Some(text) = item.text() else { return };
+        let Some(text) = text else { return };
         self.selection = None;
         self.state.scroll_to_bottom();
         let bracketed = self.state.modes().contains(TermModes::BRACKETED_PASTE);

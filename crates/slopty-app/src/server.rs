@@ -16,7 +16,7 @@ use slopty_client::server::{ServerEvent, ServerTask};
 use slopty_core::WorkerId;
 use slopty_net::HostAddr;
 use slopty_net::server::ServerLink;
-use slopty_proto::orchestration::Happening;
+use slopty_proto::orchestration::{Happening, Outcome};
 use slopty_proto::server::{FromServer, Liveness, Refusal, WorkerCaps};
 use slopty_ui::workspace::WorkerStatus;
 
@@ -373,10 +373,47 @@ impl Workspace {
     pub(crate) fn server_address(&self) -> Option<&HostAddr> {
         self.server.as_ref().map(|s| &s.address)
     }
+
+    /// Ask the server to wake `id` from sleep; a notice says which machine sent the magic
+    /// packet, or why none went. The worker coming online is the directory's news.
+    pub(crate) fn wake_worker(&self, id: WorkerId, cx: &mut Context<Self>) {
+        let name = self.directory.get(id).map_or_else(|| id.to_string(), |w| w.name.clone());
+        let Some(caller) =
+            self.server.as_ref().and_then(|s| s.task.as_ref()).map(ServerTask::caller)
+        else {
+            self.show_notice(format!("Could not wake {name}: no server to send it"), cx);
+            return;
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
+            let _gone = tx.send(caller.wake(id).await);
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(outcome) = rx.await else { return };
+            let _gone = this.update(cx, |ws, cx| ws.show_notice(wake_notice(&name, outcome), cx));
+        })
+        .detach();
+    }
+}
+
+/// What the person hears of a wake sent for the worker called `name`.
+fn wake_notice(name: &str, outcome: Outcome) -> String {
+    match outcome {
+        Outcome::WakeSent { by, .. } => {
+            format!("{by} sent {name} a wake; it shows online once it is up")
+        }
+        Outcome::Error { message, .. } => format!("Could not wake {name}: {message}"),
+        other => {
+            tracing::warn!(?other, "a wake answered with something else");
+            format!("Could not wake {name}: the server answered something else")
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use slopty_proto::orchestration::ErrorCode;
+
     use super::*;
 
     /// The server named in the cache at `path`, once it is `want`; `None` for a file that is
@@ -436,5 +473,23 @@ mod tests {
         );
         assert_eq!(failure_status(&at, other()), WorkerStatus::Reconnecting("no answer".into()));
         assert_eq!(refused_status(Refusal::NotGranted), NOT_GRANTED);
+    }
+
+    /// A wake names the machine that sent it, and a refusal says why.
+    #[test]
+    fn a_wake_says_who_sent_it_or_why_none_went() {
+        let sent = Outcome::WakeSent { by: "hub".to_owned(), to: vec!["en0".to_owned()] };
+        assert_eq!(
+            wake_notice("studio", sent),
+            "hub sent studio a wake; it shows online once it is up"
+        );
+        let refused = Outcome::Error {
+            code: ErrorCode::ServerUnreachable,
+            message: "the link to the server has stopped".to_owned(),
+        };
+        assert_eq!(
+            wake_notice("studio", refused),
+            "Could not wake studio: the link to the server has stopped"
+        );
     }
 }

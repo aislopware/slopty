@@ -366,6 +366,40 @@ fn a_clipboard_that_asks_is_read_only_for_a_paste(cx: &mut TestAppContext) {
     assert!(board.reads() > 0, "read for the paste");
 }
 
+/// The system's paste button hands over the clipboard with no prompt, and that paste reads
+/// nothing more of it: its text goes into the focused shell, and a picture with no text goes
+/// to the worker as this client's offer ahead of the picture chord.
+#[gpui::test]
+fn a_paste_through_the_system_button_reads_the_clipboard_no_further(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (mut studio, _calls, _unused) = connect_remote(&view, cx);
+    let board = Rc::new(Memory::asking());
+    let shared: Rc<dyn Pasteboard> = Rc::<Memory>::clone(&board);
+    view.update_in(cx, |v, _window, _cx| v.set_pasteboard(shared));
+    let shell = SessionId::new();
+    opens(&view, cx, &studio, shell, studio.me, 1);
+    let _before = studio.drain();
+    let mut tap = |data: &[(&str, &[u8])]| {
+        board.copy(data);
+        let tapped = Memory::default();
+        tapped.copy(data);
+        view.update_in(cx, |v, _window, cx| v.paste_made(&tapped, cx));
+        cx.run_until_parked();
+    };
+
+    tap(&[(TEXT_UTI, b"copied on the phone")]);
+    assert_eq!(pasted(studio.drain(), shell), ["copied on the phone"]);
+
+    tap(&[("public.png", b"PNG")]);
+    let sent = studio.drain();
+    let offer = offers(&sent);
+    assert_eq!(offer.len(), 1, "{sent:?}");
+    assert_eq!(offer[0].items[0].format, ClipFormat::Png);
+    let chord = |m: &ClientMsg| matches!(m, ClientMsg::Term { session, req: TermRequest::PastePicture(_) } if *session == shell);
+    assert!(sent.iter().any(chord), "{sent:?}");
+    assert_eq!(board.reads(), 0, "the clipboard itself was never read");
+}
+
 /// The worker's announcement lands here as text and promises; its fetch of this client's
 /// offer is answered with the bytes, and a fetch of a stale offer with `Unavailable`.
 #[gpui::test]

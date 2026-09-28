@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
-use slopty_proto::ctl::{CtlReply, CtlRequest, Tailscale};
+use slopty_proto::ctl::{CtlReply, CtlRequest, PasteboardAccess, Tailscale};
 
 use crate::{deploy, service};
 
@@ -172,10 +172,15 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
     } else {
         format!("admits loopback, the tailnet, and by address {}", h.allow.join(", "))
     };
+    let clipboard = match pasteboard_problem(h.pasteboard) {
+        None => format!("{} Clipboard reads", mark(true)),
+        Some(problem) => format!("{} {}{}", mark(false), sentence(problem), CLIPBOARD_WAITS),
+    };
     let grants = if desktop {
         vec![
             format!("{} Screen Recording{screen}", mark(h.caps.can_capture)),
             format!("{} Accessibility (remote-window input){post}", mark(h.caps.can_inject)),
+            clipboard,
         ]
     } else {
         vec!["no desktop to stream here: terminals, files and agents only".to_owned()]
@@ -188,12 +193,47 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
             tailscale,
         ],
         grants,
+        wake_line(h.caps.wake_on_lan).into_iter().collect(),
         vec![format!("{} clients connected, {} sessions", h.clients, h.sessions)],
     ]
     .concat();
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// What follows a clipboard read that is not free: what the worker does meanwhile.
+const CLIPBOARD_WAITS: &str =
+    "\n  → until then the worker's copies stay on it; pastes from clients still land";
+
+/// Why reading the worker's pasteboard is not free, naming where to change it; `None` when it is.
+const fn pasteboard_problem(access: PasteboardAccess) -> Option<&'static str> {
+    use slopty_platform::pasteboard_access::Access;
+    let access = match access {
+        PasteboardAccess::Allowed => Access::Allowed,
+        PasteboardAccess::NotAskedYet => Access::NotAskedYet,
+        PasteboardAccess::Asks => Access::Asks,
+        PasteboardAccess::Denied => Access::Denied,
+    };
+    access.problem()
+}
+
+/// `text` with its first letter capitalised, for a line of its own.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+/// Whether the machine wakes for a magic packet, when it could tell.
+fn wake_line(wake_on_lan: Option<bool>) -> Option<String> {
+    let line = if wake_on_lan? {
+        "✔ Wake for network access: a client can wake this machine from sleep"
+    } else {
+        "✘ Wake for network access is off: a client cannot wake this machine from sleep\n  \
+         → turn on Wake for network access in System Settings ▸ Energy (Battery ▸ Options on a \
+         laptop), or `sudo pmset -a womp 1`"
+    };
+    Some(line.to_owned())
 }
 
 #[cfg(test)]
@@ -232,6 +272,7 @@ mod tests {
                 node: "studio.tail1234.ts.net".to_owned(),
                 ip: Some([100, 64, 0, 3].into()),
             },
+            pasteboard: PasteboardAccess::Allowed,
             clients: 2,
             sessions: 3,
             uptime_secs: 61,
@@ -261,6 +302,25 @@ mod tests {
         assert!(report.contains("✘ Tailscale is Stopped:"), "{report}");
         let report = with(Tailscale::Unreachable { error: "timed out".to_owned() });
         assert!(report.contains("✘ Tailscale did not answer (timed out)"), "{report}");
+        assert!(report.contains("✔ Clipboard reads\n"), "{report}");
+        assert!(!report.contains("Wake for network access"), "{report}");
+        let asks = slopty_proto::ctl::Health {
+            pasteboard: PasteboardAccess::NotAskedYet,
+            caps: WorkerCaps { wake_on_lan: Some(false), ..h.caps.clone() },
+            ..h.clone()
+        };
+        let report = doctor_report(&asks, true);
+        assert!(
+            report.contains("✘ Clipboard reads need permission: allow pasting from other apps"),
+            "{report}"
+        );
+        assert!(report.contains("✘ Wake for network access is off"), "{report}");
+        assert!(report.contains("sudo pmset -a womp 1"), "{report}");
+        let wakes = slopty_proto::ctl::Health {
+            caps: WorkerCaps { wake_on_lan: Some(true), ..h.caps.clone() },
+            ..h.clone()
+        };
+        assert!(doctor_report(&wakes, true).contains("✔ Wake for network access"));
         let linux = doctor_report(&h, false);
         assert!(!linux.contains("Screen Recording") && !linux.contains("Accessibility"), "{linux}");
         assert!(linux.contains("no desktop to stream here"), "{linux}");

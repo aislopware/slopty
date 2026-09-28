@@ -152,6 +152,8 @@ pub enum FaceEvent {
     /// Show the TUI and type `/rewind` there, for the person to pick the point in Claude
     /// Code's own menu.
     Rewind,
+    /// Dial the unreachable worker now rather than at the end of its backoff.
+    Reconnect,
 }
 
 /// What an attachment is before it goes up.

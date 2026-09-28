@@ -21,16 +21,18 @@
 //! does a round trip nobody would read.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, Div, ElementId, InteractiveElement as _, IntoElement as _, MouseButton,
-    ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Task,
-    Window, div, px,
+    App, AppContext as _, Context, Div, ElementId, InteractiveElement as _, IntoElement as _,
+    MouseButton, ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Task, Window, div, px,
 };
 use slopty_client::layout::WorkerKey;
+use slopty_client::relay::RelayNotice;
 use slopty_core::SessionId;
 use slopty_proto::items::{Item, ItemKind};
 use slopty_theme::Theme;
@@ -67,6 +69,9 @@ pub struct HostActions {
     pub connect: Option<MenuRun>,
     /// Forget it: offered for a worker added by address, which the server does not list.
     pub forget: Option<MenuRun>,
+    /// Wake it from sleep: offered while the server can send it a magic packet
+    /// (`slopty_client::directory::Directory::can_wake`). The palette offers it too.
+    pub wake: Option<MenuRun>,
 }
 
 impl std::fmt::Debug for HostActions {
@@ -74,6 +79,7 @@ impl std::fmt::Debug for HostActions {
         f.debug_struct("HostActions")
             .field("connect", &self.connect.is_some())
             .field("forget", &self.forget.is_some())
+            .field("wake", &self.wake.is_some())
             .finish()
     }
 }
@@ -170,6 +176,11 @@ impl WorkspaceView {
         self.bar.hosts = hosts;
         self.bar.add = add;
         cx.notify();
+    }
+
+    /// What the app lets this client do to `key`.
+    pub(super) fn host_actions(&self, key: WorkerKey) -> Option<&HostActions> {
+        self.bar.hosts.get(&key)
     }
 
     /// Whether the hosts popover is up.
@@ -392,12 +403,14 @@ impl WorkspaceView {
             let text: SharedString = transfers_label(elsewhere.len(), done, total).into();
             spaced(tabular(readout("status-transfers", text.clone())), &text, theme)
         });
+        let clock = cx.background_executor().now();
         let link_readout = link.filter(|w| w.status.is_up()).and_then(|w| {
-            let path = w.path.as_ref().map(path_label);
-            let relayed = path.as_ref().is_some_and(|(_, slow)| *slow);
-            let shown =
-                self.bar.hovered || relayed || w.rtt.is_some_and(|rtt| rtt >= RTT_SHOWN_FROM);
-            shown.then(|| self.render_link(path, w.rtt))
+            let path = w.relay.path().map(path_label);
+            let relayed = w.relay.notice(clock);
+            let shown = self.bar.hovered
+                || relayed.is_some()
+                || w.rtt.is_some_and(|rtt| rtt >= RTT_SHOWN_FROM);
+            shown.then(|| self.render_link(path, relayed, w.rtt))
         });
         // The link says something only when it is not up: a word in its tone, the mark being
         // on the left.
@@ -476,18 +489,40 @@ impl WorkspaceView {
 
     /// The link to the focused worker: how the tailnet carries it (a DERP relay in the
     /// warning tone, being the slow path) and its round trip, warning past
-    /// [`crate::screen::RTT_WARN_FROM`]. The figure sits in a slot as wide as any it shows,
-    /// pinned at its right, so a new sample moves only its own digits; its unit says what it
-    /// is, and a screen reader hears the words.
-    fn render_link(&self, path: Option<(String, bool)>, rtt: Option<Duration>) -> Div {
+    /// [`crate::screen::RTT_WARN_FROM`]. A DERP relay that has held is said in words instead,
+    /// quietly, with its fix under the pointer. The figure sits in a slot as wide as any it
+    /// shows, pinned at its right, so a new sample moves only its own digits; its unit says
+    /// what it is, and a screen reader hears the words.
+    fn render_link(
+        &self,
+        path: Option<(String, bool)>,
+        relayed: Option<RelayNotice>,
+        rtt: Option<Duration>,
+    ) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let path = path.map(|(text, slow)| {
-            let text = SharedString::from(text);
-            readout("status-path", text.clone())
-                .when(slow, |el| el.text_color(hsla(s.warn)))
-                .child(text)
-        });
+        let path = match relayed {
+            Some(RelayNotice { note, fix, .. }) => {
+                let text = SharedString::from(note);
+                let hint_theme = Rc::new(theme.clone());
+                Some(
+                    readout("status-relay", text.clone())
+                        .aria_description(fix)
+                        .text_color(hsla(s.text_muted))
+                        .tooltip(move |_window, cx| {
+                            let theme = Rc::clone(&hint_theme);
+                            cx.new(|_| kit::Hint::new(fix, "", theme)).into()
+                        })
+                        .child(text),
+                )
+            }
+            None => path.map(|(text, slow)| {
+                let text = SharedString::from(text);
+                readout("status-path", text.clone())
+                    .when(slow, |el| el.text_color(hsla(s.warn)))
+                    .child(text)
+            }),
+        };
         let figure = rtt.map(|rtt| {
             let text = SharedString::from(rtt_label(rtt));
             tabular(readout("status-rtt", text.clone()))
@@ -590,7 +625,7 @@ impl WorkspaceView {
             tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, window, cx| {
                 this.bar.hosts_open = false;
                 cx.notify();
-                let run = std::rc::Rc::clone(&run);
+                let run = Rc::clone(&run);
                 cx.defer_in(window, move |_this, window, cx| run(window, cx));
             }))
         });
@@ -655,7 +690,7 @@ impl WorkspaceView {
             None => icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted))
                 .into_any_element(),
         };
-        let path = w.path.as_ref().filter(|_| health.is_none()).map(path_label);
+        let path = w.relay.path().filter(|_| health.is_none()).map(path_label);
         // The machine under the name, once the worker has said what it is.
         let machine =
             w.caps.as_ref().filter(|c| !c.os_version.is_empty()).map(|c| host_line(c, w.load));
@@ -697,7 +732,7 @@ impl WorkspaceView {
                 cx.stop_propagation();
                 this.bar.hosts_open = false;
                 cx.notify();
-                let run = std::rc::Rc::clone(&run);
+                let run = Rc::clone(&run);
                 cx.defer_in(window, move |_this, window, cx| run(window, cx));
             }))
         };
@@ -705,6 +740,7 @@ impl WorkspaceView {
             .connect
             .filter(|_| !w.status.is_up())
             .map(|run| action(format!("hosts-connect-{key}"), "Connect", run));
+        let wake = actions.wake.map(|run| action(format!("hosts-wake-{key}"), "Wake", run));
         let forget = actions.forget.map(|run| action(format!("hosts-forget-{key}"), "Forget", run));
         let hover_actions = div()
             .flex_none()
@@ -713,6 +749,7 @@ impl WorkspaceView {
             .gap(px(spacing.xxs))
             .invisible()
             .group_hover(group.clone(), gpui::Styled::visible)
+            .children(wake)
             .children(connect)
             .children(forget);
         let label = SharedString::from(match health {

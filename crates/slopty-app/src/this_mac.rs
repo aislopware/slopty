@@ -652,6 +652,7 @@ mod tests {
                 node: "studio.tail1234.ts.net".to_owned(),
                 ip: Some([100, 64, 0, 3].into()),
             },
+            pasteboard: slopty_proto::ctl::PasteboardAccess::Allowed,
             clients: 0,
             sessions: 0,
             uptime_secs: 1,

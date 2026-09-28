@@ -60,13 +60,13 @@ use gpui::{
 };
 use slopty_client::ItemDoc;
 use slopty_client::layout::{Layout, LayoutConfig, Saved, TileRef, WorkerKey};
+use slopty_client::relay::RelayWatch;
 use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentEvent;
 use slopty_proto::items::{Item, ItemOp};
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::server::WorkerCaps;
-use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::SessionSummary;
 use slopty_theme::Theme;
 pub use statusbar::HostActions;
@@ -295,9 +295,11 @@ struct Worker {
     doc: ItemDoc,
     sessions: HashMap<SessionId, SessionSummary>,
     rtt: Option<Duration>,
-    /// How the tailnet carries the link, once the worker has said; never on a loopback or LAN
-    /// link.
-    path: Option<LinkPath>,
+    /// How the tailnet carries the link, once the worker has said (never on a loopback or LAN
+    /// link), and since when it has been on a DERP relay.
+    relay: RelayWatch,
+    /// Draws again once a DERP path has held long enough to be said ([`RelayWatch::due`]).
+    relay_due: Option<Task<()>>,
     /// Its home directory as its hello said, so a path under it reads `~/…`; `None` until a
     /// link has said, or when the daemon has none.
     home: Option<String>,
@@ -340,7 +342,8 @@ impl Worker {
             doc: ItemDoc::default(),
             sessions: HashMap::new(),
             rtt: None,
-            path: None,
+            relay: RelayWatch::default(),
+            relay_due: None,
             home: None,
             caps: None,
             load: None,
@@ -608,6 +611,9 @@ pub struct WorkspaceView {
     pending_focus_rename: bool,
     palette_return: Option<FocusHandle>,
     palette_action: Option<Box<dyn gpui::Action>>,
+    /// What the app does for a line or a button of ours (wake a worker, dial it now), run on
+    /// the next frame, where there is a window to run it in.
+    pending_runs: Vec<MenuRun>,
     palette_extra: Vec<PaletteItem>,
     /// A keyboard is there to press chords on: always on a Mac, only when one is attached on
     /// a phone or tablet.
@@ -810,6 +816,7 @@ impl WorkspaceView {
             pending_focus_rename: false,
             palette_return: None,
             palette_action: None,
+            pending_runs: Vec::new(),
             palette_extra: Vec::new(),
             hardware_keyboard: true,
             key_bar_shown: false,
@@ -1422,6 +1429,9 @@ impl WorkspaceView {
                 // Once this frame is done, from the element that had the keyboard.
                 cx.defer_in(window, move |_this, window, cx| window.dispatch_action(action, cx));
             }
+        }
+        for run in std::mem::take(&mut self.pending_runs) {
+            cx.defer_in(window, move |_this, window, cx| run(window, cx));
         }
         if let Some(id) = self.pending_focus_note.take()
             && let Some(view) = self.notes.get(&id)

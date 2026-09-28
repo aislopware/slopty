@@ -260,6 +260,15 @@ impl WorkspaceView {
                 self.send_session(session, ClientMsg::Conversation(search));
             }
             FaceEvent::OpenPath { path } => self.open_mention(session, &path, cx),
+            FaceEvent::Reconnect => {
+                let connect = self
+                    .worker_of_session(session)
+                    .and_then(|key| self.host_actions(key)?.connect.clone());
+                if let Some(run) = connect {
+                    self.pending_runs.push(run);
+                    cx.notify();
+                }
+            }
             FaceEvent::Rewind => {
                 // The person's click, typed as they would type it: Claude Code's own menu picks
                 // the point, never the face.

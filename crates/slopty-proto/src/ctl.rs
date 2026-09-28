@@ -68,6 +68,9 @@ pub struct Health {
     /// This machine's Tailscale as the daemon reads it: only while it is up does a tailnet
     /// peer get in.
     pub tailscale: Tailscale,
+    /// Reading the pasteboard clipboard sync keeps in step: while reads are not free the
+    /// worker announces none of its clipboard's changes.
+    pub pasteboard: PasteboardAccess,
     /// Clients connected right now.
     pub clients: usize,
     /// Sessions the worker runs, exited ones kept for their last screen included.
@@ -99,6 +102,22 @@ pub enum Tailscale {
     },
     /// No Tailscale this daemon can read.
     Absent,
+}
+
+/// How reading the worker's pasteboard goes for the daemon, as macOS decides it for a read the
+/// person did not make (`slopty_platform::pasteboard_access::Access`, whose `problem` says
+/// where to change it).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteboardAccess {
+    /// Reads go through without a word.
+    Allowed,
+    /// The first read will raise the paste alert.
+    NotAskedYet,
+    /// Every read raises the paste alert.
+    Asks,
+    /// Every read is refused.
+    Denied,
 }
 
 /// Daemon → CLI.

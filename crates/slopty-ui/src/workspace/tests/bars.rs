@@ -242,7 +242,12 @@ fn the_workers_count_opens_the_hosts_and_their_actions(cx: &mut TestAppContext) 
         let hosts = [studio_key, laptop_key]
             .into_iter()
             .map(|k| {
-                (k, HostActions { connect: Some(run(&connected)), forget: Some(run(&forgot)) })
+                let actions = HostActions {
+                    connect: Some(run(&connected)),
+                    forget: Some(run(&forgot)),
+                    wake: None,
+                };
+                (k, actions)
             })
             .collect();
         v.set_host_actions(hosts, Some(run(&added)), cx);
@@ -303,12 +308,15 @@ fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut Tes
     cx.run_until_parked();
     let names = labels(&view, cx);
     assert!(!names.iter().any(|l| l == "Direct"), "a quick direct link is quiet: {names:#?}");
-    assert!(names.iter().any(|l| l == "laptop, DERP · fra"), "a relay is named: {names:#?}");
+    assert!(
+        !names.iter().any(|l| l == "laptop, DERP · fra"),
+        "a relay that has not held is not news yet: {names:#?}"
+    );
     hover(cx, "statusbar");
     let names = labels(&view, cx);
     assert!(names.iter().any(|l| l == "Direct"), "the focused worker's path: {names:#?}");
     assert!(cx.debug_bounds(leak(format!("nav-path-{studio_key}"))).is_none(), "direct is quiet");
-    assert!(cx.debug_bounds(leak(format!("nav-path-{laptop_key}"))).is_some());
+    assert!(cx.debug_bounds(leak(format!("nav-path-{laptop_key}"))).is_none());
 
     toggle_hosts(&view, cx);
     let names = labels(&view, cx);
@@ -339,6 +347,94 @@ fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut Tes
     let derp = |region: &str| LinkPath::Derp { region: region.to_owned() };
     assert_eq!(label(derp("fra")), ("DERP · fra".to_owned(), true), "the slow path");
     assert_eq!(label(derp("")), ("DERP".to_owned(), true), "no region to name");
+}
+
+/// A link on a DERP relay is said only once the relay has held for
+/// [`slopty_proto::tailnet::DERP_NOTICE_AFTER`], since a path starts there while a direct one is
+/// found. Then the status bar says it in words, in the muted tone, with the fix under the
+/// pointer, and the navigator names the relay. A direct path takes both away.
+#[gpui::test]
+fn a_link_that_stays_on_derp_is_said_once_it_has_held(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let key = studio.key;
+    let nav = leak(format!("nav-path-{key}"));
+    let derp = || LinkPath::Derp { region: "fra".to_owned() };
+    view.update_in(cx, |v, _w, cx| v.set_link_path(key, derp(), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("status-relay").is_none(), "a path still settling says nothing");
+    assert!(cx.debug_bounds(nav).is_none());
+
+    let almost = slopty_proto::tailnet::DERP_NOTICE_AFTER.saturating_sub(Duration::from_secs(1));
+    cx.executor().advance_clock(almost);
+    // The worker says the path again: the relay's clock is not restarted by it.
+    view.update_in(cx, |v, _w, cx| v.set_link_path(key, derp(), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("status-relay").is_none(), "nine seconds are not enough");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    let names = labels(&view, cx);
+    assert!(names.iter().any(|l| l == "Relayed via fra — adds latency"), "said: {names:#?}");
+    assert!(names.iter().any(|l| l == "studio, DERP · fra"), "the navigator: {names:#?}");
+    assert!(cx.debug_bounds(nav).is_some());
+    let fix = view.read_with(cx, |v, cx| v.relay_notice(key, cx).map(|n| n.fix));
+    assert_eq!(fix, Some(LinkPath::relay_fix()));
+
+    view.update_in(cx, |v, _w, cx| v.set_link_path(key, LinkPath::Direct, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("status-relay").is_none(), "a direct path takes it away");
+    assert!(cx.debug_bounds(nav).is_none());
+}
+
+/// A worker the app can wake gets "Wake <name>" among the palette's commands and a Wake in its
+/// hosts row, and either runs the app's wake; a worker the app cannot wake gets neither.
+#[gpui::test]
+fn a_sleeping_worker_is_woken_from_the_palette_and_its_hosts_row(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let (studio_key, laptop_key) = (studio.key, laptop.key);
+    let woke = Rc::new(Cell::new(0_u32));
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(laptop_key, WorkerStatus::Unreachable, cx);
+        let count = Rc::clone(&woke);
+        let wake: MenuRun = Rc::new(move |_w, _cx| count.set(count.get().saturating_add(1)));
+        let hosts = [
+            (studio_key, HostActions::default()),
+            (laptop_key, HostActions { wake: Some(wake), ..HostActions::default() }),
+        ]
+        .into_iter()
+        .collect();
+        v.set_host_actions(hosts, None, cx);
+    });
+    cx.run_until_parked();
+    let wakes: Vec<(String, crate::palette::Section)> = view.update(cx, |v, cx| {
+        let lines = v.palette_lines(cx);
+        lines
+            .into_iter()
+            .filter(|l| matches!(l.run, PaletteRun::Wake(_)))
+            .map(|l| (l.label, l.section))
+            .collect()
+    });
+    assert_eq!(wakes, [("Wake laptop".to_owned(), crate::palette::Section::Commands)]);
+
+    cx.simulate_keystrokes("cmd-shift-p");
+    cx.run_until_parked();
+    cx.simulate_input("Wake laptop");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.palette_open()));
+    assert_eq!(woke.get(), 1, "the palette ran the app's wake");
+
+    toggle_hosts(&view, cx);
+    hover(cx, leak(format!("hosts-row-{studio_key}")));
+    assert!(cx.debug_bounds(leak(format!("hosts-wake-{studio_key}"))).is_none());
+    hover(cx, leak(format!("hosts-row-{laptop_key}")));
+    click(cx, leak(format!("hosts-wake-{laptop_key}")));
+    assert_eq!(woke.get(), 2, "and so did the row");
 }
 
 /// A worker that turns this device away says so in a word wherever its link's health shows,
