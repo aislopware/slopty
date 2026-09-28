@@ -28,6 +28,7 @@ slopty-grid.workspace = true
 slopty-net.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true
+slopty-pty.workspace = true
 slopty-settings.workspace = true
 slopty-tools.workspace = true
 tokio = { workspace = true, features = [ "io-std" ] }

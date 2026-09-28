@@ -19,7 +19,7 @@ use slopty_net::endpoint::SERVER_PORT;
 use slopty_platform::service::{
     self as platform, Layout, Manager, PTYD, SERVER, Session, WORKER, WorkerOpts,
 };
-use slopty_proto::ctl::{CtlReply, CtlRequest};
+use slopty_proto::ctl::{CtlReply, CtlRequest, Health};
 use slopty_proto::server::Role;
 
 use crate::workerctl;
@@ -44,6 +44,13 @@ pub struct InstallOpts {
     /// `RUST_LOG` for both daemons.
     #[arg(long, default_value = "info")]
     log: String,
+    /// Replace the worker installed here: its port and address carry over, and if the new one
+    /// does not come up the previous one is put back (`worker deploy --update` runs this).
+    #[arg(long, conflicts_with = "fresh")]
+    update: bool,
+    /// Refuse when a worker is installed here already (`worker deploy` runs this).
+    #[arg(long)]
+    fresh: bool,
 }
 
 impl InstallOpts {
@@ -71,48 +78,159 @@ fn install_error(e: std::io::Error) -> anyhow::Error {
 /// Install and start both services, then wait for the daemon. `server` (the global
 /// `--server`) is saved as the server the worker registers with.
 pub async fn install(opts: &InstallOpts, server: Option<&str>, data_dir: &Path) -> Result<()> {
+    install_in(&Session::native(), opts, server, data_dir, START_TIMEOUT).await
+}
+
+/// [`install`] in `session`, giving the daemon `within` to answer as the one just installed.
+async fn install_in(
+    session: &Session,
+    opts: &InstallOpts,
+    server: Option<&str>,
+    data_dir: &Path,
+    within: Duration,
+) -> Result<()> {
     let source = binaries_source(opts.bin_dir.as_deref())?;
+    let installed = session.file(WORKER).is_file();
+    if opts.fresh && installed {
+        bail!("a worker is installed here already; pass --update to replace it");
+    }
+    if opts.update && !installed {
+        bail!("no worker is installed here to update");
+    }
+    let mut worker = opts.worker();
+    let previous =
+        if opts.update { Some(keep_previous(session, data_dir, &mut worker)?) } else { None };
     if let Some(server) = server {
         save_worker_server(data_dir, server)?;
     }
     let registers_with =
         slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings.worker.server;
-    let session = Session::native();
-    let installed = platform::install_worker(&session, &opts.worker(), &source, data_dir)
+    let started = Instant::now();
+    let done = platform::install_worker(session, &worker, &source, data_dir)
         .await
         .map_err(install_error)?;
-    for (job, path) in &installed.definitions {
+    for (job, path) in &done.definitions {
         println!("installed {}  ({})", job.program, path.display());
     }
     let socket = Layout::new(data_dir).worker_socket();
+    let expected = done.bin_dir.join(WORKER.program);
+    let name = match come_up(&socket, within, |h| is_the_new_one(h, &expected, started)).await {
+        Ok(name) => name,
+        Err(e) => {
+            let logs = session.logs(WORKER);
+            let Some(previous) = previous else {
+                bail!("daemon did not come up ({e:#}); see {logs}");
+            };
+            println!("the new worker did not come up ({e:#}); putting the previous one back");
+            platform::install_worker(session, &previous.opts, &previous.dir, data_dir)
+                .await
+                .map_err(install_error)?;
+            return match come_up(&socket, within, |_| Ok(())).await {
+                Ok(_) => Err(anyhow!(
+                    "the new worker did not come up ({e:#}); the previous one is back. See {logs}"
+                )),
+                Err(again) => Err(anyhow!(
+                    "the new worker did not come up ({e:#}), and the previous one did not either ({again:#}); see {logs}"
+                )),
+            };
+        }
+    };
+    match &registers_with {
+        Some(server) => println!(
+            "\n{name} is up and registers with {server}; every client of that server lists it"
+        ),
+        None => println!(
+            "\n{name} is up on its own (pass --server to register it); add it from a client \
+             with `slopty add <this machine's tailnet name or IP>` or the app's \"Add a worker\""
+        ),
+    }
+    if let Some(note) = session.install_note() {
+        println!("{note}");
+    }
+    Ok(())
+}
+
+/// The worker an update replaces: where its binaries were kept, and how it ran.
+#[derive(Debug)]
+struct Previous {
+    dir: PathBuf,
+    opts: WorkerOpts,
+}
+
+/// Copy the installed worker's binaries to `<data dir>/bin.previous` and read how it runs;
+/// `worker` takes its port and address unless given its own.
+fn keep_previous(session: &Session, data_dir: &Path, worker: &mut WorkerOpts) -> Result<Previous> {
+    let definition = session.file(WORKER);
+    let args = platform::installed_args(session.manager, &definition)
+        .with_context(|| format!("read {}", definition.display()))?;
+    let from = args
+        .first()
+        .and_then(|program| Path::new(program).parent())
+        .with_context(|| format!("no program in {}", definition.display()))?;
+    let opts = WorkerOpts {
+        port: flag_value(&args, "--port").and_then(|p| p.parse().ok()),
+        bind: flag_value(&args, "--bind").and_then(|ip| ip.parse().ok()),
+        log: worker.log.clone(),
+    };
+    worker.port = worker.port.or(opts.port);
+    worker.bind = worker.bind.or(opts.bind);
+    let dir = data_dir.join("bin.previous");
+    std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
+    for name in platform::WORKER_BINARIES {
+        let (src, dst) = (from.join(name), dir.join(name));
+        std::fs::copy(&src, &dst)
+            .with_context(|| format!("keep {} as {}", src.display(), dst.display()))?;
+    }
+    Ok(Previous { dir, opts })
+}
+
+/// Until the worker at `socket` answers its status and a doctor that `check` accepts, for
+/// `within`; its name. A doctor `check` refuses ends the wait at once.
+async fn come_up(
+    socket: &Path,
+    within: Duration,
+    check: impl Fn(&Health) -> Result<()>,
+) -> Result<String> {
     let started = Instant::now();
     loop {
-        match workerctl::call_at(&socket, CtlRequest::Status).await {
-            Ok(CtlReply::Status { name, .. }) => {
-                match &registers_with {
-                    Some(server) => println!(
-                        "\n{name} is up and registers with {server}; every client of that server \
-                         lists it"
-                    ),
-                    None => println!(
-                        "\n{name} is up on its own (pass --server to register it); add it from a \
-                         client with `slopty add <this machine's tailnet name or IP>` or the \
-                         app's \"Add a worker\""
-                    ),
-                }
-                if let Some(note) = session.install_note() {
-                    println!("{note}");
-                }
-                return Ok(());
-            }
-            Ok(other) => bail!("unexpected reply {other:?}"),
-            Err(e) if started.elapsed() < START_TIMEOUT => {
+        let answered = async {
+            let CtlReply::Status { name, .. } =
+                workerctl::call_at(socket, CtlRequest::Status).await?
+            else {
+                bail!("a status that is no status");
+            };
+            let CtlReply::Doctor(health) = workerctl::call_at(socket, CtlRequest::Doctor).await?
+            else {
+                bail!("a doctor that is no doctor");
+            };
+            Ok((name, health))
+        };
+        match answered.await {
+            Ok((name, health)) => return check(&health).map(|()| name),
+            Err(e) if started.elapsed() < within => {
                 tracing::debug!(error = %e, "waiting for slopty-worker");
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            Err(e) => bail!("daemon did not come up ({e:#}); see {}", session.logs(WORKER)),
+            Err(e) => return Err(e),
         }
     }
+}
+
+/// Whether `health` is the worker just installed as `expected`: this build's version, run from
+/// there, started since `installed`.
+fn is_the_new_one(health: &Health, expected: &Path, installed: Instant) -> Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    if health.version != version {
+        bail!("it answers as version {}, not {version}", health.version);
+    }
+    let resolved = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    if resolved(Path::new(&health.exe)) != resolved(expected) {
+        bail!("it runs {}, not {}", health.exe, expected.display());
+    }
+    if health.uptime_secs > installed.elapsed().as_secs().saturating_add(1) {
+        bail!("it has been up since before the install");
+    }
+    Ok(())
 }
 
 /// Stop both services and remove their definitions. Sessions die with `slopty-ptyd`.
@@ -166,16 +284,19 @@ pub struct ServerInstallOpts {
 
 /// The port the installed server's definition names, else the default.
 fn installed_port(manager: Manager, path: &Path) -> u16 {
-    platform::installed_args(manager, path).as_deref().and_then(port_arg).unwrap_or(SERVER_PORT)
+    platform::installed_args(manager, path)
+        .as_deref()
+        .and_then(|args| flag_value(args, "--port"))
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(SERVER_PORT)
 }
 
-/// The value of `--port` in an argument list.
-fn port_arg(argv: &[String]) -> Option<u16> {
+/// The value after `flag` in an argument list.
+fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
     argv.iter()
-        .position(|a| a == "--port")
-        .and_then(|i| argv.get(i.saturating_add(1)))?
-        .parse()
-        .ok()
+        .position(|a| a == flag)
+        .and_then(|i| argv.get(i.saturating_add(1)))
+        .map(String::as_str)
 }
 
 /// Dial the server on loopback as an agent and return its name.
@@ -259,7 +380,7 @@ async fn server_status() {
 }
 
 /// Where to take binaries from: `--bin-dir`, else this binary's directory.
-fn binaries_source(bin_dir: Option<&Path>) -> Result<PathBuf> {
+pub fn binaries_source(bin_dir: Option<&Path>) -> Result<PathBuf> {
     match bin_dir {
         Some(dir) => dir.canonicalize().with_context(|| format!("{}", dir.display())),
         None => platform::sibling_dir().context("this binary's directory"),
@@ -298,6 +419,8 @@ mod tests {
             port: Some(45551),
             bind: Some(std::net::IpAddr::from([192, 168, 1, 10])),
             log: "debug".to_owned(),
+            update: false,
+            fresh: false,
         };
         assert_eq!(
             opts.worker(),
@@ -311,10 +434,10 @@ mod tests {
 
     #[test]
     fn an_installed_server_without_a_port_flag_uses_the_default() {
-        assert_eq!(port_arg(&["/bin/slopty-server".to_owned()]), None);
+        assert_eq!(flag_value(&["/bin/slopty-server".to_owned()], "--port"), None);
         assert_eq!(
-            port_arg(&["s".to_owned(), "--port".to_owned(), "45561".to_owned()]),
-            Some(45561)
+            flag_value(&["s".to_owned(), "--port".to_owned(), "45561".to_owned()], "--port"),
+            Some("45561")
         );
         assert_eq!(installed_port(Manager::Launchd, Path::new("/nonexistent.plist")), SERVER_PORT);
     }
@@ -324,5 +447,176 @@ mod tests {
     fn a_missing_binary_points_at_bin_dir() {
         let e = std::io::Error::new(std::io::ErrorKind::NotFound, "/x/slopty-ptyd not found");
         assert_eq!(install_error(e).to_string(), "/x/slopty-ptyd not found; pass --bin-dir");
+    }
+
+    /// Records the manager's commands and says no service is loaded, as a clean launchd would.
+    #[derive(Debug)]
+    struct Recorder(std::sync::mpsc::Sender<String>);
+
+    impl platform::Runner for Recorder {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<String> {
+            let _sent = self.0.send(format!("{program} {}", args.join(" ")));
+            if args.first() == Some(&"print") {
+                return Err(std::io::Error::other("Could not find service"));
+            }
+            Ok(String::new())
+        }
+    }
+
+    /// A launchd session in a temporary home, a data dir beside it, and the worker's control
+    /// socket answering status as "studio" and doctor with what `health` holds at the time.
+    struct Stage {
+        dir: tempfile::TempDir,
+        session: Session,
+        commands: std::sync::mpsc::Receiver<String>,
+        health: tokio::sync::watch::Sender<Health>,
+    }
+
+    impl Stage {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("home");
+            let (tx, commands) = std::sync::mpsc::channel();
+            let session = Session {
+                manager: Manager::Launchd,
+                definitions: home.join("Library").join("LaunchAgents"),
+                home,
+                uid: 501,
+                runner: std::sync::Arc::new(Recorder(tx)),
+            };
+            let run = dir.path().join("data").join("run");
+            std::fs::create_dir_all(&run).unwrap();
+            let listener = tokio::net::UnixListener::bind(run.join("worker.sock")).unwrap();
+            let (health, answers) = tokio::sync::watch::channel(Self::health("?", 0));
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+                while let Ok((stream, _addr)) = listener.accept().await {
+                    let (rd, mut wr) = stream.into_split();
+                    let mut line = String::new();
+                    tokio::io::BufReader::new(rd).read_line(&mut line).await.unwrap();
+                    let reply = match serde_json::from_str(&line).unwrap() {
+                        CtlRequest::Doctor => CtlReply::Doctor(Box::new(answers.borrow().clone())),
+                        _ => CtlReply::Status {
+                            id: slopty_core::WorkerId::new(),
+                            name: "studio".to_owned(),
+                            sessions: Vec::new(),
+                        },
+                    };
+                    let mut out = serde_json::to_vec(&reply).unwrap();
+                    out.push(b'\n');
+                    wr.write_all(&out).await.unwrap();
+                }
+            });
+            Self { dir, session, commands, health }
+        }
+
+        fn data(&self) -> PathBuf {
+            self.dir.path().join("data")
+        }
+
+        fn health(exe: &str, uptime_secs: u64) -> Health {
+            Health {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                exe: exe.to_owned(),
+                caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+                listen: "[::]:45550".to_owned(),
+                allow: Vec::new(),
+                tailscale: slopty_proto::ctl::Tailscale::Absent,
+                clients: 0,
+                sessions: 0,
+                uptime_secs,
+            }
+        }
+
+        /// The doctor answers as the worker installed from the data dir's `bin`.
+        fn answer_as_installed(&self) {
+            let exe = self.data().join("bin").join(WORKER.program);
+            self.health.send_replace(Self::health(&exe.to_string_lossy(), 0));
+        }
+
+        /// Three binaries holding `tag`, in a directory of their own.
+        fn binaries(&self, tag: &str) -> PathBuf {
+            let dir = self.dir.path().join(tag);
+            std::fs::create_dir_all(&dir).unwrap();
+            for name in platform::WORKER_BINARIES {
+                std::fs::write(dir.join(name), format!("{name} {tag}")).unwrap();
+            }
+            dir
+        }
+
+        fn opts(from: &Path, update: bool, fresh: bool) -> InstallOpts {
+            InstallOpts {
+                bin_dir: Some(from.to_path_buf()),
+                update,
+                fresh,
+                ..InstallOpts::default()
+            }
+        }
+
+        async fn install(&self, opts: &InstallOpts) -> Result<()> {
+            let within = Duration::from_secs(2);
+            install_in(&self.session, opts, None, &self.data(), within).await
+        }
+
+        fn installed(&self, name: &str) -> String {
+            std::fs::read_to_string(self.data().join("bin").join(name)).unwrap()
+        }
+
+        fn bootstraps(&self) -> usize {
+            self.commands.try_iter().filter(|c| c.starts_with("launchctl bootstrap")).count()
+        }
+    }
+
+    /// `--fresh` leaves an installed worker alone, `--update` needs one, and an update keeps
+    /// the previous binaries and the port the worker ran on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_update_keeps_the_previous_worker_and_its_port() {
+        let stage = Stage::new();
+        let old = stage.binaries("old");
+        stage.answer_as_installed();
+        let update = Stage::opts(&old, true, false);
+        let refused = stage.install(&update).await.unwrap_err();
+        assert!(refused.to_string().contains("no worker is installed"), "{refused:#}");
+        let first = InstallOpts { port: Some(45551), ..Stage::opts(&old, false, true) };
+        stage.install(&first).await.unwrap();
+        assert_eq!(stage.bootstraps(), 2, "ptyd and the worker");
+        let again = stage.install(&first).await.unwrap_err();
+        assert!(again.to_string().contains("pass --update"), "{again:#}");
+
+        let new = stage.binaries("new");
+        stage.install(&Stage::opts(&new, true, false)).await.unwrap();
+        assert_eq!(stage.installed("slopty-worker"), "slopty-worker new");
+        let kept = stage.data().join("bin.previous").join("slopty-worker");
+        assert_eq!(std::fs::read_to_string(kept).unwrap(), "slopty-worker old");
+        let args = platform::installed_args(Manager::Launchd, &stage.session.file(WORKER)).unwrap();
+        assert_eq!(flag_value(&args, "--port"), Some("45551"), "the port carried over: {args:?}");
+    }
+
+    /// A new worker that answers as some other build, or one that was up before the install,
+    /// is not the one installed: an update puts the previous binaries back and says so.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_update_that_does_not_come_up_puts_the_previous_worker_back() {
+        let stage = Stage::new();
+        stage.answer_as_installed();
+        stage.install(&Stage::opts(&stage.binaries("old"), false, true)).await.unwrap();
+        let _earlier = stage.bootstraps();
+
+        let exe = stage.data().join("bin").join(WORKER.program).to_string_lossy().into_owned();
+        let broken = Health { version: "0.0.0-broken".to_owned(), ..Stage::health(&exe, 0) };
+        stage.health.send_replace(broken);
+        let new = stage.binaries("new");
+        let failed = stage.install(&Stage::opts(&new, true, false)).await.unwrap_err();
+        let said = format!("{failed:#}");
+        assert!(said.contains("answers as version 0.0.0-broken"), "{said}");
+        assert!(said.contains("the previous one is back"), "{said}");
+        assert_eq!(stage.installed("slopty-worker"), "slopty-worker old");
+        assert_eq!(stage.installed("slopty"), "slopty old");
+        assert_eq!(stage.bootstraps(), 4, "the new pair, then the previous pair");
+
+        // A worker up since before the install is the old process, not the new one.
+        stage.health.send_replace(Stage::health(&exe, 3600));
+        let stale = stage.install(&Stage::opts(&new, true, false)).await.unwrap_err();
+        assert!(format!("{stale:#}").contains("up since before the install"), "{stale:#}");
+        assert_eq!(stage.installed("slopty-worker"), "slopty-worker old");
     }
 }

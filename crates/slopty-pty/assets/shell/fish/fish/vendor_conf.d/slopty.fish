@@ -115,3 +115,13 @@ if status is-interactive; and set -q SLOPTY_CLAUDE_MOD; and not functions -q cla
         end
     end
 end
+
+# `ssh` keeps a terminal the far side knows (ghostty's `ssh-env` and `ssh-terminfo`): `slopty
+# ssh` installs our terminfo entry on the host once, else the session gets xterm-256color, and
+# SLOPTY_NO_SSH_TERMINFO=1 leaves every host untouched. An `ssh` of the user's own (a function,
+# an alias, an autoloaded file) is left alone, and `command ssh` is always the plain one.
+if status is-interactive; and set -q SLOPTY_CLI; and test -x "$SLOPTY_CLI"; and not functions -q ssh
+    function ssh --wraps ssh -d "ssh, with a terminal the far side knows"
+        $SLOPTY_CLI ssh -- $argv
+    end
+end

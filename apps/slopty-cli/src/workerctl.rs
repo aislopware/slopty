@@ -6,7 +6,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 use slopty_proto::ctl::{CtlReply, CtlRequest, Tailscale};
 
-use crate::service;
+use crate::{deploy, service};
 
 #[derive(Subcommand, Debug)]
 pub enum WorkerCmd {
@@ -25,6 +25,9 @@ pub enum WorkerCmd {
     Uninstall,
     /// Whether the services are installed and running.
     Service,
+    /// Put a worker on another machine over `ssh`, or with `--update` replace the one there:
+    /// upload the binaries built for it, install its services and check it answers.
+    Deploy(deploy::DeployOpts),
 }
 
 /// The worker's control socket, for every verb and relay that talks to it:
@@ -47,7 +50,7 @@ fn socket_in(env: Option<std::ffi::OsString>, data_dir: &Path) -> PathBuf {
     slopty_platform::dirs::runtime_dir().join("worker.sock")
 }
 
-pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path) -> Result<()> {
+pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bool) -> Result<()> {
     let req = match cmd {
         WorkerCmd::Status => CtlRequest::Status,
         WorkerCmd::Doctor => CtlRequest::Doctor,
@@ -56,6 +59,12 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path) -> Resul
         WorkerCmd::Uninstall => return service::uninstall().await,
         WorkerCmd::Service => {
             service::status();
+            return Ok(());
+        }
+        WorkerCmd::Deploy(opts) => {
+            let source = service::binaries_source(opts.bin_dir())?;
+            let deployed = deploy::deploy(&opts, &source).await?;
+            print!("{}", deploy::report(opts.target(), &deployed));
             return Ok(());
         }
     };
@@ -69,6 +78,7 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path) -> Resul
                 );
             }
         }
+        CtlReply::Doctor(health) if json => println!("{}", serde_json::to_string(&health)?),
         CtlReply::Doctor(health) => {
             print!("{}", doctor_report(&health, DESKTOP));
             if DESKTOP && !(health.caps.can_capture && health.caps.can_inject) {

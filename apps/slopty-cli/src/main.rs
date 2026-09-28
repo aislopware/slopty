@@ -5,7 +5,9 @@
 //! * `slopty mcp` is the same verbs as an MCP server on stdio, for an AI agent.
 //! * `slopty server …` runs `slopty-server` as a `LaunchAgent` or a systemd user unit.
 //! * `slopty worker …` talks to the local `slopty-worker` over its control socket.
+//! * `slopty worker deploy <ssh target>` puts a worker on another machine over `ssh`.
 //! * `slopty hook` is the Claude Code hook relay (`slopty hook install` registers it).
+//! * `slopty ssh` is `ssh` with a terminal the far side knows; a Slopty shell's `ssh` runs it.
 //! * `slopty add <host[:port]>` remembers a worker (today's `slopty-worker`) by its address.
 //! * `slopty sessions|attach` are a real client over QUIC straight to a worker: a raw-mode terminal
 //!   that renders frames locally. It is the reference client for latency measurements and works
@@ -17,6 +19,7 @@
 mod attach;
 mod bench;
 mod client;
+mod deploy;
 mod hook;
 mod link;
 mod mcp;
@@ -72,6 +75,16 @@ enum Cmd {
     Worker {
         #[command(subcommand)]
         cmd: workerctl::WorkerCmd,
+    },
+    /// `ssh` with a terminal the far side knows: Slopty's terminfo entry is installed on the
+    /// host once, else the session gets xterm-256color. A Slopty shell's `ssh` runs this.
+    Ssh {
+        /// The `ssh` to run.
+        #[arg(long, default_value = "ssh")]
+        ssh: PathBuf,
+        /// `ssh`'s own arguments, as typed (after `--`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<std::ffi::OsString>,
     },
     /// Claude Code hook relay: forwards the hook on stdin to the worker daemon (exits 0 always).
     Hook {
@@ -212,7 +225,18 @@ async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let data_dir = cli.data_dir.unwrap_or_else(slopty_platform::dirs::data_dir);
     let done = match cli.cmd {
-        Cmd::Worker { cmd } => workerctl::run(cmd, cli.server.as_deref(), &data_dir).await,
+        Cmd::Worker { cmd } => {
+            workerctl::run(cmd, cli.server.as_deref(), &data_dir, cli.json).await
+        }
+        Cmd::Ssh { ssh, args } => {
+            let opts =
+                slopty_pty::ssh::Options { ssh, ..slopty_pty::ssh::Options::from_env(&data_dir) };
+            let (mut ssh, _decision) =
+                slopty_pty::ssh::prepare(&opts, &args, &mut |note| eprintln!("slopty: {note}"))
+                    .await;
+            let e = std::os::unix::process::CommandExt::exec(&mut ssh);
+            return Err(anyhow::anyhow!("run {}: {e}", opts.ssh.display()));
+        }
         Cmd::Hook { cmd: None } => {
             hook::relay(&data_dir).await;
             Ok(())
@@ -297,6 +321,21 @@ mod tests {
         ] {
             let cli = super::Cli::try_parse_from(args).unwrap();
             assert_eq!(cli.data_dir.as_deref(), Some(std::path::Path::new("/d")), "{args:?}");
+        }
+    }
+
+    /// `ssh`'s own flags reach `slopty ssh` as typed, with or without the `--` the shells put.
+    #[test]
+    fn ssh_takes_its_arguments_as_typed() {
+        use clap::Parser as _;
+        for args in [
+            &["slopty", "ssh", "--", "-p", "2222", "box", "-t", "htop"][..],
+            &["slopty", "ssh", "box", "-t", "htop"],
+        ] {
+            let cli = super::Cli::try_parse_from(args).unwrap();
+            let super::Cmd::Ssh { args: got, .. } = cli.cmd else { panic!("{args:?}") };
+            let typed: Vec<&str> = args.iter().skip(2).filter(|a| **a != "--").copied().collect();
+            assert_eq!(got, typed, "{args:?}");
         }
     }
 }

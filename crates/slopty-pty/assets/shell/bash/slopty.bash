@@ -160,3 +160,13 @@ if [ -n "${SLOPTY_CLAUDE_MOD-}" ] && ! declare -F claude >/dev/null && ! alias c
         CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 command claude "$flag" "$@"
     }
 fi
+
+# `ssh` keeps a terminal the far side knows (ghostty's `ssh-env` and `ssh-terminfo`): `slopty
+# ssh` installs our terminfo entry on the host once, else the session gets xterm-256color, and
+# SLOPTY_NO_SSH_TERMINFO=1 leaves every host untouched. An `ssh` of the user's own (an alias or
+# a function) is left alone, and `command ssh` is always the plain one.
+if [ -n "${SLOPTY_CLI-}" ] && [ -x "$SLOPTY_CLI" ] && ! declare -F ssh >/dev/null && ! alias ssh >/dev/null 2>&1; then
+    function ssh {
+        "$SLOPTY_CLI" ssh -- "$@"
+    }
+fi

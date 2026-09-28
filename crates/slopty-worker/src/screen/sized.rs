@@ -5,6 +5,11 @@
 //! [`DisplayKey`], and a stream's task hands its asks over as jobs ([`Main`]) and waits for the
 //! answer. One key has one display; a second stream with the same key shares it.
 //!
+//! The last stream letting go keeps the display for [`LINGER`] ([`Displays::lingering`]), and
+//! the same key asking again within it takes the display back, windows where they were. A phone
+//! that roams between networks, or a laptop whose lid closes, would otherwise have macOS move
+//! every window on it to a physical display and leave them there.
+//!
 //! macOS picks its own mode for a new display and may restore a saved one seconds later, so a
 //! display is enforced ([`Factory::enforce`]) every [`ENFORCE_EVERY`] until it settles, and again
 //! whenever the displays are reconfigured ([`Displays::reconfigured`]). One that does not
@@ -35,6 +40,9 @@ pub const ENFORCE_EVERY: Duration = Duration::from_millis(100);
 
 /// How long a new or changed display has to settle in its mode before the stream gives up on it.
 pub const SETTLE_WITHIN: Duration = Duration::from_secs(5);
+
+/// How long a worker keeps a display its client let go of, for the client to take it back.
+pub const LINGER: Duration = Duration::from_mins(10);
 
 /// What makes, changes and checks displays: CoreGraphics on a worker ([`Cg`]), a fake in tests.
 /// Called on the main thread only.
@@ -79,6 +87,9 @@ pub trait Main<S>: Send + Sync + 'static {
 pub struct Registry<F: Factory> {
     factory: F,
     displays: HashMap<DisplayKey, Entry<F::Display>>,
+    /// The last linger started: each has its own number, so a timer outlived by a take-back
+    /// and a later let-go releases nothing.
+    lingers: u64,
 }
 
 impl<F: Factory> std::fmt::Debug for Registry<F> {
@@ -90,7 +101,7 @@ impl<F: Factory> std::fmt::Debug for Registry<F> {
 impl<F: Factory> Registry<F> {
     /// No display yet; `factory` makes them.
     pub fn new(factory: F) -> Self {
-        Self { factory, displays: HashMap::new() }
+        Self { factory, displays: HashMap::new(), lingers: 0 }
     }
 }
 
@@ -101,6 +112,10 @@ struct Entry<D> {
     plan: Plan,
     /// Leases on it.
     users: usize,
+    /// While no lease holds it: the linger that releases it unless its key asks again.
+    lingering: Option<u64>,
+    /// Kept through a disconnect; `false` once a stream found it unusable.
+    keep: bool,
     settled: bool,
     /// When it was last made or changed: the settle deadline runs from here.
     changed_at: Instant,
@@ -110,6 +125,21 @@ struct Entry<D> {
 }
 
 impl<D> Entry<D> {
+    /// A display just made (or made anew) for `users` leases.
+    fn new(display: D, plan: Plan, users: usize, waiting: Vec<oneshot::Sender<Settled>>) -> Self {
+        Self {
+            display,
+            plan,
+            users,
+            lingering: None,
+            keep: true,
+            settled: false,
+            changed_at: Instant::now(),
+            enforcing: false,
+            waiting,
+        }
+    }
+
     fn tell(&mut self, answer: Settled) {
         for waiter in self.waiting.drain(..) {
             let _gone = waiter.send(answer);
@@ -135,11 +165,16 @@ pub enum Resized {
 pub struct Displays<F: Factory> {
     main: Arc<dyn Main<Registry<F>>>,
     settle_within: Duration,
+    linger: Duration,
 }
 
 impl<F: Factory> Clone for Displays<F> {
     fn clone(&self) -> Self {
-        Self { main: Arc::clone(&self.main), settle_within: self.settle_within }
+        Self {
+            main: Arc::clone(&self.main),
+            settle_within: self.settle_within,
+            linger: self.linger,
+        }
     }
 }
 
@@ -147,6 +182,7 @@ impl<F: Factory> std::fmt::Debug for Displays<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Displays")
             .field("settle_within", &self.settle_within)
+            .field("linger", &self.linger)
             .finish_non_exhaustive()
     }
 }
@@ -174,9 +210,16 @@ const fn why(error: &DisplayError) -> NoVirtualDisplay {
 }
 
 impl<F: Factory> Displays<F> {
-    /// Displays living where `main` runs its jobs, given `settle_within` to settle.
+    /// Displays living where `main` runs its jobs, given `settle_within` to settle, each
+    /// released with its last lease.
     pub fn new(main: Arc<dyn Main<Registry<F>>>, settle_within: Duration) -> Self {
-        Self { main, settle_within }
+        Self { main, settle_within, linger: Duration::ZERO }
+    }
+
+    /// Keep a display `linger` after its last lease, for its key to take back.
+    #[must_use]
+    pub fn lingering(self, linger: Duration) -> Self {
+        Self { linger, ..self }
     }
 
     /// Ask the main thread `job` and wait for its answer; `None` when the main thread dropped
@@ -209,6 +252,10 @@ impl<F: Factory> Displays<F> {
             .ask(move |registry, this| {
                 if let Some(entry) = registry.displays.get_mut(&key) {
                     entry.users = entry.users.saturating_add(1);
+                    if entry.lingering.take().is_some() {
+                        let id = registry.factory.id(&entry.display);
+                        tracing::info!(id, "virtual display taken back by its client");
+                    }
                     return Ok(());
                 }
                 let display = registry.factory.create(&plan).map_err(|e| {
@@ -217,18 +264,7 @@ impl<F: Factory> Displays<F> {
                 })?;
                 let id = registry.factory.id(&display);
                 tracing::info!(id, mode = ?plan.mode, "virtual display made");
-                registry.displays.insert(
-                    key,
-                    Entry {
-                        display,
-                        plan,
-                        users: 1,
-                        settled: false,
-                        changed_at: Instant::now(),
-                        enforcing: false,
-                        waiting: Vec::new(),
-                    },
-                );
+                registry.displays.insert(key, Entry::new(display, plan, 1, Vec::new()));
                 this.enforce_soon(registry, key);
                 Ok(())
             })
@@ -270,7 +306,7 @@ impl<F: Factory> Displays<F> {
     /// Enforce `key`'s display once: settled tells the waiters, pending asks again a tick later
     /// until the deadline, which tells them it never settled.
     fn tick(&self, registry: &mut Registry<F>, key: DisplayKey) {
-        let Registry { factory, displays } = registry;
+        let Registry { factory, displays, .. } = registry;
         let Some(entry) = displays.get_mut(&key) else { return };
         let id = factory.id(&entry.display);
         match factory.enforce(&entry.display) {
@@ -305,8 +341,45 @@ impl<F: Factory> Displays<F> {
     }
 }
 
-/// A stream's hold on the display for its key. Dropping it lets go on the main thread, and the
-/// last lease on a display releases it, which is what removes it.
+impl<F: Factory> Displays<F> {
+    /// One lease on `key` let go: the last keeps the display for the linger, unless a stream
+    /// found it unusable or there is no linger, and then releases it.
+    fn let_go(&self, registry: &mut Registry<F>, key: DisplayKey) {
+        let Some(entry) = registry.displays.get_mut(&key) else { return };
+        entry.users = entry.users.saturating_sub(1);
+        if entry.users > 0 {
+            return;
+        }
+        if !entry.keep || self.linger.is_zero() {
+            Self::release(registry, key);
+            return;
+        }
+        registry.lingers = registry.lingers.wrapping_add(1);
+        let linger = registry.lingers;
+        entry.lingering = Some(linger);
+        let id = registry.factory.id(&entry.display);
+        tracing::info!(id, linger = ?self.linger, "virtual display kept for its client");
+        self.main.run_after(
+            self.linger,
+            Box::new(move |registry| {
+                if registry.displays.get(&key).is_some_and(|e| e.lingering == Some(linger)) {
+                    Self::release(registry, key);
+                }
+            }),
+        );
+    }
+
+    /// Remove `key`'s display, telling whoever waits on it.
+    fn release(registry: &mut Registry<F>, key: DisplayKey) {
+        if let Some(mut gone) = registry.displays.remove(&key) {
+            gone.tell(Err(NoVirtualDisplay::Refused));
+            tracing::info!(id = registry.factory.id(&gone.display), "virtual display released");
+        }
+    }
+}
+
+/// A stream's hold on the display for its key. Dropping it lets go on the main thread; the last
+/// lease on a display keeps it for the linger and then releases it, which is what removes it.
 pub struct Lease<F: Factory> {
     displays: Displays<F>,
     key: DisplayKey,
@@ -323,6 +396,17 @@ impl<F: Factory> Lease<F> {
     #[must_use]
     pub const fn key(&self) -> DisplayKey {
         self.key
+    }
+
+    /// The stream found the display unusable: its last lease releases it at once rather than
+    /// keeping it for a client that would only find it unusable again.
+    pub fn lost(&self) {
+        let key = self.key;
+        self.displays.main.run(Box::new(move |registry| {
+            if let Some(entry) = registry.displays.get_mut(&key) {
+                entry.keep = false;
+            }
+        }));
     }
 
     /// The display's id once it is in its mode.
@@ -365,7 +449,7 @@ impl<F: Factory> Lease<F> {
         let (key, plan) = (self.key, plan_for(self.key, shape));
         self.displays
             .ask(move |registry, this| {
-                let Registry { factory, displays } = registry;
+                let Registry { factory, displays, .. } = registry;
                 let Some(entry) = displays.get_mut(&key) else {
                     return Err(NoVirtualDisplay::Refused);
                 };
@@ -384,15 +468,7 @@ impl<F: Factory> Lease<F> {
                         let display = factory.create(&plan).map_err(|e| why(&e))?;
                         displays.insert(
                             key,
-                            Entry {
-                                display,
-                                plan,
-                                users,
-                                settled: false,
-                                changed_at: Instant::now(),
-                                enforcing: false,
-                                waiting: waiting.unwrap_or_default(),
-                            },
+                            Entry::new(display, plan, users, waiting.unwrap_or_default()),
                         );
                         this.enforce_soon(registry, key);
                         return Ok(Resized::Remade);
@@ -416,17 +492,8 @@ impl<F: Factory> Lease<F> {
 impl<F: Factory> Drop for Lease<F> {
     fn drop(&mut self) {
         let key = self.key;
-        self.displays.main.run(Box::new(move |registry| {
-            let Some(entry) = registry.displays.get_mut(&key) else { return };
-            entry.users = entry.users.saturating_sub(1);
-            if entry.users > 0 {
-                return;
-            }
-            if let Some(mut gone) = registry.displays.remove(&key) {
-                gone.tell(Err(NoVirtualDisplay::Refused));
-                tracing::info!(id = registry.factory.id(&gone.display), "virtual display released");
-            }
-        }));
+        let displays = self.displays.clone();
+        self.displays.main.run(Box::new(move |registry| displays.let_go(registry, key)));
     }
 }
 
@@ -518,7 +585,7 @@ pub fn on_main_queue() -> Option<Displays<Cg>> {
         return None;
     }
     let main = MainQueue::new(Registry::new(Cg))?;
-    let displays = Displays::new(Arc::new(main), SETTLE_WITHIN);
+    let displays = Displays::new(Arc::new(main), SETTLE_WITHIN).lingering(LINGER);
     let notified = displays.clone();
     if let Err(e) = slopty_vdisplay::on_reconfiguration(move || notified.reconfigured()) {
         tracing::warn!(error = %e, "no display reconfiguration notices; enforcing on changes only");
@@ -560,9 +627,17 @@ async fn made<P: Platform, F: Factory>(
 ) -> Result<(Lease<F>, DisplayId), NoVirtualDisplay> {
     let displays = displays.ok_or(NoVirtualDisplay::Unavailable)?;
     let lease = displays.acquire(key, shape).await?;
-    let id = lease.settled().await?;
-    let display = listed::<P>(id).await?;
-    Ok((lease, display))
+    let listed = match lease.settled().await {
+        Ok(id) => listed::<P>(id).await,
+        Err(why) => Err(why),
+    };
+    match listed {
+        Ok(display) => Ok((lease, display)),
+        Err(why) => {
+            lease.lost();
+            Err(why)
+        }
+    }
 }
 
 /// What a client's `OpenDisplay` asked for.
@@ -597,8 +672,8 @@ impl std::fmt::Debug for Sized {
 /// Open a stream of the display made for the client that asked, or of a physical display.
 ///
 /// Returns the stream, the `Display` and `Opened` events to send in that order, and for a made
-/// display what serves its resizes. Dropping the [`Sized`] (after closing the stream) releases
-/// the display on the main thread.
+/// display what serves its resizes. Dropping the [`Sized`] (after closing the stream) lets go
+/// of the display on the main thread (see [`Lease`]).
 ///
 /// # Errors
 ///
@@ -667,6 +742,7 @@ fn sizing<P: Platform, F: Factory>(
                 Ok(told) => told,
                 Err(why) => {
                     tracing::warn!(?why, "the display made for the client was lost");
+                    held.lost();
                     lease.lock().take();
                     match Pipeline::<P>::physical_display(Some(shown)).await {
                         Ok(display) => VirtualDisplay::Physical { display, why },

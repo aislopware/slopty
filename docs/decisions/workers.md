@@ -473,3 +473,66 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   client on the tailnet listens. While none does, the reader sleeps on a `Notify` instead of
   ticking, and the first client to listen has the status read at once rather than up to a
   poll later. Test: `the_status_is_read_when_a_client_listens_and_only_then`.
+
+- ✅ **A client's virtual display outlives its disconnect** (2026-09-29, product gap 1). The
+  last stream letting go of a display made for a client removed it, and macOS then moved
+  every window on it to a physical display and left them there. A phone roaming between
+  networks or a lid closing did that each time. Now the worker keeps a display its client let
+  go of for `sized::LINGER` (10 min), and an `OpenDisplay` with the same key within that time
+  takes the same display back, windows in place, resized to the new shape. Each linger is
+  numbered, so a timer outlived by a take-back and a later let-go releases nothing. A display
+  the stream found unusable (it never settled, ScreenCaptureKit never listed it, a resize
+  lost it) is released at once (`Lease::lost`): the client would only fail on it again.
+  `Displays::new` keeps no linger. The worker's `on_main_queue` turns it on, so the
+  stream-level tests in `apps/slopty-worker` still see a display go with its stream.
+  - Not done yet: Jump ends a linger early on local keyboard or mouse input, and the
+    research proposed the same (a `CGEventSource` counter). The counter counts the input
+    Slopty itself posts for other clients too, so it needs a way to tell the two apart first.
+    The linger is a constant until `[worker] display_linger` lands in `slopty-settings`.
+  - Tests: `a_display_let_go_lingers_for_its_client_and_goes_when_the_linger_runs_out` (on
+    paused time, with an outlived timer) and
+    `a_lost_display_is_released_at_once_and_a_linger_is_its_own_keys`, both over the fake
+    `Factory`; no real display is made.
+
+- ✅ **A worker is deployed and updated over the system `ssh`** (2026-09-29, product gap 9).
+  `slopty worker deploy <ssh target>` puts a worker on another machine, and `--update`
+  replaces the one there.
+  - **The system `ssh`, one connection per step.** `~/.ssh/config`, `ControlMaster` and
+    Tailscale SSH apply as they do to a typed `ssh`. Every remote step is a `sh -c` script,
+    so the login shell does not matter, and paths are relative to the home where `ssh`
+    starts. No `scp` or `sftp` is needed: a file goes up as `cat > name.part` and is moved
+    over its name once whole.
+  - **The binaries are checked against the machine before anything moves.** `uname -sm`
+    names the target, and the Mach-O (thin or universal) or ELF header of each of
+    `slopty-ptyd`, `slopty-worker` and `slopty` must name the same OS and CPU. A mismatch
+    asks for `--bin-dir` with a build for it. Linux is recognised; what is missing for it is a
+    musl build to ship.
+  - **The install runs on the target, in Rust.** The uploaded `slopty worker install
+    --bin-dir ~/.slopty/deploy` installs the services with the same
+    `slopty_platform::service::install_worker` a local install uses. A deploy passes
+    `--fresh`, which refuses a machine that already has a worker. `--update` requires one,
+    keeps its port and bind address, and first copies its binaries to
+    `<data dir>/bin.previous`.
+  - **Health means the new worker answers as itself.** Every install now waits for the
+    control socket to answer both status and doctor. The doctor must show this build's
+    version, the `slopty-worker` just installed, and an uptime no longer than the install
+    has taken. A worker left over from before, or another build, fails at once rather than
+    counting as up. If an update's new worker fails, the previous binaries are installed
+    again and the command fails with "the previous one is back".
+  - **Then the doctor, as JSON.** `slopty --json worker doctor` prints the `Health`. The
+    deploy reports the version, the binary, which of Screen Recording and Accessibility a
+    person at that Mac still has to allow, and `slopty add <tailnet name>`. Terminals and
+    agents work before those grants.
+  - Tests: `deploy::tests` run whole deploys through a fake `ssh` that plays the host in a
+    temporary home. The uploads run there under `sh`, byte for byte, executable and without
+    a leftover `.part`. The tests also cover `--fresh` versus `--update`, a failed remote
+    install failing the deploy, a machine the binaries do not fit being refused after
+    `uname` alone, and header reading. `service::tests` drive the remote side against a
+    recording launchd and a fake control socket: `--fresh`, `--update`, the port carried
+    over, and the previous worker put back when the new one answers as another version or
+    was already up.
+  - **Pending: a live deploy.** Remote Login is on here, but `localhost` fails its host key
+    check in `~/.ssh/known_hosts`, which is the user's to fix. A deploy to this Mac would
+    also replace its own worker: the launchd labels are fixed, and this Mac has the worker's
+    agents installed. The live proof waits for a second machine or a label of its own for
+    tests in `slopty-platform`.

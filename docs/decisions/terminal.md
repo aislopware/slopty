@@ -1970,3 +1970,39 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     engine and the pty crate to share. `MouseButton::bit()` is the one encoding of a held
     button.
   - Goldens: `worker_term_error_input_full` and `worker_term_error_engine`.
+- ✅ **`ssh` out of a Slopty shell keeps a terminal the far side knows** (2026-09-29, product
+  gap 6). A Slopty shell has `TERM=xterm-ghostty`, and a host without that entry left vim,
+  less and htop with an unknown terminal.
+  - **What ghostty does, and what we took.** Ghostty 1.4 wraps `ssh` in a CLI action
+    (`ghostty +ssh`, `src/cli/ssh.zig`). It resolves the destination with `ssh -G`, pipes its
+    entry to `tic -x -` on the host once, caches each success by `user@hostname` and entry
+    version, and falls back to `xterm-256color` when the install fails. It also asks to
+    `SendEnv` `COLORTERM` and `TERM_PROGRAM`. Slopty does the same in Rust
+    (`slopty_pty::ssh`, run as `slopty ssh`). Each shell's hooks define an `ssh` function
+    that calls the CLI, which ptyd names in `SLOPTY_CLI`: the `slopty` beside it, which every
+    worker install carries. A shell without that variable keeps the plain `ssh`.
+  - **Different from ghostty.** Ghostty sends no `TERM` for an `ssh` with a remote command,
+    and still runs the install; here such an `ssh` passes through untouched, like `-N`, `-W`,
+    `-O`, `-G`, `-V` and `-Q`. So `ssh host cat f | …` never prints or waits for a terminfo
+    install. `-t` makes a command interactive again. The command line is cut the way OpenSSH
+    reads it, with options after the destination too, so the install never runs the
+    person's command. `TERM` goes in the `ssh` child's environment, which every OpenSSH
+    sends, where ghostty uses `SetEnv=TERM`. The install runs through `sh -c`, so a fish or
+    csh login shell on the host reads it the same way. The cache is `<data dir>/ssh-terminfo`,
+    keyed by a digest of our entry's source, so a changed entry goes out again. A `TERM` that
+    is not ours (inside tmux, say) is left alone.
+  - **On by default, where ghostty's `ssh-env` and `ssh-terminfo` are opt-in.** Slopty's
+    shells are a developer reaching into their own machines, and without the wrapper every
+    such `ssh` is broken. The install writes only the user's `~/.terminfo`, and it says so on
+    the first connection. `SLOPTY_NO_SSH_TERMINFO=1` never touches a host and gives every
+    session `xterm-256color`. An `ssh` alias or function of the user's own wins, and
+    `command ssh` is always the plain one. No setting was added: an environment variable
+    covers the one choice there is.
+  - **Cost.** The first login to a host is two connections (install, then the session). With
+    password authentication that means typing the password twice, once per host and entry
+    version. Keys, an agent, `ControlMaster` or Tailscale SSH hide it.
+  - Tests: `slopty-pty` `ssh::tests` drive a fake `ssh` that records its calls. They cover
+    the install then the cache, a failed `tic` falling back without caching, and what passes
+    through untouched. They also cut the command line as OpenSSH does and read `ssh -G`.
+    `a_typed_ssh_goes_through_the_cli` types `ssh` into real zsh, bash and fish and checks
+    that a user's alias wins. `the_cli_travels_to_integrated_shells_only` covers the variable.

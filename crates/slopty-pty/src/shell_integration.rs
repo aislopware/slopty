@@ -19,6 +19,8 @@ pub const FISH_INTEGRATION: &str =
     include_str!("../assets/shell/fish/fish/vendor_conf.d/slopty.fish");
 /// Set (to anything but `0` or empty) to run shells untouched.
 pub const OPT_OUT: &str = "SLOPTY_NO_SHELL_INTEGRATION";
+/// The `slopty` CLI, which the hooks' `ssh` runs as `slopty ssh` ([`crate::ssh`]).
+pub const CLI: &str = "SLOPTY_CLI";
 /// Where the zsh bootstrap finds the user's original `ZDOTDIR`, when there was one.
 const ZSH_ORIGINAL_ZDOTDIR: &str = "SLOPTY_ZSH_ZDOTDIR";
 /// Tells the bash bootstrap the shell was asked to be a login shell (bash ignores `--rcfile`
@@ -47,6 +49,9 @@ pub struct ShellIntegration {
     pub original_xdg_data_dirs: Option<String>,
     /// `false` when the daemon's environment carries [`OPT_OUT`]: no shell is touched.
     pub enabled: bool,
+    /// The `slopty` CLI beside the daemon, handed to the shell as [`CLI`]; without it `ssh`
+    /// stays the plain one.
+    pub cli: Option<PathBuf>,
 }
 
 /// What to change about a spawn for the integration to load.
@@ -82,7 +87,15 @@ pub fn install(dir: &Path) -> io::Result<ShellIntegration> {
         original_zdotdir: var("ZDOTDIR"),
         original_xdg_data_dirs: var("XDG_DATA_DIRS"),
         enabled: !std::env::var(OPT_OUT).is_ok_and(|v| opted_out(&v)),
+        cli: sibling_cli(),
     })
+}
+
+/// `slopty` beside this binary: an installed worker's bin dir carries all three
+/// (`slopty_platform::service::WORKER_BINARIES`), and so does a build's target dir.
+fn sibling_cli() -> Option<PathBuf> {
+    let cli = std::env::current_exe().ok()?.parent()?.join("slopty");
+    cli.is_file().then_some(cli)
 }
 
 fn write_if_changed(path: &Path, content: &str) -> io::Result<()> {
@@ -121,15 +134,15 @@ impl ShellIntegration {
             return untouched();
         }
         let base = Path::new(program).file_name().map(|n| n.to_string_lossy().into_owned());
-        match base.as_deref() {
+        let injection = match base.as_deref() {
             Some("zsh") => {
                 let mut env = vec![("ZDOTDIR".to_owned(), lossy(&self.zdotdir))];
                 if let Some(original) = &self.original_zdotdir {
                     env.push((ZSH_ORIGINAL_ZDOTDIR.to_owned(), original.clone()));
                 }
-                Injection { env, ..untouched() }
+                Some(Injection { env, ..untouched() })
             }
-            Some("bash") => self.bash(args, arg0).unwrap_or_else(untouched),
+            Some("bash") => self.bash(args, arg0),
             Some("fish") => {
                 let session = extra.iter().find(|(k, _)| k == "XDG_DATA_DIRS").map(|(_, v)| v);
                 let behind = session
@@ -137,10 +150,15 @@ impl ShellIntegration {
                     .filter(|v| !v.is_empty())
                     .map_or(XDG_DATA_DIRS_DEFAULT, String::as_str);
                 let dirs = format!("{}:{behind}", lossy(&self.fish_data_dir));
-                Injection { env: vec![("XDG_DATA_DIRS".to_owned(), dirs)], ..untouched() }
+                Some(Injection { env: vec![("XDG_DATA_DIRS".to_owned(), dirs)], ..untouched() })
             }
-            _ => untouched(),
+            _ => None,
+        };
+        let Some(mut injection) = injection else { return untouched() };
+        if let Some(cli) = &self.cli {
+            injection.env.push((CLI.to_owned(), lossy(cli)));
         }
+        injection
     }
 
     /// The bash rewrite: `--rcfile` replaces the user's `~/.bashrc` for interactive shells
@@ -214,6 +232,7 @@ mod tests {
             original_zdotdir: None,
             original_xdg_data_dirs: None,
             enabled: true,
+            cli: None,
         }
     }
 
@@ -287,6 +306,19 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    /// Every shell the hooks load in is told where the CLI is, for its `ssh`; nothing else is.
+    #[test]
+    fn the_cli_travels_to_integrated_shells_only() {
+        let si = ShellIntegration { cli: Some(PathBuf::from("/opt/s/slopty")), ..integration() };
+        for (shell, args) in [("zsh", vec![]), ("bash", strings(&["-i"])), ("fish", vec![])] {
+            let env = si.apply(shell, &args, None, &[]).env;
+            assert_eq!(env.last(), Some(&pair(CLI, "/opt/s/slopty")), "{shell}: {env:?}");
+        }
+        assert!(si.apply("bash", &strings(&["-c", "true"]), None, &[]).env.is_empty(), "no prompt");
+        assert!(si.apply("vim", &[], None, &[]).env.is_empty());
+        assert!(si.apply("zsh", &[], None, &[pair(OPT_OUT, "1")]).env.is_empty(), "opted out");
     }
 
     #[test]
@@ -387,6 +419,7 @@ mod tests {
             original_zdotdir: None,
             original_xdg_data_dirs: None,
             enabled: true,
+            cli: None,
             ..si
         };
         let home = tmp.join("home");
@@ -655,6 +688,36 @@ mod tests {
             let own =
                 run_shell_with(&tag, interactive(), &[(rc, alias)], &env, "claude z\nexit\n").await;
             assert!(own.contains("got[--mine z]hooks[]"), "{shell}, the user's alias: {own:?}");
+        }
+    }
+
+    /// A typed `ssh` goes through `slopty ssh --` with its arguments as typed, in every shell;
+    /// the user's own `ssh` is left alone.
+    #[tokio::test]
+    async fn a_typed_ssh_goes_through_the_cli() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = tmp.path().join("slopty");
+        fs::write(&cli, "#!/bin/sh\nprintf 'cli[%s]\\n' \"$*\"\n").unwrap();
+        fs::set_permissions(&cli, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let cli = cli.to_string_lossy().into_owned();
+        let env = [(CLI, cli.as_str())];
+        let mut shells: Vec<(&str, &str, &str)> =
+            vec![("/bin/zsh", ".zshrc", "alias ssh='echo mine'\n")];
+        shells.extend(bashes().into_iter().map(|b| (b, ".bashrc", "alias ssh='echo mine'\n")));
+        let fish = ["/opt/homebrew/bin/fish", "/usr/local/bin/fish"]
+            .into_iter()
+            .find(|p| Path::new(p).is_file());
+        shells.extend(fish.map(|f| (f, ".config/fish/config.fish", "alias ssh 'echo mine'\n")));
+        for (n, (shell, rc, alias)) in shells.into_iter().enumerate() {
+            let interactive = || Shell { program: shell, args: &["-i"], arg0: None };
+            let input = "ssh -p 2222 'a b' -t htop\nexit\n";
+            let text = run_shell_with(&format!("ssh-{n}"), interactive(), &[], &env, input).await;
+            assert!(text.contains("cli[ssh -- -p 2222 a b -t htop]"), "{shell}: {text:?}");
+            let own =
+                run_shell_with(&format!("ssh-own-{n}"), interactive(), &[(rc, alias)], &env, input)
+                    .await;
+            assert!(own.contains("mine -p 2222 a b -t htop"), "{shell}, the user's alias: {own:?}");
+            assert!(!own.contains("cli["), "{shell}: {own:?}");
         }
     }
 }

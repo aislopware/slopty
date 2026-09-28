@@ -7,6 +7,7 @@
 //! * [`client`] — the worker side of the ptyd socket.
 //! * [`shell_integration`] — bundled zsh scripts that emit OSC 133 prompt marks.
 //! * [`terminfo`] — ghostty's terminfo entry, compiled on start-up so `TERM=xterm-ghostty`.
+//! * [`ssh`] — `ssh` out of a Slopty shell, with the entry installed on the far side.
 //! * [`process`] — the foreground process of a tty, for attributing agent sessions.
 
 pub mod client;
@@ -16,6 +17,7 @@ pub mod protocol;
 pub mod pty;
 pub mod ring;
 pub mod shell_integration;
+pub mod ssh;
 pub mod terminfo;
 
 pub use client::PtydClient;

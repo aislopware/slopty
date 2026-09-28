@@ -228,3 +228,63 @@ async fn a_reconfiguration_enforces_every_display_again() {
     let enforced: Vec<Did> = fake.did().split_off(before);
     assert_eq!(enforced, [Did::Enforced(1), Did::Enforced(1)]);
 }
+
+fn released(fake: &Fake, id: u32) -> bool {
+    fake.did().contains(&Did::Released(id))
+}
+
+/// A client that drops off and comes back within the linger gets its display back, windows and
+/// all; one that stays away loses it once the linger runs out, counted from its last let-go.
+#[tokio::test(start_paused = true)]
+async fn a_display_let_go_lingers_for_its_client_and_goes_when_the_linger_runs_out() {
+    let fake = Fake::scripted(Some(0));
+    let linger = Duration::from_secs(600);
+    let displays = displays(&fake, Duration::from_secs(5)).lingering(linger);
+    let lease = displays.acquire(KEY, &shape(2752, 2064, 2.0)).await.unwrap();
+    assert_eq!(lease.settled().await, Ok(1));
+    drop(lease);
+    fake.drained(&displays).await;
+    assert!(!released(&fake, 1), "kept through the disconnect: {:?}", fake.did());
+
+    tokio::time::sleep(Duration::from_secs(400)).await;
+    // The phone is back, rotated: the same display takes the new shape.
+    let back = displays.acquire(KEY, &shape(2064, 2752, 2.0)).await.unwrap();
+    assert_eq!(back.settled().await, Ok(1), "the same display, taken back");
+    assert_eq!(fake.did().iter().filter(|d| matches!(d, Did::Made(_))).count(), 1);
+    assert!(fake.did().contains(&Did::Resized(1)), "{:?}", fake.did());
+    drop(back);
+    fake.drained(&displays).await;
+
+    // The first linger's timer comes due while the second runs: it releases nothing.
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    fake.drained(&displays).await;
+    assert!(!released(&fake, 1), "an outlived linger released it: {:?}", fake.did());
+    tokio::time::sleep(Duration::from_secs(301)).await;
+    fake.drained(&displays).await;
+    assert_eq!(fake.did().last(), Some(&Did::Released(1)));
+
+    let fresh = displays.acquire(KEY, &shape(2752, 2064, 2.0)).await.unwrap();
+    assert_eq!(fresh.settled().await, Ok(2), "past the linger a new display is made");
+}
+
+/// A display a stream could not use is released with its last lease, linger or not; another
+/// client's key never takes a lingering display.
+#[tokio::test(start_paused = true)]
+async fn a_lost_display_is_released_at_once_and_a_linger_is_its_own_keys() {
+    let fake = Fake::scripted(Some(0));
+    let displays = displays(&fake, Duration::from_secs(5)).lingering(Duration::from_secs(600));
+    let lease = displays.acquire(KEY, &shape(1920, 1080, 1.0)).await.unwrap();
+    assert_eq!(lease.settled().await, Ok(1));
+    lease.lost();
+    drop(lease);
+    fake.drained(&displays).await;
+    assert_eq!(fake.did().last(), Some(&Did::Released(1)), "unusable, so not kept");
+
+    let lease = displays.acquire(KEY, &shape(1920, 1080, 1.0)).await.unwrap();
+    assert_eq!(lease.settled().await, Ok(2));
+    drop(lease);
+    let other =
+        displays.acquire(DisplayKey(*b"another-client!!"), &shape(1920, 1080, 1.0)).await.unwrap();
+    assert_eq!(other.settled().await, Ok(3), "a key of its own");
+    assert!(!released(&fake, 2), "the first client's display still waits for it");
+}
