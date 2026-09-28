@@ -12,9 +12,9 @@ upstream_branch = "main"
 fork = "https://github.com/aislopware/zed.git"
 branch = "main"
 checkout = ".research/zed-main"
-base = "bda9c0bd43a8d235d82adb01ea5bc875b861ecfc"
-base_date = "2026-09-26"
-checked = "2026-09-27"
+base = "dd510f99e04e7a5b464f9a4e8771fa978ada138b"
+base_date = "2026-09-28"
+checked = "2026-09-28"
 check_every_days = 7
 
 [gpui-kit]
@@ -23,7 +23,7 @@ upstream_branch = "main"
 fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
-base = "56dc9648c4049abab97045d925ef3983214d97e3"
+base = "25d59c06f45cd81a02c5b9d5b81d32ee4985f87d"
 base_date = "2026-09-28"
 checked = "2026-09-28"
 # It lands several changes a day, so every gate asks.

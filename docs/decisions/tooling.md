@@ -261,3 +261,35 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   a thread holds no more than that. A bigger frame, such as a checkpoint, leaves as the buffer
   it grew, as before. A `Serialize` impl that encodes a frame while it is being encoded gets a
   fresh buffer instead of a borrow panic.
+
+**The zed fork moves to upstream `dd510f99`, gpui-kit to `25d59c06`.** ✅ 2026-09-29
+- The zed fork now carries 33 commits on upstream `dd510f99`. The last sync had already
+  rebased it onto `ee43be11` without moving `base` in `xtask/upstream.toml`, so 19 of the 27
+  commits the check reported were new. One conflict, in `crates/gpui/src/window.rs`: upstream's
+  `InputPreference` import landed beside the fork's `PresentedFrame` imports, and both were kept.
+  No upstream commit touched `gpui_macos`, `gpui_apple` or `gpui_ios`, so the display-link,
+  presentation and iOS patches replayed as they were.
+- gpui-kit now carries its 7 commits on upstream `25d59c06`. Upstream's #3294 makes
+  `TextViewState::set_text` append Markdown that extends the current text, which our
+  "parse only the last block" commit already did. The merged `set_text` keeps our version and
+  adds upstream's two guards. A parse that failed, or a text that is still empty, gets a whole
+  parse again rather than an append, so an append can no longer land on a document that is
+  missing text. It also keeps our MDX guard, the synchronous parse of a small append, and the
+  whole parse when the text holds a definition or frontmatter. Upstream's four new tests pass on
+  the merge (86 of 86 in `text::state`).
+- **Adopted, with no code in Slopty:** the `set_text` guard above, which the conversation face's
+  streamed answers go through. gpui's `PriorityQueue` receivers now end when the last sender
+  drops instead of blocking, but only the threaded dispatcher uses it, not the GCD one on Apple.
+- **Not adopted:**
+  - `KeystrokeEvent::input_preference`: only Windows sets `prefer_character_input` (for AltGr),
+    and every Apple backend passes `false`. Slopty's keystroke interceptor would always see
+    `KeyBindings`.
+  - gpui's bench kit: `CountingAllocator` in `bench_main!`, the seeded randomized element tree
+    and `bench_text_system`. They are Criterion harness pieces behind `bench-support`. Slopty
+    already budgets allocations in its own tests, and a frame is timed end to end on the real
+    window, which a synthetic tree cannot stand in for.
+  - gpui-kit's button focus lines (#3299, #3300). Slopty turns `focus_ring` off, but it uses no
+    gpui-kit `Button` and draws its own focus hairlines. The kit `Input` takes a focus style
+    only when it draws its own border, which is still just tinted, so no field changes.
+  - Everything else: chart appear motion, `text` anchor summaries, `gpui_web`, `gpui_wgpu`, and
+    the editor, agent and git crates. None of it is on a path Slopty builds.
