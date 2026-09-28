@@ -2082,3 +2082,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `restore::tests` cover the files, the forgetting, the write pacing and the shell rule.
     `ghostty::restored::tests` cover the divider and the mode reset. Golden:
     `worker_term_restored`.
+- ✅ **libghostty-vt at ghostty `12752b2ac`** (2026-09-29). `vendor/ghostty` moved 31 commits
+  (from `6301810a4`). The libghostty-rs fork pins the same commit with regenerated bindings,
+  and it is rebased on upstream `8953a74` (one CI commit). Cargo.lock pins the fork at
+  `d1a57e4`. Of the 31 commits, these touch the VT library:
+  - **OSC integers are parsed strictly** (`lib.parseInt`, #14417). `4_2` is no longer 42, and
+    an unsigned field takes no sign, in OSC 4/5/104/105 colour indexes, kitty colours, OSC 9
+    sleep and progress, OSC 3008 fields, OSC 66, OSC 99 and the OSC 133 `D` exit code.
+    Nothing to adopt. The engine's own OSC 133 scanner already reads the exit status with
+    `str::parse::<u8>`, which rejects `_`.
+  - **Kitty `o=z` payloads are inflated by wuffs** (#14422), with the image's size as the
+    first allocation, in place of `std.compress.flate`. It is a faster decoder in the same
+    place, so there is no API to adopt. No engine test sent a compressed image before, so
+    engine `a_zlib_compressed_transmission_arrives_inflated` now proves `o=z` through the
+    engine.
+  - **The mouse pointer shape an application asks for with OSC 22** is readable
+    (`GHOSTTY_TERMINAL_DATA_MOUSE_SHAPE`, #14371). The fork wraps it as
+    `Terminal::mouse_shape()` and `mouse::Shape` (fork test `mouse_shape_follows_osc_22`).
+    Slopty does not carry it yet. The shape would travel in the frame (slopty-grid and
+    slopty-proto) and be set by the terminal view, and none of those crates were part of
+    this bump. Until then, OSC 22 is parsed and has no visible effect, as before.
+  - **`ghostty_search_tick` refuses once its terminal is freed** (#14437). The engine's
+    search is its own (`search.rs`), so nothing changes.
+  - The rest is the macOS app, fonts, tmux control mode, nix and themes.
+  - **The reflow bug is not fixed.** No commit touches `PageList`, `Screen` or the prompt
+    marks, so a wrapped prompt row still carries its prompt mark onto the rows it wraps onto,
+    and `ghostty/redraw.rs` stays. No issue draft about it was found under `.research/`, and
+    upstream has no open issue or PR on it.
+  - Cost: the engine's `*_cost` series held within 1 % (MEASUREMENTS 2026-09-29, "ghostty
+    `12752b2ac`"); the budgets are unchanged.

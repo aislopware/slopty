@@ -7691,3 +7691,36 @@ runs:
 A session is written at most once every 10 s (`restore::KEEP_EVERY`), and the newest state
 replaces one still waiting. Twenty busy sessions at full scrollback cost the writer about 60 ms
 of I/O every 10 s, on no thread a key or a frame waits on.
+
+## 2026-09-29 — ghostty `12752b2ac`
+
+The engine's `*_cost` series before and after moving libghostty-vt from ghostty `6301810a4` to
+`12752b2ac` (fork `801866f` → `d1a57e4`), in instructions per operation. mac-studio, release,
+libghostty-vt ReleaseFast, other sessions building. `--filter` matches test names, so the
+engine's series take three runs:
+
+```sh
+for f in ghostty osc_scan encode_cost; do cargo xtask bench --filter $f; done
+cargo xtask bench --filter checkpoint_cost    # the checkpoint series again, twice
+```
+
+| series | budget | before | after | after, reruns |
+| --- | --- | --- | --- | --- |
+| checkpoint `fill_engine` | 32850996 | 32800596 | 32959469 | 32488025, 32403227 |
+| checkpoint `fill_raw_vt` | 27067881 | 27051037 | 27657895 | 27037350, 27059814 |
+| checkpoint `format` | 45649442 | 45674146 | 46534571 | 45800235, 45268418 |
+| checkpoint `replay_one_chunk` | 35249023 | 35263439 | 35712401 | 35412170, 35568184 |
+| checkpoint `replay_64k_chunks` | 35270833 | 35330829 | 35672509 | 35356749, 35819244 |
+| `frame_cost.take_frame` | 38209 | 37975 | 37959 | |
+| `scroll_frame_cost.200x60` | 5315576 | 5317737 | 5315858 | |
+| `fetch_lines_cost.4096_rows` | 124790604 | 125543551 | 124924229 | |
+| `search_after_output_cost.plain` | 1877298 | 1880992 | 1840799 | |
+| `search_cost.50000_lines.plain` | 101218349 | 101149605 | 101141637 | |
+| `osc_scan_cost.per_osc` | 172 | 171 | 171 | |
+| `encode_cost.full_200x60` | 1084187 | 1084187 | 1084187 | |
+
+Every series held within the 5 % slack, and the eighteen search, frame, OSC and encode series
+moved less than 2 %. The checkpoint series are one sample each: the first run after the bump
+read 1–2 % higher, and two reruns landed on either side of the budget, so that was noise. The
+budgets stay as they are. None of the 31 commits touches the parser's print path or the page
+list. The OSC integer parser and the wuffs zlib decoder are off these paths.

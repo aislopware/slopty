@@ -3933,4 +3933,35 @@ mod graphics_tests {
             e.drain_images().into_iter().map(|u| (u.id, u.rgba)).collect();
         assert_eq!(rgba, vec![(1, vec![10, 20, 30, 255]), (2, vec![40, 50, 60, 255])]);
     }
+
+    /// `bytes` as a zlib stream of one stored (uncompressed) deflate block.
+    fn zlib_stored(bytes: &[u8]) -> Vec<u8> {
+        let len = u16::try_from(bytes.len()).unwrap();
+        let (a, b) = bytes.iter().fold((1_u32, 0_u32), |(a, b), &byte| {
+            let a = a.wrapping_add(u32::from(byte)) % 65_521;
+            (a, b.wrapping_add(a) % 65_521)
+        });
+        let mut out = vec![0x78, 0x01, 0x01];
+        out.extend(len.to_le_bytes());
+        out.extend((!len).to_le_bytes());
+        out.extend(bytes);
+        out.extend((b.wrapping_shl(16) | a).to_be_bytes());
+        out
+    }
+
+    /// `o=z`: libghostty inflates the payload (wuffs since ghostty `d48c0372f`) before the
+    /// engine sees the pixels.
+    #[test]
+    fn a_zlib_compressed_transmission_arrives_inflated() {
+        let mut e = engine();
+        let pixels: Vec<u8> = (0..16).collect();
+        let transmit =
+            format!("\x1b_Ga=T,f=32,o=z,s=2,v=2,i=3;{}\x1b\\", base64(&zlib_stored(&pixels)));
+        e.write(transmit.as_bytes());
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        assert_eq!(frame.images.iter().map(|p| p.image).collect::<Vec<_>>(), vec![3]);
+        let rgba: Vec<(u32, Vec<u8>)> =
+            e.drain_images().into_iter().map(|u| (u.id, u.rgba)).collect();
+        assert_eq!(rgba, vec![(3, pixels)]);
+    }
 }
