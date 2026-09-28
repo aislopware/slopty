@@ -1,5 +1,5 @@
 //! Screen pipeline on real hardware: list, open the first display, count datagrams, close.
-//! Needs Screen Recording permission, so it runs only with `SLOPTY_SCREEN_E2E=1`.
+//! Needs Screen Recording permission, so every test here is live (`cargo xtask e2e screen`).
 
 #![cfg(target_vendor = "apple")]
 
@@ -12,11 +12,8 @@ mod tests {
     use slopty_worker::screen::{ScreenStream, StreamEvent, listing};
 
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn display_stream_produces_datagrams() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let ScreenEvent::Listing { windows, displays } = listing().await.unwrap() else {
             panic!("listing")
         };
@@ -141,7 +138,7 @@ mod ghostty {
     }
 }
 
-/// The crop path's rulings against a real window, gated by `SLOPTY_SCREEN_E2E=1`.
+/// The crop path's rulings against a real window.
 #[cfg(test)]
 mod crop_path {
     use std::time::Duration;
@@ -163,11 +160,8 @@ mod crop_path {
     /// window filter does (`on_stop`, which the connection turns into `Closed`), not keep
     /// streaming the desktop where the window was.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn closing_the_window_under_a_display_crop_ends_the_stream() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let (mut window, id) = super::ghostty::launch(&["sleep", "600"]).await;
         assert!(slopty_capture::window_on_screen(id));
         let (sink, mut rx) = super::channel();
@@ -239,8 +233,8 @@ mod crop_path {
     }
 }
 
-/// Encoder rate control on real content, gated by `SLOPTY_SCREEN_E2E=1`: the low-latency
-/// mode the worker runs (`EnableLowLatencyRateControl` + `AverageBitRate` + `DataRateLimits`)
+/// Encoder rate control on real content: the low-latency mode the worker runs
+/// (`EnableLowLatencyRateControl` + `AverageBitRate` + `DataRateLimits`)
 /// against macOS 26's `VariableBitRate` + VBV keys, on a Ghostty window this test launches
 /// running `yes` (scrolling) and one running `sleep` (static). Same window size, same
 /// bitrate; prints encode latency, keyframe size and frame-size spikes. Numbers go to
@@ -450,11 +444,8 @@ mod encoder_rate_control {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn low_latency_versus_vbv_on_a_terminal_window() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let seconds: u64 =
             std::env::var("SLOPTY_E2E_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
         // What each mode's session says about the optional keys.

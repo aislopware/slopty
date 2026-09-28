@@ -1,7 +1,7 @@
 //! Endpoint construction and what a connection can tell about its path.
 
 use std::net::{Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use noq::{
@@ -120,22 +120,110 @@ pub fn transport_config() -> TransportConfig {
         .datagram_send_buffer_size(DATAGRAM_BUFFER)
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_STREAMS))
         .max_concurrent_uni_streams(VarInt::from_u32(MAX_STREAMS))
-        .stream_priority_before_datagrams(streams_ahead_of_datagrams())
+        .stream_priority_before_datagrams(
+            (!tuning().datagrams_first).then_some(crate::streams::AHEAD_OF_DATAGRAMS),
+        )
         .stream_priority_unpaced(Some(crate::streams::ECHO_PRIORITY));
-    if let Some(window) = std::env::var(STREAM_WINDOW_ENV)
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|bytes| *bytes > 0)
-    {
+    if let Some(window) = tuning().stream_window {
         config.stream_receive_window(VarInt::from_u32(window));
     }
     config
 }
 
-/// [`crate::streams::AHEAD_OF_DATAGRAMS`], unless [`DATAGRAMS_FIRST_ENV`] is `1`.
-fn streams_ahead_of_datagrams() -> Option<i32> {
-    let datagrams_first = std::env::var(DATAGRAMS_FIRST_ENV).is_ok_and(|v| v == "1");
-    (!datagrams_first).then_some(crate::streams::AHEAD_OF_DATAGRAMS)
+/// The transport's diagnostic knobs, as the environment set them when the process first needed
+/// one. Every connection after that uses the same.
+///
+/// They exist to measure an alternative without a rebuild (`docs/MEASUREMENTS.md`), so release
+/// builds keep them; read once and logged at that moment, a run is never on a knob its log does
+/// not show (`docs/decisions/transport.md`, "the transport's knobs").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tuning {
+    /// The congestion controller ([`CC_ENV`]).
+    pub controller: Controller,
+    /// Whether the controller's window is held to [`crate::congestion::CEILING_BDPS`] of the
+    /// measured path ([`UNBOUNDED_SUFFIX`] turns it off).
+    pub bounded: bool,
+    /// The initial congestion window, in packets ([`INITIAL_WINDOW_ENV`]).
+    pub initial_window_packets: u64,
+    /// Each stream's receive window in bytes, when it is not noq's ([`STREAM_WINDOW_ENV`]).
+    pub stream_window: Option<u32>,
+    /// Whether queued datagrams go ahead of every stream, as noq ships
+    /// ([`DATAGRAMS_FIRST_ENV`]).
+    pub datagrams_first: bool,
+    /// How keystroke and echo copies go; `None` sends none ([`crate::echo::ECHO_COPY_ENV`]).
+    pub echo_copies: Option<crate::echo::Copies>,
+    /// The path trace's period; `None` is off ([`PATH_TRACE_ENV`]).
+    pub path_trace: Option<Duration>,
+}
+
+/// A congestion controller noq ships.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Controller {
+    /// BBR3: pacing at the measured bottleneck rate.
+    #[default]
+    Bbr3,
+    /// Cubic, noq's default.
+    Cubic,
+    /// `NewReno`.
+    NewReno,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self::read(|_| None)
+    }
+}
+
+impl Tuning {
+    /// The knobs as `var` gives them, each one unset or unreadable at its default.
+    fn read(var: impl Fn(&str) -> Option<String>) -> Self {
+        let cc = var(CC_ENV).unwrap_or_default();
+        let (choice, bounded) =
+            cc.strip_suffix(UNBOUNDED_SUFFIX).map_or((cc.as_str(), true), |inner| (inner, false));
+        let controller = match choice {
+            "cubic" => Controller::Cubic,
+            "newreno" => Controller::NewReno,
+            "bbr3" | "" => Controller::Bbr3,
+            other => {
+                tracing::warn!(%other, "unknown {CC_ENV}; using bbr3");
+                Controller::Bbr3
+            }
+        };
+        Self {
+            controller,
+            bounded,
+            initial_window_packets: var(INITIAL_WINDOW_ENV)
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|p| *p > 0)
+                .unwrap_or(INITIAL_WINDOW_PACKETS),
+            stream_window: var(STREAM_WINDOW_ENV)
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|bytes| *bytes > 0),
+            datagrams_first: var(DATAGRAMS_FIRST_ENV).is_some_and(|v| v == "1"),
+            echo_copies: crate::echo::Copies::parse(var(crate::echo::ECHO_COPY_ENV).as_deref()),
+            path_trace: var(PATH_TRACE_ENV).as_deref().and_then(parse_trace_period),
+        }
+    }
+
+    /// The initial congestion window in bytes, in packets of the initial 1200-byte datagram.
+    const fn initial_window(&self) -> u64 {
+        self.initial_window_packets.saturating_mul(1200)
+    }
+}
+
+/// The process's [`Tuning`]: read from the environment on the first call and logged then, at
+/// `info` when a knob is set.
+pub fn tuning() -> &'static Tuning {
+    static TUNING: OnceLock<Tuning> = OnceLock::new();
+    TUNING.get_or_init(|| {
+        let tuning = Tuning::read(|name| std::env::var(name).ok());
+        if tuning == Tuning::default() {
+            tracing::debug!(?tuning, "transport tuning");
+        } else {
+            tracing::info!(?tuning, "transport tuning set by the environment");
+        }
+        tuning
+    })
 }
 
 /// Transport config for server links: [`transport_config`] with the lease's idle timeout.
@@ -158,56 +246,33 @@ pub fn lease_client_config() -> noq::ClientConfig {
     config
 }
 
-/// The initial congestion window in bytes: [`INITIAL_WINDOW_ENV`] packets if set, else
-/// [`INITIAL_WINDOW_PACKETS`].
-fn initial_window() -> u64 {
-    initial_window_of(std::env::var(INITIAL_WINDOW_ENV).ok().as_deref())
-}
-
-/// [`initial_window`] without the environment: `packets` if it reads as a positive number.
-fn initial_window_of(packets: Option<&str>) -> u64 {
-    let packets = packets
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|p| *p > 0)
-        .unwrap_or(INITIAL_WINDOW_PACKETS);
-    packets.saturating_mul(1200)
-}
-
-/// The congestion controller factory: [`CC_ENV`] if set and known, else BBR3, bounded by
-/// [`crate::congestion::Bounded`] unless the choice says otherwise.
+/// The congestion controller factory [`tuning`] names, bounded by
+/// [`crate::congestion::Bounded`] unless it says otherwise.
 fn congestion_controller() -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync + 'static> {
-    let choice = std::env::var(CC_ENV).unwrap_or_default();
-    let (inner, ceiling) = match choice.strip_suffix(UNBOUNDED_SUFFIX) {
-        Some(inner) => (inner, None),
-        None => (choice.as_str(), Some(crate::congestion::CEILING_BDPS)),
-    };
-    Arc::new(crate::congestion::BoundedFactory::new(noq_controller(inner), ceiling))
+    let tuning = tuning();
+    let ceiling = tuning.bounded.then_some(crate::congestion::CEILING_BDPS);
+    Arc::new(crate::congestion::BoundedFactory::new(noq_controller(tuning), ceiling))
 }
 
-/// noq's controller factory `choice` names, BBR3 for anything else.
-fn noq_controller(choice: &str) -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync> {
+/// noq's factory for the controller `tuning` names, at its initial window.
+fn noq_controller(tuning: &Tuning) -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync> {
     use noq::congestion::{Bbr3Config, CubicConfig, NewRenoConfig};
-    let window = initial_window();
-    let bbr3 = || {
-        let mut config = Bbr3Config::default();
-        config.initial_window(window);
-        Arc::new(config)
-    };
-    match choice {
-        "cubic" => {
+    let window = tuning.initial_window();
+    match tuning.controller {
+        Controller::Bbr3 => {
+            let mut config = Bbr3Config::default();
+            config.initial_window(window);
+            Arc::new(config)
+        }
+        Controller::Cubic => {
             let mut config = CubicConfig::default();
             config.initial_window(window);
             Arc::new(config)
         }
-        "newreno" => {
+        Controller::NewReno => {
             let mut config = NewRenoConfig::default();
             config.initial_window(window);
             Arc::new(config)
-        }
-        "bbr3" | "" => bbr3(),
-        other => {
-            tracing::warn!(%other, "unknown {CC_ENV}; using bbr3");
-            bbr3()
         }
     }
 }
@@ -349,17 +414,18 @@ pub fn path_rtt_cwnd(conn: &Connection) -> Option<(Duration, u64)> {
 /// Environment variable that turns [`trace_path_health`] on, in milliseconds between samples.
 pub const PATH_TRACE_ENV: &str = "SLOPTY_PATH_TRACE_MS";
 
-/// The sampling period from [`PATH_TRACE_ENV`], or `None` when the trace is off.
+/// The sampling period [`PATH_TRACE_ENV`] set ([`Tuning::path_trace`]), or `None` when the trace
+/// is off.
 ///
 /// A congestion window is only legible as a series: one reading at the end of a run cannot tell
 /// a window that sat on BBR's four-packet floor the whole time from one that dipped there for
 /// `ProbeRTT`. Off by default because the line is per sample, not per event.
 #[must_use]
 pub fn path_trace_period() -> Option<Duration> {
-    parse_trace_period(std::env::var(PATH_TRACE_ENV).ok()?.as_str())
+    tuning().path_trace
 }
 
-/// [`path_trace_period`] without the environment: milliseconds; `0` and anything unreadable is off.
+/// A [`PATH_TRACE_ENV`] value: milliseconds; `0` and anything unreadable is off.
 fn parse_trace_period(raw: &str) -> Option<Duration> {
     let ms: u64 = raw.trim().parse().ok()?;
     (ms > 0).then(|| Duration::from_millis(ms))
@@ -398,14 +464,51 @@ pub async fn trace_path_health(conn: Connection, side: &'static str) {
 mod tests {
     use super::*;
 
+    /// The knobs as a map of set variables would give them.
+    fn tuning_of(set: &[(&str, &str)]) -> Tuning {
+        Tuning::read(|name| set.iter().find(|(n, _)| *n == name).map(|(_, v)| (*v).to_owned()))
+    }
+
     #[test]
     fn the_initial_window_reads_its_flag() {
-        assert_eq!(initial_window_of(None), 32 * 1200);
-        assert_eq!(initial_window_of(Some("8")), 8 * 1200);
+        assert_eq!(Tuning::default().initial_window(), 32 * 1200);
+        assert_eq!(tuning_of(&[(INITIAL_WINDOW_ENV, "8")]).initial_window(), 8 * 1200);
         for bad in ["0", "-3", "many", ""] {
-            assert_eq!(initial_window_of(Some(bad)), 32 * 1200, "{bad:?}");
+            let tuning = tuning_of(&[(INITIAL_WINDOW_ENV, bad)]);
+            assert_eq!(tuning.initial_window(), 32 * 1200, "{bad:?}");
         }
         assert_eq!(DATAGRAM_BUFFER, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn unset_knobs_are_the_shipped_transport() {
+        let shipped = Tuning::default();
+        assert_eq!(shipped.controller, Controller::Bbr3);
+        assert!(shipped.bounded);
+        assert_eq!(shipped.stream_window, None);
+        assert!(!shipped.datagrams_first);
+        assert!(shipped.echo_copies.is_some(), "copies are on");
+        assert_eq!(shipped.path_trace, None);
+        assert_eq!(tuning_of(&[(CC_ENV, "no-such")]), shipped, "an unknown controller is BBR3");
+    }
+
+    #[test]
+    fn each_knob_reads_its_variable() {
+        let set = tuning_of(&[
+            (CC_ENV, "cubic-unbounded"),
+            (STREAM_WINDOW_ENV, "8000000"),
+            (DATAGRAMS_FIRST_ENV, "1"),
+            (crate::echo::ECHO_COPY_ENV, "off"),
+            (PATH_TRACE_ENV, "50"),
+        ]);
+        assert_eq!(set.controller, Controller::Cubic);
+        assert!(!set.bounded);
+        assert_eq!(set.stream_window, Some(8_000_000));
+        assert!(set.datagrams_first);
+        assert_eq!(set.echo_copies, None);
+        assert_eq!(set.path_trace, Some(Duration::from_millis(50)));
+        assert_eq!(tuning_of(&[(CC_ENV, "newreno")]).controller, Controller::NewReno);
+        assert_eq!(tuning_of(&[(STREAM_WINDOW_ENV, "0")]).stream_window, None);
     }
 
     #[test]

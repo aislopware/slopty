@@ -5,7 +5,7 @@
 
 use slopty_e2e::{Command, Driver, Dump, Stack};
 
-use super::gallery::{STEP, first_shell, gated, golden};
+use super::gallery::{STEP, first_shell, golden};
 
 /// The renders' window: the size the other app goldens use.
 const WINDOW: (f32, f32) = (900.0, 600.0);
@@ -20,10 +20,8 @@ async fn press(drv: &mut Driver, dump: &Dump, role: &str, label: &str) {
 }
 
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn the_settings_form_edits_the_file() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let settings = dir.join("app").join("settings.toml");

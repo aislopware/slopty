@@ -299,3 +299,21 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   In the e2e build the app reads the `Status` JSON named by `slopty_e2e::TAILNET_STATUS_ENV`
   instead of the `LocalAPI`, and `spawn_app` writes an empty running tailnet there, so the panel
   says "Nothing answered on your tailnet" at once; `first-run` waits for those words.
+
+- ✅ **A live test is `#[ignore]`d, not gated on a variable** (2026-09-28, audit finding 60).
+  A live test used to return early when its variable was unset, so `cargo gate` counted it as
+  passed without running it. Now each one carries `#[ignore = "live: <the command that runs
+  it>"]`: the gate lists it as skipped, and `cargo xtask e2e <case>` runs it with nextest's
+  `--run-ignored only`. The six `fn gated()` copies in `slopty-e2e` are gone, and the tests
+  read no variable to decide whether to run.
+  - Within a live target, xtask picks tests by module. Tests that need the Screen Recording
+    grant sit in the target's `screen_recording` module and run only with
+    `--screen-recording`, the flag that replaces setting `SLOPTY_SCREEN_E2E` beside another
+    case. The app's frame-time measurement sits in `frame_time`, which `app` leaves out and
+    `smooth` runs alone.
+  - `cargo xtask e2e screen` runs `screen_stream_over_quic` from the worker's target by
+    default. `--filter` reaches the target's other live tests, which are measurements.
+  - Still to convert: the live tests of `slopty-capture`, `slopty-input` and
+    `slopty-vdisplay`, which still read `SLOPTY_SCREEN_E2E`/`SLOPTY_INPUT_E2E`. Their suites
+    are `Kept::Env` in `xtask/src/e2e.rs` until then.
+  - Test: `a_suites_filters_the_callers_and_the_capture_rule_all_apply` (`xtask`).

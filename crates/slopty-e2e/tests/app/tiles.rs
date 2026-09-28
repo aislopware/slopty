@@ -17,14 +17,6 @@ const STEP: Duration = Duration::from_secs(20);
 /// The renders' window: the size the other app goldens use.
 const WINDOW: (f32, f32) = (900.0, 600.0);
 
-fn gated() -> bool {
-    if std::env::var_os("SLOPTY_APP_E2E").is_none() {
-        eprintln!("skipped: set SLOPTY_APP_E2E=1 (or run `cargo xtask e2e app`)");
-        return false;
-    }
-    true
-}
-
 /// Render the frame after every link has its round trip and two dumps agree on every tile's
 /// place, and hold it against `golden/<name>.png`.
 async fn golden(drv: &mut Driver, stack_dir: &std::path::Path, name: &str) {
@@ -66,10 +58,8 @@ fn file_of(d: &Dump) -> Option<&FileItemInfo> {
 /// Edit again, change the file behind the tile's back: the tile says so inline and keeps the
 /// edit; "Reload" takes the disk's text.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_file_is_edited_saved_and_caught_changing_under_an_edit() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let project = dir.join("project");
@@ -143,10 +133,8 @@ async fn a_file_is_edited_saved_and_caught_changing_under_an_edit() {
 /// down a bulk stream and its save goes up one: the tile opens it editable near its end, takes
 /// an edit there, and ⌘S puts the whole edited file on the worker's disk.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_twenty_thousand_line_file_is_edited_near_its_end_and_saved() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let file = stack.dir.path().join("big.rs");
     let lines: Vec<String> =
@@ -256,10 +244,8 @@ fn serve_page() -> u16 {
 /// through the tunnel. The web view reports its title and address, the tile's header says
 /// them, and the page hides while the palette is over it.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_page_on_localhost_opens_in_a_browser_tile() {
-    if !gated() {
-        return;
-    }
     let port = serve_page();
     let url = format!("http://127.0.0.1:{port}/");
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
@@ -335,10 +321,8 @@ fn pages(d: &Dump) -> Vec<&slopty_e2e::ItemInfo> {
 /// it; its `confirm` follows, and OK runs the page's `window.close()`, which closes the tile.
 /// Back on the first page, ⌘F finds in it and the bar says how many matches the page holds.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_blank_link_opens_a_tile_and_a_script_s_dialogs_are_sheets_in_it() {
-    if !gated() {
-        return;
-    }
     let port = serve_page();
     let popup = format!("http://127.0.0.1:{port}/popup");
     let second = format!("http://127.0.0.1:{port}/second");
@@ -428,10 +412,8 @@ fn folder_at(d: &Dump) -> Option<String> {
 /// keyboard: its folders first, a hidden entry listed too. ↩ on a folder browses into it in
 /// place, and ↩ on a file there opens a file tile right of the folder with the file's text.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_folder_tile_browses_the_worker_and_opens_a_file_beside_it() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-folder").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let project = stack.path("project");

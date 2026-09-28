@@ -1,30 +1,146 @@
 //! The Slopty iOS app.
 //!
-//! A static library linked by the UIKit shell in `app/main.m` (the one Objective-C file in the
-//! tree: `UIApplicationMain` has to be driven from there). The app delegate calls
-//! `slopty_ios_did_finish_launching` while the app finishes launching, and the scene delegate
-//! calls `slopty_ios_run` once the window scene is connected; that starts the tokio runtime,
-//! registers the GPUI application callback and runs GPUI embedded in UIKit's run loop.
-//! Everything the app does lives in `slopty-app`, shared with the macOS app.
+//! A static library the app bundle links whole: it defines `main`, which hands the process to
+//! `UIApplicationMain`, and the two classes UIKit drives, the app delegate and the window
+//! scene's delegate. The app delegate installs the notification delegate while the app
+//! finishes launching; the scene delegate starts the tokio runtime and GPUI, embedded in
+//! UIKit's run loop, once the window scene connects, and forwards the scene's lifecycle to
+//! `gpui_ios`. Everything the app does lives in `slopty-app`, shared with the macOS app.
 
 #![cfg(target_os = "ios")]
 
-use gpui::WindowOptions;
+use std::ffi::{c_char, c_int, c_void};
 
-/// Called from the app delegate's `application:didFinishLaunchingWithOptions:`.
+use gpui::WindowOptions;
+use gpui_ios::ios::ffi;
+use objc2::runtime::{AnyObject, NSObjectProtocol};
+use objc2::{ClassType as _, MainThreadMarker, MainThreadOnly, define_class};
+use objc2_foundation::{NSDictionary, NSObject, NSSet, NSString};
+use objc2_ui_kit::{
+    UIApplication, UIApplicationDelegate, UIApplicationLaunchOptionsKey, UIOpenURLContext,
+    UIResponder, UIScene, UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIWindowScene,
+    UIWindowSceneDelegate,
+};
+
+/// The process entry point: the bundle has no other code, so the linker takes this `main`.
 ///
-/// It runs before any scene connects: the notification delegate has to be in place by the time
-/// that method returns, or the tap that launched the app is never delivered
-/// (`slopty_platform::notify::install`).
+/// `Info.plist` names [`SceneDelegate`] as the scene's delegate class, and UIKit looks both
+/// classes up by name, so they are registered with the runtime before it starts.
 #[unsafe(no_mangle)]
-pub extern "C" fn slopty_ios_did_finish_launching() {
-    init_logging();
-    slopty_platform::notify::install();
+pub extern "C" fn main(_argc: c_int, _argv: *const *const c_char) -> c_int {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return 1;
+    };
+    let _registered = (AppDelegate::class(), SceneDelegate::class());
+    UIApplication::main(None, Some(&NSString::from_str(AppDelegate::NAME)), mtm)
 }
 
-/// Entry point for the UIKit shell. A failure to start is logged; UIKit has no use for it.
-#[unsafe(no_mangle)]
-pub extern "C" fn slopty_ios_run() {
+define_class!(
+    // SAFETY:
+    // - `UIResponder` has no subclassing requirements beyond being used on the main thread.
+    // - `AppDelegate` does not implement `Drop`.
+    #[unsafe(super(UIResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SloptyAppDelegate"]
+    struct AppDelegate;
+
+    unsafe impl NSObjectProtocol for AppDelegate {}
+
+    unsafe impl UIApplicationDelegate for AppDelegate {
+        /// Runs before any scene connects: the notification delegate has to be in place by
+        /// the time this returns, or the tap that launched the app is never delivered
+        /// (`slopty_platform::notify::install`). GPUI starts only once the scene connects.
+        #[unsafe(method(application:didFinishLaunchingWithOptions:))]
+        fn did_finish_launching(
+            &self,
+            _application: &UIApplication,
+            _options: Option<&NSDictionary<UIApplicationLaunchOptionsKey, AnyObject>>,
+        ) -> bool {
+            init_logging();
+            slopty_platform::notify::install();
+            true
+        }
+
+        #[unsafe(method(applicationDidReceiveMemoryWarning:))]
+        fn did_receive_memory_warning(&self, application: &UIApplication) {
+            ffi::gpui_ios_did_receive_memory_warning(object_ptr(application));
+        }
+
+        #[unsafe(method(applicationWillTerminate:))]
+        fn will_terminate(&self, application: &UIApplication) {
+            ffi::gpui_ios_will_terminate(object_ptr(application));
+        }
+    }
+);
+
+define_class!(
+    // SAFETY:
+    // - `UIResponder` has no subclassing requirements beyond being used on the main thread.
+    // - `SceneDelegate` does not implement `Drop`.
+    #[unsafe(super(UIResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SloptySceneDelegate"]
+    struct SceneDelegate;
+
+    unsafe impl NSObjectProtocol for SceneDelegate {}
+
+    unsafe impl UISceneDelegate for SceneDelegate {
+        #[unsafe(method(scene:willConnectToSession:options:))]
+        fn will_connect(
+            &self,
+            scene: &UIScene,
+            _session: &UISceneSession,
+            _options: &UISceneConnectionOptions,
+        ) {
+            let Some(scene) = scene.downcast_ref::<UIWindowScene>() else {
+                return;
+            };
+            ffi::gpui_ios_set_window_scene(object_ptr(scene));
+            // Each window drives its own display link, paused while idle (gpui_ios frame pacing).
+            run();
+        }
+
+        #[unsafe(method(sceneWillEnterForeground:))]
+        fn will_enter_foreground(&self, scene: &UIScene) {
+            ffi::gpui_ios_will_enter_foreground(object_ptr(scene));
+        }
+
+        #[unsafe(method(sceneDidBecomeActive:))]
+        fn did_become_active(&self, scene: &UIScene) {
+            ffi::gpui_ios_did_become_active(object_ptr(scene));
+        }
+
+        #[unsafe(method(sceneWillResignActive:))]
+        fn will_resign_active(&self, scene: &UIScene) {
+            ffi::gpui_ios_will_resign_active(object_ptr(scene));
+        }
+
+        #[unsafe(method(sceneDidEnterBackground:))]
+        fn did_enter_background(&self, scene: &UIScene) {
+            ffi::gpui_ios_did_enter_background(object_ptr(scene));
+        }
+
+        #[unsafe(method(scene:openURLContexts:))]
+        fn open_url_contexts(&self, _scene: &UIScene, contexts: &NSSet<UIOpenURLContext>) {
+            if let Some(url) =
+                contexts.anyObject().and_then(|context| context.URL().absoluteString())
+            {
+                ffi::gpui_ios_handle_open_url(object_ptr(&*url));
+            }
+        }
+    }
+
+    unsafe impl UIWindowSceneDelegate for SceneDelegate {}
+);
+
+/// An Objective-C object as the untyped pointer `gpui_ios`'s entry points take. They borrow it
+/// for the call; UIKit keeps each object alive for longer than that.
+const fn object_ptr<T: objc2::Message>(object: &T) -> *mut c_void {
+    std::ptr::from_ref(object).cast_mut().cast()
+}
+
+/// Starts tokio and GPUI once the window scene is connected. A failure to start is logged.
+fn run() {
     slopty_platform::playback_audio_session();
     // The link's writer, the session pumps and noq's drivers carry every keystroke and echo.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -40,13 +156,13 @@ pub extern "C" fn slopty_ios_run() {
     };
     // The runtime lives as long as the process; UIKit never returns from `UIApplicationMain`.
     let handle = Box::leak(Box::new(runtime)).handle().clone();
-    gpui_ios::ios::ffi::set_app_callback(Box::new(move |cx| {
+    ffi::set_app_callback(Box::new(move |cx| {
         gpui_kit::init(cx);
         if let Err(e) = slopty_app::open_workspace(cx, handle, WindowOptions::default()) {
             tracing::error!(error = %e, "open workspace");
         }
     }));
-    gpui_ios::ios::ffi::run_app_with_assets(slopty_ui::icons::Assets);
+    ffi::run_app_with_assets(slopty_ui::icons::Assets);
 }
 
 /// Logs go to stderr, which `simctl launch --console-pty` and `devicectl --console` stream.

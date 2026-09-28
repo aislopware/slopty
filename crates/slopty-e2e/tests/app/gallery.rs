@@ -24,14 +24,6 @@ const WINDOW: (f32, f32) = (900.0, 600.0);
 /// shows the round trip under the pointer.
 const PARK: (f32, f32) = (1.0, 1.0);
 
-pub fn gated() -> bool {
-    if std::env::var_os("SLOPTY_APP_E2E").is_none() {
-        eprintln!("skipped: set SLOPTY_APP_E2E=1 (or run `cargo xtask e2e app`)");
-        return false;
-    }
-    true
-}
-
 /// Wait until nothing moves and every link has its round trip: two dumps a frame apart place
 /// every tile alike, so a spring still running cannot end up in a golden, nor a status bar
 /// whose readout is yet to land.
@@ -77,10 +69,8 @@ pub async fn first_shell(drv: &mut Driver) -> Dump {
 
 /// The first run: one way forward, and nothing else on the screen to choose from.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn the_first_run_offers_one_way_in() {
-    if !gated() {
-        return;
-    }
     // This Mac's entry is on the page as a user meets it: the stand-in behind it installs
     // nothing, and this case never presses it.
     let report = this_mac_report(true);
@@ -169,10 +159,8 @@ fn this_mac_report(screen_recording: bool) -> String {
 /// checklist: running, one grant missing with the button to its pane, the other granted, the
 /// tailnet reached. The stand-in behind it installs nothing and adds nothing.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn this_mac_walks_its_checklist() {
-    if !gated() {
-        return;
-    }
     let report = this_mac_report(false);
     let env = [(slopty_e2e::THIS_MAC_ENV, report.as_str())];
     let mut stack = Stack::launch_first_run_with("e2e-worker", &env).await.unwrap();
@@ -213,10 +201,8 @@ async fn this_mac_walks_its_checklist() {
 /// A file past what a tile edits says so in its body, with the two ways to read it in a
 /// terminal on its worker instead.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_file_too_large_to_edit_says_where_to_read_it() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let project = dir.join("project");
@@ -243,10 +229,8 @@ async fn a_file_too_large_to_edit_says_where_to_read_it() {
 /// Three columns with the shell focused, the overview, the palette and the settings, then
 /// the same workspace dark.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_workspace_of_columns_in_both_themes() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
@@ -355,10 +339,8 @@ async fn a_workspace_of_columns_in_both_themes() {
 
 /// A worker with nothing open: the strip says how to begin, once.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn the_empty_workspace_says_how_to_begin() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
@@ -381,10 +363,8 @@ const TITLED_AGENT: &str = "Fix the login redirect";
 /// waiting tile's pill and the bar's count, each agent named once, the second by its own
 /// title rather than "Claude Code 2".
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -438,10 +418,8 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
 /// A port a shell listens on, and a file on its way up: the chip and the upload on the
 /// tiles they belong to.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_forwarded_port_and_an_upload_show_on_their_tiles() {
-    if !gated() {
-        return;
-    }
     // A home of the run's own: the shells name the directory under it from `~`, so no
     // temporary path of the machine's is in the render.
     let mut stack = Stack::launch_at_home("e2e-worker").await.unwrap();
@@ -529,10 +507,8 @@ fn steady_port() -> u16 {
 /// placeholder. The window id names no window, so nothing is captured and nothing needs the
 /// grant; a real picture would be this machine's screen, which has no place in a golden.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_remote_window_waits_in_its_chrome() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
@@ -552,10 +528,8 @@ async fn a_remote_window_waits_in_its_chrome() {
 /// finished while the human was in another column, each a two-line row naming its worker and
 /// directory, under the Unread and All views.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn the_inbox_lists_what_waits_and_what_finished() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -619,10 +593,8 @@ async fn the_inbox_lists_what_waits_and_what_finished() {
 /// harness's driver types a command that succeeds and one that fails; the pointer rests on the
 /// failed one's output.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_failed_command_block_says_so_under_the_pointer() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -672,10 +644,8 @@ async fn a_failed_command_block_says_so_under_the_pointer() {
 /// Two shells in one tabbed column: the header is a tab row, a tab per shell with its slot and
 /// its title, the shown one on its body's surface.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_tabbed_column_draws_its_tab_row() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;

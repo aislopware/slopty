@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Slopty iOS app: the static library the UIKit shell links"
+description = "Slopty iOS app: UIKit's delegates and `main`, as the static library the bundle links"
 
 [lints]
 workspace = true
@@ -24,6 +24,18 @@ crate-type = [ "staticlib", "rlib" ]
 gpui.workspace = true
 gpui-kit.workspace = true
 gpui_ios.workspace = true
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = [ "NSDictionary", "NSSet", "NSURL" ] }
+# The app and scene delegates, and `UIApplicationMain`.
+objc2-ui-kit = { workspace = true, features = [
+    "UIApplication",
+    "UIOpenURLContext",
+    "UIResponder",
+    "UIScene",
+    "UISceneOptions",
+    "UISceneSession",
+    "UIWindowScene",
+] }
 slopty-app.workspace = true
 slopty-e2e = { workspace = true, default-features = false }
 slopty-platform.workspace = true

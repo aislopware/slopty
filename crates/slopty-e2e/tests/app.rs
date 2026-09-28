@@ -1,9 +1,9 @@
 //! The real app, driven from inside: add a worker, open a shell, type, read the rows back,
 //! render frames with the app's own renderer and compare them with the goldens.
 //!
-//! Runs only with `SLOPTY_APP_E2E=1` (`cargo xtask e2e app`), since it launches the app. Every
-//! case but one needs no permission from the machine; the one that captures a window says so and
-//! skips without `SLOPTY_SCREEN_E2E`.
+//! Every test is live (`#[ignore]`, run by `cargo xtask e2e app`), since it launches the app. Only
+//! the cases in `screen_recording` need a permission from the machine; they run with
+//! `--screen-recording`.
 
 #[cfg(test)]
 #[path = "app/conversation.rs"]
@@ -41,32 +41,9 @@ mod tests {
         u64::from(slopty_media::Config::default().refresh_max_repeats)
     }
 
-    fn gated() -> bool {
-        if std::env::var_os("SLOPTY_APP_E2E").is_none() {
-            eprintln!("skipped: set SLOPTY_APP_E2E=1 (or run `cargo xtask e2e app`)");
-            return false;
-        }
-        true
-    }
-
-    /// [`gated`], plus the screen-recording grant the worker needs to capture anything. The rest of
-    /// this suite asks the machine for nothing, so a case that captures gates on both.
-    fn gated_on_capture() -> bool {
-        if !gated() {
-            return false;
-        }
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("skipped: capturing a window needs SLOPTY_SCREEN_E2E=1 and the grant");
-            return false;
-        }
-        true
-    }
-
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn shell_typed_from_the_app_echoes_back_into_its_rows() {
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch("e2e-worker").await.unwrap();
         let render_path = stack.path("terminal.png");
         let image_path = stack.path("terminal-image.png");
@@ -319,10 +296,8 @@ mod tests {
     /// on ptyd's `PATH`, and the worker attributes it from its foreground process, then its
     /// title, then the transcript it writes — each signal taking over from the weaker one.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn an_agent_started_without_hooks_is_attributed_from_what_the_worker_can_see() {
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch_with_fake_claude("e2e-worker").await.unwrap();
         stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         stack
@@ -426,10 +401,8 @@ mod tests {
     /// The click goes through the accessibility tree: the pill publishes its bounds there
     /// because it is a button with a label, which is also how a screen reader reaches it.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn the_hooks_pill_installs_the_relay_in_the_harness_home() {
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch_with_fake_claude("e2e-worker").await.unwrap();
         // Before anything else: the daemons' home is the run's own directory, so this test
         // cannot touch the developer's `~/.claude` even if the wiring were wrong.
@@ -511,10 +484,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn notes_and_the_width_keys_change_the_workspace_as_dumped() {
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch("e2e-worker").await.unwrap();
         let render_path = stack.path("note.png");
         let drv = &mut stack.driver;
@@ -611,120 +582,21 @@ mod tests {
         stack.shutdown().await;
     }
 
-    /// A remote window whose target never draws: ⌘O picks it while it is still on screen, the
-    /// helper takes it away before the stream opens, and the item says so instead of asking the
-    /// worker for refreshes no refresh can answer. Then the window draws again and the picture
-    /// arrives without the client doing anything.
-    #[tokio::test]
-    async fn a_remote_window_that_never_draws_waits_instead_of_asking_forever() {
-        if !gated_on_capture() {
-            return;
-        }
-        let mut stack = Stack::launch("e2e-worker").await.unwrap();
-        stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-        let idle = stack.start_idle_window().await.unwrap();
-        stack
-            .driver
-            .wait_for("the first shell", STEP, |d| {
-                d.status == "connected" && d.item("terminal").is_some()
-            })
-            .await
-            .unwrap();
+    /// The cases that capture a window, which needs the Screen Recording grant
+    /// (`cargo xtask e2e app --screen-recording`); the rest ask the machine for nothing.
+    mod screen_recording {
+        use super::*;
 
-        // ⌘O lists the worker's windows. The picker shows on-screen windows only, which is why the
-        // helper is still on screen here.
-        stack.driver.keys("cmd-o").await.unwrap();
-        let row = format!(", {}", idle.title());
-        let dump = stack
-            .driver
-            .wait_for("the idle window in the picker", STEP, |d| {
-                d.a11y.iter().any(|n| {
-                    n.role == "Button" && n.label.as_deref().is_some_and(|l| l.ends_with(&row))
-                })
-            })
-            .await
-            .unwrap();
-        let button = dump
-            .a11y
-            .iter()
-            .find(|n| n.role == "Button" && n.label.as_deref().is_some_and(|l| l.ends_with(&row)))
-            .unwrap_or_else(|| panic!("{:#?}", dump.a11y))
-            .clone();
-
-        // Off screen before the stream opens: the worker can still capture it, and captures
-        // nothing.
-        idle.hide().unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let [x, y, w, h] = button.bounds;
-        stack.driver.click(x + w / 2.0, y + h / 2.0).await.unwrap();
-
-        // The worker says the target is idle; the item says which end everyone is waiting on, and
-        // a screen reader is told the same thing.
-        let dump = stack
-            .driver
-            .wait_for("the item to say the window is not drawing", STEP, |d| {
-                d.screens.iter().any(|s| s.source == "idle")
-            })
-            .await
-            .unwrap();
-        assert_eq!(dump.screens.len(), 1, "{dump:#?}");
-        assert_eq!(dump.screens[0].frames, 0, "an off-screen window produced pictures");
-        assert!(
-            dump.a11y_node("Status", Some("Waiting for the window to draw…")).is_some(),
-            "{:#?}",
-            dump.a11y
-        );
-
-        // What the worker was asked for over the whole time: a handful of refreshes, then silence.
-        // The cap is the receiver's, and this is the only place it can be seen from outside.
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let screens = stack.worker_screens().await.unwrap();
-        let refreshes: u64 =
-            screens.iter().filter_map(|s| s.get("stats")?.get("refreshes")?.as_u64()).sum();
-        let cap = refresh_cap();
-        assert!(
-            refreshes <= cap,
-            "{refreshes} refresh requests for a window that cannot answer one (cap {cap})"
-        );
-
-        // Drawing again is enough: no refresh, no reopen, the picture just starts.
-        idle.show().unwrap();
-        let dump = stack
-            .driver
-            .wait_for("the picture once the window draws", STEP, |d| {
-                d.screens.iter().any(|s| s.source == "live" && s.frames > 0)
-            })
-            .await
-            .unwrap();
-        assert!(
-            dump.a11y_node("Status", Some("Waiting for the window to draw…")).is_none(),
-            "{:#?}",
-            dump.a11y
-        );
-        stack.shutdown().await;
-    }
-
-    /// A scrolling terminal as the capture target under injected loss: the app floods a shell so
-    /// its window is busy, captures the display that window fills, and the stream comes back over
-    /// loopback with a fixed fraction of its datagrams dropped on the app's receive path
-    /// (`SLOPTY_E2E_DROP_PERMILLE`, one app process per rate). This is the run the worker loss
-    /// test could not drive (it captures the still desktop it cannot change); here the app self
-    /// -test drives the content. Recovery is read from the client's own `ScreenStats`, surfaced
-    /// in `dump.screens[].recovery`. Needs the screen-recording grant.
-    #[tokio::test]
-    async fn a_scrolling_window_recovers_from_injected_loss() {
-        if !gated_on_capture() {
-            return;
-        }
-        // A shell that prints as fast as it can, so the captured window changes every frame.
-        let flood = "i=0; while :; do printf '%06d the quick brown fox jumps over the lazy dog\\n' \"$i\"; i=$((i+1)); done";
-        let mut rows = Vec::new();
-        for permille in [0_u32, 20, 50, 100] {
-            let value = permille.to_string();
-            let mut stack = Stack::launch_with("e2e-loss", &[("SLOPTY_E2E_DROP_PERMILLE", &value)])
-                .await
-                .unwrap();
-            stack.driver.ok(&Command::Resize { width: 1200.0, height: 800.0 }).await.unwrap();
+        /// A remote window whose target never draws: ⌘O picks it while it is still on screen, the
+        /// helper takes it away before the stream opens, and the item says so instead of asking the
+        /// worker for refreshes no refresh can answer. Then the window draws again and the picture
+        /// arrives without the client doing anything.
+        #[tokio::test]
+        #[ignore = "live: cargo xtask e2e app --screen-recording"]
+        async fn a_remote_window_that_never_draws_waits_instead_of_asking_forever() {
+            let mut stack = Stack::launch("e2e-worker").await.unwrap();
+            stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+            let idle = stack.start_idle_window().await.unwrap();
             stack
                 .driver
                 .wait_for("the first shell", STEP, |d| {
@@ -732,68 +604,176 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            // Flood a shell so the app's window is a scrolling terminal, then capture the
-            // display it fills. The picker does not offer the app its own window, so the target
-            // is the display the flooding window sits on — the app self-test still drives the
-            // content (a shell printing as fast as it can) the worker loss test could not.
-            stack.driver.open(&["/bin/sh", "-c", flood], 1).await.unwrap();
-            stack.driver.add_display().await.unwrap();
 
-            // Let it stream: at least 5 s of frames, as the worker loss table samples.
-            stack
+            // ⌘O lists the worker's windows. The picker shows on-screen windows only, which is why
+            // the helper is still on screen here.
+            stack.driver.keys("cmd-o").await.unwrap();
+            let row = format!(", {}", idle.title());
+            let dump = stack
                 .driver
-                .wait_for("the window streaming", STEP, |d| d.screens.iter().any(|s| s.frames > 5))
+                .wait_for("the idle window in the picker", STEP, |d| {
+                    d.a11y.iter().any(|n| {
+                        n.role == "Button" && n.label.as_deref().is_some_and(|l| l.ends_with(&row))
+                    })
+                })
                 .await
                 .unwrap();
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            let dump = stack.driver.dump().await.unwrap();
-            assert_eq!(dump.screens.len(), 1, "one capture: {dump:#?}");
-            rows.push((permille, dump.screens[0].clone()));
+            let button = dump
+                .a11y
+                .iter()
+                .find(|n| {
+                    n.role == "Button" && n.label.as_deref().is_some_and(|l| l.ends_with(&row))
+                })
+                .unwrap_or_else(|| panic!("{:#?}", dump.a11y))
+                .clone();
+
+            // Off screen before the stream opens: the worker can still capture it, and captures
+            // nothing.
+            idle.hide().unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let [x, y, w, h] = button.bounds;
+            stack.driver.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+
+            // The worker says the target is idle; the item says which end everyone is waiting on,
+            // and a screen reader is told the same thing.
+            let dump = stack
+                .driver
+                .wait_for("the item to say the window is not drawing", STEP, |d| {
+                    d.screens.iter().any(|s| s.source == "idle")
+                })
+                .await
+                .unwrap();
+            assert_eq!(dump.screens.len(), 1, "{dump:#?}");
+            assert_eq!(dump.screens[0].frames, 0, "an off-screen window produced pictures");
+            assert!(
+                dump.a11y_node("Status", Some("Waiting for the window to draw…")).is_some(),
+                "{:#?}",
+                dump.a11y
+            );
+
+            // What the worker was asked for over the whole time: a handful of refreshes, then
+            // silence. The cap is the receiver's, and this is the only place it can be
+            // seen from outside.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let screens = stack.worker_screens().await.unwrap();
+            let refreshes: u64 =
+                screens.iter().filter_map(|s| s.get("stats")?.get("refreshes")?.as_u64()).sum();
+            let cap = refresh_cap();
+            assert!(
+                refreshes <= cap,
+                "{refreshes} refresh requests for a window that cannot answer one (cap {cap})"
+            );
+
+            // Drawing again is enough: no refresh, no reopen, the picture just starts.
+            idle.show().unwrap();
+            let dump = stack
+                .driver
+                .wait_for("the picture once the window draws", STEP, |d| {
+                    d.screens.iter().any(|s| s.source == "live" && s.frames > 0)
+                })
+                .await
+                .unwrap();
+            assert!(
+                dump.a11y_node("Status", Some("Waiting for the window to draw…")).is_none(),
+                "{:#?}",
+                dump.a11y
+            );
             stack.shutdown().await;
         }
 
-        // The loss table (client-side recovery counters, one app process per rate).
-        println!(
-            "\nMEASURE (loss) app self-test: a scrolling window under injected loss (loopback, debug)"
-        );
-        println!(
-            "| drop | frames | by parity | by NACK | lost | datagrams (lost) | kB | parity ‰ | NACK / refresh | stalls | gap p50 ms | audio played / lost / concealed |"
-        );
-        println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-        for (permille, s) in &rows {
-            let r = &s.recovery;
-            println!(
-                "| {permille} ‰ | {} | {} | {} | {} | {} ({}) | {} | {} | {} / {} | {} | {:.1} | {} / {} / {} |",
-                r.frames,
-                r.frames_fec,
-                r.frames_retransmit,
-                r.frames_lost,
-                r.datagrams,
-                r.datagrams_lost,
-                r.bytes / 1000,
-                r.parity_permille,
-                r.nacks,
-                r.refreshes,
-                r.stalls,
-                slopty_e2e::FrameInfo::ms(s.interval_p50_us),
-                r.audio_packets,
-                r.audio_lost,
-                r.audio_concealed,
-            );
-        }
+        /// A scrolling terminal as the capture target under injected loss: the app floods a shell
+        /// so its window is busy, captures the display that window fills, and the stream
+        /// comes back over loopback with a fixed fraction of its datagrams dropped on the
+        /// app's receive path (`SLOPTY_E2E_DROP_PERMILLE`, one app process per rate). This
+        /// is the run the worker loss test could not drive (it captures the still desktop
+        /// it cannot change); here the app self -test drives the content. Recovery is read
+        /// from the client's own `ScreenStats`, surfaced in `dump.screens[].recovery`.
+        /// Needs the screen-recording grant.
+        #[tokio::test]
+        #[ignore = "live: cargo xtask e2e app --screen-recording"]
+        async fn a_scrolling_window_recovers_from_injected_loss() {
+            // A shell that prints as fast as it can, so the captured window changes every frame.
+            let flood = "i=0; while :; do printf '%06d the quick brown fox jumps over the lazy dog\\n' \"$i\"; i=$((i+1)); done";
+            let mut rows = Vec::new();
+            for permille in [0_u32, 20, 50, 100] {
+                let value = permille.to_string();
+                let mut stack =
+                    Stack::launch_with("e2e-loss", &[("SLOPTY_E2E_DROP_PERMILLE", &value)])
+                        .await
+                        .unwrap();
+                stack.driver.ok(&Command::Resize { width: 1200.0, height: 800.0 }).await.unwrap();
+                stack
+                    .driver
+                    .wait_for("the first shell", STEP, |d| {
+                        d.status == "connected" && d.item("terminal").is_some()
+                    })
+                    .await
+                    .unwrap();
+                // Flood a shell so the app's window is a scrolling terminal, then capture the
+                // display it fills. The picker does not offer the app its own window, so the target
+                // is the display the flooding window sits on — the app self-test still drives the
+                // content (a shell printing as fast as it can) the worker loss test could not.
+                stack.driver.open(&["/bin/sh", "-c", flood], 1).await.unwrap();
+                stack.driver.add_display().await.unwrap();
 
-        // Verdicts: every rate reassembled frames; nothing was lost with no loss injected; loss
-        // is recovered (parity or a retransmission repairs frames) once it is injected.
-        for (permille, s) in &rows {
-            let r = &s.recovery;
-            assert!(r.frames >= 1, "{permille} ‰ reassembled nothing: {s:#?}");
-            if *permille == 0 {
-                assert_eq!(r.frames_lost, 0, "0 ‰ still lost a frame: {s:#?}");
-            } else {
-                assert!(
-                    r.frames_fec + r.frames_retransmit > 0,
-                    "{permille} ‰ injected loss repaired nothing: {s:#?}"
+                // Let it stream: at least 5 s of frames, as the worker loss table samples.
+                stack
+                    .driver
+                    .wait_for("the window streaming", STEP, |d| {
+                        d.screens.iter().any(|s| s.frames > 5)
+                    })
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let dump = stack.driver.dump().await.unwrap();
+                assert_eq!(dump.screens.len(), 1, "one capture: {dump:#?}");
+                rows.push((permille, dump.screens[0].clone()));
+                stack.shutdown().await;
+            }
+
+            // The loss table (client-side recovery counters, one app process per rate).
+            println!(
+                "\nMEASURE (loss) app self-test: a scrolling window under injected loss (loopback, debug)"
+            );
+            println!(
+                "| drop | frames | by parity | by NACK | lost | datagrams (lost) | kB | parity ‰ | NACK / refresh | stalls | gap p50 ms | audio played / lost / concealed |"
+            );
+            println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+            for (permille, s) in &rows {
+                let r = &s.recovery;
+                println!(
+                    "| {permille} ‰ | {} | {} | {} | {} | {} ({}) | {} | {} | {} / {} | {} | {:.1} | {} / {} / {} |",
+                    r.frames,
+                    r.frames_fec,
+                    r.frames_retransmit,
+                    r.frames_lost,
+                    r.datagrams,
+                    r.datagrams_lost,
+                    r.bytes / 1000,
+                    r.parity_permille,
+                    r.nacks,
+                    r.refreshes,
+                    r.stalls,
+                    slopty_e2e::FrameInfo::ms(s.interval_p50_us),
+                    r.audio_packets,
+                    r.audio_lost,
+                    r.audio_concealed,
                 );
+            }
+
+            // Verdicts: every rate reassembled frames; nothing was lost with no loss injected; loss
+            // is recovered (parity or a retransmission repairs frames) once it is injected.
+            for (permille, s) in &rows {
+                let r = &s.recovery;
+                assert!(r.frames >= 1, "{permille} ‰ reassembled nothing: {s:#?}");
+                if *permille == 0 {
+                    assert_eq!(r.frames_lost, 0, "0 ‰ still lost a frame: {s:#?}");
+                } else {
+                    assert!(
+                        r.frames_fec + r.frames_retransmit > 0,
+                        "{permille} ‰ injected loss repaired nothing: {s:#?}"
+                    );
+                }
             }
         }
     }
@@ -875,10 +855,8 @@ mod tests {
     /// The app finds its worker through the server, opens a terminal on it directly, keeps
     /// typing into it while the server is dead, and links to the server again once it is back.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn the_app_reaches_its_worker_through_the_server_and_outlives_it() {
-        if !gated() {
-            return;
-        }
         let mut stack = slopty_e2e::harness::ServerStack::launch("e2e-worker").await.unwrap();
         let app_dir = stack.path("app");
         let (mut app, mut drv) = launch_app_for(&app_dir, stack.server.address()).await.unwrap();
@@ -951,10 +929,8 @@ mod tests {
     /// its quoted path is typed at the prompt. The drop is GPUI's own file-drop events at the
     /// tile, delivered through the self-test socket; no system drag.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn a_file_dropped_on_a_shell_lands_on_the_worker_and_its_path_is_typed() {
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch("e2e-drop").await.unwrap();
         let work = stack.path("drop-here");
         let outbox = stack.path("outbox");
@@ -997,13 +973,11 @@ mod tests {
     /// reads it. Both ends are the run's own named pasteboards; the human's is never touched.
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn the_worker_clipboard_arrives_as_text_and_a_picture_fetched_on_paste() {
         use slopty_e2e::harness::pasteboard_name;
         use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
 
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch("e2e-clip").await.unwrap();
         let worker_name = pasteboard_name(stack.dir.path(), "worker");
         let app_name = pasteboard_name(stack.dir.path(), "app");
@@ -1061,6 +1035,7 @@ mod tests {
     /// process. Both ends are the run's own named pasteboards.
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn a_worker_copy_pastes_promptly_after_the_link_drops_and_returns() {
         use slopty_e2e::harness::pasteboard_name;
         use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
@@ -1077,9 +1052,6 @@ mod tests {
             assert!(status.success(), "kill {which} {pid}: {status}");
         }
 
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch("e2e-clip-relink").await.unwrap();
         let worker_name = pasteboard_name(stack.dir.path(), "worker");
         let app_name = pasteboard_name(stack.dir.path(), "app");
@@ -1148,13 +1120,11 @@ mod tests {
     /// on the run's own named pasteboard; the human's is never touched.
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn files_copied_here_and_pasted_into_a_shell_land_there() {
         use slopty_e2e::harness::pasteboard_name;
         use slopty_platform::pasteboard::MacPasteboard;
 
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch("e2e-paste-files").await.unwrap();
         let app_name = pasteboard_name(stack.dir.path(), "app");
         let work = stack.path("paste-here");
@@ -1198,15 +1168,13 @@ mod tests {
     /// pasteboards are the run's own named ones; the human's is never touched.
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn a_picture_copied_here_is_on_the_workers_pasteboard_before_a_shells_paste() {
         use slopty_e2e::harness::pasteboard_name;
         use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
 
         const PNG: &str = "public.png";
 
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch("e2e-paste-picture").await.unwrap();
         let worker_name = pasteboard_name(stack.dir.path(), "worker");
         let app_name = pasteboard_name(stack.dir.path(), "app");
@@ -1246,13 +1214,11 @@ mod tests {
     /// on ⌘V and types the paths. Both pasteboards are the run's own.
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn files_copied_on_the_worker_paste_into_its_shell_as_their_paths() {
         use slopty_e2e::harness::pasteboard_name;
         use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
 
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch("e2e-paste-worker-files").await.unwrap();
         let worker_name = pasteboard_name(stack.dir.path(), "worker");
         let app_name = pasteboard_name(stack.dir.path(), "app");
@@ -1304,10 +1270,8 @@ mod tests {
     /// directory would ask, brings the whole file down from the worker under its own name.
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn a_path_dragged_out_of_a_shell_is_kept_by_a_download() {
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch("e2e-drag-out").await.unwrap();
         // Short, so the printed path fits one row.
         let short = tempfile::Builder::new().prefix("slopty-drag-").tempdir_in("/tmp").unwrap();
@@ -1355,12 +1319,10 @@ mod tests {
     /// the worker through a tunnel. With the worker on this very Mac the port is taken here by
     /// the program itself, so the forward moves to the next free one.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn a_port_listening_in_a_shell_is_reachable_here() {
         use tokio::io::AsyncWriteExt as _;
 
-        if !gated() {
-            return;
-        }
         let mut stack = Stack::launch("e2e-ports").await.unwrap();
         let drv = &mut stack.driver;
         drv.wait_for("the first shell focused", STEP, |d| {

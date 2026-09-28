@@ -3,7 +3,7 @@
 //! input requests. The worker, its ptyd and the `slopty` relay are the Linux builds, running in
 //! a Debian container on Docker Desktop as an account of their own.
 //!
-//! Runs only with `SLOPTY_LINUX_E2E=1`, from `cargo xtask linux e2e`, which builds the Linux
+//! Live (`#[ignore]`), run by `cargo xtask linux e2e`, which builds the Linux
 //! binaries, starts the container and says where it is (`SLOPTY_LINUX_WORKER`, the address
 //! published on this Mac's loopback; `SLOPTY_LINUX_CONTAINER`; `SLOPTY_LINUX_USER`;
 //! `SLOPTY_LINUX_BIN_DIR`, where the binaries are inside it). Nothing is typed into a shell the
@@ -47,18 +47,14 @@ mod tests {
         bin_dir: String,
     }
 
-    fn linux() -> Option<Linux> {
-        if std::env::var_os("SLOPTY_LINUX_E2E").is_none() {
-            eprintln!("skipped: run `cargo xtask linux e2e` (sets SLOPTY_LINUX_E2E=1)");
-            return None;
-        }
+    fn linux() -> Linux {
         let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} unset"));
-        Some(Linux {
+        Linux {
             addr: var("SLOPTY_LINUX_WORKER").parse().expect("SLOPTY_LINUX_WORKER is ip:port"),
             container: var("SLOPTY_LINUX_CONTAINER"),
             user: var("SLOPTY_LINUX_USER"),
             bin_dir: var("SLOPTY_LINUX_BIN_DIR"),
-        })
+        }
     }
 
     /// One client's link to the worker with one terminal on it, its screen kept as the app
@@ -223,8 +219,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask linux e2e"]
     async fn a_linux_worker_runs_a_shell_serves_files_and_reports_an_agent() {
-        let Some(linux) = linux() else { return };
+        let linux = linux();
         let size = TermSize { cols: 80, rows: 24, ..TermSize::default() };
         let (mut shell, ack) = Client::open(&linux, &[], size).await.unwrap();
 
@@ -314,8 +311,9 @@ mod tests {
     /// echo, on `cat` (the terminal's line discipline echoes, nothing else draws). Printed as
     /// percentiles; fails only when a key does not come back.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask linux e2e"]
     async fn keystroke_echo_round_trip_on_linux() {
-        let Some(linux) = linux() else { return };
+        let linux = linux();
         let size = TermSize { cols: 80, rows: 24, ..TermSize::default() };
         let (mut cat, _ack) = Client::open(&linux, &["/bin/cat"], size).await.unwrap();
         // Settle the attach before timing anything.

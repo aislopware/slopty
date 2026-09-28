@@ -1,7 +1,7 @@
 //! The app as it is normally used: pointed at a server, it finds its workers in the directory and
 //! dials each one itself.
 //!
-//! Runs only with `SLOPTY_THROUGH_SERVER_E2E=1` (`cargo xtask e2e through-server`). A
+//! Live (`#[ignore]`), run by `cargo xtask e2e through-server`. A
 //! `slopty-server`, worker `near` on loopback and worker `far` behind a relay shaped like the
 //! tailnet (`harness::TAILNET`), both registered with it, then the app at its first run
 //! (`harness::ServerFleet`). In one serial test:
@@ -43,16 +43,6 @@ mod tests {
 
     const NEAR: &str = "studio";
     const FAR: &str = "remote";
-
-    fn gated() -> bool {
-        if std::env::var_os("SLOPTY_THROUGH_SERVER_E2E").is_none() {
-            eprintln!(
-                "skipped: set SLOPTY_THROUGH_SERVER_E2E=1 (or run `cargo xtask e2e through-server`)"
-            );
-            return false;
-        }
-        true
-    }
 
     fn worker<'d>(d: &'d Dump, name: &str) -> Option<&'d slopty_e2e::WorkerInfo> {
         d.workers.iter().find(|w| w.name == name)
@@ -138,10 +128,8 @@ mod tests {
     // Multi-threaded: the relay in this process holds packets for their delay, and a dump being
     // parsed on the one thread would add to it.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e through-server"]
     async fn the_app_finds_its_workers_through_the_server() {
-        if !gated() {
-            return;
-        }
         let started = Instant::now();
         let mut fleet = ServerFleet::launch(NEAR, FAR, TAILNET).await.unwrap();
         println!(

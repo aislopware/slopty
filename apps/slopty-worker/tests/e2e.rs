@@ -1040,14 +1040,10 @@ mod tests {
 
     /// Streams the first display through the worker into the real client stack (`WorkerLink` +
     /// `ScreenHandle`): reassembly, NACK/report traffic and hardware decode all run as the app
-    /// would run them. Needs Screen Recording permission for the test process, so it only runs
-    /// when `SLOPTY_SCREEN_E2E=1`.
+    /// would run them. Needs Screen Recording permission for the test process.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn screen_stream_over_quic() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let dir = tempfile::tempdir().unwrap();
         let (_guard, worker) = connect(dir.path()).await;
         let mut link = slopty_client::WorkerLink::start(worker);
@@ -1449,11 +1445,8 @@ mod tests {
     /// same losses. `SLOPTY_E2E_SECONDS` (default 5) per rate. Prints a table for
     /// `docs/MEASUREMENTS.md`.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn screen_under_injected_loss() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let seconds: u64 =
             std::env::var("SLOPTY_E2E_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
         let dir = tempfile::tempdir().unwrap();
@@ -1554,11 +1547,8 @@ mod tests {
     /// The worker, native scale at the default quality (what the app opens). Prints a table; the
     /// numbers go to `docs/MEASUREMENTS.md`.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn screen_start_up_over_quic() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let samples: u32 =
             std::env::var("SLOPTY_E2E_SAMPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
         let seconds: u64 =
@@ -1917,15 +1907,12 @@ mod tests {
     /// grant. `SLOPTY_E2E_WORKER_SOCKET` points at its control socket, under `<data dir>/run/`;
     /// the worker's address is read from it.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: a launchd worker (`slopty worker install`), SLOPTY_E2E_WORKER_SOCKET"]
     async fn screen_over_a_shaped_link() {
-        let Some(ctl_sock) = std::env::var_os("SLOPTY_E2E_WORKER_SOCKET") else {
-            eprintln!(
-                "SLOPTY_E2E_WORKER_SOCKET unset; skipping. Install the worker under launchd with \
-                 `slopty worker install` and point this at its worker.sock; a spawned worker cannot \
-                 get Screen Recording."
-            );
-            return;
-        };
+        let ctl_sock = std::env::var_os("SLOPTY_E2E_WORKER_SOCKET").expect(
+            "SLOPTY_E2E_WORKER_SOCKET: the launchd worker's worker.sock; a spawned worker cannot \
+             get Screen Recording",
+        );
         let worker_addr = listening(&PathBuf::from(ctl_sock)).await;
         let seconds: u64 =
             std::env::var("SLOPTY_E2E_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
@@ -2043,13 +2030,10 @@ mod tests {
     ///
     /// The target is this test's own window ([`slopty-idle-window`]), on screen while the worker
     /// lists it and ordered out before the stream opens, so ScreenCaptureKit has nothing to
-    /// deliver. Gated on `SLOPTY_SCREEN_E2E`: it needs the screen-recording permission.
+    /// deliver. It needs the screen-recording permission.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn a_window_that_never_draws_is_reported_idle_and_stops_the_asking() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let dir = tempfile::tempdir().unwrap();
         let markers = dir.path().join("markers");
         std::fs::create_dir_all(&markers).unwrap();
@@ -2764,13 +2748,10 @@ mod tests {
 
     /// What a stream must never show: a window on the display-crop path that is hidden stops
     /// being served from that rectangle, so the viewer sees the picture stop rather than what
-    /// was behind it. Gated on `SLOPTY_SCREEN_E2E`.
+    /// was behind it.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn a_hidden_window_stops_being_served_from_its_crop() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let run = crop_hide(Behind::SameApplication).await;
 
         // A ceiling for a worker without the accessibility watch, not the rule, and counted from
@@ -2800,13 +2781,9 @@ mod tests {
     /// promises one every `HEARTBEAT_AFTER` (25 ms). This watches a stream whose target draws
     /// nothing for a minute and reads, from the worker's own counters, how far apart the beats
     /// actually were and how long the window-geometry call in the same loop took.
-    /// Gated on `SLOPTY_SCREEN_E2E`.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn the_heartbeat_keeps_its_cadence_on_a_quiet_stream() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let dir = tempfile::tempdir().unwrap();
         let markers = dir.path().join("markers");
         std::fs::create_dir_all(&markers).unwrap();
@@ -2908,14 +2885,11 @@ mod tests {
     /// The display-crop path leaves a window in the crop until it learns the window has gone,
     /// and CoreGraphics does not say so for ~270 ms (MEASUREMENTS.md, "how late a hide is").
     /// This asks whether the accessibility API knows sooner, since it is the one signal that is
-    /// public, documented and not a poll of the same window list. Gated on `SLOPTY_SCREEN_E2E`,
-    /// and it reports rather than asserts a threshold: the number is the point.
+    /// public, documented and not a poll of the same window list. It
+    /// reports rather than asserts a threshold: the number is the point.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn how_late_each_way_of_noticing_a_hide_is() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         // SAFETY: the documented no-argument query; it takes and returns nothing owned.
         let trusted = unsafe { objc2_application_services::AXIsProcessTrusted() };
         let dir = tempfile::tempdir().unwrap();
@@ -3002,14 +2976,10 @@ mod tests {
     /// counted their going as a suspicion, every one would freeze the stream for the hold, so
     /// this opens and orders out exactly such a panel below the target (never over it, so the
     /// occlusion rule stays out of the picture) and reads the worker's counters: no suspicion,
-    /// one sibling, the stream flowing throughout and on the crop afterwards. Gated on
-    /// `SLOPTY_SCREEN_E2E`.
+    /// one sibling, the stream flowing throughout and on the crop afterwards.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn a_popup_of_the_application_closing_raises_no_suspicion() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         another_window_of_the_application_goes("popup", "unpopup").await;
     }
 
@@ -3021,13 +2991,10 @@ mod tests {
     /// window of the helper's own process beside the target, orders it out while the target
     /// streams on the crop path, and reads the worker's counters: no suspicion, one sibling,
     /// nothing held or withheld, the stream flowing throughout and back on the crop. Opening
-    /// the sibling must raise nothing either. Gated on `SLOPTY_SCREEN_E2E`.
+    /// the sibling must raise nothing either.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn a_sibling_window_closing_keeps_the_stream_flowing() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         another_window_of_the_application_goes("sibling", "unsibling").await;
     }
 
@@ -3164,13 +3131,10 @@ mod tests {
 
     /// The control for the two tests around it: the same hide with nothing behind the target.
     /// Whatever the counters do here they do for an empty rectangle, so it is the only thing
-    /// that makes a number from the other two mean anything. Gated on `SLOPTY_SCREEN_E2E`.
+    /// that makes a number from the other two mean anything.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn what_a_crop_shows_of_an_empty_rectangle() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let run = crop_hide(Behind::Nothing).await;
         assert_eq!(run.while_away, 0, "frames were still being made for a hidden window: {run:?}");
         assert!(run.recovered, "no picture after the window came back: {run:?}");
@@ -3220,13 +3184,10 @@ mod tests {
     /// `initWithDisplay:includingApplications:exceptingWindows:` on the target's owning
     /// application, so the question this answers is whether that scope is real: during the
     /// ~270 ms in which nobody can tell the window has gone, does the crop carry the other
-    /// application's window or not? Gated on `SLOPTY_SCREEN_E2E`.
+    /// application's window or not?
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e screen"]
     async fn what_a_crop_shows_of_another_application() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
-        }
         let run = crop_hide(Behind::AnotherApplication).await;
         assert_eq!(run.while_away, 0, "frames were still being made for a hidden window: {run:?}");
         assert!(run.recovered, "no picture after the window came back: {run:?}");

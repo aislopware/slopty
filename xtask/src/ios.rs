@@ -1,9 +1,9 @@
 //! `xtask ios`: build the Rust static library, generate the Xcode project with `XcodeGen`, build
 //! the app bundle, and run it on the simulator or a connected device.
 //!
-//! The only non-Rust source is `apps/slopty-ios/app/main.m` (the UIKit bootstrap). The `XcodeGen`
-//! spec and `Info.plist` are generated under `target/ios/<sdk>/` on every run, so nothing in
-//! the tree is Xcode-specific.
+//! The app has no source outside Rust: the static library holds `main` and UIKit's delegates,
+//! and Xcode only links it and packages the bundle. The `XcodeGen` spec and `Info.plist` are
+//! generated under `target/ios/<sdk>/` on every run, so nothing in the tree is Xcode-specific.
 
 use anyhow::{Context as _, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -165,11 +165,24 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     if opts.e2e {
         cargo_flags.extend(["--features", "slopty-ios/e2e"]);
     }
+    let out = root.join("target").join("ios").join(sdk.dir());
+    sh.create_dir(&out)?;
+    let link_object = out.join("link.o");
     {
         let _env = sh.push_env("IPHONEOS_DEPLOYMENT_TARGET", IOS_VERSION);
         step(
             &format!("cargo build slopty-ios ({triple}, {profile})"),
             &cmd!(sh, "cargo build -p slopty-ios --target {triple} {cargo_flags...}"),
+        )?;
+        // Xcode links a target only when it has an object file of its own, and every line of
+        // the app is in the static library: an empty crate compiled to an object is that file.
+        step(
+            "rustc link.o",
+            &cmd!(
+                sh,
+                "rustc --crate-name slopty_ios_link --crate-type lib --edition 2024 --emit obj --target {triple} -o {link_object} -"
+            )
+            .stdin(""),
         )?;
     }
     let lib = root.join("target").join(triple).join(profile).join("libslopty_ios.a");
@@ -177,15 +190,12 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
         bail!("static library missing: {lib}");
     }
 
-    let out = root.join("target").join("ios").join(sdk.dir());
-    sh.create_dir(&out)?;
-    let shim = root.join("apps").join("slopty-ios").join("app").join("main.m");
     let icon = crate::icon::Icon::load(sh)?;
     let iconset = out.join("Assets.xcassets").join("AppIcon.appiconset");
     sh.create_dir(&iconset)?;
     sh.write_file(iconset.join("Contents.json"), APPICON_CONTENTS)?;
     sh.write_file(iconset.join("AppIcon.png"), icon.png(1024)?)?;
-    sh.write_file(out.join("project.yml"), project_spec(sdk, &shim, &lib))?;
+    sh.write_file(out.join("project.yml"), project_spec(sdk, &lib, &link_object))?;
     step(
         "xcodegen generate",
         &cmd!(sh, "xcodegen generate --quiet --spec {out}/project.yml --project {out}"),
@@ -216,15 +226,16 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
         .join("Products")
         .join(format!("{configuration}-{xcode_sdk}"))
         .join(format!("{PRODUCT}.app"));
-    if !app.exists() {
-        bail!("app bundle missing: {app}");
+    if !app.join(PRODUCT).exists() {
+        bail!("app bundle missing or without its executable: {app}");
     }
     println!("✔ {app}");
     Ok(app)
 }
 
-/// The `XcodeGen` spec: one application target wrapping the static library.
-fn project_spec(sdk: Sdk, shim: &Utf8Path, lib: &Utf8Path) -> String {
+/// The `XcodeGen` spec: one application target wrapping the static library, linked beside
+/// `link_object` (see [`build`]).
+fn project_spec(sdk: Sdk, lib: &Utf8Path, link_object: &Utf8Path) -> String {
     let lib_dir = lib.parent().map_or(".", Utf8Path::as_str);
     let signing = match sdk {
         Sdk::Simulator => "    CODE_SIGNING_ALLOWED: NO\n",
@@ -246,7 +257,6 @@ settings:
     type: application
     platform: iOS
     sources:
-      - path: {shim}
       - path: Assets.xcassets
     info:
       path: Info.plist
@@ -289,6 +299,8 @@ settings:
           - "-Wl,-force_load,{lib}"
           - "-lc++"
     dependencies:
+      - framework: {link_object}
+        embed: false
       - sdk: AVFoundation.framework
       - sdk: AudioToolbox.framework
       - sdk: CoreFoundation.framework
@@ -298,6 +310,7 @@ settings:
       - sdk: CoreVideo.framework
       - sdk: Foundation.framework
       - sdk: GameController.framework
+      - sdk: IOSurface.framework
       - sdk: Metal.framework
       - sdk: Network.framework
       - sdk: QuartzCore.framework

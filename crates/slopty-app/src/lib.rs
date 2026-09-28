@@ -2333,7 +2333,12 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Permission(event)) => {
             view.update(cx, |v, cx| v.permission_event(event, cx));
         }
-        LinkEvent::Control(_) => {}
+        // The handshake's ack was read when the link connected; the tick pings to draw a
+        // restarted worker's reset, so the pong carries nothing; and the app's link forwards ports
+        // itself (`LinkEvent::Ports`).
+        LinkEvent::Control(
+            WorkerMsg::HelloAck(_) | WorkerMsg::Pong { .. } | WorkerMsg::Ports { .. },
+        ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
             view.update(cx, |v, cx| v.disconnect_worker(key, status, cx));

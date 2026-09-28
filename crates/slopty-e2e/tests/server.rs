@@ -2,7 +2,7 @@
 //! `slopty` binary with `--json`, and MCP over HTTP. `slopty-server`, `slopty-ptyd` and
 //! `slopty-worker` from this build run in a temporary directory on ports of their own.
 //!
-//! Runs only with `SLOPTY_SERVER_E2E=1` (`cargo xtask e2e server`). It needs no permission from
+//! Live (`#[ignore]`), run by `cargo xtask e2e server`. It needs no permission from
 //! the machine, and nothing is typed into a shell the test did not open.
 
 #[cfg(test)]
@@ -22,14 +22,6 @@ mod tests {
     const STEP: Duration = Duration::from_secs(10);
     /// Between two looks at something that has no event to wait on from outside.
     const POLL: Duration = Duration::from_millis(50);
-
-    fn gated() -> bool {
-        if std::env::var_os("SLOPTY_SERVER_E2E").is_none() {
-            eprintln!("skipped: set SLOPTY_SERVER_E2E=1 (or run `cargo xtask e2e server`)");
-            return false;
-        }
-        true
-    }
 
     /// Ask `look` until it answers `Some`, for at most `bound`.
     async fn until<T>(
@@ -124,10 +116,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e server"]
     async fn the_cli_and_mcp_drive_a_real_worker_through_the_server() {
-        if !gated() {
-            return;
-        }
         let mut clock = Clock::new();
         let mut stack = ServerStack::launch("e2e-worker").await.unwrap();
         clock.lap("launch");

@@ -35,14 +35,15 @@ pub struct Copies {
 }
 
 impl Copies {
-    /// As [`ECHO_COPY_ENV`] says; on, after [`COPY_DELAY`], unless it says `off`.
+    /// As [`ECHO_COPY_ENV`] said when the process first read its transport tuning
+    /// ([`crate::endpoint::Tuning::echo_copies`]); on, after [`COPY_DELAY`], unless it says `off`.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        Self::parse(std::env::var(ECHO_COPY_ENV).ok().as_deref())
+        crate::endpoint::tuning().echo_copies
     }
 
-    /// [`Self::from_env`] without the environment. Anything unreadable is the default.
-    fn parse(raw: Option<&str>) -> Option<Self> {
+    /// An [`ECHO_COPY_ENV`] value. Anything unreadable is the default.
+    pub(crate) fn parse(raw: Option<&str>) -> Option<Self> {
         let raw = raw.map(str::trim).unwrap_or_default();
         if raw.eq_ignore_ascii_case("off") {
             return None;

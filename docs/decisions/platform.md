@@ -5,9 +5,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **Floor macOS 26.5 / iOS 26.5, Apple silicon only.** User decision 2026-09-04. No
   availability checks, no fallbacks for older OS.
 
-- ✅ **Pure Rust.** Scripts are `xtask`. The only non-Rust files are the iOS `main.m` shim (a
-  UIKit bootstrap that can't be avoided until `UIApplicationMain` is driven from Rust in the GPUI
-  fork), Metal shaders, and the XcodeGen spec that xtask generates.
+- ✅ **Pure Rust.** Scripts are `xtask`. The only non-Rust files are Metal shaders and the
+  XcodeGen spec that xtask generates. The iOS app's delegates and `main` are Rust too
+  (`objc2::define_class!` and `UIApplication::main` in `apps/slopty-ios/src/lib.rs`, 2026-09-29,
+  replacing a `main.m` shim). Xcode produces no binary from a target without sources, so xtask
+  hands it an empty object compiled by rustc and `-force_load`s the library that holds `main`.
 
 - ✅ **Dock badge + bounce on macOS** (2026-09-05). `CanvasEvent::NeedsYou(n)` also calls
   `slopty_platform::set_badge(n)` (`NSApplication.dockTile.badgeLabel`, cleared at 0 and on

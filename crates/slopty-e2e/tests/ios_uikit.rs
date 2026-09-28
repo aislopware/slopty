@@ -1,6 +1,6 @@
 //! The iOS app's own input path, driven at the UIKit boundary through its test socket.
 //!
-//! Runs only with `SLOPTY_IOS_E2E=1` (`cargo xtask e2e ios [--sim iphone|ipad]`), like `ios.rs`.
+//! Live (`#[ignore]`), run by `cargo xtask e2e ios [--sim iphone|ipad]`, like `ios.rs`.
 //! Where that file drives GPUI's dispatch (`Keys`, `Click`), this one delivers *described* UIKit
 //! events (`UiKeyPress`, `UiTouch`, `UiPinch`, `UiInsertText`, `UiDeleteBackward`): the fork's
 //! metal view runs the same code its `pressesBegan:` / `touchesBegan:` / pinch target /
@@ -24,14 +24,11 @@ mod tests {
     /// would have repeated by then.
     const REPEAT_WINDOW: Duration = Duration::from_millis(800);
 
-    fn simulator() -> Option<Simulator> {
-        if std::env::var_os("SLOPTY_IOS_E2E").is_none() {
-            eprintln!("skipped: set SLOPTY_IOS_E2E=1 (or run `cargo xtask e2e ios`)");
-            return None;
-        }
+    /// The booted simulator `cargo xtask e2e ios` installed the app on.
+    fn simulator() -> Simulator {
         let udid = std::env::var("SLOPTY_SIM_UDID").expect("SLOPTY_SIM_UDID (a booted simulator)");
         let bundle_id = std::env::var("SLOPTY_SIM_BUNDLE_ID").expect("SLOPTY_SIM_BUNDLE_ID");
-        Some(Simulator { udid, bundle_id })
+        Simulator { udid, bundle_id }
     }
 
     /// The app connected to its worker and its first shell at a prompt.
@@ -103,8 +100,9 @@ mod tests {
     /// the shell as their escape sequences, and a plain key while the terminal is editing is
     /// left to the text system, which types it.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e ios"]
     async fn a_hardware_keyboard_on_the_simulator_arrives_through_presses() {
-        let Some(simulator) = simulator() else { return };
+        let simulator = simulator();
         let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         let dump = shell(&mut stack).await;
         let session = dump.terminals[0].session.clone();
@@ -199,8 +197,9 @@ mod tests {
     /// focus; taps reach the titlebar's "…" menu and a tile in the overview; a pinch in opens
     /// the overview and a pinch out closes it.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e ios"]
     async fn fingers_on_the_simulator_swipe_tap_and_pinch() {
-        let Some(simulator) = simulator() else { return };
+        let simulator = simulator();
         let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         let dump = shell(&mut stack).await;
         let first = dump.item("terminal").unwrap().clone();
@@ -290,8 +289,9 @@ mod tests {
     /// leaves exactly the composed letter in the shell (BSD `cat -v` prints a printable
     /// UTF-8 letter as itself; only control bytes get the caret form).
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e ios"]
     async fn the_soft_keyboard_on_the_simulator_types_through_insert_text() {
-        let Some(simulator) = simulator() else { return };
+        let simulator = simulator();
         let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         shell(&mut stack).await;
         start_cat_v(&mut stack).await;
@@ -321,8 +321,9 @@ mod tests {
     /// arrow reach the shell as their sequences, and ⌃ arms Control for the next typed
     /// character, so `c` ends the program.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e ios"]
     async fn the_key_bar_on_the_simulator_is_tapped_at_its_a11y_bounds() {
-        let Some(simulator) = simulator() else { return };
+        let simulator = simulator();
         let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         shell(&mut stack).await;
         start_cat_v(&mut stack).await;

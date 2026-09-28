@@ -104,7 +104,6 @@ fn e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
     let stack = Stack::start(sh, bins, "3600")?;
     println!("▶ Linux worker in {} at {}", stack.container.name, stack.addr);
     let _env = [
-        sh.push_env("SLOPTY_LINUX_E2E", "1"),
         sh.push_env("SLOPTY_LINUX_WORKER", &stack.addr),
         sh.push_env("SLOPTY_LINUX_CONTAINER", &stack.container.name),
         sh.push_env("SLOPTY_LINUX_USER", USER),
@@ -114,7 +113,7 @@ fn e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
     // `--no-capture` runs one test at a time: the echo measurement has the worker to itself.
     let tested = step(
         "slopty-e2e linux",
-        &cmd!(sh, "cargo nextest run -p slopty-e2e --test linux --no-capture"),
+        &cmd!(sh, "cargo nextest run -p slopty-e2e --test linux --run-ignored only --no-capture"),
     );
     let logs = stack.logs.clone();
     drop(stack);

@@ -1,7 +1,7 @@
 //! One client, two workers in one workspace: cross-worker attention against a real second worker
 //! on this Mac, reached over a link shaped like the tailnet path to another Mac.
 //!
-//! Runs only with `SLOPTY_WORKERS_E2E=1` (`cargo xtask e2e workers`). Stack A is ptyd + worker +
+//! Live (`#[ignore]`), run by `cargo xtask e2e workers`. Stack A is ptyd + worker +
 //! the app, as `e2e app` builds it. Worker B is a second ptyd + worker under a root of its own
 //! with a private HOME (`harness::SecondWorker`), so the real `~/.claude` is never touched and
 //! `slopty hook install` is never run; the app reaches it only through a relay that adds the
@@ -44,14 +44,6 @@ mod tests {
     const B: &str = "remote";
 
     /// Whether the suite is enabled; it skips otherwise.
-    fn gated() -> bool {
-        if std::env::var_os("SLOPTY_WORKERS_E2E").is_none() {
-            eprintln!("skipped: set SLOPTY_WORKERS_E2E=1 (or run `cargo xtask e2e workers`)");
-            return false;
-        }
-        true
-    }
-
     /// The name of the worker whose tile has the focus.
     fn focused_worker(d: &Dump) -> Option<&str> {
         d.items.iter().find(|i| i.active).map(|i| i.worker.as_str())
@@ -112,10 +104,8 @@ mod tests {
     // Multi-threaded: the relay in this process holds packets for their delay, and a dump being
     // parsed on the one thread would add to it.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask e2e workers"]
     async fn cross_worker_attention_holds_with_a_real_second_worker() {
-        if !gated() {
-            return;
-        }
         let started = Instant::now();
 
         // Stack A; a window with room for the top bar's pill and buttons.

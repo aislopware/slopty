@@ -1,9 +1,9 @@
 //! `xtask e2e`: the live tests, run on purpose and in isolation.
 //!
 //! Every test that touches real hardware or real permissions (posting events, capturing the
-//! screen, running the daemons) is gated behind an environment variable and skips itself
-//! otherwise, so `cargo gate` never touches the desktop. This command is the one sanctioned
-//! way to run them: it picks the case, sets the gate variable, gives the daemons their own
+//! screen, running the daemons) is live, `#[ignore = "live: …"]`, so `cargo gate` never touches
+//! the desktop and reports each one as skipped, not passed. This command is the one sanctioned
+//! way to run them: it picks the case, runs its ignored tests, gives the daemons their own
 //! `SLOPTY_DATA_DIR` under `target/e2e/` so nothing installed is touched, runs nextest with
 //! output visible, and prints what ran. No ad-hoc key presses, screenshots or window
 //! probing outside these tests: what they need is asserted inside them.
@@ -24,9 +24,9 @@ use crate::tools::step;
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Case {
     /// ptyd + worker + the real app, driven through its test socket: add the worker, open a
-    /// shell, type,
-    /// read the rows back, render frames with the app's own renderer and compare them with
-    /// the goldens. No permissions needed.
+    /// shell, type, read the rows back, render frames with the app's own renderer and compare
+    /// them with the goldens. No permissions needed; `--screen-recording` adds the cases that
+    /// capture a window.
     App,
     /// ptyd + worker + a client over loopback QUIC: open a shell, read its output. No
     /// permissions needed.
@@ -37,9 +37,9 @@ pub enum Case {
     /// One pointer move on the main display and back. Needs Accessibility for the test binary.
     Input,
     /// Frame-time budget: 20 streaming shells panned and zoomed, a display stream beside
-    /// shells (only when `SLOPTY_SCREEN_E2E` is also set), typing with and without the
-    /// local echo; prints the percentiles and fails when panning is over budget. No
-    /// permissions needed for the shell scenarios.
+    /// shells (only with `--screen-recording`), typing with and without the local echo, and the
+    /// conversation face under a streaming answer; prints the percentiles and fails when
+    /// panning is over budget. No permissions needed for the shell scenarios.
     Smooth,
     /// The same frame-time scenarios with the app in the simulator (`--sim iphone|ipad`);
     /// indicative only, the simulator has no GPU-backed display link.
@@ -48,7 +48,7 @@ pub enum Case {
     /// added to the same daemons; a terminal opened on one appears on the other, typing on both is
     /// serialised, attention badges both, a client dying leaves the other streaming, closing
     /// and notes propagate. No permissions needed (the display scenario also needs
-    /// `SLOPTY_SCREEN_E2E`).
+    /// `--screen-recording`).
     Pair,
     /// The same with the second client in the simulator (`--sim iphone|ipad`): the Mac and
     /// the phone on one worker.
@@ -115,150 +115,110 @@ pub struct E2eOpts {
     /// For a rerun right after a build; an edit since then is not in it.
     #[arg(long)]
     no_build: bool,
+    /// Also run the tests that capture the screen (each target's `screen_recording` module), which
+    /// need the Screen Recording grant.
+    #[arg(long)]
+    screen_recording: bool,
+}
+
+/// How a suite's tests stay out of `cargo gate`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kept {
+    /// They do not: the suite runs under `cargo gate` too.
+    No,
+    /// `#[ignore = "live: …"]`, run here with `--run-ignored only`.
+    Ignored,
+    /// A variable the tests read, returning early without it; set to `1` here. Only the live
+    /// tests of `slopty-capture` and `slopty-input` still keep out this way.
+    Env(&'static str),
 }
 
 /// One nextest invocation.
 struct Suite {
-    /// Gate variable set to `1`; `None` for a suite that also runs under `cargo gate`.
-    gate: Option<&'static str>,
+    /// How its tests stay out of `cargo gate`.
+    kept: Kept,
     /// Package.
     package: &'static str,
     /// Integration test target.
     test: &'static str,
-    /// Test name filter, empty for the whole target.
-    filter: &'static str,
+    /// A nextest filterset every run of the suite applies, beside the caller's.
+    only: Option<&'static str>,
+    /// A nextest filterset for a run the caller gives none: what the case means when the target
+    /// holds more live tests, which `--filter` can still reach.
+    default: Option<&'static str>,
     /// One test at a time: the frame-time scenarios measure a quiet machine.
     serial: bool,
 }
 
-const APP: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_APP_E2E"),
-    package: "slopty-e2e",
-    test: "app",
-    filter: "",
-    serial: false,
-}];
+impl Suite {
+    /// A suite of live tests: the whole target, in parallel.
+    const fn live(package: &'static str, test: &'static str) -> Self {
+        Self { kept: Kept::Ignored, package, test, only: None, default: None, serial: false }
+    }
+
+    /// A suite kept out of `cargo gate` by `var`.
+    const fn env(var: &'static str, package: &'static str, test: &'static str) -> Self {
+        Self { kept: Kept::Env(var), ..Self::live(package, test) }
+    }
+
+    /// Only the tests `filterset` picks.
+    const fn only(self, filterset: &'static str) -> Self {
+        Self { only: Some(filterset), ..self }
+    }
+
+    /// One test at a time.
+    const fn serial(self) -> Self {
+        Self { serial: true, ..self }
+    }
+}
+
+/// The module holding a target's tests that need the Screen Recording grant; they run only
+/// with `--screen-recording`.
+const SCREEN_RECORDING: &str = "test(~screen_recording::)";
+/// The module holding the app target's frame-time measurements, which run alone under `smooth`.
+const FRAME_TIME: &str = "test(~frame_time::)";
+
+const APP: &[Suite] = &[Suite::live("slopty-e2e", "app").only("not test(~frame_time::)")];
 
 const WORKER: &[Suite] = &[Suite {
-    gate: None,
-    package: "slopty-workerd",
-    test: "e2e",
-    filter: "shell_round_trip",
-    serial: false,
+    kept: Kept::No,
+    ..Suite::live("slopty-workerd", "e2e").only("test(~shell_round_trip)")
 }];
 
 const SCREEN: &[Suite] = &[
-    Suite {
-        gate: Some("SLOPTY_SCREEN_E2E"),
-        package: "slopty-capture",
-        test: "geometry",
-        filter: "",
-        serial: false,
-    },
-    Suite {
-        gate: Some("SLOPTY_SCREEN_E2E"),
-        package: "slopty-worker",
-        test: "screen",
-        filter: "",
-        serial: false,
-    },
-    Suite {
-        gate: Some("SLOPTY_SCREEN_E2E"),
-        package: "slopty-capture",
-        test: "latency",
-        filter: "",
-        serial: false,
-    },
-    Suite {
-        gate: Some("SLOPTY_SCREEN_E2E"),
-        package: "slopty-workerd",
-        test: "e2e",
-        filter: "screen_stream",
-        serial: false,
-    },
+    Suite::env("SLOPTY_SCREEN_E2E", "slopty-capture", "geometry"),
+    Suite::live("slopty-worker", "screen"),
+    Suite::env("SLOPTY_SCREEN_E2E", "slopty-capture", "latency"),
+    // The worker's other live tests are measurements, run by name with `--filter`.
+    Suite { default: Some("test(~screen_stream)"), ..Suite::live("slopty-workerd", "e2e") },
 ];
 
-const INPUT: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_INPUT_E2E"),
-    package: "slopty-input",
-    test: "inject",
-    filter: "",
-    serial: false,
-}];
+const INPUT: &[Suite] = &[Suite::env("SLOPTY_INPUT_E2E", "slopty-input", "inject")];
 
 const IOS: &[Suite] = &[
-    Suite {
-        gate: Some("SLOPTY_IOS_E2E"),
-        package: "slopty-e2e",
-        test: "ios",
-        filter: "",
-        serial: false,
-    },
+    Suite::live("slopty-e2e", "ios"),
     // The UIKit-boundary scenarios share the one simulator: one app at a time.
-    Suite {
-        gate: Some("SLOPTY_IOS_E2E"),
-        package: "slopty-e2e",
-        test: "ios_uikit",
-        filter: "",
-        serial: true,
-    },
+    Suite::live("slopty-e2e", "ios_uikit").serial(),
 ];
 
-const SMOOTH: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_SMOOTH_E2E"),
-    package: "slopty-e2e",
-    test: "smooth",
-    filter: "on_the_mac",
-    serial: true,
-}];
+const SMOOTH: &[Suite] = &[
+    Suite::live("slopty-e2e", "smooth").only("test(~on_the_mac)").serial(),
+    Suite::live("slopty-e2e", "app").only(FRAME_TIME).serial(),
+];
 
-const PAIR: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_PAIR_E2E"),
-    package: "slopty-e2e",
-    test: "pair",
-    filter: "on_the_mac",
-    serial: true,
-}];
+const PAIR: &[Suite] = &[Suite::live("slopty-e2e", "pair").only("test(~on_the_mac)").serial()];
 
-const PAIR_IOS: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_PAIR_IOS_E2E"),
-    package: "slopty-e2e",
-    test: "pair",
-    filter: "with_the_simulator",
-    serial: true,
-}];
+const PAIR_IOS: &[Suite] =
+    &[Suite::live("slopty-e2e", "pair").only("test(~with_the_simulator)").serial()];
 
-const WORKERS: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_WORKERS_E2E"),
-    package: "slopty-e2e",
-    test: "workers",
-    filter: "",
-    serial: true,
-}];
+const WORKERS: &[Suite] = &[Suite::live("slopty-e2e", "workers").serial()];
 
-const SERVER: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_SERVER_E2E"),
-    package: "slopty-e2e",
-    test: "server",
-    filter: "",
-    serial: false,
-}];
+const SERVER: &[Suite] = &[Suite::live("slopty-e2e", "server")];
 
-const THROUGH_SERVER: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_THROUGH_SERVER_E2E"),
-    package: "slopty-e2e",
-    test: "through_server",
-    filter: "",
-    serial: true,
-}];
+const THROUGH_SERVER: &[Suite] = &[Suite::live("slopty-e2e", "through_server").serial()];
 
-const SMOOTH_IOS: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_SMOOTH_IOS_E2E"),
-    package: "slopty-e2e",
-    test: "smooth",
-    filter: "on_the_simulator",
-    serial: true,
-}];
+const SMOOTH_IOS: &[Suite] =
+    &[Suite::live("slopty-e2e", "smooth").only("test(~on_the_simulator)").serial()];
 
 pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     let suites: Vec<&Suite> = match opts.case {
@@ -363,21 +323,26 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     let mut failed = Vec::new();
     let mut matched = 0_usize;
     for suite in &suites {
-        let _gate = suite.gate.map(|gate| sh.push_env(gate, "1"));
-        let title = format!("{} {} {}", suite.package, suite.test, suite.filter);
+        let _gate = match suite.kept {
+            Kept::Env(var) => Some(sh.push_env(var, "1")),
+            Kept::No | Kept::Ignored => None,
+        };
+        let title = format!("{} {} {}", suite.package, suite.test, suite.only.unwrap_or_default());
         let title = title.trim();
         let binaries = recorded(suite);
         if !opts.no_build && build_suite(sh, suite, &binaries).is_err() {
             failed.push(title.to_owned());
             continue;
         }
-        let expr = filterset(suite.filter, opts.filter.as_deref());
+        let expr = filterset(suite, opts.filter.as_deref(), opts.screen_recording);
         let expr: &[String] = expr.as_ref().map_or(&[], |e| std::slice::from_ref(e));
         let filter_flag: &[&str] = if expr.is_empty() { &[] } else { &["-E"] };
         let threads: &[&str] = if suite.serial { &["--test-threads", "1"] } else { &[] };
+        let ignored: &[&str] =
+            if suite.kept == Kept::Ignored { &["--run-ignored", "only"] } else { &[] };
         let command = cmd!(
             sh,
-            "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} --no-capture --no-fail-fast {threads...} {filter_flag...} {expr...}"
+            "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} --no-capture --no-fail-fast {ignored...} {threads...} {filter_flag...} {expr...}"
         );
         println!("▶ {title}");
         let started = std::time::Instant::now();
@@ -442,29 +407,52 @@ fn build_suite(sh: &Shell, suite: &Suite, binaries: &std::path::Path) -> Result<
     Ok(())
 }
 
-/// The nextest filterset for a suite: its own name filter and the caller's, both.
-fn filterset(suite: &str, caller: Option<&str>) -> Option<String> {
-    let own = (!suite.is_empty()).then(|| format!("test(~{suite})"));
-    match (own, caller) {
-        (Some(own), Some(caller)) => Some(format!("{own} & ({caller})")),
-        (Some(own), None) => Some(own),
-        (None, Some(caller)) => Some(caller.to_owned()),
-        (None, None) => None,
-    }
+/// The nextest filterset for a suite: its own, the caller's (else the suite's default), and,
+/// without `screen_recording`, none of the tests that capture.
+fn filterset(suite: &Suite, caller: Option<&str>, screen_recording: bool) -> Option<String> {
+    let capture = (suite.kept == Kept::Ignored && !screen_recording)
+        .then(|| format!("not {SCREEN_RECORDING}"));
+    let parts: Vec<String> =
+        [suite.only.map(str::to_owned), caller.or(suite.default).map(str::to_owned), capture]
+            .into_iter()
+            .flatten()
+            .map(|part| format!("({part})"))
+            .collect();
+    (!parts.is_empty()).then(|| parts.join(" & "))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::filterset;
+    use super::{Suite, filterset};
 
     #[test]
-    fn a_caller_filter_narrows_the_suites_own() {
+    fn a_suites_filters_the_callers_and_the_capture_rule_all_apply() {
+        let pair = Suite::live("slopty-e2e", "pair").only("test(~on_the_mac)");
         assert_eq!(
-            filterset("on_the_mac", Some("test(pans) | test(zooms)")).as_deref(),
-            Some("test(~on_the_mac) & (test(pans) | test(zooms))")
+            filterset(&pair, Some("test(pans) | test(zooms)"), false).as_deref(),
+            Some(
+                "(test(~on_the_mac)) & (test(pans) | test(zooms)) & (not test(~screen_recording::))"
+            )
         );
-        assert_eq!(filterset("", Some("test(x)")).as_deref(), Some("test(x)"));
-        assert_eq!(filterset("on_the_mac", None).as_deref(), Some("test(~on_the_mac)"));
-        assert_eq!(filterset("", None), None);
+        assert_eq!(filterset(&pair, None, true).as_deref(), Some("(test(~on_the_mac))"));
+
+        let worker = Suite { default: Some("test(~screen_stream)"), ..Suite::live("w", "e2e") };
+        assert_eq!(
+            filterset(&worker, None, true).as_deref(),
+            Some("(test(~screen_stream))"),
+            "the default stands in for no caller filter"
+        );
+        assert_eq!(
+            filterset(&worker, Some("test(x)"), true).as_deref(),
+            Some("(test(x))"),
+            "and gives way to one"
+        );
+
+        let gated = Suite::env("SLOPTY_INPUT_E2E", "slopty-input", "inject");
+        assert_eq!(
+            filterset(&gated, None, false),
+            None,
+            "a suite kept by a variable has no capture module"
+        );
     }
 }

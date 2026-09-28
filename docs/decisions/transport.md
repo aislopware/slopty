@@ -1464,3 +1464,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   sighting. Zero means unknown. `WallMs::to_system` and `since` replace the hand-rolled epoch
   arithmetic, and `slopty_core::shell_quote` replaces the three copies of shell quoting.
   Test: `wall_milliseconds_round_trip_and_zero_is_unknown`.
+- ✅ **The transport's knobs are read once, into a typed `Tuning`, and logged** (2026-09-28,
+  audit finding 57). `SLOPTY_CC`, `SLOPTY_QUIC_IW`, `SLOPTY_STREAM_WINDOW`,
+  `SLOPTY_DATAGRAMS_FIRST`, `SLOPTY_ECHO_COPY` and `SLOPTY_PATH_TRACE_MS` are parsed by
+  `slopty_net::endpoint::tuning()` on first use, into `Tuning` with a `Controller` enum.
+  The values are logged at `info` when any knob is set and at `debug` otherwise. Every
+  connection, endpoint and echo copy reads that one value; before, each endpoint re-read the
+  environment and an unknown controller warned once per endpoint.
+  - They stay in release builds rather than behind an `experiments` feature. They exist so a
+    measurement can compare alternatives on the binaries a person runs, and the MEASUREMENTS
+    entries behind BBR3, the bound, the initial window and the echo copies were all taken that
+    way. The only `experiments` feature is `slopty-codec`'s, and `slopty-worker` turns it on
+    unconditionally, so it would gate nothing. The risk the finding names is a run on a knob
+    nobody sees; the startup line removes it.
+  - `Copies::from_env` and `path_trace_period` read the same `Tuning`.
+  - Tests: `unset_knobs_are_the_shipped_transport`, `each_knob_reads_its_variable` and
+    `the_initial_window_reads_its_flag` (`slopty-net`).

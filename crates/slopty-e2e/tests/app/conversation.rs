@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use slopty_e2e::{Command, Dump, Stack};
 
-use crate::gallery::{STEP, first_shell, gated, golden};
+use crate::gallery::{STEP, first_shell, golden};
 
 /// The face's renders: room for the list, the approval card and the header's chips.
 const WINDOW: (f32, f32) = (1000.0, 720.0);
@@ -103,10 +103,8 @@ fn has(d: &Dump, role: &str, label: &str) -> bool {
 /// header says how many lines changed, how full the context is and which model it is. The
 /// same, dark.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn the_face_holds_a_prompt_over_the_turn_it_interrupts() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -144,10 +142,8 @@ async fn the_face_holds_a_prompt_over_the_turn_it_interrupts() {
 /// it changed; a subagent's card opens its own thread, under a bar that names it and leads
 /// back.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_subagent_has_a_thread_of_its_own() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -198,10 +194,8 @@ async fn a_subagent_has_a_thread_of_its_own() {
 /// A file dropped on the face while it shows is attached to the draft: its chip waits over the
 /// composer's field, saying how far it got and offering to stop it, and only the chip says so.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_file_dropped_on_the_face_waits_in_the_composer() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     // Sparse: big enough to still be on its way when the frame is drawn, free to make.
@@ -275,10 +269,8 @@ async fn scroll_up_until(
 /// On a phone-width window an agent's tile opens on its conversation, with no key pressed,
 /// and a prompt the agent asks takes the composer's place there too.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_phone_opens_on_the_conversation() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: PHONE.0, height: PHONE.1 }).await.unwrap();
@@ -334,10 +326,8 @@ fn recorded_mod(name: &str, session: &str) -> (Vec<Value>, Vec<String>) {
 /// tone: the answer as it grows and the tool call being prepared. When the step stops and the
 /// transcript has its entries, they take the live blocks' place.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -588,10 +578,8 @@ fn build_finished() -> String {
 /// its last line, following the file it writes as it grows and ending when its notice comes.
 /// In Verbose, the thinking opens and the screenshot the `Read` returned shows on it.
 #[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
 async fn the_face_shows_the_work_beyond_words() {
-    if !gated() {
-        return;
-    }
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -772,119 +760,121 @@ fn synthetic_session(turns: usize) -> String {
     log.out
 }
 
-/// The face over a long conversation while the model writes an answer, the frame-time case
-/// behind `docs/MEASUREMENTS.md` ("the conversation face under a streaming answer"). Runs only
-/// with `SLOPTY_SMOOTH_E2E=1`, alone, since other tests' frames would be counted.
-///
-/// (h) the list following the tail while an answer grows by a piece every 16 ms, as Slopty's
-/// Claude Code mod reports it; (i) the same with the reader panning the history at 120
-/// events per second.
-#[tokio::test]
-async fn the_face_draws_a_streaming_answer_within_a_frame() {
-    if std::env::var_os("SLOPTY_SMOOTH_E2E").is_none() {
-        eprintln!("skipped: set SLOPTY_SMOOTH_E2E=1 (and SLOPTY_APP_E2E=1)");
-        return;
-    }
-    let run = std::time::Duration::from_secs(5);
-    let mut stack = Stack::launch("e2e-worker").await.unwrap();
-    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    let dump = first_shell(&mut stack.driver).await;
-    let session = dump.terminals[0].session.clone();
-    let main = stack.path("projects").join("s1.jsonl");
-    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
-    std::fs::write(&main, synthetic_session(80)).unwrap();
-    let start = json!({
-        "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
-        "transcript_path": main, "cwd": stack.path("home"),
-    });
-    let done = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
-    assert!(done.success(), "the relay ran");
-    stack.driver.keys("cmd-j").await.unwrap();
-    stack
-        .driver
-        .wait_for("the conversation", STEP, |d| {
-            has(d, "Group", "Conversation") && labels(d, "Article").len() > 4
-        })
-        .await
-        .unwrap();
+/// Frame-time measurements, run by `cargo xtask e2e smooth` alone and never beside the app's other
+/// tests, whose frames would be counted.
+mod frame_time {
+    use super::*;
 
-    let (batches, _) = recorded_mod("bash", &session);
-    for batch in &batches[..3] {
-        assert_eq!(stack.post_mod(batch).await.unwrap(), 204, "{batch}");
-    }
-    let turn = batches[1]["events"][0]["turnId"].clone();
-    let piece = |text: &str| {
-        json!({ "session": session, "events": [{
-            "kind": "text", "block": 0, "step": 0, "turnId": turn,
-            "model": "claude-haiku-4-5-20251001", "text": text,
-        }]})
-    };
-    let words = [
-        "The ",
-        "parser ",
-        "now ",
-        "keeps ",
-        "the ",
-        "span ",
-        "through ",
-        "`recover`, ",
-        "and ",
-        "an ",
-        "empty ",
-        "line ",
-        "reads ",
-        "as ",
-        "one.\n\n",
-        "- ",
-        "fixed ",
-        "`parse_header`\n",
-        "- ",
-        "reset ",
-        "the ",
-        "cursor\n\n",
-    ];
-    assert_eq!(stack.post_mod(&piece("Writing ")).await.unwrap(), 204);
-    stack
-        .driver
-        .wait_for("the live answer", STEP, |d| {
-            labels(d, "Article").iter().any(|l| l.starts_with("Writing: "))
-        })
-        .await
-        .unwrap();
+    /// The face over a long conversation while the model writes an answer, the frame-time case
+    /// behind `docs/MEASUREMENTS.md` ("the conversation face under a streaming answer").
+    ///
+    /// (h) the list following the tail while an answer grows by a piece every 16 ms, as Slopty's
+    /// Claude Code mod reports it; (i) the same with the reader panning the history at 120
+    /// events per second.
+    #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth"]
+    async fn the_face_draws_a_streaming_answer_within_a_frame() {
+        let run = std::time::Duration::from_secs(5);
+        let mut stack = Stack::launch("e2e-worker").await.unwrap();
+        stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        let dump = first_shell(&mut stack.driver).await;
+        let session = dump.terminals[0].session.clone();
+        let main = stack.path("projects").join("s1.jsonl");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(&main, synthetic_session(80)).unwrap();
+        let start = json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+            "transcript_path": main, "cwd": stack.path("home"),
+        });
+        let done = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
+        assert!(done.success(), "the relay ran");
+        stack.driver.keys("cmd-j").await.unwrap();
+        stack
+            .driver
+            .wait_for("the conversation", STEP, |d| {
+                has(d, "Group", "Conversation") && labels(d, "Article").len() > 4
+            })
+            .await
+            .unwrap();
 
-    let region = stack
-        .driver
-        .dump()
-        .await
-        .unwrap()
-        .a11y_node("Group", Some("Conversation"))
-        .expect("the face")
-        .bounds;
-    let (x, y) = (region[0] + region[2] / 2.0, region[1] + region[3] / 2.0);
-    for (scenario, pan) in [
-        ("(h) face, following a streaming answer", false),
-        ("(i) face, panning while it streams", true),
-    ] {
-        stack.driver.frames_reset().await.unwrap();
-        let begin = tokio::time::Instant::now();
-        let mut n = 0_usize;
-        while begin.elapsed() < run {
-            let word = words[n % words.len()];
-            assert_eq!(stack.post_mod(&piece(word)).await.unwrap(), 204);
-            if pan {
-                let dy = if (n / 60).is_multiple_of(2) { 40.0 } else { -40.0 };
-                stack.driver.scroll(x, y, 0.0, dy).await.unwrap();
-                tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-                stack.driver.scroll(x, y, 0.0, dy).await.unwrap();
-                tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-            } else {
-                tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-            }
-            n = n.saturating_add(1);
+        let (batches, _) = recorded_mod("bash", &session);
+        for batch in &batches[..3] {
+            assert_eq!(stack.post_mod(batch).await.unwrap(), 204, "{batch}");
         }
-        let frames = stack.driver.dump().await.unwrap().frames;
-        println!("MEASURE {scenario}: {}", frames.row());
-        assert!(frames.frames >= 100, "too few frames to judge: {frames:?}");
+        let turn = batches[1]["events"][0]["turnId"].clone();
+        let piece = |text: &str| {
+            json!({ "session": session, "events": [{
+                "kind": "text", "block": 0, "step": 0, "turnId": turn,
+                "model": "claude-haiku-4-5-20251001", "text": text,
+            }]})
+        };
+        let words = [
+            "The ",
+            "parser ",
+            "now ",
+            "keeps ",
+            "the ",
+            "span ",
+            "through ",
+            "`recover`, ",
+            "and ",
+            "an ",
+            "empty ",
+            "line ",
+            "reads ",
+            "as ",
+            "one.\n\n",
+            "- ",
+            "fixed ",
+            "`parse_header`\n",
+            "- ",
+            "reset ",
+            "the ",
+            "cursor\n\n",
+        ];
+        assert_eq!(stack.post_mod(&piece("Writing ")).await.unwrap(), 204);
+        stack
+            .driver
+            .wait_for("the live answer", STEP, |d| {
+                labels(d, "Article").iter().any(|l| l.starts_with("Writing: "))
+            })
+            .await
+            .unwrap();
+
+        let region = stack
+            .driver
+            .dump()
+            .await
+            .unwrap()
+            .a11y_node("Group", Some("Conversation"))
+            .expect("the face")
+            .bounds;
+        let (x, y) = (region[0] + region[2] / 2.0, region[1] + region[3] / 2.0);
+        for (scenario, pan) in [
+            ("(h) face, following a streaming answer", false),
+            ("(i) face, panning while it streams", true),
+        ] {
+            stack.driver.frames_reset().await.unwrap();
+            let begin = tokio::time::Instant::now();
+            let mut n = 0_usize;
+            while begin.elapsed() < run {
+                let word = words[n % words.len()];
+                assert_eq!(stack.post_mod(&piece(word)).await.unwrap(), 204);
+                if pan {
+                    let dy = if (n / 60).is_multiple_of(2) { 40.0 } else { -40.0 };
+                    stack.driver.scroll(x, y, 0.0, dy).await.unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                    stack.driver.scroll(x, y, 0.0, dy).await.unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+                }
+                n = n.saturating_add(1);
+            }
+            let frames = stack.driver.dump().await.unwrap().frames;
+            println!("MEASURE {scenario}: {}", frames.row());
+            assert!(frames.frames >= 100, "too few frames to judge: {frames:?}");
+        }
+        stack.shutdown().await;
     }
-    stack.shutdown().await;
 }

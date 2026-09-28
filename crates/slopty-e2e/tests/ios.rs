@@ -1,6 +1,6 @@
 //! The iOS app on the simulator, driven through its own test socket.
 //!
-//! Runs only with `SLOPTY_IOS_E2E=1` (`cargo xtask e2e ios [--sim iphone|ipad]`): the daemons
+//! Live (`#[ignore]`), run by `cargo xtask e2e ios [--sim iphone|ipad]`: the daemons
 //! run on the Mac as for the app self-test, the app runs in the booted simulator named by
 //! `SLOPTY_SIM_UDID` and binds its socket on the shared file system. Phone or tablet: a
 //! shell opens, its rows come back, typed text echoes, and its column is sized for the screen
@@ -66,14 +66,11 @@ mod tests {
             .unwrap();
     }
 
-    fn simulator() -> Option<Simulator> {
-        if std::env::var_os("SLOPTY_IOS_E2E").is_none() {
-            eprintln!("skipped: set SLOPTY_IOS_E2E=1 (or run `cargo xtask e2e ios`)");
-            return None;
-        }
+    /// The booted simulator `cargo xtask e2e ios` installed the app on.
+    fn simulator() -> Simulator {
         let udid = std::env::var("SLOPTY_SIM_UDID").expect("SLOPTY_SIM_UDID (a booted simulator)");
         let bundle_id = std::env::var("SLOPTY_SIM_BUNDLE_ID").expect("SLOPTY_SIM_BUNDLE_ID");
-        Some(Simulator { udid, bundle_id })
+        Simulator { udid, bundle_id }
     }
 
     /// Render the frame and hold it against `golden/ios-<device>-<state>.png`; `crop` keeps
@@ -98,8 +95,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e ios"]
     async fn a_shell_on_the_simulator_echoes_and_is_sized_for_its_screen() {
-        let Some(simulator) = simulator() else { return };
+        let simulator = simulator();
         let mut stack =
             Stack::launch_first_run_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         let dir = stack.dir.path().to_path_buf();

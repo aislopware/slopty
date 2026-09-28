@@ -10,7 +10,7 @@
    `slopty_ui::a11y::tree(window)` after `window.set_a11y_active(true)` for roles, labels and
    the focused node. No pixels, no process, runs under `cargo gate`. Every workspace/terminal
    behaviour gets a test here first.
-3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`, gate `SLOPTY_APP_E2E`):
+3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`):
    launches ptyd + the worker + the app (built with `--features slopty/e2e`) in a temp dir, pairs
    them, and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,
    dump, render). `dump` is the structured state (tiles, focus, whether the overview is open,
@@ -24,19 +24,19 @@
    instead of waiting on the other sessions' builds in `target/`; an edit since then is not in it.
    The temp dir
    is named for its test, not at random, because a golden draws the paths under it. Nothing touches another app.
-   `cargo xtask e2e ios [--sim iphone|ipad]` (gate `SLOPTY_IOS_E2E`) is the same socket with
+   `cargo xtask e2e ios [--sim iphone|ipad]` is the same socket with
    the app in the simulator: the way to check anything on the phone or the tablet. There the
    socket also takes `ui_key_press` / `ui_touch` / `ui_pinch` / `ui_insert_text` /
    `ui_delete_backward` (`Driver::ui_key`, `ui_tap`, `ui_pan`, `ui_pinch`, `ui_insert_text`),
    delivered at the UIKit boundary by the fork (`tests/ios_uikit.rs`): use them for anything
    about how the phone's own keyboard, fingers or key bar reach the app.
-   `cargo xtask e2e pair` (gate `SLOPTY_PAIR_E2E`, serial) runs two app processes on one worker,
+   `cargo xtask e2e pair` (serial) runs two app processes on one worker,
    each on its own socket and data dir, to prove many-clients-one-server: a terminal opened on
    one shows on the other, typing on both is serialised, attention badges both, a client dying
    leaves the other streaming and reattaches on relaunch, closing and notes propagate. The
-   display scenario also needs `SLOPTY_SCREEN_E2E`. `cargo xtask e2e pair-ios [--sim iphone|ipad]`
-   (gate `SLOPTY_PAIR_IOS_E2E`) puts the second client in the simulator: the Mac and the phone
-   on one worker. `cargo xtask e2e workers` (gate `SLOPTY_WORKERS_E2E`, serial)
+   display scenario also needs `--screen-recording`. `cargo xtask e2e pair-ios [--sim iphone|ipad]`
+   puts the second client in the simulator: the Mac and the phone
+   on one worker. `cargo xtask e2e workers` (serial)
    is one client and two workers on this Mac: a second ptyd + `slopty-worker` under a root of
    its own with a private HOME (`harness::SecondWorker`), which the app reaches only through a
    `slopty-shape` relay shaped like the tailnet path to another Mac (`harness::TAILNET`: 8 to
@@ -44,14 +44,14 @@
    banner routes to the worker holding its session, a hook is played only by spawning
    `slopty hook` with the payload on its stdin, never a real agent, and a killed worker shows
    down and reattaches on restart while the other keeps streaming.
-   `cargo xtask e2e server` (gate `SLOPTY_SERVER_E2E`, about 7 s) is the server with a real
+   `cargo xtask e2e server` (about 7 s) is the server with a real
    worker: `slopty-server`, then ptyd + `slopty-worker` registered with it through `--server`,
    on ports of their own under a temp root (`harness::ServerStack`). It drives them only
    through the `slopty` binary with `--json` and MCP over HTTP. It covers the directory with
    capabilities, a shell typed to, waited on and read back, files both ways (binary too), a
    listener found by `ports`, a close, and a shell that exits on its own. A killed worker must
    turn unreachable and come back online under the same id.
-   `cargo xtask e2e through-server` (gate `SLOPTY_THROUGH_SERVER_E2E`, serial, about 20 s) is
+   `cargo xtask e2e through-server` (serial, about 20 s) is
    the app as it is normally used (`harness::ServerFleet`). A `slopty-server` has two workers
    registered with it: one on loopback and one behind the tailnet-shaped relay, which the
    directory lists at the relay's address. The app starts at its first run, and the server's
@@ -60,7 +60,7 @@
    `slopty hook` must badge the pill. The far worker is killed and restarted twice, as soon as
    it shows down and again after the server has called it unreachable. It must show down within
    5 s and be connected within 2 s of each restart. Golden `through-server`.
-   `cargo xtask linux e2e` (gate `SLOPTY_LINUX_E2E`, serial) is a terminal-only Linux worker.
+   `cargo xtask linux e2e` (serial) is a terminal-only Linux worker.
    ptyd, the worker and the `slopty` relay are cross-built for `aarch64-unknown-linux-gnu`
    and run in a Debian container on Docker Desktop, as an account with bash for its shell,
    on the paths a Linux install takes. The worker's UDP port is published on this Mac's
@@ -72,9 +72,17 @@
    `UserPromptSubmit` hook played through the Linux `slopty hook` inside the container must
    reach the client as `Working`. It also times 300 keystrokes into `cat` to their echo and
    prints the percentiles. The container is capped at two CPUs and removed at the end.
-4. **Live desktop**, `cargo xtask e2e worker|screen|input|all` (gates `SLOPTY_SCREEN_E2E`,
-   `SLOPTY_INPUT_E2E`): real capture and real event posting, own data dir under `target/e2e/`.
-   The assertions live inside those tests.
+4. **Live desktop**, `cargo xtask e2e worker|screen|input|all`: real capture and real event
+   posting, own data dir under `target/e2e/`. The assertions live inside those tests.
+
+The tests of layers 3 and 4 are live: each carries `#[ignore = "live: <the command that runs
+it>"]`, so `cargo gate` lists it as skipped rather than passing it without running it, and
+its xtask command runs it with nextest's `--run-ignored only`. A live test reads no variable to
+decide whether to run. One that needs the Screen Recording grant sits in its target's
+`screen_recording` module and runs only with `--screen-recording`. The app's frame-time
+measurement sits in `frame_time` and runs under `smooth`, alone. The live tests of
+`slopty-capture` and `slopty-input` still return early without `SLOPTY_SCREEN_E2E` or
+`SLOPTY_INPUT_E2E`, which the xtask sets for them.
 
 ## Beyond the layers: the deep checks
 `cargo xtask deep <check>` (and the weekly `Deep` workflow) runs what no layer above can see

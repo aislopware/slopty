@@ -1,7 +1,7 @@
 //! Frame-time budget: the workspace under load, measured from inside the app.
 //!
-//! Runs only with `SLOPTY_SMOOTH_E2E=1` (`cargo xtask e2e smooth`) or, in the simulator, with
-//! `SLOPTY_SMOOTH_IOS_E2E=1` (`cargo xtask e2e smooth-ios --sim ipad`). The app's frame probe
+//! Every test is live (`#[ignore]`): `cargo xtask e2e smooth` runs the Mac's, and
+//! `cargo xtask e2e smooth-ios --sim ipad` the simulator's. The app's frame probe
 //! (`slopty_ui::frames`, read back through `dump.frames`) times every frame the window draws
 //! while the driver scrolls the strip, opens the overview and types over the test socket; each
 //! scenario runs for [`RUN`] and prints one `MEASURE` line with the percentiles
@@ -9,8 +9,8 @@
 //! the guarded scenario: its p95 draw must stay under [`PAN_P95_LIMIT`] on the Mac.
 //!
 //! Load is twenty sessions running [`LOAD`] straight from `OpenSession` (nothing is typed into
-//! a shell); the display scenario needs Screen Recording for the worker and runs only when
-//! `SLOPTY_SCREEN_E2E` is set as well.
+//! a shell); the display scenario needs Screen Recording for the worker and runs only with
+//! `--screen-recording` as well.
 
 #[cfg(test)]
 mod tests {
@@ -70,18 +70,11 @@ mod tests {
         "i=0; while :; do i=$((i+1)); printf '%06d the quick brown fox jumps over the lazy dog %06x\\n' \"$i\" \"$i\"; done",
     ];
 
-    fn gated(var: &str, hint: &str) -> bool {
-        if std::env::var_os(var).is_none() {
-            eprintln!("skipped: set {var}=1 (or run `{hint}`)");
-            return false;
-        }
-        true
-    }
-
-    fn simulator() -> Option<Simulator> {
-        let udid = std::env::var("SLOPTY_SIM_UDID").ok()?;
-        let bundle_id = std::env::var("SLOPTY_SIM_BUNDLE_ID").ok()?;
-        Some(Simulator { udid, bundle_id })
+    /// The booted simulator `cargo xtask e2e smooth-ios` installed the app on.
+    fn simulator() -> Simulator {
+        let udid = std::env::var("SLOPTY_SIM_UDID").expect("SLOPTY_SIM_UDID (a booted simulator)");
+        let bundle_id = std::env::var("SLOPTY_SIM_BUNDLE_ID").expect("SLOPTY_SIM_BUNDLE_ID");
+        Simulator { udid, bundle_id }
     }
 
     fn measure(scenario: &str, frames: &FrameInfo) {
@@ -250,10 +243,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth"]
     async fn twenty_streaming_shells_scroll_the_strip_within_budget_on_the_mac() {
-        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
-            return;
-        }
         let mut stack = Stack::launch("e2e-smooth").await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -330,10 +321,8 @@ mod tests {
     /// editor draws the rows on screen, so paging through it, typing into it and scrolling the
     /// strip past it should cost what those rows cost, not the file.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth"]
     async fn a_large_file_tile_beside_five_shells_scrolls_and_types_on_the_mac() {
-        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
-            return;
-        }
         let lines = file_lines();
         let mut stack = Stack::launch("e2e-smooth-file").await.unwrap();
         // `SLOPTY_SMOOTH_FILE_NAME=big.txt` measures the same text uncoloured.
@@ -374,29 +363,34 @@ mod tests {
         assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
     }
 
-    #[tokio::test]
-    async fn a_display_stream_beside_five_shells_pans_on_the_mac() {
-        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
-            return;
-        }
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("skipped: the display scenario needs SLOPTY_SCREEN_E2E=1 (Screen Recording)");
-            return;
-        }
-        let mut stack = Stack::launch("e2e-smooth-display").await.unwrap();
-        let drv = &mut stack.driver;
-        drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-        ready(drv).await;
-        load(drv, SHELLS_WITH_DISPLAY).await;
-        drv.add_display().await.unwrap();
-        drv.wait_for("the display streaming", STEP, |d| d.screens.iter().any(|s| s.frames >= 10))
+    /// The scenario that captures a display, which needs the Screen Recording grant
+    /// (`cargo xtask e2e smooth --screen-recording`).
+    mod screen_recording {
+        use super::*;
+
+        #[tokio::test]
+        #[ignore = "live: cargo xtask e2e smooth --screen-recording"]
+        async fn a_display_stream_beside_five_shells_pans_on_the_mac() {
+            let mut stack = Stack::launch("e2e-smooth-display").await.unwrap();
+            let drv = &mut stack.driver;
+            drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+            ready(drv).await;
+            load(drv, SHELLS_WITH_DISPLAY).await;
+            drv.add_display().await.unwrap();
+            drv.wait_for("the display streaming", STEP, |d| {
+                d.screens.iter().any(|s| s.frames >= 10)
+            })
             .await
             .unwrap();
-        focus_first_shell(drv).await;
-        let panned = pan(drv, RUN).await;
-        measure("(c) mac: 1 display stream + 5 streaming shells, strip column to column", &panned);
-        stack.shutdown().await;
-        assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
+            focus_first_shell(drv).await;
+            let panned = pan(drv, RUN).await;
+            measure(
+                "(c) mac: 1 display stream + 5 streaming shells, strip column to column",
+                &panned,
+            );
+            stack.shutdown().await;
+            assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
+        }
     }
 
     /// A shell that fills its screen once and then sits still.
@@ -419,10 +413,8 @@ mod tests {
     /// still ones. A frame should redraw the terminals whose output changed, not every tile,
     /// so these numbers are the view cache's.
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth"]
     async fn six_streaming_shells_in_view_on_the_mac() {
-        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
-            return;
-        }
         let mut stack = Stack::launch("e2e-smooth-busy").await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -514,10 +506,8 @@ mod tests {
     /// [`SPRINGS`] each way, and the overview held open for [`RUN`]. What the overview's
     /// miniatures cost (MEASUREMENTS 2026-09-28, "the overview's miniatures").
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth"]
     async fn twenty_mixed_tiles_open_hold_and_close_the_overview_on_the_mac() {
-        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
-            return;
-        }
         let mut stack = Stack::launch("e2e-smooth-mixed").await.unwrap();
         let files: Vec<String> = (0..MIXED_FILES)
             .map(|n| {
@@ -595,10 +585,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth"]
     async fn typing_is_timed_with_and_without_the_local_echo_on_the_mac() {
-        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
-            return;
-        }
         for policy in ["never", "always"] {
             let env = [("SLOPTY_PREDICT", policy)];
             let mut stack = Stack::launch_with("e2e-smooth-typing", &env).await.unwrap();
@@ -633,10 +621,8 @@ mod tests {
     /// shaped link"). Misses are the app's `prediction miss` lines
     /// (`RUST_LOG=slopty_ui::terminal::view=debug`).
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth"]
     async fn typing_over_a_shaped_round_trip_on_the_mac() {
-        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
-            return;
-        }
         for rtt in SHAPED_RTTS {
             let link = slopty_shape::Link { delay: rtt / 2, ..slopty_shape::Link::CLEAR };
             for policy in ["never", "always", "adaptive"] {
@@ -672,11 +658,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth-ios"]
     async fn the_same_scenarios_on_the_simulator() {
-        if !gated("SLOPTY_SMOOTH_IOS_E2E", "cargo xtask e2e smooth-ios --sim ipad") {
-            return;
-        }
-        let simulator = simulator().expect("SLOPTY_SIM_UDID and SLOPTY_SIM_BUNDLE_ID");
+        let simulator = simulator();
         // The simulator draws at 60 Hz whatever device it imitates.
         let mut stack = Stack::launch_on_simulator_with(
             "e2e-smooth-ios",
