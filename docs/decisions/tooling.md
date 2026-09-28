@@ -220,3 +220,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   test (and accepts only the goldens it renders); `--no-build` reuses the last build. The `xtask`
   and `gate` aliases build xtask in `target/xtask`: in the shared `target/` it waited 2 min 05 s
   behind other builds just to start, apart it starts in about 1 s.
+
+**A test that leaves a process behind fails, and CI gets its sccache.** ✅ 2026-09-29
+- nextest's `leak-timeout` (500 ms, result `fail`) in the default profile, which every other
+  profile inherits: a test whose child (ptyd, a worker, a shell) still holds its stdout or stderr
+  half a second after the test ends is a failure, not a quiet orphan that eats a core. The whole
+  suite ran clean with it (2,090 tests, 69 s) before it was turned on.
+- CI and Deep had failed on every run since `.cargo/config.toml` began wrapping rustc in sccache:
+  the runners had no `sccache`, so `cargo xtask setup` died before compiling. Both workflows now
+  install it (`mozilla-actions/sccache-action`) and cache to the Actions cache
+  (`SCCACHE_GHA_ENABLED`), rather than turning the wrapper off, so a runner also shares compiles.

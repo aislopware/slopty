@@ -437,3 +437,39 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `an_edit_changes_only_what_moves_and_only_where_it_fits` in `slopty-proto`; the
     client's `snapshot_then_deltas_and_echoes` checks an echo that the worker trimmed and one
     it did not.
+
+- ✅ **An idle stream waits on events; a crop and the real pointer still poll** (2026-09-28).
+  A window stream's cursor loop sleeps until its input moves the placed pointer
+  (`PointerWatch` is a `watch` now), or the probe reports new bounds, a change of visibility
+  or a new zoom (`Shared::cursor_wake`). It also sleeps while the target is hidden. A display
+  stream's pointer is the real one, which the worker's own user moves without any event, so
+  that loop keeps its 120 Hz read of the move counters. The geometry probe keeps its 100 ms
+  period while the stream has something to follow or took input in the last second, and
+  otherwise waits for the accessibility API or a 1 s backstop (`Pipeline::geometry_quiet`).
+  Input counts because the injector reads the window server itself, in front of the event,
+  once the probe's bounds are older than `BOUNDS_TTL` (250 ms). The first input after a quiet
+  spell probes at once. The accessibility watch now also hears
+  `kAXWindowMovedNotification` and `kAXWindowResizedNotification` (`Went::Moved`). Following
+  covers a window served as a crop, since another application's window moving over it
+  announces nothing and the crop would show that window until a probe. It also covers a
+  hidden target (nothing announces a return from another Space), a source that draws, and
+  anything under way. The first frame after the client was told the source is idle wakes the
+  probe, so `Live` is not a backstop late. Since a drag can now wake the probe on every step,
+  a new size must hold for 100 ms rather than for two ticks (`ResizeDebounce`, `RESIZE_HOLD`).
+  Numbers: MEASUREMENTS.md, "an idle stream's wakeups". Tests:
+  `the_cursor_loop_sleeps_until_the_placed_pointer_moves`,
+  `a_move_or_a_frame_after_idle_wakes_the_geometry_probe`,
+  `a_resize_rebuilds_only_once_the_size_holds`, `only_a_move_wakes_a_reader` and
+  `a_quiet_stream_is_probed_when_woken_not_every_period`.
+
+- ✅ **The tailnet path is read, not watched** (2026-09-28). The code audit suggested
+  replacing the 2 s read of `/localapi/v0/status` with the daemon's `watch-ipn-bus` stream.
+  The bus cannot tell a client its path. Its `Notify` carries no peer's current address or
+  relay: `Engine` is byte counts and live peers (`PeerStatusLite`), and peer patches carry
+  control's endpoints, not the one magicsock chose. The engine updates are the daemon polling
+  itself every 2 s for any watcher that asks for them (`pollRequestEngineStatus` in
+  `ipn/ipnlocal/local.go`, tailscale v1.102.4, whose comment says so). A watch would still have
+  to read the status to learn a path, on the same clock. So the read stays, only while a
+  client on the tailnet listens. While none does, the reader sleeps on a `Notify` instead of
+  ticking, and the first client to listen has the status read at once rather than up to a
+  poll later. Test: `the_status_is_read_when_a_client_listens_and_only_then`.

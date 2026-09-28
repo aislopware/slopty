@@ -1,8 +1,12 @@
 //! How each client's packets travel, as this machine's Tailscale sees it.
 //!
 //! Straight, through a peer relay, or through DERP. One task reads the daemon's status while any
-//! client listens; each client on the tailnet is told its path when it has one and again when it
-//! changes.
+//! client listens, and sleeps while none does; each client on the tailnet is told its path when
+//! it has one and again when it changes.
+//!
+//! A read, not a watch of the daemon's IPN bus: the bus carries no peer's path, and its engine
+//! updates are the daemon polling itself every 2 s (`docs/decisions/workers.md`, "The tailnet
+//! path is read, not watched").
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -12,7 +16,7 @@ use slopty_net::admission::Admission;
 use slopty_proto::WorkerMsg;
 use slopty_proto::tailnet::LinkPath;
 use slopty_tailnet::{Path, Status};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 /// How often the status is read while a client listens: a path moves from DERP to direct
 /// within a few seconds of traffic starting, and a status read costs the daemon a few ms.
@@ -22,6 +26,8 @@ const POLL: Duration = Duration::from_secs(2);
 #[derive(Clone, Debug)]
 pub struct Paths {
     status: Arc<watch::Sender<Option<Arc<Status>>>>,
+    /// Wakes the reader when a client starts listening.
+    listening: Arc<Notify>,
 }
 
 impl Paths {
@@ -29,8 +35,9 @@ impl Paths {
     /// there is none, no client is told a path.
     pub fn spawn(admission: Admission) -> Self {
         let status = Arc::new(watch::Sender::new(None));
-        tokio::spawn(poll(admission, Arc::clone(&status)));
-        Self { status }
+        let listening = Arc::new(Notify::new());
+        tokio::spawn(poll(admission, Arc::clone(&status), Arc::clone(&listening)));
+        Self { status, listening }
     }
 
     /// Tell the client at `remote` its path through `out`, each time it changes, until the
@@ -40,25 +47,35 @@ impl Paths {
         if !slopty_net::admission::on_tailnet(ip) {
             return;
         }
-        report(self.status.subscribe(), ip, out).await;
+        let status = self.status.subscribe();
+        self.listening.notify_one();
+        report(status, ip, out).await;
     }
 }
 
-async fn poll(admission: Admission, status: Arc<watch::Sender<Option<Arc<Status>>>>) -> ! {
-    let mut every = tokio::time::interval(POLL);
-    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+/// Read the status every [`POLL`] while a client listens. While none does, nothing is read and
+/// the task sleeps; the status it last read is dropped, and the first client to listen again
+/// has it read at once rather than a poll later.
+async fn poll(
+    admission: Admission,
+    status: Arc<watch::Sender<Option<Arc<Status>>>>,
+    listening: Arc<Notify>,
+) -> ! {
     loop {
-        every.tick().await;
         if status.receiver_count() == 0 {
+            status.send_replace(None);
+            listening.notified().await;
             continue;
         }
-        let Some(api) = admission.local_api() else { continue };
-        match api.status().await {
-            Ok(read) => {
-                status.send_replace(Some(Arc::new(read)));
+        if let Some(api) = admission.local_api() {
+            match api.status().await {
+                Ok(read) => {
+                    status.send_replace(Some(Arc::new(read)));
+                }
+                Err(e) => tracing::debug!(error = %e, "tailscale status"),
             }
-            Err(e) => tracing::debug!(error = %e, "tailscale status"),
         }
+        tokio::time::sleep(POLL).await;
     }
 }
 
@@ -133,6 +150,40 @@ mod tests {
         drop(tx);
         task.await.unwrap();
         assert!(heard.try_recv().is_err(), "the same path is not told twice");
+    }
+
+    /// Nothing is read while no client listens; the first client to listen has the status
+    /// read at once and hears its path, not a poll later.
+    #[tokio::test]
+    async fn the_status_is_read_when_a_client_listens_and_only_then() {
+        let (api, seen) = slopty_tailnet::fake::daemon(|_path| {
+            (
+                200,
+                r#"{"BackendState":"Running","Peer":{"k":{"ID":"n2","HostName":"laptop",
+            "DNSName":"laptop.ts.net.","OS":"macOS","TailscaleIPs":["100.64.0.4"],
+            "CurAddr":"192.168.1.20:41641","Relay":"fra","Active":true}}}"#
+                    .to_owned(),
+            )
+        })
+        .await
+        .unwrap();
+        let paths = Paths::spawn(Admission::with_tailnet(Vec::new(), Some(api)));
+        tokio::time::sleep(POLL + Duration::from_millis(500)).await;
+        assert!(seen.lock().is_empty(), "read with no client listening: {:?}", seen.lock());
+
+        let (out, mut heard) = mpsc::channel(8);
+        let asked = std::time::Instant::now();
+        let reporting = tokio::spawn({
+            let paths = paths.clone();
+            async move { paths.report("100.64.0.4:5000".parse().unwrap(), out).await }
+        });
+        let told = tokio::time::timeout(POLL, heard.recv()).await;
+        assert!(
+            matches!(told, Ok(Some(WorkerMsg::Path(LinkPath::Direct)))),
+            "the path, within a poll: {told:?}"
+        );
+        assert!(asked.elapsed() < POLL / 2, "told after {:?}", asked.elapsed());
+        reporting.abort();
     }
 
     /// An address no node has, and one idle node, give no path.

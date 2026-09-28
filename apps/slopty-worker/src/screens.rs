@@ -20,11 +20,17 @@ use tokio::sync::mpsc;
 
 use crate::Daemon;
 
-/// How often a stream's target is checked for a size change.
-/// Also how fast a window on the display-crop path follows a drag: the crop lags a move by
-/// one period plus ScreenCaptureKit's ~20 ms configuration update (MEASUREMENTS.md, "capture
-/// floor"), during which one edge of the picture shows the desktop the window left.
+/// How often a stream's target is probed while it has something to follow
+/// ([`Pipeline::geometry_quiet`]): a window served as a crop, a source that draws, a change
+/// under way. The accessibility API wakes a probe at once when the target moves or is resized,
+/// so a window on the display-crop path follows a drag within ScreenCaptureKit's ~20 ms
+/// configuration update of the step (MEASUREMENTS.md, "capture floor"); another application's
+/// window moving over it is seen within this period.
 const GEOMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long a quiet stream's target goes unprobed when nothing wakes it: a display resized
+/// under the stream, which announces nothing to the stream, is seen within this.
+const GEOMETRY_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A connection's datagrams, written from whichever thread produced them.
 pub struct QuicSink(pub Connection);
@@ -206,8 +212,9 @@ pub async fn serve<P: Platform>(
     out: &mpsc::Sender<WorkerMsg>,
     mut sized: Option<&mut sized::Sized>,
 ) -> bool {
-    let mut geometry = tokio::time::interval(GEOMETRY_PERIOD);
-    geometry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let woken = stream.geometry_wake();
+    let mut next_probe = tokio::time::Instant::now();
+    let mut input_at: Option<tokio::time::Instant> = None;
     let mut probing: Option<tokio::task::JoinHandle<slopty_worker::screen::Probe>> = None;
     // The geometry is not probed again until the new encoder is in.
     let mut rebuilding: Option<Rebuild<P>> = None;
@@ -226,7 +233,19 @@ pub async fn serve<P: Platform>(
                         (sized.resize)(width, height, scale);
                     }
                 }
-                Some(command) => apply(stream, client, command),
+                Some(command) => {
+                    if matches!(command, Command::Input(_)) {
+                        // Input maps through the probe's bounds, which the injector reads again
+                        // itself, in front of the event, once they are older than its
+                        // `BOUNDS_TTL`: a stream that takes input follows at the period.
+                        let now = tokio::time::Instant::now();
+                        input_at = Some(now);
+                        if next_probe > now.checked_add(GEOMETRY_PERIOD).unwrap_or(now) {
+                            next_probe = now;
+                        }
+                    }
+                    apply(stream, client, command);
+                }
             },
             switch = async { sized.as_deref_mut()?.switches.recv().await }, if sized.is_some() => {
                 let key = sized.as_deref().map(|s| s.key);
@@ -248,7 +267,7 @@ pub async fn serve<P: Platform>(
             probe = async { probing.as_mut()?.await.ok() }, if probing.is_some() => {
                 probing = None;
                 let Some(probe) = probe else { continue };
-                // Read before a quality change started a build: the next tick after it reads
+                // Read before a quality change started a build: the next probe after it reads
                 // again, and this one must not take the build's place.
                 if rebuilding.is_some() {
                     continue;
@@ -257,6 +276,7 @@ pub async fn serve<P: Platform>(
                 if let Some(event) = stream.check_source() {
                     telling.push(event);
                 }
+                next_probe = geometry_due(stream, input_at);
             }
             built = async { Some(rebuilding.as_mut()?.built().await) }, if rebuilding.is_some() => {
                 if let (Some(rebuild), Some(built)) = (rebuilding.take(), built) {
@@ -279,7 +299,10 @@ pub async fn serve<P: Platform>(
                 Ok(permit) => telling.send(permit),
                 Err(_gone) => telling.clear(),
             },
-            _ = geometry.tick(), if probing.is_none() && rebuilding.is_none() => {
+            () = tokio::time::sleep_until(next_probe), if probing.is_none() && rebuilding.is_none() => {
+                probing = Some(tokio::task::spawn_blocking(stream.prober()));
+            }
+            () = woken.notified(), if probing.is_none() && rebuilding.is_none() => {
                 probing = Some(tokio::task::spawn_blocking(stream.prober()));
             }
         }
@@ -289,6 +312,19 @@ pub async fn serve<P: Platform>(
     }
     // What is still untold is moot: the stream is ending, and `Closed` says so.
     by_client
+}
+
+/// When the probe after the one just checked is due: a period on while the stream has
+/// something to follow or took input within the backstop (`input_at`), the backstop once it has
+/// neither ([`Pipeline::geometry_quiet`]).
+fn geometry_due<P: Platform>(
+    stream: &Pipeline<P>,
+    input_at: Option<tokio::time::Instant>,
+) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    let typing = input_at.is_some_and(|at| now.saturating_duration_since(at) < GEOMETRY_BACKSTOP);
+    let wait = if stream.geometry_quiet() && !typing { GEOMETRY_BACKSTOP } else { GEOMETRY_PERIOD };
+    now.checked_add(wait).unwrap_or(now)
 }
 
 /// What a stream's task has yet to tell its client, oldest first. A newer event of a kind
@@ -553,6 +589,13 @@ pub mod fake {
     pub static UPDATED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
     /// The displays the fake enumeration lists.
     pub static LISTED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    /// Geometry reads of each display so far.
+    static PROBED: LazyLock<Mutex<HashMap<u32, u64>>> = LazyLock::new(Mutex::default);
+
+    /// How many times the geometry of display `display` has been read.
+    pub fn probed(display: u32) -> u64 {
+        PROBED.lock().get(&display).copied().unwrap_or(0)
+    }
 
     impl CaptureSource for Still {
         type Content = ();
@@ -646,6 +689,13 @@ pub mod fake {
         }
 
         fn target_bounds(target: CaptureTarget) -> Option<Rect> {
+            if let CaptureTarget::Display(display) = target {
+                PROBED
+                    .lock()
+                    .entry(display.0)
+                    .and_modify(|n| *n = n.saturating_add(1))
+                    .or_insert(1);
+            }
             if target
                 == CaptureTarget::Display(slopty_core::DisplayId(
                     SLOW_DISPLAY.load(Ordering::SeqCst),
@@ -862,6 +912,32 @@ pub mod fake {
         }
     }
 
+    /// A session that encodes nothing and is built at once, whatever [`GATE`] holds.
+    pub struct Plain;
+
+    impl VideoEncoder for Plain {
+        type Image = PixelBuffer;
+
+        fn new(
+            _config: EncoderConfig,
+            _sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, CodecError> {
+            Ok(Self)
+        }
+
+        fn encode(&self, _: &PixelBuffer, _: u64, _: &FrameOptions) -> Result<(), CodecError> {
+            Ok(())
+        }
+
+        fn set_bitrate(&self, _bps: u32) -> Result<(), CodecError> {
+            Ok(())
+        }
+
+        fn set_frame_rate(&self, _fps: u16) -> Result<(), CodecError> {
+            Ok(())
+        }
+    }
+
     /// Datagrams that go nowhere.
     pub struct Nowhere;
 
@@ -907,7 +983,7 @@ mod serving {
     use slopty_worker::screen::Pipeline;
     use tokio::sync::mpsc;
 
-    use super::fake::{BUILT, Fake, Gated, Nowhere, Queued, Toolbox, note};
+    use super::fake::{BUILT, Fake, Gated, Nowhere, Plain, Queued, Toolbox, note};
     use super::{Command, serve};
 
     /// A stream of display `display` on `P`, served on a task of its own: its command queue, the
@@ -1072,6 +1148,89 @@ mod serving {
                 Some(WorkerMsg::Screen(ScreenEvent::Source { state: SourceState::Idle, .. }))
             ),
             "the news, once there was room: {told:?}"
+        );
+        drop(commands);
+        task.await.unwrap();
+    }
+
+    /// A stream of display `display` served on a task of its own, whose events are drained:
+    /// its command queue, what wakes its geometry probe, and the task.
+    async fn served_quiet(
+        display: u32,
+    ) -> (mpsc::UnboundedSender<Command>, Arc<tokio::sync::Notify>, tokio::task::JoinHandle<()>)
+    {
+        let target = CaptureTarget::Display(slopty_core::DisplayId(display));
+        let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+        let (mut stream, _opened) = Pipeline::<Fake<Plain>>::open(
+            StreamId(display),
+            target,
+            Quality::default(),
+            sink,
+            |_event| {},
+        )
+        .await
+        .unwrap();
+        let wake = stream.geometry_wake();
+        let (commands_tx, mut commands) = mpsc::unbounded_channel();
+        let (out, mut events) = mpsc::channel(1024);
+        tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let task = tokio::spawn(async move {
+            serve(&mut stream, ClientId::new(), &mut commands, &out, None).await;
+            stream.close().await;
+        });
+        (commands_tx, wake, task)
+    }
+
+    /// A stream with nothing to follow (the client told its source is idle, nothing under
+    /// way) is probed at the backstop rather than every period; a wake (the accessibility
+    /// API's word that the target moved) probes it at once, and input puts it back on the
+    /// period.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_quiet_stream_is_probed_when_woken_not_every_period() {
+        use super::fake::probed;
+        const DISPLAY: u32 = 16;
+        let (commands, wake, task) = served_quiet(DISPLAY).await;
+        // Past the idle grace, and a probe after it that finds the stream quiet.
+        tokio::time::sleep(slopty_worker::screen::SOURCE_IDLE_AFTER + Duration::from_millis(300))
+            .await;
+        let before = probed(DISPLAY);
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let quiet = probed(DISPLAY) - before;
+        assert!(quiet <= 2, "{quiet} probes in 1.5 s; the follow period makes 15");
+        let before = probed(DISPLAY);
+        wake.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(probed(DISPLAY) - before, 1, "a wake probes at once");
+        // Input maps through the probe's bounds, so a stream that takes it follows again.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let before = probed(DISPLAY);
+        commands.send(Command::Input(at(1.0))).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(probed(DISPLAY) - before, 1, "the first input probes at once");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let following = probed(DISPLAY) - before;
+        assert!(following >= 5, "{following} probes in 550 ms after input; the period makes 6");
+        drop(commands);
+        task.await.unwrap();
+    }
+
+    /// Geometry probes of an idle stream over ten seconds on the test platform: a display
+    /// whose source is idle and that nothing moves. `idle stream wakeups` in MEASUREMENTS.md.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "measurement"]
+    async fn idle_stream_probes() {
+        use super::fake::probed;
+        const DISPLAY: u32 = 17;
+        const WINDOW: Duration = Duration::from_secs(10);
+        let (commands, _wake, task) = served_quiet(DISPLAY).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let before = probed(DISPLAY);
+        tokio::time::sleep(WINDOW).await;
+        let probes = probed(DISPLAY) - before;
+        eprintln!(
+            "idle_stream_probes: {probes} probes in {} s, {:.1} a second",
+            WINDOW.as_secs(),
+            probes as f64 / WINDOW.as_secs_f64()
         );
         drop(commands);
         task.await.unwrap();

@@ -38,7 +38,7 @@ use slopty_codec::{
     AudioEncoder as _, CodecError, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder as _,
 };
 use slopty_core::{DisplayId, StreamId};
-use slopty_input::{InputError, InputSink as _, Pointer, PointerWatch};
+use slopty_input::{InputError, InputSink as _, Pointer, PointerChanges, PointerWatch};
 pub use slopty_media::PathSample;
 use slopty_media::{
     Cadence, ChromaGate, Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Pace, Packetizer,
@@ -105,8 +105,15 @@ pub enum Refused {
     Closed,
 }
 
-/// Cursor sample period (120 Hz); a datagram goes out only when the position changed.
+/// Cursor sample period (120 Hz) while the real pointer is the one shown; a datagram goes out
+/// only when the position changed.
 const CURSOR_PERIOD: Duration = Duration::from_micros(8_333);
+/// How long the cursor loop sleeps when nothing wakes it: a placed pointer, or a target that
+/// is hidden or not yet probed, moves only on an event, and this only looks at whether the
+/// stream has closed.
+const CURSOR_BACKSTOP: Duration = Duration::from_secs(1);
+/// How long a new size must hold before the stream is rebuilt for it ([`ResizeDebounce`]).
+const RESIZE_HOLD: Duration = Duration::from_millis(100);
 /// How often the cursor's picture is read while the pointer is over the target (30 Hz). It
 /// goes to the client only when it changed.
 const SHAPE_PERIOD: Duration = Duration::from_millis(33);
@@ -601,6 +608,12 @@ impl SourceTracker {
             state
         })
     }
+
+    /// The client was last told the source is idle.
+    #[must_use]
+    pub fn idle(&self) -> bool {
+        self.reported == Some(SourceState::Idle)
+    }
 }
 
 /// Closed streams the registry remembers.
@@ -1050,6 +1063,16 @@ struct Shared<P: Platform = Native> {
     too_large_logged: AtomicBool,
     /// The target's bounds as the last geometry probe read them, for the cursor loop.
     bounds: Mutex<Option<Rect>>,
+    /// Wakes [`cursor_loop`]: the target's bounds, its visibility or the zoom changed.
+    cursor_wake: tokio::sync::Notify,
+    /// Times [`cursor_loop`] went round, said when the stream closes.
+    cursor_wakes: AtomicU64,
+    /// Wakes the owner's geometry probe ahead of its period: the accessibility API says the
+    /// target moved, was resized or went, or a frame came while the client was told the source
+    /// is idle ([`Pipeline::geometry_quiet`]).
+    geometry_wake: Arc<tokio::sync::Notify>,
+    /// The client was last told the source is idle ([`Pipeline::check_source`]).
+    source_idle: AtomicBool,
     counters: Counters,
 }
 
@@ -1096,6 +1119,10 @@ impl<P: Platform> Shared<P> {
             sink,
             too_large_logged: AtomicBool::new(false),
             bounds: Mutex::new(None),
+            cursor_wake: tokio::sync::Notify::new(),
+            cursor_wakes: AtomicU64::new(0),
+            geometry_wake: Arc::new(tokio::sync::Notify::new()),
+            source_idle: AtomicBool::new(false),
             counters: Counters::new(),
         }
     }
@@ -1120,6 +1147,23 @@ impl<P: Platform> Shared<P> {
     /// Stream pixels per native pixel right now.
     fn zoom(&self) -> f64 {
         f64::from_bits(self.zoom.load(Ordering::Relaxed))
+    }
+
+    /// Scale the stream by `zoom` stream pixels per native pixel; the cursor's place in the
+    /// picture moves with it.
+    fn set_zoom(&self, zoom: f64) {
+        self.zoom.store(zoom.to_bits(), Ordering::Relaxed);
+        self.cursor_wake.notify_one();
+    }
+
+    /// Whether the target is on screen, from the geometry probe; the cursor loop hears of a
+    /// change.
+    fn set_hidden(&self, hidden: bool) -> bool {
+        let was = self.target_hidden.swap(hidden, Ordering::Relaxed);
+        if was != hidden {
+            self.cursor_wake.notify_one();
+        }
+        was
     }
 
     /// Whether a refresh would come back as a delta: an acknowledged reference newer than the
@@ -1267,6 +1311,16 @@ impl<P: Platform> Shared<P> {
         )
     }
 
+    /// What the accessibility watch heard of the target's application: a suspicion, a sibling
+    /// gone, or a move or resize of the target, which wakes the geometry probe.
+    fn heard(&self, went: Went) {
+        match went {
+            Went::Target => self.suspect(now::<P>()),
+            Went::Other => self.sibling_went(),
+            Went::Moved => self.geometry_wake.notify_one(),
+        }
+    }
+
     /// The accessibility API says a window of the target's application went at `now`: hold
     /// frames for [`SUSPICION_HOLD`] while the window list catches up; the geometry tick moves
     /// the stream to the window filter meanwhile.
@@ -1275,6 +1329,7 @@ impl<P: Platform> Shared<P> {
         self.suspect_until_us.store(now.saturating_add(hold_us), Ordering::Relaxed);
         let suspicions = self.counters.suspicions.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(stream = %self.id, suspicions = suspicions.saturating_add(1), "hide suspected");
+        self.geometry_wake.notify_one();
     }
 
     /// The accessibility API says a window of the target's application that is not the target
@@ -1284,6 +1339,7 @@ impl<P: Platform> Shared<P> {
         self.filter_stalled.store(true, Ordering::Relaxed);
         let siblings = self.counters.siblings.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(stream = %self.id, siblings = siblings.saturating_add(1), "another window of the application went");
+        self.geometry_wake.notify_one();
     }
 
     /// Whether a suspicion raised by [`Self::suspect`] is still holding frames at `now`.
@@ -1555,6 +1611,12 @@ impl<P: Platform> Shared<P> {
         self.counters.returned(packet.pts_us, now);
         let latency = now.saturating_sub(packet.pts_us);
         let encoded = self.counters.encoded.fetch_add(1, Ordering::Relaxed);
+        // The quiet geometry probe learns the source draws again from this, not its backstop.
+        if self.source_idle.load(Ordering::Relaxed)
+            && self.source_idle.swap(false, Ordering::Relaxed)
+        {
+            self.geometry_wake.notify_one();
+        }
         if packet.keyframe {
             let bytes = u64::try_from(packet.data.len()).unwrap_or(u64::MAX);
             let estimate = keyframe_estimate(self.keyframe_bytes.load(Ordering::Relaxed), bytes);
@@ -1972,7 +2034,10 @@ fn probe<P: Platform>(
         },
     };
     shared.counters.bounds.lock().push(now::<P>().saturating_sub(started));
-    *shared.bounds.lock() = probe.bounds;
+    let moved = std::mem::replace(&mut *shared.bounds.lock(), probe.bounds) != probe.bounds;
+    if moved {
+        shared.cursor_wake.notify_one();
+    }
     probe
 }
 
@@ -2047,6 +2112,11 @@ impl Transitions {
         }
     }
 
+    /// A transition is in flight or waits to be settled.
+    fn pending(&self) -> bool {
+        self.0.lock().is_some()
+    }
+
     /// Take the outcome once every call has completed.
     fn settle(&self) -> Settled {
         let mut slot = self.0.lock();
@@ -2066,31 +2136,50 @@ impl Transitions {
     }
 }
 
-/// A new size the target has to hold for a tick before the stream is rebuilt for it.
+/// A new size the target has to hold for [`RESIZE_HOLD`] before the stream is rebuilt for it.
 ///
 /// A rebuild is a fresh encoder session and a keyframe, and a live drag of a window's corner
-/// changes its size on every 100 ms geometry tick: rebuilt at once, that is ten IDRs a second
-/// for as long as the drag lasts. Until the size holds, the capture keeps its old output size
-/// and scales the window into it.
+/// changes its size on every probe, which the accessibility API wakes on each step of the
+/// drag: rebuilt at once, that is an IDR per step for as long as the drag lasts. Until the
+/// size holds, the capture keeps its old output size and scales the window into it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct ResizeDebounce {
-    candidate: Option<(u32, u32)>,
+    /// The new size, and when it was first seen.
+    candidate: Option<((u32, u32), Instant)>,
 }
 
 impl ResizeDebounce {
-    /// The target measures `native` pixels while the stream is built for `current`: the size to
-    /// rebuild for, once the same new size is seen on two ticks in a row.
-    fn observe(&mut self, native: (u32, u32), current: (u32, u32)) -> Option<(u32, u32)> {
+    /// The target measures `native` pixels at `at` while the stream is built for `current`: the
+    /// size to rebuild for, once the same new size is seen again [`RESIZE_HOLD`] after it was
+    /// first seen, with no other size in between.
+    fn observe(
+        &mut self,
+        native: (u32, u32),
+        current: (u32, u32),
+        at: Instant,
+    ) -> Option<(u32, u32)> {
         if native == current {
             self.candidate = None;
             return None;
         }
-        if self.candidate == Some(native) {
-            self.candidate = None;
-            return Some(native);
+        match self.candidate {
+            Some((size, since)) if size == native => {
+                if at.saturating_duration_since(since) < RESIZE_HOLD {
+                    return None;
+                }
+                self.candidate = None;
+                Some(native)
+            }
+            _new_size => {
+                self.candidate = Some((native, at));
+                None
+            }
         }
-        self.candidate = Some(native);
-        None
+    }
+
+    /// A size is waiting to hold.
+    const fn pending(&self) -> bool {
+        self.candidate.is_some()
     }
 }
 
@@ -2395,7 +2484,7 @@ impl<P: Platform> Pipeline<P> {
         let (mut capture_config, mut encoder_config) = carrying(chroma, sized);
         capture_config.crop = Source::<P>::crop(&resolved);
         let zoom = f64::from(capture_config.width) / f64::from(native.0);
-        shared.zoom.store(zoom.to_bits(), Ordering::Relaxed);
+        shared.set_zoom(zoom);
         let t_encoder = Instant::now();
         let encoder = match build_encoder(&Arc::downgrade(&shared), encoder_config).await {
             Err(e) if chroma == Chroma::Full => {
@@ -2627,7 +2716,7 @@ impl<P: Platform> Pipeline<P> {
         if let (CaptureTarget::Window(_), Some((on_screen, crop))) = (self.target, probe.window) {
             self.follow_window(on_screen, crop);
         }
-        let Some(native) = self.resize.observe(native, self.native) else {
+        let Some(native) = self.resize.observe(native, self.native, probe.at) else {
             if let Some(rebuild) = self.follow_chroma() {
                 return Some(rebuild);
             }
@@ -2728,7 +2817,42 @@ impl<P: Platform> Pipeline<P> {
         let hidden = self.shared.target_hidden.load(Ordering::Relaxed);
         let state = self.source.poll(encoded, hidden, Instant::now())?;
         tracing::debug!(stream = %self.id, ?state, "capture source state");
+        self.shared.source_idle.store(self.source.idle(), Ordering::Relaxed);
         Some(ScreenEvent::Source { stream: self.id, state })
+    }
+
+    /// Whether the target may go unprobed until [`Self::geometry_wake`] fires or a backstop
+    /// passes, rather than at the follow period.
+    ///
+    /// Only a stream with nothing to follow is: the client was told its source is idle (a
+    /// frame wakes the probe), the target is on screen (nothing announces a window's return
+    /// from another Space), and nothing is under way (a transition to settle, a size to hold,
+    /// a suspicion, a stalled filter, a chroma to switch to). A window served as a crop of its
+    /// display never is: a window of another application moving over it announces nothing to
+    /// this worker, and the crop would show that window until the probe saw it.
+    #[must_use]
+    pub fn geometry_quiet(&self) -> bool {
+        let window_crop = matches!(self.target, CaptureTarget::Window(_))
+            && (self.path == WindowPath::DisplayCrop
+                || self.desired_path == WindowPath::DisplayCrop);
+        self.source.idle()
+            && !window_crop
+            && !self.shared.target_hidden.load(Ordering::Relaxed)
+            && !self.transitions.pending()
+            && !self.resize.pending()
+            && self.desired_path == self.path
+            && self.desired == self.capture_config
+            && !self.shared.suspected_at(now::<P>())
+            && !self.shared.filter_stalled.load(Ordering::Relaxed)
+            && self.shared.chroma.lock().chroma() == self.encoder_config.chroma
+    }
+
+    /// What wakes a quiet stream's probe ([`Self::geometry_quiet`]): the accessibility API
+    /// saying the target moved, was resized or went, and the first frame after the client was
+    /// told the source is idle. One permit is kept for a wake while no one waits.
+    #[must_use]
+    pub fn geometry_wake(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.shared.geometry_wake)
     }
 
     /// The window list no longer knows the target. Through the window filter ScreenCaptureKit
@@ -2743,7 +2867,7 @@ impl<P: Platform> Pipeline<P> {
             return;
         }
         // Nothing more goes out while the stop is in flight: the crop outlives the window.
-        self.shared.target_hidden.store(true, Ordering::Relaxed);
+        self.shared.set_hidden(true);
         self.stopped = true;
         tracing::info!(stream = %self.id, "window closed under a display crop: stopping");
         let id = self.id;
@@ -2782,7 +2906,7 @@ impl<P: Platform> Pipeline<P> {
         // machine. A swap that ScreenCaptureKit keeps rejecting leaves a transition busy for as
         // long as it keeps failing, and those are exactly the ticks where the crop is still
         // running over a window that is no longer there.
-        if self.shared.target_hidden.swap(!on_screen, Ordering::Relaxed) == on_screen {
+        if self.shared.set_hidden(!on_screen) == on_screen {
             tracing::info!(stream = %self.id, on_screen, "target visibility");
         }
         // Keyed on the target, not on the path this side believes it is on: a `retarget` the
@@ -2917,7 +3041,7 @@ impl<P: Platform> Pipeline<P> {
     /// pixels wide.
     fn map_at(&mut self, width: u32, native_width: u32) {
         let zoom = f64::from(width) / f64::from(native_width);
-        self.shared.zoom.store(zoom.to_bits(), Ordering::Relaxed);
+        self.shared.set_zoom(zoom);
         self.injector.set_scale(self.point_scale * zoom);
     }
 
@@ -3055,7 +3179,8 @@ impl<P: Platform> Pipeline<P> {
             tracing::debug!(stream = %self.id, error = %e, "capture stop");
         }
         let stats = self.stats();
-        tracing::info!(stream = %self.id, ?stats, "screen stream closed");
+        let cursor_wakes = self.shared.cursor_wakes.load(Ordering::Relaxed);
+        tracing::info!(stream = %self.id, ?stats, cursor_wakes, "screen stream closed");
     }
 }
 
@@ -3101,10 +3226,7 @@ async fn hide_watch_for<P: Platform>(
         let target = TargetWindow { bounds, title };
         Some(Source::<P>::watch_hides(pid, target, move |went| {
             if let Some(shared) = weak.upgrade() {
-                match went {
-                    Went::Target => shared.suspect(now::<P>()),
-                    Went::Other => shared.sibling_went(),
-                }
+                shared.heard(went);
             }
         }))
     })
@@ -3222,26 +3344,39 @@ const fn beat_due_in(silence_us: u64, after_us: u64) -> Option<Duration> {
 ///
 /// A window stream's input goes to the window's application and leaves the worker's pointer
 /// wherever the worker's own user left it, so its pointer is where the input last put it
-/// (`input`), and hidden before the first event. A display stream's input moves the real pointer,
-/// which is read. A still pointer costs one read of the event system's move counters a tick
-/// ([`CaptureSource::pointer_moves`], tens of nanoseconds): the pointer itself is only asked
-/// for when the counters moved, and the target's bounds (which move a still pointer across the
-/// picture) are the ones the owner's geometry probe last read. The pointer read is a
+/// (`input`), and hidden before the first event. Nothing else moves it across the picture but
+/// the target's bounds and the stream's zoom, so the loop sleeps until one of them changes
+/// (`input`'s changes, [`Shared::cursor_wake`]), as it does while the target is hidden or not
+/// yet probed.
+///
+/// A display stream's input moves the real pointer, and so does the worker's own user, which
+/// nothing announces: that pointer is read every [`CURSOR_PERIOD`]. A still one costs one read
+/// of the event system's move counters a tick ([`CaptureSource::pointer_moves`], tens of
+/// nanoseconds): the pointer itself is only asked for when the counters moved, and the
+/// target's bounds are the ones the owner's geometry probe last read. The pointer read is a
 /// window-server round trip, so it runs on the blocking pool: what this loop must not do is
 /// occupy a runtime worker, because [`beat_loop`] needs one on time (MEASUREMENTS.md, "the beat
 /// behind the geometry call").
 async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, point_scale: f64, input: PointerWatch) {
     let mut ticks = tokio::time::interval(CURSOR_PERIOD);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut placed = input.changes();
     let mut pointer: Option<(u32, (f64, f64))> = None;
     let mut last: Option<(i32, i32, bool)> = None;
     let mut seq: u32 = 0;
     while !shared.sink.is_closed() {
-        ticks.tick().await;
-        let Some(rect) = *shared.bounds.lock() else { continue };
-        // Read every sample: a quality change rescales the stream under a still pointer.
+        shared.cursor_wakes.fetch_add(1, Ordering::Relaxed);
+        let shown =
+            if shared.target_hidden.load(Ordering::Relaxed) { None } else { *shared.bounds.lock() };
+        let Some(rect) = shown else {
+            shared.pointer_over.store(false, Ordering::Relaxed);
+            cursor_event(&mut placed, &shared.cursor_wake).await;
+            continue;
+        };
+        // Read every round: a quality change rescales the stream under a still pointer.
         let pixels_per_point = point_scale * shared.zoom();
-        let sample = if let Some(placed) = placed_sample(&input, rect, pixels_per_point) {
+        let placed_at = placed_sample(&input, rect, pixels_per_point);
+        let sample = if let Some(placed) = placed_at {
             placed
         } else {
             let moves = Source::<P>::pointer_moves();
@@ -3259,14 +3394,34 @@ async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, point_scale: f64, inpu
             cursor_sample(rect, at, pixels_per_point)
         };
         shared.pointer_over.store(sample.2, Ordering::Relaxed);
-        if last == Some(sample) {
-            continue;
+        if last != Some(sample) {
+            last = Some(sample);
+            seq = seq.wrapping_add(1);
+            let datagram = cursor_datagram(
+                shared.id,
+                seq,
+                send_ms_lo(now::<P>()),
+                sample.0,
+                sample.1,
+                sample.2,
+            );
+            shared.send(&[datagram]);
         }
-        last = Some(sample);
-        seq = seq.wrapping_add(1);
-        let datagram =
-            cursor_datagram(shared.id, seq, send_ms_lo(now::<P>()), sample.0, sample.1, sample.2);
-        shared.send(&[datagram]);
+        if placed_at.is_some() {
+            cursor_event(&mut placed, &shared.cursor_wake).await;
+        } else {
+            ticks.tick().await;
+        }
+    }
+}
+
+/// Until the placed pointer moves, the target's bounds, its visibility or the zoom change
+/// (`wake`), or [`CURSOR_BACKSTOP`] passes.
+async fn cursor_event(placed: &mut PointerChanges, wake: &tokio::sync::Notify) {
+    tokio::select! {
+        () = placed.changed() => {}
+        () = wake.notified() => {}
+        () = tokio::time::sleep(CURSOR_BACKSTOP) => {}
     }
 }
 
@@ -3901,24 +4056,34 @@ mod tests {
         );
     }
 
-    /// A live drag changes the window's size on every tick; the stream is rebuilt only for a
-    /// size that holds for one, so a drag costs one keyframe at its end rather than ten a second.
+    /// A live drag changes the window's size on every probe; the stream is rebuilt only for a
+    /// size that holds for [`RESIZE_HOLD`], so a drag costs one keyframe at its end rather than
+    /// one for each step, however often the accessibility API wakes the probe.
     #[test]
-    fn a_resize_rebuilds_only_once_the_size_holds_for_a_tick() {
+    fn a_resize_rebuilds_only_once_the_size_holds() {
         let mut debounce = ResizeDebounce::default();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0.checked_add(Duration::from_millis(ms)).expect("a time after t0");
         let built = (800, 600);
-        assert_eq!(debounce.observe((800, 600), built), None, "no change");
-        // Dragging: a new size every tick.
-        assert_eq!(debounce.observe((820, 610), built), None);
-        assert_eq!(debounce.observe((840, 620), built), None);
-        assert_eq!(debounce.observe((860, 630), built), None);
-        // Released: the same size twice.
-        assert_eq!(debounce.observe((860, 630), built), Some((860, 630)));
+        assert_eq!(debounce.observe((800, 600), built, at(0)), None, "no change");
+        // Dragging: a new size on every probe.
+        assert_eq!(debounce.observe((820, 610), built, at(100)), None);
+        assert_eq!(debounce.observe((840, 620), built, at(200)), None);
+        assert_eq!(debounce.observe((860, 630), built, at(300)), None);
+        // The same size again, woken sooner than the hold: not yet.
+        assert_eq!(debounce.observe((860, 630), built, at(340)), None, "held 40 ms");
+        // Released: the same size a hold later.
+        assert_eq!(debounce.observe((860, 630), built, at(400)), Some((860, 630)));
         // Built for it now; a size that goes back before it holds rebuilds nothing.
         let built = (860, 630);
-        assert_eq!(debounce.observe((900, 700), built), None);
-        assert_eq!(debounce.observe((860, 630), built), None, "back where it was");
-        assert_eq!(debounce.observe((900, 700), built), None, "a fresh candidate, not the old one");
+        assert_eq!(debounce.observe((900, 700), built, at(500)), None);
+        assert_eq!(debounce.observe((860, 630), built, at(600)), None, "back where it was");
+        assert_eq!(
+            debounce.observe((900, 700), built, at(700)),
+            None,
+            "a fresh candidate, not the old one"
+        );
+        assert_eq!(debounce.observe((900, 700), built, at(800)), Some((900, 700)));
     }
 
     /// The encode latency is the time between a frame's submit and its return, matched by
@@ -4139,6 +4304,105 @@ mod tests {
             ltr_refresh: refresh,
             pts_us: host_now_us(),
         }
+    }
+
+    /// A window stream's pointer is placed by its input, so the cursor loop sleeps until the
+    /// input moves it, or the target's bounds, its visibility or the zoom change: with no
+    /// pointer event it does not wake at all, where it used to sample 120 times a second.
+    #[tokio::test]
+    async fn the_cursor_loop_sleeps_until_the_placed_pointer_moves() {
+        let (shared, wire) = shared_for_frames();
+        *shared.bounds.lock() = Some(Rect { x: 100.0, y: 50.0, w: 800.0, h: 600.0 });
+        let input = PointerWatch::default();
+        let cursor = tokio::spawn(cursor_loop(Arc::clone(&shared), 1.0, input.clone()));
+        let wakes = || shared.cursor_wakes.load(Ordering::Relaxed);
+        let settle = || tokio::time::sleep(Duration::from_millis(300));
+        settle().await;
+        assert_eq!(
+            (wakes(), wire.drain().len()),
+            (1, 1),
+            "one sample (nothing placed), then asleep"
+        );
+        input.place(110.0, 70.0);
+        settle().await;
+        assert_eq!((wakes(), wire.drain().len()), (2, 1), "one move, one wake, one sample");
+        input.place(110.0, 70.0);
+        settle().await;
+        assert_eq!(wakes(), 2, "the same place is not a move");
+        shared.set_zoom(2.0);
+        settle().await;
+        assert_eq!((wakes(), wire.drain().len()), (3, 1), "a zoom rescales a still pointer");
+        *shared.bounds.lock() = Some(Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 });
+        settle().await;
+        assert_eq!(wakes(), 3, "bounds are news only from the probe, which wakes the loop");
+        shared.set_hidden(true);
+        settle().await;
+        input.place(120.0, 70.0);
+        settle().await;
+        assert_eq!((wakes(), wire.drain().len()), (5, 0), "hidden: woken, nothing sampled");
+        assert!(!shared.pointer_over.load(Ordering::Relaxed), "nothing is over a hidden target");
+        cursor.abort();
+    }
+
+    /// Cursor loop rounds over ten seconds with nobody moving the pointer: a placed pointer (a
+    /// window stream's) against the real one (a display stream's), which is read every period
+    /// as every stream's was before the placed one waited on its input. `idle stream wakeups`
+    /// in MEASUREMENTS.md.
+    #[tokio::test]
+    #[ignore = "measurement"]
+    async fn idle_cursor_wakes() {
+        const WINDOW: Duration = Duration::from_secs(10);
+        // The first pointer read of a process takes seconds; it is paid before the count.
+        tokio::task::spawn_blocking(Source::<Native>::pointer_location).await.expect("a read");
+        let rounds = async |real: bool| {
+            let (shared, _wire) = shared_for_frames();
+            *shared.bounds.lock() = Some(Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 });
+            let input = PointerWatch::default();
+            if real {
+                input.follow_real();
+            }
+            let cursor = tokio::spawn(cursor_loop(Arc::clone(&shared), 1.0, input));
+            tokio::time::sleep(WINDOW).await;
+            cursor.abort();
+            shared.cursor_wakes.load(Ordering::Relaxed)
+        };
+        let (placed, real) = tokio::join!(rounds(false), rounds(true));
+        let rate = |n: u64| {
+            #[expect(clippy::cast_precision_loss, reason = "a small count")]
+            let rate = n as f64 / WINDOW.as_secs_f64();
+            rate
+        };
+        eprintln!(
+            "idle_cursor_wakes: placed {placed} ({:.1}/s), real {real} ({:.1}/s) in {} s",
+            rate(placed),
+            rate(real),
+            WINDOW.as_secs()
+        );
+    }
+
+    /// The accessibility API's word that the target moved wakes the geometry probe, and is
+    /// neither a suspicion nor a sibling gone; so does the first frame after the client was
+    /// told the source is idle, once.
+    #[tokio::test]
+    async fn a_move_or_a_frame_after_idle_wakes_the_geometry_probe() {
+        let (shared, _wire) = shared_for_frames();
+        let wake = Arc::clone(&shared.geometry_wake);
+        let woken = async |wake: &tokio::sync::Notify| {
+            tokio::time::timeout(Duration::from_millis(100), wake.notified()).await.is_ok()
+        };
+        shared.heard(Went::Moved);
+        assert!(woken(&wake).await, "a move wakes the probe");
+        let seen = shared.stats();
+        assert_eq!((seen.suspicions, seen.siblings), (0, 0), "a move is not a going");
+        assert!(!shared.suspected_at(host_now_us()));
+
+        shared.on_packet(&packet(900, false, None, false));
+        assert!(!woken(&wake).await, "a frame while live is no news");
+        shared.source_idle.store(true, Ordering::Relaxed);
+        shared.on_packet(&packet(900, false, None, false));
+        assert!(woken(&wake).await, "the first frame after idle wakes the probe");
+        shared.on_packet(&packet(900, false, None, false));
+        assert!(!woken(&wake).await, "and only the first");
     }
 
     #[test]

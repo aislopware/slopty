@@ -192,7 +192,7 @@ pub struct CapturedFrame<I = DefaultImage> {
     pub latency_us: u64,
 }
 
-/// What the watch heard go.
+/// What the watch heard go, or move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Went {
     /// The target: its element was destroyed or minimised, or the application was hidden. Also
@@ -200,6 +200,9 @@ pub enum Went {
     Target,
     /// Another window of the application; the target is untouched.
     Other,
+    /// Nothing went: the target was moved or resized (with the same fallback as
+    /// [`Self::Target`] when no element was matched), so its geometry is worth reading now.
+    Moved,
 }
 
 /// The target as the window list describes it, for matching it to its accessibility element.
@@ -353,8 +356,8 @@ pub trait CaptureSource: 'static {
         width: f64,
         height: f64,
     ) -> Result<(), AxError>;
-    /// Watch the application `pid` for `target` or another of its windows going; `on_went`
-    /// runs on the watch's own thread. Blocking.
+    /// Watch the application `pid` for `target` or another of its windows going, and for the
+    /// target moving or being resized; `on_went` runs on the watch's own thread. Blocking.
     ///
     /// # Errors
     ///

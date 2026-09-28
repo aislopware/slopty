@@ -7386,3 +7386,42 @@ nice -n 10 ./worker --exact screen::synthetic::tests::a_full_chroma_stream_arriv
 A switch costs 30–100 ms of the old picture held, and a keyframe, once. The hold in
 `ChromaGate` keeps that to about one switch every half a minute on a link that sits at the
 line. Nothing was measured at 1080p or on a real link.
+
+## 2026-09-28 — an idle stream's wakeups: the cursor loop and the geometry probe
+
+Mac Studio M1 Max, macOS 27.0, debug build. Each stream ran a cursor loop that woke every
+8.3 ms and a geometry probe every 100 ms, whether anything moved or not. Now a window stream's
+cursor loop waits on its input's pointer (`PointerWatch::changes`), the target's bounds, its
+visibility and the zoom. A stream with nothing to follow (its source told idle, not a window on
+the crop path, nothing under way) is probed when the accessibility API says the target moved,
+was resized or went, when the first frame after idle is encoded, or after a 1 s backstop. The
+counts are loop rounds over ten seconds with nobody touching anything:
+
+```sh
+cargo test -p slopty-worker --lib -- --ignored idle_cursor_wakes --nocapture
+cargo test -p slopty-workerd --bin slopty-worker -- --ignored idle_stream_probes --nocapture
+```
+
+| loop | before | after |
+| --- | --- | --- |
+| cursor, window stream (placed pointer) | 118.3/s | **1.0/s** (the backstop) |
+| cursor, display stream (real pointer) | 118.3/s | 118.3/s |
+| geometry probe, idle display or covered window | 10/s | **1.0/s** (the backstop) |
+| geometry probe, window on the crop path, or a source that draws | 10/s | 10/s |
+| tailnet status reads, no client on the tailnet | 0 reads, 0.5 wakes/s | 0 reads, 0 wakes |
+
+The "before" cursor figure is measured: it is the real-pointer loop, which is still the one
+every stream used to run. The "before" probe figure is the old `interval(GEOMETRY_PERIOD)`.
+`a_quiet_stream_is_probed_when_woken_not_every_period` checks both sides of it: two probes at
+most in 1.5 s against the period's fifteen, and one probe within 50 ms of a wake. A display
+stream still reads the pointer's move counters every period, because nothing announces the
+worker's own user moving it. A window on the crop path is still probed every period, because
+another application's window moving over it announces nothing to this worker.
+
+Not measured:
+- The worker process's wakeups with a real capture open. That needs a launchd worker with
+  Screen Recording (TCC per build), and installing one replaces the host the user runs.
+- How closely the crop follows a drag now that each accessibility move wakes the probe. The
+  drag would have to be synthetic input.
+- The frame-path cost of the idle check in `Shared::on_packet`. It is one relaxed load of a
+  flag per encoded frame, against an encode of about 7 ms.

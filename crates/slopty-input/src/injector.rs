@@ -13,9 +13,10 @@ use crate::backend::{Backend, Event, Post, Route, System};
 use crate::{InputError, PointerWatch, keymap};
 
 /// How long bounds stay valid before a pointer event reads them itself. The stream's geometry
-/// probe hands fresh ones over every 100 ms ([`Injector::set_bounds`]); this is long enough that a
-/// probe late by a slow window-server answer does not put a read in front of a move, and short
-/// enough that an injector nobody feeds still follows a window that moved.
+/// probe hands fresh ones over every 100 ms while the stream takes input
+/// ([`Injector::set_bounds`]); this is long enough that a probe late by a slow window-server
+/// answer does not put a read in front of a move, and short enough that an injector nobody
+/// feeds still follows a window that moved.
 pub const BOUNDS_TTL: Duration = Duration::from_millis(250);
 
 /// How long an owner found active, or just activated, is taken to stay active. Activation lands

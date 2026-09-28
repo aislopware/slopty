@@ -3,10 +3,10 @@
 //! Everything an injection can wait on happens here: the `NSRunningApplication` lookup behind
 //! activation (1–2 ms each), the post itself, and, when nobody handed fresher ones over, the
 //! window server's answer for the target's bounds (p95 2–6 ms, 93 ms at worst). The stream's
-//! geometry probe reads the bounds off the runtime every 100 ms whether or not input flows and
-//! hands each read over ([`InputSink::set_bounds`]), in order with the input, so a move is mapped
-//! with bounds already read and waits on nothing (MEASUREMENTS.md, "input injection off the
-//! runtime").
+//! geometry probe reads the bounds off the runtime every 100 ms while input flows (and when
+//! the target moves) and hands each read over ([`InputSink::set_bounds`]), in order with the
+//! input, so a move is mapped with bounds already read and waits on nothing (MEASUREMENTS.md,
+//! "input injection off the runtime").
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};

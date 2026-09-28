@@ -52,6 +52,8 @@ slopty-worker.workspace = true
 slopty-media.workspace = true
 slopty-shape.workspace = true
 slopty-client.workspace = true
+# A stand-in LocalAPI for the path reader's tests (`tailnet`).
+slopty-tailnet = { workspace = true, features = [ "fake" ] }
 tempfile.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]

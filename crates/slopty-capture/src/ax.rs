@@ -13,6 +13,9 @@
 //! list the window, or it moved between the two reads — every window's going is a suspicion,
 //! as before.
 //!
+//! The same observer hears the target move or change size ([`Went::Moved`]), which is what
+//! wakes the stream's geometry probe instead of a poll.
+//!
 //! One thread per watch runs a `CFRunLoop` for the observer; the callback does nothing but
 //! count and call back, so the run loop is never behind work.
 
@@ -46,6 +49,12 @@ const APPLICATION_HIDDEN: &str = "AXApplicationHidden";
 const ELEMENT_DESTROYED: &str = "AXUIElementDestroyed";
 /// `kAXWindowCreatedNotification`: a new window to watch for destruction.
 const WINDOW_CREATED: &str = "AXWindowCreated";
+/// `kAXWindowMovedNotification`: posted by the window, once per step of a drag.
+const WINDOW_MOVED: &str = "AXWindowMoved";
+/// `kAXWindowResizedNotification`: posted by the window, once per step of a resize.
+const WINDOW_RESIZED: &str = "AXWindowResized";
+/// What each window is registered for, as it is listed or created.
+const PER_WINDOW: [&str; 3] = [ELEMENT_DESTROYED, WINDOW_MOVED, WINDOW_RESIZED];
 /// `kAXPositionAttribute`: a window's top-left corner in screen points, as an `AXValue`.
 const POSITION_ATTRIBUTE: &str = "AXPosition";
 /// `kAXSizeAttribute`: a window's size in points, as an `AXValue`.
@@ -140,8 +149,10 @@ struct Watcher {
     targets: Vec<CFRetained<AXUIElement>>,
 }
 
-/// An accessibility observer on one application, calling back whenever a window of that
-/// application is hidden, minimised or destroyed. Dropping it stops the observer.
+/// An accessibility observer on one application's windows going, and on its target moving.
+///
+/// It calls back whenever a window of that application is hidden, minimised or destroyed, and
+/// whenever the target moves or is resized. Dropping it stops the observer.
 pub struct HideWatch {
     /// Stops the watch thread's loop when dropped; kept for that alone.
     _run_loop: StopHandle,
@@ -288,7 +299,7 @@ fn create_observer(pid: i32) -> Result<CFRetained<AXObserver>, AxError> {
     }
 }
 
-/// Register for everything that means "a window went".
+/// Register for everything that means "a window went" or "the target moved".
 fn register(
     observer: &AXObserver,
     app: &AXUIElement,
@@ -303,14 +314,24 @@ fn register(
             return Err(AxError::Observer(status.0));
         }
     }
-    // Destruction is posted by the window, not the application, so each window is registered
-    // on its own; a window that vanishes between the listing and the call is simply skipped.
-    let destroyed = CFString::from_str(ELEMENT_DESTROYED);
+    // Destruction, moves and resizes are posted by the window, not the application, so each
+    // window is registered on its own; a window that vanishes between the listing and the call
+    // is simply skipped.
     for window in windows {
-        // SAFETY: as above; the observer keeps its own reference to the element.
-        let _may_be_gone = unsafe { observer.add_notification(window, &destroyed, refcon) };
+        register_window(observer, window, refcon);
     }
     Ok(())
+}
+
+/// Register `window` for [`PER_WINDOW`]. A window that is already gone is skipped.
+fn register_window(observer: &AXObserver, window: &AXUIElement, refcon: *mut c_void) {
+    for name in PER_WINDOW {
+        // SAFETY: `window` and `observer` are live; `refcon` points at the watcher, which the
+        // watch thread keeps alive until after the observer is released (`serve`). The
+        // observer keeps its own reference to the element.
+        let _may_be_gone =
+            unsafe { observer.add_notification(window, &CFString::from_str(name), refcon) };
+    }
 }
 
 /// Whether `window` is the target: the same frame within [`FRAME_TOLERANCE`] and, when both
@@ -381,9 +402,10 @@ fn windows_of(app: &AXUIElement) -> Vec<CFRetained<AXUIElement>> {
     windows.to_vec()
 }
 
-/// The observer callback: a new window is put under watch; anything else went, and is the
-/// target if it is one of the matched elements, the application being hidden, or anything at
-/// all when nothing was matched.
+/// The observer callback: a new window is put under watch; a move or resize of the target (or
+/// of any window when nothing was matched) is [`Went::Moved`], of another window nothing;
+/// anything else went, and is the target if it is one of the matched elements, the application
+/// being hidden, or anything at all when nothing was matched.
 unsafe extern "C-unwind" fn on_notification(
     observer: NonNull<AXObserver>,
     element: NonNull<AXUIElement>,
@@ -400,9 +422,7 @@ unsafe extern "C-unwind" fn on_notification(
     if name == WINDOW_CREATED {
         // SAFETY: the observer is live for the duration of the callback.
         let observer = unsafe { observer.as_ref() };
-        let destroyed = CFString::from_str(ELEMENT_DESTROYED);
-        // SAFETY: as in `register`: live element and observer, `refcon` the same pointer.
-        let _may_be_gone = unsafe { observer.add_notification(element, &destroyed, refcon) };
+        register_window(observer, element, refcon);
         return;
     }
     let state = &watcher.state;
@@ -410,17 +430,18 @@ unsafe extern "C-unwind" fn on_notification(
         let (a, b): (&CFType, &CFType) = (candidate, element);
         a == b
     };
-    let went = if name == APPLICATION_HIDDEN
-        || watcher.targets.is_empty()
-        || watcher.targets.iter().any(is_target)
-    {
-        Went::Target
+    let targeted = watcher.targets.is_empty() || watcher.targets.iter().any(is_target);
+    if name == WINDOW_MOVED || name == WINDOW_RESIZED {
+        if targeted {
+            (state.on_went)(Went::Moved);
+        }
+        return;
+    }
+    let (went, count) = if name == APPLICATION_HIDDEN || targeted {
+        (Went::Target, &state.suspicions)
     } else {
-        Went::Other
+        (Went::Other, &state.others)
     };
-    match went {
-        Went::Target => state.suspicions.fetch_add(1, Ordering::Relaxed),
-        Went::Other => state.others.fetch_add(1, Ordering::Relaxed),
-    };
+    count.fetch_add(1, Ordering::Relaxed);
     (state.on_went)(went);
 }

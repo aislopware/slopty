@@ -5,14 +5,7 @@
 //! leave the real pointer wherever the worker's own user left it, so the picture's pointer is
 //! where the input put it, or nowhere before the first event.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// The sink's events move the real pointer. Both halves are NaN patterns, which no placed
-/// point (finite by construction) packs to.
-const REAL: u64 = u64::MAX;
-/// Nothing placed yet.
-const UNPLACED: u64 = u64::MAX - 1;
+use tokio::sync::watch;
 
 /// Where the worker's pointer is, as far as a stream's input is concerned.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -24,13 +17,16 @@ pub enum Pointer {
     Placed(Option<(f64, f64)>),
 }
 
-/// A [`Pointer`] one thread writes and any other reads, lock-free. Starts as `Placed(None)`.
+/// A [`Pointer`] the input thread writes and any other reads or waits on.
+///
+/// Starts as `Placed(None)`. A write that changes nothing wakes nobody, so a reader that waits
+/// on [`Self::changes`] sleeps for as long as the input leaves the pointer where it is.
 #[derive(Clone, Debug)]
-pub struct PointerWatch(Arc<AtomicU64>);
+pub struct PointerWatch(watch::Sender<Pointer>);
 
 impl Default for PointerWatch {
     fn default() -> Self {
-        Self(Arc::new(AtomicU64::new(UNPLACED)))
+        Self(watch::Sender::new(Pointer::Placed(None)))
     }
 }
 
@@ -38,40 +34,56 @@ impl PointerWatch {
     /// The pointer as last written.
     #[must_use]
     pub fn get(&self) -> Pointer {
-        match self.0.load(Ordering::Relaxed) {
-            REAL => Pointer::Real,
-            UNPLACED => Pointer::Placed(None),
-            bits => {
-                let high = u32::try_from(bits >> 32).unwrap_or_default();
-                let low = u32::try_from(bits & u64::from(u32::MAX)).unwrap_or_default();
-                Pointer::Placed(Some((
-                    f64::from(f32::from_bits(high)),
-                    f64::from(f32::from_bits(low)),
-                )))
-            }
-        }
+        *self.0.borrow()
+    }
+
+    /// Wakes on every write that changed the pointer from here on: [`PointerChanges::changed`].
+    #[must_use]
+    pub fn changes(&self) -> PointerChanges {
+        PointerChanges(self.0.subscribe())
     }
 
     /// The input moves the worker's own pointer.
     pub fn follow_real(&self) {
-        self.0.store(REAL, Ordering::Relaxed);
+        self.set(Pointer::Real);
     }
 
     /// The input put the pointer at `(x, y)` global display points. A point that is not finite
     /// was never posted anywhere and is ignored.
     pub fn place(&self, x: f64, y: f64) {
-        #[expect(clippy::cast_possible_truncation, reason = "display points fit an f32 to 0.01")]
-        let (x, y) = (x as f32, y as f32);
-        if !x.is_finite() || !y.is_finite() {
-            return;
+        if x.is_finite() && y.is_finite() {
+            self.set(Pointer::Placed(Some((x, y))));
         }
-        let bits = (u64::from(x.to_bits()) << 32) | u64::from(y.to_bits());
-        self.0.store(bits, Ordering::Relaxed);
+    }
+
+    fn set(&self, pointer: Pointer) {
+        self.0.send_if_modified(|now| {
+            let changed = *now != pointer;
+            *now = pointer;
+            changed
+        });
+    }
+}
+
+/// One reader's view of a [`PointerWatch`]'s changes.
+#[derive(Debug)]
+pub struct PointerChanges(watch::Receiver<Pointer>);
+
+impl PointerChanges {
+    /// Resolves once the pointer changed since this was made or last resolved. It never
+    /// resolves while the watch it came from is held, which is what the caller holds to read
+    /// the pointer.
+    pub async fn changed(&mut self) {
+        if self.0.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -84,5 +96,24 @@ mod tests {
         assert_eq!(watch.get(), Pointer::Placed(Some((-1512.5, 982.25))), "a NaN is not a place");
         watch.follow_real();
         assert_eq!(watch.get(), Pointer::Real);
+    }
+
+    /// A reader waiting on the changes wakes once per move and not for a write that put the
+    /// pointer where it already was, or one that was ignored.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn only_a_move_wakes_a_reader() {
+        let watch = PointerWatch::default();
+        let mut changes = watch.changes();
+        let quiet = Duration::from_secs(60);
+        watch.place(10.0, 20.0);
+        tokio::time::timeout(quiet, changes.changed()).await.unwrap();
+        watch.place(10.0, 20.0);
+        watch.place(f64::NAN, 1.0);
+        assert!(
+            tokio::time::timeout(quiet, changes.changed()).await.is_err(),
+            "the same place, or no place, is not a move"
+        );
+        watch.follow_real();
+        tokio::time::timeout(quiet, changes.changed()).await.unwrap();
     }
 }

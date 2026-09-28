@@ -14,6 +14,8 @@ workspace = true
 slopty-capture.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
+# The pointer a cursor loop waits on (`pointer`).
+tokio.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
@@ -30,4 +32,4 @@ tracing.workspace = true
 [dev-dependencies]
 slopty-core.workspace = true
 slopty-proto.workspace = true
-tokio = { workspace = true, features = [ "macros", "rt-multi-thread", "time" ] }
+tokio = { workspace = true, features = [ "macros", "rt-multi-thread", "test-util", "time" ] }

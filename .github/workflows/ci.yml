@@ -13,6 +13,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # `.cargo/config.toml` wraps rustc in sccache; on a runner it caches to the Actions cache.
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   gate:
@@ -23,6 +25,7 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.1
