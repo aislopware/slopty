@@ -346,10 +346,7 @@ pub fn dirs() -> Vec<PathBuf> {
     if let Some(dir) = std::env::var_os(DIR_ENV) {
         return vec![PathBuf::from(dir)];
     }
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join(".terminfo"));
-    }
+    let mut dirs = vec![crate::pty::home().join(".terminfo")];
     if let Some(list) = std::env::var_os("TERMINFO_DIRS") {
         dirs.extend(std::env::split_paths(&list));
     }
@@ -390,7 +387,7 @@ pub fn user_database() -> PathBuf {
     if let Some(dir) = std::env::var_os(DIR_ENV) {
         return PathBuf::from(dir);
     }
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from).join(".terminfo")
+    crate::pty::home().join(".terminfo")
 }
 
 /// What [`install`] did.

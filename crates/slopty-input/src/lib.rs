@@ -65,6 +65,9 @@ pub enum InputError {
     /// The stream's input thread is gone.
     #[error("input thread stopped")]
     Stopped,
+    /// This platform injects no input (`docs/decisions/platform.md`, "Linux seams").
+    #[error("input injection is unsupported on this platform")]
+    Unsupported,
 }
 
 /// Where a screen stream's client input goes: the worker's input seam.

@@ -8,22 +8,29 @@
 //! first is used, and only in order: a copy is taken only when it is the very next one, and
 //! anything else waits for its stream copy, which always comes.
 //!
+//! A window stream's input goes the same way, client to worker: a click or a key behind a lost
+//! packet waited for QUIC's recovery, and so did every move after it, for every stream on the
+//! connection. A move only says where the pointer is now, so its copy may overtake older moves;
+//! everything else applies strictly in turn ([`ClientDatagram::ScreenInput`]).
+//!
 //! * Client → worker: [`ClientDatagram`], postcard, no prefix.
 //! * Worker → client: a [`crate::media::MediaHeader`] of kind [`crate::media::Kind::Term`], then a
 //!   [`TermDatagram`] in postcard.
 
 use bytes::{BufMut as _, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use slopty_core::SessionId;
+use slopty_core::{SessionId, StreamId};
 use zerocopy::IntoBytes as _;
 
 use crate::codec::{self, CodecError};
 use crate::media::{HEADER_BYTES, Kind, MediaHeader};
-use crate::screen::Feedback;
+#[cfg(doc)]
+use crate::screen::ScreenRequest;
+use crate::screen::{Feedback, ScreenInput};
 use crate::terminal::{TermEvent, TermRequest};
 
 /// Everything a client sends as a datagram.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ClientDatagram {
     /// Loss feedback for a screen stream.
     Feedback(Feedback),
@@ -38,6 +45,26 @@ pub enum ClientDatagram {
         seq: u64,
         /// The request, as the control stream carries it.
         req: TermRequest,
+    },
+    /// A copy of input `seq` for window stream `stream`.
+    ///
+    /// Both ends number the requests [`ScreenRequest::numbered`] names (input and quality
+    /// changes) per stream in control-stream order, from 1: that is `seq`. `ordered` counts
+    /// those up to this one that apply only in their turn (everything but a move), this one
+    /// included. The worker applies a copy of an in-order input only when it is the next
+    /// in-order one not yet applied; a move, when every in-order input before it is applied and
+    /// nothing newer is. The stream copy of an input already applied is skipped, and so is one
+    /// of a move older than an input applied. A quality change and a paste chord have no copy,
+    /// so input behind either waits for them.
+    ScreenInput {
+        /// The stream.
+        stream: StreamId,
+        /// Its place among the stream's numbered requests on this connection.
+        seq: u64,
+        /// The stream's in-order requests up to this one.
+        ordered: u64,
+        /// The input, as the control stream carries it.
+        input: ScreenInput,
     },
 }
 
@@ -87,6 +114,20 @@ pub fn parse_term_datagram(datagram: &[u8]) -> Option<TermDatagram> {
     (header.kind() == Some(Kind::Term)).then(|| codec::decode_body(payload).ok()).flatten()
 }
 
+/// A worker's term datagram as its session and the event's postcard body, undecoded.
+///
+/// `None` when it is media or the session does not decode. Read the event with
+/// [`codec::decode_body`]; a copy the stream already brought is dropped from the body's head
+/// ([`crate::terminal::frame_head`]), without decoding its rows.
+#[must_use]
+pub fn split_term_datagram(datagram: &[u8]) -> Option<(SessionId, &[u8])> {
+    let (header, payload) = MediaHeader::parse(datagram)?;
+    if header.kind() != Some(Kind::Term) {
+        return None;
+    }
+    postcard::take_from_bytes::<SessionId>(payload).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use slopty_grid::{Cursor, CursorShape, LineIndex, TermModes};
@@ -129,6 +170,22 @@ mod tests {
         let whole = codec::encode_body(&TermDatagram { session, event: event.clone() }).unwrap();
         assert_eq!(&datagram[HEADER_BYTES..], &*whole);
         assert_eq!(parse_term_datagram(&datagram), Some(TermDatagram { session, event }));
+    }
+
+    /// A copy is split into its session and body, and the body's head read, without decoding
+    /// the rows; any other event has no frame head.
+    #[test]
+    fn a_copy_is_read_to_its_frame_number_without_decoding_it() {
+        let session = SessionId::new();
+        let body = codec::encode_body(&frame(300)).unwrap();
+        let datagram = term_datagram(session, &body).unwrap();
+        let (got, event) = split_term_datagram(&datagram).unwrap();
+        assert_eq!((got, event), (session, &*body));
+        assert_eq!(crate::terminal::frame_head(event), Some((300, false)));
+        // The head alone is enough: the rows past it are not read.
+        assert_eq!(crate::terminal::frame_head(&event[..4]), Some((300, false)));
+        let bell = codec::encode_body(&TermEvent::Bell).unwrap();
+        assert_eq!(crate::terminal::frame_head(&bell), None);
     }
 
     #[test]

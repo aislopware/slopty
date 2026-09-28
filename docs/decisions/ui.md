@@ -1046,7 +1046,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     path its accessible name.
   - A fresh shell showed two hairlines, the header's and a command-block rule over the first
     prompt. No rule is drawn over a prompt with only blank lines above it, nor a neutral one
-    on the viewport's top row (`the_prompt_that_opens_a_terminal_has_no_rule_over_it`).
+    on the viewport's top row. Since 2026-09-28 a rule parts only heads that touch, so no
+    prompt that follows output has one (terminal.md, "The head band is seen").
   - The focus ring was 2 pt of saturated accent against 1 pt hairlines; it is the accent
     hairline the token ruling always named. The status dot, accent when focused, said what the
     ring says; it now shows only while the tile's worker is away.
@@ -2097,6 +2098,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     scaled pixels, since scaled text is what the shapes replaced). The overview golden was
     re-recorded by hand: the label sits inside the diff tolerance, so the old golden would
     not have caught it going missing.
+  - Amended 2026-09-28: below zoom 0.5 a tile is now its true miniature, not shapes and a
+    label on its surface; see `workspace.md`, "The overview draws miniatures".
   Tests: ui `the_overview_lifts_each_workspace_and_offers_a_new_one`,
   `a_small_overview_draws_tiles_as_shapes`.
 
@@ -2869,6 +2872,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     content's mono face, a note's lines with the Markdown marks left off. Niri and Warp show
     what a window holds in their overviews; a centred label over a blank card said only its
     name. Built only at the overview's shapes zoom, at most the rows that fit.
+    (Superseded 2026-09-28: the overview draws true miniatures, MEASUREMENTS "the overview's
+    miniatures against its word covers"; `TerminalView::tail` is gone.)
   - **The empty workspace is a start page on every empty workspace**, once the strip has come
     to rest on it (laid over a workspace still sliding in, it would hide the slide). It lands
     without a fade: a fade cut short by a tile arriving owed a frame after the strip was at
@@ -2885,3 +2890,638 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_overview_lifts_each_workspace_and_offers_a_new_one`,
     `the_empty_workspace_offers_where_shells_stand`. App goldens to be taken again: overview,
     empty-workspace, tabbed-column, agent-needs-you, transfers, workspace(-dark).
+
+- ✅ **Design critique round two, wave A: the shared pieces** (2026-09-27,
+  `.research/design-critique-round2-2026-09-27.md` §2 #1, #2, #5, #12, #15, #16, #22 and §3).
+  What several surfaces draw is drawn once, in `kit`, and a lint keeps it there.
+  - **A diff's size is `kit::changes`** (`changes_at` at a zoom; `changes_text` for a line of
+    plain text). Only the signs take the diff's tones; the figures are `text_secondary`,
+    tabular; a side that is zero is left out, and no change draws nothing. The header chip
+    coloured the signs while the diff head, the fold and "Changed 1 file" coloured the whole
+    figure, and a red "−0" read as an error about nothing. Amp's fold sets its counts plain.
+  - **The one gradient is `kit::edge_fade(edge, surface, depth)`**, a mask from clear to the
+    surface along one edge of a scrolling region, drawn only while something lies past it:
+    the palette's foot, the transcript's top (the first diff was sliced by the header's
+    hairline) and bottom, the key bar's ends. Direction §3.1 allows exactly this gradient.
+  - **`kit::FIELD_INSET`** is gpui-kit's medium field padding (10), pinned to
+    `Size::Medium.input_px()`. What lines up with a field's text reads it, so the approval that
+    takes the composer's place starts on the field's text edge rather than 10 pt left of it.
+  - **One scrim.** Light's `Elevation::scrim` is the new `alpha::DIM` (0.16), about what an iOS
+    sheet dims; at `TINT` a drawer turned the whole screen mid grey. Dark keeps `SCRIM`. Every
+    dim is `kit::scrim`; the shade or the scrim's alpha read by hand fails the elevation lint.
+  - **Motion goes through `kit::Pace`** (fade, settle, sheet: the `Motion` durations with their
+    curves) and **`kit::slide_fade(el, id, from, pace, cx)`**: opacity and a few points of travel
+    by `top` on an element in the flow, so nothing round it moves. Under Reduce Motion it is in
+    place and opaque on the first frame, with no fade either.
+  - **One wording per state.** `agent_status_word` is the state alone ("Needs approval"), and the
+    new `agent_ask_text` is what is asked without it ("Bash · touch refused.txt"): no `$`, no
+    "Needs approval:", the tool's own name not said twice. A row whose trailing word says the
+    state takes the ask as its detail, and the header's pill, when it shows the word alone,
+    shows the ask on hover. `kit::separator` is the faint "·" between facts on a line.
+  - `IconName::CornerDownLeft` is embedded for the patch's "No newline" mark.
+  - Lints in `kit.rs`: `a_diff_size_is_drawn_by_kit_changes`, `a_gradient_is_an_edge_fade`,
+    `the_field_inset_is_the_kits`, and the scrim half of `a_floating_layer_wears_the_one_elevation`.
+    The first three name the files wave B moves onto the kit; each such file leaves its list
+    as it moves. Tests: `a_slide_starts_off_its_place_and_holds_still_under_reduce_motion`,
+    `the_paces_are_the_motion_tokens`, `a_diff_size_drops_its_zero_side`, agents
+    `the_ask_says_what_is_asked_without_the_state`, `a_state_has_one_word_whatever_its_detail`,
+    theme `elevation_and_density`.
+
+- ✅ **Settings open on a form; the TOML is one link away** (2026-09-27, design critique round
+  2, finding 11, wave D). The dialog was the raw `settings.toml` with line numbers: nothing said
+  what could be set, and a theme, a font or a cursor had to be known by its key. Raycast, Linear
+  and Zed's settings window put a sectioned form beside the file, so the dialog now opens on one
+  (`settings_form.rs`). A 168 pt sidebar holds the search field at its top, as System Settings
+  does, and five sections as tabs a row tall: Appearance, Terminal, Input, Streams and Network.
+  These are the tables the file has. There are no Agents or Keys sections, since the file sets
+  neither. The page lists the section's rows under quiet group labels (Font, Cursor, Text,
+  Behaviour, and so on). Each row is a label at 500, one line of meta in `text_muted` and its
+  control on the right: a switch, a segmented choice, a stepper with its unit, a field for a
+  host, an address list or a colour with its swatch, and a font picker that lists the installed
+  monospace families, each in its own face. The families are found off the main thread the
+  first time the list opens. Every control is a well on `raised` with no hairline: no cards,
+  and no icon on a row. A query matches a row's words, its group and section, and its key as
+  the file spells it (`max_bitrate`), and lists the matches under their section's names. A
+  window too narrow for the sidebar shows every section in one column.
+  - **One text behind both faces.** A row writes its key into the file's text a line at a
+    time (`slopty_settings::edit::write`): the value is swapped in place with its comment kept,
+    else the key joins the end of its table, else the table joins the end of the file, so an
+    edit never reorders or drops a line. `slopty_settings::with_server` now edits through the
+    same writer. The TOML field holds the same text. "Edit as TOML" shows it, and "Edit with
+    controls" reads it back into the form, which applies it with its next change.
+  - **A change applies as it is made; the file's face keeps its save.** System Settings, Zed's
+    settings window and Linear apply a control as it moves and have no Save, so the form does
+    too. A switch, a choice or a font hands the app the new text at once; a stepper and a field
+    wait until the hand pauses for 300 ms (`settings_form::SETTLE`), so a run of clicks or
+    keystrokes writes the file once. The dialog raises `SettingsEditorEvent::Apply(text)`, and
+    `slopty-app` writes and reloads it through the save path it already had, keeping the dialog
+    open. The form's foot is "Edit as TOML" and Done; Done, Escape, ⌘↩ and a click outside
+    apply what is still waiting before they close, and so does turning to the file's face. The
+    TOML face keeps Cancel and Save (⌘↩), since a half-typed file is not a setting: Save
+    parses, writes, applies and closes, and Cancel drops what was typed there. A text the app
+    refuses (a file broken by hand) shows its reason above the foot in either face.
+  - **An invalid value is never written.** Each value is checked against its key alone before
+    it joins the text (`schema::Field::check` parses a one-key file into `Settings`), so a
+    colour that is not one or a host with a bad port stays in its field, the file untouched,
+    and its row says why in `error` in place of its meta line, as an Alert that also describes
+    the control. The reason goes as soon as the field is typed into again, since the fix is in
+    progress, and the fixed value applies after the pause. A parse error in the whole file now
+    reads "line N: why" rather than toml's first line, which only said where.
+  - **The rows are the schema's.** `slopty-settings` derives `schemars::JsonSchema` on every
+    table, and `schema::fields` walks that schema once into typed fields: the key, its title
+    (`#[schemars(title)]`), its one-line summary (the doc comment's first paragraph), its kind
+    (switch, choice with each variant's title, number, text, list, colour or font by `format`),
+    its bounds (`range`), its grid and unit (`x-step`, `x-unit`), an example for a placeholder,
+    and its default read off `Settings::default()` serialised. The form's rows are those fields;
+    `slopty-ui` keeps only a presentation table (`settings_form_schema::LAYOUT`: each group's
+    page, name and order). A key it does not name still gets a row, at the end of its table's
+    page under the table's own title, so a setting added to `slopty-settings` shows up with no
+    second edit. The bounds are the ones `slopty-app` accepts (mono 6 to 72 pt, chrome 8 to 32
+    pt, scroll 0.1 to 10), where the form had narrower ones of its own. `slopty-app`'s
+    `settings.rs` still holds those bounds as its own constants; reading them from the schema
+    is the next step. `colors.ansi`, which the form had skipped, is a row now, as a list.
+  - Keyboard: the search has the keyboard on open. ↓ goes to the first row's control, ↑ and ↓
+    move from row to row and back to the search, ← and → move a choice or a stepper, and Space
+    or Return turns a switch or opens the fonts. In the sidebar ↑ and ↓ change the section and
+    → enters it. ⌘↩ from any control is Done. The roles are Tab, Switch (toggled), RadioGroup of
+    RadioButtons, SpinButton (value, range and step), ComboBox (expanded) with a ListBox, each
+    named by its label and described by its meta. A turned switch's knob slides on
+    `kit::Pace::Settle`, the dialog rises 4 pt on `kit::slide_fade` (`Pace::Fade`), and under
+    Reduce Motion both land at once. The page fades into the dialog's surface at an edge with
+    more past it (`kit::edge_fade`), and a field's text sits `kit::FIELD_INSET` in. A stepper
+    shows the value the file holds, even off its grid, and steps to the nearer grid point.
+  - Tests: settings_editor `the_dialog_opens_on_the_form`,
+    `a_change_applies_as_it_is_made_and_the_dialog_stays_open`,
+    `an_invalid_value_is_not_written_and_its_row_says_why`, `the_keyboard_walks_the_form`,
+    `a_search_finds_rows_by_their_words_and_their_key`,
+    `a_switch_slides_unless_motion_is_reduced`; settings_form_schema `a_row_comes_from_the_schema`,
+    `every_key_is_a_row_once`, `a_stepper_moves_on_its_grid`; slopty-settings schema
+    `every_key_is_a_field_with_its_default`, `a_field_reads_its_type`,
+    `a_value_is_checked_by_its_key`, `a_bare_key_still_reads`, and edit
+    `a_write_keeps_the_rest_of_the_file`, `values_are_read_under_their_table`,
+    `literals_read_back`; slopty-app `a_settings_change_applies_with_the_dialog_still_open`; app
+    e2e `the_settings_form_edits_the_file`, which turns a switch and picks the dark theme with no
+    Save and waits for the file and the dark theme under the open dialog (golden
+    `settings-form`). The gallery's `settings` golden is to be taken again, since it is now the
+    form.
+
+- ✅ **The way in speaks a status as a line, lays out by the room, and the iPad key bar is one
+  bar** (2026-09-27, design critique round 2, findings 8, 24 and 25 and the add-worker row of
+  its motion table; `slopty-app`).
+  - **A status is a line, not a box.** While the panel looks on the tailnet, or when nothing
+    answered, one `kit::meta` line gives the words and what to do ("Nothing answered on your
+    tailnet. Start the Slopty server on a machine there."), with no frame and no label. It is
+    announced as a status by its words, and the step is its description. The stepped
+    `Status::Running` mark leads it while looking, and `WifiOff` leads it only when Tailscale is
+    off. The magnifier is gone. A framed row with a magnifier over a borderless field read as
+    the search field to type in. Geist's and Linear's sign-in pages say a status as text and
+    frame only what can be chosen, so the frame and its "On your tailnet" label come only with
+    found rows. "Or type an address" follows as the field's label, so the steps no longer say
+    it too.
+  - **The field's row is chosen by width, not by input.** From 600 pt (`FIELD_ROW_FROM`, the
+    width under which iPad Split View columns keep the phone's rules) the field and its action
+    share a row. Narrower, the action is full width under the field. The iPad's first run was
+    the phone's stack, with a 440 pt Connect button under its field. Where the tailnet cannot
+    be listed (iOS), a meta line over the field says so, so the section's absence has a
+    reason.
+  - **The iPad key bar is one leading run.** Esc, Tab, Ctrl and ⌘, then the arrows, then the
+    symbols form one run with `spacing.md` between groups, and the word keys (Copy, Paste,
+    Find) trail. This is iOS's input-assistant layout. In three islands the arrows floated
+    alone in the middle, about 350 pt from either hand's keys. Control is the word "Ctrl" at
+    `small()` 500 like Esc and Tab, because "⌃" at the title size drew as a bare chevron that
+    read as "up". The row's ends fade with `kit::edge_fade`, the one gradient chrome draws.
+  - **The add-worker dialog arrives.** Its scrim goes from clear to `kit::scrim` while the
+    dialog fades in and rises 4 pt (`kit::slide_fade`), both on `Pace::Fade`. Under Reduce
+    Motion both are there on the first frame. The first run is a page, not an overlay, so it
+    does not move.
+  - Tests: app `an_ipad_key_bar_is_one_leading_run_with_the_word_keys_trailing`,
+    `every_bar_spreads_on_an_ipad_and_scrolls_on_a_phone`,
+    `the_field_and_its_action_share_a_row_from_a_tablets_width`,
+    `the_dialog_rises_into_place_unless_motion_is_reduced`,
+    `the_panel_names_its_host_and_the_server_the_tailnet_found`; kit
+    `a_gradient_is_an_edge_fade` with `slopty-app` off its waiting list. Goldens: first-run(-dark),
+    add-worker, ios-pad-first-run, ios-phone-first-run, ios-pad-terminal, ios-phone-terminal.
+
+- ✅ **The lists: one plate, one wording, and motion** (2026-09-27, design critique round 2,
+  waves B and C for the navigator, the palette, the picker and the inbox; §2 #1, #12, #21, #22,
+  #28 and the lists' rows of §3).
+  - **The selection is one plate** (`palette::Plate`). The selected row no longer paints its own
+    `overlay`; it reports where it was laid out (`Plate::mark`, a canvas in its prepaint) and
+    one plate laid under the rows (`Plate::under`) paints there in the same frame, since every
+    element is laid out before any is painted. A list that scrolls carries the plate along
+    with no frame of lag, the navigator's virtual list included. A move eases the plate's place
+    and size from where it is drawn at that moment on `Pace::Settle`, so a second move
+    retargets from the current value and nothing queues. A move sooner than the settle after
+    the last one is a held key and lands in 60 ms; one sooner than 60 ms snaps, so a held arrow
+    never trails the list. Under Reduce Motion it is on the row at once. The navigator, the
+    palette, the picker and the inbox's Unread/All views use it; the inbox has no selected row,
+    so its plate is the view's.
+  - **A waiting agent is said once per place.** A tile's second line and a *Needs you* row take
+    `agent_ask_text` ("Bash · touch refused.txt") rather than "Needs approval: …": the row's
+    trailing word or the section's heading already says the state. The ask is muted; only a
+    working agent's words keep its tone. A row's working-tree size is `kit::changes`, and a
+    tree with no line changed shows none rather than "+0 −0".
+  - **The palette.** The list's bottom fade is `kit::edge_fade(Bottom, elevated, 16)`. The foot
+    is sentence case, as the key bar is: "↑↓ Move", "Esc Close", "↩ Go to", "Run", "Open". It
+    opens with `kit::slide_fade` (4 pt rise on `Pace::Fade`; the picker too), and the field has
+    the keys in frame 0. The phone's sheet comes down its whole height on `Pace::Sheet` over a
+    `kit::scrim` that fades in with it, and it casts no shadow. `CommandPalette::leave` draws the
+    way out in three quarters of the way in (90 ms fade, 180 ms sheet back up, nothing under
+    Reduce Motion), takes no more keys or clicks, and returns how long its owner keeps it drawn.
+  - `navigator::slow_rtt` is the one rule for naming a round trip unasked (from
+    `RTT_SHOWN_FROM`, 20 ms); the palette's worker lines are to read it too.
+  - The inbox drops 4 pt from the bell as it fades in (`kit::slide_fade`, `Pace::Fade`).
+  - Tests: palette `the_plate_retargets_from_where_it_is_and_never_queues`,
+    `the_palette_plate_settles_from_line_to_line`, `the_palette_leaves_quicker_than_it_came`;
+    workspace `the_selected_row_sits_on_the_plate`,
+    `the_inbox_drops_in_and_its_view_sits_on_the_plate`, and the updated
+    `a_tile_row_reads_its_age_or_its_state_then_its_place`, `the_palette_foot_names_its_keys`,
+    `repo_changes_show_in_the_row_and_the_bar`. `navigator.rs` and `palette.rs` left the
+    `a_diff_size_is_drawn_by_kit_changes` and `a_gradient_is_an_edge_fade` lists.
+
+- ✅ **The tiles and the frame: said once, and motion** (2026-09-27, design critique round 2,
+  waves B and C for the tile, the title bar, the status bar, the strip, the faces and the
+  notices; §2 #3, #6, #7, #10, #20, #23, #26, #27, #29, #30 and their rows of §3).
+  - **The header's controls are one set.** An agent's face toggle left the readouts it split
+    and sits with fullscreen and close in the trailing strip, shown on hover or focus; the
+    strip is as wide as the buttons it holds, so the swap moves nothing. The readouts end on
+    the state chip, alone.
+  - **Rest shows the kind.** An idle agent keeps its glyph in the leading slot, as a waiting
+    one does; the hollow ring read as an unticked radio button.
+  - **The face can say "working".** `agent_mark` raises an idle or finished agent to working
+    while its face shows a block streaming or a call of the last turn with no result (and no
+    interruption after it). Hooks lag or are missing; the transcript then knows more. The
+    header, the navigator's mark (through `tile_status`) and the status bar's count read it.
+    It changes only marks. The workspace draws again only when that answer flips, not per
+    streamed delta. The navigator's lines follow the mark: under a calm hook they say the
+    face's summary, which names the call in flight (`ConversationView::mid_turn` lets the
+    summary name it though the hook says idle), or nothing yet, and never the hook's "Idle".
+  - **A finished command is marked once.** A good end reads as its time alone, in the meta
+    size and `text_muted`; a failure keeps "Exit N · time". The header drops the unseen dot:
+    the tile is on screen, and the navigator and the tab's rollup say it went unseen.
+  - **A note says its title once.** An unnamed note whose page opens on its own title shows its
+    progress as the header's title ("1 of 3 done"), else "Note", and no place.
+  - **A page's host is its header's.** The header's place for a browser tile is the host, and
+    the status bar no longer repeats it. Typing an address in the header needs an address mode
+    of the rename field and a way to load a URL in `BrowserView`, which this change does not own.
+  - **Uploads are said once, but the other way round from the critique.** The status bar counts
+    the uploads of every tile but the focused one, whose header pill says its own and carries
+    the only way to stop it. Hiding the pill for the focused tile would have taken away the
+    cancel. The bar's right-hand readouts are parted by `kit::separator`, and its working-tree
+    size is `kit::changes`.
+  - **The column marks are segments**, 10 × 4 pt at `radii.xs` and a base unit apart, 8 pt from
+    "+". Three dots after "+" read as the "…" button's glyph.
+  - **A phone's bar is a navigation bar.** On a phone the bar shows the active workspace's name
+    at 17 pt in the strong weight, with no tab row and no "+". What "+" opened leads the "…"
+    menu, and the column marks follow the name.
+  - **The overview.** The names and "New workspace" start on the edge of the panes' glyphs, and
+    the active card's ring is the full accent (at the keyboard ring's strength it read grey).
+    The keyed toggle stays on the layout's critically damped spring. The words fade in over its
+    last 120 ms (`overview_words`, landing at 280 ms). They are not drawn while it closes, and
+    are there at once where chrome does not move.
+  - **Motion** (`chrome_moves`: not under Reduce Motion, nor the self-test). A tab that opens
+    grows from nothing to the width its name takes on `Pace::Settle`, and its words fade in over
+    the last 60 %. The active tab's fill is one plate that slides from the old tab's box to the
+    new one's while the weight of the words swaps at once. The "+" and "…" menus drop 4 pt as
+    they fade in (`kit::slide_fade`, `Pace::Fade`). A notice rises 4 pt in and, when its time is
+    up, fades where it stands before it goes, no longer counted as up. A closing tile fades
+    where it stood on `Pace::Fade`, with its glyph and title and no scale. The layout's 0.8
+    shrink is no longer drawn, because text never scales. Nothing on the terminal's frame path
+    moves.
+  - Tests: workspace `the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves`
+    (updated), `an_idle_agent_keeps_its_kind_in_the_slot`,
+    `a_face_mid_turn_marks_its_tile_working_while_the_hook_lags`,
+    `a_finished_command_reads_as_its_time_alone`, `a_note_does_not_say_its_title_twice`,
+    `the_overview_words_start_on_the_panes_glyphs`, `the_overview_words_wait_for_the_zoom`,
+    `a_phone_bar_is_a_navigation_bar`, `the_column_marks_are_segments`,
+    `chrome_moves_and_holds_still_under_reduce_motion`, and the updated
+    `a_header_is_its_title_then_its_context_in_the_ui_face`.
+
+- ✅ **A page's address is its header's field** (2026-09-27, design critique round 2 #27). The
+  header of a browser tile works like the compact address bars of Arc, Safari and Chrome.
+  - **At rest.** The header's place is the address: the host in the title's ink, between a
+    quiet scheme and path (`text_muted`), with the path giving way first. A lone `/` is no
+    path (`browser::address_parts`). It is a button named "Address" whose value is the whole
+    address. A page with no title of its own is titled by its address, and that title takes
+    the click instead. The navigator and the palette still say the host alone
+    (`tile_place`).
+  - **Editing.** ⌘L or a click on the address turns the header into a field in place of the
+    title and the place. It holds the whole address the page shows, selected, so typing
+    replaces it. ↩ goes there; Esc, or a click elsewhere or in the page, closes it with
+    nothing changed. Text that is no web address keeps the field open with a notice. A bare
+    host gets `http://`, as in the palette. A page that had the keyboard gives it to the
+    field. It is the name field's machinery with a `Field::Address` purpose (`open_field`,
+    `finish_rename`), not a second field. With no page focused, ⌘L opens "Open URL…".
+  - **One source of truth.** A typed address becomes the item's, through a new
+    `ItemOp::SetUrl { id, url }` (additive wire change, golden `client_item_set_url`). The
+    worker takes it only for a browser item and only for an http or https address, as it
+    does for a new item. A new address is what every client's page goes to, and the tools'
+    view reads it too. Loading it only in this client's web view was the other choice. That
+    would have kept a second address that only this client knew. The workspace serves
+    forwards from the item's address, so a typed `localhost:3000` would also have loaded
+    from this client's own loopback instead of the worker's. `reconcile_browsers` hands a
+    changed item address to `BrowserView::go_to`: the header names it at once, the port is
+    served anew, and the page loads when it is. The same address loads again. Where the page
+    goes by its own links stays each client's, read back from the web view as before, and
+    that read-back waits until the new address has loaded, so the header never flicks back.
+  - **Back, forward and reload** are palette lines ("Page back", "Page forward", "Reload
+    page"). ⌘[, ⌘] and ⌘R belong to the layout, so back and forward are ⌘← and ⌘→ (Chrome's
+    other pair). They are bound in a `Page` key context that the workspace adds only while
+    the focused tile is a page that does not hold the keyboard, so a text field in the page
+    keeps them. Reload has no key. The header keeps its bare "←" (while there is history)
+    and "↻". `slopty_platform::web::WebView` gained `forward` and `Page::can_go_forward`.
+  - Tests: workspace `command_l_opens_the_address_and_return_goes_there`,
+    `escape_leaves_the_address_as_it_was`, `a_bad_address_keeps_the_field`,
+    `the_address_is_a_button_at_rest_and_a_field_when_clicked`,
+    `a_new_address_from_another_client_moves_the_page`,
+    `command_l_without_a_page_opens_a_url`, `the_page_keys_are_bound_only_on_a_page`
+    (`workspace/tests/address.rs`); `slopty-client`
+    `a_browser_takes_a_new_address_and_nothing_else_does`; `slopty-worker`
+    `an_address_takes_only_a_browser_and_a_web_address`; browser
+    `addresses_are_http_or_https_with_a_host` (updated).
+
+- ✅ **Design critique round three, wave A: the shared pieces** (2026-09-28,
+  `.research/design-critique-round3-2026-09-28.md` §2 #1, #2, #6, #14, #18 and §3). The pieces
+  wave B draws from, each in one place with a lint that holds it there.
+  - **`kit::pill(theme, tone, k)`** is a state's pill: `kit::pill_frame(theme, k)` filled with
+    the tone at `alpha::FAINT`, its words in the tone at the medium weight. The frame is a fixed
+    `kit::PILL_HEIGHT` (20 pt, T3's `h-5`) at the chrome's zoom, `spacing.sm` at the ends,
+    `radii.xs`, the text centred at `small()`. Grown from a pad round the text, the agent's pill
+    stood 23 pt in a 27 pt header, off centre and touching the hairline. A header's words that
+    act (Take, Mute, the hooks' offer) wear the bare frame so they stand as tall beside it. The
+    agent's pill and the finished-command badge in `workspace/agents.rs` are on it now.
+  - **`Surfaces::band`** is a terminal block's head band: the content with 4.5 % of the ink in
+    light (about `F4F4F4` on white) and 3.5 % in dark, so the band sits 3.5 L* off the content
+    in both variants, as far as the bars do, and more than a unit off `panel`. The critique kept
+    dark on the sunken `panel` step. That left an unfocused tile's header and its first band
+    one colour in dark, the double header it names in light, so both variants take one rule,
+    and the dark band is lit a step rather than sunk. The terminal moves onto it in wave B.
+  - **`kit::duration(Duration)`** is the one way chrome says how long: "850 ms", "6.2 s" (a
+    tenth under ten seconds, left off when it is zero, so a clock ticking whole seconds never
+    shows "6.0 s"), "35 s", "1m 5s", "1h 4m", in tabular figures. That is Claude Code's and
+    cargo's compact form, so the tray row no longer sets "1 m 05 s" beside cargo's "1m 04s".
+    The critique wrote hours as "1h 04m". Minutes and hours both leave the zero off here, the
+    way seconds under a minute already do. `conversation::rows::took(ms)` is kept only as a
+    wrapper over it until the conversation's callers move.
+  - **One state word.** `agent_status_word` is the word wherever a state is said beside
+    something else: the pill, the navigator row's trailing word, an inbox row with nothing
+    asked. A tool call is now "Working", not the tool's name. "Needs you" only heads the
+    section that groups "Needs approval", "Has a question" and "Needs input".
+  - **`agent_ask_line`** is what a waiting agent asks, as a row leads with it. A bare tool name
+    becomes `tool_statement`, the approval card's sentence without "Claude" or a subject
+    ("Wants to run a command", "Wants to use query from db"), so the inbox no longer titles a
+    row "Bash".
+  - Lints in `kit.rs`: `a_pill_is_kit_pill` (a pill's height from a pad at the chrome's zoom, or
+    a tone's faint fill at rest) and `a_duration_is_kit_duration` (a figure then seconds, or
+    minutes or hours then a second figure; a latency in ms and an age are not durations). Their
+    lists name what wave B moves: `workspace/tile.rs` and `file.rs` for the pill,
+    `terminal/view.rs`, `workspace/navigator.rs` and `workspace.rs` for the duration. Tests:
+    kit `a_pill_is_twenty_points_at_its_zoom`, `a_duration_reads_one_way` and the lints'
+    self-checks; agents `a_state_has_one_word_whatever_its_detail` (extended),
+    `a_bare_tool_is_said_as_what_it_asks`; theme `the_head_band_shows_and_is_not_a_header`.
+
+- ✅ **Design critique round three, wave B: the conversation face** (2026-09-28,
+  `.research/design-critique-round3-2026-09-28.md` §2 #4, #5, #10, #14, #15, #19).
+  - **One surface under the list.** The background work and the task list are the composer
+    shell's top sections, a `border_subtle` hairline apart, as T3's composer holds pending work.
+    Before, they were three raised boxes 8 pt apart. Rows are `density.row` tall, with the mark
+    on the field's text edge and the trailing figures on the send button's edge. A work row
+    reads name · state and time in `text_muted`. The mono last line sits right-aligned, cut
+    from its start, and only while the work runs, so "Done · 1m 5s" no longer sits beside
+    cargo's "1m 04s". A finished row leaves once the transcript shows its call (Verbose, an
+    open turn) or at the next prompt, so it is never said twice.
+  - **One model.** The composer names the model that answered the last turn, and the status
+    line's only before any answer. A fold's figures compare against that same name, so the
+    latest fold never repeats or contradicts it. The default permission mode reads
+    "Asks permission", which is what it does; "Default" named the setting's key.
+  - **The grant is read before it is pressed.** The approval drops "What always allows ⌄". What
+    "Always allow" grants is one `meta()` line over the buttons, the command in the mono face:
+    "Always allow stops asking for `npm test` commands in this project, for you". It wraps as
+    one paragraph. Where every grant is kept in the same place, the place is said once, at the
+    end.
+  - **Facts follow their subject.** A changed file's `+a −r` follows its directory. Only a
+    hover arrow, the way into the diff, sits at the right.
+  - **Durations.** Every time the face says goes through `kit::duration`, and `rows::took` is
+    gone.
+  - **A title for the tile.** `ConversationView::first_prompt` is the first line of the
+    session's first prompt, cut at 48 characters with slash commands passed over. It is there
+    for the tile's header when the agent has not titled itself.
+  - Tests: ui `background_work_sits_over_the_composer` (the sections in the shell, over the
+    field), approval `always_says_what_it_grants`, figures
+    `a_session_is_named_by_its_first_prompt`; e2e `the_face_shows_the_work_beyond_words` (the
+    finished row gone in Verbose, "1m 5s") and the fold without the model it shares with the
+    composer.
+
+- ✅ **Design critique round three, wave B: the lists and the first run** (2026-09-28,
+  `.research/design-critique-round3-2026-09-28.md` §2 #1, #3, #9, #11, #17, #18, #25).
+  - **One agent, one row.** *Working* lists an agent only while its own tile row is out of
+    sight (folded, scrolled or filtered away, or with no tile), the rule *Needs you* already
+    kept. A tile row ends in `agent_status_word` ("Needs approval", "Has a question", "Working"),
+    and "Needs you" is left to head the section.
+  - **An agent at rest** says what it last said (the face's summary, else the hook's detail),
+    with a single word quoted (“done”), and no state word at all: "Idle · done" read as two
+    states. Its age runs from the hook's `since_ms`, when it came to rest, not from the shell's
+    start.
+  - **One clock.** The navigator's ticking time is whole seconds through `kit::duration`, from
+    "1 s", and the inbox's finished row takes `kit::duration` too.
+  - **Workspaces on a phone.** The phone's title bar has no tabs, so its drawer heads the list
+    with *Workspaces*: a row per workspace the bar would tab, with its tile count, then "New
+    workspace" (left out while the active one is that new one). The active row sits on a plate
+    of its own, because the list's plate stays with the focused tile.
+  - **The inbox** leads a waiting row with `agent_ask_line`, so a bare tool reads "Wants to run
+    a command", not "Bash". It hangs flush from the title bar. The gap under it had shown the
+    tile header's pill as a sliver, and the shadow already lifts it.
+  - **A way out on glass.** With no keyboard attached the palette's field row ends in a Cancel
+    link, as iOS search does, and the scrim dims under it on an iPad as well as on a phone, so
+    the tap outside that closes it is visible. The window picker has no Cancel yet. The
+    workspace does not tell it whether a keyboard is attached.
+  - **The first run** leads with the app's own icon at 40 pt, `radii.lg`, with "Slopty" at
+    `title()` in the strong weight beside it. The icon is `assets/icon.svg`, embedded and
+    declared at 120 px: GPUI rasterises an SVG image at its declared size and samples it down
+    with no mipmaps, and 1024 px drawn at 40 pt shimmered at its edges. Under the heading the
+    block keeps two sizes, the body's and `meta()`. The labels, the tailnet line and the
+    connection status are all `meta()`. The switch link is at the body size, like Cancel beside
+    it. The field is labelled "Or type an address" only under rows to press, and otherwise
+    "Server address" or "Worker address". On iOS the line saying the tailnet cannot be listed
+    stands where the list would. The foot sits on the bottom safe edge
+    (`insets().safe_area`), as on the Mac. Only the block's room gives way to a keyboard.
+  - Tests: ui `an_agent_in_view_is_listed_once_in_its_own_word`,
+    `a_resting_agent_reads_its_last_word_and_its_age`, `a_phone_drawer_lists_the_workspaces`
+    (`workspace/tests/nav_rows.rs`), `without_a_keyboard_the_palette_prints_no_chords`
+    (Cancel and the scrim), `an_inbox_row_says_its_age_first_and_no_word_its_heading_does` (a
+    bare tool, flush under the bar), navigator `a_turn_ticks_in_whole_seconds`,
+    `a_resting_agent_is_quoted_not_stated`; app
+    `the_panel_names_its_host_and_the_server_the_tailnet_found` (the mark, the field's label).
+
+- ✅ **Design critique round three, wave B: tiles, the frame and notes** (2026-09-28,
+  `.research/design-critique-round3-2026-09-28.md` §2 #1, #7, #8, #15, #16, #20–#24).
+  - **An agent's state is said once on its tile.** While the face shows an approval the
+    header wears no pill: the card is the statement, and a pill 450 pt above it said the same.
+    Over the TUI the pill is back. The status bar's "N working" counts only agents whose tiles
+    are off screen, as it already did for uploads; one in view says so in its own header.
+  - **A tile is named by what it is about.** An agent that has not titled itself takes its
+    session's first prompt (`ConversationView::first_prompt`) once its face has read it, so
+    two agents no longer read "Claude Code" and "Claude Code 2". One that titles itself keeps
+    that title.
+  - **A note has one name.** Its header says its title ("Release"), as the navigator and the
+    palette do. How far its tasks got is a count at the end, "1/3" in `meta()` muted with
+    tabular figures, among the readouts where a command's time sits. Identity beats
+    de-duplication: the page's own heading may repeat it.
+  - **Real checkboxes.** A task box is a notch under the prose size (0.95), `radii.xs`, a
+    `border` hairline that turns `text_muted` under the pointer, centred on the first line. A
+    done box is the accent fill with a drawn check (`IconName::Check`, 4 pt inside the box),
+    not the font's tick. A done task's text goes `text_muted` with the strike at
+    `alpha::STRONG`, where the whole row had been dimmed.
+  - **A shell's place does not contradict its prompt.** A shell titled by its directory shows
+    no place: the directory above it ("drop-here ~") read as the cwd, and the status bar has
+    the whole path.
+  - **The frame.** The status bar's left is one path, the server's word first, parted from the
+    worker by the faint dot, and the word says what it costs: "Server unreachable · direct
+    links only". The column marks are 8 × 3 pt, 3 apart; the columns in view join into one
+    thumb in `text_muted` and the rest are `border`, so they no longer read as "2 of 3
+    loaded". The overview's active card wears a 1.5 pt accent edge flush with it, as a
+    selected thumbnail does, not the keyboard's ring outside a gap.
+  - **An empty workspace says where things open.** Its three ways to begin carry their worker
+    as meta ("on e2e-worker"). The recent places and the workers follow as before.
+  - **A remote window on its way** is one block in the body: the calm mark, "Opening Safari"
+    at `small()` in the medium weight, the worker in `meta()` under it. The header's slot
+    keeps the kind's glyph until the first frame. The critique asked for the app's icon; the
+    window list carries none, so that waits for a wire change.
+  - **The pills.** Take, Mute, the hooks' offer, an upload, a port's two ends, the body's
+    Restart and Close, and the file's changed-on-disk buttons stand on `kit::pill_frame`, and
+    a silent link's seconds and a finished command's time on `kit::duration`.
+  - Not done: the overview's panes still show a cover of words, not a miniature of the tile.
+    Drawing each tile's last frame there is paint work on the frame path, which wants a number
+    first.
+  - Tests: ui `faces::the_approval_card_is_said_once`,
+    `faces::the_status_bar_counts_only_agents_out_of_view`,
+    `faces::an_untitled_agent_is_named_by_its_first_prompt`,
+    `tiles::a_note_keeps_its_name_and_counts_its_tasks`, `tiles::a_place_does_not_repeat_the_title`,
+    `tiles::the_columns_in_view_are_one_thumb`, `tiles::the_servers_word_says_what_it_costs`,
+    `tiles::the_ways_to_begin_say_where_they_open`,
+    `tiles::an_opening_window_turns_its_mark_in_the_body`,
+    `markdown::a_task_box_is_drawn_not_typed`; the overview's edge in
+    `strip_marks::the_overview_lifts_each_workspace_and_offers_a_new_one`. The e2e
+    agent-needs-you scenario opens a second agent that titles itself, so its goldens show two
+    agents each named once.
+
+- ✅ **Design critique round three, wave B: settings** (2026-09-28,
+  `.research/design-critique-round3-2026-09-28.md` §2 #12, #13).
+  - **A row holds one line.** The line on what a key does is cut to one line with an
+    ellipsis, and the whole text is that line's hint. The wells for a colour, a host and a
+    font are 140 pt, down from 184, and a segmented choice keeps its own width. The colour rows
+    had wrapped to two lines, so the rows ran 40, 56 and 48 pt and the rhythm broke. System
+    Settings and Linear hold one line of explanation per row.
+  - **The columns start together.** The page's first label takes the search field's top and
+    height with its words centred, so it stands on the field's line and not 9 pt under it.
+  - **The title is "Settings".** The file's name beside it repeated the foot's "Edit as TOML".
+    It shows on the file's face, where the path is what is being edited. This supersedes
+    round one's "the title is the file name".
+  - **Keyboard** is a page that sets nothing. It lists the app's keymap as bound
+    (`cx.key_bindings()`), not a copy of the tables, so the app's own ⌘, is there beside the
+    workspace's keys. Each action is one line in the palette's words (else its name in
+    words), with every chord it has on key caps, each chord once. A numbered family (⌘1 to ⌘9)
+    is one span, "⌘1–9". The groups are General, Layout, Terminal, Conversation and Files; a
+    text field's own editing keys are left out. A query finds bindings too. The palette stays
+    where bindings are run; this is where they are read, in one list, as in Zed, Warp and
+    Raycast.
+  - **About** names the app, the version and the build ("Release build for macOS") on one
+    quiet line, and links to the source, the changes and a new issue. The crate carries no
+    revision, so the build is the profile and the system.
+  - Tests: schema `the_keyboard_page_reads_the_keymap`; editor
+    `rows_hold_one_line_and_the_columns_start_together`,
+    `keyboard_and_about_read_what_is_bound_and_built`; e2e `the_settings_form_edits_the_file`
+    (the running app's ⌘, and ⌘T, ⌘N on the Keyboard page).
+
+- ✅ **The browser tile's own chrome** (2026-09-28, `.research/gap-audit-2026-09-28.md` §3 #6).
+  A page does what a browser would, and what it draws sits beside the native view, never on it,
+  since nothing GPUI draws can cover one.
+  - **Pop-ups.** One delegate object answers WebKit for a page: navigations, `WKUIDelegate` and
+    `WKDownloadDelegate`, the last two by selector (the bindings type most of `WKUIDelegate` for
+    macOS only, and WebKit asks `respondsToSelector:` rather than conformance). `window.open`
+    and `target=_blank` get no web view back; the address, put back on the worker's port,
+    opens a page tile right of this one through `open_browser`, the path "Open URL…" takes. A
+    tile is an item every client shares, so it opens by address, and a pop-up loses its
+    `window.opener`: a sign-in that posts back to its opener does not complete. A page that
+    closes its own window (`window.close()`, which WebKit allows a pop-up or a page with one
+    entry of history, and reports as `webViewDidClose:`) closes its tile as ⌘W would, so "Undo
+    close" brings it back. Pop-ups follow WebKit's own rule on macOS, where a script may open a
+    window without a click.
+  - **Dialogs.** `alert`, `confirm` and `prompt` hide the page (its snapshot stays) under the
+    scrim and an elevated sheet from the kit, the keyboard in it: ↩ is OK, Esc Cancel. A
+    `Dialog` answers WebKit's handler exactly once, and dropping one (the tile closed) cancels
+    it, since WebKit raises on a handler never called.
+  - **Web Inspector** is on in debug builds, off in release; a setting can come when someone
+    needs it in a release build. `isInspectable` opens a page to Safari's Develop menu only, so
+    a debug build on the Mac also turns on WebKit's developer extras, and "Inspect page" in the
+    palette opens the inspector's own window. Both are WebKit's private headers
+    (`_setDeveloperExtrasEnabled:`, `_inspector` and its `show`), asked `respondsToSelector:`
+    first, so a WebKit without them loses the command and nothing else, and neither reaches a
+    release build. The palette lists the line only in a Mac debug build; on iOS Safari's Develop
+    menu on a Mac is the way in.
+  - **Find** is a bar above the page, like a file tile's, on WebKit's `findString:`: ↩ and ⇧↩
+    (⌘G and ⇧⌘G) step, Esc closes. WebKit answers found or not, never a count, so the page
+    counts: a script run with `callAsyncJavaScript:` in WebKit's client content world, which the
+    page's own scripts cannot reach or patch, takes the needle as an argument (never pasted into
+    source) and counts it case-folded in `document.body.innerText`. The bar says "3 matches",
+    "1 match" or "No matches"; a count for text since typed over is dropped, and text found only
+    in a frame the count cannot see shows no number rather than a wrong one.
+  - **Zoom** is `pageZoom` on Safari's steps (50 % to 300 %), per tile. ⌘+, ⌘− and ⌘0 zoom a
+    focused page and size terminal text anywhere else, one key for "bigger" whatever is in front.
+  - **Downloads land on the client**, in `~/Downloads` (the app's `Documents` on iOS), with a
+    row under the page: progress, Saved, the failure, Show in Finder, ✕ to cancel or dismiss.
+    The bytes come through the worker's tunnel to this client's WebKit, and the human wants the
+    file on the machine in front of them. Saving on the worker would send every byte back
+    across the link and needs an upload verb, and the worker already holds whatever its own
+    server serves. Closing the tile cancels its downloads.
+  - Tests: platform `the_delegate_answers_what_webkit_asks_it`,
+    `a_dialog_answers_once_and_a_dropped_one_cancels`,
+    `a_download_gets_a_name_of_its_own_in_downloads`, `an_attachment_is_saved_and_inline_is_shown`;
+    ui `workspace::tests::page_chrome` (pop-up, a page closing its tile, dialog, find and its
+    count, zoom, download row) and `browser::tests` for the zoom steps, the find bar's words and
+    a row's; e2e `a_blank_link_opens_a_tile_and_a_script_s_dialogs_are_sheets_in_it` (a real
+    `_blank` link, `alert`, `confirm` whose OK closes the tile, ⌘F's count on a real page).
+
+- ✅ **A folder tile** (2026-09-28, `.research/gap-audit-2026-09-28.md` §3 #9). A worker's
+  directory is a tile of its own, `ItemKind::Folder { path }`, browsed in place, and the item
+  moves with it (`ItemOp::SetFolder`, refused for any other kind, as `SetUrl` is for a page):
+  every client, and the next start, shows the folder the tile is at.
+  - **The listing is the client link's**, `ClientMsg::ListFolder` answered by
+    `WorkerMsg::Folder { path, listing }`, not orchestration's `ListDir`, which goes through the
+    server and orders by bytes. Both read through one function,
+    `slopty_worker::listing::first`: only the names are gathered, the first so many in an order
+    kept on a heap, and only those looked at. A folder's order is folders first (a link to one
+    counts), then the name with its case folded. It is cut at `folder::FOLDER_ENTRIES` (2 000)
+    with the whole count, so the frame stays near a file card's read on the control stream, and
+    the tile's foot says how much it shows. A hidden entry (a dot name, or the Mac's
+    `UF_HIDDEN`, which `~/Library` carries) is listed, its name muted. A folder's row counts
+    what it holds: one more directory read per kept folder, on the blocking pool.
+  - **The view** (`slopty-ui::folder`) is a path bar (each folder above a click away, `~` for
+    the worker's home, the middle folded past three) over rows drawn as far as they are seen
+    (`uniform_list`: a folder can hold thousands), the palette's selection plate under the
+    selected one. A row is its kind, its name, a muted size or count and its age
+    (`palette::age_label`), in tabular columns. ↑ ↓ Home End walk it, ↩ opens (a folder in
+    place, a file as a file tile right of the folder), ⌫ and ⌘↑ go up and select the folder
+    left; the header's arrow goes up too. A click opens once: the second click of a
+    double-click would land on the next folder's rows. A row dragged past the terminal's slop
+    goes out as a file promise through the path a shell's ⌘-drag takes, and files dropped on
+    the tile go up into its folder (`Dest::Path`), which is listed again when they are there.
+    The tile asks again whenever it takes the keyboard and after a link comes back.
+  - **A path of unknown kind is asked first.** ⌘-click on a path while a command runs, a tool
+    call's "View" and the palette's `Open <path>` send `ListFolder` and open what the answer
+    says: a folder tile with the listing at hand, else a file tile. A path that names a line or
+    ends in `/` says what it is and opens at once. The cost is one round trip before a file
+    tile opened that way appears. ⌘-click at a prompt still types the editor command
+    (`terminal/view.rs` `open_path`), which cannot know a directory from a file.
+  - "Open folder…" is the palette with the focused shell's directory in its field, and a
+    directory spelled with a trailing `/` offers "Open folder …" first.
+  - Tiles that read alike are numbered within a kind: a shell and a folder at one directory are
+    told apart by their icons, not "project 2".
+  - Tests: worker `listing::tests` (order, cap, hidden, links, a file is not a folder), worker
+    and client `items` (the move, refused elsewhere, reopened), proto `golden::folders`, ui
+    `workspace::tests::folders` (keys, click, the way up, a path opened as what it is, a drop),
+    e2e `tiles::a_folder_tile_browses_the_worker_and_opens_a_file_beside_it` (golden `folder`).
+
+- ✅ **Design critique round four** (2026-09-28, `.research/design-critique-round4-2026-09-28.md`).
+  The surfaces added since round three, none of them critiqued before: the folder tile, this
+  Mac as a worker, the file tile's notices, the trackpad control and the zoom readout, the
+  composer's attachment chip, and the settings' Keyboard and About pages.
+  - **This Mac is a row to press.** "Use this Mac as a worker" was a second link under the
+    panel's way aside, at the page's foot, dressed like "Connect to a server instead". For one
+    Mac it is the likeliest first step, so it is a row as a found worker's is, under "On this
+    Mac": the Mac's glyph, the words over what pressing does, and a chevron.
+  - **The checklist says to-do, not failure.** A grant not yet given wore the red cross of a
+    failed install. It waits on the human, so it takes the waiting tone beside its button, and
+    red is left for an install that failed or a worker that never answered. A line that is not
+    in the way (a tailnet that does not reach this Mac) wears the quiet ring. A missing grant
+    says "Turn on slopty-worker in System Settings." on one line: the button opens the very
+    list, and naming it had wrapped the line in two.
+  - **A hidden entry is set back.** Its name had gone `text_muted`, which is the AA grey every
+    size and age in the list already wore, so `.env` read like `README.md`. The whole row is at
+    `alpha::STRONG` now, the "present but set back" of a read inbox row, as Finder dims one.
+  - **A folder says where it is once.** Its header shows no place: the path bar right under it
+    names every folder above, and the parent beside the title said it twice 20 pt apart. The
+    first crumb's words stand on the rows' icons; a crumb's pad had put them 2 pt right.
+  - **`kit::notice`** is what a body says when it has nothing to show: a mark at the large
+    icon size in `text_muted`, what is so at `small()` in the medium weight, why in `meta()`
+    under it, and any ways on below. A remote window on its way, a file too large, not text or
+    not readable, and an empty, missing or wrong folder all say it so. A file had printed its
+    summary as the notice ("binary, 2 KB", lowercase), and the cap's reason ran as one clause
+    ("Too large to edit here: 40 MB, past 16 MB"). It now reads "Too large to open here" over
+    "40.0 MB, over the 16.0 MB a tile opens". The status bar says no caret under a notice.
+    The file's secondary button is on `elevated`, as `kit::button`'s is, not `panel`.
+  - **An attachment is said once.** The chip over the composer's field was one of three
+    readouts of one upload, with the header's "↑ 0%" pill and its accent line. The header now
+    leaves an attachment's upload out, and the chip carries the way to take it off the draft
+    (✕, "Remove <name>"), which stops the upload; a picture still being written lands on no
+    chip.
+  - **A toggle has one name.** The trackpad control was "Use as a trackpad", then "Touch the
+    picture directly", and "Trackpad mode" in the palette. `kit::icon_toggle` is one name with
+    a pressed state (`aria_toggled`): on, it rests on the selected fill with its icon in
+    `text`, and the pointer keeps that fill, where the hover's lighter `raised` had read as
+    letting go.
+  - **The zoom readout floats.** It was a hand-made pill at the caption size on a 90 % veil of
+    the chrome's grey, over a remote picture's own pixels, which could swallow it. It is
+    `kit::pill_frame` lifted by `kit::elevate`, and says "150%", as the context and an upload
+    do, not "150 %".
+  - **One mark.** `kit::brand` (the app icon at 40 pt, the name at `title()`) leads the first
+    run and now About, with the version and build under the name.
+  - **The overview's miniature** sets a tile's own lines on the card's edge under its glyph,
+    as the body's text stands under the header's; hung from the title's words they read as
+    indented output. The meta still hangs from the title, as a list row's second line does.
+  - The Keyboard page was looked at and left as it is.
+  - The self-test can draw this Mac's checklist: with `slopty_e2e::THIS_MAC_ENV` holding a
+    `doctor` report, the e2e build's app runs the flow against a stand-in that installs,
+    restarts, opens and adds nothing. Without it the self-test has no entry at all.
+  - Lints in `kit.rs`: `a_percent_sits_against_its_figure`. Tests: kit
+    `a_toggle_rests_on_the_selected_fill_only_while_on`, `the_brand_is_the_app_icon_at_its_side`;
+    folder `a_hidden_entry_is_set_back`; file `a_file_that_cannot_open_says_what_is_so_then_why`;
+    ui `folders::a_folder_says_where_it_is_once_on_the_rows_edge`,
+    `facts::overview_covers_say_state_place_and_worker` (the lines' edge),
+    `remote::a_picture_pasted_into_the_composer_uploads_and_its_path_is_typed` (no header
+    pill, the chip's ✕ stops the upload); app `this_mac::tests` (the marks),
+    `this_mac_installs_then_is_added_once_its_doctor_is_green` (the row over the field). New
+    goldens: `this-mac`, `file-too-large`, `conversation-attachment`.
+  - A waiting agent's row says the action on its subject, not the tool's name: "Run touch
+    notes.txt", "Edit src/main.rs", "Use query from db: users" (`agents::tool_action`). The
+    tooltip keeps the exact tool (`agent_ask_text`). Test: `a_bare_tool_is_said_as_what_it_asks`.

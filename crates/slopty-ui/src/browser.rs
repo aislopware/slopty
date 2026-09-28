@@ -12,24 +12,36 @@
 //! the strip, or nowhere when GPUI has something to show on top (the palette, a menu, the
 //! overview) or the tile is off the strip. While the page is hidden the body shows its last
 //! snapshot, so covering it never leaves a hole.
+//!
+//! What a browser brings of its own sits in the tile beside the page, never over it, since
+//! nothing GPUI draws can cover a native view: the find bar above the page, a download's row
+//! below it, and a script's dialog on the page's snapshot while the page waits for the answer.
+//! A pop-up opens a tile of its own (`docs/decisions/ui.md`, "The browser tile's own chrome").
 
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Bounds, Context, EventEmitter, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement as _, Pixels, Render, RenderImage, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, Window, canvas, div, img,
-    px,
+    AnyElement, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ObjectFit, ParentElement as _, Pixels,
+    Render, RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Subscription, Task, Window, canvas, div, img, px,
 };
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+pub use native::{Dialog, DialogKind};
 use slopty_client::layout::{Rect, WorkerKey};
 use slopty_core::ItemId;
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
+use crate::icons::{IconName, IconSize};
+use crate::kit::{self, ButtonKind, FIND_PLACEHOLDER};
+use crate::terminal::{CloseFind, FindNext, FindPrev};
 
 /// Below this the tile is fading out (or in) and the page stays hidden; a native view would
 /// not fade with it.
@@ -38,6 +50,40 @@ pub const MIN_ALPHA: f32 = 0.05;
 /// How often a shown page is asked for its title and address, which scripts change without
 /// a navigation.
 const POLL: Duration = Duration::from_secs(1);
+
+/// How often a download under way is asked how far it has come.
+const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
+
+/// The find field's width at most, as a file tile's.
+const FIND_WIDTH: f32 = 240.0;
+
+/// A script's dialog at its widest, as Safari's sheet.
+const DIALOG_WIDTH: f32 = 360.0;
+
+/// The page's zoom steps, Safari's: ⌘+ and ⌘− walk them, ⌘0 goes back to 1.
+pub const ZOOMS: [f64; 13] = [0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+
+/// A step of the page's zoom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Zoom {
+    /// ⌘+: the next step up.
+    In,
+    /// ⌘−: the next step down.
+    Out,
+    /// ⌘0: the page's own size.
+    Reset,
+}
+
+/// The zoom after `step` from `current`; past either end of [`ZOOMS`] it stays.
+#[must_use]
+pub fn next_zoom(current: f64, step: Zoom) -> f64 {
+    const NUDGE: f64 = 0.001;
+    match step {
+        Zoom::Reset => 1.0,
+        Zoom::In => ZOOMS.iter().copied().find(|z| *z > current + NUDGE).unwrap_or(current),
+        Zoom::Out => ZOOMS.iter().rev().copied().find(|z| *z < current - NUDGE).unwrap_or(current),
+    }
+}
 
 /// What GPUI is drawing over the strip this frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -89,12 +135,89 @@ pub fn placement(body: Option<Rect>, strip: Rect, alpha: f32, cover: Cover) -> P
 pub(crate) type Drawn = Rc<Cell<Option<(u64, Bounds<Pixels>)>>>;
 
 /// What a browser tile tells the workspace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserEvent {
     /// The page was clicked and has the keyboard: its tile takes the focus.
     Focused,
-    /// The page gave the keyboard back (a click elsewhere, ⌃Tab, Esc twice).
+    /// The keyboard is the workspace's again: the page gave it back (a click elsewhere,
+    /// ⌃Tab, Esc twice), or the find bar or a dialog that had it closed.
     Released,
+    /// A pop-up or a `_blank` link asked for this address, as the worker names it: a tile of
+    /// its own beside this one.
+    Open(String),
+    /// The page closed its own window (`window.close()`): its tile goes.
+    Closed,
+}
+
+/// A download of the page's, as its row shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadRow {
+    /// The platform's id for it.
+    pub id: u64,
+    /// Where it lands.
+    pub path: PathBuf,
+    /// How it goes.
+    pub state: DownloadState,
+}
+
+/// How a download goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DownloadState {
+    /// Bytes are coming: `done` of `total` (0 while the server has not said).
+    Receiving {
+        /// Bytes saved so far.
+        done: u64,
+        /// Bytes in all, or 0.
+        total: u64,
+    },
+    /// All of it is saved.
+    Saved,
+    /// It stopped; why.
+    Failed(String),
+}
+
+impl DownloadRow {
+    /// The file's name.
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+
+    /// What the row says of how it goes: `42% of 3.1 MB`, `3.1 MB`, `Saved`, the failure.
+    #[must_use]
+    pub fn status(&self) -> String {
+        match &self.state {
+            DownloadState::Receiving { done, total: 0 } => crate::file::size_label(*done),
+            DownloadState::Receiving { done, total } => {
+                let percent = done.saturating_mul(100).checked_div(*total).unwrap_or(0).min(100);
+                format!("{percent}% of {}", crate::file::size_label(*total))
+            }
+            DownloadState::Saved => "Saved".to_owned(),
+            DownloadState::Failed(why) => why.clone(),
+        }
+    }
+}
+
+/// The find bar over the page.
+struct PageFind {
+    input: Entity<InputState>,
+    needle: String,
+    /// The page's answer for the needle, once it has one.
+    found: Option<bool>,
+    /// How many times the needle is in the page's text, once the page has counted.
+    count: Option<usize>,
+    _subscription: Subscription,
+}
+
+/// A script's dialog, waiting in the tile.
+struct PageDialog {
+    dialog: Dialog,
+    /// Who asks: the page's host.
+    host: String,
+    /// A prompt's field.
+    input: Option<Entity<InputState>>,
+    focus: FocusHandle,
+    _subscription: Option<Subscription>,
 }
 
 /// What the page shows, as last read.
@@ -108,6 +231,8 @@ pub struct PageState {
     pub loading: bool,
     /// There is a page to go back to.
     pub can_go_back: bool,
+    /// There is a page to go forward to.
+    pub can_go_forward: bool,
     /// Why the last navigation failed, until the next one starts.
     pub failed: Option<String>,
 }
@@ -134,6 +259,13 @@ pub struct BrowserView {
     native: native::Native,
     /// The page's messages, and the poll for its title while it is open.
     tasks: Vec<Task<()>>,
+    /// The page's zoom, 1 at its own size.
+    zoom: f64,
+    search: Option<PageFind>,
+    dialog: Option<PageDialog>,
+    downloads: Vec<DownloadRow>,
+    /// A poll of the downloads under way is running.
+    polling_downloads: bool,
 }
 
 impl std::fmt::Debug for BrowserView {
@@ -166,6 +298,11 @@ impl BrowserView {
             theme,
             native: native::Native::default(),
             tasks: Vec::new(),
+            zoom: 1.0,
+            search: None,
+            dialog: None,
+            downloads: Vec::new(),
+            polling_downloads: false,
         }
     }
 
@@ -296,7 +433,10 @@ impl BrowserView {
     /// failed page stays hidden, so its reason shows instead of a blank page.
     pub fn apply(&mut self, placement: Placement, window: &Window, cx: &mut Context<Self>) {
         match placement {
-            Placement::Shown { clip, frame, alpha } if self.page.failed.is_none() => {
+            // A dialog is drawn on the page's picture: the page waits under it.
+            Placement::Shown { clip, frame, alpha }
+                if self.page.failed.is_none() && self.dialog.is_none() =>
+            {
                 if !self.native.open() {
                     let Some(address) = self.local.clone() else { return };
                     self.open(&address, window, cx);
@@ -324,10 +464,15 @@ impl BrowserView {
             return;
         }
         self.loaded = Some(address.to_owned());
+        if (self.zoom - 1.0).abs() > f64::EPSILON {
+            self.native.set_zoom(self.zoom);
+        }
         tracing::info!(item = %self.id, url = %self.url, %address, "browser tile opened");
-        let events = cx.spawn(async move |this, cx| {
+        let events = cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = rx.recv().await {
-                if this.update(cx, |view, cx| view.native_event(event, cx)).is_err() {
+                let sent =
+                    this.update_in(cx, |view, window, cx| view.native_event(event, window, cx));
+                if sent.is_err() {
                     break;
                 }
             }
@@ -343,8 +488,13 @@ impl BrowserView {
         self.tasks = vec![events, poll];
     }
 
-    /// A message from the page.
-    fn native_event(&mut self, event: native::Event, cx: &mut Context<Self>) {
+    /// A message from the page (or a test's, standing in for it).
+    pub(crate) fn native_event(
+        &mut self,
+        event: native::Event,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !matches!(event, native::Event::Snapshot(_)) {
             tracing::debug!(item = %self.id, ?event, "page event");
         }
@@ -378,11 +528,46 @@ impl BrowserView {
                 })
                 .detach();
             }
+            native::Event::Open(url) => {
+                let url = match &self.loaded {
+                    Some(loaded) => worker_url(&url, loaded, &self.url),
+                    None => url,
+                };
+                if is_web_url(&url) {
+                    tracing::info!(item = %self.id, %url, "the page asks for a new window");
+                    cx.emit(BrowserEvent::Open(url));
+                } else {
+                    tracing::info!(item = %self.id, %url, "a new window with no web address");
+                }
+            }
+            native::Event::Dialog(dialog) => self.show_dialog(dialog, window, cx),
+            native::Event::Download(download) => self.download_event(download, cx),
+            native::Event::Found(found) => {
+                if let Some(search) = &mut self.search {
+                    search.found = Some(found);
+                    cx.notify();
+                }
+            }
+            native::Event::Counted { needle, count } => {
+                // A count for text since typed over is not this one's.
+                if let Some(search) = self.search.as_mut().filter(|s| s.needle == needle) {
+                    search.count = Some(count);
+                    cx.notify();
+                }
+            }
+            native::Event::Closed => {
+                tracing::info!(item = %self.id, "the page closed its window");
+                cx.emit(BrowserEvent::Closed);
+            }
         }
     }
 
-    /// Read the page's title and address again; a change repaints the header.
+    /// Read the page's title and address again; a change repaints the header. Between a new
+    /// address and its load the view still names the old page, so it is not asked.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.loaded != self.local {
+            return;
+        }
         let Some(page) = self.native.page() else { return };
         let page = self.as_the_worker_sees(page);
         if page != self.page {
@@ -391,9 +576,34 @@ impl BrowserView {
         }
     }
 
+    /// Go to `url`, the item's address as the worker names it, which the item has just
+    /// taken (`ItemOp::SetUrl`, from any client). The header names it at once. A new address
+    /// is served here anew and loads once it is (`set_local`); the same one loads again.
+    pub fn go_to(&mut self, url: &str, cx: &mut Context<Self>) {
+        if url == self.url {
+            if let Some(local) = self.local.clone() {
+                self.native.load(&local);
+                self.loaded = Some(local);
+            }
+        } else {
+            tracing::info!(item = %self.id, %url, "the page goes to a new address");
+            url.clone_into(&mut self.url);
+            self.local = None;
+        }
+        self.page = PageState { url: url.to_owned(), loading: true, ..PageState::default() };
+        cx.notify();
+    }
+
     /// Back one page.
     pub fn back(&mut self, cx: &mut Context<Self>) {
         self.native.back();
+        self.page.loading = true;
+        cx.notify();
+    }
+
+    /// Forward one page.
+    pub fn forward(&mut self, cx: &mut Context<Self>) {
+        self.native.forward();
         self.page.loading = true;
         cx.notify();
     }
@@ -409,6 +619,243 @@ impl BrowserView {
             self.native.reload();
         }
         self.page.loading = true;
+        cx.notify();
+    }
+
+    /// ⌘F: the find bar above the page, or the caret back in it with its text selected. A
+    /// page that had the keyboard gives it to the bar.
+    pub fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.native.focused() {
+            self.native.release();
+        }
+        if self.search.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(FIND_PLACEHOLDER));
+            let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
+                InputEvent::Change => this.search_changed(cx),
+                InputEvent::PressEnter { shift, .. } => this.find_step(*shift),
+                InputEvent::Focus | InputEvent::Blur => {}
+            });
+            self.search = Some(PageFind {
+                input,
+                needle: String::new(),
+                found: None,
+                count: None,
+                _subscription: subscription,
+            });
+        }
+        if let Some(search) = &self.search {
+            search.input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn search_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        let needle = search.input.read(cx).value().to_string();
+        if needle == search.needle {
+            return;
+        }
+        search.needle = needle;
+        search.found = None;
+        search.count = None;
+        if !search.needle.is_empty() {
+            self.native.find(&search.needle, false);
+            self.native.count(&search.needle);
+        }
+        cx.notify();
+    }
+
+    /// The next match (↩), or the one before (⇧↩).
+    pub fn find_step(&self, backwards: bool) {
+        if let Some(search) = self.search.as_ref().filter(|s| !s.needle.is_empty()) {
+            self.native.find(&search.needle, backwards);
+        }
+    }
+
+    /// Esc or ✕ in the find bar: it closes, and the keyboard goes back to the workspace.
+    pub fn close_find(&mut self, cx: &mut Context<Self>) {
+        if self.search.take().is_some() {
+            cx.emit(BrowserEvent::Released);
+            cx.notify();
+        }
+    }
+
+    /// The find bar's text, while the bar is open.
+    #[must_use]
+    pub fn search_needle(&self) -> Option<&str> {
+        self.search.as_ref().map(|s| s.needle.as_str())
+    }
+
+    /// Whether the page has the find bar's text, once it has answered.
+    #[must_use]
+    pub fn found(&self) -> Option<bool> {
+        self.search.as_ref().and_then(|s| s.found)
+    }
+
+    /// What the find bar says of its matches: `3 matches`, `No matches`, or nothing yet.
+    #[must_use]
+    pub fn matches(&self) -> String {
+        self.search.as_ref().map(|s| match_status(&s.needle, s.found, s.count)).unwrap_or_default()
+    }
+
+    /// Web Inspector on the page, in its own window. Whether it opened: a page that is open,
+    /// in a debug build of the Mac app.
+    pub fn inspect(&self) -> bool {
+        self.native.inspect()
+    }
+
+    /// ⌘+, ⌘− or ⌘0 on the page.
+    pub fn zoom_by(&mut self, step: Zoom, cx: &mut Context<Self>) {
+        let zoom = next_zoom(self.zoom, step);
+        if (zoom - self.zoom).abs() > f64::EPSILON {
+            self.zoom = zoom;
+            self.native.set_zoom(zoom);
+            cx.notify();
+        }
+    }
+
+    /// The page's zoom, 1 at its own size.
+    #[must_use]
+    pub const fn zoom(&self) -> f64 {
+        self.zoom
+    }
+
+    /// A script's dialog: drawn in the tile on the page's picture, the keyboard in it. One
+    /// still up is dismissed first, so the page never waits on two.
+    fn show_dialog(&mut self, dialog: Dialog, window: &mut Window, cx: &mut Context<Self>) {
+        if self.native.focused() {
+            self.native.release();
+        }
+        let input = match dialog.kind() {
+            DialogKind::Prompt { default } => {
+                let default = default.clone();
+                Some(cx.new(|cx| InputState::new(window, cx).default_value(default)))
+            }
+            DialogKind::Alert | DialogKind::Confirm => None,
+        };
+        let subscription = input.as_ref().map(|input| {
+            cx.subscribe(input, |this, _input, event, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.answer_dialog(true, cx);
+                }
+            })
+        });
+        let focus = cx.focus_handle();
+        match &input {
+            Some(input) => input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            }),
+            None => window.focus(&focus, cx),
+        }
+        let host =
+            split_origin(&self.page.url).map(|(_, host, _)| host.to_owned()).unwrap_or_default();
+        tracing::info!(item = %self.id, kind = ?dialog.kind(), "a script's dialog");
+        self.dialog = Some(PageDialog { dialog, host, input, focus, _subscription: subscription });
+        cx.notify();
+    }
+
+    /// The dialog up, if one is.
+    #[must_use]
+    pub fn dialog(&self) -> Option<&Dialog> {
+        self.dialog.as_ref().map(|d| &d.dialog)
+    }
+
+    /// OK (with a prompt's text) or Cancel: the page goes on, and the keyboard goes back to
+    /// the workspace.
+    pub fn answer_dialog(&mut self, ok: bool, cx: &mut Context<Self>) {
+        let Some(pending) = self.dialog.take() else { return };
+        if ok {
+            let text = pending.input.map(|i| i.read(cx).value().to_string()).unwrap_or_default();
+            pending.dialog.accept(&text);
+        } else {
+            pending.dialog.dismiss();
+        }
+        cx.emit(BrowserEvent::Released);
+        cx.notify();
+    }
+
+    fn download_event(&mut self, event: native::Download, cx: &mut Context<Self>) {
+        match event {
+            native::Download::Started { id, path } => {
+                tracing::info!(item = %self.id, path = %path.display(), "a download starts");
+                self.downloads.push(DownloadRow {
+                    id,
+                    path,
+                    state: DownloadState::Receiving { done: 0, total: 0 },
+                });
+                self.poll_downloads(cx);
+            }
+            native::Download::Finished { id } => {
+                if let Some(row) = self.downloads.iter_mut().find(|r| r.id == id) {
+                    row.state = DownloadState::Saved;
+                }
+            }
+            native::Download::Failed { id, why } => {
+                tracing::info!(item = %self.id, %why, "a download failed");
+                if let Some(row) = self.downloads.iter_mut().find(|r| r.id == id) {
+                    row.state = DownloadState::Failed(why);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Ask how far each download under way has come, every [`DOWNLOAD_POLL`] while one is.
+    fn poll_downloads(&mut self, cx: &Context<Self>) {
+        if self.polling_downloads {
+            return;
+        }
+        self.polling_downloads = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(DOWNLOAD_POLL).await;
+                let going = this.update(cx, Self::read_downloads).unwrap_or(false);
+                if !going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Read each download's progress; whether any is still under way.
+    fn read_downloads(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut going = false;
+        let mut changed = false;
+        for row in &mut self.downloads {
+            let DownloadState::Receiving { done, total } = &mut row.state else { continue };
+            going = true;
+            if let Some(now) = self.native.received(row.id)
+                && now != (*done, *total)
+            {
+                (*done, *total) = now;
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+        self.polling_downloads = going;
+        going
+    }
+
+    /// The page's downloads, as their rows show them.
+    #[must_use]
+    pub fn downloads(&self) -> &[DownloadRow] {
+        &self.downloads
+    }
+
+    /// ✕ on a download's row: one under way stops; the row goes.
+    pub fn dismiss_download(&mut self, id: u64, cx: &mut Context<Self>) {
+        let receiving = |r: &DownloadRow| matches!(r.state, DownloadState::Receiving { .. });
+        if self.downloads.iter().any(|r| r.id == id && receiving(r)) {
+            self.native.cancel_download(id);
+        }
+        self.downloads.retain(|r| r.id != id);
         cx.notify();
     }
 
@@ -459,11 +906,38 @@ impl BrowserView {
     }
 }
 
+/// What a page's find bar says of `needle`'s matches, from the page's find (`found`) and its
+/// count: `3 matches`, `1 match`, `No matches`, or nothing while neither has answered.
+#[must_use]
+pub fn match_status(needle: &str, found: Option<bool>, count: Option<usize>) -> String {
+    if needle.is_empty() {
+        return String::new();
+    }
+    match (found, count) {
+        (Some(false), _) | (None, Some(0)) => "No matches".to_owned(),
+        (_, Some(1)) => "1 match".to_owned(),
+        (_, Some(n)) if n > 0 => format!("{n} matches"),
+        // Found where the count does not reach (a frame of the page's), or not answered yet.
+        _ => String::new(),
+    }
+}
+
 /// `url` without its scheme and a lone trailing slash: `localhost:5173/app`.
 #[must_use]
 pub fn short_url(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     rest.strip_suffix('/').filter(|r| !r.contains('/')).unwrap_or(rest)
+}
+
+/// An address as a header shows it at rest: its scheme with `://`, its host (and port), and
+/// the rest, where a lone `/` is none. `None` for text with no scheme.
+#[must_use]
+pub fn address_parts(url: &str) -> Option<(&str, &str, &str)> {
+    let (_, after) = url.split_once("://")?;
+    let scheme = url.strip_suffix(after)?;
+    let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+    let (authority, rest) = after.split_at(end);
+    Some((scheme, authority, if rest == "/" { "" } else { rest }))
 }
 
 /// Whether `text` is an address a browser tile opens: http or https, a host, at most 2 KiB
@@ -606,6 +1080,16 @@ impl Render for BrowserView {
             }
             (None, None) => div().size_full().into_any_element(),
         };
+        // The page's own area: what is measured for the native view, under the find bar and
+        // over the downloads, which it must not cover.
+        let page = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .child(body)
+            .child(measure)
+            .children(self.render_dialog(cx));
         div()
             .id(SharedString::from(format!("browser-{id}")))
             .debug_selector(move || format!("browser-{id}"))
@@ -614,11 +1098,214 @@ impl Render for BrowserView {
             .aria_value(SharedString::from(self.title()))
             .relative()
             .size_full()
+            .flex()
+            .flex_col()
             .overflow_hidden()
             // The tile's own body surface until the page draws over it.
             .bg(hsla(theme.content()))
-            .child(body)
-            .child(measure)
+            .children(self.render_find(cx))
+            .child(page)
+            .children(self.render_downloads(cx))
+    }
+}
+
+impl BrowserView {
+    /// The find bar, across the top of the tile's body.
+    fn render_find(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let search = self.search.as_ref()?;
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let id = *self.id.as_uuid();
+        let status = SharedString::from(match_status(&search.needle, search.found, search.count));
+        let bar = kit::inset_x(div(), theme)
+            .id("page-find")
+            .debug_selector(move || format!("page-find-{id}"))
+            .key_context("PageSearch")
+            .role(Role::Group)
+            .aria_label("Find in page")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm))
+            .py(px(theme.spacing.xs))
+            .border_b_1()
+            .border_color(hsla(s.border))
+            .text_size(px(theme.typography.small()))
+            .font_family(theme.typography.ui_family.clone())
+            .text_color(hsla(s.text))
+            .on_action(cx.listener(|this, _: &CloseFind, _window, cx| this.close_find(cx)))
+            .on_action(cx.listener(|this, _: &Escape, _window, cx| this.close_find(cx)))
+            .on_action(cx.listener(|this, _: &FindNext, _window, _cx| this.find_step(false)))
+            .on_action(cx.listener(|this, _: &FindPrev, _window, _cx| this.find_step(true)))
+            .child(crate::icons::icon(
+                theme,
+                IconName::Search,
+                IconSize::Inline,
+                hsla(s.text_muted),
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .max_w(px(FIND_WIDTH))
+                    .child(Input::new(&search.input).aria_label("Find in page")),
+            )
+            .child(
+                div()
+                    .id("page-find-status")
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(hsla(s.text_secondary))
+                    .role(Role::Label)
+                    .aria_label("Matches")
+                    .aria_value(status.clone())
+                    .child(status),
+            )
+            .child(
+                kit::icon_button(theme, "page-find-prev", IconName::ChevronUp, "Previous match")
+                    .on_click(cx.listener(|this, _ev, _window, _cx| this.find_step(true))),
+            )
+            .child(
+                kit::icon_button(theme, "page-find-next", IconName::ChevronDown, "Next match")
+                    .on_click(cx.listener(|this, _ev, _window, _cx| this.find_step(false))),
+            )
+            .child(
+                kit::icon_button(theme, "page-find-close", IconName::X, "Close find")
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.close_find(cx))),
+            );
+        Some(bar.into_any_element())
+    }
+
+    /// A script's dialog: a sheet on the page's picture, under the scrim.
+    fn render_dialog(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let pending = self.dialog.as_ref()?;
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let id = *self.id.as_uuid();
+        let asks = !matches!(pending.dialog.kind(), DialogKind::Alert);
+        let who: SharedString = if pending.host.is_empty() {
+            "The page says".into()
+        } else {
+            format!("{} says", pending.host).into()
+        };
+        let message = SharedString::from(pending.dialog.message().to_owned());
+        let sheet = kit::elevate(div(), theme)
+            .id("page-dialog")
+            .debug_selector(move || format!("page-dialog-{id}"))
+            .key_context("PageDialog")
+            .track_focus(&pending.focus)
+            .role(Role::AlertDialog)
+            .aria_label(message.clone())
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                let ok = match event.keystroke.key.as_str() {
+                    "enter" => true,
+                    "escape" => false,
+                    _ => return,
+                };
+                cx.stop_propagation();
+                this.answer_dialog(ok, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Escape, _window, cx| this.answer_dialog(false, cx)))
+            .w_full()
+            .min_w_0()
+            .max_w(px(DIALOG_WIDTH))
+            .flex()
+            .flex_col()
+            .gap(px(theme.spacing.sm))
+            .p(px(theme.spacing.md))
+            .rounded(px(theme.radii.lg))
+            .text_size(px(theme.typography.ui_size))
+            .font_family(theme.typography.ui_family.clone())
+            .text_color(hsla(s.text))
+            .child(kit::meta(div(), theme).child(who))
+            .child(div().max_h(px(DIALOG_WIDTH)).overflow_hidden().child(message))
+            .children(pending.input.as_ref().map(|i| Input::new(i).aria_label("Answer")))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(theme.spacing.sm))
+                    .when(asks, |el| {
+                        el.child(
+                            kit::button(theme, "page-dialog-cancel", "Cancel", ButtonKind::Ghost)
+                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                    this.answer_dialog(false, cx);
+                                })),
+                        )
+                    })
+                    .child(
+                        kit::button(theme, "page-dialog-ok", "OK", ButtonKind::Primary).on_click(
+                            cx.listener(|this, _ev, _window, cx| this.answer_dialog(true, cx)),
+                        ),
+                    ),
+            );
+        let layer = div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px(px(theme.spacing.md))
+            .pt(px(theme.spacing.xl))
+            .bg(kit::scrim(theme))
+            .child(sheet);
+        Some(layer.into_any_element())
+    }
+
+    /// A row per download, under the page: what it is, how it goes, and the way to stop or
+    /// dismiss it.
+    fn render_downloads(&self, cx: &Context<Self>) -> Vec<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        self.downloads
+            .iter()
+            .map(|row| {
+                let id = row.id;
+                let (icon, tone) = match row.state {
+                    DownloadState::Receiving { .. } => (IconName::Download, s.text_muted),
+                    DownloadState::Saved => (IconName::Check, s.success),
+                    DownloadState::Failed(_) => (IconName::CircleAlert, s.error),
+                };
+                let receiving = matches!(row.state, DownloadState::Receiving { .. });
+                let name = SharedString::from(row.name());
+                let status = SharedString::from(row.status());
+                let close = if receiving { "Cancel download" } else { "Dismiss" };
+                kit::row(theme, kit::Row::One)
+                    .id(SharedString::from(format!("page-download-{id}")))
+                    .debug_selector(move || format!("page-download-{id}"))
+                    .role(Role::Group)
+                    .aria_label(name.clone())
+                    .aria_value(status.clone())
+                    .border_t_1()
+                    .border_color(hsla(s.border))
+                    .text_size(px(theme.typography.small()))
+                    .font_family(theme.typography.ui_family.clone())
+                    .text_color(hsla(s.text))
+                    .child(crate::icons::icon(theme, icon, IconSize::Inline, hsla(tone)))
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(kit::meta(kit::tabular(div()), theme).flex_none().child(status))
+                    .when(cfg!(target_os = "macos") && row.state == DownloadState::Saved, |el| {
+                        let path = row.path.clone();
+                        el.child(
+                            kit::button(
+                                theme,
+                                "page-download-show",
+                                "Show in Finder",
+                                ButtonKind::Link,
+                            )
+                            .on_click(move |_ev, _window, _cx| native::reveal(&path)),
+                        )
+                    })
+                    .child(
+                        kit::icon_button(theme, "page-download-close", IconName::X, close)
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.dismiss_download(id, cx);
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect()
     }
 }
 
@@ -635,7 +1322,7 @@ mod native {
 
     use gpui::Window;
     use slopty_client::layout::Rect;
-    pub use slopty_platform::web::WebEvent as Event;
+    pub use slopty_platform::web::{Dialog, DialogKind, Download, WebEvent as Event};
 
     use super::PageState;
 
@@ -699,6 +1386,7 @@ mod native {
                     url: p.url,
                     loading: p.loading,
                     can_go_back: p.can_go_back,
+                    can_go_forward: p.can_go_forward,
                     failed: None,
                 }
             })
@@ -719,6 +1407,12 @@ mod native {
         pub fn back(&self) {
             if let Some(view) = &self.view {
                 view.back();
+            }
+        }
+
+        pub fn forward(&self) {
+            if let Some(view) = &self.view {
+                view.forward();
             }
         }
 
@@ -743,7 +1437,49 @@ mod native {
         pub fn press(&self, key: &str, command: bool, shift: bool) -> bool {
             self.view.as_ref().is_some_and(|v| v.press(key, command, shift))
         }
+
+        pub fn find(&self, text: &str, backwards: bool) {
+            if let Some(view) = &self.view {
+                view.find(text, backwards);
+            }
+        }
+
+        pub fn count(&self, text: &str) {
+            if let Some(view) = &self.view {
+                view.count(text);
+            }
+        }
+
+        pub fn inspect(&self) -> bool {
+            self.view.as_ref().is_some_and(slopty_platform::web::WebView::inspect)
+        }
+
+        pub fn set_zoom(&self, zoom: f64) {
+            if let Some(view) = &self.view {
+                view.set_zoom(zoom);
+            }
+        }
+
+        pub fn received(&self, id: u64) -> Option<(u64, u64)> {
+            self.view.as_ref()?.received(id)
+        }
+
+        pub fn cancel_download(&self, id: u64) {
+            if let Some(view) = &self.view {
+                view.cancel_download(id);
+            }
+        }
     }
+
+    /// Show a saved download in the Finder.
+    #[cfg(target_os = "macos")]
+    pub fn reveal(path: &std::path::Path) {
+        slopty_platform::web::reveal(path);
+    }
+
+    /// The Files app is the way to a download on iOS, and no row offers this.
+    #[cfg(target_os = "ios")]
+    pub const fn reveal(_path: &std::path::Path) {}
 }
 
 #[cfg(test)]
@@ -826,6 +1562,15 @@ mod tests {
         assert_eq!(web_url("ftp://a.test"), None);
         assert_eq!(short_url("http://localhost:5173/"), "localhost:5173");
         assert_eq!(short_url("http://localhost:5173/app/"), "localhost:5173/app/");
+        assert_eq!(
+            address_parts("http://127.0.0.1:5173/"),
+            Some(("http://", "127.0.0.1:5173", ""))
+        );
+        assert_eq!(
+            address_parts("https://a.test/docs?q=1#top"),
+            Some(("https://", "a.test", "/docs?q=1#top"))
+        );
+        assert_eq!(address_parts("a.test/docs"), None);
     }
 
     #[test]
@@ -853,6 +1598,38 @@ mod tests {
             "http://localhost:5173/docs#a"
         );
         assert_eq!(worker_url("https://example.test/", loaded, item), "https://example.test/");
+    }
+
+    #[test]
+    fn zoom_walks_safari_s_steps_and_stops_at_the_ends() {
+        assert!((next_zoom(1.0, Zoom::In) - 1.1).abs() < f64::EPSILON);
+        assert!((next_zoom(1.0, Zoom::Out) - 0.9).abs() < f64::EPSILON);
+        assert!((next_zoom(3.0, Zoom::In) - 3.0).abs() < f64::EPSILON, "the top stays");
+        assert!((next_zoom(0.5, Zoom::Out) - 0.5).abs() < f64::EPSILON, "the bottom stays");
+        assert!((next_zoom(1.2, Zoom::In) - 1.25).abs() < f64::EPSILON, "off a step, the next");
+        assert!((next_zoom(2.5, Zoom::Reset) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_find_bar_counts_what_the_page_counted() {
+        assert_eq!(match_status("", Some(false), Some(0)), "", "nothing typed");
+        assert_eq!(match_status("x", None, None), "", "no answer yet");
+        assert_eq!(match_status("x", Some(false), Some(3)), "No matches", "find is the word");
+        assert_eq!(match_status("x", None, Some(0)), "No matches");
+        assert_eq!(match_status("x", Some(true), Some(1)), "1 match");
+        assert_eq!(match_status("x", None, Some(12)), "12 matches");
+        assert_eq!(match_status("x", Some(true), Some(0)), "", "found in a frame it cannot count");
+    }
+
+    #[test]
+    fn a_download_row_says_how_far_it_has_come() {
+        let row = |state| DownloadRow { id: 1, path: "/d/a.zip".into(), state };
+        let receiving = |done, total| row(DownloadState::Receiving { done, total });
+        assert_eq!(receiving(512, 0).status(), "512 B", "no size given: what has come");
+        assert_eq!(receiving(1_048_576, 4_194_304).status(), "25% of 4.0 MB");
+        assert_eq!(row(DownloadState::Saved).status(), "Saved");
+        assert_eq!(row(DownloadState::Failed("No space".into())).status(), "No space");
+        assert_eq!(row(DownloadState::Saved).name(), "a.zip");
     }
 
     #[test]

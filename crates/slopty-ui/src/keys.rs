@@ -212,7 +212,7 @@ mod tests {
         );
         assert_eq!(natural_editing(&chord(true, false, false, "up")), None, "⌘↑ is a prompt step");
         assert_eq!(natural_editing(&chord(true, false, true, "left")), None, "⌘⇧← selects");
-        assert_eq!(natural_editing(&chord(true, true, false, "left")), None, "⌘⌥← walks cards");
+        assert_eq!(natural_editing(&chord(true, true, false, "left")), None, "⌘⌥← walks columns");
         assert_eq!(
             natural_editing(&chord(false, false, false, "left")),
             None,

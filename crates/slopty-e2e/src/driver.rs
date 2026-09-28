@@ -155,13 +155,13 @@ impl Driver {
         self.ok(&Command::KeepDragged { into: into.display().to_string() }).await
     }
 
-    /// Scroll `dx`, `dy` lines at a window point; with `zoom`, ⌘ is held and the canvas zooms.
+    /// Scroll `dx`, `dy` lines at a window point.
     ///
     /// # Errors
     ///
     /// When the socket breaks.
-    pub async fn scroll(&mut self, x: f32, y: f32, dx: f32, dy: f32, zoom: bool) -> Result<()> {
-        self.ok(&Command::Scroll { x, y, dx, dy, zoom }).await
+    pub async fn scroll(&mut self, x: f32, y: f32, dx: f32, dy: f32) -> Result<()> {
+        self.ok(&Command::Scroll { x, y, dx, dy }).await
     }
 
     /// A hardware key press and release at the UIKit boundary (iOS): `keystroke` in GPUI's
@@ -260,26 +260,26 @@ impl Driver {
         self.ok(&Command::UiDeleteBackward).await
     }
 
-    /// Open `count` sessions running `command` on the active canvas.
+    /// Open `count` sessions running `command` in the active workspace.
     ///
     /// # Errors
     ///
-    /// When the socket breaks or there is no canvas.
+    /// When the socket breaks.
     pub async fn open(&mut self, command: &[&str], count: u32) -> Result<()> {
         let command = command.iter().map(|s| (*s).to_owned()).collect();
         self.ok(&Command::Open { command, count }).await
     }
 
-    /// Open a file card for `path` on the worker.
+    /// Open a file tile for `path` on the worker.
     pub async fn open_file(&mut self, path: &str, line: Option<u32>) -> Result<()> {
         self.ok(&Command::OpenFile { path: path.to_owned(), line }).await
     }
 
-    /// Add the worker's first display to the canvas.
+    /// Add the worker's first display to the workspace.
     ///
     /// # Errors
     ///
-    /// When the socket breaks or there is no canvas.
+    /// When the socket breaks.
     pub async fn add_display(&mut self) -> Result<()> {
         self.ok(&Command::AddDisplay).await
     }
@@ -293,12 +293,11 @@ impl Driver {
         self.ok(&Command::FramesReset).await
     }
 
-    /// Bring `session`'s terminal into view, active and holding the keyboard (a phone zooms the
-    /// card up to a live grid, which a click cannot).
+    /// Bring `session`'s terminal into view, active and holding the keyboard.
     ///
     /// # Errors
     ///
-    /// When the socket breaks or there is no canvas.
+    /// When the socket breaks.
     pub async fn reveal(&mut self, session: &str) -> Result<()> {
         self.ok(&Command::Reveal { session: session.to_owned() }).await
     }

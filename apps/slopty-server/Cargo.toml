@@ -22,6 +22,8 @@ anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 slopty-net.workspace = true
+# The machine's name, per platform.
+slopty-platform.workspace = true
 slopty-server.workspace = true
 slopty-settings.workspace = true
 tokio.workspace = true

@@ -1,19 +1,30 @@
 //! The Slopty iOS app.
 //!
 //! A static library linked by the UIKit shell in `app/main.m` (the one Objective-C file in the
-//! tree: `UIApplicationMain` has to be driven from there). The scene delegate calls
-//! `slopty_ios_run` once the window scene is connected; it starts the tokio runtime, registers
-//! the GPUI application callback and runs GPUI embedded in UIKit's run loop. Everything the app
-//! does lives in `slopty-app`, shared with the macOS app.
+//! tree: `UIApplicationMain` has to be driven from there). The app delegate calls
+//! `slopty_ios_did_finish_launching` while the app finishes launching, and the scene delegate
+//! calls `slopty_ios_run` once the window scene is connected; that starts the tokio runtime,
+//! registers the GPUI application callback and runs GPUI embedded in UIKit's run loop.
+//! Everything the app does lives in `slopty-app`, shared with the macOS app.
 
 #![cfg(target_os = "ios")]
 
 use gpui::WindowOptions;
 
+/// Called from the app delegate's `application:didFinishLaunchingWithOptions:`.
+///
+/// It runs before any scene connects: the notification delegate has to be in place by the time
+/// that method returns, or the tap that launched the app is never delivered
+/// (`slopty_platform::notify::install`).
+#[unsafe(no_mangle)]
+pub extern "C" fn slopty_ios_did_finish_launching() {
+    init_logging();
+    slopty_platform::notify::install();
+}
+
 /// Entry point for the UIKit shell. A failure to start is logged; UIKit has no use for it.
 #[unsafe(no_mangle)]
 pub extern "C" fn slopty_ios_run() {
-    init_logging();
     slopty_platform::playback_audio_session();
     // The link's writer, the session pumps and noq's drivers carry every keystroke and echo.
     let runtime = match tokio::runtime::Builder::new_multi_thread()

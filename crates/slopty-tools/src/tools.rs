@@ -16,13 +16,18 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use slopty_core::WindowId;
+use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
-use slopty_proto::orchestration::{ErrorCode, EventFilter, Input, Size, WaitUntil};
+use slopty_proto::orchestration::{ErrorCode, EventFilter, IdempotencyKey, Input, Size, WaitUntil};
+use slopty_proto::screen::CaptureTarget;
 
-use crate::ops::{self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_WAIT_MS, Spec};
+use crate::ops::{
+    self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRIES_PAGE, DEFAULT_MAX_LINES,
+    DEFAULT_WAIT_MS, Spec,
+};
 use crate::resolve::Resolver;
 use crate::view::{self, Encoding};
-use crate::{Dispatch, ToolError};
+use crate::{Dispatch, ToolError, bulk};
 
 /// What the model reads before any tool description.
 pub const INSTRUCTIONS: &str = "\
@@ -32,7 +37,8 @@ lists print it); copy it verbatim into the terminal tools. A `worker` argument t
 name or id. To run a command: send_input text \"cmd\\n\", then wait_for command_done, then \
 read_output from the line you started at. Prefer wait_for (one terminal) and events (the whole \
 fleet: agents needing you, terminals opening and closing, workers coming and going) to polling \
-read_screen or read_output in a loop.";
+read_screen or read_output in a loop. To work with another coding agent, read_conversation (its \
+permission prompts then wait for you) and answer_permission; never type its menu's digits.";
 
 /// How often a `wait_for` with a progress sink reports that it is still waiting.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);
@@ -76,6 +82,10 @@ struct OpenTerminalArgs {
     cols: Option<u16>,
     /// Rows (2-500); with `cols`.
     rows: Option<u16>,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
 }
 
 /// `spawn_agent`.
@@ -98,6 +108,10 @@ struct SpawnAgentArgs {
     cols: Option<u16>,
     /// Rows (2-500); with `cols`.
     rows: Option<u16>,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
 }
 
 /// `resize_terminal`.
@@ -110,6 +124,10 @@ struct ResizeArgs {
     cols: u16,
     /// Rows (2-500).
     rows: u16,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
 }
 
 /// `events`.
@@ -139,6 +157,10 @@ struct SendInputArgs {
     paste: Option<String>,
     /// Named keys pressed in order, each `[mods+]key`.
     keys: Option<Vec<String>>,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
 }
 
 /// A terminal alone.
@@ -147,6 +169,18 @@ struct SendInputArgs {
 struct TermArgs {
     /// The terminal, as the lists print it (`worker/session`).
     term: String,
+}
+
+/// `close_terminal`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CloseArgs {
+    /// The terminal, as the lists print it (`worker/session`).
+    term: String,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
 }
 
 /// `read_output`.
@@ -193,6 +227,10 @@ struct WaitForArgs {
     agent_input: bool,
     /// Give up after this many milliseconds (default 60000; the server caps it at 240000).
     timeout_ms: Option<u32>,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
 }
 
 /// `read_file`.
@@ -238,6 +276,10 @@ struct PathArgs {
 struct ForgetWorkerArgs {
     /// Worker name or id.
     worker: String,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
 }
 
 /// `write_file`.
@@ -253,6 +295,10 @@ struct WriteFileArgs {
     /// `utf8` (the default) for text as it is, `base64` for binary contents.
     #[serde(default)]
     encoding: Encoding,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
 }
 
 /// `open_item`.
@@ -273,6 +319,10 @@ struct OpenItemArgs {
     display: Option<u32>,
     /// A short name for the tile.
     name: Option<String>,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
 }
 
 /// An item alone.
@@ -281,6 +331,10 @@ struct OpenItemArgs {
 struct ItemArgs {
     /// The item, as `list_items` prints it (`worker/item`).
     item: String,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
 }
 
 /// `rename_item`.
@@ -291,6 +345,123 @@ struct RenameItemArgs {
     item: String,
     /// The new name; omitted takes the name away, and the tile says what it shows.
     name: Option<String>,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
+}
+
+/// `read_conversation`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReadConversationArgs {
+    /// The terminal the agent runs in, as the lists print it (`worker/session`).
+    term: String,
+    /// `main` (the default) for the agent's own conversation, or a subagent's id from
+    /// `threads`.
+    thread: Option<String>,
+    /// First entry wanted, by its place in the thread: the `next` of the previous call. The
+    /// last `max` entries when omitted.
+    since: Option<u32>,
+    /// At most this many entries (default 50, at most 500).
+    max: Option<u32>,
+}
+
+/// How a permission prompt is answered.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum VerdictArg {
+    /// Allow this call.
+    Allow,
+    /// Allow it and apply what the prompt's `always` lists.
+    AllowAlways,
+    /// Refuse the call.
+    Deny,
+}
+
+/// `answer_permission`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AnswerPermissionArgs {
+    /// The terminal the agent runs in, as the lists print it (`worker/session`).
+    term: String,
+    /// The prompt's `ask`, from the `held` of `read_conversation`.
+    ask: u64,
+    /// `allow`, `allow_always` or `deny`.
+    verdict: VerdictArg,
+    /// With `deny`: why, for the agent to read.
+    message: Option<String>,
+    /// With `deny`: also stop the agent's turn.
+    #[serde(default)]
+    interrupt: bool,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
+}
+
+impl AnswerPermissionArgs {
+    fn verdict(&self) -> Result<Verdict, ToolError> {
+        match (self.verdict, &self.message, self.interrupt) {
+            (VerdictArg::Allow, None, false) => Ok(Verdict::Allow),
+            (VerdictArg::AllowAlways, None, false) => Ok(Verdict::AllowAlways),
+            (VerdictArg::Deny, message, interrupt) => {
+                Ok(Verdict::Deny { message: message.clone().unwrap_or_default(), interrupt })
+            }
+            _ => Err(ToolError::invalid("message and interrupt go with deny only")),
+        }
+    }
+}
+
+/// `capture_still`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CaptureStillArgs {
+    /// Worker name or id; the only worker online when omitted.
+    worker: Option<String>,
+    /// A window, by its id from `list_windows`.
+    window: Option<u32>,
+    /// A whole display, by its id from `list_windows`.
+    display: Option<u32>,
+}
+
+impl CaptureStillArgs {
+    fn target(&self) -> Result<CaptureTarget, ToolError> {
+        match (self.window, self.display) {
+            (Some(id), None) => Ok(CaptureTarget::Window(WindowId(id))),
+            (None, Some(id)) => Ok(CaptureTarget::Display(id)),
+            _ => Err(ToolError::invalid("give exactly one of window, display")),
+        }
+    }
+}
+
+/// `upload_file`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UploadArgs {
+    /// Worker name or id; the only worker online when omitted.
+    worker: Option<String>,
+    /// The file on the machine this tool runs on, absolute.
+    local: String,
+    /// Where it goes on the worker: absolute, or `~/…`.
+    path: String,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
+}
+
+/// `download_file`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DownloadArgs {
+    /// Worker name or id; the only worker online when omitted.
+    worker: Option<String>,
+    /// The file on the worker: absolute, or `~/…`.
+    path: String,
+    /// Where it goes on the machine this tool runs on, absolute; a directory takes the file
+    /// under its own name.
+    local: String,
 }
 
 impl OpenItemArgs {
@@ -308,6 +479,11 @@ impl OpenItemArgs {
             _ => Err(ToolError::invalid("give exactly one of url, file, note, window, display")),
         }
     }
+}
+
+/// The key a call gave, checked.
+fn checked_key(given: Option<String>) -> Result<Option<IdempotencyKey>, ToolError> {
+    given.map(IdempotencyKey::new).transpose().map_err(|e| ToolError::invalid(e.to_string()))
 }
 
 /// `cols` and `rows` together, or neither.
@@ -491,7 +667,7 @@ pub fn list() -> Vec<Tool> {
              Fails while a client shows the terminal, since its window sets the size then.",
             Kind::Write,
         ),
-        tool::<TermArgs>(
+        tool::<CloseArgs>(
             "close_terminal",
             "Hang up a terminal's program and remove the terminal.",
             Kind::Destroy,
@@ -570,6 +746,49 @@ pub fn list() -> Vec<Tool> {
              (`display` id, width, height, scale, hz).",
             Kind::Read,
         ),
+        tool::<ReadConversationArgs>(
+            "read_conversation",
+            "The conversation of the coding agent in a terminal, as Slopty's conversation face \
+             shows it: `entries` (prompts, answers, thinking, tool calls with their results) \
+             from `start` to `next` of `total`, the other `threads` (subagents), `tasks`, \
+             `meters`, and `held`: the permission prompts waiting for an answer, each with its \
+             `ask`, `tool` and what the call would do. From then on the agent's permission \
+             prompts wait for answer_permission instead of showing in its terminal, as they do \
+             for a person who opened its conversation. Pass `next` back as `since` to read on.",
+            Kind::Read,
+        ),
+        tool::<AnswerPermissionArgs>(
+            "answer_permission",
+            "Answer a permission prompt of the coding agent in a terminal, by its `ask` from \
+             read_conversation's `held`: `allow` this call, `allow_always` (also apply the \
+             prompt's `always` rules, as the agent's own \"don't ask again\" does) or `deny` \
+             (with a `message` for the agent, and `interrupt` to stop its turn). Fails when the \
+             prompt no longer waits: answered, handed back to the terminal, or withdrawn.",
+            Kind::Write,
+        ),
+        tool::<CaptureStillArgs>(
+            "capture_still",
+            "One still picture of a window or a whole display on a worker, by its id from \
+             list_windows, as a PNG image (halved until it fits a reply), with its `width` and \
+             `height`. A worker that may not record its screen answers Unsupported.",
+            Kind::Read,
+        ),
+        tool::<UploadArgs>(
+            "upload_file",
+            "Send a file of any size from the machine this tool runs on (`local`) to `path` on \
+             a worker, in parts, replacing what is there only once every part has arrived and \
+             adds up. A new file keeps the local file's mode. Only where the tool runs on your \
+             machine (`slopty mcp`); the server's endpoint answers Unsupported.",
+            Kind::Destroy,
+        ),
+        tool::<DownloadArgs>(
+            "download_file",
+            "Bring a file of any size from `path` on a worker to `local` on the machine this \
+             tool runs on, in parts; refused when the file changes while it is read. Only where \
+             the tool runs on your machine (`slopty mcp`); the server's endpoint answers \
+             Unsupported.",
+            Kind::Destroy,
+        ),
         tool::<ForgetWorkerArgs>(
             "forget_worker",
             "Remove a worker that is not online (unreachable or gone) from the server's list, \
@@ -601,10 +820,44 @@ pub async fn call<D: Dispatch>(
     if get(name).is_none() {
         return Err(ErrorData::invalid_params(format!("no tool is called {name}"), None));
     }
-    Ok(match run(dispatch, name, arguments, progress).await {
-        Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
+    let answered = if name == "capture_still" {
+        capture(dispatch, arguments).await
+    } else {
+        run(dispatch, name, arguments, progress)
+            .await
+            .map(|value| vec![ContentBlock::text(value.to_string())])
+    };
+    Ok(match answered {
+        Ok(content) => CallToolResult::success(content),
         Err(e) => CallToolResult::error(vec![ContentBlock::text(e.to_string())]),
     })
+}
+
+/// `capture_still`: the picture as an image, after its size as JSON.
+async fn capture<D: Dispatch>(
+    dispatch: &D,
+    arguments: Map<String, Value>,
+) -> Result<Vec<ContentBlock>, ToolError> {
+    let a: CaptureStillArgs = args(arguments)?;
+    let target = a.target()?;
+    let still =
+        ops::capture_still(&mut Resolver::new(dispatch), a.worker.as_deref(), target).await?;
+    let size = json(&view::still(None, still.width, still.height, still.png.len()))?;
+    let image = data_encoding::BASE64.encode(&still.png);
+    Ok(vec![ContentBlock::text(size.to_string()), ContentBlock::image(image, "image/png")])
+}
+
+/// Refused where the tool does not run on the caller's machine.
+fn here<D: Dispatch>(dispatch: &D) -> Result<(), ToolError> {
+    if dispatch.local_files() {
+        Ok(())
+    } else {
+        Err(ToolError::new(
+            ErrorCode::Unsupported,
+            "this endpoint runs on the server, not on your machine, so it cannot reach your \
+             files; run `slopty mcp` where they are, or `slopty push` and `slopty pull`",
+        ))
+    }
 }
 
 fn args<T: DeserializeOwned>(arguments: Map<String, Value>) -> Result<T, ToolError> {
@@ -640,7 +893,8 @@ async fn run<D: Dispatch>(
             let env = a.env.into_iter().collect();
             let size = size(a.cols, a.rows)?;
             let spec = Spec { cwd: a.cwd, command: a.command, env, name: a.name, size };
-            json(&view::opened(ops::open(&mut res, a.worker.as_deref(), spec).await?))
+            let key = checked_key(a.idempotency_key)?;
+            json(&view::opened(ops::open(&mut res, a.worker.as_deref(), spec, key).await?))
         }
         "spawn_agent" => {
             let a: SpawnAgentArgs = args(arguments)?;
@@ -651,11 +905,14 @@ async fn run<D: Dispatch>(
                 env: a.env.into_iter().collect(),
                 size: size(a.cols, a.rows)?,
             };
-            json(&view::opened(ops::spawn_agent(&mut res, a.worker.as_deref(), spec).await?))
+            let key = checked_key(a.idempotency_key)?;
+            let term = ops::spawn_agent(&mut res, a.worker.as_deref(), spec, key).await?;
+            json(&view::opened(term))
         }
         "resize_terminal" => {
             let a: ResizeArgs = args(arguments)?;
-            ops::resize(&mut res, &a.term, Size { cols: a.cols, rows: a.rows }).await?;
+            let size = Size { cols: a.cols, rows: a.rows };
+            ops::resize(&mut res, &a.term, size, checked_key(a.idempotency_key)?).await?;
             json(&view::DONE)
         }
         "events" => {
@@ -667,9 +924,9 @@ async fn run<D: Dispatch>(
             json(&view::events(&page.await?))
         }
         "send_input" => {
-            let a: SendInputArgs = args(arguments)?;
-            let term = a.term.clone();
-            ops::send(&mut res, &term, a.input()?).await?;
+            let mut a: SendInputArgs = args(arguments)?;
+            let (term, key) = (a.term.clone(), checked_key(a.idempotency_key.take())?);
+            ops::send(&mut res, &term, a.input()?, key).await?;
             json(&view::DONE)
         }
         "read_screen" => {
@@ -691,7 +948,7 @@ async fn run<D: Dispatch>(
             let until = a.until()?;
             let term = res.term(&a.term).await?;
             let timeout = a.timeout_ms.unwrap_or(DEFAULT_WAIT_MS);
-            let wait = ops::wait(dispatch, term, until, timeout);
+            let wait = ops::wait(dispatch, term, until, timeout, checked_key(a.idempotency_key)?);
             json(&view::waited(&with_progress(wait, progress).await?))
         }
         "agent_status" => {
@@ -699,8 +956,8 @@ async fn run<D: Dispatch>(
             json(&view::agent(ops::agent_status(&mut res, &a.term).await?.as_ref()))
         }
         "close_terminal" => {
-            let a: TermArgs = args(arguments)?;
-            ops::close(&mut res, &a.term).await?;
+            let a: CloseArgs = args(arguments)?;
+            ops::close(&mut res, &a.term, checked_key(a.idempotency_key)?).await?;
             json(&view::DONE)
         }
         "read_file" => {
@@ -716,7 +973,8 @@ async fn run<D: Dispatch>(
                 .encoding
                 .decode(a.content)
                 .map_err(|e| ToolError::invalid(format!("content is not base64: {e}")))?;
-            ops::write_file(&mut res, a.worker.as_deref(), a.path, bytes).await?;
+            let key = checked_key(a.idempotency_key)?;
+            ops::write_file(&mut res, a.worker.as_deref(), a.path, bytes, key).await?;
             json(&view::DONE)
         }
         "list_ports" => {
@@ -738,7 +996,7 @@ async fn run<D: Dispatch>(
         }
         "forget_worker" => {
             let a: ForgetWorkerArgs = args(arguments)?;
-            ops::forget_worker(&mut res, &a.worker).await?;
+            ops::forget_worker(&mut res, &a.worker, checked_key(a.idempotency_key)?).await?;
             json(&view::DONE)
         }
         "list_items" => {
@@ -747,31 +1005,61 @@ async fn run<D: Dispatch>(
             json(&view::items(worker, &items))
         }
         "open_item" => {
-            let a: OpenItemArgs = args(arguments)?;
-            let worker = a.worker.clone();
+            let mut a: OpenItemArgs = args(arguments)?;
+            let (worker, key) = (a.worker.clone(), checked_key(a.idempotency_key.take())?);
             let (kind, name) = a.kind()?;
-            let item = ops::open_item(&mut res, worker.as_deref(), kind, name).await?;
+            let item = ops::open_item(&mut res, worker.as_deref(), kind, name, key).await?;
             json(&view::opened_item(item))
         }
         "rename_item" => {
             let a: RenameItemArgs = args(arguments)?;
-            ops::rename_item(&mut res, &a.item, a.name).await?;
+            ops::rename_item(&mut res, &a.item, a.name, checked_key(a.idempotency_key)?).await?;
             json(&view::DONE)
         }
         "remove_item" => {
             let a: ItemArgs = args(arguments)?;
-            ops::remove_item(&mut res, &a.item).await?;
+            ops::remove_item(&mut res, &a.item, checked_key(a.idempotency_key)?).await?;
             json(&view::DONE)
         }
         "point_at" => {
             let a: ItemArgs = args(arguments)?;
-            ops::point_at(&mut res, &a.item).await?;
+            ops::point_at(&mut res, &a.item, checked_key(a.idempotency_key)?).await?;
             json(&view::DONE)
         }
         "list_windows" => {
             let a: WorkerArgs = args(arguments)?;
             let (_worker, windows, displays) = ops::windows(&mut res, a.worker.as_deref()).await?;
             json(&view::screens(&windows, &displays))
+        }
+        "read_conversation" => {
+            let a: ReadConversationArgs = args(arguments)?;
+            let thread = view::thread_named(a.thread.as_deref());
+            let max = a.max.unwrap_or(DEFAULT_MAX_ENTRIES_PAGE);
+            let (term, page) =
+                ops::read_conversation(&mut res, &a.term, thread, a.since, max).await?;
+            json(&view::conversation(term, &page))
+        }
+        "answer_permission" => {
+            let a: AnswerPermissionArgs = args(arguments)?;
+            let verdict = a.verdict()?;
+            let key = checked_key(a.idempotency_key)?;
+            ops::answer_permission(&mut res, &a.term, a.ask, verdict, key).await?;
+            json(&view::DONE)
+        }
+        "upload_file" => {
+            here(dispatch)?;
+            let a: UploadArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key)?;
+            let local = std::path::Path::new(&a.local);
+            let moved = bulk::upload(&mut res, a.worker.as_deref(), local, a.path, key).await?;
+            json(&view::moved(&moved))
+        }
+        "download_file" => {
+            here(dispatch)?;
+            let a: DownloadArgs = args(arguments)?;
+            let local = std::path::Path::new(&a.local);
+            let moved = bulk::download(&mut res, a.worker.as_deref(), a.path, local).await?;
+            json(&view::moved(&moved))
         }
         other => Err(ToolError::invalid(format!("no tool is called {other}"))),
     }
@@ -798,8 +1086,11 @@ mod tests {
     use parking_lot::Mutex;
     use serde_json::json;
     use slopty_core::{ItemId, SessionId, WorkerId};
+    use slopty_proto::conversation::{Clipped, PermissionPrompt, ThreadId, ToolDetail};
     use slopty_proto::items::Item;
-    use slopty_proto::orchestration::{ItemRef, Outcome, TermRef, Verb, Waited};
+    use slopty_proto::orchestration::{
+        ConversationPage, ItemRef, Outcome, TermRef, ThreadInfo, Verb, Waited,
+    };
     use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
 
@@ -817,10 +1108,14 @@ mod tests {
         "0199a1b1-c3d4-7000-8000-00000000abcd".parse().unwrap()
     }
 
-    /// One online worker with one shell; records every verb; a wait takes 25 s.
+    /// One online worker with one shell; records every verb and the keys that came with them;
+    /// a wait takes 25 s.
     #[derive(Default)]
     struct Fake {
         verbs: Mutex<Vec<Verb>>,
+        keys: Mutex<Vec<Option<IdempotencyKey>>>,
+        /// Runs on another machine than its caller, as the server's endpoint does.
+        elsewhere: bool,
     }
 
     impl Fake {
@@ -830,8 +1125,9 @@ mod tests {
     }
 
     impl Dispatch for Fake {
-        async fn call(&self, verb: Verb) -> Outcome {
+        async fn send(&self, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
             self.verbs.lock().push(verb.clone());
+            self.keys.lock().push(key);
             match verb {
                 Verb::ListWorkers => Outcome::Workers(vec![WorkerInfo {
                     worker: studio(),
@@ -893,8 +1189,38 @@ mod tests {
                     sleeping: false,
                     name: None,
                 }]),
+                Verb::ReadConversation { thread, .. } => {
+                    let text = Clipped { text: "{}".to_owned(), lines: 1, chars: 2, full: None };
+                    Outcome::Conversation(Box::new(ConversationPage {
+                        threads: vec![ThreadInfo { id: ThreadId::Main, origin: None, entries: 0 }],
+                        thread,
+                        entries: Vec::new(),
+                        start: 0,
+                        next: 0,
+                        total: 0,
+                        tasks: Vec::new(),
+                        meters: None,
+                        held: vec![PermissionPrompt {
+                            session: shell(),
+                            ask: 3,
+                            tool: "Bash".to_owned(),
+                            detail: ToolDetail::Other { input: text },
+                            suggestions: Vec::new(),
+                            mode: None,
+                            asked_ms: 0,
+                            until_ms: 0,
+                        }],
+                    }))
+                }
+                Verb::CaptureStill { .. } => {
+                    Outcome::Still { png: b"\x89PNG".to_vec(), width: 640, height: 400 }
+                }
                 _ => Outcome::Done,
             }
+        }
+
+        fn local_files(&self) -> bool {
+            !self.elsewhere
         }
     }
 
@@ -936,6 +1262,11 @@ mod tests {
                 "remove_item",
                 "point_at",
                 "list_windows",
+                "read_conversation",
+                "answer_permission",
+                "capture_still",
+                "upload_file",
+                "download_file",
                 "forget_worker",
             ]
         );
@@ -1056,6 +1387,22 @@ mod tests {
         assert!(failed && text.contains("not base64"), "{text}");
     }
 
+    /// A key given to a tool that changes something goes with its verb; a malformed one is the
+    /// model's to fix.
+    #[tokio::test]
+    async fn an_idempotency_key_goes_with_its_verb() {
+        let fake = Fake::default();
+        let term = format!("{}/{}", studio(), shell());
+        let args = json!({ "term": term, "text": "make\n", "idempotency_key": "step-3" });
+        let (failed, text) = call_json(&fake, "send_input", args).await;
+        assert!(!failed, "{text}");
+        let sent = fake.keys.lock().last().cloned().flatten();
+        assert_eq!(sent, Some(IdempotencyKey::new("step-3").unwrap()));
+        let args = json!({ "term": term, "idempotency_key": "two words" });
+        let (failed, text) = call_json(&fake, "close_terminal", args).await;
+        assert!(failed && text.contains("idempotency key"), "{text}");
+    }
+
     /// The new verbs' arguments reach the wire as they were given: a size together or not at
     /// all, a range, the agent filter, the agent's arguments.
     #[tokio::test]
@@ -1153,5 +1500,66 @@ mod tests {
         let (failed, text) = call_json(&fake, "rename_item", json!({ "item": "0199a1b1" })).await;
         assert!(!failed, "{text}");
         assert_eq!(fake.verbs().pop(), Some(Verb::RenameItem { item, name: None }));
+    }
+
+    /// A conversation is read from a thread and page, and its waiting prompt answered by its
+    /// `ask` under a key; a verdict's message goes with deny only.
+    #[tokio::test]
+    async fn a_conversation_is_read_and_its_prompt_answered() {
+        let fake = Fake::default();
+        let term = format!("{}/{}", studio(), shell());
+        let t = TermRef { worker: studio(), session: shell() };
+        let read = json!({ "term": term, "thread": "a1", "since": 4 });
+        let (failed, text) = call_json(&fake, "read_conversation", read).await;
+        assert!(!failed, "{text}");
+        let page: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            (page["thread"].clone(), page["held"][0]["ask"].clone()),
+            (json!("a1"), json!(3))
+        );
+        let thread = ThreadId::Agent("a1".to_owned());
+        let asked = Verb::ReadConversation { term: t, thread, since: Some(4), max: 50 };
+        assert_eq!(fake.verbs().pop(), Some(asked));
+
+        let deny = json!({
+            "term": term, "ask": 3, "verdict": "deny", "message": "not on main",
+            "idempotency_key": "answer-3",
+        });
+        let (failed, text) = call_json(&fake, "answer_permission", deny).await;
+        assert!(!failed, "{text}");
+        let verdict = Verdict::Deny { message: "not on main".to_owned(), interrupt: false };
+        assert_eq!(fake.verbs().pop(), Some(Verb::AnswerPermission { term: t, ask: 3, verdict }));
+        let keyed = fake.keys.lock().last().cloned().flatten();
+        assert_eq!(keyed, Some(IdempotencyKey::new("answer-3").unwrap()));
+        let bad = json!({ "term": term, "ask": 3, "verdict": "allow", "message": "x" });
+        let (failed, text) = call_json(&fake, "answer_permission", bad).await;
+        assert!(failed && text.contains("deny only"), "{text}");
+    }
+
+    /// A still comes back as an image after its size; the endpoint that runs elsewhere than
+    /// its caller refuses to move the caller's files.
+    #[tokio::test]
+    async fn a_still_is_an_image_and_files_move_only_where_they_are() {
+        let fake = Fake::default();
+        let Value::Object(args) = json!({ "window": 42 }) else { panic!() };
+        let result = call(&fake, "capture_still", args, None).await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let size: Value = serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(size, json!({ "width": 640, "height": 400, "bytes": 4, "format": "png" }));
+        let image = result.content[1].as_image().unwrap();
+        assert_eq!((image.mime_type.as_str(), image.data.as_str()), ("image/png", "iVBORw=="));
+        let target = CaptureTarget::Window(WindowId(42));
+        assert_eq!(fake.verbs().pop(), Some(Verb::CaptureStill { worker: studio(), target }));
+        let (failed, text) = call_json(&fake, "capture_still", json!({})).await;
+        assert!(failed && text.contains("exactly one"), "{text}");
+
+        let server = Fake { elsewhere: true, ..Fake::default() };
+        let up = json!({ "local": "/tmp/x", "path": "/w/x" });
+        let (failed, text) = call_json(&server, "upload_file", up).await;
+        assert!(failed && text.contains("(Unsupported)"), "{text}");
+        let down = json!({ "path": "/w/x", "local": "/tmp/x" });
+        let (failed, text) = call_json(&server, "download_file", down).await;
+        assert!(failed && text.contains("(Unsupported)"), "{text}");
+        assert!(server.verbs().is_empty(), "nothing was sent");
     }
 }

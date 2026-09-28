@@ -4,12 +4,16 @@
 //! `<id>/subagents/agent-<agent id>.jsonl` beside it. [`Transcripts`] reads the main file first
 //! and then every subagent file it finds there or is told of (the hooks name each subagent's
 //! file as it stops), feeding one [`Conversation`], so a follower gets one stream of
-//! [`Change`]s for all the threads.
+//! [`Change`]s for all the threads. Beside them it tails the files background commands write
+//! ([`Outputs`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::{Change, Conversation, TextRef, ThreadId, full_text_at, thread_of};
+use super::output::{self, Outputs};
+use super::{
+    Change, Conversation, Output, Part, TextRef, ThreadId, full_text_at, image_bytes, thread_of,
+};
 use crate::transcript::Tail;
 
 /// Where Claude Code writes the subagents of the session whose transcript is `main`.
@@ -26,6 +30,8 @@ pub struct Transcripts {
     main: Option<(PathBuf, Tail)>,
     /// Each subagent file, and how far.
     subagents: BTreeMap<PathBuf, Tail>,
+    /// The background commands' output, as far as it was sent.
+    outputs: Outputs,
 }
 
 impl Transcripts {
@@ -47,8 +53,10 @@ impl Transcripts {
             && let Ok(read) = self.conversation.read(tail, path)
         {
             if read.iter().any(|change| matches!(change, Change::Reset { thread: None })) {
-                // The decoder dropped every thread: the subagents' files are read again too.
+                // The decoder dropped every thread: the subagents' files are read again too,
+                // and every output is sent again.
                 self.subagents.values_mut().for_each(|tail| *tail = Tail::default());
+                self.outputs = Outputs::default();
             }
             changes.extend(read);
         }
@@ -68,6 +76,12 @@ impl Transcripts {
         changes
     }
 
+    /// What the background commands printed since the last call: each changed tail, every
+    /// one after the conversation started over.
+    pub fn outputs(&mut self) -> Vec<Output> {
+        self.outputs.read(&self.conversation)
+    }
+
     /// The conversation as read so far.
     #[must_use]
     pub const fn conversation(&self) -> &Conversation {
@@ -77,10 +91,29 @@ impl Transcripts {
     /// The whole of a clipped text of `thread`: from the subagent's own file, else from the
     /// main one (older versions wrote subagents there). `None` when neither has it.
     #[must_use]
+    /// A background command's output is read from the end of its file, up to
+    /// [`output::WHOLE`].
     pub fn full_text(&self, thread: &ThreadId, reference: &TextRef) -> Option<String> {
-        let own = self.subagents.keys().filter(|path| thread_of(path) == *thread);
-        let main = self.main.iter().map(|(path, _tail)| path);
-        own.chain(main).find_map(|path| full_text_at(path, reference).ok().flatten())
+        if let Part::Output { tool_use_id } = &reference.part {
+            let file = output::file_of(&self.conversation, thread, tool_use_id)?;
+            return output::read_end(file, output::WHOLE).ok();
+        }
+        self.files(thread).find_map(|path| full_text_at(path, reference).ok().flatten())
+    }
+
+    /// The bytes of the picture `reference` names in `thread`; `None` when neither file has
+    /// it, or it is too large to send.
+    pub fn image(&self, thread: &ThreadId, reference: &TextRef) -> Option<Vec<u8>> {
+        self.files(thread).find_map(|path| {
+            let jsonl = std::fs::read_to_string(path).ok()?;
+            image_bytes(&jsonl, reference)
+        })
+    }
+
+    /// The files `thread`'s records can be in: a subagent's own, then the main one.
+    fn files(&self, thread: &ThreadId) -> impl Iterator<Item = &PathBuf> {
+        let own = self.subagents.keys().filter(move |path| thread_of(path) == *thread);
+        own.chain(self.main.iter().map(|(path, _tail)| path))
     }
 }
 
@@ -188,6 +221,63 @@ mod tests {
             ids(&transcripts.read(&main, &[])),
             ["reset None", "Main w1", "Agent(\"a1\") s1:0"]
         );
+    }
+
+    /// A follower's reads bring a background command's output as it grows, and asked for, its
+    /// whole output and a picture's bytes come from where they are.
+    #[test]
+    fn outputs_and_pictures_are_found_for_a_follower() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("s1.jsonl");
+        let tasks = dir.path().join("tasks");
+        std::fs::create_dir_all(&tasks).expect("mkdir");
+        let out = tasks.join("b1.output");
+        let bytes = b"GIF89a\x02\x00\x03\x00".to_vec();
+        let data = data_encoding::BASE64.encode(&bytes);
+        let records = [
+            serde_json::json!({
+                "type": "user", "uuid": "u1", "message": { "content": [
+                    { "type": "image", "source": {
+                        "type": "base64", "media_type": "image/gif", "data": data } },
+                    { "type": "text", "text": "run it" },
+                ]},
+            }),
+            serde_json::json!({
+                "type": "assistant", "uuid": "a1", "message": { "content": [{
+                    "type": "tool_use", "id": "t1", "name": "Bash",
+                    "input": { "command": "make", "run_in_background": true } }] },
+            }),
+            serde_json::json!({
+                "type": "user", "uuid": "r1", "message": { "content": [{
+                    "type": "tool_result", "tool_use_id": "t1",
+                    "content": format!("Output is being written to: {}.", out.display()) }] },
+                "toolUseResult": { "backgroundTaskId": "b1" },
+            }),
+        ];
+        append(
+            &main,
+            &records.iter().map(|r| [r.to_string(), "\n".to_owned()].concat()).collect::<String>(),
+        );
+        append(&out, "cc -c a.c\n");
+        let mut transcripts = Transcripts::default();
+        transcripts.read(&main, &[]);
+        let outputs = transcripts.outputs();
+        assert_eq!(outputs.iter().map(|o| o.tail.text.as_str()).collect::<Vec<_>>(), ["cc -c a.c"]);
+        assert!(transcripts.outputs().is_empty(), "nothing new");
+        append(&out, "cc -c b.c\n");
+        let reference = TextRef {
+            record: "t1".to_owned(),
+            part: Part::Output { tool_use_id: "t1".to_owned() },
+        };
+        assert_eq!(
+            transcripts.full_text(&ThreadId::Main, &reference).as_deref(),
+            Some("cc -c a.c\ncc -c b.c\n")
+        );
+        let picture =
+            TextRef { record: "u1".to_owned(), part: Part::Image { tool_use_id: None, index: 0 } };
+        assert_eq!(transcripts.image(&ThreadId::Main, &picture), Some(bytes));
+        let missing = TextRef { record: "u9".to_owned(), part: picture.part };
+        assert_eq!(transcripts.image(&ThreadId::Main, &missing), None);
     }
 
     /// A clipped subagent text is found in the subagent's own file.

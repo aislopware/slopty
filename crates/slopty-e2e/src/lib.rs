@@ -37,6 +37,14 @@ pub const SOCKET_ENV: &str = "SLOPTY_TEST_SOCKET";
 /// there and never what the machine's real tailnet answers.
 pub const TAILNET_STATUS_ENV: &str = "SLOPTY_TAILNET_STATUS";
 
+/// Environment variable holding a worker's `doctor` report (`slopty_proto::ctl::Health` as
+/// JSON) for the e2e build's app on a Mac.
+///
+/// With it set, "Use this Mac as a worker" runs against a stand-in that installs nothing,
+/// answers with this report and adds nothing, so the checklist can be drawn in any state.
+/// Without it the self-test offers no such entry.
+pub const THIS_MAC_ENV: &str = "SLOPTY_THIS_MAC";
+
 /// A pointer button, as the driver names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -143,12 +151,9 @@ pub enum Command {
         dx: f32,
         /// Vertical lines (positive scrolls the content down, GPUI convention).
         dy: f32,
-        /// Hold ⌘ (the platform modifier): on the canvas that zooms instead of panning.
-        #[serde(default)]
-        zoom: bool,
     },
-    /// Open `count` sessions running `command` (the login shell when empty) on the active
-    /// canvas, as ⌘N does; the worker places them. Load for the frame-time scenarios without
+    /// Open `count` sessions running `command` (the login shell when empty) in the active
+    /// workspace, as ⌘N does. Load for the frame-time scenarios without
     /// typing anything into a shell.
     Open {
         /// Program and arguments.
@@ -158,7 +163,7 @@ pub enum Command {
         #[serde(default = "one")]
         count: u32,
     },
-    /// Open a file card for `path` on the worker, as "view" on a tool call does, landing on
+    /// Open a file tile for `path` on the worker, as "view" on a tool call does, landing on
     /// `line` when given.
     OpenFile {
         /// Absolute path on the worker.
@@ -185,13 +190,12 @@ pub enum Command {
     /// Start a fresh frame-time measurement window ([`FrameInfo`] in the next dumps).
     FramesReset,
     /// Bring a session's terminal into view, make it active and give it the keyboard, as
-    /// tapping a waiting badge does. On a phone this zooms the card up to a live grid (clamped
-    /// to `CARD_ZOOM`), which a plain click cannot, so the soft keyboard can route to it.
+    /// tapping a waiting badge does, so the soft keyboard can route to it.
     Reveal {
         /// The session id (`terminal:<id>` without the prefix), as the dump reports it.
         session: String,
     },
-    /// Add the worker's first display to the active canvas, as picking it would (the worker
+    /// Add the worker's first display to the active workspace, as picking it would (the worker
     /// needs Screen Recording permission; the stream opens when the item lands).
     AddDisplay,
     /// Put a window of the worker in the strip, as picking it in the ⌘O picker does. The id
@@ -205,9 +209,8 @@ pub enum Command {
     },
     /// Drive the app's system-notification response path with `tag` (a session UUID),
     /// exactly as `cx.on_system_notification_response` would when the user activates an
-    /// agent banner: find the worker whose canvas holds the session, switch to it, then reveal
-    /// the session. System notifications are disabled outside a bundle, so this is the only
-    /// way to test the path.
+    /// agent banner: reveal the session in whichever workspace holds its tile. System
+    /// notifications are disabled outside a bundle, so this is the only way to test the path.
     NotificationResponse {
         /// The banner's tag, which is the session UUID.
         tag: String,
@@ -265,7 +268,7 @@ pub enum Command {
     },
     /// The text system's `deleteBackward` on the text input view (iOS only).
     UiDeleteBackward,
-    /// Everything the chrome and the canvas know, as data.
+    /// Everything the chrome and the workspace know, as data.
     Dump,
     /// Render the current frame with the app's own renderer to a PNG at `path`.
     Render {
@@ -604,7 +607,7 @@ pub struct ItemInfo {
     /// A note's text, as the document holds it.
     #[serde(default)]
     pub note: Option<String>,
-    /// A file card's path and what it shows.
+    /// A file tile's path and what it shows.
     #[serde(default)]
     pub file: Option<FileItemInfo>,
     /// A browser tile's page, read from the web view itself.
@@ -637,7 +640,7 @@ pub struct BrowserItemInfo {
 pub struct FileItemInfo {
     /// Absolute path on the worker.
     pub path: String,
-    /// The card's one-line summary ("12 lines", "missing: …", "reading…").
+    /// The tile's one-line summary ("12 lines", "missing: …", "reading…").
     pub summary: String,
     /// Lines drawn.
     pub lines: usize,
@@ -832,7 +835,7 @@ pub struct FaceInfo {
 /// saw, a paint that showed the picture already up).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct ScreenInfo {
-    /// Canvas item id.
+    /// Item id.
     pub item: String,
     /// Stream id.
     pub stream: u32,

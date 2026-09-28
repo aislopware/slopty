@@ -1,7 +1,7 @@
 //! The client's installation id and the workers it has added, as `workers.json` in its data dir.
 //!
 //! A worker is keyed by its [`WorkerId`] (from `HelloAck`), never by its address: the address
-//! is only where it was last reached, and a worker that moves keeps its canvas and its row.
+//! is only where it was last reached, and a worker that moves keeps its tiles and its row.
 
 use std::path::{Path, PathBuf};
 
@@ -129,9 +129,7 @@ impl KnownWorkers {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(store)?;
         }
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json).map_err(store)?;
-        std::fs::rename(&tmp, &self.path).map_err(store)
+        slopty_platform::fs::replace(&self.path, &json).map_err(store)
     }
 }
 

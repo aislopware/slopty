@@ -551,12 +551,12 @@ fn apply(
             );
             Reply::Ok
         }
-        Command::Scroll { x, y, dx, dy, zoom } => {
+        Command::Scroll { x, y, dx, dy } => {
             let _scrolled = window.dispatch_event(
                 PlatformInput::ScrollWheel(ScrollWheelEvent {
                     position: point(px(x), px(y)),
                     delta: ScrollDelta::Lines(point(dx, dy)),
-                    modifiers: Modifiers { platform: zoom, ..Modifiers::default() },
+                    modifiers: Modifiers::default(),
                     touch_phase: TouchPhase::Moved,
                 }),
                 cx,
@@ -619,12 +619,11 @@ fn apply(
             Reply::Ok
         }
         Command::NotificationResponse { tag } => {
-            let Ok(session) = tag.parse::<SessionId>() else {
+            if tag.parse::<SessionId>().is_err() {
                 return Reply::Error { message: format!("not a session id: {tag}") };
-            };
-            workspace.update(cx, |ws, cx| {
-                ws.notification_response(session, window, cx);
-            });
+            }
+            let tap = slopty_platform::notify::Tap { id: tag, ..Default::default() };
+            workspace.update(cx, |ws, cx| ws.open_notification(&tap, cx));
             Reply::Ok
         }
         Command::Resize { width, height } => {
@@ -881,6 +880,7 @@ impl Workspace {
                 ItemKind::Display { .. } => ("display", None),
                 ItemKind::Note { .. } => ("note", None),
                 ItemKind::File { .. } => ("file", None),
+                ItemKind::Folder { .. } => ("folder", None),
                 ItemKind::Browser { .. } => ("browser", None),
             };
             let note = match &item.kind {
@@ -963,6 +963,9 @@ impl Workspace {
             }
             if view.file(item.id).is_some_and(|f| f.read(cx).focused(window, cx)) {
                 focused = format!("file:{}", item.id);
+            }
+            if view.folder(item.id).is_some_and(|f| f.read(cx).focused(window)) {
+                focused = format!("folder:{}", item.id);
             }
             if view.browser(item.id).is_some_and(|b| b.read(cx).focused()) {
                 focused = format!("browser:{}", item.id);

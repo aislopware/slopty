@@ -11,6 +11,7 @@ description = "Slopty orchestration tools: one contract for the verbs (names, ha
 workspace = true
 
 [dependencies]
+blake3.workspace = true
 data-encoding.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
@@ -20,8 +21,10 @@ slopty-core.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 insta = { workspace = true, features = [ "json" ] }
 parking_lot.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = [ "test-util" ] }

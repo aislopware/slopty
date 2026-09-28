@@ -55,11 +55,16 @@ mod tests {
 
     /// Open a quiet bash (no profile, no rc; the shell integration still marks its commands).
     async fn open_bash(stack: &ServerStack, name: &str) -> Result<String> {
+        open_bash_keyed(stack, name, &[]).await
+    }
+
+    /// [`open_bash`] with more arguments before the command.
+    async fn open_bash_keyed(stack: &ServerStack, name: &str, more: &[&str]) -> Result<String> {
         let cwd = stack.dir.path().to_string_lossy().into_owned();
         let worker = stack.worker.name();
-        let args = ["open", "--worker", worker, "--cwd", &cwd, "--name", name, "--"];
-        let bash = ["/bin/bash", "--noprofile", "--norc", "-i"];
-        let opened = stack.slopty(&[&args[..], &bash[..]].concat()).await?;
+        let args = ["open", "--worker", worker, "--cwd", &cwd, "--name", name];
+        let bash = ["--", "/bin/bash", "--noprofile", "--norc", "-i"];
+        let opened = stack.slopty(&[&args[..], more, &bash[..]].concat()).await?;
         Ok(str_of(&opened, "term")?.to_owned())
     }
 
@@ -165,6 +170,24 @@ mod tests {
         );
         clock.lap("open, send, wait, read");
 
+        // 2b. An open sent again under its idempotency key, as a caller whose answer was lost
+        //     sends it, answers the first terminal and opens no second.
+        let count = async || -> Result<usize> {
+            Ok(stack.slopty(&["terminals"]).await?.as_array().context("terminals")?.len())
+        };
+        let before = count().await?;
+        let key = ["--idempotency-key", "e2e-open-once"];
+        let once = open_bash_keyed(stack, "e2e once", &key).await?;
+        let again = open_bash_keyed(stack, "e2e once", &key).await?;
+        ensure!(once == again, "the same terminal: {once} and {again}");
+        let opened = count().await?.saturating_sub(before);
+        ensure!(opened == 1, "one terminal opened, not {opened}");
+        let other = open_bash_keyed(stack, "e2e twice", &key).await;
+        ensure!(other.is_err(), "the key with other arguments is refused: {other:?}");
+        let closed = stack.slopty(&["close", &once]).await?;
+        ensure!(closed == json!({ "ok": true }), "{closed}");
+        clock.lap("open once under a key");
+
         // 3. Files both ways, text and binary.
         let worker = stack.worker.name().to_owned();
         let text_path = stack.path("note.txt").to_string_lossy().into_owned();
@@ -201,6 +224,11 @@ mod tests {
         let stat = stack.slopty(&["stat", "--worker", &worker, &bin_path]).await?;
         ensure!(stat["exists"] == true && stat["size"] == binary.len(), "{stat}");
         clock.lap("put, cat, ls, stat");
+
+        // 3b. A file past one reply goes up and comes down in parts; the server's MCP endpoint,
+        //     which runs on another machine than its caller, refuses to move the caller's files.
+        bulk(stack, &worker).await?;
+        clock.lap("push, pull past 8 MiB");
 
         // 4. A listener started in the terminal is found in it.
         let port = {
@@ -242,12 +270,17 @@ mod tests {
         let bash = ["/bin/bash", "--noprofile", "--norc", "-i"];
         let open = json!({
             "worker": worker, "cwd": cwd, "command": bash, "cols": 100, "rows": 30,
+            "idempotency_key": "e2e-mcp-open",
         });
-        let sized = tool(stack, 11, "open_terminal", open).await?;
+        let sized = tool(stack, 11, "open_terminal", open.clone()).await?;
         let sized = str_of(&sized, "term")?.to_owned();
+        let repeated = tool(stack, 18, "open_terminal", open).await?;
+        ensure!(repeated["term"] == sized.as_str(), "the same terminal: {repeated}");
         let since = json!({ "since": cursor["next"], "timeout_ms": 10_000 });
         let heard = tool(stack, 12, "events", since).await?;
         let opened = heard["events"].as_array().context("events")?;
+        let opens = opened.iter().filter(|e| e["kind"] == "session_opened").count();
+        ensure!(opens == 1, "one terminal opened, not {opens}: {heard}");
         ensure!(
             opened.iter().any(|e| e["kind"] == "session_opened" && e["term"] == sized.as_str()),
             "{heard}"
@@ -277,6 +310,12 @@ mod tests {
         let refused = stack.mcp(17, "tools/call", params).await?;
         ensure!(refused["result"]["isError"] == json!(true), "an online worker stays: {refused}");
         clock.lap("mcp events, resize");
+
+        // 8b. Another agent, played through the real hook relay: its conversation read, its
+        //     permission prompt held for orchestration and answered over MCP; and a still
+        //     picture refused, or asked of a window no worker has, so nothing is ever captured.
+        agent_reached(stack, &worker).await?;
+        clock.lap("conversation, answer, still");
 
         // 5. A closed terminal leaves the list. One whose program exited stays, exited with its
         //    status, until it is closed.
@@ -319,6 +358,181 @@ mod tests {
             .collect();
         ensure!(moves == [&json!("unreachable"), &json!("online")], "{moves:?}");
         clock.lap("back online");
+        Ok(())
+    }
+
+    /// Push a file past the 8 MiB one read carries, pull it back, compare; and see the server's
+    /// endpoint refuse `upload_file`.
+    async fn bulk(stack: &ServerStack, worker: &str) -> Result<()> {
+        // 9 MiB and 3 bytes: past the 8 MiB one read carries, and not a whole number of parts.
+        let size: usize = 9_437_187;
+        let contents: Vec<u8> = (0..size).map(|i| i.wrapping_mul(31).to_le_bytes()[1]).collect();
+        let here = stack.path("big-here.bin");
+        std::fs::write(&here, &contents)?;
+        let there = stack.path("big-there.bin").to_string_lossy().into_owned();
+        let here_arg = here.to_string_lossy().into_owned();
+        let pushed = stack
+            .slopty(&[
+                "push",
+                "--worker",
+                worker,
+                &here_arg,
+                &there,
+                "--idempotency-key",
+                "e2e-push",
+            ])
+            .await?;
+        ensure!(pushed["size"] == size && pushed["path"] == there.as_str(), "{pushed}");
+        ensure!(std::fs::read(&there)? == contents, "the worker holds the same bytes");
+        let back = stack.path("big-back.bin");
+        let back_arg = back.to_string_lossy().into_owned();
+        let pulled = stack.slopty(&["pull", "--worker", worker, &there, &back_arg]).await?;
+        ensure!(pulled["size"] == size, "{pulled}");
+        ensure!(std::fs::read(&back)? == contents, "pulled back whole");
+        let leftovers: Vec<String> = std::fs::read_dir(stack.dir.path())?
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|name| name.ends_with(".slopty-upload") || name.ends_with(".slopty-download"))
+            .collect();
+        ensure!(leftovers.is_empty(), "no parts left behind: {leftovers:?}");
+        let params = json!({
+            "name": "upload_file",
+            "arguments": { "worker": worker, "local": here_arg, "path": there },
+        });
+        let refused = stack.mcp(30, "tools/call", params).await?;
+        let text = str_of(&refused["result"]["content"][0], "text")?;
+        ensure!(refused["result"]["isError"] == json!(true), "{refused}");
+        ensure!(text.contains("(Unsupported)"), "{text}");
+        Ok(())
+    }
+
+    /// `slopty hook` as Claude Code runs it for `session`, `payload` on its stdin, returned
+    /// running: a `PermissionRequest` relay waits for its answer.
+    fn relay(stack: &ServerStack, session: &str, payload: &Value) -> Result<tokio::process::Child> {
+        use tokio::io::AsyncWriteExt as _;
+        let slopty = slopty_e2e::harness::bin_dir()?.join("slopty");
+        let mut child = tokio::process::Command::new(slopty)
+            .arg("--data-dir")
+            .arg(stack.path("hook-data"))
+            .arg("hook")
+            .env("SLOPTY_SESSION", session)
+            .env("SLOPTY_WORKER_SOCKET", stack.worker.ctl_socket())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawn slopty hook")?;
+        let mut stdin = child.stdin.take().context("the hook's stdin")?;
+        let bytes = payload.to_string().into_bytes();
+        tokio::spawn(async move {
+            let _written = stdin.write_all(&bytes).await;
+        });
+        Ok(child)
+    }
+
+    /// A played agent in a quiet shell: its conversation read over the CLI, which makes
+    /// orchestration follow it; a permission prompt the relay asks is held, shown on the next
+    /// read, answered over MCP under a key (and again, answering the first), and the relay prints
+    /// the denial. Then a still picture of a window no worker has, so nothing is captured.
+    async fn agent_reached(stack: &ServerStack, worker: &str) -> Result<()> {
+        let term = open_bash(stack, "e2e agent").await?;
+        let session = term.rsplit('/').next().context("a session in the term")?.to_owned();
+        let transcript = stack.path("agent.jsonl");
+        let records = [
+            json!({
+                "type": "user", "uuid": "u1", "parentUuid": null,
+                "timestamp": "2026-09-28T03:15:25.849Z",
+                "message": { "role": "user", "content": "tidy the build folder" },
+            }),
+            json!({
+                "type": "user", "uuid": "u2", "parentUuid": "u1",
+                "timestamp": "2026-09-28T03:15:27.000Z",
+                "message": { "role": "user", "content": "and keep the logs" },
+            }),
+        ];
+        let mut jsonl = String::new();
+        for record in &records {
+            jsonl.push_str(&record.to_string());
+            jsonl.push('\n');
+        }
+        std::fs::write(&transcript, jsonl)?;
+        let hook = |event: &str| {
+            json!({
+                "hook_event_name": event, "session_id": "e2e",
+                "transcript_path": transcript.to_string_lossy(),
+            })
+        };
+        let mut prompted = relay(stack, &session, &hook("UserPromptSubmit"))?;
+        let status = tokio::time::timeout(STEP, prompted.wait()).await??;
+        ensure!(status.success(), "the relay exits 0: {status}");
+
+        let page = until("the prompts in the conversation", STEP, async || {
+            let page = stack.slopty(&["agent", "conversation", &term]).await?;
+            Ok((page["total"] == 2).then_some(page))
+        })
+        .await?;
+        let first = page["entries"][0].to_string();
+        ensure!(first.contains("tidy the build folder"), "{page}");
+        ensure!(page["held"] == json!([]) && page["thread"] == "main", "{page}");
+        let tail = stack.slopty(&["agent", "conversation", &term, "--max", "1"]).await?;
+        ensure!(tail["start"] == 1 && tail["next"] == 2, "the last entry alone: {tail}");
+
+        let mut asking = hook("PermissionRequest");
+        asking["tool_name"] = json!("Bash");
+        asking["tool_input"] = json!({ "command": "rm -rf build" });
+        asking["permission_mode"] = json!("default");
+        let asked = relay(stack, &session, &asking)?;
+        let held = until("the prompt held for orchestration", STEP, async || {
+            let page = stack.slopty(&["agent", "conversation", &term]).await?;
+            Ok(page["held"].as_array().and_then(|h| h.first()).cloned())
+        })
+        .await?;
+        ensure!(held["tool"] == "Bash", "{held}");
+        let ask = held["ask"].as_u64().context("ask")?;
+        let answer = json!({
+            "term": term, "ask": ask, "verdict": "deny", "message": "not the build folder",
+            "idempotency_key": "e2e-answer",
+        });
+        let done = tool(stack, 40, "answer_permission", answer.clone()).await?;
+        ensure!(done == json!({ "ok": true }), "{done}");
+        let out = tokio::time::timeout(STEP, asked.wait_with_output()).await??;
+        let printed: Value = serde_json::from_slice(&out.stdout).with_context(|| {
+            format!("the relay printed {:?}", String::from_utf8_lossy(&out.stdout))
+        })?;
+        let decision = &printed["hookSpecificOutput"]["decision"];
+        ensure!(decision["behavior"] == "deny", "{printed}");
+        ensure!(decision["message"] == "not the build folder", "{printed}");
+        let again = tool(stack, 41, "answer_permission", answer).await?;
+        ensure!(again == json!({ "ok": true }), "the same key answers the first: {again}");
+        let params = json!({
+            "name": "answer_permission",
+            "arguments": { "term": term, "ask": ask, "verdict": "allow" },
+        });
+        let late = stack.mcp(42, "tools/call", params).await?;
+        ensure!(late["result"]["isError"] == json!(true), "a second answer finds nothing: {late}");
+
+        // A window no worker has: whether or not this one may record its screen, it answers
+        // without a picture (Unsupported, or Invalid past the preflight).
+        let capture = json!({ "worker": worker, "window": u32::MAX });
+        let params = json!({ "name": "capture_still", "arguments": capture });
+        let still = stack.mcp(43, "tools/call", params).await?;
+        let text = str_of(&still["result"]["content"][0], "text")?;
+        ensure!(still["result"]["isError"] == json!(true), "no picture is taken: {still}");
+        ensure!(text.contains("(Unsupported)") || text.contains("(Invalid)"), "{text}");
+        let cli = stack
+            .slopty(&[
+                "capture",
+                "--worker",
+                worker,
+                "--window",
+                "4294967295",
+                "--out",
+                "/dev/null",
+            ])
+            .await;
+        ensure!(cli.is_err(), "the CLI fails the same way: {cli:?}");
+        let closed = stack.slopty(&["close", &term]).await?;
+        ensure!(closed == json!({ "ok": true }), "{closed}");
         Ok(())
     }
 }

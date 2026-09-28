@@ -25,8 +25,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
-#[cfg(test)]
+#[cfg(all(test, target_vendor = "apple"))]
 use slopty_capture::host_now_us;
 use slopty_capture::{
     AxError, CaptureConfig, CaptureError, CaptureSource, CapturedAudio, CapturedFrame, Crop,
@@ -42,6 +41,7 @@ use slopty_media::{
     Cadence, Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Pace, Packetizer, RateController,
     Redundancy, audio_datagram, cursor_datagram, heartbeat_datagram,
 };
+use slopty_proto::ctl::{LtrStats, Quantiles, ScreenStats, ScreenSummary};
 use slopty_proto::media::MAX_DATAGRAM;
 use slopty_proto::screen::{
     CaptureTarget, CursorShape, Quality, ReceiverReport, ScreenEvent, ScreenInput, SourceState,
@@ -377,24 +377,6 @@ impl LtrBook {
     }
 }
 
-/// What the long-term reference machinery did on a stream, for the control socket.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct LtrStats {
-    /// Frames the encoder marked as long-term references (tokens offered).
-    pub offered: u64,
-    /// Tokens the client acknowledged that this encoder session had offered.
-    pub acked: u64,
-    /// Refreshes the encoder answered with an IDR: no usable reference behind them.
-    pub refreshes_idr: u64,
-    /// Refreshes the encoder answered with a delta off an acknowledged reference.
-    pub refreshes_delta: u64,
-    /// Whether an acknowledged reference newer than the latest keyframe is on record now, so a
-    /// refresh would be a delta.
-    pub usable: bool,
-    /// Age of that reference, microseconds; 0 when there is none.
-    pub usable_age_us: u64,
-}
-
 /// How much of the link, in time, video may hold in QUIC ahead of an audio packet.
 ///
 /// QUIC's datagram queue is first in, first out, so audio sent behind a frame waits for the
@@ -507,64 +489,6 @@ impl Taken {
     }
 }
 
-/// p50 / p95 / max of a latency over the last `LATENCY_WINDOW` samples, microseconds.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct Quantiles {
-    /// Samples in the window.
-    pub n: u32,
-    /// Median.
-    pub p50_us: u64,
-    /// 95th percentile.
-    pub p95_us: u64,
-    /// Worst in the window.
-    pub max_us: u64,
-}
-
-impl Quantiles {
-    /// Quantiles of `samples` (any order).
-    #[must_use]
-    pub fn of(samples: &[u64]) -> Self {
-        Self::of_owned(samples.to_vec())
-    }
-
-    /// Quantiles of `samples` (any order), sorted in place.
-    #[must_use]
-    pub fn of_owned(mut sorted: Vec<u64>) -> Self {
-        sorted.sort_unstable();
-        let last = sorted.len().saturating_sub(1);
-        let at = |q: f64| -> u64 {
-            #[expect(
-                clippy::cast_precision_loss,
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "an index below 2^53"
-            )]
-            let i = (last as f64 * q).round() as usize;
-            sorted.get(i.min(last)).copied().unwrap_or(0)
-        };
-        Self {
-            n: u32::try_from(sorted.len()).unwrap_or(u32::MAX),
-            p50_us: at(0.5),
-            p95_us: at(0.95),
-            max_us: sorted.last().copied().unwrap_or(0),
-        }
-    }
-
-    /// `p50 / p95 / max ms (n)`.
-    #[must_use]
-    pub fn describe(&self) -> String {
-        #[expect(clippy::cast_precision_loss, reason = "microseconds well below 2^53")]
-        let ms = |us: u64| us as f64 / 1e3;
-        format!(
-            "{:.2} / {:.2} / {:.2} ms (n={})",
-            ms(self.p50_us),
-            ms(self.p95_us),
-            ms(self.max_us),
-            self.n
-        )
-    }
-}
-
 /// Samples the latency quantiles are computed over: 10 s at 60 fps.
 const LATENCY_WINDOW: usize = 600;
 
@@ -602,99 +526,6 @@ impl LatencyRing {
     pub fn quantiles(&self) -> Quantiles {
         Quantiles::of_owned(self.samples.iter().copied().collect())
     }
-}
-
-/// Counters for logs and telemetry.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct ScreenStats {
-    /// Frames ScreenCaptureKit delivered.
-    pub captured: u64,
-    /// Frames dropped because the transport already held more than the guard allows
-    /// ([`frame_fits`]).
-    pub dropped: u64,
-    /// Frames captured and thrown away because the target was not on screen: the picture was of
-    /// whatever is behind it. Zero on a stream whose target never left the screen.
-    pub withheld: u64,
-    /// Frames held because the accessibility API had just said a window of the target's
-    /// application went away and the window list had not yet answered (see
-    /// [`SUSPICION_HOLD`]). Counted apart from [`Self::withheld`] so a hide shows where it was
-    /// caught: here in the first ~260 ms, there once core graphics agrees.
-    pub suspected: u64,
-    /// Accessibility notifications that raised a suspicion: the target hidden, minimised or
-    /// destroyed — or, when the watch could not match the target to its accessibility element,
-    /// any window of its application.
-    pub suspicions: u64,
-    /// Accessibility notifications for a window of the target's application that was not the
-    /// target (a sibling window, a pop-up, a tooltip) going away. Never a hold: each one is a
-    /// round trip through the window filter, because the capture framework stalls on it
-    /// (`Shared::filter_stalled`).
-    pub siblings: u64,
-    /// Encoded frames packetized.
-    pub encoded: u64,
-    /// Datagrams the transport took (data, parity, retransmits, audio, cursor, heartbeats).
-    pub datagrams: u64,
-    /// Datagrams the transport refused: the connection was gone, or a datagram was larger
-    /// than the path carries.
-    pub queue_full: u64,
-    /// Heartbeats sent while the source was quiet.
-    pub heartbeats: u64,
-    /// Refresh requests the client sent for this stream (what the receiver's cap bounds).
-    pub refreshes: u64,
-    /// Times a wanted keyframe was put off because the link could not drain one, counted once
-    /// per episode rather than per frame (see [`keyframe_fits`]). Each one sent an LTR refresh in
-    /// its place and ended either when the link could carry the keyframe or when the one-second
-    /// valve opened.
-    pub keyframes_deferred: u64,
-    /// Worst capture-to-packet latency seen, microseconds.
-    pub latency_max_us: u64,
-    /// Sum of capture-to-packet latencies, microseconds (divide by `encoded`).
-    pub latency_sum_us: u64,
-    /// Opus packets sent.
-    pub audio_packets: u64,
-    /// Bitrate the controller last asked the encoder for.
-    pub bitrate_bps: u64,
-    /// Capture latency: the window server's display time of a frame → ScreenCaptureKit's
-    /// callback (what SCK adds), over the last `LATENCY_WINDOW` frames.
-    pub capture: Quantiles,
-    /// Encode latency: `VTCompressionSessionEncodeFrame` → the output callback.
-    pub encode: Quantiles,
-    /// Time between two heartbeats, over the last `LATENCY_WINDOW` of them. The beat is what
-    /// tells the receiver the worker is alive while nothing is being drawn, and the receiver calls
-    /// a silence of `STALL_GAP` a stall, so this is the number that says whether the worker is
-    /// keeping its own promise.
-    pub beat_gap: Quantiles,
-    /// How long the geometry probe took (its window-server reads, off the runtime), over the
-    /// last `LATENCY_WINDOW` of them: the work the beat used to wait behind.
-    pub bounds: Quantiles,
-    /// The longest gap between two beats since the stream opened, microseconds. The quantiles
-    /// above are over a sliding window of `LATENCY_WINDOW` beats — about twenty seconds — so
-    /// a single late beat early in a long stream would be gone from them by the end. This is
-    /// the one that cannot forget, and it is what a rule about the beat has to be written on.
-    pub beat_gap_worst_us: u64,
-    /// Frames sent from the display-crop path (a window served as a `sourceRect` of its display
-    /// rather than through the window filter). Frames the crop delivered after it stopped holding
-    /// the target are not among them — those are [`Self::withheld`].
-    pub cropped: u64,
-    /// Long-term references: offered, acknowledged, whether one is usable now, and how the
-    /// refreshes were answered.
-    ///
-    /// What it costs to ask for a refresh. With a usable reference the encoder answers
-    /// `force_ltr_refresh` with a delta off it — 733 B against a 3 998 B IDR in
-    /// `a_forced_ltr_refresh_is_a_delta_not_an_idr` — and without one it falls back to a full
-    /// keyframe.
-    pub ltr: LtrStats,
-    /// Bitrate the encoder was last given: the controller's target less the parity share
-    /// ([`encoder_bps`]).
-    pub encoder_bps: u64,
-    /// Frames encoded from the held capture rather than a fresh one: the last capture of a
-    /// picture that went still, or a refresh or keyframe answered while nothing changed.
-    pub repaired: u64,
-    /// Video datagrams that waited in the audio lane past their frame's own hand-over.
-    pub laned: u64,
-    /// Whether the stream is on the display-crop path *right now*. The counter above says how
-    /// many frames came that way; this says where the next one will come from, which is what a
-    /// test asking "did the crop go away when the window did" has to look at.
-    pub on_crop: bool,
 }
 
 /// How long a stream that has drawn may go without a frame before the client is told the source
@@ -757,19 +588,6 @@ impl SourceTracker {
             state
         })
     }
-}
-
-/// One stream as the control socket lists it.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ScreenSummary {
-    /// The client that opened it.
-    pub client: String,
-    /// Stream id on that connection.
-    pub stream: u32,
-    /// What it captures.
-    pub target: CaptureTarget,
-    /// Counters (final ones for a closed stream).
-    pub stats: ScreenStats,
 }
 
 /// Closed streams the registry remembers.
@@ -1978,17 +1796,21 @@ fn start_encoder<P: Platform>(
     })
 }
 
-/// A new encoder session being built for the size a window settled on.
+/// A new encoder session being built for the size a window settled on or the quality the client
+/// asked for.
 ///
-/// [`Pipeline::check_geometry`] starts it, and the stream's task waits for [`Self::built`]
-/// beside its commands, so input for the window is not held behind the 3.5–42 ms of a
-/// VideoToolbox session (MEASUREMENTS.md, "encoder sessions off the runtime").
-/// [`Pipeline::finish_rebuild`] puts it in; until then the stream goes on at its old size.
+/// [`Pipeline::check_geometry`] and [`Pipeline::set_quality`] start it, and the stream's task
+/// waits for [`Self::built`] beside its commands, so input for the window is not held behind the
+/// 3.5–42 ms of a VideoToolbox session (MEASUREMENTS.md, "encoder sessions off the runtime" and
+/// "input behind a quality change"). [`Pipeline::finish_rebuild`] puts it in; until then the
+/// stream goes on at its old size.
 pub struct Rebuild<P: Platform> {
     encoder: JoinHandle<Result<P::Video, CodecError>>,
     native: (u32, u32),
     desired: CaptureConfig,
     config: EncoderConfig,
+    /// The target changed size: the client is told the stream's new one once it is in.
+    resized: bool,
 }
 
 impl<P: Platform> std::fmt::Debug for Rebuild<P> {
@@ -2006,6 +1828,12 @@ impl<P: Platform> Rebuild<P> {
     /// When VideoToolbox refuses the session, or the build was cancelled.
     pub async fn built(&mut self) -> Result<P::Video, ScreenError> {
         (&mut self.encoder).await.map_err(|_cancelled| ScreenError::Closed)?.map_err(Into::into)
+    }
+
+    /// Give the build up for a newer one: the session it makes is dropped on the blocking pool
+    /// once it is made, as a replaced one is ([`retire`]).
+    fn abandon(self) {
+        drop(tokio::task::spawn_blocking(move || drop(self.encoder)));
     }
 }
 
@@ -2612,16 +2440,37 @@ impl<P: Platform> Pipeline<P> {
         StatsHandle(Arc::<Shared<P>>::clone(&self.shared))
     }
 
-    /// Change quality. A size, rate or codec change rebuilds the encoder and reconfigures the
-    /// capture; a bitrate-only change is applied in place, cadence included.
-    pub async fn set_quality(&mut self, quality: &Quality) -> Result<(), ScreenError> {
+    /// Change quality. A bitrate alone is applied in place, cadence included. A size, rate or
+    /// codec change starts building the encoder it needs and returns the build, for the caller
+    /// to wait for beside its input and hand to [`Self::finish_rebuild`], as a resize's
+    /// ([`Self::check_geometry`]). It replaces `pending`, a build already under way, and keeps
+    /// the size that one was for.
+    ///
+    /// Input and the pointer are mapped at the new scale from here on, not once the encoder is
+    /// in: the client maps its pointer at the scale it asked for from the moment it asks, so
+    /// the input behind the change must neither wait for the build nor be read at the old
+    /// scale.
+    pub fn set_quality(
+        &mut self,
+        quality: &Quality,
+        pending: Option<Rebuild<P>>,
+    ) -> Option<Rebuild<P>> {
         self.quality = *quality;
-        let (capture_config, encoder_config) = configs(self.native, quality, self.refresh_hz);
+        let native = pending.as_ref().map_or(self.native, |rebuild| rebuild.native);
+        let (capture_config, encoder_config) = configs(native, quality, self.refresh_hz);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
+        let (was, was_config) =
+            pending.as_ref().map_or((self.desired, self.encoder_config), |rebuild| {
+                (rebuild.desired, rebuild.config)
+            });
         // The rate is the encoder's alone while the capture follows the display's beat.
-        let same_rate = encoder_config.fps == self.encoder_config.fps;
-        if desired == self.desired && same_rate && encoder_config.codec == self.encoder_config.codec
-        {
+        let same_rate = encoder_config.fps == was_config.fps;
+        if desired == was && same_rate && encoder_config.codec == was_config.codec {
+            if let Some(mut rebuild) = pending {
+                // The session under way is the one wanted; it goes in under the new ceiling.
+                rebuild.config.bitrate_bps = encoder_config.bitrate_bps;
+                return Some(rebuild);
+            }
             if encoder_config.bitrate_bps != self.encoder_config.bitrate_bps {
                 // The client moved its ceiling; the controller keeps its place under it, and the
                 // rung follows the target the way a rate decision moves it.
@@ -2634,9 +2483,16 @@ impl<P: Platform> Pipeline<P> {
                 self.shared.apply_cadence(target);
                 self.encoder_config = encoder_config;
             }
-            return Ok(());
+            return None;
         }
-        self.reconfigure(desired, encoder_config).await
+        let resized = pending.as_ref().is_some_and(|rebuild| rebuild.resized);
+        if let Some(superseded) = pending {
+            superseded.abandon();
+        }
+        self.map_at(desired.width, native.0);
+        let mut rebuild = self.start_rebuild(native, desired, encoder_config);
+        rebuild.resized = resized;
+        Some(rebuild)
     }
 
     /// Follow the target: a window the user resized on the worker gets a stream of its new
@@ -2672,18 +2528,26 @@ impl<P: Platform> Pipeline<P> {
         tracing::info!(stream = %self.id, from = ?self.native, to = ?native, "target resized");
         let (capture_config, encoder_config) = configs(native, &self.quality, self.refresh_hz);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
-        Some(self.start_rebuild(native, desired, encoder_config))
+        let mut rebuild = self.start_rebuild(native, desired, encoder_config);
+        rebuild.resized = true;
+        Some(rebuild)
     }
 
     /// Put in the encoder `rebuild` built ([`Rebuild::built`]) and ask the capture for its size:
-    /// the `Geometry` to tell the client.
-    pub fn finish_rebuild(&mut self, rebuild: Rebuild<P>, encoder: P::Video) -> ScreenEvent {
+    /// for a target that changed size, the `Geometry` to tell the client. A quality change tells
+    /// nothing; the client already maps at the size it asked for.
+    pub fn finish_rebuild(
+        &mut self,
+        rebuild: Rebuild<P>,
+        encoder: P::Video,
+    ) -> Option<ScreenEvent> {
+        let resized = rebuild.resized;
         self.install_rebuild(rebuild, encoder);
-        ScreenEvent::Geometry {
+        resized.then_some(ScreenEvent::Geometry {
             stream: self.id,
             width: self.desired.width,
             height: self.desired.height,
-        }
+        })
     }
 
     fn start_rebuild(
@@ -2693,7 +2557,7 @@ impl<P: Platform> Pipeline<P> {
         config: EncoderConfig,
     ) -> Rebuild<P> {
         let encoder = start_encoder(&Arc::downgrade(&self.shared), config);
-        Rebuild { encoder, native, desired, config }
+        Rebuild { encoder, native, desired, config, resized: false }
     }
 
     /// The window-server reads [`Self::check_geometry`] decides from, as a call to make off the
@@ -2882,21 +2746,8 @@ impl<P: Platform> Pipeline<P> {
         });
     }
 
-    /// Rebuild the encoder for a new size, rate or codec and ask the capture for `desired`.
-    /// The new session's long-term references start from nothing ([`Shared::rebuilt`]).
-    async fn reconfigure(
-        &mut self,
-        desired: CaptureConfig,
-        encoder_config: EncoderConfig,
-    ) -> Result<(), ScreenError> {
-        let mut rebuild = self.start_rebuild(self.native, desired, encoder_config);
-        let encoder = rebuild.built().await?;
-        self.install_rebuild(rebuild, encoder);
-        Ok(())
-    }
-
     fn install_rebuild(&mut self, rebuild: Rebuild<P>, encoder: P::Video) {
-        let Rebuild { encoder: _answered, native, desired, config: encoder_config } = rebuild;
+        let Rebuild { encoder: _answered, native, desired, config: encoder_config, .. } = rebuild;
         self.native = native;
         retire(self.shared.install(encoder));
         let target = {
@@ -2910,17 +2761,23 @@ impl<P: Platform> Pipeline<P> {
         self.shared.fps_ceiling.store(encoder_config.fps, Ordering::Relaxed);
         self.shared.fps.store(encoder_config.fps, Ordering::Relaxed);
         self.shared.apply_cadence(target);
-        let zoom = f64::from(desired.width) / f64::from(self.native.0);
-        self.shared.zoom.store(zoom.to_bits(), Ordering::Relaxed);
-        self.injector.set_scale(self.point_scale * zoom);
+        self.map_at(desired.width, native.0);
         self.desired = desired;
         self.encoder_config = encoder_config;
         self.apply_desired();
     }
 
-    /// Stream pixels per native pixel of the target: the quality's scale as the stream was last
-    /// built for it. A client position in stream pixels over `zoom × point_scale` is a
-    /// position in the target's points.
+    /// Map input and the pointer for a stream `width` pixels wide of a target `native_width`
+    /// pixels wide.
+    fn map_at(&mut self, width: u32, native_width: u32) {
+        let zoom = f64::from(width) / f64::from(native_width);
+        self.shared.zoom.store(zoom.to_bits(), Ordering::Relaxed);
+        self.injector.set_scale(self.point_scale * zoom);
+    }
+
+    /// Stream pixels per native pixel of the target: the quality's scale as input and the
+    /// pointer are mapped, the one last asked for even while its encoder is being built. A client
+    /// position in stream pixels over `zoom × point_scale` is a position in the target's points.
     #[must_use]
     pub fn zoom(&self) -> f64 {
         self.shared.zoom()
@@ -3327,7 +3184,10 @@ mod shape_tests {
     }
 }
 
+// These drive the macOS platform's types (ScreenCaptureKit, VideoToolbox, `CVPixelBuffer`); a
+// build for another system streams no desktop.
 #[cfg(test)]
+#[cfg(target_vendor = "apple")]
 mod tests {
     use slopty_codec::audio::{CHANNELS, FRAME_SAMPLES};
 
@@ -3406,11 +3266,7 @@ mod tests {
     }
 
     #[test]
-    fn quantiles_read_any_order_and_a_ring_keeps_the_window() {
-        assert_eq!(Quantiles::of(&[]), Quantiles::default());
-        let q = Quantiles::of(&[5, 1, 3, 2, 4]);
-        assert_eq!((q.n, q.p50_us, q.p95_us, q.max_us), (5, 3, 5, 5));
-        assert_eq!(Quantiles::of(&[7]).describe(), "0.01 / 0.01 / 0.01 ms (n=1)");
+    fn a_ring_keeps_the_window() {
         let mut ring = LatencyRing::default();
         for us in 0..u64::try_from(LATENCY_WINDOW).unwrap_or(u64::MAX).saturating_add(10) {
             ring.push(us);
@@ -4532,8 +4388,13 @@ mod tests {
         let (capture, config) = configs((1280, 800), &Quality::default(), None);
         let started = Instant::now();
         let encoder = start_encoder(&Arc::downgrade(&shared), config);
-        let mut rebuild =
-            Rebuild::<Slow> { encoder, native: (1280, 800), desired: capture, config };
+        let mut rebuild = Rebuild::<Slow> {
+            encoder,
+            native: (1280, 800),
+            desired: capture,
+            config,
+            resized: true,
+        };
         assert!(started.elapsed() < Duration::from_millis(50), "{:?}", started.elapsed());
 
         let waited = tokio::time::timeout(Duration::from_millis(100), rebuild.built()).await;

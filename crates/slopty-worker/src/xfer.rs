@@ -294,6 +294,7 @@ impl Transfers {
         let (base, staging) = match dest {
             Dest::SessionCwd(_) => (cwd.map(|c| crate::file::expand_home(Path::new(c))), false),
             Dest::Staging => (None, true),
+            Dest::Attachment => (None, false),
             Dest::Path(p) => (Some(crate::file::expand_home(Path::new(p))), false),
         };
         let transfer = Transfer {
@@ -459,8 +460,8 @@ impl Transfers {
             .collect()
     }
 
-    /// Replace the ledger with `entries`: a temporary file renamed over it, so a crash leaves
-    /// the old list or the new. No entries removes it.
+    /// Replace the ledger with `entries` (`slopty_platform::fs::replace`), so a crash leaves the
+    /// old list or the new. No entries removes it.
     fn write_ledger(&self, entries: &[(XferId, PathBuf)]) {
         let path = self.ledger_path();
         if entries.is_empty() {
@@ -468,10 +469,7 @@ impl Transfers {
             return;
         }
         let text: String = entries.iter().filter_map(|(x, e)| ledger_line(*x, e)).collect();
-        let mut tmp = path.clone().into_os_string();
-        tmp.push(".tmp");
-        let written = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &path));
-        if let Err(e) = written {
+        if let Err(e) = slopty_platform::fs::replace(&path, text.as_bytes()) {
             tracing::warn!(path = %path.display(), error = %e, "partial ledger");
         }
     }

@@ -1,7 +1,7 @@
-//! `WindowPicker`: jump to a session on the canvas, or choose a worker window or display to put
-//! on it.
+//! `WindowPicker`: jump to a session in the workspace, or choose a worker window or display to
+//! put in it.
 //!
-//! Shown by the canvas after a `Listing` arrives; a click picks, Escape dismisses. Sessions come
+//! Shown by the workspace after a `Listing` arrives; a click picks, Escape dismisses. Sessions come
 //! first, and among them the ones whose agent is waiting on the human, so a wall of terminals
 //! is searched by what needs doing rather than by position. A field at the top filters the
 //! rows by every word typed, ↑/↓ choose one and ↩ picks it, as the palette does.
@@ -22,7 +22,7 @@ use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::icons::{IconName, Status};
 use crate::palette::{
-    dotted, field_row, icon_slot, line_height, list_pad, quiet_line, rise_in, section_heading,
+    Plate, dotted, field_row, icon_slot, line_height, list_pad, quiet_line, section_heading,
     status_slot,
 };
 
@@ -31,7 +31,7 @@ use crate::palette::{
 pub(crate) const FILTER_PLACEHOLDER: &str = "Jump to a session or add a window";
 
 /// The picker's empty states: nothing to offer at all, and nothing left after the query.
-pub(crate) const NOTHING_TO_JUMP_TO: &str = "Nothing on the canvas or shareable on the worker";
+pub(crate) const NOTHING_TO_JUMP_TO: &str = "Nothing in the workspace or shareable on the worker";
 pub(crate) const NOTHING_MATCHES: &str = "Nothing matches";
 
 /// The row that stands for the worker's windows until its listing arrives.
@@ -40,7 +40,7 @@ pub(crate) const LOADING_WINDOWS: &str = "Asking the worker for its windows…";
 /// What the user chose.
 #[derive(Clone, Debug)]
 pub enum PickerEvent {
-    /// Put this on the canvas; `size` is the target's size in points.
+    /// Put this in the workspace; `size` is the target's size in points.
     Pick {
         /// Target.
         target: CaptureTarget,
@@ -55,7 +55,7 @@ pub enum PickerEvent {
     Dismiss,
 }
 
-/// One terminal session on the canvas, as the picker lists it.
+/// One terminal session in the workspace, as the picker lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRow {
     /// Session.
@@ -143,7 +143,7 @@ pub fn matches(query: &str, text: &str) -> bool {
 
 /// A modal list of sessions, windows and displays.
 pub struct WindowPicker {
-    /// Already ordered by the canvas: needs-you, other agents, plain shells.
+    /// Already ordered by the workspace: needs-you, other agents, plain shells.
     sessions: Vec<SessionRow>,
     windows: Vec<WindowInfo>,
     displays: Vec<DisplayInfo>,
@@ -164,6 +164,8 @@ pub struct WindowPicker {
     scroll: ScrollHandle,
     /// The choice moved (a step, a new filter): the next frame scrolls to it.
     reveal: bool,
+    /// The fill under the chosen row.
+    plate: Plate,
 }
 
 impl std::fmt::Debug for WindowPicker {
@@ -197,7 +199,7 @@ fn offered(mut windows: Vec<WindowInfo>) -> Vec<WindowInfo> {
 }
 
 impl WindowPicker {
-    /// A picker over the canvas's sessions and a worker listing.
+    /// A picker over the workspace's sessions and a worker listing.
     pub fn new(
         sessions: Vec<SessionRow>,
         windows: Vec<WindowInfo>,
@@ -218,10 +220,11 @@ impl WindowPicker {
             selected: 0,
             scroll: ScrollHandle::new(),
             reveal: false,
+            plate: Plate::default(),
         }
     }
 
-    /// A picker over the canvas's sessions, shown at once while the worker is asked for its
+    /// A picker over the workspace's sessions, shown at once while the worker is asked for its
     /// windows; [`Self::set_listing`] fills them in.
     pub fn loading(sessions: Vec<SessionRow>, theme: Theme, cx: &Context<Self>) -> Self {
         Self { loading: true, ..Self::new(sessions, Vec::new(), Vec::new(), theme, cx) }
@@ -406,7 +409,6 @@ impl WindowPicker {
             .aria_label(SharedString::from(label))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .when(chosen, |el| el.bg(hsla(overlay)))
             .active(move |st| st.bg(hsla(overlay)))
             .on_mouse_move(cx.listener(move |this, _ev, _w, cx| this.point_at(ix, cx)))
             .child(status_slot(theme, icon, mark, hsla(icon_ink), 1.0))
@@ -437,6 +439,7 @@ impl WindowPicker {
             .children(worker.map(|worker| {
                 crate::kit::meta(div(), theme).flex_none().child(dotted(theme, worker))
             }));
+        let row = if chosen { self.plate.mark(row, ix) } else { row };
         tab_stop(row, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
             cx.emit(on_pick.clone());
         }))
@@ -471,7 +474,7 @@ impl WindowPicker {
     }
 
     /// Nothing to list, in one quiet line on the rows' edge: a query that narrows to nothing,
-    /// or a worker and a canvas with nothing at all to offer.
+    /// or a worker and a workspace with nothing at all to offer.
     fn empty_state(&self) -> gpui::AnyElement {
         let text = if self.query.is_empty() { NOTHING_TO_JUMP_TO } else { NOTHING_MATCHES };
         quiet_line(&self.theme, "picker-empty", text).into_any_element()
@@ -523,15 +526,17 @@ impl Render for WindowPicker {
             // the picker is for, as the palette's does.
             .children(self.input.as_ref().map(|input| field_row(&theme, input, "Filter")))
             .child(
-                div()
-                    .id("picker-list")
-                    .debug_selector(|| "picker-list".to_owned())
-                    .track_scroll(&self.scroll)
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .py(px(list_pad(&theme)))
-                    .children(rows)
-                    .when(empty, |el| el.child(self.empty_state())),
+                div().relative().flex_1().min_h_0().flex().flex_col().child(self.plate.under(&theme)).child(
+                    div()
+                        .id("picker-list")
+                        .debug_selector(|| "picker-list".to_owned())
+                        .track_scroll(&self.scroll)
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .py(px(list_pad(&theme)))
+                        .children(rows)
+                        .when(empty, |el| el.child(self.empty_state())),
+                ),
             );
         let root = crate::kit::anchor(&theme, window)
             .id("picker-backdrop")
@@ -549,9 +554,14 @@ impl Render for WindowPicker {
                     cx.stop_propagation();
                 }),
             )
-            .child(rise_in(panel, "picker-rise", &theme, cx));
-        gpui::deferred(crate::kit::fade_in(root, "picker-fade", cx))
-            .with_priority(crate::palette::Layer::Dialog.priority())
+            .child(crate::kit::slide_fade(
+                panel,
+                "picker-rise",
+                theme.spacing.xs,
+                crate::kit::Pace::Fade,
+                cx,
+            ));
+        gpui::deferred(root).with_priority(crate::palette::Layer::Dialog.priority())
     }
 }
 
@@ -587,7 +597,7 @@ mod tests {
         }
     }
 
-    /// The listing is sessions first (in the canvas's order), then the worker's displays and
+    /// The listing is sessions first (in the workspace's order), then the worker's displays and
     /// its on-screen windows by app then title, an untitled window under its app's name; a
     /// window off screen (minimised, another Space) is not offered. The filter keeps the rows
     /// whose text holds every word; ↑/↓ wrap over what is visible and ↩ emits the chosen

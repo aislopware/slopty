@@ -125,6 +125,14 @@ pub struct Prepared {
     link: Hsla,
     /// The scrollbar's thumb over the grid's right edge, while the bar shows.
     scrollbar: Option<(Bounds<Pixels>, Hsla)>,
+    /// The rows each command was typed on, as `(top, height)` bands on the head surface, edge
+    /// to edge ([`head_color`]).
+    heads: Vec<(Pixels, Pixels)>,
+    /// The head surface's colour.
+    head: Hsla,
+    /// The tops of the rules that part two heads with nothing between them, and their colour.
+    rules: Vec<Pixels>,
+    rule: Hsla,
     /// The failed blocks' rows as `(top, height)` bands: washed edge to edge, a bar at the
     /// left edge.
     failed: Vec<(Pixels, Pixels)>,
@@ -188,17 +196,115 @@ struct PreparedRow {
     /// The screen row (0 = the top of the viewport).
     row: u16,
     y: Pixels,
+    /// What the row's cells make, kept across frames ([`RowCache`]).
+    parts: Rc<RowParts>,
+    /// The selection and search hits on it, over the cell backgrounds and under the text.
+    marks: Vec<(u16, u16, Hsla)>,
+    /// Columns of the link under a ⌘-hover, underlined over the text.
+    link: Option<(u16, u16)>,
+}
+
+/// What a row's cells make: the same for as long as the line and the few things beyond it
+/// that restyle it ([`RowKey`]) are.
+#[derive(Debug, Default)]
+struct RowParts {
+    /// Cell backgrounds, as runs of columns.
     quads: Vec<(u16, u16, Hsla)>,
     /// Underlines and strikethroughs, at ghostty's offsets rather than GPUI's.
     decorations: Vec<Decoration>,
     /// The row's words, each shaped on its own at the base size and placed at its start column.
     segments: Vec<(u16, Rc<Word>)>,
-    /// Columns of the link under a ⌘-hover, underlined over the text.
-    link: Option<(u16, u16)>,
-    /// Colour of the command-block separator drawn along the row's top edge.
-    separator: Option<Hsla>,
     /// Cells drawn from geometry rather than the font (box drawing, blocks, Braille).
     sprites: Vec<SpriteCell>,
+    /// A cell of it carries SGR 5: its colours follow the blink phase.
+    blinks: bool,
+}
+
+/// Everything besides the line's cells that a row's [`RowParts`] depend on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct RowKey {
+    /// The frame's font, size, cell, palette and stroke geometry (see [`frame_key`]).
+    frame: u64,
+    /// Where the faint prompt ends on it, if it is a prompt's row.
+    prompt_end: Option<u16>,
+    /// The local-echo guesses written into it, hashed; `None` without any.
+    guesses: Option<u64>,
+    /// The blink phase, which only a row that [`RowParts::blinks`] minds.
+    blink_off: bool,
+    /// Where a sprite's atlas tile lands on device pixels, which only a row with sprites minds.
+    sprites: SpriteGeometry,
+}
+
+/// What the device-pixel size of a row's sprite tiles comes from: the grid's left edge (each
+/// cell's width is snapped from it), the row's snapped height and whether tiles are used at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SpriteGeometry {
+    origin_x: u32,
+    height: u16,
+    tiles: bool,
+}
+
+impl RowKey {
+    /// Whether parts built under `self` stand for a row under `now`.
+    fn fits(&self, parts: &RowParts, now: &Self) -> bool {
+        self.frame == now.frame
+            && self.prompt_end == now.prompt_end
+            && self.guesses == now.guesses
+            && (!parts.blinks || self.blink_off == now.blink_off)
+            && (parts.sprites.is_empty() || self.sprites == now.sprites)
+    }
+}
+
+/// The rows one terminal built last frame, by the line each showed. A line is replaced whole
+/// when it changes (the screen and history share it, so it is never changed in place), so an
+/// entry holding it is valid for as long as its key is; holding it also keeps its address from
+/// naming another line. Only the rows drawn in the last frame are kept.
+#[derive(Default)]
+pub(super) struct RowCache(FxHashMap<usize, (Arc<slopty_grid::Line>, RowKey, Rc<RowParts>)>);
+
+impl RowCache {
+    /// Room for `rows` without growing: a frame keeps about as many rows as the last.
+    fn with_capacity(rows: usize) -> Self {
+        Self(FxHashMap::with_capacity_and_hasher(rows, rustc_hash::FxBuildHasher))
+    }
+}
+
+impl std::fmt::Debug for RowCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RowCache").field(&self.0.len()).finish()
+    }
+}
+
+/// The part of every [`RowKey`] that is the same for the whole frame: the words' base (font,
+/// size, cell, palette), the painted cell, the stroke geometry and the sprite line thickness.
+fn frame_key(base: u64, grid: &Grid, scale: f32, sprite_thickness: f32) -> u64 {
+    let mut h = FxHasher::default();
+    base.hash(&mut h);
+    for v in [
+        f32::from(grid.cell_width),
+        f32::from(grid.line_height),
+        f32::from(grid.underline.y),
+        f32::from(grid.underline.thickness),
+        f32::from(grid.strikethrough.y),
+        f32::from(grid.strikethrough.thickness),
+        scale,
+        sprite_thickness,
+    ] {
+        v.to_bits().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The guesses the predictor made for screen row `row`, hashed: `None` when it has none.
+fn guesses_key(guesses: &VecDeque<Prediction>, row: u16, marked: bool) -> Option<u64> {
+    let mut on_row = guesses.iter().filter(|p| p.row == row).peekable();
+    on_row.peek()?;
+    let mut h = FxHasher::default();
+    marked.hash(&mut h);
+    for guess in on_row {
+        (guess.col, guess.text.as_str()).hash(&mut h);
+    }
+    Some(h.finish())
 }
 
 /// One cell the element draws itself (see [`sprite`]), in the cell's own colours.
@@ -295,11 +401,41 @@ fn cursor_span(line: Option<&slopty_grid::Line>, col: u16) -> u16 {
     if wide { 2 } else { 1 }
 }
 
-/// The command-block separator for a prompt-start row: the terminal foreground, faint. A
-/// failed block says so with its own bar and wash ([`FailedLook`]), not with its rule.
+/// The rule that parts two heads with nothing between them (a command that printed nothing):
+/// the terminal foreground, faint. A head after output needs none, as the band's own top edge
+/// is the boundary. A failed block says so with its own bar and wash ([`FailedLook`]).
 #[must_use]
 pub fn separator_color(theme: &Theme) -> Hsla {
     hsla_alpha(theme.terminal.fg, alpha::FAINT)
+}
+
+/// The surface under a block's head, the rows its command was typed on: the theme's band, a
+/// step off the content that is not the header's `panel`, so an unfocused tile's header and
+/// its first head do not read as two headers.
+#[must_use]
+pub fn head_color(theme: &Theme) -> Hsla {
+    hsla(theme.surfaces.band)
+}
+
+/// The view rows of the blocks' heads, as runs: prompt rows, and `Input` rows continuing a
+/// command on the head row above them. Heads with nothing between them (a command that
+/// printed nothing) make one run, which their rules part. A row without a line is no head.
+fn head_runs(
+    marks: impl Iterator<Item = Option<slopty_grid::SemanticMark>>,
+) -> Vec<std::ops::Range<u16>> {
+    let mut runs: Vec<std::ops::Range<u16>> = Vec::new();
+    for (row, mark) in (0..u16::MAX).zip(marks) {
+        let Some(mark) = mark else { continue };
+        let continues = runs.last().is_some_and(|run| run.end == row);
+        if !(mark.is_prompt() || (continues && mark == slopty_grid::SemanticMark::Input)) {
+            continue;
+        }
+        match runs.last_mut() {
+            Some(run) if continues => run.end = row.saturating_add(1),
+            _ => runs.push(row..row.saturating_add(1)),
+        }
+    }
+    runs
 }
 
 /// How a block whose command failed is drawn, as Warp does it: a bar of the error fill down
@@ -369,8 +505,8 @@ pub struct TerminalElement {
     view: Entity<TerminalView>,
     focused: bool,
     zoom: f32,
-    /// The zoom is changing frame to frame (a pinch, a flight): glyphs come from the raster
-    /// ladder, stretched, instead of a fresh raster per size.
+    /// The zoom is changing frame to frame (the overview opening or closing): glyphs come from the
+    /// raster ladder, stretched, instead of a fresh raster per size.
     zooming: bool,
     /// What a screen reader hears: the program's title and the cursor row's text. Filled by
     /// the view only while the accessibility tree is being built.
@@ -392,8 +528,8 @@ impl TerminalElement {
     }
 
     /// Scale everything (font, cells, padding) by `zoom` while keeping the grid size that the
-    /// unscaled bounds would give. Used by the canvas so a terminal keeps its columns when the
-    /// camera zooms.
+    /// unscaled bounds would give. Used by the workspace so a terminal keeps its columns while
+    /// the overview zooms.
     #[must_use]
     pub const fn zoom(mut self, zoom: f32) -> Self {
         self.zoom = zoom;
@@ -419,7 +555,7 @@ impl IntoElement for TerminalElement {
 
 /// Most glyphs the word cache holds before it forgets the words used least recently: about
 /// ten megabytes, and some forty screens of 20 × 200 × 50 cells of distinct text, so what the
-/// canvas showed a moment ago is still shaped when a pan or a scroll brings it back.
+/// workspace showed a moment ago is still shaped when a scroll brings it back.
 const WORD_BUDGET: usize = 1 << 18;
 
 /// Shaped words by the hash of their text, styles and look ([`segment_hash`]), each stamped
@@ -531,6 +667,8 @@ struct ShapeCache {
     /// the installed fonts is a trip to the font server (tens of milliseconds), so it happens
     /// once per list for the whole app, not once per view.
     families: FxHashMap<Vec<String>, SharedString>,
+    /// The four faces per (family, ligatures), built once rather than per terminal per frame.
+    faces: FxHashMap<(SharedString, bool), Rc<Faces>>,
 }
 
 impl gpui::Global for ShapeCache {}
@@ -543,6 +681,8 @@ struct Probe {
     picks: usize,
     /// How many rows the last prepaint built (the rows the clip shows, not the grid's).
     rows_prepared: usize,
+    /// How many of those it built from their cells rather than took from the row cache.
+    rows_built: usize,
     /// The "took" captions the last prepaint drew, top row first.
     captions: Vec<String>,
     /// Words shaped since the app started.
@@ -580,6 +720,15 @@ impl ShapeCache {
         let (grid, derived, _font_id, face) = measure(window, &font, font_size, height_mult);
         self.grids.insert(key, (grid, derived, face));
         (grid, derived, face)
+    }
+
+    /// The faces of `family` (see [`Faces`]), built once.
+    fn faces(&mut self, family: &SharedString, ligatures: bool) -> Rc<Faces> {
+        Rc::clone(
+            self.faces
+                .entry((family.clone(), ligatures))
+                .or_insert_with(|| Rc::new(Faces::new(family, ligatures))),
+        )
     }
 
     /// The first of `candidates` that is installed, resolved once per list (see
@@ -655,8 +804,8 @@ fn segment_hash(base: u64, cells: &[Cell], blink_off: bool) -> u64 {
 }
 
 /// The four faces of the terminal font (regular, bold, italic, bold italic), built once per
-/// frame: building a [`Font`] copies the family and allocates its features and fallbacks, and a
-/// screen of new text asks for one per style run.
+/// family ([`ShapeCache::faces`]): building a [`Font`] copies the family and allocates its
+/// features and fallbacks, and a screen of new text asks for one per style run.
 struct Faces([Font; 4]);
 
 impl Faces {
@@ -1243,6 +1392,11 @@ impl Element for TerminalElement {
         let sprite_masks = cache.sprites.len();
         #[cfg(test)]
         let mut shaped = 0_usize;
+        #[cfg(test)]
+        let mut built = 0_usize;
+        // What this view built of its rows last frame, and what it builds of them in this one.
+        let mut rows_before = self.view.update(cx, |view, _cx| view.take_row_cache());
+        let mut rows_after = RowCache::with_capacity(rows_before.0.len());
         let text_system = Arc::clone(window.text_system());
         let focused = self.focused;
         // A sprite is painted from its atlas tile once the zoom settles; in motion, from its
@@ -1285,25 +1439,22 @@ impl Element for TerminalElement {
                 let alpha = if held { alpha::PRESSED } else { alpha::TINT };
                 (hsla_alpha(palette.theme.fg, alpha * shown), state.history_len(), view_offset)
             });
-            let faces = Faces::new(&family, ligatures);
+            let faces = cache.faces(&family, ligatures);
             let look = |blink_off| Look { faces: &faces, palette, blink_off };
 
             cache.words.begin(WORD_BUDGET);
             let base = hash_base(base_size, base_cell_width, &family, ligatures, palette);
+            let row_frame = frame_key(base, &grid, scale, sprite_thickness);
             // Rows the clip cannot show (a grid half off the viewport) are not built at all:
             // no quads, no words, no hashing. Paint walks only the rows prepared here.
             let clip = window.content_mask().bounds.intersect(&bounds);
             let (clip_top, clip_bottom) = (clip.top(), clip.bottom());
             let overhang = row_overhang(&grid, &face, metrics.pixel_scale);
             // Rows above the oldest line the worker still has: a `~` filler, shaped once.
-            let mut filler: Option<Rc<Word>> = None;
+            let mut filler: Option<Rc<RowParts>> = None;
             let mut prepared_rows = Vec::with_capacity(rows_view.len());
             // "took 3.2 s" at the right end of a prompt row whose command took a while.
             let mut captions: Vec<(Point<Pixels>, ShapedLine)> = Vec::new();
-            // Nothing but blank rows from the terminal's first line down to here: a prompt
-            // in that stretch opens the terminal rather than following a command, and a rule
-            // over it would only double the tile header's hairline.
-            let mut blank_from_start = rows_view.first().is_some_and(|r| r.index.0 == 0);
             let hovered = view.hovered_block();
             let failed = state
                 .failed_runs(&rows_view)
@@ -1314,11 +1465,33 @@ impl Element for TerminalElement {
                 })
                 .collect();
             let failed_look = FailedLook::new(theme, zoom);
+            // The alternate screen has no blocks, whatever marks a program leaves on it.
+            let head_rows = if modes.contains(slopty_grid::TermModes::ALT_SCREEN) {
+                Vec::new()
+            } else {
+                head_runs(rows_view.iter().map(|row| row.line.map(|line| line.mark)))
+            };
+            // A prompt starts inside a head run only where the head above printed nothing: the
+            // one boundary no band edge draws. From the runs, not the row loop, as the heads are.
+            let rules = head_rows
+                .iter()
+                .flat_map(|run| run.start.saturating_add(1)..run.end)
+                .filter(|&row| {
+                    rows_view
+                        .get(usize::from(row))
+                        .and_then(|r| r.line)
+                        .is_some_and(|line| line.mark.starts_prompt())
+                })
+                .map(|row| origin.y + line_height * f32::from(row))
+                .collect();
+            let heads = head_rows
+                .iter()
+                .map(|run| {
+                    let top = origin.y + line_height * f32::from(run.start);
+                    (top, line_height * f32::from(run.end.saturating_sub(run.start)))
+                })
+                .collect();
             for (i, row) in rows_view.iter().enumerate() {
-                let opens_terminal = blank_from_start;
-                if row.line.is_some_and(|l| l.cells.iter().any(|c| !plain_space(c))) {
-                    blank_from_start = false;
-                }
                 let screen_row = u16::try_from(i).unwrap_or(u16::MAX);
                 let y = origin.y + line_height * f32::from(screen_row);
                 if !row_in_band(y, line_height, overhang, clip_top, clip_bottom) {
@@ -1336,104 +1509,168 @@ impl Element for TerminalElement {
                             look(false),
                             &mut cache.contrast,
                         );
-                        Rc::new(word)
+                        let segments = vec![(0, Rc::new(word))];
+                        Rc::new(RowParts { segments, ..RowParts::default() })
                     });
+                    let parts = Rc::clone(filler);
                     prepared_rows.push(PreparedRow {
                         row: screen_row,
                         y,
-                        quads: Vec::new(),
-                        decorations: Vec::new(),
-                        segments: vec![(0, Rc::clone(filler))],
+                        parts,
+                        marks: Vec::new(),
                         link: None,
-                        separator: None,
-                        sprites: Vec::new(),
                     });
                     continue;
                 };
-                // The local-echo guesses on this row are cells like the worker's.
-                let guessed = predicted.and_then(|guesses| {
-                    predicted_cells(&line.cells, guesses.pending, screen_row, guesses.marked)
-                });
-                let cells: &[Cell] = guessed.as_deref().unwrap_or(&line.cells);
                 let typing_at = shell_cursor.filter(|c| c.row == screen_row).map(|c| c.col);
-                let prompt =
-                    prompt_end(line.mark, typing_at).and_then(|end| faint_prompt(cells, end));
-                let cells: &[Cell] = prompt.as_deref().unwrap_or(cells);
-                let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
-                let mut decorations: Vec<Decoration> = Vec::new();
-                let mut sprites: Vec<SpriteCell> = Vec::new();
-                // The last background resolved: a run of one colour converts it once.
-                let mut last_bg: Option<(slopty_grid::Color, bool, Hsla)> = None;
-                for (col, cell) in cells.iter().enumerate() {
-                    let col = u16::try_from(col).unwrap_or(u16::MAX);
-                    let inverse = cell.style.flags.contains(StyleFlags::INVERSE);
-                    let bg = if inverse { cell.style.fg } else { cell.style.bg };
-                    let is_default_bg = !inverse && matches!(bg, slopty_grid::Color::Default);
-                    if !is_default_bg {
-                        let color = match last_bg {
-                            Some((slot, was_inverse, color))
-                                if slot == bg && was_inverse == inverse =>
-                            {
-                                color
-                            }
-                            _ => {
-                                let color = hsla(palette.resolve(bg, !inverse));
-                                last_bg = Some((bg, inverse, color));
-                                color
-                            }
-                        };
-                        if let Some((_start, end, c)) = quads.last_mut()
-                            && *end == col
-                            && *c == color
-                        {
-                            *end = col.saturating_add(1);
-                        } else {
-                            quads.push((col, col.saturating_add(1), color));
-                        }
+                let key = RowKey {
+                    frame: row_frame,
+                    prompt_end: prompt_end(line.mark, typing_at),
+                    guesses: predicted.and_then(|g| guesses_key(g.pending, screen_row, g.marked)),
+                    blink_off,
+                    sprites: SpriteGeometry {
+                        origin_x: f32::from(origin.x).to_bits(),
+                        height: device_span(y, line_height, scale),
+                        tiles: sprite_tiles,
+                    },
+                };
+                let address = Arc::as_ptr(line).addr();
+                let kept = rows_before
+                    .0
+                    .remove(&address)
+                    .filter(|(held, was, parts)| Arc::ptr_eq(held, line) && was.fits(parts, &key));
+                let parts = if let Some((_, _, parts)) = kept {
+                    parts
+                } else {
+                    #[cfg(test)]
+                    {
+                        built = built.saturating_add(1);
                     }
-                    let drawn = drawn_here(cell);
-                    let struck = cell.style.flags.contains(StyleFlags::STRIKETHROUGH);
-                    if drawn.is_none() && cell.style.underline == Underline::None && !struck {
-                        // Its glyphs' colour is the shaped word's business.
-                        continue;
-                    }
-                    let text = cell_color(&cell.style, palette, blink_off, &mut cache.contrast);
-                    if let Some(ch) = drawn {
-                        let tile = if sprite_tiles {
-                            let x = origin.x + cell_width * f32::from(col);
-                            let (w, h) = (
-                                device_span(x, cell_width, scale),
-                                device_span(y, line_height, scale),
-                            );
-                            cache.sprite(ch, w, h, sprite_thickness)
-                        } else {
-                            None
-                        };
-                        sprites.push(SpriteCell { col, ch, fg: text, tile });
-                    }
-                    // Underline and strikethrough go where the font says, not where GPUI
-                    // would put them; a curly underline is GPUI's wave at that position.
-                    if cell.style.underline != Underline::None {
-                        let color = underline_color(&cell.style, palette, text);
-                        let wavy = cell.style.underline == Underline::Curly;
-                        stroke(&mut decorations, col, color, grid.underline, wavy, Layer::Under);
-                        if cell.style.underline == Underline::Double {
-                            // The second stroke sits one stroke's gap above the first.
-                            let above = metrics::Line {
-                                y: grid.underline.y - grid.underline.thickness * 2.0,
-                                thickness: grid.underline.thickness,
+                    // The local-echo guesses on this row are cells like the worker's.
+                    let guessed = predicted.and_then(|guesses| {
+                        predicted_cells(&line.cells, guesses.pending, screen_row, guesses.marked)
+                    });
+                    let cells: &[Cell] = guessed.as_deref().unwrap_or(&line.cells);
+                    let prompt = key.prompt_end.and_then(|end| faint_prompt(cells, end));
+                    let cells: &[Cell] = prompt.as_deref().unwrap_or(cells);
+                    let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
+                    let mut decorations: Vec<Decoration> = Vec::new();
+                    let mut sprites: Vec<SpriteCell> = Vec::new();
+                    let mut blinks = false;
+                    // The last background resolved: a run of one colour converts it once.
+                    let mut last_bg: Option<(slopty_grid::Color, bool, Hsla)> = None;
+                    for (col, cell) in cells.iter().enumerate() {
+                        let col = u16::try_from(col).unwrap_or(u16::MAX);
+                        let inverse = cell.style.flags.contains(StyleFlags::INVERSE);
+                        let bg = if inverse { cell.style.fg } else { cell.style.bg };
+                        let is_default_bg = !inverse && matches!(bg, slopty_grid::Color::Default);
+                        if !is_default_bg {
+                            let color = match last_bg {
+                                Some((slot, was_inverse, color))
+                                    if slot == bg && was_inverse == inverse =>
+                                {
+                                    color
+                                }
+                                _ => {
+                                    let color = hsla(palette.resolve(bg, !inverse));
+                                    last_bg = Some((bg, inverse, color));
+                                    color
+                                }
                             };
-                            stroke(&mut decorations, col, color, above, false, Layer::Under);
+                            if let Some((_start, end, c)) = quads.last_mut()
+                                && *end == col
+                                && *c == color
+                            {
+                                *end = col.saturating_add(1);
+                            } else {
+                                quads.push((col, col.saturating_add(1), color));
+                            }
+                        }
+                        let drawn = drawn_here(cell);
+                        let struck = cell.style.flags.contains(StyleFlags::STRIKETHROUGH);
+                        if drawn.is_none() && cell.style.underline == Underline::None && !struck {
+                            // Its glyphs' colour is the shaped word's business.
+                            continue;
+                        }
+                        blinks |= cell.style.flags.contains(StyleFlags::BLINK);
+                        let text = cell_color(&cell.style, palette, blink_off, &mut cache.contrast);
+                        if let Some(ch) = drawn {
+                            let tile = if sprite_tiles {
+                                let x = origin.x + cell_width * f32::from(col);
+                                let (w, h) = (
+                                    device_span(x, cell_width, scale),
+                                    device_span(y, line_height, scale),
+                                );
+                                cache.sprite(ch, w, h, sprite_thickness)
+                            } else {
+                                None
+                            };
+                            sprites.push(SpriteCell { col, ch, fg: text, tile });
+                        }
+                        // Underline and strikethrough go where the font says, not where GPUI
+                        // would put them; a curly underline is GPUI's wave at that position.
+                        if cell.style.underline != Underline::None {
+                            let color = underline_color(&cell.style, palette, text);
+                            let wavy = cell.style.underline == Underline::Curly;
+                            stroke(
+                                &mut decorations,
+                                col,
+                                color,
+                                grid.underline,
+                                wavy,
+                                Layer::Under,
+                            );
+                            if cell.style.underline == Underline::Double {
+                                // The second stroke sits one stroke's gap above the first.
+                                let above = metrics::Line {
+                                    y: grid.underline.y - grid.underline.thickness * 2.0,
+                                    thickness: grid.underline.thickness,
+                                };
+                                stroke(&mut decorations, col, color, above, false, Layer::Under);
+                            }
+                        }
+                        if struck {
+                            stroke(
+                                &mut decorations,
+                                col,
+                                text,
+                                grid.strikethrough,
+                                false,
+                                Layer::Over,
+                            );
                         }
                     }
-                    if struck {
-                        stroke(&mut decorations, col, text, grid.strikethrough, false, Layer::Over);
-                    }
-                }
+                    let segments = segments(cells)
+                        .map(|(col, word)| {
+                            blinks |= self::blinks(word);
+                            let key = segment_hash(base, word, blink_off);
+                            let shaped_word = cache.words.get_or_shape(key, || {
+                                #[cfg(test)]
+                                {
+                                    shaped = shaped.saturating_add(1);
+                                }
+                                let (size, width) = (base_size, base_cell_width);
+                                let look = look(blink_off);
+                                shape_cells(
+                                    &text_system,
+                                    word,
+                                    size,
+                                    width,
+                                    look,
+                                    &mut cache.contrast,
+                                )
+                            });
+                            (col, shaped_word)
+                        })
+                        .collect();
+                    Rc::new(RowParts { quads, decorations, segments, sprites, blinks })
+                };
+                blinking |= parts.blinks;
                 // The selection paints over cell backgrounds and under the text.
                 let index = row.index;
+                let mut marks = Vec::new();
                 if let Some(range) = selection.and_then(|s| s.columns(index, grid_cols)) {
-                    quads.push((range.start, range.end, hsla(palette.theme.selection)));
+                    marks.push((range.start, range.end, hsla(palette.theme.selection)));
                 }
                 // Search hits, sorted by line: the slice for this row by binary search.
                 let first = matches.partition_point(|m| m.line < index);
@@ -1446,24 +1683,8 @@ impl Element for TerminalElement {
                     } else {
                         palette.theme.search_match
                     };
-                    quads.push((m.col, m.col.saturating_add(m.len).min(grid_cols), hsla(color)));
+                    marks.push((m.col, m.col.saturating_add(m.len).min(grid_cols), hsla(color)));
                 }
-                let segments = segments(cells)
-                    .map(|(col, word)| {
-                        blinking |= blinks(word);
-                        let key = segment_hash(base, word, blink_off);
-                        let shaped_word = cache.words.get_or_shape(key, || {
-                            #[cfg(test)]
-                            {
-                                shaped = shaped.saturating_add(1);
-                            }
-                            let (size, width) = (base_size, base_cell_width);
-                            let look = look(blink_off);
-                            shape_cells(&text_system, word, size, width, look, &mut cache.contrast)
-                        });
-                        (col, shaped_word)
-                    })
-                    .collect();
                 // A link wrapped over rows is underlined on each, edge to edge in between.
                 let link = link
                     .filter(|((first, _), (last, _))| (*first..=*last).contains(&index))
@@ -1473,17 +1694,12 @@ impl Element for TerminalElement {
                             if last == index { end.min(grid_cols) } else { grid_cols },
                         )
                     });
-                // A prompt starts here: rule off the command above it. On the grid's top edge
-                // the rule would lie a padding under the tile header's hairline and read as a
-                // double line.
-                let separator = (line.mark.starts_prompt() && !opens_terminal && screen_row > 0)
-                    .then(|| separator_color(theme));
                 // A hovered block says how long it took in its own facts, drawn over this row.
                 if line.mark.starts_prompt()
                     && hovered != Some(index)
                     && let Some(elapsed) = view.took(index)
                 {
-                    let text = super::view::took_label(elapsed);
+                    let text = crate::kit::duration(elapsed);
                     let width = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
                     // The columns the command's text reaches, trailing blanks aside.
                     let typed =
@@ -1511,13 +1727,11 @@ impl Element for TerminalElement {
                 prepared_rows.push(PreparedRow {
                     row: screen_row,
                     y,
-                    quads,
-                    decorations,
-                    segments,
+                    parts: Rc::clone(&parts),
+                    marks,
                     link,
-                    separator,
-                    sprites,
                 });
+                rows_after.0.insert(address, (Arc::clone(line), key, parts));
             }
 
             let cursor_visible = cursor.visible
@@ -1529,7 +1743,8 @@ impl Element for TerminalElement {
             let cursor_blinks = cursor_visible && cursor_blink.blinks(cursor.blink) && focused;
             blinking |= cursor_blinks;
             let cursor_shown = cursor_visible && !(cursor_blinks && blink_off);
-            let cursor_line = rows_view.get(usize::from(cursor.row)).and_then(|row| row.line);
+            let cursor_line =
+                rows_view.get(usize::from(cursor.row)).and_then(|row| row.line).map(AsRef::as_ref);
             let span = cursor_span(cursor_line, cursor.col);
             // While an input method composes, its underlined preview stands in for the cursor.
             let cursor_prepared = (cursor_shown && marked.is_none()).then(|| {
@@ -1617,6 +1832,10 @@ impl Element for TerminalElement {
                 scrollbar: scrollbar.and_then(|(color, history, offset)| {
                     scrollbar_thumb(&metrics, history, offset).map(|thumb| (thumb, color))
                 }),
+                heads,
+                head: head_color(theme),
+                rules,
+                rule: separator_color(theme),
                 failed,
                 failed_look,
                 overlay,
@@ -1635,9 +1854,12 @@ impl Element for TerminalElement {
             probe.rows_prepared = prepared.rows.len();
             probe.captions = caption_texts;
             probe.shaped = probe.shaped.saturating_add(shaped);
+            probe.rows_built = built;
             probe.sprite_masks = probe.sprite_masks.saturating_add(masks);
         }
         *cx.global_mut::<ShapeCache>() = cache;
+        drop(rows_before);
+        self.view.update(cx, |view, _cx| view.put_row_cache(rows_after));
         // The clock ticks only while a painted frame has something to blink.
         self.view.update(cx, |view, cx| view.blinking(prepared.blinking, cx));
         if fading {
@@ -1663,8 +1885,8 @@ impl Element for TerminalElement {
         // iOS, input-method commits on macOS).
         let focus = self.view.read(cx).focus_handle(cx);
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.view.clone()), cx);
-        // Touch: a long press over the text starts a selection (a plain drag pans the canvas).
-        // Claiming it at `Started` keeps the rest of the gesture away from the canvas.
+        // Touch: a long press over the text starts a selection (a plain drag scrolls the strip).
+        // Claiming it at `Started` keeps the rest of the gesture away from the strip.
         let view = self.view.clone();
         let hitbox = prepared.hitbox.clone();
         window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
@@ -1685,7 +1907,7 @@ impl Element for TerminalElement {
         });
         // A drag is followed wherever the pointer goes (the div's own move listener stops at
         // its edge): the selection keeps growing and scrolls past the top or bottom. So is
-        // the pointer's way to the scrollbar and away from it, off the card too.
+        // the pointer's way to the scrollbar and away from it, off the tile too.
         let view = self.view.clone();
         let grid_hitbox = prepared.hitbox.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
@@ -1721,22 +1943,25 @@ impl Element for TerminalElement {
         });
         window.paint_quad(fill(bounds, prepared.background));
         let look = prepared.failed_look;
-        // A block spans the tile, as Warp's do: its wash and its rule run edge to edge, so the
-        // band and the rules end together whatever width the grid's last column leaves.
+        // A block spans the tile, as Warp's do: its head, its wash and its rule run edge to
+        // edge, so the bands and the rules end together whatever width the grid's last column
+        // leaves. A failed block's wash lies over its head.
+        for &(top, height) in &prepared.heads {
+            let band = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height));
+            window.paint_quad(fill(band, prepared.head));
+        }
         for &(top, height) in &prepared.failed {
             let band = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height));
             window.paint_quad(fill(band, look.wash));
             window
                 .paint_quad(fill(Bounds::new(band.origin, size(look.bar_width, height)), look.bar));
         }
+        for &top in &prepared.rules {
+            let rule = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, px(1.0)));
+            window.paint_quad(fill(rule, prepared.rule));
+        }
         for row in &prepared.rows {
-            if let Some(color) = row.separator {
-                window.paint_quad(fill(
-                    Bounds::new(point(bounds.origin.x, row.y), size(bounds.size.width, px(1.0))),
-                    color,
-                ));
-            }
-            for (start, end, color) in &row.quads {
+            for (start, end, color) in row.parts.quads.iter().chain(&row.marks) {
                 let x = m.origin.x + m.cell_width * f32::from(*start);
                 let w = m.cell_width * f32::from(end.saturating_sub(*start));
                 window
@@ -1785,10 +2010,10 @@ impl Element for TerminalElement {
         };
         let cursor_text = prepared.cursor_text;
         // One layer for them, as for the glyphs below.
-        if prepared.rows.iter().any(|row| !row.sprites.is_empty()) {
+        if prepared.rows.iter().any(|row| !row.parts.sprites.is_empty()) {
             window.paint_layer(bounds, |window| {
                 for row in &prepared.rows {
-                    for sprite in &row.sprites {
+                    for sprite in &row.parts.sprites {
                         let x = m.origin.x + m.cell_width * f32::from(sprite.col);
                         let origin = point(x, row.y);
                         let color = CursorText::over(cursor_text, row.row, sprite.col, sprite.fg);
@@ -1815,7 +2040,7 @@ impl Element for TerminalElement {
         window.paint_layer(bounds, |window| {
             for row in &prepared.rows {
                 let baseline = row.y + grid.baseline;
-                for (col, word) in &row.segments {
+                for (col, word) in &row.parts.segments {
                     let origin = point(m.origin.x + m.cell_width * f32::from(*col), baseline);
                     for glyph in &word.glyphs {
                         let at = glyph_origin(origin, glyph.position, zoom);
@@ -2018,7 +2243,7 @@ fn paint_sprite(
 /// Paint one row's decorations on `layer`, where the font's metrics put them.
 fn paint_decorations(window: &mut Window, m: &CellMetrics, row: &PreparedRow, layer: Layer) {
     let over = layer == Layer::Over;
-    for deco in row.decorations.iter().filter(|d| d.over == over) {
+    for deco in row.parts.decorations.iter().filter(|d| d.over == over) {
         let x = m.origin.x + m.cell_width * f32::from(deco.start);
         let w = m.cell_width * f32::from(deco.end.saturating_sub(deco.start));
         if deco.wavy {
@@ -2057,7 +2282,7 @@ pub fn scrollbar_thumb(m: &CellMetrics, history: u64, offset: u64) -> Option<Bou
 }
 
 /// Whether `at` is where the pointer brings the scrollbar up: level with the grid, within
-/// `SCROLLBAR_REACH_CELLS` of its right edge or anywhere right of it (the card's inset).
+/// `SCROLLBAR_REACH_CELLS` of its right edge or anywhere right of it (the tile's inset).
 #[must_use]
 pub fn near_scrollbar(m: &CellMetrics, at: Point<Pixels>) -> bool {
     let right = m.origin.x + m.cell_width * f32::from(m.cols);
@@ -2134,6 +2359,12 @@ pub fn family_picks(cx: &App) -> usize {
 #[cfg(test)]
 pub fn rows_prepared(cx: &App) -> usize {
     cx.try_global::<Probe>().map_or(0, |probe| probe.rows_prepared)
+}
+
+/// How many rows the last prepaint built from their cells, the rest taken from the row cache.
+#[cfg(test)]
+pub fn rows_built(cx: &App) -> usize {
+    cx.try_global::<Probe>().map_or(0, |probe| probe.rows_built)
 }
 
 /// The "took" captions the last prepaint drew, top row first (tests).
@@ -2239,7 +2470,7 @@ mod tests {
     }
 
     /// A pixel mouse report is in the units the worker measures in: device pixels of the *fitted*
-    /// grid, whatever the display's scale and however far the canvas has zoomed. The worker
+    /// grid, whatever the display's scale and however far the overview has zoomed. The worker
     /// divides by the cell size it was told (8 × 17 here), so the column it reads back is the
     /// column the pointer is over.
     #[test]

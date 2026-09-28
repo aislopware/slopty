@@ -2,7 +2,8 @@
 //! tokio task on the worker. Real window-server reads (the target's bounds, the owner's
 //! activation state) against a real on-screen window, and no event posted and nothing
 //! activated, so it needs no Accessibility grant and leaves the desktop alone. A measurement,
-//! run by hand: `docs/MEASUREMENTS.md`, "input injection off the runtime".
+//! run by hand: `docs/MEASUREMENTS.md`, "input injection off the runtime" and "moves queued
+//! behind a stall".
 
 #[cfg(test)]
 #[expect(clippy::cast_precision_loss, reason = "measurement arithmetic on small counts")]
@@ -11,10 +12,14 @@ mod tests {
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
 
+    use objc2_core_foundation::CGPoint;
+    use objc2_core_graphics::{CGEvent, CGEventType};
     use slopty_capture::Rect;
     use slopty_core::WindowId;
-    use slopty_input::{Backend, Injector, InputError, InputSink as _, InputThread, Post, System};
-    use slopty_proto::input::{KeyAction, KeyCode, Mods};
+    use slopty_input::{
+        Backend, Event, Injector, InputError, InputSink as _, InputThread, Post, System, to_point,
+    };
+    use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton};
     use slopty_proto::screen::{CaptureTarget, ScreenInput};
 
     /// `System`'s reads, counted; posting and activation do nothing but note when the post
@@ -24,7 +29,7 @@ mod tests {
         /// Bounds reads in front of an event.
         bounds_reads: Arc<AtomicUsize>,
         active_checks: Arc<AtomicUsize>,
-        posted: Option<mpsc::Sender<Instant>>,
+        posted: Option<mpsc::Sender<(Instant, Post)>>,
     }
 
     impl Backend for Dry {
@@ -46,9 +51,9 @@ mod tests {
             Ok(())
         }
 
-        fn post(&mut self, _post: Post) -> Result<(), InputError> {
+        fn post(&mut self, post: Post) -> Result<(), InputError> {
             if let Some(posted) = &self.posted {
-                let _gone = posted.send(Instant::now());
+                let _gone = posted.send((Instant::now(), post));
             }
             Ok(())
         }
@@ -91,6 +96,49 @@ mod tests {
         );
     }
 
+    /// One event handed to the sink: when, and where a pointer event should land (`None` for a
+    /// key), which is how its post is found again.
+    type Handed = (Instant, Option<CGPoint>);
+
+    /// Each post matched to the event it came from, in order; an event with no post of its own
+    /// (a move the thread passed over) is skipped. The delays of every post, the button posts'
+    /// alone, and how many events went unposted.
+    fn delays(handed: &[Handed], posts: impl Iterator<Item = (Instant, Post)>) -> Delays {
+        let mut out = Delays::default();
+        let mut next = handed.iter();
+        for (posted, post) in posts {
+            let (at, release) = match post.event {
+                Event::Mouse { at, kind, .. } => (Some(at), kind == CGEventType::LeftMouseUp),
+                Event::Key { .. } | Event::Scroll { .. } => (None, false),
+            };
+            let Some((handed_at, _)) = next.by_ref().find(|(_, want)| match (want, at) {
+                (Some(want), Some(at)) => {
+                    (want.x - at.x).abs() < 1e-6 && (want.y - at.y).abs() < 1e-6
+                }
+                (None, None) => true,
+                _ => false,
+            }) else {
+                out.unmatched = out.unmatched.saturating_add(1);
+                continue;
+            };
+            let us = posted.duration_since(*handed_at).as_secs_f64() * 1e6;
+            out.all.push(us);
+            if release {
+                out.releases.push(us);
+            }
+        }
+        out.skipped = handed.len().saturating_sub(out.all.len());
+        out
+    }
+
+    #[derive(Debug, Default)]
+    struct Delays {
+        all: Vec<f64>,
+        releases: Vec<f64>,
+        skipped: usize,
+        unmatched: usize,
+    }
+
     /// What the stream's task hands the injector: an event, or the bounds its geometry probe
     /// read.
     enum Feed<'a> {
@@ -100,24 +148,31 @@ mod tests {
 
     /// Moves at 500 Hz with the bounds read every 100 ms beside them, as the stream's geometry
     /// probe does, then key presses at 200 Hz, each timed on the calling thread, with the
-    /// window-server reads made in front of an event. Returns when each event was handed over,
-    /// in order.
+    /// window-server reads made in front of an event. Returns when each event was handed over
+    /// and where it should land, in order.
     fn drive(
         label: &str,
         target: CaptureTarget,
+        scale: f64,
         mut feed: impl FnMut(Feed<'_>),
         dry: &Dry,
-    ) -> Vec<Instant> {
+    ) -> Vec<Handed> {
         let mut handed = Vec::with_capacity(MOVES + 2 * KEYS);
         let mut moves = Vec::with_capacity(MOVES);
+        let mut rect = None;
         for n in 0..MOVES {
             if n % PROBE_EVERY == 0 {
-                feed(Feed::Bounds(System.bounds(target)));
+                rect = System.bounds(target);
+                feed(Feed::Bounds(rect));
             }
             let started = Instant::now();
-            let at = (n % 400) as f32;
-            handed.push(Instant::now());
-            feed(Feed::Input(&ScreenInput::Move { x: at, y: at }));
+            // Every move lands somewhere of its own, so its post can be found again.
+            let (x, y) = ((n % 400) as f32, (n / 400) as f32);
+            handed.push((
+                Instant::now(),
+                rect.map(|r| to_point(r, scale, f64::from(x), f64::from(y))),
+            ));
+            feed(Feed::Input(&ScreenInput::Move { x, y }));
             moves.push(started.elapsed().as_secs_f64() * 1e6);
             pace(started, MOVE_EVERY);
         }
@@ -127,7 +182,7 @@ mod tests {
         let mut keys = Vec::with_capacity(KEYS);
         for _ in 0..KEYS {
             let started = Instant::now();
-            handed.push(Instant::now());
+            handed.push((Instant::now(), None));
             feed(Feed::Input(&ScreenInput::Key {
                 code: KeyCode::A,
                 action: KeyAction::Press,
@@ -135,7 +190,7 @@ mod tests {
                 text: Some("a".into()),
             }));
             keys.push(started.elapsed().as_secs_f64() * 1e6);
-            handed.push(Instant::now());
+            handed.push((Instant::now(), None));
             feed(Feed::Input(&ScreenInput::Key {
                 code: KeyCode::A,
                 action: KeyAction::Release,
@@ -165,6 +220,7 @@ mod tests {
         drive(
             "inline",
             target,
+            2.0,
             |feed| {
                 if let Feed::Input(input) = feed {
                     let _posted = inline.inject(input);
@@ -179,6 +235,7 @@ mod tests {
         let handed = drive(
             "thread",
             target,
+            2.0,
             |feed| match feed {
                 Feed::Input(input) => {
                     let _queued = thread.inject(input);
@@ -189,11 +246,118 @@ mod tests {
         );
         drop(thread);
         drop(dry);
-        let delays: Vec<f64> = handed
-            .iter()
-            .zip(posts.iter())
-            .map(|(handed, posted)| posted.duration_since(*handed).as_secs_f64() * 1e6)
-            .collect();
-        quantiles("thread handed → posted", delays);
+        let delays = delays(&handed, posts.iter());
+        eprintln!(
+            "thread: {} events handed, {} passed over, {} posts unmatched",
+            handed.len(),
+            delays.skipped,
+            delays.unmatched
+        );
+        quantiles("thread handed → posted", delays.all);
+    }
+
+    /// How long the owner lookup in front of a button-down holds the input thread: 17 ms, the
+    /// worst measured (MEASUREMENTS.md, "input injection off the runtime").
+    const STALL: Duration = Duration::from_millis(17);
+
+    /// A window whose owner lookup stalls like the slowest real one, and whose posts build the
+    /// `CGEvent` the real backend would post, without posting it.
+    #[derive(Debug)]
+    struct Stalling {
+        posted: mpsc::Sender<(Instant, Post)>,
+    }
+
+    const RECT: Rect = Rect { x: 0.0, y: 0.0, w: 2000.0, h: 2000.0 };
+
+    impl Backend for Stalling {
+        fn owner_pid(&self, _target: CaptureTarget) -> Option<i32> {
+            Some(4242)
+        }
+
+        fn bounds(&mut self, _target: CaptureTarget) -> Option<Rect> {
+            Some(RECT)
+        }
+
+        fn is_active(&mut self, _pid: i32) -> bool {
+            #[expect(clippy::disallowed_methods, reason = "the stall being modelled")]
+            std::thread::sleep(STALL);
+            true
+        }
+
+        fn activate(&mut self, _pid: i32) -> Result<(), InputError> {
+            Ok(())
+        }
+
+        fn post(&mut self, post: Post) -> Result<(), InputError> {
+            if let Event::Mouse { kind, at, button, .. } = post.event {
+                let _built = CGEvent::new_mouse_event(None, kind, at, button);
+            }
+            let _gone = self.posted.send((Instant::now(), post));
+            Ok(())
+        }
+    }
+
+    /// Clicks in a stream of moves at 500 Hz, the owner lookup in front of each press holding
+    /// the input thread for [`STALL`]: every move and the release handed over meanwhile queue
+    /// behind it. How long the release waits, and how many of the queued moves are posted.
+    #[test]
+    #[ignore = "measurement"]
+    fn moves_queued_behind_a_stall() {
+        const CLICKS: usize = 40;
+        /// Moves per click: 300 ms, past the owner check's 250 ms, so every press looks again.
+        const ROUND: usize = 150;
+        const PRESS_AT: usize = 50;
+        /// The release 10 ms after the press, in the middle of the stall.
+        const RELEASE_AT: usize = 55;
+        // The first event a process builds connects to the window server, which takes seconds.
+        let _warm = CGEvent::new_mouse_event(
+            None,
+            CGEventType::MouseMoved,
+            CGPoint::new(0.0, 0.0),
+            objc2_core_graphics::CGMouseButton::Left,
+        );
+        let (posted, posts) = mpsc::channel();
+        let target = CaptureTarget::Window(WindowId(1));
+        let mut thread = InputThread::spawn(target, 1.0, Stalling { posted });
+        let mut handed: Vec<Handed> = Vec::with_capacity(CLICKS * (ROUND + 2));
+        let mut n = 0_u32;
+        // Every event lands somewhere of its own, so its post can be found again.
+        let mut hand = |thread: &mut InputThread, input: &dyn Fn(f32, f32) -> ScreenInput| {
+            n = n.wrapping_add(1);
+            let (x, y) = ((n % 1000) as f32, (n / 1000) as f32);
+            handed.push((Instant::now(), Some(to_point(RECT, 1.0, f64::from(x), f64::from(y)))));
+            let _queued = thread.inject(&input(x, y));
+        };
+        for _ in 0..CLICKS {
+            for m in 0..ROUND {
+                let started = Instant::now();
+                if m % PROBE_EVERY == 0 {
+                    thread.set_bounds(Some(RECT), Instant::now());
+                }
+                if m == PRESS_AT || m == RELEASE_AT {
+                    let down = m == PRESS_AT;
+                    hand(&mut thread, &|x, y| ScreenInput::Button {
+                        button: MouseButton::Left,
+                        down,
+                        clicks: 1,
+                        x,
+                        y,
+                        mods: Mods::empty(),
+                    });
+                }
+                hand(&mut thread, &|x, y| ScreenInput::Move { x, y });
+                pace(started, MOVE_EVERY);
+            }
+        }
+        drop(thread);
+        let delays = delays(&handed, posts.iter());
+        eprintln!(
+            "stall {STALL:?}: {} events handed, {} passed over, {} posts unmatched",
+            handed.len(),
+            delays.skipped,
+            delays.unmatched
+        );
+        quantiles("stalled handed → posted, every post", delays.all);
+        quantiles("stalled handed → posted, releases", delays.releases);
     }
 }

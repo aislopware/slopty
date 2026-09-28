@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: line
+---
+{"state":"unreachable","error":"tailscale's local API did not answer within 2s"}

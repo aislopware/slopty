@@ -29,6 +29,10 @@ pub const AHEAD_OF_DATAGRAMS: i32 = 0;
 /// Every session stream and the control stream sit at [`AHEAD_OF_DATAGRAMS`], and noq
 /// round-robins equal priorities a packet each, so an echo written beside other sessions' floods
 /// waited a packet per busy stream. Raised, it leaves in the next packet ([`EchoLift`]).
+///
+/// It is also `noq::TransportConfig::stream_priority_unpaced`: an echo does not wait for the
+/// pacer's millisecond timer behind paced video (MEASUREMENTS.md, "an echo behind paced
+/// video").
 pub const ECHO_PRIORITY: i32 = 1;
 
 /// Send priority of tunnels: behind video, since a download through a forwarded port has no
@@ -54,9 +58,10 @@ const _: () = assert!(
     "files, then tunnels and conversations, then everything that goes ahead of video, then an echo"
 );
 
-/// A session stream's priority, following its frames: at [`ECHO_PRIORITY`] from an echo
-/// until a frame that is not one (the viewer's input has been answered), then back at
-/// [`AHEAD_OF_DATAGRAMS`].
+/// A stream's priority, following its frames.
+///
+/// At [`ECHO_PRIORITY`] from a frame on a keystroke's path (a session's echo, or the client's
+/// input on the control stream) until one that is not, then back at [`AHEAD_OF_DATAGRAMS`].
 ///
 /// noq files a stream by the priority it had when data was queued on it, so the priority is
 /// set before the frame is written.
@@ -66,8 +71,8 @@ pub struct EchoLift {
 }
 
 impl EchoLift {
-    /// Before a frame goes on `stream`: `echo` is whether it answers a viewer's input.
-    pub fn before_frame(&mut self, stream: &FramedSend<TermEvent>, echo: bool) {
+    /// Before a frame goes on `stream`: `echo` is whether it is on a keystroke's path.
+    pub fn before_frame<T: serde::Serialize>(&mut self, stream: &FramedSend<T>, echo: bool) {
         if echo == self.raised {
             return;
         }

@@ -744,6 +744,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   there, its picture or an arrow, or nothing when the host hides it (a hidden host pointer
   is then mirrored rather than replaced by ours), and before the first frame the arrow stays
   since there is nothing to point at. Test: `the_local_pointer_hides_once_a_frame_is_up`.
+  - Amended 2026-09-28: the pointer drawn over the frame is no longer always the host's
+    sample. While this client drives it (always on a window stream, and for a hold after its
+    last move on a display), it is drawn at the client's own point in the host's cursor
+    picture, so the hidden arrow and the drawn one no longer sit a round trip apart
+    (`docs/decisions/input.md`, "A window stream's pointer is where its input put it",
+    amended).
 
 - ✅ **The source state follows the frames, not the first one** (2026-09-06). `check_source`
   decided `Live` from `encoded > 0`, a latch: a window that drew once and was then hidden, or
@@ -1122,3 +1128,96 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   dropped for a full socket buffer across keyframe-heavy and lossy loopback streams, and the
   machine-wide counter did not move (MEASUREMENTS, "UDP receive buffer"). `SO_RCVBUF` is set
   when a measurement shows drops, and not before.
+
+- ⏸ **A zoomed picture's region at native resolution** (designed 2026-09-28, not built). A
+  zoomed picture already asks for the scale it is drawn at, which tops out at the whole target
+  at native size: a 5K display at 1:1 on a phone costs a 14.7 MP encode, send and decode for the
+  3 MP the phone shows. The follow-up streams only the zoomed region, at native resolution. It
+  needs a wire change, so it waits for its own round:
+  - `ScreenRequest::SetRegion { stream: StreamId, region: Option<Region> }`, with
+    `Region { x: u16, y: u16, w: u16, h: u16 }` in the target's native pixels. `None` streams
+    the whole target again. The client asks when the zoom settles (the pinch or pan ended,
+    then `QUALITY_COOLDOWN`), for the drawn rect plus a quarter of it on each side, so a small
+    pan stays inside what is streamed. A pan past that margin asks again.
+  - `FramePrefix` gains the region the frame shows (`region: [U16; 4]`, the same units, all
+    zero for the whole target). It rides with each frame, under the frame's parity. A frame in
+    flight across a change then says for itself where it goes, with no ordering between the
+    control stream and the datagrams to get wrong. The prefix grows from 16 to 24 bytes.
+  - The worker sets `SCStreamConfiguration.sourceRect` to the region (display points on the
+    display and crop paths, the window's own space on the window path, as the crop path
+    already does) and the output size to the region at the quality's scale. A new size is a new
+    encoder session and a keyframe, so a region change costs what a quality change does
+    today (the `sourceRect` update itself took about 20 ms on the crop path).
+  - Input and the cursor stay in whole-target stream pixels, so `ScreenInput` and the
+    cursor channel do not change and the view's mapping (`Zoom::to_picture`) is untouched. The
+    view draws each frame at its region's place in the zoomed picture, over the last
+    whole-target frame, which fills the margin while a new region is on its way.
+  Before building it, measure encode, bitrate and decode for a 5K display at native against a
+  phone-sized region, and the time from `SetRegion` to the first frame of the new region.
+
+- ✅ **A cursor sample draws only what it moves, and rides the frames** (2026-09-28). The view
+  drew on every cursor sample, up to 120 a second. It did so in trackpad mode, where the
+  trackpad's pointer is drawn and not the sample, and when the worker's pointer was off the
+  target and nothing was drawn. Frames drew separately. A cursor-only draw just before a frame
+  made that frame the second inside one refresh, and a `CAMetalLayer` shows it a refresh late
+  (31.9 against 18.9 ms to glass). Now the pump hands each sample to
+  `ScreenView::pointer_changed`, which compares the pointer the view would draw (a point of
+  the picture, or none) with the one the last render drew, and does nothing when they match.
+  While frames flow (the last came within two periods of the rate asked for), a change waits
+  for the next frame, which draws it anyway. It draws on its own only when that frame is more
+  than `FOLD` (half a 60 Hz refresh) past its due time. With frames stopped it draws at once.
+  Every render, whatever asked for it, records the pointer it drew and ends any wait. At 60
+  frames and 120 samples a second, the view draws 61 times instead of 180 (MEASUREMENTS, "a
+  remote pointer drawn where the client put it"). The price is a pointer the worker moves on
+  its own drawn up to one frame period plus `FOLD` late, about 25 ms at 60 fps. The pointer
+  this client moves is never drawn from samples: it is drawn at once, in the move's own frame
+  (`docs/decisions/input.md`, "A window stream's pointer is where its input put it",
+  amended). So the wait adds nothing a hand here can feel. Test:
+  `cursor_samples_ride_the_frames_while_they_flow`.
+
+- ✅ **The client reads datagrams in batches and its stream worker keeps one timer** (2026-09-28).
+  The link's reader takes a read's worth with `read_many_datagrams` (one lock of the
+  connection) and routes the screen datagrams under one lock of the router
+  (`ScreenRouter::route_many`). Each stream worker moves the deadline of one pinned `Sleep`,
+  which is an atomic update when it moves later. Before, it made a sleep each wake and dropped
+  it unfired, taking the timer wheel's lock twice (52–56 against 335–403 ns a wake). The worker
+  reads the path's round trip once a report rather than on every wake, because that read takes
+  the connection's lock and waits on its driver (p50 0.7 µs, tens of µs at worst). The
+  reassembler's timers go by a figure up to 50 ms old. The tick still restarts after each
+  arrival, as the 2026-09-26 ruling needs. End to end the saving is below what this machine's
+  load lets the frame benchmarks resolve (MEASUREMENTS, "the client's datagram path"). Tests:
+  `a_batch_fans_out_in_order_and_skips_what_does_not_parse`,
+  `the_round_trip_is_read_once_a_report`, `the_reader_sorts_a_burst_between_sessions_and_screens`.
+
+- ❌ **The cursor's picture is not deduped on the cursor's identity** (2026-09-28). The shape loop
+  reads the picture 30 times a second while the pointer is over the target. An unchanged cursor
+  was meant to cost one pointer compare. AppKit returns a fresh `NSCursor`, `NSImage`,
+  representations and `CGImage` on every `currentSystemCursor`, so there is nothing to compare.
+  The read's cost is that call, about 155 of 190 µs at the median. A pixel digest would still
+  make the call and save at most the copy and conversion. Rejected (MEASUREMENTS, "the cursor's
+  picture"). What would cut the cost is reading less often, for instance only after the move
+  counters change plus a slow fallback. That would delay a shape change under a still pointer
+  (a scroll, a click, an app going busy), so it waits for a measurement of those cases.
+
+- ✅ **A quality change builds its session beside the stream's input, and the stream's news
+  waits for room on its own** (2026-09-28, MEASUREMENTS "input behind a quality change").
+  `Pipeline::set_quality` no longer awaits anything. A bitrate alone still applies in place. A
+  size, rate or codec change maps input and the pointer at the new scale at once and returns a
+  `Rebuild`, which the stream's task waits for in the same select arm as a resize's. The client
+  maps its pointer at the scale it asked for from the moment it asks, so this is also the scale
+  the input behind the change was sent at. A change that comes while a build is under way
+  replaces that build and keeps its size, so a quality asked for after a resize still applies on
+  top of it. A replaced session is dropped on the blocking pool. Only a resize's build tells the
+  client `Geometry`; a quality change tells nothing, as before, because a late `Geometry` for an
+  older ask would move the size the client maps with. A move sent right behind a scale change
+  reached the input thread after 2.9–3.8 ms at the median, the session build, and now after
+  11–12 µs.
+
+  The `Geometry` and `Source` events the task sends used to wait for room in the connection's
+  1024-slot queue in front of the next command. They now wait in a queue of their own, drained
+  by a select arm, where a newer event of a kind replaces the one waiting, since each says
+  where the stream is now. Dropping them was rejected: a lost `Geometry` leaves the client
+  mapping input at the wrong size. Tests: `input_behind_a_quality_change_does_not_wait_for_the_encoder`,
+  `a_quality_change_replaces_the_build_of_the_one_before`,
+  `news_the_client_has_no_room_for_does_not_hold_input`,
+  `a_read_landing_during_a_quality_build_does_not_drop_it`.

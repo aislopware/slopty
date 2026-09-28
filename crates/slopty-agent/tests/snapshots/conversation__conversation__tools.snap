@@ -14,7 +14,7 @@ expression: "decode(\"tools\").snapshot()"
             lines: 1
             chars: 715
             full: ~
-          images: 0
+          images: []
           command: ~
     - id: "00000000-0000-4000-8000-000000000015:0"
       at_ms: 1790482573134
@@ -44,6 +44,7 @@ expression: "decode(\"tools\").snapshot()"
               chars: 0
               full: ~
             at_ms: 1790482573495
+            images: []
     - id: "00000000-0000-4000-8000-000000000021:0"
       at_ms: 1790482577266
       body:
@@ -74,6 +75,7 @@ expression: "decode(\"tools\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482577911
+            images: []
     - id: toolu_03
       at_ms: 1790482578134
       body:
@@ -88,6 +90,7 @@ expression: "decode(\"tools\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482578164
+            images: []
     - id: "00000000-0000-4000-8000-000000000028:0"
       at_ms: 1790482579626
       body:
@@ -113,6 +116,7 @@ expression: "decode(\"tools\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482579900
+            images: []
     - id: "00000000-0000-4000-8000-000000000032:0"
       at_ms: 1790482581073
       body:
@@ -140,6 +144,7 @@ expression: "decode(\"tools\").snapshot()"
               chars: 7
               full: ~
             at_ms: 1790482581229
+            images: []
     - id: "00000000-0000-4000-8000-000000000036:0"
       at_ms: 1790482582567
       body:
@@ -169,6 +174,7 @@ expression: "decode(\"tools\").snapshot()"
               chars: 32
               full: ~
             at_ms: 1790482582851
+            images: []
     - id: "00000000-0000-4000-8000-000000000040:0"
       at_ms: 1790482584171
       body:
@@ -201,10 +207,12 @@ expression: "decode(\"tools\").snapshot()"
                 full: ~
               stderr: ~
               output_file: ~
+              finished_ms: ~
           result:
             status: Ok
             text: ~
             at_ms: 1790482584717
+            images: []
     - id: "00000000-0000-4000-8000-000000000044:0"
       at_ms: 1790482586121
       body:
@@ -233,6 +241,7 @@ expression: "decode(\"tools\").snapshot()"
               stdout: ~
               stderr: ~
               output_file: ~
+              finished_ms: ~
           result:
             status: Error
             text:
@@ -241,6 +250,7 @@ expression: "decode(\"tools\").snapshot()"
               chars: 66
               full: ~
             at_ms: 1790482586485
+            images: []
     - id: "00000000-0000-4000-8000-000000000048:0"
       at_ms: 1790482587959
       body:
@@ -269,10 +279,12 @@ expression: "decode(\"tools\").snapshot()"
               stdout: ~
               stderr: ~
               output_file: /private/tmp/claude-uid/-work/00000000-0000-4000-8000-000000000001/tasks/b00000001.output
+              finished_ms: 1790482589448
           result:
             status: Ok
             text: ~
             at_ms: 1790482588418
+            images: []
     - id: "00000000-0000-4000-8000-000000000052:0"
       at_ms: 1790482592446
       body:
@@ -301,6 +313,7 @@ expression: "decode(\"tools\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482592914
+            images: []
     - id: "00000000-0000-4000-8000-000000000058:0"
       at_ms: 1790482595015
       body:
@@ -338,6 +351,7 @@ expression: "decode(\"tools\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482598999
+            images: []
     - id: "00000000-0000-4000-8000-000000000062:0"
       at_ms: 1790482600753
       body:
@@ -363,6 +377,7 @@ expression: "decode(\"tools\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482601041
+            images: []
     - id: toolu_13
       at_ms: 1790482601242
       body:
@@ -380,6 +395,7 @@ expression: "decode(\"tools\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482601264
+            images: []
     - id: "00000000-0000-4000-8000-000000000068:0"
       at_ms: 1790482603999
       body:
@@ -435,7 +451,7 @@ expression: "decode(\"tools\").snapshot()"
             lines: 1
             chars: 102
             full: ~
-          images: 0
+          images: []
           command: ~
     - id: toolu_14
       at_ms: 1790482597611
@@ -458,6 +474,7 @@ expression: "decode(\"tools\").snapshot()"
               chars: 44
               full: ~
             at_ms: 1790482597625
+            images: []
     - id: "00000000-0000-4000-8000-000000000089:0"
       at_ms: 1790482598941
       body:

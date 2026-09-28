@@ -63,7 +63,7 @@ parking_lot = "0.12.5"
 uuid = { version = "1.26.1", features = [ "v4", "v7", "serde", "fast-rng" ] }
 # The MCP SDK (protocol revision 2026-07-28): the server's Streamable HTTP endpoint and the
 # `slopty mcp` stdio shim. Each crate adds the transport it serves.
-rmcp = { version = "3.4.1", default-features = false, features = [ "server", "macros" ] }
+rmcp = { version = "3.5.0", default-features = false, features = [ "server", "macros" ] }
 # The MCP tools' input schemas; the major rmcp builds on.
 schemars = { version = "1.2.2", features = [ "uuid1" ] }
 # The server's MCP listener (HTTP/1.1 connections served one task each, admitted by peer address)
@@ -77,6 +77,9 @@ camino = { version = "1.2.6", features = [ "serde1" ] }
 # serialization
 serde = { version = "1.0.229", features = [ "derive", "rc" ] }
 serde_json = "1.0.151"
+# `Vec<u8>` fields as one byte string (`serialize_bytes`) instead of a sequence of `u8`s: the
+# same postcard bytes, one copy instead of a call per byte (kitty images, cursor shapes).
+serde_bytes = "0.11.19"
 similar = "3.2.0"
 # Syntax colouring for file cards, fenced code and the settings (`slopty_ui::highlight`): bat's
 # grammars (two-face) on syntect's pure-Rust regex engine; no onig, no C.
@@ -254,11 +257,18 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
 ] }
 objc2-audio-toolbox = { version = "=0.3.2", default-features = false, features = [
     "std",
-    "AudioServices",
+    "AUComponent",
+    "AudioComponent",
     "AudioConverter",
-    "AudioQueue",
+    "AudioOutputUnit",
+    "AudioServices",
+    "AudioUnitProperties",
     "objc2-core-audio-types",
     "objc2-core-foundation",
+] }
+objc2-core-audio = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "AudioHardware",
 ] }
 objc2-core-audio-types = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 objc2-avf-audio = { version = "=0.3.2", default-features = false, features = [
@@ -279,6 +289,8 @@ objc2-ui-kit = { version = "=0.3.2", default-features = false, features = [
 ] }
 # The browser tile's `WKWebView` (`slopty_platform::web`). Features are per crate.
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = [ "std" ] }
+# Local notifications and the icon badge (`slopty_platform::notify`). Features are per crate.
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"
 
@@ -322,9 +334,10 @@ ignore = "0.4.33"
 pretty_assertions = "1.4.1"
 
 # noq-proto 1.3.0 with `TransportConfig::stream_priority_before_datagrams`, so a keystroke's
-# echo is not written behind a keyframe's datagrams, two BBR3 fixes against the draft, and a
-# pacer that lets BBR3's send quantum out together (docs/decisions/transport.md). `vendor/noq-proto/SLOPTY.md` lists the patches and how to
-# move them.
+# echo is not written behind a keyframe's datagrams, `stream_priority_unpaced`, so it does not
+# wait for the pacer either, two BBR3 fixes against the draft, and a pacer that lets BBR3's send
+# quantum out together (docs/decisions/transport.md). `vendor/noq-proto/SLOPTY.md` lists the
+# patches and how to move them.
 [patch.crates-io]
 noq-proto = { path = "vendor/noq-proto" }
 

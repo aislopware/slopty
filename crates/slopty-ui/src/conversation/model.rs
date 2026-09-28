@@ -1,8 +1,8 @@
 //! A followed conversation as this client holds it.
 //!
 //! It keeps the threads the worker streamed, the blocks the model is writing, the meters, the
-//! texts expanded on request and the messages sent from the composer that the transcript has
-//! not recorded yet.
+//! texts expanded on request, what background commands printed, the pictures fetched (by
+//! digest) and the messages sent from the composer that the transcript has not recorded yet.
 //!
 //! Nothing here draws. [`Model::apply`] takes the worker's events in order and says what
 //! changed; [`crate::conversation::rows`] turns a thread into the list's rows.
@@ -15,10 +15,11 @@
 //! the reader where they were: a toggle does not scroll the conversation.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use slopty_proto::conversation::{
-    Body, Change, Clipped, ConversationEvent, Entry, Live, LiveId, LiveKind, Meters, Origin, Part,
-    Task, TextRef, ThreadId, Turn,
+    Body, Change, Clipped, ConversationEvent, Entry, Image, Live, LiveId, LiveKind, Meters, Origin,
+    Output, Part, Task, TextRef, ThreadId, Turn,
 };
 
 /// One thread: its entries in order, its task list and, for a subagent, the call that
@@ -65,6 +66,12 @@ impl Thread {
     #[must_use]
     pub fn entry(&self, id: &str) -> Option<&Entry> {
         self.entries.get(*self.index.get(id)?)
+    }
+
+    /// Where the entry `id` is in [`Self::entries`].
+    #[must_use]
+    pub fn position(&self, id: &str) -> Option<usize> {
+        self.index.get(id).copied()
     }
 
     /// The figures of the turn the prompt `id` opened (empty for work before any prompt).
@@ -143,6 +150,20 @@ pub struct Applied {
     pub meters: bool,
     /// The conversation as it stands has just arrived in full, the first time or again.
     pub current: bool,
+    /// A background command's output, or a picture's bytes: the rows that show them are
+    /// drawn again.
+    pub media: bool,
+}
+
+/// A picture's bytes, as far as this client has them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Picture {
+    /// Asked for; not here yet.
+    Asked,
+    /// Here.
+    Here(Arc<[u8]>),
+    /// The worker has none to send: gone from the transcript, or too large.
+    Missing,
 }
 
 /// A text's place in [`Model`]'s map of expanded texts: its thread, record and part.
@@ -158,6 +179,10 @@ fn text_key(thread: &ThreadId, reference: &TextRef) -> String {
         Part::Stdout => "stdout".to_owned(),
         Part::Stderr => "stderr".to_owned(),
         Part::Patch => "patch".to_owned(),
+        Part::Image { tool_use_id, index } => {
+            format!("image:{}:{index}", tool_use_id.as_deref().unwrap_or_default())
+        }
+        Part::Output { tool_use_id } => format!("output:{tool_use_id}"),
     };
     format!("{thread}/{}/{part}", reference.record)
 }
@@ -189,6 +214,12 @@ pub struct Model {
     expanded: HashMap<String, Option<Clipped>>,
     live: BTreeMap<LiveId, LiveBlock>,
     pending: Vec<Pending>,
+    /// What each background command printed last, by thread and call.
+    outputs: HashMap<(ThreadId, String), Output>,
+    /// Pictures by digest.
+    pictures: HashMap<String, Picture>,
+    /// The digest each picture asked for was asked by, by its place.
+    asked: HashMap<String, String>,
 }
 
 impl Model {
@@ -209,6 +240,14 @@ impl Model {
                 applied.threads = true;
                 applied.current = true;
                 self.drop_recorded();
+                // A request on the stream before this one is not answered on this one.
+                self.pictures.retain(|_, p| *p != Picture::Asked);
+                self.asked.clear();
+                // A new transcript's commands are new calls: the old outputs have no row.
+                let threads = &self.threads;
+                self.outputs.retain(|(thread, call), _| {
+                    threads.get(thread).is_some_and(|t| t.entry(call).is_some())
+                });
             }
             ConversationEvent::Meters(meters) => {
                 applied.meters = self.meters.as_ref() != Some(&meters);
@@ -224,8 +263,48 @@ impl Model {
                 }
                 applied.live = true;
             }
+            ConversationEvent::Output(outputs) => {
+                for output in outputs {
+                    self.outputs.insert((output.thread.clone(), output.call.clone()), output);
+                }
+                applied.media = true;
+            }
+            ConversationEvent::Image { thread, reference, blob } => {
+                let Some(digest) = self.asked.remove(&text_key(&thread, &reference)) else {
+                    return applied;
+                };
+                let picture = match blob {
+                    Some(blob) if blob.digest == digest => Picture::Here(Arc::from(blob.data)),
+                    _ => Picture::Missing,
+                };
+                self.pictures.insert(digest, picture);
+                applied.media = true;
+            }
         }
         applied
+    }
+
+    /// What the background command `call` of `thread` printed last.
+    #[must_use]
+    pub fn output(&self, thread: &ThreadId, call: &str) -> Option<&Output> {
+        self.outputs.get(&(thread.clone(), call.to_owned()))
+    }
+
+    /// A picture's bytes, as far as they came.
+    #[must_use]
+    pub fn picture(&self, digest: &str) -> Option<&Picture> {
+        self.pictures.get(digest)
+    }
+
+    /// Note that `image` of `thread` is being asked for; `false` when it is here, missing or
+    /// asked already (by this place or another with the same digest).
+    pub fn want(&mut self, thread: &ThreadId, image: &Image) -> bool {
+        if self.pictures.contains_key(&image.digest) {
+            return false;
+        }
+        self.pictures.insert(image.digest.clone(), Picture::Asked);
+        self.asked.insert(text_key(thread, &image.at), image.digest.clone());
+        true
     }
 
     fn change(&mut self, change: Change, applied: &mut Applied) {
@@ -415,7 +494,7 @@ mod tests {
             at_ms: 1,
             body: Body::Prompt(Prompt {
                 text: clipped(text),
-                images: 0,
+                images: Vec::new(),
                 command: command.map(str::to_owned),
             }),
         }
@@ -487,6 +566,7 @@ mod tests {
             status: ResultStatus::Ok,
             text: None,
             at_ms: 4,
+            images: Vec::new(),
         })))]));
         assert_eq!(ids(&model), ["p1", "toolu_1", "t1"], "the result lands on its call");
         let main = model.thread(&ThreadId::Main).unwrap();
@@ -574,5 +654,70 @@ mod tests {
             text: None,
         });
         assert_eq!(model.expanded(&ThreadId::Main, &gone), Some(Expanded::Gone));
+    }
+
+    /// A picture is asked for once, whatever draws it again, and kept by its digest once its
+    /// bytes come; a reply with other bytes, or none, marks it missing rather than asking on.
+    #[test]
+    fn a_picture_is_asked_for_once_and_kept_by_its_digest() {
+        use slopty_proto::conversation::{Blob, Image};
+        let image = |digest: &str, record: &str| Image {
+            digest: digest.to_owned(),
+            media_type: "image/png".to_owned(),
+            bytes: 3,
+            width: 1,
+            height: 1,
+            at: TextRef {
+                record: record.to_owned(),
+                part: Part::Image { tool_use_id: None, index: 0 },
+            },
+        };
+        let mut model = Model::default();
+        let shot = image("d1", "u1");
+        assert!(model.want(&ThreadId::Main, &shot));
+        assert!(!model.want(&ThreadId::Main, &shot), "asked already");
+        assert!(!model.want(&ThreadId::Main, &image("d1", "u2")), "the same bytes elsewhere");
+        assert!(matches!(model.picture("d1"), Some(Picture::Asked)));
+        let applied = model.apply(ConversationEvent::Image {
+            thread: ThreadId::Main,
+            reference: shot.at.clone(),
+            blob: Some(Blob { digest: "d1".to_owned(), data: vec![1, 2, 3] }),
+        });
+        assert!(applied.media);
+        assert!(matches!(model.picture("d1"), Some(Picture::Here(b)) if b[..] == [1, 2, 3]));
+
+        let other = image("d2", "u3");
+        assert!(model.want(&ThreadId::Main, &other));
+        model.apply(ConversationEvent::Image {
+            thread: ThreadId::Main,
+            reference: other.at.clone(),
+            blob: Some(Blob { digest: "not d2".to_owned(), data: vec![9] }),
+        });
+        assert!(matches!(model.picture("d2"), Some(Picture::Missing)));
+        let unasked = model.apply(ConversationEvent::Image {
+            thread: ThreadId::Main,
+            reference: image("d3", "u4").at,
+            blob: None,
+        });
+        assert!(!unasked.media && model.picture("d3").is_none(), "a reply nobody asked for");
+    }
+
+    /// A background command's last lines are kept by its call, the newest over the last, and
+    /// go with the call when a replay no longer has it.
+    #[test]
+    fn a_background_commands_lines_follow_its_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut model = Model::default();
+        for event in crate::conversation::fixtures::work(dir.path()) {
+            model.apply(event);
+        }
+        let tail = model.output(&ThreadId::Main, "t4").map(|o| o.tail.text.clone());
+        assert_eq!(
+            tail.as_deref().and_then(|t| t.lines().last()),
+            Some("   Compiling slopty v0.1.0")
+        );
+        model.apply(ConversationEvent::Changes(vec![Change::Reset { thread: None }]));
+        model.apply(ConversationEvent::Current);
+        assert!(model.output(&ThreadId::Main, "t4").is_none(), "its call is gone");
     }
 }

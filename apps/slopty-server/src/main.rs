@@ -27,8 +27,8 @@ struct Args {
     /// `SLOPTY_MCP_PORT`.
     #[arg(long, env = "SLOPTY_MCP_PORT", default_value_t = slopty_net::endpoint::MCP_PORT)]
     mcp_port: u16,
-    /// Where `workers.json` lives (default: `$SLOPTY_DATA_DIR/server`, else
-    /// `~/Library/Application Support/Slopty/server`).
+    /// Where `workers.json` lives (default: `server` in `$SLOPTY_DATA_DIR`, else in
+    /// `~/Library/Application Support/Slopty` on macOS and `$XDG_DATA_HOME/slopty` on Linux).
     #[arg(long)]
     data_dir: Option<PathBuf>,
     /// The name clients show for this server (default: `$SLOPTY_SERVER_NAME`, else the
@@ -53,19 +53,6 @@ fn admission(data_dir: &std::path::Path) -> Admission {
     Admission::new(parse_allow(&loaded.settings.server.allow, "[server]"))
 }
 
-/// The machine's computer name, else `server`.
-fn computer_name() -> String {
-    std::process::Command::new("scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "server".to_owned())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -81,7 +68,9 @@ async fn main() -> Result<()> {
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
     let admission = admission(&data_dir);
     let config = Config {
-        name: args.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(computer_name),
+        name: args.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
+            slopty_platform::computer_name().unwrap_or_else(|| "server".to_owned())
+        }),
         quic: slopty_net::endpoint::any(args.port),
         mcp: slopty_net::endpoint::any(args.mcp_port),
         data_dir,

@@ -3,8 +3,8 @@
 //! Claude Code runs the `PermissionRequest` hook when it is about to ask the person for
 //! permission to use a tool. A hook that prints a decision answers for them; one that prints
 //! nothing leaves the TUI to show its own dialog. So `slopty hook` is registered for that event
-//! synchronously ([`crate::hooks`]): after posting the hook as usual it asks the worker for a
-//! decision over the control socket and waits, up to [`WAIT`], for one of
+//! synchronously ([`crate::hooks`]): instead of posting the hook as it does every other event, it
+//! asks the worker for a decision over the control socket and waits, up to [`WAIT`], for one of
 //! - allow once;
 //! - allow always, handing back the permission updates Claude Code suggested;
 //! - deny, with a message for the model;
@@ -12,26 +12,32 @@
 //!
 //! **The socket contract.** The request is one line of JSON, `{"cmd": "permission",
 //! "session": <SessionId>, "payload": <the forwarded hook, as a JSON string>, "wait_ms": <u64>}`
-//! (`CtlRequest::Permission` carrying a [`PermissionAsk`]), and the reply one line,
+//! ([`CtlRequest::Permission`] carrying a [`PermissionAsk`]), and the reply one line,
 //! `{"reply": "permission", "decision": {"kind": "pass" | "allow" | "allow_always" | "deny", …}}`
-//! (`CtlReply::Permission` carrying a [`PermissionAnswer`]). The relay keeps its end of the
-//! socket open while it waits, so the worker knows the question is withdrawn when Claude Code
-//! gives up on the hook. The worker holds the reply while a client follows the session and
-//! answers from the prompt it is shown ([`prompt`], [`decision`]); with no follower, or when the
-//! last one leaves, it answers [`Decision::Pass`], and it never holds past `wait_ms`. The payload
-//! is the same hook the relay already posted as `CtlRequest::Hook`; the worker does not apply it
-//! to the tracker a second time.
+//! ([`CtlReply::Permission`] carrying a [`PermissionAnswer`]); the types are the control
+//! protocol's, in [`slopty_proto::ctl`]. The relay keeps its end of the socket open while it
+//! waits, so the worker knows the question is withdrawn when Claude Code gives up on the hook.
+//! The worker holds the reply while a client follows the session and answers from the prompt
+//! it is shown ([`prompt`], [`decision`]); with no follower, or when the last one leaves, it
+//! answers [`Decision::Pass`], and it never holds past `wait_ms`. The ask is the only request
+//! this hook makes: the worker parses the payload once, takes it in as any hook (the tracker, the
+//! followers' board), then holds it for the answer.
+//!
+//! [`CtlRequest::Permission`]: slopty_proto::ctl::CtlRequest::Permission
+//! [`CtlReply::Permission`]: slopty_proto::ctl::CtlReply::Permission
+//! [`PermissionAsk`]: slopty_proto::ctl::PermissionAsk
+//! [`PermissionAnswer`]: slopty_proto::ctl::PermissionAnswer
 //!
 //! A worker that is not running reads nothing; the relay then prints nothing, at once.
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use slopty_core::SessionId;
 use slopty_proto::conversation::{Grant, PermissionPrompt, Suggestion, Verdict};
+use slopty_proto::ctl::Decision;
 
-use crate::Hook;
+use crate::{Hook, HookEvent};
 
 /// The `timeout` the `PermissionRequest` entry is registered with, in seconds: Claude Code's
 /// own default for command hooks. Past it, Claude Code cancels the hook and shows its dialog.
@@ -41,70 +47,26 @@ pub const HOOK_TIMEOUT_S: u32 = 600;
 /// answers "no decision" itself before Claude Code gives up on it.
 pub const WAIT: Duration = Duration::from_secs(HOOK_TIMEOUT_S as u64 - 5);
 
-/// The relay's question.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionAsk {
-    /// The terminal session the agent runs in (`SLOPTY_SESSION`).
-    pub session: SessionId,
-    /// The `PermissionRequest` hook as the relay forwards it ([`crate::Hook::trimmed`]): the
-    /// tool, its input and the suggested permission updates.
-    pub payload: String,
-    /// How long the relay waits; the worker answers before then.
-    pub wait_ms: u64,
-}
-
-/// The worker's answer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionAnswer {
-    /// What to tell Claude Code.
-    pub decision: Decision,
-}
-
-/// A decision on one permission request.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Decision {
-    /// No decision: Claude Code shows its own dialog.
-    Pass,
-    /// Allow this call.
-    Allow,
-    /// Allow this call and apply these permission updates, normally what the request's
-    /// `permission_suggestions` offered (an allow rule, a mode, a directory).
-    AllowAlways {
-        /// The updates, as Claude Code's `updatedPermissions` entries.
-        updated_permissions: Vec<Value>,
-    },
-    /// Refuse the call.
-    Deny {
-        /// Why, for the model.
-        message: String,
-        /// Also stop the turn.
-        interrupt: bool,
-    },
-}
-
-impl Decision {
-    /// What the hook prints for Claude Code: `hookSpecificOutput.decision` as the hooks
-    /// reference defines it for `PermissionRequest`; `None` (print nothing) for no decision.
-    #[must_use]
-    pub fn hook_output(&self) -> Option<Value> {
-        let decision = match self {
-            Self::Pass => return None,
-            Self::Allow => json!({ "behavior": "allow" }),
-            Self::AllowAlways { updated_permissions } => {
-                json!({ "behavior": "allow", "updatedPermissions": updated_permissions })
-            }
-            Self::Deny { message, interrupt: false } => {
-                json!({ "behavior": "deny", "message": message })
-            }
-            Self::Deny { message, interrupt: true } => {
-                json!({ "behavior": "deny", "message": message, "interrupt": true })
-            }
-        };
-        Some(json!({
-            "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": decision }
-        }))
-    }
+/// What the hook prints for Claude Code on `decision`: `hookSpecificOutput.decision` as the
+/// hooks reference defines it for `PermissionRequest`; `None` (print nothing) for no decision.
+#[must_use]
+pub fn hook_output(decision: &Decision) -> Option<Value> {
+    let output = match decision {
+        Decision::Pass => return None,
+        Decision::Allow => json!({ "behavior": "allow" }),
+        Decision::AllowAlways { updated_permissions } => {
+            json!({ "behavior": "allow", "updatedPermissions": updated_permissions })
+        }
+        Decision::Deny { message, interrupt: false } => {
+            json!({ "behavior": "deny", "message": message })
+        }
+        Decision::Deny { message, interrupt: true } => {
+            json!({ "behavior": "deny", "message": message, "interrupt": true })
+        }
+    };
+    Some(json!({
+        "hookSpecificOutput": { "hookEventName": HookEvent::PermissionRequest, "decision": output }
+    }))
 }
 
 /// The decision a person's verdict makes.
@@ -209,13 +171,13 @@ mod tests {
     use super::*;
 
     /// A decision prints what the hooks reference defines, and no decision prints nothing.
-    /// (The socket lines are pinned beside `CtlRequest` in `slopty-worker`.)
+    /// (The socket lines are pinned beside `CtlRequest` in `slopty-proto`.)
     #[test]
     fn a_decision_is_the_output_the_hooks_reference_defines() {
-        assert_eq!(Decision::Pass.hook_output(), None);
+        assert_eq!(hook_output(&Decision::Pass), None);
         let stop = Decision::Deny { message: "stop".to_owned(), interrupt: true };
         assert_eq!(
-            stop.hook_output().map(|o| o["hookSpecificOutput"]["decision"].clone()),
+            hook_output(&stop).map(|o| o["hookSpecificOutput"]["decision"].clone()),
             Some(json!({ "behavior": "deny", "message": "stop", "interrupt": true }))
         );
     }

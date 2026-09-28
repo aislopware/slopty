@@ -182,6 +182,12 @@ impl Scrollback {
         self.lines.get(&index).map(AsRef::as_ref)
     }
 
+    /// A cached line with its allocation: a renderer keys what it built of the line by it.
+    #[must_use]
+    pub fn get_shared(&self, index: LineIndex) -> Option<&Arc<Line>> {
+        self.lines.get(&index)
+    }
+
     /// A cached line, shared: what the screen re-adopts when the viewport moves.
     #[must_use]
     pub fn shared(&self, index: LineIndex) -> Option<Arc<Line>> {

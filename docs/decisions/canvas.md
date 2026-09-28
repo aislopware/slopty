@@ -2,9 +2,11 @@
 
 See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
-**Superseded in part 2026-09-24** by `workspace.md`: the plane, the camera, flights, arrange,
-the minimap, the reading-order and cone walks and every placement rule are gone. The entries on
-notes, file cards, the palette, names and agents still hold, a "card" now being a tile.
+**Superseded in part 2026-09-24**: the scrolling workspace replaced the canvas, by the entry
+"A scrollable tiling workspace replaces the infinite canvas" in `workspace.md`. The plane, the
+camera, flights, arrange, the minimap, the reading-order and cone walks and every placement rule
+are gone. The entries on notes, file cards, the palette, names and agents still hold, a "card"
+now being a tile.
 
 - ✅ **Infinite canvas is the product.** slop-desk built and retired one; its reasons were
   AppKit-specific (a libghostty surface cannot live under a scaled ancestor) and product-fit
@@ -266,7 +268,7 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   (`FileView::find`); the bar is the terminal's in shape and position (top-right, the field,
   `n/total`, ↑ ↓ ✕) with its own key context `FileSearch` bound in the canvas's table (Esc
   closes, ⌘G/⌘⇧G step, ↩/⇧↩ step from the field) since no terminal is around it; (2) a hit
-  is a line, not a span — plain `contains` on the client (`file::find_hits`) with the
+  is a line, not a span — plain `contains` on the client (`file::hit_lines`) with the
   terminal's smart case (a needle with no capital matches in any case, one with a capital
   as typed; so the counts of a find in every card agree across cards), no regex and no host
   round trip, because the card already holds every
@@ -559,7 +561,7 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   with no debounce: a needle is short, a host answers a search in milliseconds, and the
   card's own bar sends on every change already; (5) conversations, notes and file cards are
   counted on the client, where their text already is (`conversation::entry_hits`, as the
-  card's own ⌘F does; `file::find_hits` over the note's lines or the file view's), and are
+  card's own ⌘F does; `file::hit_lines` over the note's lines or the file view's), and are
   lines at once; every line sits in reading order (one map keyed by card, the shells' counts
   landing in it as the hosts answer) — a driven card is not asked, its grid is not what it
   shows, and a grid answer from one is ignored; a note's ↩ goes to the note, a file card's opens its find bar on the

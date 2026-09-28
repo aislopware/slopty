@@ -7,26 +7,20 @@
 //! comes to need a human anywhere on the fleet is announced as a `notifications/message`, so the
 //! orchestrating session hears of it without polling.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, Implementation, ListToolsResult,
-    PaginatedRequestParams, ProgressNotificationParam, ProtocolVersion, ServerCapabilities,
-    ServerConfig, Tool,
-};
-use rmcp::service::{MaybeSendFuture, RequestContext};
-use rmcp::{ErrorData, Peer, RoleServer, ServerHandler, ServiceExt as _};
+use rmcp::model::{Implementation, ServerCapabilities};
+use rmcp::{Peer, RoleServer, ServiceExt as _};
 use serde_json::{Value, json};
 use slopty_core::WorkerId;
 use slopty_net::client::bind_client;
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::server::{Event, FromServer, Role};
-use slopty_tools::{tools, view};
+use slopty_tools::mcp::Handler;
+use slopty_tools::view;
 use tokio::sync::broadcast;
 
 use crate::link::{self, Link};
@@ -41,17 +35,13 @@ The server is --server, else $SLOPTY_SERVER, else `server` under [client] in set
 else the first that answers on the tailnet. \
 To pin one: claude mcp add slopty -- slopty mcp --server studio";
 
-/// The protocol revision this shim speaks; older ones are still negotiated for clients that
-/// ask for them in `initialize`.
-const REVISION: ProtocolVersion = ProtocolVersion::V_2026_07_28;
-
 /// Serve MCP on stdio until the client hangs up.
 pub async fn run(server: Option<&str>, data_dir: &Path) -> Result<()> {
     let endpoint = bind_client()?;
     let address = link::locate(server, data_dir, &endpoint).await?;
     let role = Role::Agent { name: format!("slopty mcp @ {}", crate::client::machine_name()) };
     let (link, events) = Link::persistent(endpoint.clone(), address, role);
-    let running = Slopty { link }
+    let running = handler(link)
         .serve(rmcp::transport::stdio())
         .await
         .context("the MCP client did not open a session")?;
@@ -63,66 +53,17 @@ pub async fn run(server: Option<&str>, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The MCP server: tools that forward to the link.
-#[derive(Debug, Clone)]
-struct Slopty {
-    link: Link,
-}
-
-impl ServerHandler for Slopty {
-    fn get_info(&self) -> ServerConfig {
-        #[expect(
-            deprecated,
-            reason = "SEP-2577 deprecates logging, but a `notifications/message` is the one \
-                      message a stdio client shows unprompted; Claude Code's channels are a \
-                      preview on an older revision"
-        )]
-        let capabilities = ServerCapabilities::builder().enable_logging().enable_tools().build();
-        ServerConfig::new(capabilities)
-            .with_protocol_version(REVISION)
-            .with_server_info(Implementation::new("slopty", env!("CARGO_PKG_VERSION")))
-            .with_instructions(tools::INSTRUCTIONS)
-    }
-
-    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        Cow::Borrowed(ProtocolVersion::known_up_to(&REVISION))
-    }
-
-    fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<ListToolsResult, ErrorData>> + MaybeSendFuture + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(tools::list())))
-    }
-
-    fn get_tool(&self, name: &str) -> Option<Tool> {
-        tools::get(name)
-    }
-
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, ErrorData> {
-        let report = context.meta.get_progress_token().map(|token| {
-            let peer = context.peer.clone();
-            move |waited: Duration| {
-                let waited = waited.as_secs_f64();
-                let note = ProgressNotificationParam::new(token.clone(), waited)
-                    .with_message(format!("waited {waited:.0} s"));
-                let peer = peer.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = peer.notify_progress(note).await {
-                        tracing::debug!(error = %e, "progress");
-                    }
-                });
-            }
-        });
-        let progress = report.as_ref().map(|r| -> tools::Progress<'_> { r });
-        let arguments = request.arguments.unwrap_or_default();
-        tools::call(&self.link, &request.name, arguments, progress).await.map(Into::into)
-    }
+/// The tools over `link`, reporting a long wait to a caller that asks.
+fn handler(link: Link) -> Handler<Link> {
+    #[expect(
+        deprecated,
+        reason = "SEP-2577 deprecates logging, but a `notifications/message` is the one message a \
+                  stdio client shows unprompted; Claude Code's channels are a preview on an older \
+                  revision"
+    )]
+    let capabilities = ServerCapabilities::builder().enable_logging().enable_tools().build();
+    let info = Implementation::new("slopty", env!("CARGO_PKG_VERSION"));
+    Handler::new(link, info, capabilities).with_progress()
 }
 
 /// Announce each agent that comes to need a human, once per episode, until the client leaves.
@@ -164,7 +105,7 @@ async fn forward_needs(mut pushed: broadcast::Receiver<FromServer>, peer: Peer<R
     }
 }
 
-#[expect(deprecated, reason = "see `get_info`: logging is how a stdio client hears of it")]
+#[expect(deprecated, reason = "see `handler`: logging is how a stdio client hears of it")]
 async fn notify(peer: &Peer<RoleServer>, (level, data): (Level, Value)) -> Result<()> {
     use rmcp::model::{LoggingLevel, LoggingMessageNotificationParam};
     let level = match level {

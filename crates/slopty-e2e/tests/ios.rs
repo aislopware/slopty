@@ -22,7 +22,7 @@ mod tests {
     const PHONE_BELOW: f32 = 700.0;
     /// Fraction of pixels allowed to differ from a golden: with the cursor steady, two runs
     /// differ by 0.009 % at most (iPhone; the iPad 0.002 %), so 0.05 % is five times the noise.
-    /// At 1 %, an iPad frame, mostly canvas, passed with its whole chrome redrawn (0.84 %).
+    /// At 1 %, an iPad frame, mostly bare workspace, passed with its whole chrome redrawn (0.84 %).
     const TOLERANCE: f64 = 0.0005;
     /// Long enough for a spring or the soft keyboard to come to rest before a golden.
     const SETTLE: Duration = Duration::from_millis(600);
@@ -194,9 +194,10 @@ mod tests {
         .unwrap();
 
         // The phone has no editor for a file in its sandbox: "Open settings" from the palette
-        // puts `settings.toml` in the in-app editor, ⌘A and the soft keyboard replace it, ⌘↩
-        // writes the file. The new text keeps the harness's pins: without them the cursor goes
-        // back to blinking as the shell asks, and a golden holds it or not by the phase.
+        // opens the settings on their form, "Edit as TOML" puts `settings.toml` in the in-app
+        // editor, ⌘A and the soft keyboard replace it, ⌘↩ writes the file. The new text keeps
+        // the harness's pins: without them the cursor goes back to blinking as the shell asks,
+        // and a golden holds it or not by the phase.
         open_palette(drv).await;
         drv.ui_insert_text("open settings").await.unwrap();
         drv.wait_for("one line", STEP, |d| {
@@ -205,8 +206,17 @@ mod tests {
         .await
         .unwrap();
         drv.keys("enter").await.unwrap();
-        drv.wait_for("the settings editor", STEP, |d| {
-            d.a11y_node("Dialog", Some("Settings")).is_some()
+        let dump = drv
+            .wait_for("the settings editor", STEP, |d| {
+                d.a11y_node("Dialog", Some("Settings")).is_some()
+            })
+            .await
+            .unwrap();
+        let [left, top, width, height] =
+            dump.a11y_node("Button", Some("Edit as TOML")).expect("the file's link").bounds;
+        drv.ui_tap(left + width / 2.0, top + height / 2.0).await.unwrap();
+        drv.wait_for("the file's text", STEP, |d| {
+            d.a11y_node("Button", Some("Edit with controls")).is_some()
         })
         .await
         .unwrap();

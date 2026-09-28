@@ -12,10 +12,8 @@ use bytes::Bytes;
 use slopty_core::{ClientId, StreamId};
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput};
-use slopty_worker::platform::{Native, Platform};
-use slopty_worker::screen::{
-    Rebuild, Refused, ScreenError, ScreenStream, StreamControl, StreamEvent,
-};
+use slopty_worker::platform::Platform;
+use slopty_worker::screen::{Pipeline, Rebuild, Refused, ScreenStream, StreamControl, StreamEvent};
 use tokio::sync::mpsc;
 
 use crate::Daemon;
@@ -124,50 +122,7 @@ pub async fn run(
         }
     };
 
-    let mut geometry = tokio::time::interval(GEOMETRY_PERIOD);
-    geometry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // The probe runs beside the commands, not ahead of them: input for this window never waits
-    // on the window server either.
-    let mut probing: Option<tokio::task::JoinHandle<slopty_worker::screen::Probe>> = None;
-    // A resize's new encoder, built beside the commands for the same reason: input never waits
-    // on VideoToolbox. The geometry is not probed again until it is in.
-    let mut rebuilding: Option<Rebuild<Native>> = None;
-    let by_client = loop {
-        tokio::select! {
-            command = commands.recv() => match command {
-                None => break false,
-                Some(Command::Close) => break true,
-                Some(command @ Command::SetQuality(_)) => {
-                    // A quality asked for after the resize applies on top of it, not under it.
-                    if let Some(mut rebuild) = rebuilding.take() {
-                        let built = rebuild.built().await;
-                        rebuilt(&mut stream, rebuild, built, &out).await;
-                    }
-                    apply(&mut stream, client, command).await;
-                }
-                Some(command) => apply(&mut stream, client, command).await,
-            },
-            probe = async { probing.as_mut()?.await.ok() }, if probing.is_some() => {
-                probing = None;
-                let Some(probe) = probe else { continue };
-                rebuilding = stream.check_geometry(&probe);
-                if let Some(event) = stream.check_source() {
-                    let _sent = out.send(WorkerMsg::Screen(event)).await;
-                }
-            }
-            built = async { Some(rebuilding.as_mut()?.built().await) }, if rebuilding.is_some() => {
-                if let (Some(rebuild), Some(built)) = (rebuilding.take(), built) {
-                    rebuilt(&mut stream, rebuild, built, &out).await;
-                }
-            }
-            _ = geometry.tick(), if probing.is_none() && rebuilding.is_none() => {
-                probing = Some(tokio::task::spawn_blocking(stream.prober()));
-            }
-        }
-    };
-    if let Some(probe) = probing {
-        probe.abort();
-    }
+    let by_client = serve(&mut stream, client, &mut commands, &out).await;
     if by_client {
         tracing::info!(
             %client,
@@ -188,24 +143,109 @@ pub async fn run(
     let _told = told.send(Told::Gone(id));
 }
 
-/// Put in the encoder a resize built and tell the client the stream's new size; a build that
-/// failed leaves the stream at its old size, and the next ticks see the new one again.
-async fn rebuilt(
-    stream: &mut ScreenStream,
-    rebuild: Rebuild<Native>,
-    built: Result<<Native as Platform>::Video, ScreenError>,
+/// Serve `stream`'s commands and follow its geometry until it is closed (`true`) or the
+/// connection lets go of it (`false`).
+///
+/// Nothing here waits in front of the next command but the command itself. The window-server
+/// probe and every encoder build (a resize's or a quality change's) run beside the commands,
+/// and what the stream tells the client waits for room in the connection's queue in an arm of
+/// its own, so input for the window never waits on VideoToolbox, the window server or a client
+/// that is slow to read (MEASUREMENTS.md, "input behind a quality change").
+pub async fn serve<P: Platform>(
+    stream: &mut Pipeline<P>,
+    client: ClientId,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
     out: &mpsc::Sender<WorkerMsg>,
-) {
-    match built {
-        Ok(encoder) => {
-            let event = stream.finish_rebuild(rebuild, encoder);
-            let _sent = out.send(WorkerMsg::Screen(event)).await;
+) -> bool {
+    let mut geometry = tokio::time::interval(GEOMETRY_PERIOD);
+    geometry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut probing: Option<tokio::task::JoinHandle<slopty_worker::screen::Probe>> = None;
+    // The geometry is not probed again until the new encoder is in.
+    let mut rebuilding: Option<Rebuild<P>> = None;
+    let mut telling = Telling::default();
+    let by_client = loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                None => break false,
+                Some(Command::Close) => break true,
+                // Applied on top of a resize's build under way, not under it.
+                Some(Command::SetQuality(quality)) => {
+                    rebuilding = stream.set_quality(&quality, rebuilding.take());
+                }
+                Some(command) => apply(stream, client, command),
+            },
+            probe = async { probing.as_mut()?.await.ok() }, if probing.is_some() => {
+                probing = None;
+                let Some(probe) = probe else { continue };
+                // Read before a quality change started a build: the next tick after it reads
+                // again, and this one must not take the build's place.
+                if rebuilding.is_some() {
+                    continue;
+                }
+                rebuilding = stream.check_geometry(&probe);
+                if let Some(event) = stream.check_source() {
+                    telling.push(event);
+                }
+            }
+            built = async { Some(rebuilding.as_mut()?.built().await) }, if rebuilding.is_some() => {
+                if let (Some(rebuild), Some(built)) = (rebuilding.take(), built) {
+                    match built {
+                        Ok(encoder) => {
+                            if let Some(event) = stream.finish_rebuild(rebuild, encoder) {
+                                telling.push(event);
+                            }
+                        }
+                        // The stream stays at its old size; a resize is seen again on the next
+                        // ticks, and the next quality change asks again.
+                        Err(e) => tracing::warn!(stream = %stream.id(), error = %e, "encoder rebuild"),
+                    }
+                }
+            }
+            permit = out.reserve(), if !telling.is_empty() => match permit {
+                Ok(permit) => telling.send(permit),
+                Err(_gone) => telling.clear(),
+            },
+            _ = geometry.tick(), if probing.is_none() && rebuilding.is_none() => {
+                probing = Some(tokio::task::spawn_blocking(stream.prober()));
+            }
         }
-        Err(e) => tracing::warn!(stream = %stream.id(), error = %e, "geometry: encoder rebuild"),
+    };
+    if let Some(probe) = probing {
+        probe.abort();
+    }
+    // What is still untold is moot: the stream is ending, and `Closed` says so.
+    by_client
+}
+
+/// What a stream's task has yet to tell its client, oldest first. A newer event of a kind
+/// replaces the one waiting: each says where the stream is now (its size, whether its source
+/// draws), so only the last matters, and the queue never holds more than one of each.
+#[derive(Debug, Default)]
+struct Telling(std::collections::VecDeque<ScreenEvent>);
+
+impl Telling {
+    fn push(&mut self, event: ScreenEvent) {
+        let kind = std::mem::discriminant(&event);
+        self.0.retain(|waiting| std::mem::discriminant(waiting) != kind);
+        self.0.push_back(event);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn send(&mut self, permit: mpsc::Permit<'_, WorkerMsg>) {
+        if let Some(event) = self.0.pop_front() {
+            permit.send(WorkerMsg::Screen(event));
+        }
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
     }
 }
 
-async fn apply(stream: &mut ScreenStream, client: ClientId, command: Command) {
+fn apply<P: Platform>(stream: &mut Pipeline<P>, client: ClientId, command: Command) {
     let id = stream.id();
     match command {
         Command::Input(input) => {
@@ -216,11 +256,6 @@ async fn apply(stream: &mut ScreenStream, client: ClientId, command: Command) {
         Command::Focus => {
             if let Err(e) = stream.focus() {
                 tracing::debug!(%client, stream = %id, error = %e, "focus");
-            }
-        }
-        Command::SetQuality(quality) => {
-            if let Err(e) = stream.set_quality(&quality).await {
-                tracing::warn!(%client, stream = %id, error = %e, "set quality");
             }
         }
         Command::Resize { width, height } => {
@@ -236,7 +271,7 @@ async fn apply(stream: &mut ScreenStream, client: ClientId, command: Command) {
                 }
             }));
         }
-        Command::Close => {}
+        Command::SetQuality(_) | Command::Close => {}
     }
 }
 
@@ -277,58 +312,6 @@ mod tests {
         let cpu = cpu_us().saturating_sub(before);
         producer.join().unwrap();
         report("direct send", &latencies, cpu);
-        report("  whole frames", &whole, cpu);
-    }
-
-    /// The path this replaced, kept here only to measure against: the frame's datagrams into a
-    /// 4096-slot queue one by one, and a task draining it into QUIC, reading the buffer and the
-    /// datagram size beside every send and polling at 1 kHz while QUIC holds bytes.
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "measurement"]
-    async fn datagram_send_cost_through_a_pump() {
-        let (server, client, _endpoints) = pair().await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4096);
-        let pump = tokio::spawn(async move {
-            let mut holding = false;
-            loop {
-                let datagram = if holding {
-                    match tokio::time::timeout(Duration::from_millis(1), rx.recv()).await {
-                        Ok(Some(d)) => Some(d),
-                        Ok(None) => break,
-                        Err(_elapsed) => None,
-                    }
-                } else {
-                    rx.recv().await
-                };
-                let held = slopty_net::endpoint::DATAGRAM_BUFFER
-                    .saturating_sub(server.datagram_send_buffer_space());
-                holding = held > 0;
-                let Some(datagram) = datagram else { continue };
-                if server.max_datagram_size().is_some_and(|max| datagram.len() > max) {
-                    continue;
-                }
-                if server.send_datagram(datagram).is_err() {
-                    break;
-                }
-            }
-        });
-        let epoch = std::time::Instant::now();
-        let before = cpu_us();
-        let producer = std::thread::spawn(move || {
-            for n in 0..FRAMES {
-                let started = std::time::Instant::now();
-                for _ in 0..PER_FRAME {
-                    let _full = tx.try_send(stamped(epoch, n));
-                }
-                #[expect(clippy::disallowed_methods, reason = "the frame clock of a test thread")]
-                std::thread::sleep(FRAME.saturating_sub(started.elapsed()));
-            }
-        });
-        let (latencies, whole) = receive(&client, epoch).await;
-        let cpu = cpu_us().saturating_sub(before);
-        producer.join().unwrap();
-        pump.abort();
-        report("queue + pump", &latencies, cpu);
         report("  whole frames", &whole, cpu);
     }
 
@@ -439,5 +422,599 @@ mod tests {
         accepted.tx.send(&slopty_net::WorkerMsg::HelloAck(ack)).await.unwrap();
         let client = client.await.unwrap().unwrap();
         (accepted.conn, client.conn, (listener, endpoint))
+    }
+}
+
+/// The stream's task over a platform of this test's own: a capture that starts and never
+/// delivers, input that notes when each event was queued and at what scale, and an encoder
+/// that is VideoToolbox's or one whose build waits for the test. Nothing reaches the screen,
+/// the window server or the worker's input.
+#[cfg(test)]
+#[cfg(target_vendor = "apple")]
+pub mod fake {
+    use std::collections::HashMap;
+    use std::marker::PhantomData;
+    use std::sync::LazyLock;
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    use parking_lot::Mutex;
+    use slopty_capture::{
+        AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop, Rect,
+        TargetWindow, Went, WindowState,
+    };
+    use slopty_codec::{
+        CodecError, EncodedPacket, EncoderConfig, FrameOptions, PixelBuffer, VideoEncoder,
+    };
+    use slopty_core::WindowId;
+    use slopty_input::{InputError, InputSink, PointerWatch};
+    use slopty_proto::screen::{CaptureTarget, CursorShape, DisplayInfo, ScreenInput, WindowInfo};
+    use slopty_worker::platform::Platform;
+    use tokio::sync::mpsc;
+
+    /// A display of 800 × 500 points at two pixels a point.
+    pub const NATIVE: (u32, u32) = (1600, 1000);
+
+    /// The test platform, with `V` for its encoder.
+    pub struct Fake<V>(PhantomData<V>);
+
+    impl<V: VideoEncoder<Image = PixelBuffer>> Platform for Fake<V> {
+        type Audio = slopty_codec::Opus;
+        type Capture = Still;
+        type Input = Noted;
+        type Video = V;
+    }
+
+    /// A capture that starts, updates and stops at once and never delivers a frame.
+    pub enum Still {}
+
+    /// The display whose geometry reads take [`SLOW_READ`], as a busy window server's do.
+    pub static SLOW_DISPLAY: AtomicU32 = AtomicU32::new(0);
+    /// How long each of [`SLOW_DISPLAY`]'s geometry reads takes.
+    pub const SLOW_READ: Duration = Duration::from_millis(60);
+    /// A read of [`SLOW_DISPLAY`] is under way.
+    pub static READING: AtomicBool = AtomicBool::new(false);
+    /// The widths each capture update asked for: what a new encoder going in asks of the capture.
+    pub static UPDATED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+    impl CaptureSource for Still {
+        type Content = ();
+        type HideWatch = ();
+        type Image = PixelBuffer;
+        type Stream = ();
+        type Target = ();
+
+        fn can_capture() -> bool {
+            true
+        }
+
+        fn enumerate(done: impl FnOnce(Result<(), CaptureError>) + Send + 'static) {
+            done(Ok(()));
+        }
+
+        fn windows((): &()) -> Vec<WindowInfo> {
+            Vec::new()
+        }
+
+        fn displays((): &()) -> Vec<DisplayInfo> {
+            Vec::new()
+        }
+
+        fn resolve((): &(), _kind: CaptureTarget) -> Result<(), CaptureError> {
+            Ok(())
+        }
+
+        fn resolve_crop((): &(), _id: WindowId) -> Result<Option<()>, CaptureError> {
+            Ok(None)
+        }
+
+        fn crop((): &()) -> Option<Crop> {
+            None
+        }
+
+        fn pixel_size((): &()) -> (u32, u32) {
+            NATIVE
+        }
+
+        fn point_scale((): &()) -> f32 {
+            2.0
+        }
+
+        fn start(
+            (): &(),
+            _config: &CaptureConfig,
+            _sink: impl Fn(CapturedFrame<PixelBuffer>) + Send + Sync + 'static,
+            _audio: Option<AudioSink>,
+            _on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
+            done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+        ) -> Result<(), CaptureError> {
+            done(Ok(()));
+            Ok(())
+        }
+
+        fn update(
+            (): &(),
+            config: &CaptureConfig,
+            done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+        ) {
+            UPDATED.lock().push(config.width);
+            done(Ok(()));
+        }
+
+        fn retarget(
+            (): &(),
+            (): &(),
+            done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+        ) {
+            done(Ok(()));
+        }
+
+        fn stop((): &(), done: impl FnOnce(Result<(), CaptureError>) + Send + 'static) {
+            done(Ok(()));
+        }
+
+        fn now_us() -> u64 {
+            static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+            u64::try_from(EPOCH.elapsed().as_micros()).unwrap_or(u64::MAX)
+        }
+
+        fn target_bounds(target: CaptureTarget) -> Option<Rect> {
+            if target == CaptureTarget::Display(SLOW_DISPLAY.load(Ordering::SeqCst)) {
+                READING.store(true, Ordering::SeqCst);
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "a blocking read, on the blocking pool"
+                )]
+                std::thread::sleep(SLOW_READ);
+                READING.store(false, Ordering::SeqCst);
+            }
+            Some(Rect { x: 0.0, y: 0.0, w: 800.0, h: 500.0 })
+        }
+
+        fn refresh_hz(_target: CaptureTarget) -> Option<f64> {
+            Some(60.0)
+        }
+
+        fn window_state(_id: WindowId) -> Option<WindowState> {
+            None
+        }
+
+        fn window_bounds(_id: WindowId) -> Option<Rect> {
+            None
+        }
+
+        fn window_owner(_id: WindowId) -> Option<i32> {
+            None
+        }
+
+        fn window_on_screen(_id: WindowId) -> bool {
+            false
+        }
+
+        fn window_title(_id: WindowId) -> Option<String> {
+            None
+        }
+
+        fn occluded(_id: WindowId, _bounds: &Rect, _owner: i32) -> bool {
+            false
+        }
+
+        fn display_enclosing(_rect: &Rect) -> Option<u32> {
+            None
+        }
+
+        fn display_bounds(_id: u32) -> Rect {
+            Rect::default()
+        }
+
+        fn resize_window(
+            _pid: i32,
+            _target: &TargetWindow,
+            _width: f64,
+            _height: f64,
+        ) -> Result<(), AxError> {
+            Err(AxError::Unsupported)
+        }
+
+        fn watch_hides(
+            _pid: i32,
+            _target: TargetWindow,
+            _on_went: impl Fn(Went) + Send + Sync + 'static,
+        ) -> Result<(), AxError> {
+            Err(AxError::Unsupported)
+        }
+
+        fn watch_targeted((): &()) -> bool {
+            false
+        }
+
+        fn pointer_moves() -> u32 {
+            0
+        }
+
+        fn pointer_location() -> (f64, f64) {
+            (0.0, 0.0)
+        }
+
+        fn cursor_shape(_scale: u8) -> Option<CursorShape> {
+            None
+        }
+    }
+
+    /// One event as the stream queued it for its input thread.
+    #[derive(Debug)]
+    pub struct Queued {
+        pub at: Instant,
+        /// Stream pixels per display point the sink maps it with.
+        pub scale: f64,
+        pub input: ScreenInput,
+    }
+
+    /// Where each display's input sink tells its test what was queued.
+    static NOTED: LazyLock<Mutex<HashMap<u32, mpsc::UnboundedSender<Queued>>>> =
+        LazyLock::new(Mutex::default);
+
+    /// What the sink of display `display` queues from now on.
+    pub fn note(display: u32) -> mpsc::UnboundedReceiver<Queued> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        NOTED.lock().insert(display, tx);
+        rx
+    }
+
+    /// An input sink that notes each event instead of posting it: the point where the real one
+    /// hands it to its thread.
+    pub struct Noted {
+        display: u32,
+        scale: f64,
+        pointer: PointerWatch,
+    }
+
+    impl InputSink for Noted {
+        fn new(target: CaptureTarget, scale: f64) -> Self {
+            let display = match target {
+                CaptureTarget::Display(id) => id,
+                CaptureTarget::Window(_) => 0,
+            };
+            Self { display, scale, pointer: PointerWatch::default() }
+        }
+
+        fn set_scale(&mut self, scale: f64) {
+            self.scale = scale;
+        }
+
+        fn set_bounds(&mut self, _bounds: Option<Rect>, _at: Instant) {}
+
+        fn inject(&mut self, input: &ScreenInput) -> Result<(), InputError> {
+            let queued = Queued { at: Instant::now(), scale: self.scale, input: input.clone() };
+            if let Some(tx) = NOTED.lock().get(&self.display) {
+                let _gone = tx.send(queued);
+            }
+            Ok(())
+        }
+
+        fn focus(&mut self) -> Result<(), InputError> {
+            Ok(())
+        }
+
+        fn release_all(&mut self) {}
+
+        fn pointer(&self) -> PointerWatch {
+            self.pointer.clone()
+        }
+    }
+
+    /// Encoder sessions built so far, by either encoder here.
+    pub static BUILT: AtomicU64 = AtomicU64::new(0);
+
+    /// A VideoToolbox session, counted when built.
+    pub struct Toolbox(slopty_codec::VideoToolbox);
+
+    impl VideoEncoder for Toolbox {
+        type Image = PixelBuffer;
+
+        fn new(
+            config: EncoderConfig,
+            sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, CodecError> {
+            let built = slopty_codec::VideoToolbox::new(config, sink).map(Self);
+            BUILT.fetch_add(1, Ordering::SeqCst);
+            built
+        }
+
+        fn encode(
+            &self,
+            image: &PixelBuffer,
+            pts_us: u64,
+            options: &FrameOptions,
+        ) -> Result<(), CodecError> {
+            self.0.encode(image, pts_us, options)
+        }
+
+        fn set_bitrate(&self, bps: u32) -> Result<(), CodecError> {
+            self.0.set_bitrate(bps)
+        }
+
+        fn set_frame_rate(&self, fps: u16) -> Result<(), CodecError> {
+            self.0.set_frame_rate(fps)
+        }
+    }
+
+    /// The next build of a [`Gated`] session waits for one message on this.
+    pub static GATE: Mutex<Option<std::sync::mpsc::Receiver<()>>> = Mutex::new(None);
+
+    /// A session that encodes nothing, whose build waits on [`GATE`] when one is set.
+    pub struct Gated;
+
+    impl VideoEncoder for Gated {
+        type Image = PixelBuffer;
+
+        fn new(
+            _config: EncoderConfig,
+            _sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, CodecError> {
+            let gate = GATE.lock().take();
+            let _opened = gate.as_ref().map(std::sync::mpsc::Receiver::recv);
+            BUILT.fetch_add(1, Ordering::SeqCst);
+            Ok(Self)
+        }
+
+        fn encode(&self, _: &PixelBuffer, _: u64, _: &FrameOptions) -> Result<(), CodecError> {
+            Ok(())
+        }
+
+        fn set_bitrate(&self, _bps: u32) -> Result<(), CodecError> {
+            Ok(())
+        }
+
+        fn set_frame_rate(&self, _fps: u16) -> Result<(), CodecError> {
+            Ok(())
+        }
+    }
+
+    /// Datagrams that go nowhere.
+    pub struct Nowhere;
+
+    impl slopty_worker::DatagramSink for Nowhere {
+        fn send(&self, _datagrams: &[bytes::Bytes]) -> Result<(), slopty_worker::screen::Refused> {
+            Ok(())
+        }
+
+        fn max_size(&self) -> Option<usize> {
+            Some(slopty_proto::media::MAX_DATAGRAM)
+        }
+
+        fn held(&self) -> usize {
+            0
+        }
+
+        fn cwnd(&self) -> u64 {
+            0
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_vendor = "apple")]
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::arithmetic_side_effects,
+    reason = "measurement arithmetic on small counts"
+)]
+mod serving {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    use slopty_core::{ClientId, StreamId};
+    use slopty_net::WorkerMsg;
+    use slopty_proto::screen::{CaptureTarget, Quality, ScreenInput};
+    use slopty_worker::platform::Platform;
+    use slopty_worker::screen::Pipeline;
+    use tokio::sync::mpsc;
+
+    use super::fake::{BUILT, Fake, Gated, Nowhere, Queued, Toolbox, note};
+    use super::{Command, serve};
+
+    /// A stream of display `display` on `P`, served on a task of its own: its command queue, the
+    /// events it sends the client, and what its input sink queued.
+    async fn served<P: Platform>(
+        display: u32,
+        depth: usize,
+        full: bool,
+    ) -> (
+        mpsc::UnboundedSender<Command>,
+        mpsc::Receiver<WorkerMsg>,
+        mpsc::UnboundedReceiver<Queued>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let queued = note(display);
+        let target = CaptureTarget::Display(display);
+        let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+        let (mut stream, _opened) =
+            Pipeline::<P>::open(StreamId(display), target, Quality::default(), sink, |_event| {})
+                .await
+                .unwrap();
+        let (commands_tx, mut commands) = mpsc::unbounded_channel();
+        let (out, events) = mpsc::channel(depth);
+        while full && out.try_send(filler()).is_ok() {}
+        let task = tokio::spawn(async move {
+            serve(&mut stream, ClientId::new(), &mut commands, &out).await;
+            stream.close().await;
+        });
+        (commands_tx, events, queued, task)
+    }
+
+    fn filler() -> WorkerMsg {
+        WorkerMsg::Pong { sent_at: slopty_core::MonoTime::now() }
+    }
+
+    fn quality(scale: f32) -> Quality {
+        Quality { scale, ..Quality::default() }
+    }
+
+    fn at(x: f32) -> ScreenInput {
+        ScreenInput::Move { x, y: 0.0 }
+    }
+
+    async fn next(queued: &mut mpsc::UnboundedReceiver<Queued>) -> Queued {
+        tokio::time::timeout(Duration::from_secs(5), queued.recv()).await.unwrap().unwrap()
+    }
+
+    async fn built(past: u64) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while BUILT.load(Ordering::SeqCst) <= past {
+            assert!(Instant::now() < deadline, "no session was built");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// How long an input queued right behind a quality change that rebuilds the encoder waits
+    /// before the stream hands it to its input thread, with VideoToolbox building the sessions.
+    /// `input_behind_a_quality_change` in MEASUREMENTS.md.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "measurement"]
+    async fn input_behind_a_quality_change() {
+        const ROUNDS: usize = 40;
+        let (commands, mut events, mut queued, task) =
+            served::<Fake<Toolbox>>(11, 1024, false).await;
+        tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let mut waits = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let scale = if round % 2 == 0 { 0.5 } else { 1.0 };
+            let before = BUILT.load(Ordering::SeqCst);
+            commands.send(Command::SetQuality(quality(scale))).unwrap();
+            let sent = Instant::now();
+            commands.send(Command::Input(at(round as f32))).unwrap();
+            let got = next(&mut queued).await;
+            waits.push(got.at.saturating_duration_since(sent));
+            built(before).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(commands);
+        task.await.unwrap();
+        waits.sort_unstable();
+        let us = |d: Duration| d.as_micros();
+        eprintln!(
+            "input_behind_a_quality_change: {ROUNDS} rounds, queued after p50 {} / p90 {} / max {} µs",
+            us(waits[ROUNDS / 2]),
+            us(waits[ROUNDS * 9 / 10]),
+            us(waits[ROUNDS - 1]),
+        );
+    }
+
+    /// The encoder a quality change asks for is still being built, and the input sent after
+    /// the change is already with the input thread, mapped at the scale the change asked for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn input_behind_a_quality_change_does_not_wait_for_the_encoder() {
+        let (commands, mut events, mut queued, task) = served::<Fake<Gated>>(12, 1024, false).await;
+        tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let (open, gate) = std::sync::mpsc::channel();
+        *super::fake::GATE.lock() = Some(gate);
+        let before = BUILT.load(Ordering::SeqCst);
+        commands.send(Command::SetQuality(quality(0.5))).unwrap();
+        commands.send(Command::Input(at(7.0))).unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(2), queued.recv()).await;
+        let still_building = BUILT.load(Ordering::SeqCst) == before;
+        open.send(()).unwrap();
+        let got = got.expect("the input waited for the encoder").unwrap();
+        assert!(still_building, "the build finished first; the test proves nothing");
+        assert_eq!(got.input, at(7.0), "the input sent");
+        assert!(
+            (got.scale - 1.0).abs() < 1e-9,
+            "two pixels a point at the asked half: {}",
+            got.scale
+        );
+        built(before).await;
+        drop(commands);
+        task.await.unwrap();
+    }
+
+    /// A second quality change while the first one's encoder is still being built replaces
+    /// that build: input maps at the newest scale at once, and the stream goes on serving once
+    /// both builds are done.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_quality_change_replaces_the_build_of_the_one_before() {
+        let (commands, mut events, mut queued, task) = served::<Fake<Gated>>(13, 1024, false).await;
+        tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let (open, gate) = std::sync::mpsc::channel();
+        *super::fake::GATE.lock() = Some(gate);
+        let before = BUILT.load(Ordering::SeqCst);
+        commands.send(Command::SetQuality(quality(0.5))).unwrap();
+        commands.send(Command::SetQuality(quality(0.25))).unwrap();
+        commands.send(Command::Input(at(1.0))).unwrap();
+        let got = next(&mut queued).await;
+        assert!(
+            (got.scale - 0.5).abs() < 1e-9,
+            "two pixels a point at the newest quarter: {}",
+            got.scale
+        );
+        open.send(()).unwrap();
+        built(before + 1).await;
+        commands.send(Command::Input(at(2.0))).unwrap();
+        assert_eq!(next(&mut queued).await.input, at(2.0), "still serving");
+        drop(commands);
+        task.await.unwrap();
+    }
+
+    /// The client's queue is full when the stream has news for it (here, that its source has
+    /// not drawn): the news waits for room, and input goes on meanwhile.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn news_the_client_has_no_room_for_does_not_hold_input() {
+        use slopty_proto::screen::{ScreenEvent, SourceState};
+
+        let (commands, mut events, mut queued, task) = served::<Fake<Gated>>(14, 1, true).await;
+        // Past the idle grace, and a geometry tick after it.
+        tokio::time::sleep(slopty_worker::screen::SOURCE_IDLE_AFTER + Duration::from_millis(250))
+            .await;
+        commands.send(Command::Input(at(3.0))).unwrap();
+        assert_eq!(next(&mut queued).await.input, at(3.0), "the input went on");
+        let first = events.recv().await.unwrap();
+        assert!(matches!(first, WorkerMsg::Pong { .. }), "{first:?}");
+        let told = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap();
+        assert!(
+            matches!(
+                told,
+                Some(WorkerMsg::Screen(ScreenEvent::Source { state: SourceState::Idle, .. }))
+            ),
+            "the news, once there was room: {told:?}"
+        );
+        drop(commands);
+        task.await.unwrap();
+    }
+
+    /// A geometry read that began before a quality change and lands while its encoder is still
+    /// being built is let go: the build goes in, and the capture is asked for its size.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_landing_during_a_quality_build_does_not_drop_it() {
+        use super::fake::{READING, SLOW_DISPLAY, SLOW_READ, UPDATED};
+
+        SLOW_DISPLAY.store(15, Ordering::SeqCst);
+        let (commands, mut events, _queued, task) = served::<Fake<Gated>>(15, 1024, false).await;
+        tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !READING.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "no geometry read began");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let (open, gate) = std::sync::mpsc::channel();
+        *super::fake::GATE.lock() = Some(gate);
+        let before = BUILT.load(Ordering::SeqCst);
+        commands.send(Command::SetQuality(quality(0.5))).unwrap();
+        // The read lands while the build waits.
+        tokio::time::sleep(SLOW_READ + Duration::from_millis(40)).await;
+        open.send(()).unwrap();
+        built(before).await;
+        let wanted = super::fake::NATIVE.0 / 2;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !UPDATED.lock().contains(&wanted) {
+            assert!(Instant::now() < deadline, "the build never went in: {:?}", UPDATED.lock());
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        drop(commands);
+        task.await.unwrap();
     }
 }

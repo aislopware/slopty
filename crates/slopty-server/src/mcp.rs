@@ -15,16 +15,12 @@ use std::sync::Arc;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, Implementation, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
-};
-use rmcp::service::{MaybeSendFuture, RequestContext};
+use rmcp::model::{Implementation, ServerCapabilities};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rmcp::{ErrorData, RoleServer, ServerHandler};
 use slopty_net::admission::{Admission, Verdict};
 use slopty_proto::codec::MAX_FRAME_BYTES;
+use slopty_tools::mcp::Handler;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
@@ -38,50 +34,14 @@ use crate::hub::Hub;
 pub const MAX_BODY_BYTES: usize =
     MAX_FRAME_BYTES.div_ceil(3).saturating_mul(4).saturating_add(1_048_576);
 
-/// The MCP tool server.
-#[derive(Clone, Debug)]
-pub struct Mcp {
-    hub: Hub,
-}
+/// The MCP tool server over the hub.
+pub type Mcp = Handler<Hub>;
 
-impl Mcp {
-    /// Tools over `hub`.
-    #[must_use]
-    pub const fn new(hub: Hub) -> Self {
-        Self { hub }
-    }
-}
-
-impl ServerHandler for Mcp {
-    fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("slopty-server", env!("CARGO_PKG_VERSION")))
-            .with_instructions(slopty_tools::tools::INSTRUCTIONS)
-    }
-
-    fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<ListToolsResult, ErrorData>> + MaybeSendFuture + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(slopty_tools::tools::list())))
-    }
-
-    fn get_tool(&self, name: &str) -> Option<Tool> {
-        slopty_tools::tools::get(name)
-    }
-
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, ErrorData> {
-        let arguments = request.arguments.unwrap_or_default();
-        // A stateless HTTP call has no stream to send progress on.
-        slopty_tools::tools::call(&self.hub, &request.name, arguments, None)
-            .await
-            .map(CallToolResponse::from)
-    }
+/// The tools over `hub`. A stateless HTTP call has no stream to send progress on.
+#[must_use]
+pub fn handler(hub: Hub) -> Mcp {
+    let info = Implementation::new("slopty-server", env!("CARGO_PKG_VERSION"));
+    Handler::new(hub, info, ServerCapabilities::builder().enable_tools().build())
 }
 
 /// Serve MCP on `listener` to the peers `admission` admits. Connections run in a set this
@@ -95,7 +55,7 @@ pub async fn serve(listener: TcpListener, admission: Admission, hub: Hub) {
         .disable_allowed_hosts()
         .enforce_origin_validation();
     let service = StreamableHttpService::new(
-        move || Ok(Mcp::new(hub.clone())),
+        move || Ok(handler(hub.clone())),
         Arc::new(NeverSessionManager::default()),
         config,
     );

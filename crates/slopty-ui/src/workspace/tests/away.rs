@@ -41,7 +41,6 @@ fn file_tile(
     let tile = arrives(view, cx, fake, ItemKind::File { path: path.to_owned() }, 1);
     let read = slopty_proto::file::FileRead::Text {
         text: "# Notes".to_owned(),
-        more_lines: 0,
         size: 8,
         modified_ms: 1_000,
         final_newline: true,
@@ -79,7 +78,7 @@ fn a_closed_file_tile_comes_back_with_its_edit(cx: &mut TestAppContext) {
     let tile = file_tile(&view, cx, &mut studio, path);
     cx.simulate_input("x");
     cx.run_until_parked();
-    let edited = file_state(&view, cx, tile).expect("a card");
+    let edited = file_state(&view, cx, tile).expect("a file tile");
     assert!(edited.1 && edited.0.contains('x'), "{edited:?}");
 
     cx.simulate_keystrokes("cmd-w");

@@ -143,7 +143,7 @@ mod tests {
         async fn send(&mut self, verb: Verb) -> u64 {
             let id = self.next;
             self.next = self.next.saturating_add(1);
-            self.tx.send(&FromServer::Request { id, verb }).await.unwrap();
+            self.tx.send(&FromServer::Request { id, key: None, verb }).await.unwrap();
             id
         }
 

@@ -110,10 +110,10 @@ impl Outbound {
     }
 
     /// The event as the session stream carries it (length prefix, then postcard): write it
-    /// with `FramedSend::send_raw`.
+    /// with `FramedSend::send_raw`, which hands the shared buffer to the stream uncopied.
     #[must_use]
-    pub fn wire(&self) -> &[u8] {
-        &self.wire
+    pub fn wire(&self) -> Bytes {
+        self.wire.clone()
     }
 
     /// Whether it carries a [`TermEvent::Frame`].
@@ -1248,6 +1248,9 @@ impl Actor {
                 EngineEvent::Notification { title, body } => {
                     self.broadcast(&TermEvent::Notification { title, body });
                 }
+                // A prompt that sets the title on every draw repeats it; the viewers already
+                // hold it.
+                EngineEvent::Title(t) if self.title.as_ref() == Some(&t) => {}
                 EngineEvent::Title(t) => {
                     self.title = Some(t.clone());
                     self.broadcast(&TermEvent::Title(t));
@@ -1806,6 +1809,10 @@ impl Actor {
         let mut key = None;
         let result = match req {
             TermRequest::Attach { .. } | TermRequest::Detach | TermRequest::Close => Ok(()),
+            // The connection puts the picture on the pasteboard first; here it is the chord.
+            TermRequest::PastePicture(chord) => {
+                return self.request(client, chord.into_request(), at);
+            }
             TermRequest::Resize(size) => {
                 if let Some(v) = self.viewers.iter_mut().find(|v| v.client == client) {
                     v.size = size;
@@ -1914,15 +1921,28 @@ async fn sleep_until_due(due: Option<tokio::time::Instant>) {
     }
 }
 
-/// The pixels of an image the viewers do not hold yet, sent ahead of the frame placing it.
+/// The pixels of an image the viewers do not hold yet, sent ahead of the frame placing it: BGRA
+/// with the alpha premultiplied, the texture's format, so no client converts it on its UI thread.
 fn image_event(u: ImageUpload) -> TermEvent {
     TermEvent::Image {
         id: u.id,
         generation: u.generation,
         width: u.width,
         height: u.height,
-        rgba: u.rgba,
+        bgra: premultiplied_bgra(u.rgba),
     }
+}
+
+/// Straight RGBA made premultiplied BGRA in place.
+fn premultiplied_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
+    for px in pixels.as_chunks_mut::<4>().0 {
+        let [r, g, b, a] = *px;
+        // c·a/255 ≤ c, so the quotient always fits.
+        let pre =
+            |c: u8| u8::try_from(u32::from(c).saturating_mul(u32::from(a)) / 255).unwrap_or(c);
+        *px = [pre(b), pre(g), pre(r), a];
+    }
+    pixels
 }
 
 #[cfg(test)]
@@ -1960,13 +1980,53 @@ mod tests {
         );
     }
 
+    /// An image goes out as the texture's format: straight RGBA made premultiplied BGRA.
+    #[test]
+    fn an_image_is_sent_as_premultiplied_bgra() {
+        let upload = ImageUpload {
+            id: 3,
+            generation: 2,
+            width: 2,
+            height: 1,
+            rgba: vec![255, 128, 0, 255, 200, 100, 50, 128],
+        };
+        let TermEvent::Image { bgra, .. } = image_event(upload) else { panic!("an image") };
+        assert_eq!(bgra, [0, 128, 255, 255, 25, 50, 100, 128], "opaque kept, half alpha halved");
+    }
+
+    /// What premultiplying a 12 MiB image (the largest shipped) costs the session actor, once
+    /// per image sent. Prints the number MEASUREMENTS records; run by hand, in release:
+    /// `cargo test -p slopty-worker --release --lib image_premultiply_cost -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn image_premultiply_cost() {
+        let pixels: Vec<u8> = (0..=u8::MAX).cycle().take(12 << 20).collect();
+        let mut samples: Vec<Duration> = std::iter::repeat_with(|| {
+            let rgba = pixels.clone();
+            let started = std::time::Instant::now();
+            std::hint::black_box(premultiplied_bgra(rgba));
+            started.elapsed()
+        })
+        .take(12)
+        .collect();
+        samples.sort_unstable();
+        println!(
+            "MEASURE 12 MiB image premultiplied on the worker (min / median / max, 12): {:?} / \
+             {:?} / {:?}",
+            samples[0],
+            samples[samples.len() / 2],
+            samples[samples.len().saturating_sub(1)]
+        );
+    }
+
     /// A frame's datagram copy must not overtake what the frame depends on: the pixels it
     /// places, the colours and size it paints with, the lines it shows.
     #[test]
     fn the_events_a_frame_depends_on_hold_its_copy_back() {
         let ahead = |ev: TermEvent| Outbound::encode(&ev).unwrap().goes_ahead_of_frames();
         let image =
-            TermEvent::Image { id: 1, generation: 1, width: 1, height: 1, rgba: vec![0; 4] };
+            TermEvent::Image { id: 1, generation: 1, width: 1, height: 1, bgra: vec![0; 4] };
         assert!(ahead(image));
         assert!(ahead(TermEvent::Colors(ColorOverrides::default())));
         assert!(ahead(TermEvent::Resized { cols: 80, rows: 24 }));

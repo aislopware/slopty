@@ -159,7 +159,7 @@ fn a_long_command_shows_running_and_its_time_everywhere(cx: &mut TestAppContext)
 }
 
 /// What a repository's working tree changed shows at the end of the shell's navigator row and
-/// after the branch in the status bar, added in the success tone and removed in the error one.
+/// after the branch in the status bar, as `kit::changes` draws a diff's size.
 #[gpui::test]
 fn repo_changes_show_in_the_row_and_the_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -184,9 +184,11 @@ fn repo_changes_show_in_the_row_and_the_bar(cx: &mut TestAppContext) {
     let bar = cx.debug_bounds("status-changes").expect("the bar's changes");
     let branch = cx.debug_bounds("status-branch").expect("the branch");
     assert!(bar.left() >= branch.right(), "after the branch");
-    let words = navigator::change_words(RepoChanges { files: 2, added: 12, removed: 3 });
-    assert_eq!(words, Some(("+12".into(), "\u{2212}3".into())));
-    assert_eq!(navigator::change_words(RepoChanges::default()), None, "clean");
+    let lines = navigator::line_changes(RepoChanges { files: 2, added: 12, removed: 3 });
+    assert_eq!(lines, Some((12, 3)), "drawn by `kit::changes`");
+    assert_eq!(navigator::line_changes(RepoChanges::default()), None, "clean");
+    let renamed = RepoChanges { files: 1, added: 0, removed: 0 };
+    assert_eq!(navigator::line_changes(renamed), None, "no line changed, no figure");
 }
 
 /// A worker's header says what is wrong with it only when something is: Screen Recording or
@@ -220,6 +222,12 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
     cx.run_until_parked();
     let notices = view.read_with(cx, WorkspaceView::toast_texts);
     assert!(notices.iter().any(|n| n.contains("Screen Recording is off")), "{notices:?}");
+    // A Linux worker has no capture at all: ⌘O says so, not that a Mac's grant is off.
+    view.update_in(cx, |v, _w, cx| v.set_worker_caps(key, linux, cx));
+    view.update_in(cx, |v, window, cx| v.add_window(&AddWindow, window, cx));
+    cx.run_until_parked();
+    let notices = view.read_with(cx, WorkspaceView::toast_texts);
+    assert!(notices.iter().any(|n| n.contains("it has no screen capture")), "{notices:?}");
 
     view.update_in(cx, |v, _w, cx| v.toggle_hosts(cx));
     cx.run_until_parked();
@@ -228,7 +236,7 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
 }
 
 /// The status bar is never empty: with one worker and nothing that says where, it names the
-/// worker; a focused page says its host.
+/// worker; a focused page leaves its host to its header, so the bar names the worker there too.
 #[gpui::test]
 fn the_status_bar_always_says_something(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -245,7 +253,8 @@ fn the_status_bar_always_says_something(cx: &mut TestAppContext) {
         let item = v.item(page).cloned();
         item.and_then(|item| v.focus_facts(&item, cx))
     });
-    assert_eq!(facts.as_deref(), Some("localhost:5173"));
+    assert_eq!(facts, None, "the host is the header's place, said once");
+    assert!(cx.debug_bounds("status-worker").is_some(), "a page says nowhere else: the worker");
 }
 
 /// With several workers the empty workspace's rows each open a shell on theirs, here; and "+"
@@ -297,10 +306,10 @@ fn the_palette_lists_tiles_by_recency_with_the_focused_last(cx: &mut TestAppCont
     assert_eq!(sessions(&view, cx), vec![b, a, c], "who waits on the human first");
 }
 
-/// Overview covers say more than a title: the tile's state, one muted line of where it is,
-/// and its worker where there are several; a workspace's name carries its rollup.
+/// An overview miniature's label says more than a title: the tile's state, one muted line of
+/// where it is, and its worker where there are several; a workspace's name carries its rollup.
 #[gpui::test]
-fn overview_covers_say_state_place_and_worker(cx: &mut TestAppContext) {
+fn overview_labels_say_state_place_and_worker(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let _laptop = connect(&view, cx, 2, "laptop");
@@ -311,12 +320,15 @@ fn overview_covers_say_state_place_and_worker(cx: &mut TestAppContext) {
         view.update_in(cx, |v, _w, cx| v.session_opened(key, moved, cx));
     }
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(shells[0].0), cx));
+    run(&view, cx, shells[2].0, "cargo test");
     cx.simulate_keystrokes("cmd-alt-o");
     cx.run_until_parked();
+    // One thin line: the name, then the facts after it on the same line.
     let first = shells[0].1.item;
     let label = cx.debug_bounds(selector("shapes-label", first)).expect("named");
     let meta = cx.debug_bounds(selector("shapes-meta", first)).expect("one meta line");
-    assert!(meta.top() >= label.bottom() - px(0.5), "under the name");
+    assert!(meta.left() >= label.right() - px(0.5), "after the name: {meta:?} {label:?}");
+    assert!((meta.center().y - label.center().y).abs() < px(1.0), "on its line");
     let lines = view.read_with(cx, |v, cx| {
         let item = v.item(shells[1].1).cloned();
         item.map(|item| v.tile_meta(&item, std::time::SystemTime::now(), cx).0)

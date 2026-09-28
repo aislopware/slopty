@@ -1,7 +1,7 @@
 //! The overlays over the strip: the command palette (and its find in every tile), and the
 //! picker of a worker's windows.
 
-use gpui::{AppContext as _, Context, Entity, SharedString, Window};
+use gpui::{AppContext as _, Context, Entity, Window};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::SessionId;
 use slopty_proto::ClientMsg;
@@ -9,7 +9,7 @@ use slopty_proto::items::ItemKind;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
 use slopty_proto::terminal::TermRequest;
 
-use super::actions::{FindEverywhere, ListWorkers, OpenFile, OpenPalette};
+use super::actions::{FindEverywhere, ListWorkers, OpenFile, OpenFolder, OpenPalette};
 use super::agents::{agent_status_text, needs_human};
 use super::tile::kind_icon;
 use super::{AGENT_COMMAND, WorkspaceView};
@@ -44,7 +44,7 @@ impl WorkspaceView {
             let health = super::navigator::worker_health(&w.status);
             let detail = match health {
                 Some((_, word)) => palette::sentence_case(word),
-                None => w.rtt.map(super::navigator::rtt_label).unwrap_or_default(),
+                None => super::navigator::slow_rtt(w.rtt).unwrap_or_default(),
             };
             PaletteItem::worker(&w.name, &detail, *key).with_status(health.map(|(mark, _)| mark))
         })
@@ -81,7 +81,7 @@ impl WorkspaceView {
             if matches!(item.kind, ItemKind::Terminal { .. }) {
                 continue;
             }
-            let title = self.card_title(tile, item, cx);
+            let title = self.tile_title(tile, item, cx);
             let line = PaletteItem::item(&title, kind_icon(item, false), item.id)
                 .placed(self.tile_place(item, cx));
             items.push(line.on_worker(self.worker_label(tile.worker)));
@@ -161,6 +161,17 @@ impl WorkspaceView {
         self.show_palette(palette, window, cx);
     }
 
+    /// "Open folder…": the palette, its field holding the focused shell's directory (or the
+    /// worker's home), so ↩ opens it and a few keys go elsewhere.
+    pub fn open_folder_palette(
+        &mut self,
+        _: &OpenFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_file_palette(&OpenFile, window, cx);
+    }
+
     /// ⌘⇧F: the palette as a find in every tile.
     pub fn find_everywhere(
         &mut self,
@@ -201,9 +212,30 @@ impl WorkspaceView {
             ItemKind::Note { .. }
             | ItemKind::Window { .. }
             | ItemKind::Display { .. }
-            | ItemKind::Browser { .. } => None,
+            | ItemKind::Browser { .. }
+            | ItemKind::Folder { .. } => None,
         };
         needle.unwrap_or_default()
+    }
+
+    /// Keep drawing a dismissed palette for as long as its way out takes, then drop it; a
+    /// palette opened meanwhile draws over it and is not dropped with it.
+    fn let_palette_leave(&mut self, palette: Entity<CommandPalette>, cx: &mut Context<Self>) {
+        let during = palette.update(cx, CommandPalette::leave);
+        if during.is_zero() {
+            return;
+        }
+        self.palette_leaving = Some(palette.clone());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(during).await;
+            let _gone = this.update(cx, |this, cx| {
+                if this.palette_leaving.as_ref() == Some(&palette) {
+                    this.palette_leaving = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn show_palette(
@@ -223,7 +255,7 @@ impl WorkspaceView {
             p.set_chords(chords);
             p.set_sheet_below(phone_below);
         });
-        cx.subscribe(&palette, |this, _palette, event, cx| {
+        cx.subscribe(&palette, |this, palette, event, cx| {
             if let PaletteEvent::Changed(text) = event {
                 if this.find_needle.is_some() {
                     this.find_changed(text, cx);
@@ -233,6 +265,7 @@ impl WorkspaceView {
                 return;
             }
             this.palette = None;
+            this.let_palette_leave(palette, cx);
             this.find_needle = None;
             this.find_hits.clear();
             match event {
@@ -260,9 +293,22 @@ impl WorkspaceView {
                     this.palette_return = None;
                     this.open_browser(None, url, cx);
                 }
-                PaletteEvent::Run(PaletteRun::OpenFile { path, line }) => {
+                PaletteEvent::Run(PaletteRun::OpenFile { path, line, found }) => {
                     let path = this.absolute_in_active_shell(path);
-                    this.open_file_on(None, &path, *line, cx);
+                    if let Some(key) = this.context_worker() {
+                        if *found {
+                            this.open_file_on(Some(key), &path, *line, cx);
+                        } else {
+                            this.open_path_on(key, &path, *line, cx);
+                        }
+                    }
+                }
+                PaletteEvent::Run(PaletteRun::OpenFolder { path }) => {
+                    this.palette_return = None;
+                    let path = this.absolute_in_active_shell(path);
+                    if let Some(key) = this.context_worker() {
+                        this.open_folder_on(key, &path, cx);
+                    }
                 }
                 PaletteEvent::Run(PaletteRun::OpenShell { cwd }) => {
                     if let Some(key) = this.context_worker() {
@@ -305,7 +351,7 @@ impl WorkspaceView {
     }
 
     /// The find-everywhere field changed: every live shell is asked for the needle (one hit
-    /// each is enough: the count is what the line says); the notes and file cards are counted
+    /// each is enough: the count is what the line says); the notes and file tiles are counted
     /// here, where their text is.
     fn find_changed(&mut self, text: &str, cx: &mut Context<Self>) {
         let needle = text.trim().to_owned();
@@ -338,15 +384,17 @@ impl WorkspaceView {
                     continue;
                 }
                 ItemKind::Note { text } => {
-                    let lines: Vec<SharedString> = text.lines().map(SharedString::from).collect();
-                    (crate::file::find_hits(&lines, &needle).len(), PaletteRun::Item(id))
+                    (crate::file::hit_lines(text, &needle).len(), PaletteRun::Item(id))
                 }
                 ItemKind::File { .. } => {
                     let Some(view) = self.files.get(&id) else { continue };
-                    let total = crate::file::find_hits(&view.read(cx).lines(cx), &needle).len();
+                    let total = crate::file::hit_lines(&view.read(cx).text(cx), &needle).len();
                     (total, PaletteRun::FindInFile { item: id, needle: needle.clone() })
                 }
-                ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Browser { .. } => {
+                ItemKind::Window { .. }
+                | ItemKind::Display { .. }
+                | ItemKind::Browser { .. }
+                | ItemKind::Folder { .. } => {
                     continue;
                 }
             };
@@ -389,7 +437,7 @@ impl WorkspaceView {
                 let (total, run) = self.find_hits.get(&tile.item)?;
                 let item = self.item(tile)?;
                 (*total > 0).then(|| {
-                    PaletteItem::hits(&self.card_title(tile, item, cx), *total, run.clone())
+                    PaletteItem::hits(&self.tile_title(tile, item, cx), *total, run.clone())
                 })
             })
             .collect();
@@ -510,7 +558,7 @@ impl WorkspaceView {
                 let summary = self.summary(session);
                 let row = SessionRow {
                     session,
-                    title: self.card_title(*tile, item, cx),
+                    title: self.tile_title(*tile, item, cx),
                     status: agent.map(agent_status_text),
                     needs_you,
                     mark: agent.and_then(Status::of_agent),

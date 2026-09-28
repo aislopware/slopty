@@ -9,27 +9,41 @@
 
 use std::path::{Path, PathBuf};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use slopty_net::HostAddr;
+
+pub mod edit;
+pub mod schema;
+
+/// What the app takes of each number, outside of which a value is a typo and its default
+/// applies. The schema's `range` reads these, so the form's steppers and the app's check agree.
+pub mod bounds {
+    use std::ops::RangeInclusive;
+
+    /// Terminal font size, in points.
+    pub const MONO_SIZE: RangeInclusive<f32> = 6.0..=72.0;
+    /// Chrome font size, in points.
+    pub const UI_SIZE: RangeInclusive<f32> = 8.0..=32.0;
+    /// Half the font's line height packs rows past reading; twice it is a list, not a grid.
+    pub const LINE_HEIGHT: RangeInclusive<f32> = 0.5..=2.0;
+    /// A tenth of a line per wheel line is glacial; ten is a page.
+    pub const SCROLL: RangeInclusive<f32> = 0.1..=10.0;
+    /// WCAG ratios run from 1 (the same colour) to 21 (black on white).
+    pub const CONTRAST: RangeInclusive<f32> = 1.0..=21.0;
+    /// Below 15 the stream is a slideshow; above 120 no display here refreshes.
+    pub const FPS: RangeInclusive<u16> = 15..=120;
+    /// Under a megabit nothing decodes; 200 Mbit/s is past what one stream ever grows to.
+    pub const MBPS: RangeInclusive<u16> = 1..=200;
+}
 
 /// File name inside the data directory.
 pub const FILE_NAME: &str = "settings.toml";
 
-/// `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty`. The same directory the
-/// client identity and the worker daemon use.
-#[must_use]
-pub fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("SLOPTY_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    home.join("Library").join("Application Support").join("Slopty")
-}
-
-/// `<data dir>/settings.toml`.
+/// `settings.toml` in the platform's data directory (`slopty_platform::dirs::data_dir`).
 #[must_use]
 pub fn path() -> PathBuf {
-    path_in(&data_dir())
+    path_in(&slopty_platform::dirs::data_dir())
 }
 
 /// `settings.toml` inside `data_dir`.
@@ -39,59 +53,73 @@ pub fn path_in(data_dir: &Path) -> PathBuf {
 }
 
 /// Which theme variant to use.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
-    /// Always dark.
-    Dark,
-    /// Always light.
-    Light,
     /// Follow the window's appearance (System Settings ▸ Appearance).
     #[default]
+    #[schemars(title = "System")]
     System,
+    /// Always light.
+    #[schemars(title = "Light")]
+    Light,
+    /// Always dark.
+    #[schemars(title = "Dark")]
+    Dark,
 }
 
 /// Whether the terminal cursor blinks.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CursorBlink {
     /// The program decides (DECSCUSR): shells are steady, editors often blink.
     #[default]
+    #[schemars(title = "Auto")]
     Program,
     /// Always.
+    #[schemars(title = "Always")]
     Always,
     /// Never.
+    #[schemars(title = "Never")]
     Never,
 }
 
 /// The terminal cursor's shape.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CursorStyle {
     /// The program decides (DECSCUSR).
     #[default]
+    #[schemars(title = "Auto")]
     Program,
     /// A filled block.
+    #[schemars(title = "Block")]
     Block,
     /// A bar at the left edge.
+    #[schemars(title = "Bar")]
     Bar,
     /// An underline.
+    #[schemars(title = "Underline")]
     Underline,
 }
 
 /// Whether ⌥ is Alt (ghostty's `macos-option-as-alt`): a modifier that sends an escape
 /// prefix, or the layout's key that types the symbol.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum OptionAsAlt {
     /// The layout's key (`⌥b` types `∫`).
     #[default]
+    #[schemars(title = "Off")]
     False,
     /// Alt on both sides.
+    #[schemars(title = "Both")]
     True,
     /// Only the left key is Alt.
+    #[schemars(title = "Left")]
     Left,
     /// Only the right key is Alt.
+    #[schemars(title = "Right")]
     Right,
 }
 
@@ -133,41 +161,89 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
+impl JsonSchema for Color {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Color".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "format": schema::COLOR,
+            "pattern": "^#?([0-9a-fA-F]{6})?$",
+        })
+    }
+}
+
 /// `[colors]`: the terminal palette, each entry the theme's own unless set. They apply
 /// to both appearances.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[schemars(title = "Terminal colours")]
 pub struct ColorSettings {
+    /// Empty keeps the theme's own, in both appearances.
+    ///
     /// Default text.
+    #[schemars(title = "Text")]
     pub foreground: Color,
+    /// The chrome's surfaces follow it.
+    ///
     /// Default background.
+    #[schemars(title = "Background")]
     pub background: Color,
-    /// The cursor block.
+    /// The block, bar or underline.
+    #[schemars(title = "Cursor")]
     pub cursor: Color,
-    /// Text under the cursor block (black or white against `cursor` when unset).
+    /// Black or white against the cursor when empty.
+    ///
+    /// Text under the cursor block.
+    #[schemars(title = "Text under the cursor")]
     pub cursor_text: Color,
-    /// Selection background.
+    /// Behind selected text.
+    #[schemars(title = "Selection")]
     pub selection: Color,
+    /// Black to white, then their bright forms; fewer than 16 keep the rest.
+    ///
     /// ANSI 0–15 in order; fewer than 16 leave the rest to the theme.
+    #[schemars(title = "ANSI colours", example = ["#15161e", "#f7768e"])]
     pub ansi: Vec<Color>,
 }
 
 /// `[font]`.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[schemars(title = "Font")]
 pub struct Font {
+    /// `JetBrains Mono` ships with the app; any installed monospace works.
+    ///
     /// Monospace family for terminals. The bundled face is `JetBrains Mono`; any installed
     /// family works, with `SF Mono` and `Menlo` as fallbacks when it is missing.
+    #[schemars(title = "Family", extend("format" = schema::FONT_FAMILY))]
     pub mono_family: String,
+    /// Zooming a tile changes it for that tile only.
+    ///
     /// Terminal font size in points.
+    #[schemars(title = "Size", range(min = *bounds::MONO_SIZE.start(), max = *bounds::MONO_SIZE.end()), extend("x-step" = 1.0, "x-unit" = "pt"))]
     pub mono_size: f32,
+    /// A multiple of the font's own; 1.0 is what it asks for.
+    ///
     /// Terminal line height as a multiple of the font's own (ghostty's `adjust-cell-height`):
     /// `1.0` is the font's, `1.2` airier, `0.9` tighter.
+    #[schemars(
+        title = "Line height",
+        range(min = *bounds::LINE_HEIGHT.start(), max = *bounds::LINE_HEIGHT.end()),
+        extend("x-step" = 0.1, "x-unit" = "\u{d7}")
+    )]
     pub mono_line_height: f32,
-    /// Whether the terminal font's ligatures are shaped (`=>`, `!=` as one glyph in fonts
-    /// that have them).
+    /// Draw => and != as one glyph in fonts that have them.
+    ///
+    /// Whether the terminal font's ligatures are shaped.
+    #[schemars(title = "Ligatures")]
     pub ligatures: bool,
+    /// Bars, lists and dialogs; every label scales with it.
+    ///
     /// Chrome (top bar, pills, picker) font size in points.
+    #[schemars(title = "Text size", range(min = *bounds::UI_SIZE.start(), max = *bounds::UI_SIZE.end()), extend("x-step" = 1.0, "x-unit" = "pt"))]
     pub ui_size: f32,
 }
 
@@ -184,53 +260,98 @@ impl Default for Font {
 }
 
 /// `[theme]`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[schemars(title = "Theme")]
 pub struct ThemeSettings {
-    /// `dark`, `light` or `system`.
+    /// Follow the system, or stay light or dark.
+    #[schemars(title = "Theme")]
     pub appearance: Appearance,
 }
 
 /// `[terminal]`.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[schemars(title = "Terminal")]
 pub struct TerminalSettings {
+    /// Text under this ratio moves toward black or white; 1 keeps every colour.
+    ///
     /// The least WCAG contrast ratio (1–21) between a cell's text and its background; text
     /// under it is moved toward black or white, whichever reads, only as far as the ratio
     /// needs, keeping its hue. `1.0` leaves every colour as the program set it. On by
     /// default, unlike ghostty's `minimum-contrast`: a prompt's own 24-bit colours chosen for
     /// a dark terminal (a pale mint at 1.2:1) are unreadable on a light one.
+    #[schemars(
+        title = "Minimum contrast",
+        range(min = *bounds::CONTRAST.start(), max = *bounds::CONTRAST.end()),
+        extend("x-step" = 0.5, "x-unit" = ":1")
+    )]
     pub minimum_contrast: f32,
-    /// Copy a selection to the clipboard as soon as it is made (ghostty's
-    /// `copy-on-select = clipboard`, iTerm2's default).
+    /// A selection goes to the clipboard as soon as it is made.
+    ///
+    /// Ghostty's `copy-on-select = clipboard`, iTerm2's default.
+    #[schemars(title = "Copy on select")]
     pub copy_on_select: bool,
+    /// Sound the alert and bounce the Dock; off, the tile only flashes.
+    ///
     /// A bell while the app is in the background plays the alert sound and bounces the Dock;
-    /// off, it only flashes the card.
+    /// off, it only flashes the tile.
+    #[schemars(title = "Bell in the background")]
     pub bell_alert: bool,
+    /// Auto lets the shell or the editor choose.
+    ///
     /// Whether the cursor blinks (ghostty's `cursor-style-blink`): the program's choice, or
     /// always, or never.
+    #[schemars(title = "Blink")]
     pub cursor_blink: CursorBlink,
+    /// Auto lets the shell or the editor choose.
+    ///
     /// The cursor's shape (ghostty's `cursor-style`): the program's choice, or block, bar
     /// or underline.
+    #[schemars(title = "Shape")]
     pub cursor_style: CursorStyle,
+    /// A paste that would run a command waits for a confirmation.
+    ///
     /// A paste that could run commands (a newline into a shell that did not ask for
     /// bracketed paste) waits for a confirmation (ghostty's `clipboard-paste-protection`).
+    #[schemars(title = "Paste protection")]
     pub paste_protection: bool,
+    /// Bold text in the first eight colours takes their bright forms.
+    ///
     /// Bold text in ANSI 0–7 is painted in ANSI 8–15 (ghostty's `bold-is-bright`).
+    #[schemars(title = "Bold is bright")]
     pub bold_is_bright: bool,
+    /// It comes back when it moves.
+    ///
     /// The pointer hides while typing into a terminal, until it moves.
+    #[schemars(title = "Hide pointer while typing")]
     pub hide_pointer_while_typing: bool,
+    /// Grid lines per wheel or trackpad line.
+    ///
     /// What a wheel or trackpad line scrolls, in grid lines (ghostty's
     /// `mouse-scroll-multiplier`): `1.0` one for one, `3.0` fast.
+    #[schemars(
+        title = "Scroll speed",
+        range(min = *bounds::SCROLL.start(), max = *bounds::SCROLL.end()),
+        extend("x-step" = 0.5, "x-unit" = "\u{d7}")
+    )]
     pub scroll_multiplier: f32,
+    /// Send the escape prefix readline wants instead of the layout's symbol.
+    ///
     /// ⌥ as Alt (ghostty's `macos-option-as-alt`): `false` types the layout's symbol,
     /// `true` sends an escape prefix for readline's ⌥b/⌥f, `left`/`right` one side each.
+    #[schemars(title = "Option as Alt")]
     pub option_as_alt: OptionAsAlt,
-    /// Closing a terminal whose command is still running asks first (ghostty's
-    /// `confirm-close-surface`).
+    /// Closing a terminal whose command still runs asks first.
+    ///
+    /// Ghostty's `confirm-close-surface`.
+    #[schemars(title = "Confirm close")]
     pub confirm_close: bool,
+    /// Command and Option with the arrows and delete edit the line as text fields do.
+    ///
     /// The Mac's line-editing keys in a shell (ghostty's macOS "natural text editing"
     /// keybinds): ⌘← ⌘→ ⌘⌫ ⌥← ⌥→ ⌥⌫ sent as readline's bytes.
+    #[schemars(title = "Natural text editing")]
     pub natural_editing: bool,
 }
 
@@ -254,15 +375,29 @@ impl Default for TerminalSettings {
 }
 
 /// `[remote]`: what a remote window or display stream asks the worker for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[schemars(title = "Remote windows and desktops")]
 pub struct RemoteSettings {
-    /// Frames per second the worker captures and encodes at (15–120).
+    /// What the worker captures and encodes at.
+    ///
+    /// Frames per second the worker captures and encodes at.
+    #[schemars(title = "Frame rate", range(min = *bounds::FPS.start(), max = *bounds::FPS.end()), extend("x-step" = 15, "x-unit" = "fps"))]
     pub fps: u16,
-    /// The most the worker may send per stream, in megabits per second (1–200): the ceiling
-    /// its bitrate controller grows towards, never the rate it starts at.
+    /// The most one stream may take; it grows toward it as the link allows.
+    ///
+    /// The most the worker may send per stream, in megabits per second: the ceiling its
+    /// bitrate controller grows towards, never the rate it starts at.
+    #[schemars(
+        title = "Bitrate ceiling",
+        range(min = *bounds::MBPS.start(), max = *bounds::MBPS.end()),
+        extend("x-step" = 5, "x-unit" = "Mb/s")
+    )]
     pub max_bitrate_mbps: u16,
+    /// A stream opens silent here; its pill still turns the sound on.
+    ///
     /// A stream opens silenced on this client; the title-bar pill still toggles it.
+    #[schemars(title = "Start muted")]
     pub muted: bool,
 }
 
@@ -273,37 +408,52 @@ impl Default for RemoteSettings {
 }
 
 /// `[worker]`: what `slopty-worker` reads from the same file when it starts.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[schemars(title = "This Mac as a worker")]
 pub struct WorkerSettings {
-    /// Address ranges (`10.8.0.0/24`, `fd00::/8`, a bare address) whose peers may connect
-    /// besides loopback and the tailnet: a VPN or LAN Tailscale does not vouch for.
+    /// Ranges admitted besides loopback and the tailnet; empty admits only those two.
+    ///
+    /// Address ranges (`10.8.0.0/24`, `fd00::/8`, a bare address) whose peers may connect: a
+    /// VPN or LAN Tailscale does not vouch for (`slopty_net::admission`).
+    #[schemars(title = "Allowed addresses", example = ["100.64.0.0/10", "fd00::/8"])]
     pub allow: Vec<String>,
+    /// Read when the worker starts; empty runs it on its own.
+    ///
     /// The server to register with, `host[:port]` with
     /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
     /// empty string in the file) runs the worker on its own. `--server` and `SLOPTY_SERVER`
     /// take precedence.
     #[serde(with = "server_address")]
+    #[schemars(title = "Register with", with = "String", example = "studio.local")]
     pub server: Option<HostAddr>,
 }
 
 /// `[server]`: what `slopty-server` reads from the file of the data directory its own lives in.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[schemars(title = "This Mac as a server")]
 pub struct ServerSettings {
+    /// Beside loopback and the tailnet, as the worker's.
+    ///
     /// Address ranges whose peers may connect besides loopback and the tailnet, as
     /// [`WorkerSettings::allow`].
+    #[schemars(title = "Allowed addresses", example = ["10.8.0.0/24"])]
     pub allow: Vec<String>,
 }
 
 /// `[client]`: how the app and the `slopty` CLI find the workers.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[schemars(title = "This app")]
 pub struct ClientSettings {
+    /// Whose directory lists the workers; empty reaches those added by address.
+    ///
     /// The server whose directory lists the workers, `host[:port]` with
     /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
     /// empty string in the file) reaches only the workers added by address.
     #[serde(with = "server_address")]
+    #[schemars(title = "Server", with = "String", example = "studio.local")]
     pub server: Option<HostAddr>,
 }
 
@@ -329,7 +479,7 @@ mod server_address {
 }
 
 /// The whole file.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Settings {
     /// Fonts.
@@ -412,7 +562,7 @@ impl Settings {
     pub fn parse(text: &str) -> Loaded {
         let table: toml::Table = match toml::from_str(text) {
             Ok(table) => table,
-            Err(e) => return Loaded::broken(first_line(&e.to_string())),
+            Err(e) => return Loaded::broken(reason(&e, text)),
         };
         let mut warnings = Vec::new();
         if let Ok(known) = toml::Table::try_from(Self::default()) {
@@ -460,7 +610,7 @@ minimum_contrast = {minimum_contrast}
 # Copy a selection to the clipboard as soon as it is made.
 copy_on_select = {copy_on_select}
 # A bell while the app is in the background sounds the alert and bounces
-# the Dock; off, the card only flashes.
+# the Dock; off, the tile only flashes.
 bell_alert = {bell_alert}
 # \"program\" (the shell or editor decides), \"always\" or \"never\".
 cursor_blink = {cursor_blink}
@@ -509,11 +659,10 @@ ansi = []
 # Read when slopty-worker starts.
 #
 # Who may connect to the worker daemon on this Mac, as address ranges
-# (\"100.64.0.0/10\", \"fd00::/8\", \"192.168.1.20\"). Empty admits the tailnet
-# (100.64.0.0/10, fd7a:115c:a1e0::/48) and private LANs (10/8, 172.16/12,
-# 192.168/16, fc00::/7, link-local); a list replaces those. Loopback always
-# connects. Traffic is not encrypted by Slopty: the VPN or tailnet is the
-# boundary.
+# (\"10.8.0.0/24\", \"fd00::/8\", \"192.168.1.20\"), besides loopback and the
+# tailnet, which always connect. A private LAN or a plain VPN is not admitted
+# until it is listed here. Traffic is not encrypted by Slopty: the VPN or
+# tailnet is the boundary.
 allow = []
 # The server this Mac registers with as a worker, \"host\" or \"host:port\"
 # (port 45560 when absent). Empty runs it on its own. --server and
@@ -559,7 +708,7 @@ server = \"\"
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, Self::default_file())?;
+        slopty_platform::fs::replace(path, Self::default_file().as_bytes())?;
         Ok(true)
     }
 }
@@ -601,45 +750,52 @@ pub fn with_server(text: &str, of: ServerOf, server: Option<&HostAddr>) -> Resul
     }
     let table = of.table();
     let value = toml_string(&server.map(ToString::to_string).unwrap_or_default());
-    let line = format!("server = {value}");
-    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-    let header = lines.iter().position(|l| table_header(l) == Some(table));
-    if let Some(at) = header {
-        let end = lines
-            .iter()
-            .skip(at.saturating_add(1))
-            .position(|l| table_header(l).is_some())
-            .map_or(lines.len(), |n| at.saturating_add(1).saturating_add(n));
-        let key = (at.saturating_add(1)..end).find(|&i| {
-            lines
-                .get(i)
-                .and_then(|l| l.trim_start().strip_prefix("server"))
-                .is_some_and(|rest| rest.trim_start().starts_with('='))
-        });
-        match key.and_then(|i| lines.get_mut(i)) {
-            Some(existing) => *existing = line,
-            None => lines.insert(at.saturating_add(1), line),
-        }
-    } else {
-        if lines.last().is_some_and(|l| !l.trim().is_empty()) {
-            lines.push(String::new());
-        }
-        lines.push(format!("[{table}]"));
-        lines.push(line);
-    }
-    let mut out = lines.join("\n");
-    out.push('\n');
+    let out = edit::write(text, table, "server", &value);
     match Settings::parse(&out) {
         Loaded { error: None, settings, .. } if of.of(&settings) == server => Ok(out),
         _ => Err(format!("could not set [{table}] server in settings.toml")),
     }
 }
 
-/// The table a `[name]` line opens.
-fn table_header(line: &str) -> Option<&str> {
-    let line = line.trim();
-    let inner = line.strip_prefix('[')?.strip_suffix(']')?;
-    (!inner.starts_with('[')).then_some(inner.trim())
+/// Set `of`'s `server` in the `settings.toml` under `data_dir` (starting from the commented
+/// defaults when there is none), keeping every other line.
+///
+/// The file is replaced whole, so the app watching it never reads half of one.
+///
+/// # Errors
+///
+/// When the file cannot be read or written, or does not parse.
+pub fn save_server(data_dir: &Path, of: ServerOf, server: Option<&HostAddr>) -> Result<(), String> {
+    let path = path_in(data_dir);
+    let shown = |e: std::io::Error| format!("{}: {e}", path.display());
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default_file(),
+        Err(e) => return Err(shown(e)),
+    };
+    let text = with_server(&text, of, server).map_err(|e| format!("{}: {e}", path.display()))?;
+    std::fs::create_dir_all(data_dir).map_err(shown)?;
+    slopty_platform::fs::replace(&path, text.as_bytes()).map_err(shown)
+}
+
+/// Have the worker under `data_dir` register with its client's server, unless it names one.
+///
+/// The Mac an app makes a worker joins the directory that app reads. Returns the server it now
+/// registers with.
+///
+/// # Errors
+///
+/// As [`save_server`].
+pub fn join_clients_server(data_dir: &Path) -> Result<Option<HostAddr>, String> {
+    let settings = Settings::load(&path_in(data_dir)).settings;
+    match (settings.worker.server, settings.client.server) {
+        (Some(own), _) => Ok(Some(own)),
+        (None, Some(client)) => {
+            save_server(data_dir, ServerOf::Worker, Some(&client))?;
+            Ok(Some(client))
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 impl Loaded {
@@ -670,6 +826,15 @@ fn unknown_keys(given: &toml::Table, known: &toml::Table, prefix: &str, out: &mu
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or_default().trim().to_owned()
+}
+
+/// The parser's reason on one line, after the line it is about: the error's own first line is
+/// only where it is (`TOML parse error at line 2, column 6`), and the why comes lines later.
+fn reason(e: &toml::de::Error, text: &str) -> String {
+    let message = first_line(e.message());
+    let Some(span) = e.span() else { return message };
+    let line = text.get(..span.start).unwrap_or_default().split('\n').count();
+    format!("line {line}: {message}")
 }
 
 const fn appearance_name(a: Appearance) -> &'static str {
@@ -904,6 +1069,7 @@ mod tests {
         let err = loaded.error.expect("a parse error");
         let text = err.to_string();
         assert!(text.starts_with(&path.display().to_string()), "{text}");
+        assert!(text.contains(": line 1: "), "the line and the reason: {text}");
         assert_eq!(text.lines().count(), 1, "one line for the status bar: {text}");
     }
 
@@ -912,6 +1078,24 @@ mod tests {
         let loaded = Settings::parse("[font]\nmono_size = \"big\"\n");
         assert!(loaded.error.is_some(), "a type error is an error");
         assert_eq!(loaded.settings, Settings::default());
+    }
+
+    /// A worker made from the app joins the app's server, and keeps a server of its own.
+    #[test]
+    fn a_worker_joins_its_clients_server_unless_it_has_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(join_clients_server(dir.path()), Ok(None), "no server anywhere");
+        assert!(!path_in(dir.path()).exists(), "and nothing written");
+
+        let studio: HostAddr = "studio:7000".parse().unwrap();
+        save_server(dir.path(), ServerOf::Client, Some(&studio)).unwrap();
+        assert_eq!(join_clients_server(dir.path()), Ok(Some(studio.clone())));
+        let saved = Settings::load(&path_in(dir.path())).settings;
+        assert_eq!(saved.worker.server, Some(studio));
+
+        let own: HostAddr = "100.64.0.9:7000".parse().unwrap();
+        save_server(dir.path(), ServerOf::Worker, Some(&own)).unwrap();
+        assert_eq!(join_clients_server(dir.path()), Ok(Some(own)), "its own wins");
     }
 
     #[test]

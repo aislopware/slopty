@@ -78,7 +78,7 @@ pub struct WebView {
     web: Retained<UIView>,
     clip: Retained<Clip>,
     sink: Sink,
-    _delegate: Retained<Delegate>,
+    delegate: Retained<Delegate>,
     mtm: MainThreadMarker,
 }
 
@@ -116,9 +116,10 @@ impl WebView {
         // SAFETY: WebKit rule: the navigation delegate is any object conforming to
         // `WKNavigationDelegate`, held weakly; `self` keeps it alive as long as the view.
         let () = unsafe { msg_send![&*web, setNavigationDelegate: &*delegate] };
+        super::adopt_view(&web, &delegate);
         clip.addSubview(&web);
         host.addSubview(&clip);
-        let this = Self { web, clip, sink, _delegate: delegate, mtm };
+        let this = Self { web, clip, sink, delegate, mtm };
         this.load_address(&address);
         Some(this)
     }
@@ -165,6 +166,12 @@ impl WebView {
         let _navigation: Option<Retained<AnyObject>> = unsafe { msg_send![&*self.web, goBack] };
     }
 
+    /// Forward one page, when there is one.
+    pub fn forward(&self) {
+        // SAFETY: WebKit rule: `goForward` with no forward history does nothing and returns nil.
+        let _navigation: Option<Retained<AnyObject>> = unsafe { msg_send![&*self.web, goForward] };
+    }
+
     /// Load the page again.
     pub fn reload(&self) {
         // SAFETY: WebKit rule: `reload` may be called at any time.
@@ -184,11 +191,14 @@ impl WebView {
         let loading: bool = unsafe { msg_send![web, isLoading] };
         // SAFETY: as above.
         let can_go_back: bool = unsafe { msg_send![web, canGoBack] };
+        // SAFETY: as above.
+        let can_go_forward: bool = unsafe { msg_send![web, canGoForward] };
         Page {
             title: title.map(|t| t.to_string()).unwrap_or_default(),
             url: url.and_then(|u| u.absoluteString()).map(|u| u.to_string()).unwrap_or_default(),
             loading,
             can_go_back,
+            can_go_forward,
         }
     }
 
@@ -248,6 +258,42 @@ impl WebView {
             ];
         }
     }
+
+    /// Find `text` in the page, after the current match or (`backwards`) before it; the
+    /// answer comes back as [`WebEvent::Found`].
+    pub fn find(&self, text: &str, backwards: bool) {
+        super::find_in(&self.web, text, backwards, Rc::clone(&self.sink));
+    }
+
+    /// Count `text` in the page; the answer comes back as [`WebEvent::Counted`].
+    pub fn count(&self, text: &str) {
+        super::count_in(&self.web, text, Rc::clone(&self.sink));
+    }
+
+    /// An iOS page has no inspector of its own: a debug build's is Safari's, on a Mac, in
+    /// its Develop menu. Never opens one.
+    #[must_use]
+    #[expect(clippy::unused_self, reason = "the Mac twin opens its page's inspector")]
+    pub const fn inspect(&self) -> bool {
+        false
+    }
+
+    /// Show the page at `zoom`, 1 being its own size.
+    pub fn set_zoom(&self, zoom: f64) {
+        super::zoom_in(&self.web, zoom);
+    }
+
+    /// How much of download `id` has come, and of how much (0 while that is unknown); `None`
+    /// once it is over.
+    #[must_use]
+    pub fn received(&self, id: u64) -> Option<(u64, u64)> {
+        self.delegate.received(id)
+    }
+
+    /// Stop download `id`.
+    pub fn cancel_download(&self, id: u64) {
+        self.delegate.cancel(id);
+    }
 }
 
 impl Drop for WebView {
@@ -255,6 +301,7 @@ impl Drop for WebView {
         self.release();
         // SAFETY: WebKit rule: a delegate is cleared before it goes.
         let () = unsafe { msg_send![&*self.web, setNavigationDelegate: None::<&AnyObject>] };
+        super::forget_view(&self.web, &self.delegate);
         self.clip.removeFromSuperview();
     }
 }

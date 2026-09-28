@@ -14,6 +14,10 @@ mod conversation;
 mod gallery;
 
 #[cfg(test)]
+#[path = "app/settings.rs"]
+mod settings;
+
+#[cfg(test)]
 #[path = "app/tiles.rs"]
 mod tiles;
 
@@ -270,11 +274,20 @@ mod tests {
         assert!(((after / before) - 20.0 / 13.0).abs() < 0.02, "{before} → {after}");
         assert_eq!(dump.status, "connected", "{dump:#?}");
 
-        // ⌘, opens the in-app editor on the file; a line typed into it and ⌘↩ write the
-        // file (the phone's only way to change a setting), and the dialog goes.
+        // ⌘, opens the settings on their form, and "Edit as TOML" on the file's text; a line
+        // typed into it and ⌘↩ write the file, and the dialog goes.
         drv.keys("cmd-,").await.unwrap();
-        drv.wait_for("the settings editor", STEP, |d| {
-            d.a11y_node("Dialog", Some("Settings")).is_some()
+        let dump = drv
+            .wait_for("the settings editor", STEP, |d| {
+                d.a11y_node("Dialog", Some("Settings")).is_some()
+            })
+            .await
+            .unwrap();
+        let [x, y, w, h] =
+            dump.a11y_node("Button", Some("Edit as TOML")).expect("the file's link").bounds;
+        drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+        drv.wait_for("the file's text", STEP, |d| {
+            d.a11y_node("Button", Some("Edit with controls")).is_some()
         })
         .await
         .unwrap();
@@ -1175,6 +1188,56 @@ mod tests {
             "its absolute path, quoted for its space: {screen}"
         );
         stack.shutdown().await;
+        app.release();
+    }
+
+    /// A picture copied here, with no text beside it, and pasted into a shell with ⌘V is on the
+    /// worker's pasteboard before the chord reaches the shell: Claude Code reads it there. The
+    /// line typed after ⌘V waits behind the paste on the worker, so once its echo is back the
+    /// worker's pasteboard must hold the picture, byte for byte, with no waiting for it. Both
+    /// pasteboards are the run's own named ones; the human's is never touched.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_picture_copied_here_is_on_the_workers_pasteboard_before_a_shells_paste() {
+        use slopty_e2e::harness::pasteboard_name;
+        use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
+
+        const PNG: &str = "public.png";
+
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-paste-picture").await.unwrap();
+        let worker_name = pasteboard_name(stack.dir.path(), "worker");
+        let app_name = pasteboard_name(stack.dir.path(), "app");
+        let drv = &mut stack.driver;
+        drv.wait_for("a shell of the worker with the keyboard", STEP, |d| {
+            d.status == "connected" && d.focus.as_deref() == Some("terminal")
+        })
+        .await
+        .unwrap();
+        let (worker, app) = (MacPasteboard::named(&worker_name), MacPasteboard::named(&app_name));
+        // Past the inline size, so it goes up as a bulk stream when the worker fetches it.
+        let picture: Vec<u8> = (0..300_000_u32).map(|i| (i % 249) as u8).collect();
+        app.copy(&[(PNG, &picture)]);
+        assert!(worker.data(PNG).is_none(), "not on the worker before the paste");
+
+        drv.keys("cmd-v").await.unwrap();
+        drv.type_text("after-the-picture").await.unwrap();
+        drv.wait_for("the line typed after the paste echoed", STEP, |d| {
+            !d.rows_containing("after-the-picture").is_empty()
+        })
+        .await
+        .unwrap();
+        let held = worker.data(PNG);
+        assert!(
+            held.as_deref() == Some(picture.as_slice()),
+            "the worker's pasteboard held the picture when the shell saw the paste: {} bytes",
+            held.map_or(0, |b| b.len())
+        );
+        drv.keys("ctrl-u").await.unwrap();
+        stack.shutdown().await;
+        worker.release();
         app.release();
     }
 

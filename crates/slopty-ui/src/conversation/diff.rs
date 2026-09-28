@@ -21,8 +21,6 @@ pub enum Kind {
     Added,
     /// Only in the old.
     Removed,
-    /// Git's "\ No newline at end of file".
-    Meta,
 }
 
 /// One line of a diff, ready to draw.
@@ -38,6 +36,9 @@ pub struct Line {
     pub text: String,
     /// Its colours, when the path names a grammar.
     pub spans: Option<Vec<Span>>,
+    /// The file ends here without a newline (git's "\ No newline at end of file", which
+    /// follows the line it is about).
+    pub no_newline: bool,
 }
 
 /// A hunk's lines.
@@ -57,26 +58,28 @@ pub fn blocks(path: &str, patch: &Patch) -> Rc<[Block]> {
 }
 
 fn block(hunk: &Hunk, syntax: Option<Syntax>) -> Block {
-    let parsed: Vec<(Kind, &str)> = hunk
-        .lines
-        .iter()
-        .map(|line| {
-            let mut chars = line.chars();
-            let kind = match chars.next() {
-                Some('+') => Kind::Added,
-                Some('-') => Kind::Removed,
-                Some('\\') => Kind::Meta,
-                _ => Kind::Context,
-            };
-            let text = if kind == Kind::Meta { line.as_str() } else { chars.as_str() };
-            (kind, text)
-        })
-        .collect();
+    // Git's note about the last newline is a flag on the line before it, not a line.
+    let mut parsed: Vec<(Kind, &str, bool)> = Vec::with_capacity(hunk.lines.len());
+    for line in &hunk.lines {
+        let mut chars = line.chars();
+        let kind = match chars.next() {
+            Some('+') => Kind::Added,
+            Some('-') => Kind::Removed,
+            Some('\\') => {
+                if let Some(last) = parsed.last_mut() {
+                    last.2 = true;
+                }
+                continue;
+            }
+            _ => Kind::Context,
+        };
+        parsed.push((kind, chars.as_str(), false));
+    }
     let side = |skip: Kind| -> String {
         parsed
             .iter()
-            .filter(|(kind, _)| *kind != skip && *kind != Kind::Meta)
-            .map(|(_, text)| *text)
+            .filter(|(kind, ..)| *kind != skip)
+            .map(|(_, text, _)| *text)
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -89,17 +92,16 @@ fn block(hunk: &Hunk, syntax: Option<Syntax>) -> Block {
     let (mut old_no, mut new_no) = (hunk.old_start, hunk.new_start);
     let (mut old_at, mut new_at) = (0_usize, 0_usize);
     let mut lines = Vec::with_capacity(parsed.len());
-    for (kind, text) in parsed {
+    for (kind, text, no_newline) in parsed {
         let (old, new, from_old) = match kind {
             Kind::Context => (Some(old_no), Some(new_no), false),
             Kind::Removed => (Some(old_no), None, true),
             Kind::Added => (None, Some(new_no), false),
-            Kind::Meta => (None, None, false),
         };
-        let coloured = match (&spans, kind) {
-            (_, Kind::Meta) | (None, _) => None,
-            (Some((old_side, _)), _) if from_old => old_side.get(old_at).cloned(),
-            (Some((_, new_side)), _) => new_side.get(new_at).cloned(),
+        let coloured = match &spans {
+            None => None,
+            Some((old_side, _)) if from_old => old_side.get(old_at).cloned(),
+            Some((_, new_side)) => new_side.get(new_at).cloned(),
         };
         if matches!(kind, Kind::Context | Kind::Removed) {
             old_no = old_no.saturating_add(1);
@@ -109,7 +111,7 @@ fn block(hunk: &Hunk, syntax: Option<Syntax>) -> Block {
             new_no = new_no.saturating_add(1);
             new_at = new_at.saturating_add(1);
         }
-        lines.push(Line { kind, old, new, text: text.to_owned(), spans: coloured });
+        lines.push(Line { kind, old, new, text: text.to_owned(), spans: coloured, no_newline });
     }
     Block { new_start: hunk.new_start, lines }
 }
@@ -141,7 +143,7 @@ pub fn pairs(block: &Block) -> Vec<Pair<'_>> {
                 removed.push(line);
             }
             Kind::Added => added.push(line),
-            Kind::Context | Kind::Meta => {
+            Kind::Context => {
                 flush(&mut out, &mut removed, &mut added);
                 out.push((Some(line), Some(line)));
             }
@@ -175,23 +177,22 @@ mod tests {
         }
     }
 
-    /// Lines carry both numbers where they are in both files, one where they are in one,
-    /// and none for git's note about the last newline.
+    /// Lines carry both numbers where they are in both files and one where they are in one;
+    /// git's note about the last newline flags the line it follows.
     #[test]
     fn lines_are_numbered_on_the_side_they_are_on() {
         let patch = hunk(&[" alpha", "-beta", "+BETA", " gamma", "\\ No newline at end of file"]);
         let blocks = blocks("notes.txt", &patch);
         let lines = &blocks[0].lines;
-        let numbers: Vec<(Kind, Option<u32>, Option<u32>, &str)> =
-            lines.iter().map(|l| (l.kind, l.old, l.new, l.text.as_str())).collect();
+        let numbers: Vec<_> =
+            lines.iter().map(|l| (l.kind, l.old, l.new, l.text.as_str(), l.no_newline)).collect();
         assert_eq!(
             numbers,
             [
-                (Kind::Context, Some(10), Some(10), "alpha"),
-                (Kind::Removed, Some(11), None, "beta"),
-                (Kind::Added, None, Some(11), "BETA"),
-                (Kind::Context, Some(12), Some(12), "gamma"),
-                (Kind::Meta, None, None, "\\ No newline at end of file"),
+                (Kind::Context, Some(10), Some(10), "alpha", false),
+                (Kind::Removed, Some(11), None, "beta", false),
+                (Kind::Added, None, Some(11), "BETA", false),
+                (Kind::Context, Some(12), Some(12), "gamma", true),
             ]
         );
         assert!(lines.iter().all(|l| l.spans.is_none()), "a .txt has no grammar");

@@ -120,7 +120,8 @@ pub fn transport_config() -> TransportConfig {
         .datagram_send_buffer_size(DATAGRAM_BUFFER)
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_STREAMS))
         .max_concurrent_uni_streams(VarInt::from_u32(MAX_STREAMS))
-        .stream_priority_before_datagrams(streams_ahead_of_datagrams());
+        .stream_priority_before_datagrams(streams_ahead_of_datagrams())
+        .stream_priority_unpaced(Some(crate::streams::ECHO_PRIORITY));
     if let Some(window) = std::env::var(STREAM_WINDOW_ENV)
         .ok()
         .and_then(|v| v.parse::<u32>().ok())

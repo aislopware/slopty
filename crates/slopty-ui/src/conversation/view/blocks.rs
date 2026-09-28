@@ -7,6 +7,8 @@
 //! their text by the file's grammar; context stays muted so the change is what the eye finds.
 //! Nothing shows raw JSON: a tool's input reads as its keys and their values.
 
+use std::time::Duration;
+
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -42,7 +44,8 @@ pub(super) fn has_body(call: &ToolCall) -> bool {
         .result
         .as_ref()
         .and_then(|r| r.text.as_ref())
-        .is_some_and(|t| !t.text.trim().is_empty());
+        .is_some_and(|t| !t.text.trim().is_empty())
+        || rows::has_pictures(call);
     match &call.detail {
         ToolDetail::Edit(edit) => !edit.patch.hunks.is_empty() || result_text,
         ToolDetail::Write(write) => !write.patch.hunks.is_empty() || result_text,
@@ -244,11 +247,23 @@ impl ConversationView {
                 .pt(self.z(self.theme.spacing.xs))
                 .into_any_element()
         });
-        match (body, failure) {
-            (None, None) => None,
-            (body, failure) => {
-                Some(div().flex().flex_col().children(body).children(failure).into_any_element())
-            }
+        let pictures = call
+            .result
+            .as_ref()
+            .filter(|r| !r.images.is_empty())
+            .map(|r| self.thumbnails(&format!("result-{}", entry.id), &r.images, cx));
+        match (body, failure, pictures) {
+            (None, None, None) => None,
+            (body, failure, pictures) => Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(self.z(self.theme.spacing.xs))
+                    .children(pictures)
+                    .children(body)
+                    .children(failure)
+                    .into_any_element(),
+            ),
         }
     }
 
@@ -367,7 +382,9 @@ impl ConversationView {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let out = bash.stdout.as_ref().filter(|o| !o.text.trim().is_empty());
+        // A background command's output is in its file, which the worker tails.
+        let tailed = self.model.output(&self.thread, id).map(|o| &o.tail);
+        let out = bash.stdout.as_ref().or(tailed).filter(|o| !o.text.trim().is_empty());
         let err = bash.stderr.as_ref().filter(|o| !o.text.trim().is_empty());
         let mut output: Vec<AnyElement> = Vec::new();
         if let Some(out) = out {
@@ -386,7 +403,10 @@ impl ConversationView {
             output.push(
                 self.code_text(&tail(self.text_of(out)), s.text_secondary).into_any_element(),
             );
-            if level == Level::Full {
+            // A running command's output is still growing: only a finished one opens whole.
+            if level == Level::Full
+                && bash.status != slopty_proto::conversation::ShellStatus::Running
+            {
                 output.extend(self.expand_link(&format!("stdout-{id}"), out, cx));
             }
         }
@@ -465,12 +485,13 @@ impl ConversationView {
                 _ => None,
             })
         });
-        let elapsed = (running && entry.at_ms > 0)
-            .then(|| rows::took(super::now_ms().saturating_sub(entry.at_ms)));
+        let elapsed = (running && entry.at_ms > 0).then(|| {
+            crate::kit::duration(Duration::from_millis(super::now_ms().saturating_sub(entry.at_ms)))
+        });
         let facts = [
             agent.tool_uses.map(|n| tools::count(n, "tool use", "tool uses")),
             agent.tokens.map(|n| format!("{} tokens", tools::tokens(n))),
-            agent.duration_ms.map(rows::took).or(elapsed),
+            agent.duration_ms.map(|ms| crate::kit::duration(Duration::from_millis(ms))).or(elapsed),
         ];
         let facts = facts.into_iter().flatten().collect::<Vec<_>>().join(" \u{b7} ");
         let report = agent.report.as_ref().filter(|_| !running).map(|report| {
@@ -879,7 +900,6 @@ impl ConversationView {
         let text = if text.is_empty() { " ".to_owned() } else { text };
         let context = line.kind == Kind::Context;
         let ink = match line.kind {
-            Kind::Meta => s.text_muted,
             Kind::Context => s.text_secondary,
             Kind::Added | Kind::Removed => s.text,
         };
@@ -891,12 +911,41 @@ impl ConversationView {
             }
             None => SharedString::from(text).into_any_element(),
         };
+        let marker = line.no_newline.then(|| self.no_newline_mark());
         div()
             .flex_1()
             .min_w_0()
-            .whitespace_normal()
-            .text_color(hsla(ink))
-            .child(styled)
+            .flex()
+            .items_baseline()
+            .gap(self.z(self.theme.spacing.xs))
+            .child(div().min_w_0().whitespace_normal().text_color(hsla(ink)).child(styled))
+            .children(marker)
+            .into_any_element()
+    }
+
+    /// The mark after a line the file ends on without a newline: the return icon struck
+    /// through by a hairline, in the muted tone, named by its hint.
+    fn no_newline_mark(&self) -> AnyElement {
+        let theme = &self.theme;
+        let hint_theme = std::rc::Rc::clone(&self.hint_theme);
+        let muted = theme.surfaces.text_muted;
+        div()
+            .id("no-newline")
+            .role(Role::Image)
+            .aria_label("No newline at end of file")
+            .relative()
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(self.icon(IconName::CornerDownLeft, muted))
+            .child(div().absolute().left_0().right_0().top_1_2().h(gpui::px(1.0)).bg(hsla(muted)))
+            .tooltip(move |_window, cx| {
+                let theme = std::rc::Rc::clone(&hint_theme);
+                gpui::AppContext::new(cx, |_| {
+                    crate::kit::Hint::new("No newline at end of file", "", theme)
+                })
+                .into()
+            })
             .into_any_element()
     }
 
@@ -906,7 +955,7 @@ impl ConversationView {
         match kind {
             Kind::Added => (Some(hsla_alpha(s.success_fill, alpha::FAINT)), "+", s.success),
             Kind::Removed => (Some(hsla_alpha(s.error_fill, alpha::FAINT)), "\u{2212}", s.error),
-            Kind::Context | Kind::Meta => (None, " ", s.text_muted),
+            Kind::Context => (None, " ", s.text_muted),
         }
     }
 

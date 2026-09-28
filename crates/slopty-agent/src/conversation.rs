@@ -13,8 +13,10 @@
 //! carry one content block each in current versions (text, thinking or a tool call), several in
 //! older ones. `system` records mark compaction (`compact_boundary`) and a few notes worth
 //! showing. `attachment` records are context for the model; the one kept is the queued
-//! `task-notification` that says a background command or agent finished. Everything else is
-//! bookkeeping and is skipped.
+//! `task-notification` that says a background command or agent finished; the same notice is
+//! read from the `queue-operation` Claude Code writes the moment the work ends, so a finished
+//! command says so before the model has taken the notice in. Everything else is bookkeeping
+//! and is skipped.
 //!
 //! **Threads.** A subagent writes its own file (`<session>/subagents/agent-<id>.jsonl`) whose
 //! records say `isSidechain` and carry `agentId`; older versions wrote those records into the
@@ -41,6 +43,11 @@
 //! [`PROSE`], tool output and inputs at [`OUTPUT`] (Bash keeps the tail, the rest the head), and
 //! a diff at [`PATCH_LINES`]. A cut text says how long the whole was and carries a [`TextRef`]
 //! that [`full_text`] resolves against the transcript when someone asks to see all of it.
+//!
+//! **Pictures.** An image pasted into a prompt or returned by a tool is described, not carried
+//! ([`media`]): its digest, type and size, and where it is, which [`image_bytes`] resolves.
+//! A background command's output is not in the transcript at all; [`output::Outputs`] tails
+//! the file the command writes.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -49,14 +56,17 @@ use std::path::Path;
 use serde_json::Value;
 pub use slopty_proto::conversation::{
     AgentDetail, AgentRun, Answer, BashDetail, Body, Cap, Change, Clipped, Compact, EditDetail,
-    Entry, GlobDetail, GrepDetail, Hunk, Link, McpDetail, Note, NoteKind, Origin, Part, Patch,
-    Prompt, Question, QuestionDetail, ReadDetail, ResultStatus, Retry, ShellStatus, Task,
-    TaskCreateDetail, TaskUpdateDetail, TextRef, ThreadId, ThreadState, ToolCall, ToolDetail,
-    ToolResult, Turn, Usage, WebFetchDetail, WebSearchDetail, WriteDetail, WriteKind,
+    Entry, GlobDetail, GrepDetail, Hunk, IMAGE_BYTES, Image, Link, McpDetail, Note, NoteKind,
+    Origin, Output, Part, Patch, Prompt, Question, QuestionDetail, ReadDetail, ResultStatus, Retry,
+    ShellStatus, Task, TaskCreateDetail, TaskUpdateDetail, TextRef, ThreadId, ThreadState,
+    ToolCall, ToolDetail, ToolResult, Turn, Usage, WebFetchDetail, WebSearchDetail, WriteDetail,
+    WriteKind,
 };
 
 use crate::transcript::Tail;
 
+pub mod media;
+pub mod output;
 mod session;
 pub use session::{Transcripts, subagents_dir};
 
@@ -171,6 +181,10 @@ struct Notice {
     status: Option<String>,
     summary: Option<String>,
     result: Option<String>,
+    /// A subagent's figures, from its `<usage>`: tokens, tool uses, how long it ran.
+    usage: (Option<u64>, Option<u64>, Option<u64>),
+    /// When the record carrying it was written.
+    at_ms: u64,
 }
 
 /// The changes one read makes, an entry updated twice kept once at its first place.
@@ -227,6 +241,8 @@ pub struct Conversation {
     calls: HashMap<String, ThreadId>,
     /// What arrived for calls not seen yet, by `tool_use_id`.
     pending: HashMap<String, Vec<Pending>>,
+    /// Calls that run in the background and write their output to a file, oldest first.
+    background: Vec<(ThreadId, String)>,
 }
 
 impl Conversation {
@@ -305,6 +321,15 @@ impl Conversation {
         self.threads.get(thread).map_or(&[], |t| t.turns.as_slice())
     }
 
+    /// The Bash calls running (or once run) in the background with a file for their output,
+    /// oldest first.
+    pub fn background(&self) -> impl Iterator<Item = (&ThreadId, &Entry)> {
+        self.background.iter().filter_map(|(thread, id)| {
+            let t = self.threads.get(thread)?;
+            Some((thread, t.entries.get(*t.index.get(id)?)?))
+        })
+    }
+
     /// Everything as it stands: what a client that starts following is sent first.
     #[must_use]
     pub fn snapshot(&self) -> Vec<ThreadState> {
@@ -322,6 +347,16 @@ impl Conversation {
 
     fn record(&mut self, source: &ThreadId, record: &Value, batch: &mut Batch) {
         let kind = str_at(record, "type").unwrap_or_default();
+        if kind == "queue-operation" {
+            // Written the moment background work ends, before the model takes the notice in.
+            if str_at(record, "operation") == Some("enqueue")
+                && let Some(mut notice) = str_at(record, "content").and_then(parse_notice)
+            {
+                notice.at_ms = str_at(record, "timestamp").and_then(parse_ms).unwrap_or(0);
+                self.notice(notice, batch);
+            }
+            return;
+        }
         if kind == "agent_metadata" {
             self.threads.entry(source.clone()).or_default().origin = Some(Origin {
                 tool_use_id: string_at(record, "toolUseId"),
@@ -370,9 +405,10 @@ impl Conversation {
                 let queued =
                     attachment.and_then(|a| str_at(a, "commandMode")) == Some("task-notification");
                 if queued
-                    && let Some(notice) =
+                    && let Some(mut notice) =
                         attachment.and_then(|a| str_at(a, "prompt")).and_then(parse_notice)
                 {
+                    notice.at_ms = at_ms;
                     self.notice(notice, batch);
                 }
             }
@@ -407,7 +443,7 @@ impl Conversation {
             Value::Array(blocks) => blocks.iter().collect(),
             _ => return,
         };
-        let images = blocks.iter().filter(|b| str_at(b, "type") == Some("image")).count();
+        let mut images = media::in_prompt(ctx.uuid, &blocks);
         let mut prompt_made = false;
         for (index, block) in blocks.iter().enumerate() {
             let text = match block {
@@ -428,7 +464,8 @@ impl Conversation {
                 text.trim().strip_prefix("[Request interrupted by user")
             {
                 Body::Interrupted { during_tool: marker.contains("for tool use") }
-            } else if let Some(notice) = parse_notice(text) {
+            } else if let Some(mut notice) = parse_notice(text) {
+                notice.at_ms = ctx.at_ms;
                 self.notice(notice, batch);
                 continue;
             } else if let Some(name) = tag(text, "command-name") {
@@ -438,13 +475,13 @@ impl Conversation {
                         PROSE,
                         Some(reference()),
                     ),
-                    images: 0,
+                    images: Vec::new(),
                     command: Some(name.trim().to_owned()),
                 })
             } else if let Some(input) = tag(text, "bash-input") {
                 Body::Prompt(Prompt {
                     text: Clipped::head(input.trim(), PROSE, Some(reference())),
-                    images: 0,
+                    images: Vec::new(),
                     command: Some("!".to_owned()),
                 })
             } else if let Some(output) =
@@ -468,7 +505,7 @@ impl Conversation {
                 prompt_made = true;
                 Body::Prompt(Prompt {
                     text: Clipped::head(text, PROSE, Some(reference())),
-                    images: to_u32(images),
+                    images: std::mem::take(&mut images),
                     command: None,
                 })
             };
@@ -478,6 +515,16 @@ impl Conversation {
             if opens_turn {
                 self.start_turn(ctx, &id, string_at(record, "permissionMode"), batch);
             }
+        }
+        // Pictures pasted with no words are a prompt still.
+        if !prompt_made && !images.is_empty() && is_prompt(record) {
+            let body = Body::Prompt(Prompt {
+                text: Clipped::head("", PROSE, None),
+                images,
+                command: None,
+            });
+            self.add(ctx, ctx.uuid.to_owned(), body, batch);
+            self.start_turn(ctx, ctx.uuid, string_at(record, "permissionMode"), batch);
         }
     }
 
@@ -787,6 +834,7 @@ impl Conversation {
             ResultStatus::Ok
         };
         let structured = result.filter(|r| r.is_object());
+        let images = media::in_result(ctx.uuid, id, block, structured);
         let shown = apply_result(&mut call.detail, status, &text, structured, ctx.uuid, id);
         let text = (!shown || status != ResultStatus::Ok).then(|| {
             Clipped::head(
@@ -798,10 +846,15 @@ impl Conversation {
                 }),
             )
         });
-        call.result = Some(ToolResult { status, text, at_ms: ctx.at_ms });
+        let text = text.filter(|t| !t.text.is_empty() || images.is_empty());
+        call.result = Some(ToolResult { status, text, at_ms: ctx.at_ms, images });
         let changed_tasks = task_change(&call.detail, call.result.as_ref());
+        let background = matches!(&call.detail, ToolDetail::Bash(b) if b.output_file.is_some());
         let entry = entry.clone();
         batch.upsert(&thread, entry);
+        if background {
+            self.note_background(&thread, id);
+        }
         if let Some(change) = changed_tasks
             && let Some(t) = self.threads.get_mut(&thread)
         {
@@ -819,6 +872,9 @@ impl Conversation {
         let Some(entry) = self.threads.get_mut(&thread).and_then(|t| t.get_mut(&id)) else {
             return;
         };
+        let before = entry.clone();
+        let started = entry.at_ms;
+        let at = (notice.at_ms > 0).then_some(notice.at_ms);
         let Body::Tool(call) = &mut entry.body else { return };
         match &mut call.detail {
             ToolDetail::Bash(bash) => {
@@ -832,6 +888,9 @@ impl Conversation {
                     Some("killed" | "stopped") => ShellStatus::Killed,
                     _ => bash.status,
                 };
+                if bash.status != ShellStatus::Running {
+                    bash.finished_ms = bash.finished_ms.or(at);
+                }
             }
             ToolDetail::Agent(agent) => {
                 agent.status = match notice.status.as_deref() {
@@ -843,11 +902,37 @@ impl Conversation {
                 if let Some(report) = notice.result.as_deref() {
                     agent.report = Some(Clipped::head(report.trim(), PROSE, None));
                 }
+                let (tokens, tool_uses, duration) = notice.usage;
+                agent.tokens = agent.tokens.or(tokens);
+                agent.tool_uses = agent.tool_uses.or(tool_uses);
+                let ran = at.filter(|_| agent.status != AgentRun::Running && started > 0);
+                agent.duration_ms =
+                    agent.duration_ms.or(duration).or_else(|| ran?.checked_sub(started));
             }
             _ => return,
         }
+        if *entry == before {
+            return;
+        }
         let entry = entry.clone();
         batch.upsert(&thread, entry);
+        self.note_background(&thread, &id);
+    }
+
+    /// Remember a background command with an output file, for [`Self::background`].
+    fn note_background(&mut self, thread: &ThreadId, id: &str) {
+        let Some(Entry { body: Body::Tool(call), .. }) =
+            self.threads.get(thread).and_then(|t| t.entries.get(*t.index.get(id)?))
+        else {
+            return;
+        };
+        let ToolDetail::Bash(bash) = &call.detail else { return };
+        if bash.output_file.is_none() || !bash.background {
+            return;
+        }
+        if !self.background.iter().any(|(t, known)| t == thread && known == id) {
+            self.background.push((thread.clone(), id.to_owned()));
+        }
     }
 }
 
@@ -1000,6 +1085,7 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
             stdout: None,
             stderr: None,
             output_file: None,
+            finished_ms: None,
         }),
         "WebFetch" => ToolDetail::WebFetch(WebFetchDetail {
             url: text("url").unwrap_or_default(),
@@ -1161,6 +1247,7 @@ fn apply_result(
             if let Some(task) = result.and_then(|r| string_at(r, "backgroundTaskId")) {
                 bash.task_id = Some(task);
                 bash.background = true;
+                bash.output_file = bash.output_file.take().or_else(|| output_file_in(text));
             }
             let interrupted = result.is_some_and(|r| bool_at(r, "interrupted"));
             let exit = text.strip_prefix("Exit code ").and_then(|rest| {
@@ -1372,7 +1459,32 @@ fn parse_notice(text: &str) -> Option<Notice> {
         status: field("status"),
         summary: field("summary"),
         result: field("result"),
+        usage: usage_in(body),
+        at_ms: 0,
     })
+}
+
+/// Where a background command writes, as its result says it: "Output is being written to:
+/// `<path>`. You will be notified …".
+fn output_file_in(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once("Output is being written to: ")?;
+    let path = rest.split_whitespace().next()?.trim_end_matches('.');
+    path.ends_with(".output").then(|| path.to_owned())
+}
+
+/// A subagent's `<usage>` in its notice: `total_tokens: 1200`, `tool_uses: 4`,
+/// `duration_ms: 3000`, one to a line (or each in a tag of its own).
+fn usage_in(body: &str) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let Some(usage) = tag(body, "usage") else { return (None, None, None) };
+    let figure = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            let value = tag(usage, key).or_else(|| {
+                usage.lines().find_map(|line| line.trim().strip_prefix(key)?.strip_prefix(':'))
+            })?;
+            value.trim().parse().ok()
+        })
+    };
+    (figure(&["total_tokens", "subagent_tokens"]), figure(&["tool_uses"]), figure(&["duration_ms"]))
 }
 
 /// "… completed (exit code 3)".
@@ -1397,7 +1509,12 @@ fn is_prompt(record: &Value) -> bool {
             if blocks.iter().any(|b| str_at(b, "type") == Some("tool_result")) {
                 return false;
             }
-            blocks.iter().find_map(|b| str_at(b, "text"))
+            let text = blocks.iter().find_map(|b| str_at(b, "text"));
+            // A picture pasted with no words.
+            if text.is_none() && blocks.iter().any(|b| str_at(b, "type") == Some("image")) {
+                return true;
+            }
+            text
         }
         _ => None,
     };
@@ -1551,6 +1668,20 @@ pub fn full_text(jsonl: &str, reference: &TextRef) -> Option<String> {
         .and_then(|record| part_text(&record, &reference.part))
 }
 
+/// The bytes of the picture `reference` names, from the transcript's JSONL: `None` when the
+/// record or the picture is not there, or it is larger than [`IMAGE_BYTES`].
+#[must_use]
+pub fn image_bytes(jsonl: &str, reference: &TextRef) -> Option<Vec<u8>> {
+    let needle = format!("\"{}\"", reference.record);
+    jsonl
+        .lines()
+        .filter(|line| line.contains(needle.as_str()))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| str_at(record, "uuid") == Some(reference.record.as_str()))
+        .and_then(|record| media::bytes_at(&record, &reference.part))
+        .filter(|bytes| bytes.len() <= IMAGE_BYTES)
+}
+
 /// [`full_text`] from the transcript file at `path`.
 ///
 /// # Errors
@@ -1591,6 +1722,8 @@ fn part_text(record: &Value, part: &Part) -> Option<String> {
                     .unwrap_or_else(|| content_text(block.get("content").unwrap_or(&Value::Null))),
             )
         }
+        // Not text of the transcript: a picture's bytes, a file the worker tails.
+        Part::Image { .. } | Part::Output { .. } => None,
         Part::Stdout => result.and_then(|r| string_at(r, "stdout")),
         Part::Stderr => result.and_then(|r| string_at(r, "stderr")),
         Part::Patch => {

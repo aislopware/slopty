@@ -25,9 +25,9 @@ pub enum Density {
     /// Settled turns fold; thinking hides; each tool at the level its kind deserves.
     #[default]
     Normal,
-    /// Normal, with the model's thinking shown.
+    /// Normal, with each thinking block as one line ("Thought for 12 s") that opens.
     Thinking,
-    /// Everything: nothing folds or groups, every tool in full, thinking shown.
+    /// Everything: nothing folds or groups, every tool in full, thinking open.
     Verbose,
 }
 
@@ -119,6 +119,19 @@ pub const fn default_level(density: Density, kind: ToolKind) -> Level {
     }
 }
 
+/// Whether a call returned pictures: it shows them, so it is never folded into a group or
+/// cut to its title.
+#[must_use]
+pub fn has_pictures(call: &ToolCall) -> bool {
+    call.result.as_ref().is_some_and(|r| !r.images.is_empty())
+}
+
+/// Whether an entry is a plan: it stays in view when its turn folds.
+#[must_use]
+pub fn is_plan(entry: &Entry) -> bool {
+    matches!(&entry.body, Body::Tool(call) if matches!(call.detail, ToolDetail::Plan { .. }))
+}
+
 /// Lines an entry added and removed: an edit's patch, a write's (a new file adds its every
 /// line).
 #[must_use]
@@ -156,25 +169,17 @@ pub struct Fold {
     pub interrupted: bool,
 }
 
-/// A duration as the fold says it: `42 s`, `3 m 12 s`, `1 h 04 m`.
-#[must_use]
-pub fn took(ms: u64) -> String {
-    let secs = Duration::from_millis(ms).as_secs();
-    match secs {
-        0 => format!("{ms} ms"),
-        1..60 => format!("{secs} s"),
-        60..3_600 => format!("{} m {:02} s", secs / 60, secs % 60),
-        _ => format!("{} h {:02} m", secs / 3_600, (secs % 3_600) / 60),
-    }
-}
-
 impl Fold {
-    /// "Worked for 3 m 12 s", "Stopped after 12 s", or the verb alone without a time.
+    /// "Worked for 3m 12s", "Stopped after 12 s", or the verb alone without a time.
     #[must_use]
     pub fn lead(&self) -> String {
         match (self.interrupted, self.took_ms) {
-            (false, Some(ms)) => format!("Worked for {}", took(ms)),
-            (true, Some(ms)) => format!("Stopped after {}", took(ms)),
+            (false, Some(ms)) => {
+                format!("Worked for {}", crate::kit::duration(Duration::from_millis(ms)))
+            }
+            (true, Some(ms)) => {
+                format!("Stopped after {}", crate::kit::duration(Duration::from_millis(ms)))
+            }
             (false, None) => "Worked".to_owned(),
             (true, None) => "Stopped".to_owned(),
         }
@@ -196,9 +201,7 @@ impl Fold {
     pub fn label(&self) -> String {
         let mut parts = vec![self.lead()];
         parts.extend(self.steps_label());
-        if self.added > 0 || self.removed > 0 {
-            parts.push(format!("+{} \u{2212}{}", self.added, self.removed));
-        }
+        parts.extend(crate::kit::changes_text(self.added, self.removed));
         if self.failed > 0 {
             parts.push(format!("{} failed", self.failed));
         }
@@ -409,8 +412,16 @@ impl Builder<'_> {
     /// The level a tool entry shows at: its kind's default, flipped when the reader flipped
     /// it (a summary opens to full, full closes to its title).
     fn level(&self, entry: &Entry) -> Level {
-        let Body::Tool(call) = &entry.body else { return Level::Full };
-        let level = default_level(self.input.density, tool_kind(call));
+        let level = match &entry.body {
+            // Thinking is a line that opens; Verbose opens it.
+            Body::Thinking(_) if self.input.density == Density::Verbose => Level::Full,
+            Body::Thinking(_) => Level::Title,
+            Body::Tool(call) => match default_level(self.input.density, tool_kind(call)) {
+                Level::Title if has_pictures(call) => Level::Summary,
+                level => level,
+            },
+            _ => return Level::Full,
+        };
         if !self.input.toggled.contains(&entry_key(&entry.id)) {
             return level;
         }
@@ -427,7 +438,7 @@ impl Builder<'_> {
         }
         let Body::Tool(call) = &entry.body else { return None };
         let kind = tool_kind(call);
-        matches!(kind, ToolKind::Explore | ToolKind::Tasks).then_some(kind)
+        (matches!(kind, ToolKind::Explore | ToolKind::Tasks) && !has_pictures(call)).then_some(kind)
     }
 
     /// Rows for `entries` in order, thinking left out where the density hides it and runs of
@@ -518,7 +529,8 @@ impl Builder<'_> {
             .enumerate()
             .filter(|(ix, e)| match e.body {
                 Body::Text(_) => *ix > last_work,
-                Body::Thinking(_) | Body::Tool(_) => false,
+                Body::Tool(_) => is_plan(e),
+                Body::Thinking(_) => false,
                 Body::Prompt(_)
                 | Body::Compact(_)
                 | Body::Interrupted { .. }
@@ -655,6 +667,50 @@ mod tests {
             .collect()
     }
 
+    /// Folded, a turn keeps its plan in view; opened, its thinking is one line from the
+    /// Thinking density on and open in Verbose, and a call that returned a picture shows it
+    /// rather than folding to its title or into a group.
+    #[test]
+    fn a_plan_stays_out_of_the_fold_and_pictures_stay_in_sight() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut model = Model::default();
+        for event in crate::conversation::fixtures::work(dir.path()) {
+            model.apply(event);
+        }
+        let main = &ThreadId::Main;
+        let fold = fold_key(&model.thread(main).unwrap().entries()[0].id);
+        let lead = "fold Worked for 55 s \u{b7} 4 steps";
+        assert_eq!(
+            words(&model, main, Density::Normal, false, &[]),
+            ["prompt", lead, "ExitPlanMode Summary", "answer."]
+        );
+        let opened = |density| words(&model, main, density, false, &[fold.as_str()]);
+        let work = ["ExitPlanMode Summary", "TodoWrite Title", "Read Summary", "Bash Summary"];
+        let open_lead = lead.replacen("fold", "fold+", 1);
+        let normal: Vec<String> = ["prompt", open_lead.as_str()]
+            .into_iter()
+            .chain(work)
+            .chain(["answer."])
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(opened(Density::Normal), normal, "thinking stays out in Normal");
+        let mut thinking = normal;
+        thinking.insert(2, "thinking".to_owned());
+        assert_eq!(opened(Density::Thinking), thinking);
+        assert_eq!(
+            words(&model, main, Density::Verbose, false, &[]),
+            [
+                "prompt",
+                "thinking",
+                "ExitPlanMode Full",
+                "TodoWrite Full",
+                "Read Full",
+                "Bash Full",
+                "answer."
+            ]
+        );
+    }
+
     /// A settled turn folds to its prompt, the one line of what it did, and its answer, which
     /// ends the turn; the files it changed come after.
     #[test]
@@ -665,7 +721,7 @@ mod tests {
             rows,
             [
                 "prompt",
-                "fold Worked for 35 s \u{b7} 13 steps \u{b7} +2 \u{2212}0 \u{b7} 1 failed",
+                "fold Worked for 35 s \u{b7} 13 steps \u{b7} +2 \u{b7} 1 failed",
                 "answer.",
                 "changes",
             ]
@@ -754,7 +810,10 @@ mod tests {
     fn a_compaction_stays_outside_the_fold() {
         let model = scenario("compact");
         let rows = words(&model, &ThreadId::Main, Density::Normal, false, &[]);
-        assert_eq!(rows, ["prompt", "fold Worked for 1 s", "answer.", "compact", "prompt", "note"]);
+        assert_eq!(
+            rows,
+            ["prompt", "fold Worked for 1.4 s", "answer.", "compact", "prompt", "note"]
+        );
     }
 
     /// A subagent's thread builds the same way, from its brief.
@@ -796,13 +855,5 @@ mod tests {
         assert_eq!(a, b);
         let unique: HashSet<&String> = a.iter().collect();
         assert_eq!(unique.len(), a.len(), "{a:?}");
-    }
-
-    #[test]
-    fn durations_read_as_the_navigator_reads_them() {
-        assert_eq!(took(850), "850 ms");
-        assert_eq!(took(42_000), "42 s");
-        assert_eq!(took(192_000), "3 m 12 s");
-        assert_eq!(took(3_840_000), "1 h 04 m");
     }
 }

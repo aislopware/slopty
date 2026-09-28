@@ -1,6 +1,8 @@
 //! Screen pipeline on real hardware: list, open the first display, count datagrams, close.
 //! Needs Screen Recording permission, so it runs only with `SLOPTY_SCREEN_E2E=1`.
 
+#![cfg(target_vendor = "apple")]
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -66,8 +68,12 @@ mod tests {
         assert_eq!(stats.encoded, frames.len() as u64);
 
         // Bitrate-only change applies in place; a scale change rebuilds capture and encoder.
-        stream.set_quality(&Quality { bitrate_bps: 4_000_000, ..quality }).await.unwrap();
-        stream.set_quality(&Quality { scale: 0.25, ..quality }).await.unwrap();
+        let in_place = stream.set_quality(&Quality { bitrate_bps: 4_000_000, ..quality }, None);
+        assert!(in_place.is_none(), "a bitrate alone builds nothing");
+        let mut rebuild =
+            stream.set_quality(&Quality { scale: 0.25, ..quality }, None).expect("a new size");
+        let encoder = rebuild.built().await.unwrap();
+        assert!(stream.finish_rebuild(rebuild, encoder).is_none(), "no Geometry for a quality");
         let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
         let mut after = 0_u32;
         while let Ok(Some(_datagram)) = tokio::time::timeout_at(deadline, rx.recv()).await {
@@ -253,8 +259,9 @@ mod encoder_rate_control {
     use slopty_capture::{Capture, CaptureConfig, PixelFormat, Target, host_now_us};
     use slopty_codec::{Encoder, EncoderConfig, FrameOptions, RateControl};
     use slopty_core::WindowId;
+    use slopty_proto::ctl::Quantiles;
     use slopty_proto::screen::{CaptureTarget, VideoCodec};
-    use slopty_worker::screen::{Quantiles, shareable};
+    use slopty_worker::screen::shareable;
 
     use super::ghostty::launch;
 

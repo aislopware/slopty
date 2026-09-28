@@ -558,7 +558,7 @@ async fn add_worker(driver: &mut Driver, address: &str) -> Result<()> {
 
 impl Stack {
     /// Start ptyd, the worker (named `worker_name`) and the app; add the worker in the app and wait
-    /// until its canvas is up.
+    /// until its workspace is up.
     ///
     /// # Errors
     ///
@@ -648,8 +648,18 @@ impl Stack {
     ///
     /// As [`Self::launch`].
     pub async fn launch_first_run(worker_name: &str) -> Result<Self> {
+        Self::launch_first_run_with(worker_name, &[]).await
+    }
+
+    /// [`Self::launch_first_run`] with extra environment for the daemons and the app (a
+    /// stand-in for this Mac's worker, [`crate::THIS_MAC_ENV`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`].
+    pub async fn launch_first_run_with(worker_name: &str, env: &[(&str, &str)]) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-")?;
-        let mut stack = Self::spawn_in(dir, worker_name, &[]).await?;
+        let mut stack = Self::spawn_in(dir, worker_name, env).await?;
         stack.driver.ok(&crate::Command::Ping).await?;
         Ok(stack)
     }
@@ -749,7 +759,7 @@ impl Stack {
     /// [`Self::launch`] plus a second app on the same worker: `b` gets its own data directory,
     /// identity and socket, and adds the same worker address. The
     /// first app is left to open its first shell before the second comes up, so the two do not
-    /// both find an empty canvas and open one each.
+    /// both find an empty workspace and open one each.
     ///
     /// # Errors
     ///
@@ -780,7 +790,7 @@ impl Stack {
         Ok(Pair { stack, b: SecondApp { driver, child: None, simulator: Some(simulator) } })
     }
 
-    /// Wait until the first app has its first shell on the canvas with a prompt.
+    /// Wait until the first app has its first shell in the workspace with a prompt.
     async fn wait_first_shell(&mut self) -> Result<()> {
         self.driver
             .wait_for("the first shell with a prompt", STARTUP, |d| {

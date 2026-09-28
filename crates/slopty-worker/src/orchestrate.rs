@@ -10,26 +10,36 @@
 //! The per-session functions ([`send_input`], [`read_screen`], [`read_output`],
 //! [`list_commands`], [`wait_for`]) take a [`SessionHandle`] alone, so they work on a session
 //! actor without ptyd behind it.
+//!
+//! A verb that changes something and comes with an idempotency key is done once per key
+//! ([`idempotency`]).
+//!
+//! An agent's conversation and its held permission prompts come through the daemon's
+//! [`Conversations`] ([`conversation`]); a still picture from ScreenCaptureKit ([`still`]); a
+//! file too large for one reply goes up in parts ([`upload`]).
 
+pub mod conversation;
+pub mod idempotency;
 pub mod keys;
+pub mod still;
+pub mod upload;
 mod wait;
 
-use std::collections::BinaryHeap;
-use std::ffi::OsString;
 use std::io::{Read as _, Seek as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
+pub use conversation::{Conversations, Sources};
 use slopty_core::{ClientId, ItemId, SessionId, WorkerId};
 use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::orchestration::{
-    Command, DirEntry, ErrorCode, FileKind, FileStat, Input, ItemRef, Line, Outcome, Screen, Size,
-    TermRef, Verb, WaitUntil,
+    Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef, Line, Outcome, Screen,
+    Size, TermRef, Verb, WaitUntil,
 };
 use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
@@ -37,7 +47,7 @@ use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
 
 use crate::session::{Read, SessionHandle, Text};
-use crate::{ItemStore, Worker, WorkerError};
+use crate::{ItemStore, Worker, WorkerError, listing};
 
 /// Who orchestration acts as, for the session actor (its errors go nowhere: the verb's own
 /// outcome reports them) and for the item deltas it causes (nobody's echo).
@@ -133,6 +143,8 @@ struct Inner {
     items: ItemStore,
     events: broadcast::Sender<WorkerMsg>,
     launch: Launch,
+    conversations: Arc<dyn Conversations>,
+    once: idempotency::Ledger,
 }
 
 /// What an agent the orchestrator starts is given.
@@ -151,8 +163,9 @@ impl std::fmt::Debug for Orchestrator {
 }
 
 impl Orchestrator {
-    /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry and
-    /// client broadcast. The agents it starts get what `launch` says.
+    /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry,
+    /// client broadcast and followed conversations. The agents it starts get what `launch`
+    /// says.
     #[must_use]
     pub fn new(
         id: WorkerId,
@@ -160,12 +173,27 @@ impl Orchestrator {
         items: ItemStore,
         events: broadcast::Sender<WorkerMsg>,
         launch: Launch,
+        conversations: Arc<dyn Conversations>,
     ) -> Self {
-        Self { inner: Arc::new(Inner { id, worker, items, events, launch }) }
+        let once = idempotency::Ledger::default();
+        let inner = Inner { id, worker, items, events, launch, conversations, once };
+        Self { inner: Arc::new(inner) }
     }
 
-    /// Answer one verb. Every failure is an [`Outcome::Error`].
-    pub async fn serve(&self, verb: Verb) -> Outcome {
+    /// Answer one verb, once per `key` when it changes something. Every failure is an
+    /// [`Outcome::Error`].
+    pub async fn serve(&self, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
+        match key {
+            Some(key) if verb.changes() => {
+                let this = self.clone();
+                let once = verb.clone();
+                self.inner.once.run(key, &verb, async move { this.answer(once).await }).await
+            }
+            _ => self.answer(verb).await,
+        }
+    }
+
+    async fn answer(&self, verb: Verb) -> Outcome {
         self.dispatch(verb).await.unwrap_or_else(Failure::outcome)
     }
 
@@ -313,6 +341,40 @@ impl Orchestrator {
                     Err(e) => Err(Failure::new(ErrorCode::Failed, e.to_string())),
                 }
             }
+            Verb::ReadConversation { term, thread, since, max } => {
+                self.session(term)?;
+                let held = inner.conversations.follow(term.session);
+                let sources = inner.conversations.sources(term.session);
+                let mut page =
+                    blocking(move || conversation::read_page(&sources, &thread, since, max))
+                        .await?;
+                page.held = held;
+                Ok(Outcome::Conversation(Box::new(page)))
+            }
+            Verb::AnswerPermission { term, ask, verdict } => {
+                self.session(term)?;
+                if inner.conversations.answer(term.session, ask, verdict) {
+                    Ok(Outcome::Done)
+                } else {
+                    Err(Failure::new(
+                        ErrorCode::Failed,
+                        format!(
+                            "no prompt {ask} waits for orchestration in this terminal: it was \
+                             answered, handed back to the TUI or withdrawn, or asked before \
+                             orchestration read this conversation"
+                        ),
+                    ))
+                }
+            }
+            Verb::CaptureStill { worker, target } => {
+                self.mine(worker)?;
+                still::capture(target).await
+            }
+            Verb::Upload { worker, path, upload, part } => {
+                self.mine(worker)?;
+                let path = crate::file::expand_home(Path::new(&path));
+                blocking(move || upload::apply(&path, upload, part)).await.map(|()| Outcome::Done)
+            }
         }
     }
 
@@ -367,6 +429,7 @@ impl Orchestrator {
         let inner = &self.inner;
         inner.worker.close(session).await?;
         inner.worker.agents().forget(session);
+        inner.conversations.forget(session);
         let reason = CloseReason::Requested;
         let _sent = inner.events.send(WorkerMsg::SessionClosed { session, reason });
         for delta in inner.items.remove_session(session, ORCHESTRATOR) {
@@ -416,6 +479,8 @@ impl Orchestrator {
         };
         let handle = self.open(&req, ORCHESTRATOR).await?;
         let session = handle.id();
+        // Orchestration started it, so orchestration answers what it asks.
+        self.inner.conversations.follow(session);
         if let Some(prompt) = prompt {
             let agents = self.inner.worker.shared_agents();
             tokio::spawn(type_when_ready(handle, prompt, AgentFeed { events, agents }));
@@ -743,35 +808,23 @@ fn list_dir(path: &Path, max: u32) -> Result<(Vec<DirEntry>, u32), Failure> {
 }
 
 /// [`list_dir`], with `look` reading an entry's metadata: only the names are gathered from the
-/// whole directory, the first `max` of them kept, and only those looked at.
+/// whole directory ([`listing::first`]), the first `max` of them kept, and only those looked at.
 fn first_entries(
     path: &Path,
     max: u32,
     mut look: impl FnMut(&Path) -> std::io::Result<std::fs::Metadata>,
 ) -> Result<(Vec<DirEntry>, u32), Failure> {
     let keep = usize::try_from(max.min(MAX_DIR_ENTRIES)).unwrap_or(usize::MAX);
-    // The greatest kept name on top, to be pushed out by a smaller one.
-    let mut first: BinaryHeap<OsString> = BinaryHeap::with_capacity(keep.saturating_add(1));
-    let mut total = 0_u32;
-    for entry in std::fs::read_dir(path).map_err(|e| io_failure(path, &e))? {
-        let name = entry.map_err(|e| io_failure(path, &e))?.file_name();
-        total = total.saturating_add(1);
-        if first.len() < keep {
-            first.push(name);
-        } else if first.peek().is_some_and(|last| name < *last) {
-            first.pop();
-            first.push(name);
-        }
-    }
-    let mut entries = Vec::with_capacity(first.len());
-    for name in first.into_sorted_vec() {
+    let (names, total) = listing::first(path, keep, |_| ()).map_err(|e| io_failure(path, &e))?;
+    let mut entries = Vec::with_capacity(names.len());
+    for name in names {
         // Gone between the listing and the look: it is not in the directory any more.
         let Ok(meta) = look(&path.join(&name)) else { continue };
         entries.push(DirEntry {
             name: name.to_string_lossy().into_owned(),
-            kind: kind(meta.file_type()),
+            kind: listing::kind(meta.file_type()),
             size: meta.len(),
-            modified_ms: modified_ms(&meta),
+            modified_ms: listing::modified_ms(&meta),
         });
     }
     Ok((entries, total))
@@ -785,40 +838,22 @@ fn stat(path: &Path) -> Result<Option<FileStat>, Failure> {
         Err(e) => return Err(io_failure(path, &e)),
     };
     Ok(Some(FileStat {
-        kind: kind(meta.file_type()),
+        kind: listing::kind(meta.file_type()),
         size: meta.len(),
-        modified_ms: modified_ms(&meta),
+        modified_ms: listing::modified_ms(&meta),
         mode: std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o7777,
     }))
 }
 
-fn kind(t: std::fs::FileType) -> FileKind {
-    use std::os::unix::fs::FileTypeExt as _;
-    if t.is_symlink() {
-        FileKind::Symlink
-    } else if t.is_dir() {
-        FileKind::Dir
-    } else if t.is_fifo() || t.is_socket() || t.is_block_device() || t.is_char_device() {
-        FileKind::Other
-    } else {
-        FileKind::File
-    }
-}
-
-fn modified_ms(meta: &std::fs::Metadata) -> u64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
-/// Replace a file whole ([`crate::file::replace`]).
+/// Replace a file whole (`slopty_platform::fs::replace`).
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
-    crate::file::replace(path, bytes).map(drop).map_err(|e| io_failure(path, &e))
+    slopty_platform::fs::replace(path, bytes).map_err(|e| io_failure(path, &e))
 }
 
 #[cfg(test)]
 mod tests {
+    use slopty_proto::orchestration::FileKind;
+
     use super::*;
 
     #[test]

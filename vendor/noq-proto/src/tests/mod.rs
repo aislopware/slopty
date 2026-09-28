@@ -2446,6 +2446,73 @@ fn stream_priority_before_datagrams_off_sends_datagrams_first() {
     assert_eq!(next_packet_behind_datagrams(None, i32::MAX), (0, 1));
 }
 
+/// Queues datagrams until the client's pacer holds the next packet, then writes a few bytes to a
+/// stream at priority 1, and returns the STREAM frames a transmit at the same instant carries.
+fn stream_frames_past_the_pacer(unpaced: Option<i32>) -> u64 {
+    const DATAGRAMS: usize = 64;
+    let _guard = subscribe();
+    let mut transport = TransportConfig::default();
+    transport
+        .stream_priority_before_datagrams(Some(0))
+        .stream_priority_unpaced(unpaced)
+        .congestion_controller_factory(Arc::new(PacingOnlyConfig {
+            cwnd_limited_reports: Arc::default(),
+        }));
+    let client_cfg = ClientConfig {
+        transport: Arc::new(transport),
+        ..client_config()
+    };
+    let mut pair = Pair::default();
+    let (client_ch, _) = pair.connect_with(client_cfg);
+
+    let max = pair.client_datagrams(client_ch).max_size().unwrap();
+    for _ in 0..DATAGRAMS {
+        pair.client_datagrams(client_ch)
+            .send(vec![0xDA; max].into(), false)
+            .unwrap();
+    }
+    let now = pair.time;
+    let mut buf = Vec::new();
+    let mut sent = 0;
+    while pair
+        .client_conn_mut(client_ch)
+        .poll_transmit(now, NonZeroUsize::MIN, &mut buf)
+        .is_some()
+    {
+        buf.clear();
+        sent += 1;
+    }
+    assert!(
+        (1..DATAGRAMS).contains(&sent),
+        "the pacer holds the datagrams after {sent}"
+    );
+
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    pair.client_send(client_ch, s).set_priority(1).unwrap();
+    pair.client_send(client_ch, s).write(b"echo").unwrap();
+    let before = pair.client_conn_mut(client_ch).stats().frame_tx;
+    let _transmit = pair
+        .client_conn_mut(client_ch)
+        .poll_transmit(now, NonZeroUsize::MIN, &mut buf);
+    let after = pair.client_conn_mut(client_ch).stats().frame_tx;
+    after.stream - before.stream
+}
+
+#[test]
+fn stream_priority_unpaced_skips_the_pacer() {
+    assert_eq!(stream_frames_past_the_pacer(Some(1)), 1);
+}
+
+#[test]
+fn stream_priority_unpaced_below_the_stream_waits() {
+    assert_eq!(stream_frames_past_the_pacer(Some(2)), 0);
+}
+
+#[test]
+fn stream_priority_unpaced_off_waits_for_the_pacer() {
+    assert_eq!(stream_frames_past_the_pacer(None), 0);
+}
+
 /// `send_many` rejects the whole batch if any datagram is too large, queueing
 /// nothing, so a size error is never a partial send.
 #[test]

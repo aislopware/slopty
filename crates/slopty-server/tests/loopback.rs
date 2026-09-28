@@ -103,7 +103,11 @@ mod tests {
         assert_eq!(directory[0].liveness, Liveness::Online);
         assert_eq!(directory[0].address, "127.0.0.1:45999", "the seen IP, the registered port");
 
-        client.tx.send(&ToServer::Request { id: 1, verb: Verb::ListWorkers }).await.unwrap();
+        client
+            .tx
+            .send(&ToServer::Request { id: 1, key: None, verb: Verb::ListWorkers })
+            .await
+            .unwrap();
         let FromServer::Reply { id: 1, outcome: Outcome::Workers(listed) } =
             next(&mut client).await
         else {
@@ -115,10 +119,10 @@ mod tests {
         let term = TermRef { worker: id, session: SessionId::new() };
         client
             .tx
-            .send(&ToServer::Request { id: 2, verb: Verb::ReadScreen { term } })
+            .send(&ToServer::Request { id: 2, key: None, verb: Verb::ReadScreen { term } })
             .await
             .unwrap();
-        let FromServer::Request { id: forwarded, verb } = next(&mut worker).await else {
+        let FromServer::Request { id: forwarded, verb, .. } = next(&mut worker).await else {
             panic!("the worker gets the verb")
         };
         assert_eq!(verb, Verb::ReadScreen { term });
@@ -133,7 +137,7 @@ mod tests {
         // The worker drops with a request pending on it.
         client
             .tx
-            .send(&ToServer::Request { id: 3, verb: Verb::ReadScreen { term } })
+            .send(&ToServer::Request { id: 3, key: None, verb: Verb::ReadScreen { term } })
             .await
             .unwrap();
         let FromServer::Request { .. } = next(&mut worker).await else {
@@ -149,10 +153,7 @@ mod tests {
                 }
                 FromServer::Reply { id: 3, outcome } => {
                     assert!(
-                        matches!(
-                            outcome,
-                            Outcome::Error { code: ErrorCode::WorkerUnreachable, .. }
-                        ),
+                        matches!(outcome, Outcome::Error { code: ErrorCode::Interrupted, .. }),
                         "{outcome:?}"
                     );
                     failed = true;
@@ -164,7 +165,7 @@ mod tests {
         // Asked now, the worker is known but not there.
         client
             .tx
-            .send(&ToServer::Request { id: 4, verb: Verb::ReadScreen { term } })
+            .send(&ToServer::Request { id: 4, key: None, verb: Verb::ReadScreen { term } })
             .await
             .unwrap();
         let FromServer::Reply { id: 4, outcome } = next(&mut client).await else { panic!("reply") };

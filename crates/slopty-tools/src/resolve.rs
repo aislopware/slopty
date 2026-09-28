@@ -102,7 +102,7 @@ impl<'a, D: Dispatch> Resolver<'a, D> {
 }
 
 /// `worker/session` split at its last `/`; a needle without one is a session alone.
-pub fn split_term(needle: &str) -> Result<(Option<&str>, &str), ToolError> {
+fn split_term(needle: &str) -> Result<(Option<&str>, &str), ToolError> {
     split_handle(needle, "a terminal; write it as worker/session")
 }
 
@@ -125,7 +125,7 @@ fn split_handle<'n>(needle: &'n str, not: &str) -> Result<(Option<&'n str>, &'n 
 ///
 /// A name several workers share means the one of them online, when one is: a worker set up
 /// again keeps its name under a new id, and the server lists the old id until it replaces it.
-pub fn pick_worker(workers: &[WorkerInfo], needle: Option<&str>) -> Result<WorkerId, ToolError> {
+fn pick_worker(workers: &[WorkerInfo], needle: Option<&str>) -> Result<WorkerId, ToolError> {
     let Some(needle) = needle.map(str::trim) else {
         let online: Vec<_> = workers.iter().filter(|w| w.liveness == Liveness::Online).collect();
         return match online.as_slice() {
@@ -173,7 +173,7 @@ fn names(workers: &[&WorkerInfo]) -> String {
 }
 
 /// The one terminal whose session id starts with `prefix`.
-pub fn pick_session(
+fn pick_session(
     terminals: &[(WorkerId, SessionSummary)],
     prefix: &str,
 ) -> Result<TermRef, ToolError> {
@@ -195,7 +195,7 @@ pub fn pick_session(
 }
 
 /// The one item on `worker` whose id starts with `prefix`.
-pub fn pick_item(worker: WorkerId, items: &[Item], prefix: &str) -> Result<ItemRef, ToolError> {
+fn pick_item(worker: WorkerId, items: &[Item], prefix: &str) -> Result<ItemRef, ToolError> {
     let prefix = prefix.to_lowercase();
     let hits: Vec<_> = items.iter().filter(|i| i.id.to_string().starts_with(&prefix)).collect();
     match hits.as_slice() {

@@ -273,6 +273,9 @@ settings:
         NSLocalNetworkUsageDescription: Slopty connects to your workers on the local network.
         CADisableMinimumFrameDurationOnPhone: true
         UIApplicationSupportsIndirectInputEvents: true
+        # A page's downloads land in Documents; these show them in the Files app.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: {BUNDLE_ID}

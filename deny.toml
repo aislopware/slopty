@@ -22,7 +22,6 @@ ignore = [
     { id = "RUSTSEC-2025-0141", reason = "bincode 1 via syntect (gpui-component)" },
     { id = "RUSTSEC-2024-0384", reason = "instant via gpui-base, gpui-component, notify" },
     { id = "RUSTSEC-2024-0436", reason = "paste via gpui-component, metal, pulp" },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile via zed-reqwest (gpui-kit)" },
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz via usvg (gpui)" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser via gpui, fontdb, rustybuzz" },
 ]
@@ -45,8 +44,6 @@ allow = [
 ]
 confidence-threshold = 0.8
 exceptions = [
-    # Mozilla's CA bundle as data; permissive, data-only licence.
-    { allow = [ "CDLA-Permissive-2.0" ], crate = "webpki-roots" },
     # BSD-style; pulled by gpui's http_client through async-compression.
     { allow = [ "bzip2-1.0.6" ], crate = "libbz2-rs-sys" },
 ]
@@ -65,16 +62,15 @@ deny = [
     { crate = "audiopus", reason = "unmaintained; use `opus`" },
     { crate = "reed-solomon-erasure", reason = "unmaintained; use reed-solomon-simd" },
     # Slopty code uses objc2 only; the legacy crates are tolerated solely inside GPUI's macOS
-    # platform layer (gpui_apple/gpui_macos, metal, media) until upstream finishes its migration.
+    # platform layer (gpui_apple/gpui_macos, metal) until upstream finishes its migration.
     { crate = "objc", reason = "use objc2", wrappers = [
         "cocoa",
         "cocoa-foundation",
         "gpui_apple",
         "gpui_macos",
-        "media",
         "metal",
     ] },
-    { crate = "cocoa", reason = "use objc2-app-kit", wrappers = [ "gpui_apple", "gpui_macos" ] },
+    { crate = "cocoa", reason = "use objc2-app-kit", wrappers = [ "gpui_macos" ] },
 ]
 skip = [  ]
 skip-tree = [  ]

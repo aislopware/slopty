@@ -92,10 +92,9 @@ impl ItemDoc {
                 self.version = version;
                 let known = self.items.contains_key(&op.id());
                 if by == me && known {
-                    // Already applied optimistically. Re-apply anyway so a worker-side
-                    // sanitising (a trimmed name) wins.
-                    self.apply_op(&op, true);
-                    return ItemChange::Echo;
+                    // Already applied optimistically, so this is an echo unless the worker
+                    // sanitised the op (a trimmed name): then its version wins.
+                    return self.apply_op(&op, true);
                 }
                 self.apply_op(&op, by == me)
             }
@@ -105,12 +104,13 @@ impl ItemDoc {
     }
 
     /// Apply an op locally (the optimistic path with `by_me`, and the worker's deltas). An op
-    /// on an item this registry does not have, or a note's text for another kind, changes
-    /// nothing.
+    /// on an item this registry does not have, one that sets what is already there, or one
+    /// the item's kind does not take (a note's text on a terminal) changes nothing.
     pub fn apply_op(&mut self, op: &ItemOp, by_me: bool) -> ItemChange {
         let id = op.id();
         match op {
             ItemOp::Add(item) => match self.items.insert(id, item.clone()) {
+                Some(old) if old == *item => ItemChange::Echo,
                 Some(_) => ItemChange::Changed(id),
                 None => ItemChange::Added { id, by_me },
             },
@@ -118,28 +118,17 @@ impl ItemDoc {
                 Some(_) => ItemChange::Removed(id),
                 None => ItemChange::Echo,
             },
-            ItemOp::Sleep { sleeping, .. } => self.change(id, |item| {
-                item.sleeping = *sleeping;
-                true
-            }),
-            ItemOp::Rename { name, .. } => self.change(id, |item| {
-                item.name.clone_from(name);
-                true
-            }),
-            ItemOp::SetNote { text, .. } => self.change(id, |item| match &mut item.kind {
-                ItemKind::Note { text: note } => {
-                    note.clone_from(text);
-                    true
+            ItemOp::Sleep { .. }
+            | ItemOp::Rename { .. }
+            | ItemOp::SetNote { .. }
+            | ItemOp::SetUrl { .. }
+            | ItemOp::SetFolder { .. } => {
+                match self.items.get_mut(&id).map(|item| item.apply(op)) {
+                    Some(Ok(true)) => ItemChange::Changed(id),
+                    Some(Ok(false) | Err(_)) | None => ItemChange::Echo,
                 }
-                _ => false,
-            }),
+            }
         }
-    }
-
-    /// Change item `id` in place; `change` says whether it took.
-    fn change(&mut self, id: ItemId, change: impl FnOnce(&mut Item) -> bool) -> ItemChange {
-        let Some(item) = self.items.get_mut(&id) else { return ItemChange::Echo };
-        if change(item) { ItemChange::Changed(id) } else { ItemChange::Echo }
     }
 }
 
@@ -173,9 +162,9 @@ mod tests {
     }
 
     /// A snapshot replaces everything; another client's addition is not by me; my own
-    /// optimistic addition is by me, and the echo of my rename is nothing while the worker's
-    /// trimmed name wins; the terminal the worker made for my `OpenSession` (never applied
-    /// here first) is an addition by me.
+    /// optimistic addition is by me, and its echo is nothing; the echo of my rename is nothing
+    /// unless the worker trimmed the name, and then its name wins; the terminal the worker made
+    /// for my `OpenSession` (never applied here first) is an addition by me.
     #[test]
     fn snapshot_then_deltas_and_echoes() {
         let me = ClientId::new();
@@ -196,12 +185,16 @@ mod tests {
             doc.apply_op(&ItemOp::Add(note.clone()), true),
             ItemChange::Added { id: note.id, by_me: true }
         );
+        let echo = ItemSync::Delta { version: 5, by: me, op: ItemOp::Add(note.clone()) };
+        assert_eq!(doc.apply_sync(echo, me), ItemChange::Echo);
         let typed = ItemOp::Rename { id: note.id, name: Some(" plan ".to_owned()) };
         assert_eq!(doc.apply_op(&typed, true), ItemChange::Changed(note.id));
         let trimmed = ItemOp::Rename { id: note.id, name: Some("plan".to_owned()) };
-        let echo = ItemSync::Delta { version: 5, by: me, op: trimmed };
-        assert_eq!(doc.apply_sync(echo, me), ItemChange::Echo);
+        let echo = ItemSync::Delta { version: 5, by: me, op: trimmed.clone() };
+        assert_eq!(doc.apply_sync(echo, me), ItemChange::Changed(note.id), "trimmed there");
         assert_eq!(doc.get(note.id).and_then(|i| i.name.as_deref()), Some("plan"));
+        let echo = ItemSync::Delta { version: 5, by: me, op: trimmed };
+        assert_eq!(doc.apply_sync(echo, me), ItemChange::Echo, "as typed");
 
         let opened = term();
         let delta = ItemSync::Delta { version: 6, by: me, op: ItemOp::Add(opened.clone()) };
@@ -259,5 +252,48 @@ mod tests {
         let rename = ItemOp::Rename { id: gone, name: None };
         assert_eq!(doc.apply_op(&rename, false), ItemChange::Echo);
         assert_eq!(doc.len(), 2);
+    }
+
+    /// A browser's address moves with another client's `SetUrl`; the same address again, or
+    /// an address for a shell, changes nothing.
+    #[test]
+    fn a_browser_takes_a_new_address_and_nothing_else_does() {
+        let me = ClientId::new();
+        let mut doc = ItemDoc::default();
+        let shell = term();
+        let page =
+            Item { kind: ItemKind::Browser { url: "http://localhost:5173/".into() }, ..term() };
+        let items = vec![shell.clone(), page.clone()];
+        assert_eq!(doc.apply_sync(ItemSync::Snapshot { version: 1, items }, me), ItemChange::Reset);
+        let url = "http://localhost:3000/docs".to_owned();
+        let moved = ItemOp::SetUrl { id: page.id, url: url.clone() };
+        let delta = ItemSync::Delta { version: 2, by: ClientId::new(), op: moved.clone() };
+        assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(page.id));
+        assert_eq!(doc.get(page.id).map(|i| i.kind.clone()), Some(ItemKind::Browser { url }));
+        assert_eq!(doc.apply_op(&moved, false), ItemChange::Echo, "already there");
+        let stray = ItemOp::SetUrl { id: shell.id, url: "http://a.test/".into() };
+        assert_eq!(doc.apply_op(&stray, false), ItemChange::Echo);
+        assert_eq!(doc.get(shell.id), Some(&shell));
+    }
+
+    /// A folder moves with another client's `SetFolder`; the same folder again, or a folder
+    /// for a shell, changes nothing.
+    #[test]
+    fn a_folder_moves_and_nothing_else_does() {
+        let me = ClientId::new();
+        let mut doc = ItemDoc::default();
+        let shell = term();
+        let folder = Item { kind: ItemKind::Folder { path: "/w".into() }, ..term() };
+        let items = vec![shell.clone(), folder.clone()];
+        assert_eq!(doc.apply_sync(ItemSync::Snapshot { version: 1, items }, me), ItemChange::Reset);
+        let path = "/w/src".to_owned();
+        let moved = ItemOp::SetFolder { id: folder.id, path: path.clone() };
+        let delta = ItemSync::Delta { version: 2, by: ClientId::new(), op: moved.clone() };
+        assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(folder.id));
+        assert_eq!(doc.get(folder.id).map(|i| i.kind.clone()), Some(ItemKind::Folder { path }));
+        assert_eq!(doc.apply_op(&moved, false), ItemChange::Echo, "already there");
+        let stray = ItemOp::SetFolder { id: shell.id, path: "/tmp".into() };
+        assert_eq!(doc.apply_op(&stray, false), ItemChange::Echo);
+        assert_eq!(doc.get(shell.id), Some(&shell));
     }
 }

@@ -5,7 +5,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use slopty_proto::server::WorkerInfo;
-use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 
 /// The file's name in the server's data directory.
@@ -13,19 +12,13 @@ pub const FILE: &str = "workers.json";
 
 /// Where the server's state lives.
 ///
-/// That is `$SLOPTY_DATA_DIR/server`, else `~/Library/Application Support/Slopty/server`; the
-/// `server` level lets a worker and a server share one data directory, as a dev setup does.
+/// That is `server` in the platform's data directory (`slopty_platform::dirs::data_dir`:
+/// `$SLOPTY_DATA_DIR`, `~/Library/Application Support/Slopty` on macOS, the XDG data home on
+/// Linux); the `server` level lets a worker and a server share one data directory, as a dev
+/// setup does.
 #[must_use]
 pub fn default_data_dir() -> PathBuf {
-    let root = std::env::var_os("SLOPTY_DATA_DIR").map_or_else(
-        || {
-            let home =
-                std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-            home.join("Library").join("Application Support").join("Slopty")
-        },
-        PathBuf::from,
-    );
-    root.join("server")
+    slopty_platform::dirs::data_dir().join("server")
 }
 
 /// The state file of one data directory.
@@ -73,19 +66,18 @@ impl Store {
         }
     }
 
-    /// Replace the file with `workers`, atomically: a temporary file beside it, synced, then
-    /// renamed over it, so a crash leaves the old list or the new one.
+    /// Replace the file with `workers` (`slopty_platform::fs::replace`, on a blocking thread),
+    /// so a crash leaves the old list or the new one.
     pub async fn save(&self, workers: &[WorkerInfo]) -> io::Result<()> {
-        if let Some(dir) = self.path.parent() {
-            tokio::fs::create_dir_all(dir).await?;
-        }
         let json = serde_json::to_vec_pretty(workers).map_err(io::Error::other)?;
-        let tmp = self.path.with_extension("json.tmp");
-        let mut file = tokio::fs::File::create(&tmp).await?;
-        file.write_all(&json).await?;
-        file.sync_all().await?;
-        drop(file);
-        tokio::fs::rename(&tmp, &self.path).await
+        let path = self.path.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            slopty_platform::fs::replace(&path, &json)
+        });
+        saved.await.map_err(io::Error::other)?
     }
 
     /// Save every snapshot `changes` publishes until its sender goes away. Snapshots that
@@ -135,7 +127,11 @@ mod tests {
         assert_eq!(listed[0].liveness, Liveness::Gone);
         assert_eq!(listed[0].address, "10.0.0.2:45550");
         assert_eq!(listed[0].caps, caps());
-        assert!(!store.path().with_extension("json.tmp").exists(), "the temporary is renamed");
+        let left: Vec<_> = std::fs::read_dir(dir.path().join("server"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [FILE], "the temporary is renamed");
     }
 
     #[tokio::test]

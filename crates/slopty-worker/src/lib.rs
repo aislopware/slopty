@@ -5,7 +5,8 @@
 //! sinks. [`manager::Worker`] owns the session table and talks to `slopty-ptyd`.
 //! [`items::ItemStore`] is the authoritative, persisted item registry.
 //! [`repo`] answers which repository a session's working directory is in, which only the
-//! machine the shell runs on can know; [`file::read`] reads a file for a file card.
+//! machine the shell runs on can know; [`file::read`] reads a file for a file tile, and
+//! [`listing::folder`] a directory for a folder tile.
 //! [`orchestrate::Orchestrator`] answers the verbs the server forwards (open, type, read, wait,
 //! files, [`ports`]); [`caps`] says what this worker can do.
 
@@ -13,10 +14,10 @@ pub mod caps;
 pub mod changes;
 pub mod clip;
 pub mod conversation;
-pub mod ctl;
 pub mod file;
 pub mod find;
 pub mod items;
+pub mod listing;
 pub mod manager;
 pub mod orchestrate;
 pub mod platform;

@@ -13,13 +13,7 @@ type Events = Rc<RefCell<Vec<FileViewEvent>>>;
 
 fn text_read(text: &str, newline: bool, modified_ms: u64) -> FileRead {
     let size = u64::try_from(text.len()).unwrap_or(0).saturating_add(u64::from(newline));
-    FileRead::Text {
-        text: text.to_owned(),
-        more_lines: 0,
-        size,
-        modified_ms,
-        final_newline: newline,
-    }
+    FileRead::Text { text: text.to_owned(), size, modified_ms, final_newline: newline }
 }
 
 /// A tile for `path` in its own window, its events recorded, drawn once.
@@ -184,31 +178,173 @@ fn a_clean_tile_takes_a_change_on_disk_and_tints_the_lines(cx: &mut TestAppConte
     assert!(events.borrow().is_empty(), "a silent reload asks nothing");
 }
 
+/// A file past the cap is not put in the editor: the tile says why and offers to open it in a
+/// terminal on the worker, in `$EDITOR` at the tile's line or in `$PAGER`.
 #[gpui::test]
-fn a_clipped_file_opens_read_only_with_the_reason(cx: &mut TestAppContext) {
-    let (view, events, cx) = tile(cx, "/w/big.log");
-    let read = FileRead::Text {
-        text: "first".to_owned(),
-        more_lines: 12,
-        size: 40_000,
-        modified_ms: 1,
-        final_newline: false,
-    };
-    arrives(&view, cx, read);
-    view.read_with(cx, |v, _| {
-        assert_eq!(v.read_only(), Some("Read-only: longer than 2000 lines"));
+fn a_file_past_the_cap_offers_a_terminal_instead(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/w/logs/it's big.log");
+    view.update(cx, |v, cx| v.focus_line(Some(12), cx));
+    arrives(&view, cx, FileRead::TooLarge { size: 40 << 20 });
+    view.read_with(cx, |v, cx| {
+        assert_eq!(
+            v.read_only(),
+            Some("Too large to open here: 40.0 MB, over the 16.0 MB a tile opens")
+        );
+        assert_eq!(v.summary(cx), "too large, 40.0 MB");
     });
-    types(&view, cx, "x");
-    assert_eq!(text(&view, cx), "first", "typing changes nothing");
-    cx.simulate_keystrokes("cmd-s");
-    assert!(events.borrow().is_empty(), "nothing to save");
     let id = view.read_with(cx, |v, _| *v.id().as_uuid());
-    assert!(cx.debug_bounds(Box::leak(format!("file-bar-{id}").into_boxed_str())).is_some());
+    click(cx, format!("file-open-editor-{id}"));
+    click(cx, format!("file-open-pager-{id}"));
     assert_eq!(
-        clipped_reason(0, FILE_BYTES + 1).as_deref(),
-        Some("Read-only: larger than 512.0 KB")
+        events.borrow().as_slice(),
+        [
+            FileViewEvent::Run("${EDITOR:-vi} +12 '/w/logs/it'\\''s big.log'".to_owned()),
+            FileViewEvent::Run("${PAGER:-less} '/w/logs/it'\\''s big.log'".to_owned()),
+        ]
     );
-    assert_eq!(clipped_reason(0, 10), None);
+    cx.simulate_keystrokes("cmd-s");
+    assert_eq!(events.borrow().len(), 2, "nothing to save");
+    assert_eq!(
+        terminal_command("${PAGER:-less} 'a'"),
+        ["/bin/sh", "-c", r#"exec "${SHELL:-/bin/sh}" -lic "$1""#, "sh", "${PAGER:-less} 'a'"],
+        "the login shell runs the line, so its rc files set $EDITOR and $PAGER"
+    );
+}
+
+/// A file the tile cannot show says what is so in a sentence, then why, as one block in the
+/// body: its summary alone ("binary, 2 KB") had stood there lowercase, and the cap's reason
+/// had run as one clause.
+#[gpui::test]
+fn a_file_that_cannot_open_says_what_is_so_then_why(cx: &mut TestAppContext) {
+    let notice = |cx: &mut VisualTestContext| {
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        cx.update(|window, _cx| crate::a11y::tree(window))
+            .into_iter()
+            .find(|n| n.role == "Status")
+            .and_then(|n| n.label)
+            .unwrap_or_default()
+    };
+    let (view, _events, cx) = tile(cx, "/w/logo.png");
+    arrives(&view, cx, FileRead::Binary { size: 2048 });
+    assert_eq!(notice(cx), format!("{NOT_TEXT}: {}", size_label(2048)));
+    arrives(&view, cx, FileRead::Missing { error: "No such file or directory".to_owned() });
+    assert_eq!(notice(cx), "Cannot read this file: No such file or directory");
+    arrives(&view, cx, FileRead::TooLarge { size: 40 << 20 });
+    assert_eq!(notice(cx), "Too large to open here: 40.0 MB, over the 16.0 MB a tile opens");
+    assert!(view.read_with(cx, |v, _| !v.shows_text()), "no text, so no caret to speak of");
+    arrives(&view, cx, text_read("fn main() {}", true, 3));
+    assert!(view.read_with(cx, |v, _| v.shows_text()), "the text, in its editor");
+    for said in [TOO_LARGE, NOT_TEXT, CANNOT_READ] {
+        assert!(said.starts_with(char::is_uppercase), "{said}");
+    }
+}
+
+/// A file that grows past the cap under an edit keeps the edit, as any change on disk does.
+#[gpui::test]
+fn a_file_grown_past_the_cap_under_an_edit_keeps_it(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/grows.log");
+    arrives(&view, cx, text_read("one", true, 1));
+    types(&view, cx, "x");
+    arrives(&view, cx, FileRead::TooLarge { size: FILE_BYTES + 1 });
+    view.read_with(cx, |v, _| {
+        assert!(v.dirty(), "the edit is kept");
+        assert_eq!(v.trouble(), Some(&Trouble::Conflict));
+    });
+    assert_eq!(text(&view, cx), "xone");
+}
+
+/// The body of a Rust file of `lines` lines, each source-like.
+fn source(lines: usize) -> String {
+    (0..lines)
+        .map(|i| {
+            format!("fn line_{i}() -> u32 {{ {i} * 2 + 1 }} // padding to a source-like width")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A 20 000-line file is edited like a short one: typed into near its end, found in, saved
+/// whole. Ten times the old viewer's line limit.
+#[gpui::test]
+fn a_twenty_thousand_line_file_stays_editable(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/w/src/big.rs");
+    let body = source(20_000);
+    arrives(&view, cx, text_read(&body, true, 5));
+    view.read_with(cx, |v, cx| {
+        assert_eq!(v.line_count(cx), 20_000);
+        assert!(v.read_only().is_none());
+    });
+    view.update_in(cx, |v, window, cx| {
+        v.focus(window, cx);
+        v.editor().update(cx, |e, cx| {
+            let at = e.text().line_start_offset(19_990);
+            e.set_selected_range(at..at, cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.simulate_input("// edited near the end\n");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.dirty()));
+    assert_eq!(view.read_with(cx, FileView::caret), (19_992, 1));
+
+    view.update_in(cx, |v, window, cx| v.find_with("LINE_1999", window, cx));
+    view.read_with(cx, |v, _| {
+        let (hits, _) = v.hits().unwrap_or_default();
+        assert!(hits.is_empty(), "a capital matches as typed");
+    });
+    view.update_in(cx, |v, window, cx| v.find_with("line_1999", window, cx));
+    view.read_with(cx, |v, _| {
+        let (hits, current) = v.hits().unwrap_or_default();
+        assert_eq!(hits.len(), 11, "line_1999 and line_19990..=19999");
+        assert_eq!(hits.first(), Some(&1_999));
+        assert_eq!(hits.get(1), Some(&19_991), "the edit moved the rest a line down");
+        assert!(current.is_some());
+    });
+
+    cx.simulate_keystrokes("cmd-s");
+    let saved = events.borrow().iter().find_map(|e| match e {
+        FileViewEvent::Save { text, base_modified_ms } => Some((text.clone(), *base_modified_ms)),
+        _ => None,
+    });
+    let (saved, base) = saved.unwrap_or_default();
+    assert_eq!(base, Some(5));
+    assert_eq!(saved.lines().count(), 20_001);
+    assert!(saved.ends_with("// padding to a source-like width\n"), "the final newline");
+    assert_eq!(saved.lines().nth(19_990), Some("// edited near the end"));
+}
+
+/// A file past [`COLOURED_BYTES`] is plain text: its whole-text parse would outlast the pauses
+/// in typing. One within it is coloured.
+#[gpui::test]
+fn a_file_past_the_colour_limit_is_plain(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/src/gen.rs");
+    arrives(&view, cx, text_read("fn a() {}", true, 1));
+    assert_eq!(view.read_with(cx, |v, _| v.coloured_as()), Some("Rust"));
+    let long = format!("fn a() {{}}\n{}", "x".repeat(COLOURED_BYTES));
+    arrives(&view, cx, text_read(&long, true, 2));
+    assert_eq!(view.read_with(cx, |v, _| v.coloured_as()), None);
+    assert_eq!(view.read_with(cx, FileView::line_count), 2, "and still editable text");
+}
+
+#[test]
+fn hit_lines_count_lines_across_a_case_fold_that_changes_lengths() {
+    let text = "Alpha beta\nbeta\n\nGAMMA beta beta\nİstanbul\nend";
+    let cases: [(&str, &[usize]); 10] = [
+        ("beta", &[0, 1, 3]),
+        ("Beta", &[]),
+        ("gamma", &[3]),
+        ("GAMMA", &[3]),
+        ("a", &[0, 1, 3, 4]),
+        ("\u{130}", &[4]),
+        ("i\u{307}", &[4]),
+        ("end", &[5]),
+        ("", &[]),
+        ("zz", &[]),
+    ];
+    for (needle, lines) in cases {
+        assert_eq!(hit_lines(text, needle), lines, "{needle:?}");
+    }
 }
 
 #[gpui::test]
@@ -230,11 +366,11 @@ fn a_failed_save_says_why_until_the_next_keystroke(cx: &mut TestAppContext) {
 
 #[test]
 fn hits_are_the_lines_holding_the_needle_with_smart_case() {
-    let lines = ["Alpha", "beta", "alpha beta", "gamma"];
-    assert_eq!(find_hits(&lines, "alpha"), [0, 2], "no capital: any case");
-    assert_eq!(find_hits(&lines, "Alpha"), [0], "a capital: as typed");
-    assert_eq!(find_hits(&lines, "BETA"), Vec::<usize>::new());
-    assert_eq!(find_hits(&lines, ""), Vec::<usize>::new(), "an empty needle finds nothing");
+    let text = "Alpha\nbeta\nalpha beta\ngamma";
+    assert_eq!(hit_lines(text, "alpha"), [0, 2], "no capital: any case");
+    assert_eq!(hit_lines(text, "Alpha"), [0], "a capital: as typed");
+    assert_eq!(hit_lines(text, "BETA"), Vec::<usize>::new());
+    assert_eq!(hit_lines(text, ""), Vec::<usize>::new(), "an empty needle finds nothing");
 }
 
 #[test]
@@ -264,4 +400,63 @@ fn reading_shows_only_after_the_grace(cx: &mut TestAppContext) {
     cx.executor().advance_clock(crate::screen::LOADING_GRACE);
     cx.run_until_parked();
     assert!(cx.debug_bounds(notice).is_some(), "past it, a word");
+}
+
+/// What a large file costs the tile on the UI thread, headless (no glyphs shaped: the frame
+/// numbers are the smooth e2e's): the text put in the editor, a keystroke near the end with its
+/// frame, a page scrolled with its frame, and a find over the whole text. 2 000, 20 000 and
+/// 200 000 lines of source.
+#[gpui::test]
+#[ignore = "timing, run by hand with --ignored --nocapture"]
+fn timing_of_a_large_file(cx: &mut TestAppContext) {
+    use std::time::{Duration, Instant};
+    let (view, _events, cx) = tile(cx, "/w/src/big.rs");
+    for lines in [2_000_usize, 20_000, 200_000] {
+        let body = source(lines);
+        let t = Instant::now();
+        arrives(&view, cx, text_read(&body, true, 1));
+        let load = t.elapsed();
+        view.update_in(cx, |v, window, cx| {
+            v.focus(window, cx);
+            v.editor().update(cx, |e, cx| {
+                let at = e.text().line_start_offset(lines.saturating_sub(10));
+                e.set_selected_range(at..at, cx);
+            });
+        });
+        cx.run_until_parked();
+        let rounds = 50_u32;
+        let t = Instant::now();
+        for _ in 0..rounds {
+            cx.simulate_input("x");
+            cx.run_until_parked();
+        }
+        let key = t.elapsed().checked_div(rounds).unwrap_or_default();
+        let t = Instant::now();
+        for round in 0..rounds {
+            let offset =
+                gpui::point(px(0.0), px(-(f32::from(u16::try_from(round).unwrap_or(0)) * 400.0)));
+            view.update(cx, |v, cx| v.editor().update(cx, |e, cx| e.set_scroll_offset(offset, cx)));
+            cx.run_until_parked();
+        }
+        let scroll = t.elapsed().checked_div(rounds).unwrap_or_default();
+        let t = Instant::now();
+        view.update_in(cx, |v, window, cx| v.find_with("line_1", window, cx));
+        let find = t.elapsed();
+        view.update(cx, FileView::close_find);
+        let t = Instant::now();
+        if let Some(syntax) = Syntax::for_path("big.rs", "") {
+            std::hint::black_box(crate::highlight::spans(&body, syntax));
+        }
+        let parse = t.elapsed();
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        println!(
+            "{lines} lines: load {:.1} ms, keystroke {:.2} ms, scroll {:.2} ms, find {:.1} ms, \
+             background parse {:.0} ms",
+            ms(load),
+            ms(key),
+            ms(scroll),
+            ms(find),
+            ms(parse)
+        );
+    }
 }

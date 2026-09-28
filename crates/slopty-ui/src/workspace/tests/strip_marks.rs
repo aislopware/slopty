@@ -149,11 +149,11 @@ fn the_drop_line_sits_on_the_divider_and_a_join_washes_its_share(cx: &mut TestAp
     cx.run_until_parked();
 }
 
-/// In the overview a workspace with tiles is one card round its panes: the content's surface
+/// In the overview a workspace with tiles is one block round its panes: the content's surface
 /// a base unit wider all round, rounded at the floating radius, with a hairline. Only the
-/// active one floats (the one elevation, which the scene does not expose) and wears the
-/// keyboard's ring, a 2 pt accent ring outside a 2 pt gap. The place for a new workspace is a ghost
-/// button under the last card, on its left edge, a row tall, and a click on it opens that
+/// active one floats (the one elevation, which the scene does not expose) and wears a 1.5 pt
+/// accent edge flush with it, as a selected thumbnail does. The place for a new workspace is a
+/// ghost button under the last block, on its left edge, a row tall, and a click on it opens that
 /// workspace. No tile's header is a band of its own at that zoom: every header is the body's
 /// surface, with no hairline.
 #[gpui::test]
@@ -169,7 +169,7 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
     let pad = theme.spacing.sm;
     let content = crate::colors::hsla(theme.content());
 
-    let card = |cx: &mut VisualTestContext, ix: usize| {
+    let block = |cx: &mut VisualTestContext, ix: usize| {
         let at = cx.debug_bounds(Box::leak(format!("overview-block-{ix}").into_boxed_str()));
         let at = at.unwrap_or_else(|| panic!("block {ix} is drawn"));
         let quads = quads_at(cx, at);
@@ -179,8 +179,8 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
             .unwrap_or_else(|| panic!("block {ix} is on the content's surface"));
         (at, quad)
     };
-    let (first, first_quad) = card(cx, 0);
-    let (second, second_quad) = card(cx, 1);
+    let (first, first_quad) = block(cx, 0);
+    let (second, second_quad) = block(cx, 1);
     let scale = cx.update(|window, _| window.scale_factor());
     for (at, quad) in [(first, &first_quad), (second, &second_quad)] {
         let lg = theme.radii.lg * scale;
@@ -188,8 +188,8 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
         let hairline = quads_at(cx, at).iter().any(|q| q.border_widths.top.0 > 0.0);
         assert!(hairline, "a hairline round {at:?}");
     }
-    let (ring, gap) = (crate::a11y::RING, crate::a11y::RING);
-    let ring_color = crate::colors::hsla_alpha(theme.surfaces.accent, slopty_theme::alpha::STRONG);
+    let (ring, gap) = (1.5, 0.0);
+    let ring_color = crate::colors::hsla(theme.surfaces.accent);
     let ringed = |cx: &mut VisualTestContext, at: Bounds<Pixels>| {
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
         let reach = 2.0 * (gap + ring);
@@ -202,24 +202,24 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
     };
     let active = view.read_with(cx, |v, _| v.layout.active_workspace());
     assert_eq!(active, 1, "the tile moved down and the focus with it");
-    assert!(ringed(cx, second), "the keyboard's ring round the active one");
+    assert!(ringed(cx, second), "the accent edge round the active one");
     assert!(!ringed(cx, first), "and only that one");
 
     let pane = shells
         .iter()
         .filter_map(|(_, tile)| cx.debug_bounds(selector("item", tile.item)))
         .find(|b| first.contains(&b.center()))
-        .expect("a pane in the first card");
+        .expect("a pane in the first block");
     near(f32::from(pane.left() - first.left()), pad);
 
-    // One left edge: the panes in the card, the name over it, the place for the next one.
+    // The name and the place for the next one start where the panes' glyphs do.
     let new = bounds(cx, "overview-new-workspace");
     let name = bounds(cx, "overview-name-1");
-    near(f32::from(name.left()), f32::from(second.left()) + pad);
-    near(f32::from(new.left()), f32::from(second.left()));
-    assert!(new.top() >= second.bottom() - px(0.5), "under the last card");
+    near(f32::from(name.left()), pad.mul_add(2.0, f32::from(second.left())));
+    near(f32::from(new.left()), f32::from(second.left()) + pad);
+    assert!(new.top() >= second.bottom() - px(0.5), "under the last block");
     near(f32::from(new.size.height), theme.density.row);
-    assert!(new.size.width < second.size.width, "a button, not a card: {new:?}");
+    assert!(new.size.width < second.size.width, "a button, not a block: {new:?}");
     assert!(quads_at(cx, new).iter().all(|q| q.background.is_transparent()), "a ghost at rest");
     for (_, tile) in &shells {
         let header = cx.debug_bounds(selector("title", tile.item)).expect("a header");
@@ -239,11 +239,11 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
     assert_eq!(Some(active), count.checked_sub(1), "on the empty workspace");
 }
 
-/// Below half size a tile in the overview is its header and body surfaces only: no title, and
-/// its body's own surface over the grid, which stays under it with the keyboard. At rest the
-/// text is back.
+/// Below half size a tile in the overview is its miniature: no title in its header, its body as
+/// it stands at the zoom with the grid keeping the keyboard, and a label at chrome size inside
+/// the tile naming it. At rest the header's title is back and the label gone.
 #[gpui::test]
-fn a_small_overview_draws_tiles_as_shapes(cx: &mut TestAppContext) {
+fn a_small_overview_draws_tiles_as_miniatures(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shells = three_shells(&view, cx, &fake);
@@ -256,21 +256,18 @@ fn a_small_overview_draws_tiles_as_shapes(cx: &mut TestAppContext) {
     assert!(zoom < tile::SHAPES_BELOW, "three columns zoom under half: {zoom}");
     assert!(cx.debug_bounds(selector("item", first.item)).is_some(), "the tile is there");
     assert!(cx.debug_bounds(name).is_none(), "its title is not");
-    let grid = cx.debug_bounds("terminal").expect("the grids stay, keeping the keyboard");
-    let covers: Vec<Bounds<Pixels>> = shells
-        .iter()
-        .map(|(_, t)| cx.debug_bounds(selector("shapes", t.item)).expect("each under its surface"))
-        .collect();
-    assert!(covers.iter().any(|c| c.contains(&grid.center())), "{covers:?} over {grid:?}");
-    // Each shape still says what it is, at a size that reads, inside its own surface.
-    for ((_, t), cover) in shells.iter().zip(&covers) {
-        let label = cx.debug_bounds(selector("shapes-label", t.item)).expect("each shape named");
-        assert!(cover.contains(&label.center()), "{label:?} inside {cover:?}");
+    assert!(cx.debug_bounds("terminal").is_some(), "the grids stay, keeping the keyboard");
+    // Each miniature still says what it is, at a size that reads, inside its own tile.
+    for (_, t) in &shells {
+        let pane = cx.debug_bounds(selector("item", t.item)).expect("the tile");
+        let label = cx.debug_bounds(selector("shapes-label", t.item)).expect("each one named");
+        assert!(pane.contains(&label.center()), "{label:?} inside {pane:?}");
         assert!(label.size.height >= px(12.0), "the label is chrome-sized: {label:?}");
     }
     cx.simulate_keystrokes("cmd-alt-o");
     cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("shapes", first.item)).is_none(), "at rest, the text");
+    assert!(cx.debug_bounds(selector("miniature-label", first.item)).is_none(), "at rest, none");
+    assert!(cx.debug_bounds(name).is_some(), "and the title is back");
 }
 
 /// A worker whose link is up is only its name in the empty workspace's list: no word and no

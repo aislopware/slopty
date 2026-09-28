@@ -7,13 +7,15 @@
 //! secondary tone, the rest are muted. On the right, the link to the focused worker while it is
 //! worth a look (a round trip past [`RTT_SHOWN_FROM`], or a DERP relay) or while the pointer is
 //! over the bar, what is wrong with the link when something is, what the focused tile says of
-//! itself (a file's language and caret), the ports forwarded here (which list them when
-//! clicked), the uploads in flight, the count of workers only while one of them is not up
+//! itself (a file's language and caret; a page's host is its header's), the ports forwarded
+//! here (which list them when clicked), the uploads in flight to tiles other than the focused
+//! one (whose header says its own), the count of workers only while one of them is not up
 //! (which opens the hosts popover: each worker's link, connect and forget), and the agents at
-//! work. Who waits on the human is counted once, on the bell. The frame time shows only with
-//! the stream stats (⌘⇧I). Each readout is meta text with no icon, its figures tabular, and a
-//! state is a small dot of its fill beside quiet words: the tile and the bell carry the loud
-//! marks. A phone keeps the worker, a slow round trip and the agents.
+//! work off screen (a tile in view says its own), each a faint "·" from the next. Who waits on
+//! the human is counted once, on the bell. The frame time shows only with the stream stats (⌘⇧I).
+//! Each readout is meta text with no icon, its figures tabular, and a state is a small dot of its
+//! fill beside quiet words: the tile and the bell carry the loud marks. A phone keeps the worker, a
+//! slow round trip and the agents.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again, nor
 //! does a round trip nobody would read.
@@ -29,17 +31,18 @@ use gpui::{
     Window, div, px,
 };
 use slopty_client::layout::WorkerKey;
+use slopty_core::SessionId;
 use slopty_proto::items::{Item, ItemKind};
-use slopty_theme::{Theme, alpha};
+use slopty_theme::Theme;
 
 use super::navigator::{Mode, RTT_SHOWN_FROM, host_line, path_label, rtt_label, worker_health};
 use super::rollup::{META_SEPARATOR, meta_line};
 use super::tile::repo_place;
 use super::{MenuRun, WorkspaceView};
 use crate::a11y::tab_stop;
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
-use crate::kit::{self, meta, tabular};
+use crate::kit::{self, meta, separator, tabular};
 use crate::palette::section_heading;
 
 /// The bar's height: a line of meta text and a base unit round it, a notch under a tile's
@@ -48,6 +51,10 @@ pub(super) const STATUSBAR_H: f32 = 24.0;
 
 /// A round trip slow enough to wear the warning tone: typing lags behind the fingers.
 const RTT_WARN_FROM: Duration = Duration::from_millis(150);
+
+/// What the server being down costs, after its word: workers are reached at the addresses
+/// this client last had for them, and none it has not met.
+const SERVER_DOWN_MEANS: &str = "direct links only";
 
 /// The hosts popover's width, in points.
 const HOSTS_W: f32 = 300.0;
@@ -134,14 +141,19 @@ impl WorkspaceView {
         self.focused().map(|t| t.worker).or_else(|| self.context_worker())
     }
 
-    /// Agents busy on their own, across every worker.
-    pub(super) fn working_count(&self) -> usize {
+    /// Agents busy on their own, across every worker, as their tiles mark them, but for those
+    /// whose tile is on screen: its header says so already, as the focused tile's upload is
+    /// its header's to say.
+    pub(super) fn working_count(&self, cx: &App) -> usize {
         let sessions = self
             .agents
             .keys()
             .chain(self.server_agents.keys().filter(|s| !self.agents.contains_key(s)));
+        let shown = |s: SessionId| {
+            self.tile_of_session(s).is_some_and(|t| self.on_screen.contains(&t.item))
+        };
         sessions
-            .filter(|s| self.agent_state(**s).and_then(Status::of_agent) == Some(Status::Working))
+            .filter(|s| !shown(**s) && self.agent_mark(**s, cx) == Some(Status::Working))
             .count()
     }
 
@@ -199,6 +211,11 @@ impl WorkspaceView {
         match &item.kind {
             ItemKind::File { .. } => {
                 let file = self.files.get(&item.id)?.read(cx);
+                // A notice in the body has no caret: "Ln 1, Col 1" under "Too large to open
+                // here" named a place in text that is not there.
+                if !file.shows_text() {
+                    return None;
+                }
                 let (line, col) = file.caret(cx);
                 let caret = format!("Ln {line}, Col {col}");
                 Some(meta_line([file.coloured_as(), Some(caret.as_str())]))
@@ -209,18 +226,14 @@ impl WorkspaceView {
                 (screen.frames() > 0)
                     .then(|| format!("{w}\u{d7}{h} \u{b7} {:.0} fps", screen.painted_fps()))
             }
-            ItemKind::Browser { url } => {
-                let url = self
-                    .browsers
-                    .get(&item.id)
-                    .map_or_else(|| url.clone(), |v| v.read(cx).page().url.clone());
-                let host = crate::browser::short_url(&url).split('/').next().unwrap_or_default();
-                (!host.is_empty()).then(|| host.to_owned())
+            ItemKind::Terminal { session } if self.agent_state(*session).is_none() => {
+                self.running_for(*session, cx).map(|ran| format!("Running {}", kit::duration(ran)))
             }
-            ItemKind::Terminal { session } if self.agent_state(*session).is_none() => self
-                .running_for(*session, cx)
-                .map(|ran| format!("Running {}", super::navigator::turn_label(ran))),
-            ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
+            // A page's host is its header's place: said there, not twice.
+            ItemKind::Terminal { .. }
+            | ItemKind::Note { .. }
+            | ItemKind::Browser { .. }
+            | ItemKind::Folder { .. } => None,
         }
     }
 
@@ -262,16 +275,20 @@ impl WorkspaceView {
         let spacing = theme.spacing;
         let safe = window.insets().effective();
 
-        // A state is a dot of its fill beside its words; no readout wears an icon.
+        // A state is a dot of its fill beside its words; no readout wears an icon. The
+        // server's word says what it costs: only the workers' own addresses reach them now.
         let server = self.server_status.clone().map(|text| {
             let text = SharedString::from(sentence(&text));
             readout("server-status", text.clone())
+                .aria_description(SERVER_DOWN_MEANS)
                 .flex()
                 .items_center()
                 .gap(px(spacing.xs))
                 .text_color(hsla(s.text_secondary))
                 .child(state_dot(theme, s.warn_fill))
                 .child(text)
+                .child(separator(theme))
+                .child(SERVER_DOWN_MEANS)
         });
         let worker = self.status_worker();
         let link = worker.and_then(|k| self.workers.get(&k));
@@ -309,28 +326,12 @@ impl WorkspaceView {
                 .text_ellipsis()
                 .child(cwd)
         });
-        // The branch, then what the working tree changed: the figures muted, only the signs in
-        // a diff's tones, so the bar holds no green or red words.
-        let changes = session.and_then(|s| s.changes).and_then(|c| {
-            let (added, removed) = super::navigator::change_words(c)?;
-            let label = SharedString::from(format!("{added} {removed}"));
-            let signed = |id: &'static str, words: String, tone: slopty_theme::Rgb| {
-                let mut chars = words.chars();
-                let sign = chars.next().map(String::from).unwrap_or_default();
-                div()
-                    .id(id)
-                    .flex()
-                    .child(div().text_color(hsla(tone)).child(SharedString::from(sign)))
-                    .child(SharedString::from(chars.collect::<String>()))
-            };
-            Some(
-                tabular(readout("status-changes", label))
-                    .flex()
-                    .items_center()
-                    .gap(px(spacing.xs))
-                    .child(signed("status-added", added, s.success))
-                    .child(signed("status-removed", removed, s.error)),
-            )
+        // The branch, then what the working tree changed, as every diff's size is drawn: only
+        // the signs in a diff's tones, so the bar holds no green or red words.
+        let changes = session.and_then(|s| s.changes).filter(|c| c.files > 0).and_then(|c| {
+            let size = kit::changes(theme, c.added, c.removed)?;
+            let label = kit::changes_text(c.added, c.removed).unwrap_or_default();
+            Some(readout("status-changes", SharedString::from(label)).child(size))
         });
         let branch = session.and_then(|s| s.branch.clone()).map(|branch| {
             let branch = SharedString::from(branch);
@@ -346,10 +347,12 @@ impl WorkspaceView {
                 )
                 .children(changes)
         });
-        // Worker · directory · branch: one path, its steps a faint dot apart.
+        // The server's word while it is down, then worker · directory · branch: one path, its
+        // steps a faint dot apart, as the right's readouts are.
         let step = || separator(theme);
         let mut place_parts: Vec<gpui::AnyElement> = Vec::new();
         for part in [
+            server.map(gpui::IntoElement::into_any_element),
             name.map(gpui::IntoElement::into_any_element),
             cwd.map(gpui::IntoElement::into_any_element),
             branch.map(gpui::IntoElement::into_any_element),
@@ -362,24 +365,16 @@ impl WorkspaceView {
             }
             place_parts.push(part);
         }
-        let left = div()
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .gap(px(spacing.md))
-            .children(server)
-            .child(
-                div()
-                    .debug_selector(|| "status-place".to_owned())
-                    .min_w_0()
-                    .overflow_hidden()
-                    .flex()
-                    .items_center()
-                    .gap(px(spacing.xs))
-                    .children(place_parts),
-            );
+        let left = div().flex_1().min_w_0().overflow_hidden().flex().items_center().child(
+            div()
+                .debug_selector(|| "status-place".to_owned())
+                .min_w_0()
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .gap(px(spacing.xs))
+                .children(place_parts),
+        );
 
         let ports = (!phone).then(|| self.forwarded_count()).filter(|n| *n > 0).map(|n| {
             let text = SharedString::from(counted(n, "port", "ports"));
@@ -388,11 +383,16 @@ impl WorkspaceView {
                 this.list_ports(&super::actions::ListPorts, window, cx);
             }))
         });
-        let transfers = (!phone && !self.uploads.is_empty()).then(|| {
-            let (done, total) = self.uploads.values().fold((0_u64, 0_u64), |(d, t), u| {
+        // The focused tile's upload is its header's to say, with the way to stop it; the bar
+        // counts the rest.
+        let focused_tile = self.focused();
+        let elsewhere: Vec<&super::remote::Upload> =
+            self.uploads.values().filter(|u| Some(u.tile) != focused_tile).collect();
+        let transfers = (!phone && !elsewhere.is_empty()).then(|| {
+            let (done, total) = elsewhere.iter().fold((0_u64, 0_u64), |(d, t), u| {
                 (d.saturating_add(u.done), t.saturating_add(u.total))
             });
-            let text: SharedString = transfers_label(self.uploads.len(), done, total).into();
+            let text: SharedString = transfers_label(elsewhere.len(), done, total).into();
             spaced(tabular(readout("status-transfers", text.clone())), &text, theme)
         });
         let link_readout = link.filter(|w| w.status.is_up()).and_then(|w| {
@@ -410,7 +410,7 @@ impl WorkspaceView {
         });
         let frame = frame.map(|text| tabular(readout("status-frame", text.clone())).child(text));
         let workers = (!phone).then(|| self.workers_button(cx)).flatten();
-        let working = self.working_count();
+        let working = self.working_count(cx);
         let agents = (working > 0).then(|| {
             let text: SharedString = agent_summary(working).into();
             readout("status-agents", text.clone())
@@ -425,21 +425,32 @@ impl WorkspaceView {
             spaced(tabular(readout("status-facts", text.clone())), &text, theme)
         });
         // The link leads the right: it comes and goes with the pointer, and growing leftward
-        // from the start of a cluster that is pinned right, it moves nothing else.
+        // from the start of a cluster that is pinned right, it moves nothing else. The readouts
+        // are parted by the faint dot the left's path steps are, never by space alone.
+        let readouts = [
+            link_readout.map(gpui::IntoElement::into_any_element),
+            health.map(gpui::IntoElement::into_any_element),
+            facts.map(gpui::IntoElement::into_any_element),
+            ports.map(gpui::IntoElement::into_any_element),
+            transfers.map(gpui::IntoElement::into_any_element),
+            frame.map(gpui::IntoElement::into_any_element),
+            workers.map(gpui::IntoElement::into_any_element),
+            agents.map(gpui::IntoElement::into_any_element),
+        ];
+        let mut right_parts: Vec<gpui::AnyElement> = Vec::new();
+        for part in readouts.into_iter().flatten() {
+            if !right_parts.is_empty() {
+                right_parts.push(separator(theme).into_any_element());
+            }
+            right_parts.push(part);
+        }
         let right = div()
             .debug_selector(|| "status-right".to_owned())
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(spacing.md))
-            .children(link_readout)
-            .children(health)
-            .children(facts)
-            .children(ports)
-            .children(transfers)
-            .children(frame)
-            .children(workers)
-            .children(agents);
+            .gap(px(spacing.sm))
+            .children(right_parts);
         let hosts = (self.bar.hosts_open && !phone).then(|| self.render_hosts(window, cx));
         let statusbar = self.chrome.statusbar.entity_id();
         let bar = div()
@@ -796,15 +807,6 @@ const fn state_fill(theme: &Theme, status: Status) -> slopty_theme::Rgb {
 /// A small dot of a state's fill beside a readout's words.
 fn state_dot(theme: &Theme, fill: slopty_theme::Rgb) -> Div {
     div().flex_none().size(px(theme.spacing.xs + theme.spacing.xxs)).rounded_full().bg(hsla(fill))
-}
-
-/// The faint dot between the steps of a readout, as between worker, directory and branch:
-/// the parts read as one line, the dot as no word of its own.
-fn separator(theme: &Theme) -> Div {
-    div()
-        .flex_none()
-        .text_color(hsla_alpha(theme.surfaces.text_muted, alpha::PRESSED))
-        .child(SharedString::from(META_SEPARATOR.trim()))
 }
 
 /// `el` holding `text`, its parts (joined by [`META_SEPARATOR`]) set apart by the faint dot.

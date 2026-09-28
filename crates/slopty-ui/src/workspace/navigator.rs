@@ -2,22 +2,24 @@
 //!
 //! It runs from the window's top edge to its bottom, and its top row is the title bar's
 //! height: the traffic lights sit in it on a Mac, then a field that filters every row below.
-//! Up to three sections follow. *Needs you* appears only while an agent waits on the human,
-//! *Working* only while one is at its turn (its heading turns the working mark and counts
-//! them, its rows tick their turn's time once a second), and then the workers, whose heading
-//! is left out when it would be the only one. Each worker has a header disclosing its tiles:
-//! its name in the strong weight after a server icon (crossed out while the worker is away),
+//! On a phone, where the title bar has no tabs, *Workspaces* heads the list: a row per
+//! workspace with its tile count, the active one on a plate of its own, then "New workspace".
+//! *Needs you* appears only while an agent waits on the human and *Working* only while one is
+//! at its turn (its heading turns the working mark and counts them, its rows tick their turn's
+//! time once a second), each only for agents whose own row is out of sight. Then the workers,
+//! whose heading is left out when it would be the only one. Each worker has a header disclosing its
+//! tiles: its name in the strong weight after a server icon (crossed out while the worker is away),
 //! then on its right edge a word for what is wrong with its link, else its round trip when that
 //! is slow enough to matter, led by what its tiles add up to while it is folded. The pointer
 //! brings out the chevron and "+" (a new shell on that worker) in the readouts' place. Its
 //! tiles come in order of attention: what needs the human, then what finished unseen, then what
 //! is working, then the rest, each class in reading order. Each tile is two lines: its kind and
-//! its title, ended by its state in a word ("Needs you", "Working", "Done", "Failed"), else
-//! the unseen dot, else its age past a minute; then, muted, its directory (its worker's name
-//! where it has none), what its agent says or its last command and its branch, or a note's
-//! progress. A row waiting on the human is not washed: the *Needs you* section above already
-//! leads with it, and its word says so in the warn tone. A row flies the camera to what it
-//! names. Workspaces are the title bar's tabs, not a section here.
+//! its title, ended by its state in a word ("Needs approval", "Working", "Done", "Failed"),
+//! else the unseen dot, else its age past a minute (an agent at rest counts from its last turn);
+//! then, muted, its directory (its worker's name where it has none), what its agent says or its
+//! last command and its branch, or a note's progress. A row waiting on the human is not washed: the
+//! *Needs you* section above already leads with it, and its word says so in the warn tone. A row
+//! flies the camera to what it names. Workspaces are the title bar's tabs, not a section here.
 //!
 //! On a window wide enough it docks beside the rest of the frame, 248 pt by default, dragged
 //! from 200 to 400 by a 12 pt handle centred on its right edge, which a double-click puts back
@@ -48,7 +50,7 @@ use gpui::{
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
-use slopty_proto::agent::AgentStatus;
+use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::tailnet::LinkPath;
@@ -56,7 +58,7 @@ use slopty_proto::terminal::RepoChanges;
 use slopty_theme::{Theme, Typography};
 
 use super::actions::ToggleNavigator;
-use super::agents::{Waiting, agent_status_text};
+use super::agents::{Waiting, agent_ask_line, agent_status_text, agent_status_word, needs_human};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
 use super::tile::kind_icon;
 use super::titlebar::{LEADING_INSET, titlebar_height};
@@ -65,6 +67,7 @@ use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize, Status, icon, status_icon, status_mark};
 use crate::kit::{self, meta, tabular};
+use crate::palette::Plate;
 
 /// The two lines' height, as a multiple of their type size: tighter than a paragraph's, so
 /// the pair reads as one row.
@@ -163,6 +166,11 @@ pub(super) struct NavList {
     /// The tile being revealed this frame: its row, once laid out, asks the list to scroll it
     /// fully into view.
     autoscroll: Option<TileRef>,
+    /// The fill under the selected row.
+    plate: Plate,
+    /// The fill under the active workspace's row, on a phone: a plate of its own, since the
+    /// focused tile's row below keeps the list's.
+    space_plate: Plate,
 }
 
 impl Default for NavList {
@@ -173,6 +181,8 @@ impl Default for NavList {
             selected: None,
             revealed: None,
             autoscroll: None,
+            plate: Plate::default(),
+            space_plate: Plate::default(),
         }
     }
 }
@@ -361,14 +371,22 @@ pub(super) fn age_shown(age: Duration) -> Option<String> {
     (age >= Duration::from_secs(60)).then(|| crate::palette::age_label(age))
 }
 
-/// A turn's time as *Working* ticks it: whole seconds, then minutes and seconds, then hours
-/// and minutes, in tabular figures.
+/// A clock that ticks once a second, as *Working* and a long command's row print it: whole
+/// seconds in [`kit::duration`]'s one form, from "1 s" (never a fraction the next tick undoes).
 pub(super) fn turn_label(elapsed: Duration) -> String {
-    let secs = elapsed.as_secs();
-    match secs {
-        0..60 => format!("{secs} s"),
-        60..3_600 => format!("{} m {:02} s", secs / 60, secs % 60),
-        _ => format!("{} h {:02} m", secs / 3_600, (secs % 3_600) / 60),
+    kit::duration(Duration::from_secs(elapsed.as_secs().max(1)))
+}
+
+/// What an agent at rest last said, as its row's second line gives it: a single word quoted
+/// (`“done”`), so the agent's own last word does not read as a second state beside the row's.
+pub(super) fn rest_words(said: &str) -> Option<String> {
+    let said = said.trim();
+    if said.is_empty() {
+        None
+    } else if said.contains(char::is_whitespace) {
+        Some(said.to_owned())
+    } else {
+        Some(format!("\u{201c}{said}\u{201d}"))
     }
 }
 
@@ -383,18 +401,27 @@ pub(super) fn until_age_changes(age: Duration) -> Duration {
     Duration::from_secs(unit.saturating_sub(secs.checked_rem(unit).unwrap_or(0)))
 }
 
-/// A working tree's changes as a diff counts them, `+12` and `−3`, for the success and error
-/// tones; nothing for a clean tree.
-pub(super) fn change_words(changes: RepoChanges) -> Option<(String, String)> {
-    (changes.files > 0)
-        .then(|| (format!("+{}", changes.added), format!("\u{2212}{}", changes.removed)))
+/// A working tree's changes as a row counts them, the lines added and removed; nothing for a
+/// tree with no line changed.
+pub(super) const fn line_changes(changes: RepoChanges) -> Option<(u32, u32)> {
+    if changes.added == 0 && changes.removed == 0 {
+        None
+    } else {
+        Some((changes.added, changes.removed))
+    }
 }
 
-/// A note's second line: its progress when it has tasks, else its first line after the
-/// title, else nothing (its icon says it is a note).
-pub(super) fn note_meta(text: &str) -> String {
-    if let Some(done) = super::tile::note_done(text) {
-        return done;
+/// A round trip as the chrome names it unasked: only once it is slow enough to feel, since a
+/// 1 ms figure beside every worker is noise the frame already hides.
+pub(super) fn slow_rtt(rtt: Option<Duration>) -> Option<String> {
+    rtt.filter(|rtt| *rtt >= RTT_SHOWN_FROM).map(rtt_label)
+}
+
+/// A note's second line: its progress (its [`super::tile::note_progress`]) when it has tasks,
+/// else its first line after the title, else nothing (its icon says it is a note).
+pub(super) fn note_meta(text: &str, progress: Option<(usize, usize)>) -> String {
+    if let Some((done, total)) = progress {
+        return super::tile::note_done(done, total);
     }
     text.lines()
         .map(str::trim)
@@ -407,6 +434,14 @@ pub(super) fn note_meta(text: &str) -> String {
 /// Whether `query` (already lowercase) is in any of `hay`; an empty query is in everything.
 pub(super) fn matches(query: &str, hay: &[&str]) -> bool {
     query.is_empty() || hay.iter().any(|h| h.to_lowercase().contains(query))
+}
+
+/// Whether an agent is at rest: its turn over, or at its prompt with nothing asked.
+const fn at_rest(agent: &AgentEvent) -> bool {
+    matches!(
+        agent.status,
+        AgentStatus::Idle | AgentStatus::Done | AgentStatus::Blocked(BlockReason::IdlePrompt)
+    )
 }
 
 /// The wall clock in Unix milliseconds, as the workers stamp an agent's change.
@@ -436,7 +471,7 @@ pub(super) fn unseen_dot(theme: &Theme, selector: String, shown: bool) -> Div {
 
 /// One row of the navigator's list: its density's height, on the one edge grid (the wash sits
 /// a base unit in from the panel's edges), a tab stop named `label`. The pointer washes it
-/// `raised`, and the selected row sits on `overlay`.
+/// `raised`; the selected row sits on the list's plate, which settles from row to row.
 pub(super) fn row(
     theme: &Theme,
     lines: kit::Row,
@@ -462,7 +497,6 @@ pub(super) fn row(
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
         .text_size(px(theme.typography.ui_size))
-        .when(selected, |el| el.bg(hsla(s.overlay)))
         .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.raised))));
     tab_stop(el, s.accent)
 }
@@ -514,6 +548,9 @@ struct NavTile {
     tile: TileRef,
     kind: IconName,
     mark: Option<Status>,
+    /// The state's word at the end of the first line: [`agent_status_word`] for an agent that
+    /// waits ("Needs approval", "Has a question"), else the mark's own label.
+    word: Option<String>,
     unseen: bool,
     title: String,
     meta: String,
@@ -522,8 +559,9 @@ struct NavTile {
     age_changes: Option<Duration>,
     /// How long its command has run, while it runs past [`RUNNING_AFTER`](super::RUNNING_AFTER).
     running: Option<String>,
-    /// What its repository's working tree has changed, at the end of the second line.
-    changes: Option<(String, String)>,
+    /// The lines its repository's working tree has added and removed, at the end of the
+    /// second line.
+    changes: Option<(u32, u32)>,
 }
 
 /// A worker's block as the navigator lists it.
@@ -565,6 +603,15 @@ struct NavAgent {
     since_ms: u64,
 }
 
+/// A workspace as the phone's drawer lists it.
+#[derive(Clone)]
+struct NavSpace {
+    ix: usize,
+    name: String,
+    tiles: usize,
+    active: bool,
+}
+
 /// One row of the navigator's list.
 #[derive(Clone)]
 enum NavRow {
@@ -577,6 +624,10 @@ enum NavRow {
     Agent(NavAgent),
     /// *Working* holds this many more than it shows.
     More(usize),
+    /// A workspace, on a phone, whose title bar has no tabs.
+    Space(NavSpace),
+    /// "New workspace", the last of *Workspaces*.
+    NewSpace,
     Worker(NavHeader),
     Tile(NavTile),
     /// An open worker with no tile, in one quiet line where its tiles would be.
@@ -595,6 +646,8 @@ impl NavRow {
             Self::Heading { .. }
             | Self::Agent(_)
             | Self::More(_)
+            | Self::Space(_)
+            | Self::NewSpace
             | Self::Vacant(_)
             | Self::Nothing => (false, false),
         };
@@ -782,6 +835,11 @@ impl WorkspaceView {
     /// note's progress or next line. Empty when nothing is worth a line: the worker's name is
     /// its header's, a home directory alone says nothing, and a kind is its icon's. Such a
     /// row is one line.
+    ///
+    /// An agent waiting on the human gives what it asks and not its state: the row's first line
+    /// ends in "Needs approval" already, and "Needs approval: …" under it said the state twice.
+    /// An agent at rest gives what it last said and no state at all, "Idle · done" having read
+    /// as two states; its age runs from when it came to rest, the one thing its row should say.
     pub(super) fn tile_meta(
         &self,
         item: &Item,
@@ -795,34 +853,42 @@ impl WorkspaceView {
                 // A followed conversation says more than the hooks: the call the agent is on
                 // where the hooks name none, and the gist of its last answer once it stopped.
                 let face = state.and_then(|_| self.face_summary(*session, cx));
-                let (agent, said) = match (state, face) {
+                let marked_working = self.agent_mark(*session, cx) == Some(Status::Working);
+                let resting = state.filter(|a| at_rest(a) && !marked_working);
+                let agent = match (state, face) {
+                    (Some(a), _) if needs_human(a) => agent_ask_line(a),
+                    // The hook lags a face mid-turn: the call, or nothing yet, never "Idle"
+                    // under a row that says it works.
+                    (Some(a), face) if marked_working && at_rest(a) => face,
                     (Some(a), Some(face))
                         if matches!(a.status, AgentStatus::Working) && a.detail.is_none() =>
                     {
-                        (Some(face), None)
+                        Some(face)
                     }
-                    (Some(a), Some(face))
-                        if matches!(a.status, AgentStatus::Idle | AgentStatus::Done) =>
-                    {
-                        (Some(agent_status_text(a)), Some(face))
+                    (Some(a), face) if at_rest(a) => {
+                        face.or_else(|| a.detail.clone()).as_deref().and_then(rest_words)
                     }
-                    (a, _) => (a.map(agent_status_text), None),
+                    (a, _) => a.map(agent_status_text),
                 };
-                let command = agent.is_none().then(|| self.last_command(*session, cx)).flatten();
+                let command = state.is_none().then(|| self.last_command(*session, cx)).flatten();
                 let doing = agent.or(command);
                 let branch = summary.and_then(|s| s.branch.as_deref());
                 let place = self
                     .session_tail(*session)
                     .filter(|p| p != "~" || doing.is_some() || branch.is_some());
-                let meta = meta_line([doing.as_deref(), said.as_deref(), place.as_deref(), branch]);
-                (meta, summary.and_then(|s| age_at(s.started_ms, now)))
+                let meta = meta_line([doing.as_deref(), place.as_deref(), branch]);
+                let since =
+                    resting.map_or_else(|| summary.map_or(0, |s| s.started_ms), |a| a.since_ms);
+                (meta, age_at(since, now))
             }
             // The header's place; a page named by its address says nothing more.
-            ItemKind::Browser { .. } | ItemKind::File { .. } => {
+            ItemKind::Browser { .. } | ItemKind::File { .. } | ItemKind::Folder { .. } => {
                 (self.tile_place(item, cx).unwrap_or_default(), None)
             }
             ItemKind::Window { .. } | ItemKind::Display { .. } => (String::new(), None),
-            ItemKind::Note { text } => (note_meta(text), None),
+            ItemKind::Note { text } => {
+                (note_meta(text, self.note_progress_of(item.id, text)), None)
+            }
         }
     }
 
@@ -854,7 +920,7 @@ impl WorkspaceView {
                 let Some(item) = w.doc.get(tile.item) else { continue };
                 let (mark, unseen) = self.tile_marks(tile, item, cx);
                 rollup.add(mark, unseen);
-                let title = self.card_title(tile, item, cx);
+                let title = self.tile_title(tile, item, cx);
                 let (meta, age) = self.tile_meta(item, now, cx);
                 if !named && !matches(&query, &[&title, &meta]) {
                     continue;
@@ -862,7 +928,7 @@ impl WorkspaceView {
                 let kind = kind_icon(item, self.runs_agent(item));
                 let changes = match &item.kind {
                     ItemKind::Terminal { session } => {
-                        self.summary(*session).and_then(|s| s.changes).and_then(change_words)
+                        self.summary(*session).and_then(|s| s.changes).and_then(line_changes)
                     }
                     _ => None,
                 };
@@ -872,10 +938,17 @@ impl WorkspaceView {
                     }
                     _ => None,
                 };
+                let word = status_word(mark).map(|word| match (word, &item.kind) {
+                    (Status::NeedsYou, ItemKind::Terminal { session }) => self
+                        .agent_state(*session)
+                        .map_or_else(|| word.label().to_owned(), agent_status_word),
+                    _ => word.label().to_owned(),
+                });
                 let row = NavTile {
                     tile,
                     kind,
                     mark,
+                    word,
                     unseen,
                     title,
                     meta,
@@ -893,7 +966,7 @@ impl WorkspaceView {
             tiles.sort_by_key(|(class, _)| *class);
             let tiles = tiles.into_iter().map(|(_, t)| t).collect();
             let health = worker_health(&w.status);
-            let rtt = w.rtt.filter(|rtt| health.is_none() && *rtt >= RTT_SHOWN_FROM).map(rtt_label);
+            let rtt = health.is_none().then(|| slow_rtt(w.rtt)).flatten();
             // Like the round trip, the path is named here only when it is worth a look.
             let relay = w
                 .path
@@ -920,18 +993,38 @@ impl WorkspaceView {
     }
 
     /// An agent's row data: what its tile is called (else what the agent says), its words,
-    /// and its worker and directory.
+    /// and its worker and directory. A waiting agent's words are what it asks, under the
+    /// section that already says it waits.
     fn nav_agent(&self, at: Waiting, status: Status, cx: &gpui::App) -> NavAgent {
         let agent = self.agent_state(at.session);
-        let words = agent.map(agent_status_text).unwrap_or_default();
+        let calm = |a: &AgentEvent| matches!(a.status, AgentStatus::Idle | AgentStatus::Done);
+        let words = agent
+            .map(|a| {
+                if needs_human(a) {
+                    agent_ask_line(a).unwrap_or_default()
+                } else if status == Status::Working && calm(a) {
+                    // Listed as working by its face while the hook lags: what the face says,
+                    // or nothing yet, never the hook's calm word.
+                    self.face_summary(at.session, cx).unwrap_or_default()
+                } else {
+                    agent_status_text(a)
+                }
+            })
+            .unwrap_or_default();
         let title = at
             .tile
-            .and_then(|t| Some(self.card_title(t, self.item(t)?, cx)))
+            .and_then(|t| Some(self.tile_title(t, self.item(t)?, cx)))
             .unwrap_or_else(|| if words.is_empty() { "Agent".to_owned() } else { words.clone() });
         let cwd = self.session_tail(at.session);
         let worker = self.worker_name(at.worker);
         let place = meta_line([Some(worker.as_str()), cwd.as_deref()]);
         NavAgent { at, status, title, words, place, since_ms: agent.map_or(0, |a| a.since_ms) }
+    }
+
+    /// The words an agent's row under *Working* says.
+    #[cfg(test)]
+    pub(super) fn working_words(&self, at: Waiting, cx: &gpui::App) -> String {
+        self.nav_agent(at, Status::Working, cx).words
     }
 
     /// The filter's field, made once there is a window to make it in. ↩ in it goes to the
@@ -1045,14 +1138,15 @@ impl WorkspaceView {
             .child(field)
     }
 
-    /// Every row the list holds this frame: *Needs you* while an agent waits out of sight,
-    /// *Working* while one is at its turn, then each worker's header and, unless it is folded,
-    /// its tiles. The workers' own heading shows only under another section. While the filter
-    /// holds something, a fold hides nothing.
+    /// Every row the list holds this frame: on a phone *Workspaces*, then *Needs you* while an
+    /// agent waits out of sight, *Working* while one is at its turn out of sight, then each
+    /// worker's header and, unless it is folded, its tiles. The workers' own heading shows only
+    /// under another section. While the filter holds something, a fold hides nothing.
     ///
-    /// A waiting agent is listed under *Needs you* only while its own row is not there to say
-    /// so: its tile is folded away, scrolled out of view, filtered out, or it has none. A tile
-    /// in view already ends its first line in "Needs you", and a second row for it repeated it.
+    /// An agent is listed under *Needs you* or *Working* only while its own row is not there to
+    /// say so: its tile is folded away, scrolled out of view, filtered out, or it has none. A
+    /// tile in view already ends its first line in its state, and a second row for it said the
+    /// same thing again.
     fn nav_rows(&self, cx: &gpui::App) -> Vec<NavRow> {
         let query = self.nav.filter.query.trim().to_lowercase();
         let listing = self.nav_listing(cx);
@@ -1065,15 +1159,17 @@ impl WorkspaceView {
             at.tile.is_some_and(|tile| listed.contains(&tile) && self.nav.list.in_view(tile))
         };
         let mut rows = Vec::new();
+        if query.is_empty() && self.nav.drawn == Some(Mode::Drawer) {
+            rows.extend(self.space_rows(cx));
+        }
         let agents = |list: &[Waiting], status: Status| -> Vec<NavAgent> {
             list.iter()
+                .filter(|at| !seen(at))
                 .map(|at| self.nav_agent(*at, status, cx))
                 .filter(|a| matches(&query, &[&a.title, &a.words, &a.place]))
                 .collect()
         };
-        let unseen: Vec<Waiting> =
-            self.drawn_waiting.iter().filter(|at| !seen(at)).copied().collect();
-        let waiting = agents(&unseen, Status::NeedsYou);
+        let waiting = agents(&self.drawn_waiting, Status::NeedsYou);
         if !waiting.is_empty() {
             rows.push(NavRow::Heading {
                 selector: "nav-needs-you",
@@ -1082,7 +1178,7 @@ impl WorkspaceView {
             });
             rows.extend(waiting.into_iter().map(NavRow::Agent));
         }
-        let working = agents(&self.working(), Status::Working);
+        let working = agents(&self.working(cx), Status::Working);
         if !working.is_empty() {
             let count = working.len();
             rows.push(NavRow::Heading {
@@ -1120,6 +1216,25 @@ impl WorkspaceView {
             rows.push(NavRow::Nothing);
         }
         rows
+    }
+
+    /// *Workspaces*, as a phone's drawer heads its list: each workspace the title bar would tab,
+    /// named, with its tile count, and "New workspace" unless the active one is that new one.
+    fn space_rows(&self, cx: &gpui::App) -> Vec<NavRow> {
+        let active = self.layout.active_workspace();
+        let spaces: Vec<NavRow> = self
+            .tabbed_workspaces()
+            .into_iter()
+            .map(|ix| {
+                let (_, tiles) = self.workspace_rollup(ix, cx);
+                let name = self.workspace_name_at(ix);
+                NavRow::Space(NavSpace { ix, name, tiles, active: ix == active })
+            })
+            .collect();
+        let fresh = self.layout.workspaces().get(active).is_some_and(|ws| ws.columns().is_empty());
+        let heading =
+            NavRow::Heading { selector: "nav-workspaces", text: "Workspaces", working: None };
+        std::iter::once(heading).chain(spaces).chain((!fresh).then_some(NavRow::NewSpace)).collect()
     }
 
     /// Draw the navigator again when the soonest label it shows changes: a turn's time every
@@ -1173,6 +1288,8 @@ impl WorkspaceView {
             }
             Some(NavRow::Agent(agent)) => self.agent_row(agent, cx),
             Some(NavRow::More(hidden)) => self.more_row(*hidden, cx),
+            Some(NavRow::Space(space)) => self.space_row(space, cx),
+            Some(NavRow::NewSpace) => self.new_space_row(cx),
             Some(NavRow::Worker(header)) => self.worker_header(header, cx),
             Some(NavRow::Tile(tile)) => self.tile_row(tile, self.nav.list.selected, cx),
             Some(NavRow::Vacant(key)) => {
@@ -1226,6 +1343,15 @@ impl WorkspaceView {
         .min_h_0()
         .pt(px(theme.spacing.xs))
         .pb(px(theme.spacing.md));
+        let rows = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(self.nav.list.space_plate.under(theme))
+            .child(self.nav.list.plate.under(theme))
+            .child(rows);
         div()
             .id("navigator")
             .debug_selector(|| "navigator".to_owned())
@@ -1426,12 +1552,15 @@ impl WorkspaceView {
             .child(title(agent.title.clone(), hsla(s.text)))
             .children(time);
         // The agent's words, then where it runs, as a tile's second line reads: joined by the
-        // same separator, spaces and all, so the two lines space their parts alike.
+        // same separator, spaces and all, so the two lines space their parts alike. A working
+        // agent's words take its tone; what a waiting one asks is detail, muted, under the
+        // heading that says it waits.
+        let tone = (agent.status == Status::Working).then(|| hsla(agent.status.tone(theme)));
         let words = (!agent.words.is_empty()).then(|| {
             div()
                 .debug_selector(move || format!("{prefix}-words-{session}"))
                 .flex_none()
-                .text_color(hsla(agent.status.tone(theme)))
+                .when_some(tone, gpui::Styled::text_color)
                 .child(agent.words.clone())
         });
         let separator = (!agent.words.is_empty() && !agent.place.is_empty()).then(|| {
@@ -1474,6 +1603,60 @@ impl WorkspaceView {
         .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
         .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_waiting(waiting, cx)))
         .into_any_element()
+    }
+
+    /// A workspace in the phone's drawer: its glyph, its name and how many tiles it holds. The
+    /// active one sits on its plate; a press goes there and closes the drawer.
+    fn space_row(&self, space: &NavSpace, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let ix = space.ix;
+        let count = match space.tiles {
+            1 => "1 tile".to_owned(),
+            n => format!("{n} tiles"),
+        };
+        let label = SharedString::from(format!("{}, {count}", space.name));
+        let ink = if space.active { s.text } else { s.text_secondary };
+        let row =
+            row(
+                theme,
+                kit::Row::One,
+                ElementId::Name(format!("nav-space-{ix}").into()),
+                format!("nav-space-{ix}"),
+                label,
+                space.active,
+            )
+            .child(lead_slot(
+                theme,
+                icon(theme, IconName::PanelsTopLeft, IconSize::Inline, hsla(s.text_muted)),
+            ))
+            .child(title(space.name.clone(), hsla(ink)).when(space.active, |el| {
+                el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+            }))
+            .child(readout(theme, space.tiles.to_string()))
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)));
+        let row = if space.active { self.nav.list.space_plate.mark(row, ix) } else { row };
+        row.into_any_element()
+    }
+
+    /// "New workspace", the last row of the phone's *Workspaces*: the empty workspace the
+    /// layout always keeps last.
+    fn new_space_row(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let text = super::strip::NEW_WORKSPACE;
+        row(theme, kit::Row::One, "nav-new-space", "nav-new-space".to_owned(), text.into(), false)
+            .text_color(hsla(s.text_secondary))
+            .child(lead_slot(
+                theme,
+                icon(theme, IconName::Plus, IconSize::Inline, hsla(s.text_muted)),
+            ))
+            .child(title(text, hsla(s.text_secondary)))
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                let last = this.layout.workspaces().len().saturating_sub(1);
+                this.go_to_workspace(last, cx);
+            }))
+            .into_any_element()
     }
 
     /// "Show N more" under the first few of *Working*.
@@ -1658,12 +1841,11 @@ impl WorkspaceView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let selected = focused == Some(t.tile);
-        let label =
-            [Some(t.title.as_str()), t.mark.map(Status::label), t.unseen.then_some("unseen")]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(", ");
+        let label = [Some(t.title.as_str()), t.word.as_deref(), t.unseen.then_some("unseen")]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
         let ink = if selected { s.text } else { s.text_secondary };
         let id = t.tile.item.as_uuid();
         let (first, second) = line_heights(theme);
@@ -1671,8 +1853,8 @@ impl WorkspaceView {
             .debug_selector(move || format!("nav-kind-{id}"));
         // One mark at the line's end: the state while there is one (it says unseen too, as
         // "Done" and "Failed" are), else the unseen dot, else the age.
-        let end = match status_word(t.mark) {
-            Some(word) => {
+        let end = match status_word(t.mark).zip(t.word.clone()) {
+            Some((state, word)) => {
                 let selector =
                     if t.unseen { format!("nav-unseen-{id}") } else { format!("nav-status-{id}") };
                 Some(
@@ -1680,8 +1862,8 @@ impl WorkspaceView {
                         .debug_selector(move || selector)
                         .flex_none()
                         .whitespace_nowrap()
-                        .text_color(hsla(word.tone(theme)))
-                        .child(word.label())
+                        .text_color(hsla(state.tone(theme)))
+                        .child(word)
                         .into_any_element(),
                 )
             }
@@ -1711,17 +1893,11 @@ impl WorkspaceView {
                     el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                 }))
                 .children(end);
-        // The working tree's changes end the line whole, in a diff's tones; the words before
-        // them give way.
-        let changes = t.changes.clone().map(|(added, removed)| {
-            div()
-                .debug_selector(move || format!("nav-changes-{id}"))
-                .flex_none()
-                .flex()
-                .gap(px(theme.spacing.xs))
-                .child(div().text_color(hsla(s.success)).child(added))
-                .child(div().text_color(hsla(s.error)).child(removed))
-        });
+        // The working tree's changes end the line whole; the words before them give way.
+        let changes = t
+            .changes
+            .and_then(|(added, removed)| kit::changes(theme, added, removed))
+            .map(|changes| changes.debug_selector(move || format!("nav-changes-{id}")));
         let line2 = (!t.meta.is_empty() || changes.is_some()).then(|| {
             meta(div(), theme)
                 .h(px(second))
@@ -1769,6 +1945,7 @@ impl WorkspaceView {
                 .child(div().h(px(first)).flex().items_center().child(lead))
                 .child(div().flex_1().min_w_0().flex().flex_col().child(line1).children(line2)),
         )
+        .map(|row| if selected { self.nav.list.plate.mark(row, tile) } else { row })
         .when(self.nav.list.autoscroll == Some(tile), |row| {
             row.child(
                 canvas(|bounds, window, _cx| window.request_autoscroll(bounds), |_, (), _, _| {})
@@ -1824,6 +2001,11 @@ impl WorkspaceView {
             .collect()
     }
 
+    /// The state's word at the end of each tile row's first line, by title.
+    pub(super) fn navigator_words(&self, cx: &gpui::App) -> Vec<(String, Option<String>)> {
+        self.nav_listing(cx).into_iter().flat_map(|w| w.tiles).map(|t| (t.title, t.word)).collect()
+    }
+
     /// The tiles the navigator's list holds, in its order, whether or not they are in view.
     pub(super) fn navigator_tiles(&self) -> Vec<TileRef> {
         let tile = |r: &NavRow| if let NavRow::Tile(t) = r { Some(t.tile) } else { None };
@@ -1837,6 +2019,16 @@ impl WorkspaceView {
             _ => None,
         };
         self.nav.list.rows.iter().filter_map(working).collect()
+    }
+
+    /// Where the plate under the phone's active workspace row was drawn in the last frame.
+    pub(super) fn navigator_space_plate(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.nav.list.space_plate.drawn()
+    }
+
+    /// Where the navigator's selection plate was drawn in the last frame.
+    pub(super) fn navigator_plate(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.nav.list.plate.drawn()
     }
 
     /// Where the list showed its rows in the last frame drawn.
@@ -1859,21 +2051,32 @@ mod tests {
         assert_eq!(until_age_changes(Duration::from_secs(3_700)), Duration::from_secs(3_500));
     }
 
-    /// A turn's time reads in whole seconds, then minutes and seconds, then hours.
+    /// A ticking clock reads in whole seconds in the one duration form, from its first second.
     #[test]
     fn a_turn_ticks_in_whole_seconds() {
+        assert_eq!(turn_label(Duration::from_millis(300)), "1 s");
         assert_eq!(turn_label(Duration::from_millis(9_999)), "9 s");
-        assert_eq!(turn_label(Duration::from_secs(64)), "1 m 04 s");
-        assert_eq!(turn_label(Duration::from_mins(62)), "1 h 02 m");
+        assert_eq!(turn_label(Duration::from_secs(64)), "1m 4s");
+        assert_eq!(turn_label(Duration::from_mins(62)), "1h 2m");
+    }
+
+    /// An agent at rest says what it last said, a lone word quoted so it is not read as a
+    /// state, and nothing when it said nothing.
+    #[test]
+    fn a_resting_agent_is_quoted_not_stated() {
+        assert_eq!(rest_words("done").as_deref(), Some("\u{201c}done\u{201d}"));
+        assert_eq!(rest_words("Fixed the build").as_deref(), Some("Fixed the build"));
+        assert_eq!(rest_words("  "), None);
     }
 
     /// A note's second line is its progress, else its next line, else nothing: its icon says
     /// it is a note, and its row is one line.
     #[test]
     fn a_notes_second_line_says_how_far_it_got() {
-        assert_eq!(note_meta("# Release\n- [x] tag\n- [ ] notes\n- [ ] ship\n"), "1 of 3 done");
-        assert_eq!(note_meta("Groceries\n- milk\n"), "milk");
-        assert_eq!(note_meta("Just a title\n"), "");
+        let meta = |text: &str| note_meta(text, super::super::tile::note_progress(text));
+        assert_eq!(meta("# Release\n- [x] tag\n- [ ] notes\n- [ ] ship\n"), "1 of 3 done");
+        assert_eq!(meta("Groceries\n- milk\n"), "milk");
+        assert_eq!(meta("Just a title\n"), "");
     }
 
     /// Only a state worth a word gets one: at rest or out of reach, the row says nothing.

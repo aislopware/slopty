@@ -4,8 +4,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **One TOML file, every key optional** (2026-09-05): `<data dir>/settings.toml`, the
   directory the client identity already uses (`SLOPTY_DATA_DIR`, else
-  `~/Library/Application Support/Slopty`; `slopty_settings::data_dir` is now the one copy the
-  app and the CLI share). `slopty-settings` is serde + `toml` 1.1.5 only, no GPUI, so the CLI
+  `~/Library/Application Support/Slopty`; `slopty_platform::dirs::data_dir` is the one copy
+  every binary shares). `slopty-settings` is serde + `toml` 1.1.5 only, no GPUI, so the CLI
   and tests use it without a window. `#[serde(default)]` on every struct makes the file and
   any subset of it valid; unknown keys are found by diffing the parsed table against the
   serialised defaults (no hand-kept key list) and reported as warnings; a parse or type error

@@ -189,3 +189,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the lanes' incremental caches, and the sweep bounds them. A `cargo clean` of the lanes
     when `Cargo.lock` changes would make every gate after a sync cold. Numbers:
     MEASUREMENTS "target/ growth under varied check sets".
+
+- ✅ **Each fork has its own check interval; gpui-kit is asked at every gate** (2026-09-27).
+  gpui-kit lands several changes a day (four between one morning's sync and the afternoon:
+  centred inputs and dialogs, a perf pass over six components), so a flat seven days let it
+  drift a week behind a UI built on it. `xtask/upstream.toml` gives each fork
+  `check_every_days`: 0 for gpui-kit, 7 for the zed fork and libghostty-rs. Once a fork's
+  interval has run out, the gate asks its upstream for the branch head with `git ls-remote`
+  (about 1 s, no fetch, given up after 5 s of a stalled link) and warns only when the head moved
+  past `base`, naming the `sync --only` that follows it. An unreachable upstream falls back to
+  the date warning.
+  - **Not done.** Syncing from the gate: a sync rebases, pushes and moves pins, which is a
+    change to read and gate on its own, not a side effect of checking another one.
+  - **The same day's sync** onto upstream `5b55691e`: a single-line input centres in its frame
+    and a dialog popup centres and keeps presses on it. Slopty draws its own dialogs and centres
+    its field rows itself, so nothing here was a workaround to delete; the perf pass over six
+    components (context menu, notification, accordion, searchable list) comes for free.

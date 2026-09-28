@@ -17,17 +17,14 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-plist.workspace = true
 rmcp = { workspace = true, features = [ "transport-io" ] }
 rustix = { workspace = true, features = [ "system" ] }
 serde.workspace = true
 serde_json.workspace = true
 slopty-agent.workspace = true
-slopty-capture.workspace = true
 slopty-client.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
-slopty-worker.workspace = true
 slopty-net.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true
@@ -36,7 +33,13 @@ slopty-tools.workspace = true
 tokio = { workspace = true, features = [ "io-std" ] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
+
+# The screen bench's capture clock (`bench::screen`), Apple only like the bench.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+slopty-capture.workspace = true
 
 [dev-dependencies]
 slopty-server.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = [ "test-util" ] }

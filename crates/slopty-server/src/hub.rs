@@ -14,6 +14,10 @@
 //! directory verbs, [`Verb::Events`] and [`Verb::ForgetWorker`] are answered here, the rest go
 //! down the owning worker's link.
 //!
+//! An [`IdempotencyKey`] goes down with the verb it came with: the worker, which does the verb,
+//! keeps the table that does it once per key. The hub keeps its own only for the one effect it
+//! owns, forgetting a worker.
+//!
 //! Every change of liveness, terminal and agent status also goes into a bounded log of
 //! [`HubEvent`]s under one sequence, which [`Verb::Events`] reads from a cursor and waits on:
 //! one call watches the whole fleet, over MCP's stateless HTTP as well as a QUIC link.
@@ -27,7 +31,8 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WorkerId};
 use slopty_proto::agent::{AgentStatus, SessionAgent};
 use slopty_proto::orchestration::{
-    ErrorCode, EventFilter, Happening, HubEvent, Outcome, TermRef, Verb,
+    ErrorCode, EventFilter, Happening, HubEvent, IdempotencyKey, KEY_LIFETIME, Outcome, TermRef,
+    Verb,
 };
 use slopty_proto::server::{
     Event, FromServer, Liveness, Refusal, Registration, RequestId, ToServer, WorkerCaps, WorkerInfo,
@@ -54,6 +59,9 @@ const EVENT_BUFFER: usize = 1024;
 pub const EVENT_LOG: usize = 4096;
 /// Most events one [`Verb::Events`] returns; the caller asks again from `next`.
 pub const EVENTS_PER_ANSWER: usize = 500;
+/// Keyed [`Verb::ForgetWorker`]s remembered, the oldest dropped first. People forget a worker
+/// now and then; this holds far more than [`KEY_LIFETIME`] brings.
+const FORGETS_KEPT: usize = 256;
 
 /// The registry and the router, shared by every link and the MCP endpoint.
 #[derive(Clone, Debug)]
@@ -95,6 +103,16 @@ struct State {
     workers: HashMap<WorkerId, Entry>,
     next_request: RequestId,
     next_generation: u64,
+    /// Workers forgotten under a key, oldest first.
+    forgets: VecDeque<Forget>,
+}
+
+/// A worker forgotten under a key, so a repeat of the verb answers as the first did.
+#[derive(Debug)]
+struct Forget {
+    key: IdempotencyKey,
+    worker: WorkerId,
+    at: tokio::time::Instant,
 }
 
 #[derive(Debug)]
@@ -279,17 +297,23 @@ impl Hub {
         Ok(Lease { hub: self.clone(), worker, generation })
     }
 
-    /// Answer a verb: the directory verbs from the registry, the rest forwarded to the owning
-    /// worker and its reply returned. Never fails; a failure is an [`Outcome::Error`].
+    /// Answer a verb that comes with no key.
     pub async fn dispatch(&self, verb: Verb) -> Outcome {
+        self.dispatch_keyed(None, verb).await
+    }
+
+    /// Answer a verb: the directory verbs from the registry, the rest forwarded to the owning
+    /// worker with `key` and its reply returned. Never fails; a failure is an
+    /// [`Outcome::Error`].
+    pub async fn dispatch_keyed(&self, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
         match verb {
             Verb::ListWorkers => Outcome::Workers(self.directory()),
             Verb::ListTerminals { worker } => self.terminals(worker),
             Verb::Events { since, timeout_ms, filter } => {
                 self.events(since, timeout_ms, filter).await
             }
-            Verb::ForgetWorker { worker } => self.forget_worker(worker),
-            other => self.forward(other).await,
+            Verb::ForgetWorker { worker } => self.forget_worker(key, worker),
+            other => self.forward(key, other).await,
         }
     }
 
@@ -348,8 +372,16 @@ impl Hub {
 
     /// Remove a worker that holds no lease. A live one would register again at once, so it is
     /// refused; every link hears the directory without the worker, and the state file loses it.
-    fn forget_worker(&self, worker: WorkerId) -> Outcome {
+    /// A repeat under the key of a forget that happened answers as it did.
+    fn forget_worker(&self, key: Option<IdempotencyKey>, worker: WorkerId) -> Outcome {
         let mut state = self.inner.state.lock();
+        let now = tokio::time::Instant::now();
+        state.forgets.retain(|f| now.duration_since(f.at) < KEY_LIFETIME);
+        if let Some(key) = &key
+            && let Some(first) = state.forgets.iter().find(|f| f.key == *key)
+        {
+            return if first.worker == worker { Outcome::Done } else { key.reused() };
+        }
         let Some(entry) = state.workers.get(&worker) else { return unknown_worker(worker) };
         if entry.link.is_some() {
             return Outcome::Error {
@@ -367,6 +399,12 @@ impl Hub {
         self.happen(Happening::WorkerRemoved { worker, name: gone.info.name });
         self.announce(FromServer::Directory(listing(&state)));
         self.persist(&state);
+        if let Some(key) = key {
+            if state.forgets.len() == FORGETS_KEPT {
+                state.forgets.pop_front();
+            }
+            state.forgets.push_back(Forget { key, worker, at: now });
+        }
         drop(state);
         Outcome::Done
     }
@@ -389,7 +427,7 @@ impl Hub {
         Outcome::Terminals(out)
     }
 
-    async fn forward(&self, mut verb: Verb) -> Outcome {
+    async fn forward(&self, key: Option<IdempotencyKey>, mut verb: Verb) -> Outcome {
         let deadline = match &mut verb {
             Verb::WaitFor { timeout_ms, .. } => {
                 *timeout_ms = (*timeout_ms).min(WAIT_CAP_MS);
@@ -407,14 +445,15 @@ impl Hub {
         // However this call ends, answered, timed out or dropped by its caller mid-wait, the
         // request stops waiting on the link.
         let _pending = Pending { hub: self, worker, generation, id };
-        if tx.send(FromServer::Request { id, verb }).await.is_err() {
+        if tx.send(FromServer::Request { id, key, verb }).await.is_err() {
             return error(ErrorCode::WorkerUnreachable, "the worker's link closed");
         }
         match tokio::time::timeout(deadline, reply).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_dropped)) => error(
-                ErrorCode::WorkerUnreachable,
-                "the worker disconnected before it answered; it may have done the work",
+                ErrorCode::Interrupted,
+                "the worker disconnected before it answered; it may have done the work, and \
+                 sent again under the same idempotency key it will not do it twice",
             ),
             Err(_elapsed) => error(ErrorCode::Failed, "the worker did not answer in time"),
         }
@@ -540,8 +579,17 @@ impl Hub {
 
 /// The orchestration tools run on the hub in-process, the same dispatch the QUIC links use.
 impl slopty_tools::Dispatch for Hub {
-    fn call(&self, verb: Verb) -> impl Future<Output = Outcome> + Send {
-        self.dispatch(verb)
+    fn send(
+        &self,
+        key: Option<IdempotencyKey>,
+        verb: Verb,
+    ) -> impl Future<Output = Outcome> + Send {
+        self.dispatch_keyed(key, verb)
+    }
+
+    /// The server runs on its own machine, not its caller's.
+    fn local_files(&self) -> bool {
+        false
     }
 }
 
@@ -681,7 +729,9 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::ListPorts { worker }
         | Verb::ListItems { worker }
         | Verb::OpenItem { worker, .. }
-        | Verb::ListWindows { worker } => Some(*worker),
+        | Verb::ListWindows { worker }
+        | Verb::CaptureStill { worker, .. }
+        | Verb::Upload { worker, .. } => Some(*worker),
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } | Verb::PointAt { item } => {
             Some(item.worker)
         }
@@ -692,7 +742,9 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::WaitFor { term, .. }
         | Verb::AgentStatus { term }
         | Verb::ResizeTerminal { term, .. }
-        | Verb::Close { term } => Some(term.worker),
+        | Verb::Close { term }
+        | Verb::ReadConversation { term, .. }
+        | Verb::AnswerPermission { term, .. } => Some(term.worker),
     }
 }
 
@@ -711,8 +763,33 @@ fn same_shape(a: &WorkerInfo, b: &WorkerInfo) -> bool {
         && same_caps(&a.caps, &b.caps)
 }
 
+/// Equal but for the load, which moves every report and is not worth a save.
 fn same_caps(a: &WorkerCaps, b: &WorkerCaps) -> bool {
-    WorkerCaps { load: a.load, ..b.clone() } == *a
+    let WorkerCaps {
+        os,
+        os_version,
+        arch,
+        cpus,
+        memory,
+        encoders,
+        displays,
+        agents,
+        can_capture,
+        can_inject,
+        load: _load,
+        version,
+    } = a;
+    *os == b.os
+        && *os_version == b.os_version
+        && *arch == b.arch
+        && *cpus == b.cpus
+        && *memory == b.memory
+        && *encoders == b.encoders
+        && *displays == b.displays
+        && *agents == b.agents
+        && *can_capture == b.can_capture
+        && *can_inject == b.can_inject
+        && *version == b.version
 }
 
 fn error(code: ErrorCode, message: &str) -> Outcome {
@@ -894,21 +971,28 @@ pub(crate) mod tests {
             let hub = hub.clone();
             async move { hub.dispatch(Verb::ReadScreen { term }).await }
         });
-        let Some(FromServer::Request { id, verb }) = rx.recv().await else { panic!("no request") };
+        let Some(FromServer::Request { id, verb, .. }) = rx.recv().await else {
+            panic!("no request")
+        };
         assert_eq!(verb, Verb::ReadScreen { term });
         lease.handle(ToServer::Reply { id, outcome: Outcome::Screen(screen()) });
         assert_eq!(asked.await.unwrap(), Outcome::Screen(screen()));
 
-        // Dropped mid-request: the waiter hears at once.
+        // Dropped mid-request: the waiter hears at once that it may have been done, and the key
+        // went down with the verb.
+        let key = IdempotencyKey::new("k1").unwrap();
         let asked = tokio::spawn({
-            let hub = hub.clone();
-            async move { hub.dispatch(Verb::ReadScreen { term }).await }
+            let (hub, key) = (hub.clone(), key.clone());
+            async move { hub.dispatch_keyed(Some(key), Verb::ReadScreen { term }).await }
         });
-        let Some(FromServer::Request { .. }) = rx.recv().await else { panic!("no request") };
+        let Some(FromServer::Request { key: sent, .. }) = rx.recv().await else {
+            panic!("no request")
+        };
+        assert_eq!(sent, Some(key));
         drop(lease);
         let dropped = asked.await.unwrap();
         assert!(
-            matches!(dropped, Outcome::Error { code: ErrorCode::WorkerUnreachable, .. }),
+            matches!(dropped, Outcome::Error { code: ErrorCode::Interrupted, .. }),
             "{dropped:?}"
         );
 
@@ -917,6 +1001,49 @@ pub(crate) mod tests {
             matches!(offline, Outcome::Error { code: ErrorCode::WorkerUnreachable, .. }),
             "{offline:?}"
         );
+    }
+
+    /// The verbs that reach another agent, the screen and a file in parts go to the worker
+    /// they name, the key with the ones that change something.
+    #[tokio::test]
+    async fn the_agent_screen_and_upload_verbs_go_to_their_worker() {
+        use slopty_proto::conversation::{ThreadId, Verdict};
+        use slopty_proto::orchestration::UploadPart;
+        use slopty_proto::screen::CaptureTarget;
+
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let worker = WorkerId::new();
+        let (tx, mut rx) = mpsc::channel(8);
+        let lease = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
+        let term = TermRef { worker, session: SessionId::new() };
+        let upload = slopty_core::XferId::new();
+        let key = IdempotencyKey::new("once").unwrap();
+        let verbs = [
+            Verb::ReadConversation { term, thread: ThreadId::Main, since: None, max: 50 },
+            Verb::AnswerPermission { term, ask: 3, verdict: Verdict::Allow },
+            Verb::CaptureStill { worker, target: CaptureTarget::Display(1) },
+            Verb::Upload {
+                worker,
+                path: "/w/a".to_owned(),
+                upload,
+                part: UploadPart::Bytes { offset: 0, bytes: vec![1] },
+            },
+        ];
+        for verb in verbs {
+            let asked = tokio::spawn({
+                let (hub, verb, key) = (hub.clone(), verb.clone(), key.clone());
+                async move { hub.dispatch_keyed(Some(key), verb).await }
+            });
+            let Some(FromServer::Request { id, verb: sent, key: sent_key }) = rx.recv().await
+            else {
+                panic!("no request")
+            };
+            assert_eq!(sent, verb);
+            assert_eq!(sent_key, Some(key.clone()), "the worker decides what the key guards");
+            lease.handle(ToServer::Reply { id, outcome: Outcome::Done });
+            assert_eq!(asked.await.unwrap(), Outcome::Done);
+        }
+        assert!(!slopty_tools::Dispatch::local_files(&hub), "the caller's files are not here");
     }
 
     /// A caller that gives up on a forwarded verb (an MCP client that went away) takes its
@@ -1382,6 +1509,29 @@ pub(crate) mod tests {
         assert!(
             matches!(again, Outcome::Error { code: ErrorCode::UnknownWorker, .. }),
             "{again:?}"
+        );
+    }
+
+    /// A forget repeated under its key answers as the first did, though the worker is no longer
+    /// listed; the key on another worker is refused, and it lapses with its lifetime.
+    #[tokio::test(start_paused = true)]
+    async fn a_keyed_forget_repeats_its_answer() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let worker = WorkerId::new();
+        let (tx, _rx) = mpsc::channel(8);
+        drop(hub.register(registration(worker, Vec::new()), ip(), tx).unwrap());
+        let key = Some(IdempotencyKey::new("forget-1").unwrap());
+        let forget = Verb::ForgetWorker { worker };
+        assert_eq!(hub.dispatch_keyed(key.clone(), forget.clone()).await, Outcome::Done);
+        assert_eq!(hub.dispatch_keyed(key.clone(), forget.clone()).await, Outcome::Done);
+        let other = Verb::ForgetWorker { worker: WorkerId::new() };
+        let reused = hub.dispatch_keyed(key.clone(), other).await;
+        assert!(matches!(reused, Outcome::Error { code: ErrorCode::Invalid, .. }), "{reused:?}");
+        tokio::time::advance(KEY_LIFETIME).await;
+        let lapsed = hub.dispatch_keyed(key, forget).await;
+        assert!(
+            matches!(lapsed, Outcome::Error { code: ErrorCode::UnknownWorker, .. }),
+            "{lapsed:?}"
         );
     }
 

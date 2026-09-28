@@ -5,7 +5,7 @@
 //! scoped to packages, on those packages only, on the working tree:
 //! - fmt;
 //! - clippy on the host triple with every target, on both iOS triples unless the crate is
-//!   host-only, and on Linux for the crates the server stands on;
+//!   host-only, and on Linux for the crates that build there (`tools::lint_linux`);
 //! - nextest and doctests;
 //! - rustdoc with warnings denied;
 //! - shear;
@@ -23,8 +23,7 @@ use anyhow::{Result, bail};
 use xshell::{Shell, cmd};
 
 use crate::tools::{
-    HOST_ONLY_CRATES, LINUX_CRATES, LINUX_TRIPLE, TRIPLES, WORKSPACE_HACK, quiet_step,
-    workspace_packages,
+    HOST_ONLY_CRATES, TRIPLES, WORKSPACE_HACK, lint_linux, quiet_step, workspace_packages,
 };
 
 pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
@@ -58,14 +57,7 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
         let i = &ios;
         quiet_step("clippy ios + ios-sim", cmd!(sh, "cargo clippy {a...} {i...} -- -D warnings"))?;
     }
-    let linux: Vec<&str> = names().filter(|c| LINUX_CRATES.contains(c)).collect();
-    if !linux.is_empty() {
-        let l = selected(linux.into_iter());
-        quiet_step(
-            &format!("clippy {LINUX_TRIPLE}"),
-            cmd!(sh, "cargo clippy {l...} --target {LINUX_TRIPLE} -- -D warnings"),
-        )?;
-    }
+    lint_linux(sh, &names().collect::<Vec<_>>())?;
     quiet_step("nextest", cmd!(sh, "cargo nextest run {b...} --no-tests=pass"))?;
     let libs: Vec<&str> = owned.iter().filter(|p| p.lib).map(|p| p.name.as_str()).collect();
     if !libs.is_empty() {

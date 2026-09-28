@@ -10,14 +10,19 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use slopty_core::WindowId;
 use slopty_net::client::bind_client;
+use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
-use slopty_proto::orchestration::{EventFilter, Happening, Input, Size, WaitUntil, Waited};
+use slopty_proto::orchestration::{
+    EventFilter, Happening, IdempotencyKey, Input, Size, WaitUntil, Waited,
+};
+use slopty_proto::screen::CaptureTarget;
 use slopty_proto::server::Role;
 use slopty_tools::ops::{
-    self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_WAIT_MS, Spec,
+    self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRIES_PAGE, DEFAULT_MAX_LINES,
+    DEFAULT_WAIT_MS, Spec,
 };
 use slopty_tools::resolve::Resolver;
-use slopty_tools::view;
+use slopty_tools::{bulk, view};
 use tokio::io::AsyncReadExt as _;
 
 use crate::link::{self, Link};
@@ -197,6 +202,85 @@ pub enum VerbCmd {
         #[arg(long)]
         worker: Option<String>,
     },
+    /// Write one still picture of a window or a display on a worker as a PNG file.
+    Capture {
+        /// Worker id or name (the only worker online when omitted).
+        #[arg(long)]
+        worker: Option<String>,
+        #[command(flatten)]
+        target: TargetArgs,
+        /// The PNG file to write.
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Send a file of any size to a worker, in parts; it replaces what is there once whole.
+    Push {
+        /// Worker id or name (the only worker online when omitted).
+        #[arg(long)]
+        worker: Option<String>,
+        /// The file here.
+        local: std::path::PathBuf,
+        /// Where it goes on the worker: absolute, or `~/…`.
+        path: String,
+    },
+    /// Bring a file of any size from a worker, in parts.
+    Pull {
+        /// Worker id or name (the only worker online when omitted).
+        #[arg(long)]
+        worker: Option<String>,
+        /// The file on the worker: absolute, or `~/…`.
+        path: String,
+        /// Where it goes here; a directory takes it under its own name.
+        local: std::path::PathBuf,
+    },
+}
+
+/// A window or a display: exactly one.
+#[derive(Args, Debug)]
+#[group(required = true, multiple = false)]
+pub struct TargetArgs {
+    /// A window, by its id from `slopty windows`.
+    #[arg(long)]
+    window: Option<u32>,
+    /// A display, by its id from `slopty windows`.
+    #[arg(long)]
+    display: Option<u32>,
+}
+
+impl TargetArgs {
+    fn target(&self) -> Result<CaptureTarget> {
+        match (self.window, self.display) {
+            (Some(id), None) => Ok(CaptureTarget::Window(WindowId(id))),
+            (None, Some(id)) => Ok(CaptureTarget::Display(id)),
+            _ => bail!("give one of --window, --display"),
+        }
+    }
+}
+
+/// How a permission prompt is answered: exactly one.
+#[derive(Args, Debug)]
+#[group(required = true, multiple = false)]
+pub struct VerdictArgs {
+    /// Allow this call.
+    #[arg(long)]
+    allow: bool,
+    /// Allow it and apply the rules the prompt suggests, as the agent's "don't ask again".
+    #[arg(long)]
+    always: bool,
+    /// Refuse the call, with this message for the agent (may be empty).
+    #[arg(long, value_name = "MESSAGE")]
+    deny: Option<String>,
+}
+
+impl VerdictArgs {
+    fn verdict(self, interrupt: bool) -> Result<Verdict> {
+        match (self.allow, self.always, self.deny) {
+            (true, false, None) if !interrupt => Ok(Verdict::Allow),
+            (false, true, None) if !interrupt => Ok(Verdict::AllowAlways),
+            (false, false, Some(message)) => Ok(Verdict::Deny { message, interrupt }),
+            _ => bail!("give one of --allow, --always, --deny (--interrupt goes with --deny)"),
+        }
+    }
 }
 
 /// An item: `worker/item`, the worker by id or name and the item by id or a unique prefix, or
@@ -317,6 +401,33 @@ pub enum AgentCmd {
         #[arg(help = TERM_HELP)]
         term: String,
     },
+    /// The agent's conversation as its face shows it, a page at a time, with the permission
+    /// prompts waiting. Its prompts then wait for `slopty agent answer`.
+    Conversation {
+        #[arg(help = TERM_HELP)]
+        term: String,
+        /// `main`, or a subagent's id.
+        #[arg(long)]
+        thread: Option<String>,
+        /// First entry (the last `--max` when omitted).
+        #[arg(long)]
+        since: Option<u32>,
+        /// At most this many entries (at most 500).
+        #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES_PAGE)]
+        max: u32,
+    },
+    /// Answer a permission prompt the agent is waiting on, by its number.
+    Answer {
+        #[arg(help = TERM_HELP)]
+        term: String,
+        /// The prompt's number, from `slopty agent conversation`.
+        ask: u64,
+        #[command(flatten)]
+        verdict: VerdictArgs,
+        /// With `--deny`: also stop the agent's turn.
+        #[arg(long)]
+        interrupt: bool,
+    },
 }
 
 /// A new terminal's size, both or neither.
@@ -404,13 +515,19 @@ impl UntilArgs {
     }
 }
 
-/// Connect to the server, run `cmd`, print its answer.
-pub async fn run(cmd: VerbCmd, server: Option<&str>, data_dir: &Path, json: bool) -> Result<()> {
+/// Connect to the server, run `cmd` (under `key` when it changes something), print its answer.
+pub async fn run(
+    cmd: VerbCmd,
+    server: Option<&str>,
+    data_dir: &Path,
+    json: bool,
+    key: Option<IdempotencyKey>,
+) -> Result<()> {
     let endpoint = bind_client()?;
     let address = link::locate(server, data_dir, &endpoint).await?;
     let role = Role::Client { name: format!("slopty @ {}", crate::client::machine_name()) };
     let result = match Link::connect(&endpoint, &address, role).await {
-        Ok(link) => execute(cmd, &link, json).await,
+        Ok(link) => execute(cmd, &link, json, key).await,
         Err(e) => Err(e),
     };
     crate::client::close_endpoint(&endpoint).await;
@@ -422,7 +539,7 @@ fn print_json(value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
+async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyKey>) -> Result<()> {
     let mut res = Resolver::new(link);
     match cmd {
         VerbCmd::Workers { cmd: None } => {
@@ -434,7 +551,7 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
             }
         }
         VerbCmd::Workers { cmd: Some(WorkersCmd::Forget { worker }) } => {
-            let id = ops::forget_worker(&mut res, &worker).await?;
+            let id = ops::forget_worker(&mut res, &worker, key).await?;
             if json {
                 print_json(&view::DONE)?;
             } else {
@@ -451,16 +568,16 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
         }
         VerbCmd::Open { worker, cwd, name, size, command } => {
             let spec = Spec { cwd, command, env: Vec::new(), name, size: size.size() };
-            let term = ops::open(&mut res, worker.as_deref(), spec).await?;
+            let term = ops::open(&mut res, worker.as_deref(), spec, key).await?;
             print_term(term, json)?;
         }
         VerbCmd::Agent { cmd: AgentCmd::Spawn { worker, cwd, prompt, env, size, args } } => {
             let spec = AgentSpec { cwd, prompt, args, env, size: size.size() };
-            let term = ops::spawn_agent(&mut res, worker.as_deref(), spec).await?;
+            let term = ops::spawn_agent(&mut res, worker.as_deref(), spec, key).await?;
             print_term(term, json)?;
         }
         VerbCmd::Resize { term, cols, rows } => {
-            ops::resize(&mut res, &term, Size { cols, rows }).await?;
+            ops::resize(&mut res, &term, Size { cols, rows }, key).await?;
             print_done(json)?;
         }
         VerbCmd::Events { since, timeout, follow, agent_input } => {
@@ -476,7 +593,7 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
             }
         }
         VerbCmd::Send { term, input } => {
-            ops::send(&mut res, &term, input.input()?).await?;
+            ops::send(&mut res, &term, input.input()?, key).await?;
             print_done(json)?;
         }
         VerbCmd::Screen { term } => {
@@ -511,7 +628,7 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
         VerbCmd::Wait { term, until, timeout } => {
             let until = until.until()?;
             let term = res.term(&term).await?;
-            let waited = ops::wait(link, term, until, timeout).await?;
+            let waited = ops::wait(link, term, until, timeout, key).await?;
             if json {
                 print_json(&view::waited(&waited))?;
             }
@@ -526,7 +643,7 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
             }
         }
         VerbCmd::Close { term } => {
-            ops::close(&mut res, &term).await?;
+            ops::close(&mut res, &term, key).await?;
             print_done(json)?;
         }
         VerbCmd::Cat { worker, path, offset, length } => {
@@ -558,7 +675,7 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
         VerbCmd::Put { worker, path } => {
             let mut bytes = Vec::new();
             tokio::io::stdin().read_to_end(&mut bytes).await.context("read stdin")?;
-            ops::write_file(&mut res, worker.as_deref(), path, bytes).await?;
+            ops::write_file(&mut res, worker.as_deref(), path, bytes, key).await?;
             print_done(json)?;
         }
         VerbCmd::Ports { worker } => {
@@ -578,7 +695,7 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
             }
         }
         VerbCmd::Item { cmd: ItemCmd::Open { worker, name, kind } } => {
-            let item = ops::open_item(&mut res, worker.as_deref(), kind.kind()?, name).await?;
+            let item = ops::open_item(&mut res, worker.as_deref(), kind.kind()?, name, key).await?;
             if json {
                 print_json(&view::opened_item(item))?;
             } else {
@@ -586,15 +703,15 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
             }
         }
         VerbCmd::Item { cmd: ItemCmd::Rename { item, name } } => {
-            ops::rename_item(&mut res, &item, name).await?;
+            ops::rename_item(&mut res, &item, name, key).await?;
             print_done(json)?;
         }
         VerbCmd::Item { cmd: ItemCmd::Remove { item } } => {
-            ops::remove_item(&mut res, &item).await?;
+            ops::remove_item(&mut res, &item, key).await?;
             print_done(json)?;
         }
         VerbCmd::Item { cmd: ItemCmd::Point { item } } => {
-            ops::point_at(&mut res, &item).await?;
+            ops::point_at(&mut res, &item, key).await?;
             print_done(json)?;
         }
         VerbCmd::Windows { worker } => {
@@ -605,8 +722,52 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
                 print!("{}", view::screens_text(&windows, &displays));
             }
         }
+        VerbCmd::Agent { cmd: AgentCmd::Conversation { term, thread, since, max } } => {
+            let thread = view::thread_named(thread.as_deref());
+            let (term, page) = ops::read_conversation(&mut res, &term, thread, since, max).await?;
+            if json {
+                print_json(&view::conversation(term, &page))?;
+            } else {
+                print!("{}", view::conversation_text(term, &page));
+            }
+        }
+        VerbCmd::Agent { cmd: AgentCmd::Answer { term, ask, verdict, interrupt } } => {
+            let verdict = verdict.verdict(interrupt)?;
+            ops::answer_permission(&mut res, &term, ask, verdict, key).await?;
+            print_done(json)?;
+        }
+        VerbCmd::Capture { worker, target, out } => {
+            let still = ops::capture_still(&mut res, worker.as_deref(), target.target()?).await?;
+            tokio::fs::write(&out, &still.png)
+                .await
+                .with_context(|| format!("write {}", out.display()))?;
+            let path = out.to_string_lossy();
+            let shown = view::still(Some(&path), still.width, still.height, still.png.len());
+            if json {
+                print_json(&shown)?;
+            } else {
+                println!("{path}: {}x{} PNG", still.width, still.height);
+            }
+        }
+        VerbCmd::Push { worker, local, path } => {
+            let moved = bulk::upload(&mut res, worker.as_deref(), &local, path, key).await?;
+            print_moved(&moved, json)?;
+        }
+        VerbCmd::Pull { worker, path, local } => {
+            let moved = bulk::download(&mut res, worker.as_deref(), path, &local).await?;
+            print_moved(&moved, json)?;
+        }
     }
     Ok(())
+}
+
+fn print_moved(moved: &bulk::Moved, json: bool) -> Result<()> {
+    if json {
+        print_json(&view::moved(moved))
+    } else {
+        println!("{} bytes: {} and {}", moved.size, moved.local.display(), moved.remote);
+        Ok(())
+    }
 }
 
 /// Print the server's events after `since`: one answer, or answer after answer with `follow`.
@@ -834,6 +995,55 @@ mod tests {
         };
         assert_eq!((cols, rows), (100, 30));
         parse(&["resize", "t", "--cols", "100"]).unwrap_err();
+    }
+
+    #[test]
+    fn the_agent_screen_and_file_verbs_parse() {
+        let VerbCmd::Agent { cmd: AgentCmd::Conversation { thread, since, max, .. } } =
+            parse(&["agent", "conversation", "t", "--thread", "a1", "--since", "4"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (thread.as_deref(), since, max),
+            (Some("a1"), Some(4), DEFAULT_MAX_ENTRIES_PAGE)
+        );
+        let answer = |args: &[&str]| {
+            let VerbCmd::Agent { cmd: AgentCmd::Answer { ask, verdict, interrupt, .. } } =
+                parse(args).unwrap()
+            else {
+                panic!()
+            };
+            (ask, verdict.verdict(interrupt))
+        };
+        let (ask, verdict) = answer(&["agent", "answer", "t", "3", "--allow"]);
+        assert_eq!((ask, verdict.unwrap()), (3, Verdict::Allow));
+        let (_, verdict) = answer(&["agent", "answer", "t", "3", "--deny", "no", "--interrupt"]);
+        let deny = Verdict::Deny { message: "no".to_owned(), interrupt: true };
+        assert_eq!(verdict.unwrap(), deny);
+        answer(&["agent", "answer", "t", "3", "--always", "--interrupt"]).1.unwrap_err();
+        parse(&["agent", "answer", "t", "3"]).unwrap_err();
+        parse(&["agent", "answer", "t", "3", "--allow", "--always"]).unwrap_err();
+
+        let VerbCmd::Capture { target, out, .. } =
+            parse(&["capture", "--display", "1", "--out", "/tmp/d.png"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (target.target().unwrap(), out.to_str()),
+            (CaptureTarget::Display(1), Some("/tmp/d.png"))
+        );
+        parse(&["capture", "--window", "1", "--display", "2", "--out", "x"]).unwrap_err();
+        let VerbCmd::Push { local, path, .. } = parse(&["push", "a.tar", "~/a.tar"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((local.to_str(), path.as_str()), (Some("a.tar"), "~/a.tar"));
+        let VerbCmd::Pull { path, local, .. } = parse(&["pull", "~/a.tar", "."]).unwrap() else {
+            panic!()
+        };
+        assert_eq!((path.as_str(), local.to_str()), ("~/a.tar", Some(".")));
     }
 
     #[test]

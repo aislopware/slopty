@@ -1,20 +1,24 @@
 //! Web pages in tiles: opening one (a forwarded port, an address typed into the palette), a
-//! view per browser item, and each frame the native page put over its tile or hidden.
+//! view per browser item, the address field in its header and the page's history, and each
+//! frame the native page put over its tile or hidden.
 
 use std::sync::Arc;
 
-use gpui::{AppContext as _, Context, Entity, IntoElement as _, Styled as _, Window, canvas};
-use slopty_client::layout::{Rect, WorkerKey};
+use gpui::{App, AppContext as _, Context, Entity, IntoElement as _, Styled as _, Window, canvas};
+use gpui_kit::component::input::InputState;
+use slopty_client::layout::{Rect, TileRef, WorkerKey};
 use slopty_core::ItemId;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 
-use super::WorkspaceView;
-use super::actions::OpenUrl;
-use crate::browser::{BrowserEvent, BrowserView, Cover};
+use super::actions::{EditAddress, InspectPage, OpenUrl, PageBack, PageForward, ReloadPage};
+use super::{Field, WorkspaceView};
+use crate::browser::{BrowserEvent, BrowserView, Cover, Zoom};
 use crate::palette::CommandPalette;
 
 /// What the "Open URL…" palette starts with: the forwarded ports live on localhost.
 const URL_SEED: &str = "http://localhost:";
+/// The address field's name, and what it says with nothing typed.
+pub(super) const ADDRESS: &str = "Address";
 
 impl WorkspaceView {
     /// A browser tile for `url` on `key` (the context worker when `None`): an existing tile
@@ -60,6 +64,126 @@ impl WorkspaceView {
         self.show_palette(palette, window, cx);
     }
 
+    /// ⌘L: the focused page's address as a field in its header; with no page focused,
+    /// "Open URL…".
+    pub fn edit_address(&mut self, _: &EditAddress, window: &mut Window, cx: &mut Context<Self>) {
+        match self.focused().filter(|t| self.browsers.contains_key(&t.item)) {
+            Some(tile) => self.start_address(tile, window, cx),
+            None => self.open_url_palette(&OpenUrl, window, cx),
+        }
+    }
+
+    /// The header of `tile`, a page, turns into its address, the whole of it selected. A page
+    /// that had the keyboard gives it to the field.
+    pub(super) fn start_address(
+        &mut self,
+        tile: TileRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.browsers.get(&tile.item).cloned() else { return };
+        let url = {
+            let page = view.read(cx);
+            if page.focused() {
+                page.release();
+            }
+            page.page().url.clone()
+        };
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(ADDRESS).default_value(url));
+        self.open_field(tile, Field::Address, input, window, cx);
+    }
+
+    /// ↩ in the address field: `text` is where `tile`'s page goes. A new address is the
+    /// item's, for every client to follow (`reconcile_browsers` takes this one there too);
+    /// the one it has loads again.
+    pub(super) fn load_address(&mut self, tile: TileRef, text: &str, cx: &mut Context<Self>) {
+        let Some(url) = crate::browser::web_url(text) else { return };
+        let Some(ItemKind::Browser { url: at }) = self.item(tile).map(|i| &i.kind) else { return };
+        if *at == url {
+            if let Some(view) = self.browsers.get(&tile.item) {
+                view.update(cx, |v, cx| v.go_to(&url, cx));
+            }
+        } else {
+            tracing::info!(item = %tile.item, %url, "a page is sent to a new address");
+            self.propose(tile.worker, ItemOp::SetUrl { id: tile.item, url }, cx);
+        }
+    }
+
+    /// The focused tile's page, when the focused tile is one.
+    fn focused_page(&self) -> Option<&Entity<BrowserView>> {
+        self.browsers.get(&self.focused()?.item)
+    }
+
+    /// Whether the page's own keys (⌘← and ⌘→) are the workspace's to take: a page is focused
+    /// and does not hold the keyboard, which would want them for its fields.
+    pub(super) fn page_keys(&self, cx: &App) -> bool {
+        self.focused_page().is_some_and(|v| !v.read(cx).focused())
+    }
+
+    /// The focused page back one page.
+    pub fn page_back(&mut self, _: &PageBack, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.focused_page().cloned() {
+            view.update(cx, BrowserView::back);
+        }
+    }
+
+    /// The focused page forward one page.
+    pub fn page_forward(&mut self, _: &PageForward, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.focused_page().cloned() {
+            view.update(cx, BrowserView::forward);
+        }
+    }
+
+    /// Load the focused page again.
+    pub fn reload_page(&mut self, _: &ReloadPage, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.focused_page().cloned() {
+            view.update(cx, BrowserView::reload);
+        }
+    }
+
+    /// A pop-up or a `_blank` link of `item`'s page: a new page tile right of it, on its
+    /// worker, as "Open URL…" makes one (an open tile for the address is focused instead).
+    fn open_beside(&mut self, item: ItemId, url: &str, cx: &mut Context<Self>) {
+        let Some(tile) = self.tile_of(item) else { return };
+        if self.focused() != Some(tile) {
+            self.focus_tile(tile, cx);
+        }
+        self.open_browser(Some(tile.worker), url, cx);
+    }
+
+    /// `item`'s page closed its own window: the tile closes as ⌘W would close it, so "Undo
+    /// close" brings it back.
+    fn close_page(&mut self, item: ItemId, cx: &mut Context<Self>) {
+        let Some(tile) = self.tile_of(item) else { return };
+        let Some(page) = self.item(tile).cloned() else { return };
+        tracing::info!(%item, "a page closed its window: its tile goes");
+        self.remember_closed(tile, page, None, cx);
+    }
+
+    /// "Inspect page": Web Inspector on the focused page (a debug build of the Mac app).
+    pub fn inspect_page(&mut self, _: &InspectPage, _window: &mut Window, cx: &mut Context<Self>) {
+        let opened = self.focused_page().is_some_and(|v| v.read(cx).inspect());
+        if !opened {
+            self.show_notice("Web Inspector needs a page in front, in a debug build".into(), cx);
+        }
+    }
+
+    /// ⌘F on a focused page: its find bar. Whether a page took it.
+    pub fn find_in_page(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(view) = self.focused_page().cloned() else { return false };
+        view.update(cx, |view, cx| view.find(window, cx));
+        true
+    }
+
+    /// ⌘+, ⌘− or ⌘0 on a focused page: its zoom, not the terminals' text. Whether a page
+    /// took it.
+    pub fn zoom_page(&self, step: Zoom, cx: &mut Context<Self>) -> bool {
+        let Some(view) = self.focused_page().cloned() else { return false };
+        view.update(cx, |view, cx| view.zoom_by(step, cx));
+        true
+    }
+
     /// The app draws a dialog over the workspace (settings, adding a worker): pages hide.
     pub fn set_covered(&mut self, covered: bool, cx: &mut Context<Self>) {
         if self.covered != covered {
@@ -85,7 +209,12 @@ impl WorkspaceView {
             })
             .collect();
         for (id, key, url) in &wanted {
-            if self.browsers.contains_key(id) {
+            if let Some(view) = self.browsers.get(id) {
+                // The item is the one address every client shares: a new one, typed here or
+                // on another client, is where the page goes.
+                if view.read(cx).url() != url {
+                    view.update(cx, |v, cx| v.go_to(url, cx));
+                }
                 continue;
             }
             let theme = self.theme.clone();
@@ -94,6 +223,11 @@ impl WorkspaceView {
             cx.subscribe(&view, move |this, _view, event, cx| {
                 match event {
                     BrowserEvent::Focused => {
+                        // A click in the page ends an edit of its address, as one anywhere
+                        // else does.
+                        if this.rename.as_ref().is_some_and(|r| r.tile.item == item) {
+                            this.finish_rename(false, false, cx);
+                        }
                         if let Some(tile) = this.tile_of(item)
                             && this.focused() != Some(tile)
                         {
@@ -101,6 +235,8 @@ impl WorkspaceView {
                         }
                     }
                     BrowserEvent::Released => this.pending_focus_self = true,
+                    BrowserEvent::Open(url) => this.open_beside(item, url, cx),
+                    BrowserEvent::Closed => this.close_page(item, cx),
                 }
                 cx.notify();
             })

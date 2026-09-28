@@ -150,6 +150,28 @@ pub enum ScreenInput {
     },
 }
 
+impl ScreenInput {
+    /// Whether this input applies only in its turn. A move sets where the pointer is, so a
+    /// newer one may overtake an older one that has not arrived; everything else is an event
+    /// the target sees once, in order (a key, a button, a scroll's delta, a pinch's).
+    #[must_use]
+    pub const fn in_order(&self) -> bool {
+        !matches!(self, Self::Move { .. })
+    }
+
+    /// Whether this is ⌘V, the chord a paste into a streamed window is: it must find the
+    /// client's clipboard on the worker's pasteboard, so nothing may carry it ahead of the offer
+    /// the control stream sent before it.
+    #[must_use]
+    pub fn is_paste_chord(&self) -> bool {
+        matches!(
+            self,
+            Self::Key { code: KeyCode::V, action: KeyAction::Press, mods, .. }
+                if mods.contains(Mods::SUPER) && !mods.intersects(Mods::CTRL | Mods::ALT)
+        )
+    }
+}
+
 /// Trackpad gesture phase, mirroring `NSEventPhase`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, Default)]
 pub enum ScrollPhase {
@@ -216,6 +238,25 @@ pub enum ScreenRequest {
         /// Wanted height in native pixels.
         height: u32,
     },
+}
+
+impl ScreenRequest {
+    /// The stream this request is numbered for, and whether it applies only in its turn, when
+    /// it is one both ends number ([`crate::datagram::ClientDatagram::ScreenInput`]): input, and
+    /// a quality change, which sets the scale the input after it is mapped at.
+    #[must_use]
+    pub const fn numbered(&self) -> Option<(StreamId, bool)> {
+        match self {
+            Self::Input { stream, input } => Some((*stream, input.in_order())),
+            Self::SetQuality { stream, .. } => Some((*stream, true)),
+            Self::List
+            | Self::Open { .. }
+            | Self::Close(_)
+            | Self::Report { .. }
+            | Self::Focus(_)
+            | Self::Resize { .. } => None,
+        }
+    }
 }
 
 /// Loss feedback, client → worker, sent as a QUIC **datagram** rather than on the control stream.
@@ -324,7 +365,8 @@ pub struct CursorShape {
     pub hot_x: u16,
     /// Hotspot y.
     pub hot_y: u16,
-    /// Premultiplied BGRA pixels.
+    /// Premultiplied BGRA pixels, written as one byte string.
+    #[serde(with = "serde_bytes")]
     pub bgra: Vec<u8>,
     /// Backing scale of the pixels.
     pub scale: u8,

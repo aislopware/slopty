@@ -942,8 +942,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   stops a stream's loops now. Measured (MEASUREMENTS.md, "datagrams from the encoder's thread"):
   median process CPU per 64-datagram frame on loopback 3.43 → 2.47 ms over five alternating
   pairs; a frame's arrival did not measurably change on loopback (p50 medians 0.86 and 0.96 ms),
-  where the pump was seldom behind. `datagram_send_cost` and its pump twin stay as the
-  instrument.
+  where the pump was seldom behind. `datagram_send_cost` stays as the instrument;
+  its pump twin went once this comparison was recorded (2026-09-28).
 
 - ✅ **A connection's loop only routes; anything slow runs beside it** (2026-09-25). Everything
   a client sent used to be handled inline in one `select!`: a window stream's open (115–300 ms),
@@ -1349,3 +1349,79 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   only, so that takes either a per-stream window in the vendored noq-proto and noq, or a large
   file sent as parallel ranges; neither is done. `SLOPTY_STREAM_WINDOW` (bytes) sets it for
   measurement (MEASUREMENTS, "the stream window against echo").
+
+- ✅ **An echo does not wait for the pacer** (2026-09-27, MEASUREMENTS "an echo behind paced
+  video"). noq's pacer holds a packet until the rate has earned it and wakes the connection on a
+  tokio timer, which rounds up to its millisecond and fires later still under macOS coalescing.
+  An echo written while video was paced out went in the next packet and waited for that timer:
+  p90 1.4–2.0 ms at 20 Mbit/s, where the rate alone asks 0.5 ms. The vendored noq-proto gained
+  `TransportConfig::stream_priority_unpaced` (`vendor/noq-proto/SLOPTY.md`, patch 8), and the
+  endpoint sets it to `ECHO_PRIORITY`. A datagram then starts without the pacing check while a
+  lifted session stream has data pending, and the echo's p90 is 0.24–0.30 ms. The congestion
+  window still applies, and the pacer is charged for the packet. What escapes pacing is bounded
+  by what `EchoLift` lifts, the echo frames `EchoBurst` exempts, and a lifted stream falls back
+  at its next frame that is not an echo. The key going up is lifted the same way: the client's
+  control stream rises to `ECHO_PRIORITY` for typed input that fits a datagram and falls back
+  for anything else, so a key typed during an upload, a pasted picture or a file save is not
+  held behind their pacing either, while a long paste is still paced.
+  Tests: `an_echo_does_not_wait_for_the_pacer` (slopty-net, loopback at 50 kB/s: 10 ms at the
+  median paced, under 5 ms unpaced) and noq-proto's three `stream_priority_unpaced_*` tests.
+
+  ❌ *Not the timer slack.* Lending the pacer a millisecond of the rate, as Chromium's pacing
+  sender does, changed nothing (p90 1.42–1.59 against 1.44–1.66 ms). The video queued behind
+  the pacer spends any credit before an echo arrives.
+
+- ✅ **A stream message is serialised once and handed to noq shared** (2026-09-28,
+  MEASUREMENTS "rows kept across frames, pixels in the texture's format"). `codec::encode`
+  serialises straight after four reserved prefix bytes (`postcard::to_extend`), patches the
+  length and freezes that `Vec` into `Bytes`; `FramedSend::send_raw` takes the `Bytes` and
+  writes it with `SendStream::write_chunk`, so noq keeps the buffer itself instead of copying a
+  slice (`Bytes::copy_from_slice` in its `write`). The worker's `Outbound::wire` hands out the
+  shared `Bytes`. A frame's credit still returns when its `Outbound` drops, after the write
+  has handed the bytes over, as before. A 96 KB screen frame's encode and hand-off went from
+  165–178 µs to 160–164 µs; an echo's one row is within noise (3.3 µs).
+- ✅ **A frame that came twice is dropped before it is decoded** (2026-09-28). With datagram
+  copies on, the second copy of an echo frame (the stream's, or the datagram's) was decoded and
+  then dropped by the frame order. The client now reads the frame's number from the front of
+  its postcard body (`terminal::frame_head`) and skips the stream's copy of a frame already
+  passed on (`FramedRecv::recv_unless`), and the datagram reader drops a copy at or below the
+  last number its pump passed on (an atomic the pump updates). The frame order stays the
+  authority; the check before decoding only drops what it would drop. Tests: client
+  `a_copy_already_passed_on_is_dropped_undecoded`, proto
+  `a_copy_is_read_to_its_frame_number_without_decoding_it`.
+
+- ✅ **A window stream's input also goes once as a datagram, and leaves unpaced** (2026-09-28,
+  MEASUREMENTS "window input through a lossy link"). Window input rode only the ordered control
+  stream, so a lost packet held every later move, click and key for every stream on the
+  connection until QUIC recovered it, and a paste or a clipboard offer ahead of it on the stream
+  held it too. It now gets the terminal's treatment: a `ClientDatagram::ScreenInput` copy 2 ms
+  after the stream copy, through the same `slopty_net::echo::Copies` (so `SLOPTY_ECHO_COPY`
+  governs both), and the echo priority on the control stream while it is written.
+
+  *Numbering.* Nothing new goes on the control stream. Both ends number each stream's input
+  and quality changes (`ScreenRequest::numbered`) in control-stream order, from 1, and count
+  apart those that apply only in their turn: everything but a move. A copy carries both
+  numbers. A click, key, scroll or pinch copy applies only when it is the next in-order request;
+  a move's copy applies when every in-order request before it has and nothing newer has, so a
+  move may overtake older moves and nothing else. From the stream, an in-order request whose
+  copy was applied is skipped, and so is a move older than anything applied. Each click and key
+  lands once and in order, and the pointer never goes back (`ScreenOrder` in
+  `apps/slopty-worker/src/conn.rs`). A quality change is in-order and has no copy, because the
+  client maps its pointer at the scale it asked for: a click's copy must not reach the window
+  before the scale it was mapped at. A ⌘V has no copy either, since its clipboard offer rides the
+  control stream just ahead of it. The two numbers were needed over one: with a single count the
+  worker cannot tell, for a copy that arrives early, whether the missing requests before it were
+  moves it may pass or a click it must wait for.
+
+  *Unpaced.* The copies first went out with window input still paced, and made a lossy drag
+  worse: p99 up to 634 ms against 309 ms before. The client's window sat at its floor and the
+  pacer charged each small packet a whole packet's credit, now for twice the packets. With the
+  control stream raised to `ECHO_PRIORITY` for window input, as for typed input, the drag's p90
+  fell from 22–40 to 7.8–11 ms and its p99 from 49–226 to 12–32 ms at 13 % loss each way. Lone
+  clicks, which is how keys typed into a window come, fell from a 27–28 ms p90 to 6.8–8.3 ms.
+
+  *Open.* On a clean link every copy is late and costs a spawned task and a timer on the client
+  and a decode on the worker; at load average 35 that cost could not be separated from the
+  load's own tails. A copy of every move at 160 Hz is a lot of redundancy for the moves, whose
+  worth is only that a newer one may pass a lost one; copying only moves that follow a gap is
+  the next thing to measure.

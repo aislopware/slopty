@@ -23,13 +23,13 @@ use slopty_client::layout::WorkerKey;
 use slopty_core::SessionId;
 use slopty_theme::{Theme, alpha};
 
-use super::agents::agent_status_text;
+use super::agents::{agent_ask_line, agent_status_word};
 use super::{Finished, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize, Status, icon, status_mark};
 use crate::kit::{self, meta, tabular};
-use crate::palette::{age_label, quiet_line, section_heading};
+use crate::palette::{Plate, age_label, quiet_line, section_heading};
 
 /// The popover's width, in points.
 const INBOX_W: f32 = 360.0;
@@ -69,6 +69,8 @@ pub(super) struct Inbox {
     seq: u64,
     /// *All* rather than *Unread*.
     all: bool,
+    /// The fill under the view that is up, which slides between *Unread* and *All*.
+    plate: Plate,
 }
 
 /// One of the inbox's rows, before it is drawn.
@@ -192,7 +194,7 @@ impl WorkspaceView {
             status,
             what,
             word,
-            meta: join(&[&crate::terminal::took_label(done.elapsed), worker]),
+            meta: join(&[&kit::duration(done.elapsed), worker]),
             cwd: logged
                 .cwd
                 .as_deref()
@@ -203,8 +205,9 @@ impl WorkspaceView {
         }
     }
 
-    /// An agent waiting on the human: its words first, then its tile, worker and directory,
-    /// and how long it has waited, from the worker's stamp so a reconnect keeps it.
+    /// An agent waiting on the human: what it asks first (what the tool does where the hook
+    /// named only the tool, never a bare "Bash"), then its tile, worker and directory, and how
+    /// long it has waited, from the worker's stamp so a reconnect keeps it.
     fn waiting_inbox_row(
         &self,
         waiting: super::agents::Waiting,
@@ -213,11 +216,13 @@ impl WorkspaceView {
     ) -> Row {
         let session = waiting.session;
         let agent = self.agent_state(session);
+        // What it asks, under the heading that already says it waits; its state only when it
+        // asks nothing in particular.
         let what = agent
-            .map(agent_status_text)
+            .and_then(|a| agent_ask_line(a).or_else(|| Some(agent_status_word(a))))
             .filter(|w| !w.is_empty())
             .unwrap_or_else(|| Status::NeedsYou.label().to_owned());
-        let title = waiting.tile.and_then(|t| Some(self.card_title(t, self.item(t)?, cx)));
+        let title = waiting.tile.and_then(|t| Some(self.tile_title(t, self.item(t)?, cx)));
         let worker = self.workers.get(&waiting.worker).map(|w| w.name.as_str()).unwrap_or_default();
         let age = agent
             .map(|a| a.since_ms)
@@ -236,10 +241,10 @@ impl WorkspaceView {
         }
     }
 
-    /// The popover's panel.
+    /// The popover's panel, dropping the base unit from the bell as it fades in.
     pub(super) fn render_inbox(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let panel = self.inbox_panel(cx);
-        kit::fade_in(panel, "inbox-fade", cx)
+        kit::slide_fade(panel, "inbox-fade", -self.theme.spacing.xs, kit::Pace::Fade, cx)
     }
 
     fn inbox_panel(&self, cx: &Context<Self>) -> gpui::Stateful<Div> {
@@ -273,8 +278,8 @@ impl WorkspaceView {
             .role(Role::Dialog)
             .aria_label("Inbox")
             .occlude()
-            // A gap below the title bar's hairline, so the popover reads as lifted off it.
-            .mt(px(theme.spacing.xs))
+            // Flush with the title bar's hairline: a gap there showed the tile header's pill
+            // through it as a sliver, and the shadow already lifts the popover.
             .w(px(INBOX_W))
             .flex()
             .flex_col()
@@ -320,7 +325,7 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.sm))
                 .cursor_pointer()
                 .text_size(px(theme.typography.small()))
-                .when(on, |el| el.bg(hsla(s.overlay)).text_color(hsla(s.text)))
+                .when(on, |el| self.inbox.plate.mark(el.text_color(hsla(s.text)), id))
                 .when(!on, |el| {
                     el.text_color(hsla(s.text_muted))
                         .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
@@ -358,6 +363,7 @@ impl WorkspaceView {
             .py(px(spacing.xs))
             .border_b_1()
             .border_color(hsla(s.border_subtle))
+            .child(self.inbox.plate.under(theme))
             .child(
                 tab("inbox-unread", "Unread", !all, Some(unread))
                     .on_click(cx.listener(|this, _ev, _w, cx| this.show_inbox_all(false, cx))),
@@ -539,6 +545,14 @@ fn never_held(theme: &Theme) -> gpui::Stateful<Div> {
         .py(px(theme.spacing.md))
         .child(div().text_color(hsla(s.text_secondary)).child(ALL_CAUGHT_UP))
         .child(meta(div(), theme).debug_selector(|| "inbox-holds".to_owned()).child(INBOX_HOLDS))
+}
+
+#[cfg(test)]
+impl WorkspaceView {
+    /// Where the inbox's view plate was drawn in the last frame.
+    pub(super) fn inbox_plate(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.inbox.plate.drawn()
+    }
 }
 
 #[cfg(test)]

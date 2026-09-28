@@ -5,8 +5,9 @@
 //! each fork branch sits (`base`, the upstream commit it was last rebased onto, and its date).
 //! `check` fetches both upstreams and reports the drift; `sync` rebases each fork onto the
 //! newest upstream, build-checks it, pushes it, moves this workspace's `Cargo.lock` pins and
-//! rewrites the base lines (plus `checked`, the day it confirmed the fork current). The gate
-//! prints a warning when a fork was last known current more than [`STALE_AFTER_DAYS`] days ago.
+//! rewrites the base lines (plus `checked`, the day it confirmed the fork current). Once a fork
+//! was last known current longer ago than its own `check_every_days`, the gate asks its upstream
+//! for the branch head (`git ls-remote`, no fetch) and warns when it moved past the base.
 //!
 //! The checkouts live under the main checkout of this repository (shared by every worktree),
 //! cloned with `--filter=blob:none` on first use.
@@ -23,8 +24,6 @@ use crate::tools::{repo_root, step};
 
 /// The configuration file, relative to the repository root.
 const CONFIG: &str = "xtask/upstream.toml";
-/// A fork base older than this many days earns a gate warning.
-const STALE_AFTER_DAYS: i64 = 7;
 /// Sync order: gpui-kit's lock resolves against the zed fork, so zed goes first.
 /// Where the vendored terminal source comes from.
 const GHOSTTY_UPSTREAM: &str = "https://github.com/ghostty-org/ghostty.git";
@@ -72,6 +71,10 @@ struct Fork {
     /// upstream keeps an old `base_date`, and this is what keeps the gate from calling it stale.
     #[serde(default)]
     checked: String,
+    /// How many days the fork may go unconfirmed before the gate asks its upstream again: none
+    /// for an upstream that lands several changes a day (gpui-kit: every gate asks), a week for
+    /// the others.
+    check_every_days: i64,
 }
 
 impl Fork {
@@ -81,6 +84,11 @@ impl Fork {
         let base = days_from_civil(&self.base_date)?;
         let checked = if self.checked.is_empty() { base } else { days_from_civil(&self.checked)? };
         Ok(today.saturating_sub(base.max(checked)).max(0))
+    }
+
+    /// Whether the fork's interval has run out, so the gate asks its upstream.
+    fn due(&self, today: i64) -> Result<bool> {
+        Ok(self.days_since_current(today)? >= self.check_every_days)
     }
 }
 
@@ -145,22 +153,37 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
     }
 }
 
-/// Print a warning line when a fork base is older than [`STALE_AFTER_DAYS`]. Never fails: the
-/// gate calls it and a broken config is reported as the warning itself.
+/// Print a warning line for each fork past its `check_every_days` whose upstream branch moved
+/// past its base; an upstream that cannot be reached is warned about by the dates alone. Never
+/// fails: the gate calls it and a broken config is reported as the warning itself.
 pub fn warn_if_stale() {
     let report = || -> Result<Vec<String>> {
         let root = repo_root()?;
         let config = Config::load(&root)?;
         let today = today_days()?;
+        let sh = Shell::new()?;
         let mut stale = Vec::new();
         for (name, fork) in config.forks() {
+            if !fork.due(today)? {
+                continue;
+            }
             let age = fork.days_since_current(today)?;
-            if age > STALE_AFTER_DAYS {
-                stale.push(format!(
-                    "{name} was last known current {age} days ago (base {}, checked {})",
+            match remote_head(&sh, fork) {
+                Ok(head) if head == fork.base => {}
+                Ok(head) => stale.push(format!(
+                    "{name}'s upstream {} moved to {} since base {} ({}); run `cargo xtask \
+                     upstream sync --only {name}`",
+                    fork.upstream_branch,
+                    short(&head),
+                    short(&fork.base),
+                    fork.base_date,
+                )),
+                Err(error) => stale.push(format!(
+                    "{name} was last known current {age} days ago (base {}, checked {}; upstream \
+                     unreachable: {error:#}); run `cargo xtask upstream check`",
                     fork.base_date,
                     if fork.checked.is_empty() { "never" } else { &fork.checked }
-                ));
+                )),
             }
         }
         Ok(stale)
@@ -168,11 +191,23 @@ pub fn warn_if_stale() {
     match report() {
         Ok(stale) => {
             for line in stale {
-                println!("⚠ upstream: {line}; run `cargo xtask upstream check`");
+                println!("⚠ upstream: {line}");
             }
         }
         Err(error) => println!("⚠ upstream: {CONFIG} unreadable ({error:#})"),
     }
+}
+
+/// The upstream branch's head, asked of the remote without fetching. A stalled connection gives
+/// up after a few seconds rather than holding the gate.
+fn remote_head(sh: &Shell, fork: &Fork) -> Result<String> {
+    let (url, branch) = (&fork.upstream, format!("refs/heads/{}", fork.upstream_branch));
+    let out =
+        cmd!(sh, "git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 ls-remote {url} {branch}")
+            .quiet()
+            .ignore_stderr()
+            .read()?;
+    out.split_whitespace().next().map(str::to_owned).context("the branch is not on the remote")
 }
 
 /// A fetched upstream: head commit and date.
@@ -671,6 +706,7 @@ mod tests {
             base: String::new(),
             base_date: "2026-09-01".to_owned(),
             checked: String::new(),
+            check_every_days: 7,
         };
         let today = days_from_civil("2026-09-12").expect("date");
         assert_eq!(fork.days_since_current(today).ok(), Some(11), "no check: the base counts");
@@ -678,6 +714,28 @@ mod tests {
         assert_eq!(fork.days_since_current(today).ok(), Some(0), "checked today");
         fork.checked = "2026-08-01".to_owned();
         assert_eq!(fork.days_since_current(today).ok(), Some(11), "the later date wins");
+    }
+
+    #[test]
+    fn a_fork_is_due_past_its_own_interval() {
+        let mut fork = Fork {
+            upstream: String::new(),
+            upstream_branch: String::new(),
+            url: String::new(),
+            branch: String::new(),
+            checkout: Utf8PathBuf::new(),
+            base: String::new(),
+            base_date: "2026-09-10".to_owned(),
+            checked: "2026-09-11".to_owned(),
+            check_every_days: 7,
+        };
+        let today = days_from_civil("2026-09-13").expect("date");
+        assert_eq!(fork.due(today).ok(), Some(false), "two days into a week");
+        fork.check_every_days = 2;
+        assert_eq!(fork.due(today).ok(), Some(true), "two days, and two was the interval");
+        fork.check_every_days = 0;
+        fork.checked = "2026-09-13".to_owned();
+        assert_eq!(fork.due(today).ok(), Some(true), "no interval: asked even the day of a sync");
     }
 
     #[test]
@@ -699,6 +757,7 @@ mod tests {
             base: String::new(),
             base_date: String::new(),
             checked: String::new(),
+            check_every_days: 7,
         };
         let pin = lock_pin(&root, &fork);
         std::fs::remove_dir_all(&dir).expect("cleanup");

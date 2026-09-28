@@ -81,7 +81,11 @@ async fn the_first_run_offers_one_way_in() {
     if !gated() {
         return;
     }
-    let mut stack = Stack::launch_first_run("e2e-worker").await.unwrap();
+    // This Mac's entry is on the page as a user meets it: the stand-in behind it installs
+    // nothing, and this case never presses it.
+    let report = this_mac_report(true);
+    let env = [(slopty_e2e::THIS_MAC_ENV, report.as_str())];
+    let mut stack = Stack::launch_first_run_with("e2e-worker", &env).await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -109,6 +113,7 @@ async fn the_first_run_offers_one_way_in() {
     }
     assert!(buttons.iter().any(|b| b == "Connect"), "{buttons:?}");
     assert!(buttons.iter().any(|b| b == "Add a worker by address instead"), "{buttons:?}");
+    assert!(buttons.iter().any(|b| b == THIS_MAC), "{buttons:?}");
 
     let switch = dump
         .a11y_node("Button", Some("Add a worker by address instead"))
@@ -130,6 +135,105 @@ async fn the_first_run_offers_one_way_in() {
     stack.add_worker().await.unwrap();
     let dump = first_shell(&mut stack.driver).await;
     assert!(!dump.adding, "the panel goes with the first worker: {dump:#?}");
+    stack.shutdown().await;
+}
+
+/// The first run's way to make this Mac a worker, and its checklist's heading.
+const THIS_MAC: &str = "Use this Mac as a worker";
+
+/// This Mac's worker as the stand-in reports it: answering, with Accessibility granted, Screen
+/// Recording as `screen_recording` says, and on the tailnet.
+fn this_mac_report(screen_recording: bool) -> String {
+    let health = slopty_proto::ctl::Health {
+        version: "0.1.0".to_owned(),
+        exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
+        screen_recording,
+        post_events: true,
+        listen: "[::]:45550".to_owned(),
+        allow: Vec::new(),
+        tailscale: slopty_proto::ctl::Tailscale::Up {
+            node: "studio.tail1234.ts.net".to_owned(),
+            ip: Some(std::net::IpAddr::from([100, 64, 0, 3])),
+        },
+        clients: 0,
+        sessions: 0,
+        uptime_secs: 1,
+    };
+    serde_json::to_string(&health).unwrap()
+}
+
+/// "Use this Mac as a worker" on the first run turns the page into the worker's own
+/// checklist: running, one grant missing with the button to its pane, the other granted, the
+/// tailnet reached. The stand-in behind it installs nothing and adds nothing.
+#[tokio::test]
+async fn this_mac_walks_its_checklist() {
+    if !gated() {
+        return;
+    }
+    let report = this_mac_report(false);
+    let env = [(slopty_e2e::THIS_MAC_ENV, report.as_str())];
+    let mut stack = Stack::launch_first_run_with("e2e-worker", &env).await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let dump = drv
+        .wait_for("the connect panel, done looking", STEP, |d| {
+            d.adding && d.a11y_node("Status", Some("Nothing answered on your tailnet")).is_some()
+        })
+        .await
+        .unwrap();
+    let entry = dump.a11y_node("Button", Some(THIS_MAC)).expect("this Mac's entry").bounds;
+    drv.click(entry[0] + entry[2] / 2.0, entry[1] + entry[3] / 2.0).await.unwrap();
+    let dump = drv
+        .wait_for("the checklist, read", STEP, |d| {
+            d.a11y_node("List", Some(THIS_MAC)).is_some()
+                && d.a11y_node("Button", Some("Open settings")).is_some()
+        })
+        .await
+        .unwrap();
+    assert_eq!(labels(&dump, "Heading"), [THIS_MAC], "{:#?}", dump.a11y);
+    let items = labels(&dump, "ListItem");
+    assert_eq!(
+        items,
+        ["Worker running", "Screen Recording", "Accessibility", "Reachable on your tailnet"],
+        "{:#?}",
+        dump.a11y
+    );
+    let fixes = labels(&dump, "Button").into_iter().filter(|b| b == "Open settings").count();
+    assert_eq!(fixes, 1, "one grant missing, one way to it: {:#?}", dump.a11y);
+    assert!(dump.adding && dump.workers.is_empty(), "nothing was added: {dump:#?}");
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "this-mac").await;
+    stack.shutdown().await;
+}
+
+/// A file past what a tile edits says so in its body, with the two ways to read it in a
+/// terminal on its worker instead.
+#[tokio::test]
+async fn a_file_too_large_to_edit_says_where_to_read_it() {
+    if !gated() {
+        return;
+    }
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let project = dir.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // Sparse: past the cap, at no cost to the disk.
+    let file = project.join("capture.log");
+    std::fs::File::create(&file).unwrap().set_len(40 << 20).unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    drv.ok(&Command::OpenFile { path: file.display().to_string(), line: None }).await.unwrap();
+    let dump = drv
+        .wait_for("the file's notice", STEP, |d| {
+            d.a11y_node("Button", Some("Open in editor")).is_some()
+        })
+        .await
+        .unwrap();
+    assert!(dump.a11y_node("Button", Some("Open in pager")).is_some(), "{:#?}", dump.a11y);
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "file-too-large").await;
     stack.shutdown().await;
 }
 
@@ -267,7 +371,12 @@ async fn the_empty_workspace_says_how_to_begin() {
     stack.shutdown().await;
 }
 
-/// An agent blocked on a permission: the tile's ring and badge, and the bar's count.
+/// The title the second agent's TUI gives itself, as Claude Code titles a session by its task.
+const TITLED_AGENT: &str = "Fix the login redirect";
+
+/// An agent blocked on a permission beside a second one at rest that has titled itself: the
+/// waiting tile's pill and the bar's count, each agent named once, the second by its own
+/// title rather than "Claude Code 2".
 #[tokio::test]
 async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
     if !gated() {
@@ -278,8 +387,27 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     let dump = first_shell(&mut stack.driver).await;
     let session = dump.terminals[0].session.clone();
-    stack.driver.open(&["cat"], 1).await.unwrap();
-    stack.driver.wait_for("a second column", STEP, |d| d.items.len() == 2).await.unwrap();
+    // The second program sets its own title (OSC 0) and then waits, as a TUI would.
+    let titled = format!("printf '\\033]0;{TITLED_AGENT}\\007'; exec cat");
+    stack.driver.open(&["sh", "-c", &titled], 1).await.unwrap();
+    let dump =
+        stack.driver.wait_for("a second column", STEP, |d| d.terminals.len() == 2).await.unwrap();
+    let second = dump
+        .terminals
+        .iter()
+        .find(|t| t.session != session)
+        .map(|t| t.session.clone())
+        .expect("the second shell");
+    stack.play_hook(&second, "SessionStart", r#","source":"startup""#).await.unwrap();
+    let heading = format!("terminal {TITLED_AGENT}");
+    stack
+        .driver
+        .wait_for("the second agent, titled", STEP, |d| {
+            d.terminal(&second).is_some_and(|t| t.agent.as_deref() == Some("idle"))
+                && d.a11y_node("Heading", Some(&heading)).is_some()
+        })
+        .await
+        .unwrap();
     stack.play_hook(&session, "PermissionRequest", r#","tool_name":"Bash""#).await.unwrap();
     let drv = &mut stack.driver;
     let dump = drv

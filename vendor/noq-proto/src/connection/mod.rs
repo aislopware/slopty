@@ -1977,8 +1977,18 @@ impl Connection {
             }
         }
 
-        // Pacing check.
-        if let Some(delay) = self.path_data_mut(path_id).pacing_delay(bytes_to_send, now) {
+        // Pacing check, skipped while a stream at the unpaced priority has data waiting: the
+        // pacing timer is too coarse for it (`TransportConfig::stream_priority_unpaced`).
+        let unpaced = space_id == SpaceId::Data
+            && can_send.other
+            && self
+                .config
+                .stream_priority_unpaced
+                .is_some_and(|priority| self.streams.has_pending_at(priority));
+        if unpaced {
+            trace!(?space_id, %path_id, "unpaced stream data pending");
+        } else if let Some(delay) = self.path_data_mut(path_id).pacing_delay(bytes_to_send, now)
+        {
             let resume_time = now + delay;
             self.timers.set(
                 Timer::PerPath(path_id, PathTimer::Pacing),

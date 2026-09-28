@@ -94,12 +94,12 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
     // ↩ runs what is shown: the laptop's line, the one left.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("palette").is_none());
+    assert!(!view.read_with(cx, |v, _| v.palette_open()));
 }
 
-/// The palette's foot names its keys: ↑↓ move and esc closes, and ↩ says what it does with the
-/// line selected (goes to a worker, runs a command). It sits under the list, across the
-/// dialog, and reads as one line.
+/// The palette's foot names its keys in sentence case, as the key bar does: ↑↓ move and Esc
+/// closes, and ↩ says what it does with the line selected (goes to a worker, runs a command). It
+/// sits under the list, across the dialog, and reads as one line.
 #[gpui::test]
 fn the_palette_foot_names_its_keys(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -115,9 +115,9 @@ fn the_palette_foot_names_its_keys(cx: &mut TestAppContext) {
             .filter_map(|n| n.label)
             .find(|l| l.starts_with("↑↓"))
     };
-    assert_eq!(legend(cx).as_deref(), Some("↑↓ move · esc close · ↩ go to"), "on the worker");
+    assert_eq!(legend(cx).as_deref(), Some("↑↓ Move · Esc Close · ↩ Go to"), "on the worker");
     cx.simulate_keystrokes("down");
-    assert_eq!(legend(cx).as_deref(), Some("↑↓ move · esc close · ↩ run"), "on a command");
+    assert_eq!(legend(cx).as_deref(), Some("↑↓ Move · Esc Close · ↩ Run"), "on a command");
     let (dialog, legend, list) = (
         cx.debug_bounds("palette").expect("the dialog"),
         cx.debug_bounds("palette-legend").expect("the foot"),
@@ -129,7 +129,8 @@ fn the_palette_foot_names_its_keys(cx: &mut TestAppContext) {
 
 /// With no keyboard attached, as on a phone, the palette prints no chord that cannot be
 /// pressed: the commands lose their keys and the foot its legend. A worker's line keeps its
-/// readout, which is not a chord.
+/// readout, which is not a chord. Esc is gone with the keys, so the field ends in Cancel on the
+/// field's row and a scrim dims the work, and Cancel closes it.
 #[gpui::test]
 fn without_a_keyboard_the_palette_prints_no_chords(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -140,11 +141,20 @@ fn without_a_keyboard_the_palette_prints_no_chords(cx: &mut TestAppContext) {
     open_palette(cx);
     assert!(chords(cx) > 0, "a Mac prints its chords");
     assert!(cx.debug_bounds("palette-legend").is_some(), "and the legend");
+    assert!(cx.debug_bounds("palette-cancel").is_none(), "Esc closes it: no Cancel");
+    assert!(cx.debug_bounds("palette-scrim").is_none(), "and it floats undimmed");
     cx.simulate_keystrokes("escape");
     view.update(cx, |v, _| v.set_hardware_keyboard(false));
     open_palette(cx);
     assert_eq!(chords(cx), 0, "no keyboard, no chords");
     assert!(cx.debug_bounds("palette-legend").is_none(), "nor a legend");
+    assert!(cx.debug_bounds("palette-scrim").is_some(), "a scrim to tap");
+    let field = cx.debug_bounds("palette").expect("the palette");
+    let cancel = cx.debug_bounds("palette-cancel").expect("Cancel on glass");
+    assert!(cancel.top() - field.top() < px(60.0), "on the field's row: {cancel:?} {field:?}");
+    assert!(cancel.center().x > field.center().x, "at its trailing end: {cancel:?} {field:?}");
+    click(cx, "palette-cancel");
+    assert!(view.read_with(cx, |v, _| v.palette.is_none()), "Cancel closes it");
 }
 
 /// Every line's title starts on one edge: a tile's or a worker's kind icon sits in a fixed

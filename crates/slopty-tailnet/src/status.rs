@@ -3,19 +3,19 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 /// The daemon's view: this node, its peers and the tailnet's name.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Status {
-    /// `Running` once the node is logged in and up; `NeedsLogin`, `Stopped`, … otherwise.
-    pub backend_state: String,
+    /// Where the daemon stands: [`BackendState::Running`] once the node is logged in and up.
+    pub backend_state: BackendState,
     /// This node, absent before login.
     #[serde(rename = "Self")]
     pub me: Option<Node>,
     /// Every peer the node's map holds, by public key.
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde(default, deserialize_with = "crate::null_as_default")]
     pub peer: BTreeMap<String, Node>,
     /// The suffix of every `MagicDNS` name, e.g. `tail1234.ts.net`.
     #[serde(rename = "MagicDNSSuffix", default)]
@@ -23,6 +23,43 @@ pub struct Status {
     /// The tailnet, absent before login.
     #[serde(default)]
     pub current_tailnet: Option<Tailnet>,
+}
+
+/// Where the daemon stands (`ipn.State`, written by name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum BackendState {
+    /// Just started, with no state yet.
+    NoState,
+    /// Another user of this machine owns the daemon (Windows).
+    InUseOtherUser,
+    /// Signed out: the node must log in.
+    NeedsLogin,
+    /// Logged in, waiting for an admin to approve the machine.
+    NeedsMachineAuth,
+    /// Turned off by its user.
+    Stopped,
+    /// Connecting.
+    Starting,
+    /// Logged in and up.
+    Running,
+    /// A state this build does not know.
+    #[serde(other)]
+    Other,
+}
+
+impl std::fmt::Display for BackendState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NoState => "NoState",
+            Self::InUseOtherUser => "InUseOtherUser",
+            Self::NeedsLogin => "NeedsLogin",
+            Self::NeedsMachineAuth => "NeedsMachineAuth",
+            Self::Stopped => "Stopped",
+            Self::Starting => "Starting",
+            Self::Running => "Running",
+            Self::Other => "an unknown state",
+        })
+    }
 }
 
 /// The tailnet the node is on.
@@ -49,10 +86,10 @@ pub struct Node {
     #[serde(rename = "OS")]
     pub os: String,
     /// Its tailnet addresses, IPv4 first.
-    #[serde(rename = "TailscaleIPs", default, deserialize_with = "null_as_default")]
+    #[serde(rename = "TailscaleIPs", default, deserialize_with = "crate::null_as_default")]
     pub ips: Vec<IpAddr>,
     /// Its tags; a tagged node belongs to no user.
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde(default, deserialize_with = "crate::null_as_default")]
     pub tags: Vec<String>,
     /// Whether it is connected to the control plane.
     #[serde(default)]
@@ -126,7 +163,7 @@ impl Status {
     /// Whether the node is logged in and up.
     #[must_use]
     pub fn running(&self) -> bool {
-        self.backend_state == "Running"
+        self.backend_state == BackendState::Running
     }
 
     /// The peer (or this node) with address `ip`.
@@ -134,14 +171,6 @@ impl Status {
     pub fn node_at(&self, ip: IpAddr) -> Option<&Node> {
         self.me.iter().chain(self.peer.values()).find(|n| n.has(ip))
     }
-}
-
-fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Default + Deserialize<'de>,
-{
-    Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
 }
 
 /// A status fixture, shared with the other modules' tests.
@@ -205,7 +234,29 @@ pub mod tests {
         let s: Status =
             serde_json::from_str(r#"{"BackendState":"NeedsLogin","Self":null,"Peer":null}"#)
                 .unwrap();
+        assert_eq!(s.backend_state, BackendState::NeedsLogin);
         assert!(!s.running());
         assert!(s.me.is_none() && s.peer.is_empty());
+    }
+
+    /// Every state the daemon writes reads as itself, and one this build does not know reads as
+    /// not up rather than failing the whole status.
+    #[test]
+    fn each_backend_state_reads_by_name() {
+        use BackendState::{
+            InUseOtherUser, NeedsLogin, NeedsMachineAuth, NoState, Other, Running, Starting,
+            Stopped,
+        };
+        let known =
+            [NoState, InUseOtherUser, NeedsLogin, NeedsMachineAuth, Stopped, Starting, Running];
+        for state in known {
+            let s: Status =
+                serde_json::from_str(&format!(r#"{{"BackendState":"{state}"}}"#)).unwrap();
+            assert_eq!(s.backend_state, state);
+            assert_eq!(s.running(), state == Running);
+        }
+        let s: Status = serde_json::from_str(r#"{"BackendState":"Rebooting"}"#).unwrap();
+        assert_eq!(s.backend_state, Other);
+        assert!(!s.running());
     }
 }

@@ -46,7 +46,12 @@ slopty-platform.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 slopty-agent.workspace = true
+# The Linux worker test reaches its worker as the app does (`tests/linux.rs`).
+slopty-client.workspace = true
+slopty-core.workspace = true
 slopty-media.workspace = true
+slopty-net.workspace = true
+slopty-proto.workspace = true
 slopty-pty.workspace = true
 image.workspace = true
 tempfile.workspace = true

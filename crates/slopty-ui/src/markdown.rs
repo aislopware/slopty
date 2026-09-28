@@ -1,6 +1,6 @@
 //! One markdown look for every surface that draws it with gpui-kit's `TextView`.
 //!
-//! A note on the canvas ([`crate::note`]) and a file card read the same, because both take
+//! A note tile ([`crate::note`]) and a file tile read the same, because both take
 //! their sizes, colours and corners from the theme through [`style`].
 
 use std::rc::Rc;
@@ -16,6 +16,7 @@ use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
+use crate::icons::{IconName, IconSize};
 
 /// A piece of a Markdown text: prose for gpui-kit's `TextView`, or a fenced block drawn as
 /// its own element so it can carry buttons.
@@ -144,6 +145,22 @@ pub fn segments(markdown: &str) -> Vec<Segment> {
     out
 }
 
+/// How many of `markdown`'s task lines are ticked, and how many there are, as [`segments`]
+/// finds them (fences skipped), without building a segment.
+#[must_use]
+pub fn task_counts(markdown: &str) -> (usize, usize) {
+    let (mut done, mut total, mut fenced) = (0_usize, 0_usize, false);
+    for line in markdown.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        } else if !fenced && let Some((ticked, _)) = task_line(line) {
+            total = total.saturating_add(1);
+            done = done.saturating_add(usize::from(ticked));
+        }
+    }
+    (done, total)
+}
+
 /// What a "run" button does with the block's code (the surface's owner knows the shells).
 pub type Run = Rc<dyn Fn(String, &mut App)>;
 
@@ -226,6 +243,12 @@ pub fn code_block(
         .into_any_element()
 }
 
+/// A task box's side, as a share of the prose size.
+const TASK_BOX: f32 = 0.95;
+
+/// How much narrower than its box a done task's check is drawn, in points at zoom 1.
+const TASK_CHECK_INSET: f32 = 4.0;
+
 /// What a task row's box does with the row's index (the surface's owner has the text).
 pub type Toggle = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
@@ -246,7 +269,11 @@ pub fn task_row(
     let (ix, done) = (*ix, *done);
     let s = &theme.surfaces;
     let spacing = theme.spacing;
-    let side = theme.typography.small() * scale;
+    // Linear's and Things' box: a notch under the prose's size, the small radius and a
+    // hairline, on the first line's middle. The font's tick at caption size, in a 12 pt box
+    // with a sharp corner, read as an unstyled browser form.
+    let side = theme.typography.prose() * TASK_BOX * scale;
+    let line = theme.typography.ui_size * theme.typography.markdown_line_height * scale;
     let toggled = if done { Toggled::True } else { Toggled::False };
     let mut label = String::from(if done { "Done: " } else { "To do: " });
     label.push_str(text);
@@ -259,29 +286,28 @@ pub fn task_row(
         .aria_toggled(toggled)
         .flex_none()
         .size(px(side))
-        .mt(px(spacing.xs * scale * 0.5))
-        .rounded(px(theme.radii.xs * 0.5))
+        .mt(px(((line - side) / 2.0).max(0.0)))
+        .rounded(px(theme.radii.xs * scale))
         .flex()
         .items_center()
         .justify_center()
         .border_1()
-        .border_color(hsla(if done { s.accent_fill } else { s.text_muted }))
-        // A ticked box is the accent fill with a tick in it, as a native checkbox is; a filled
-        // grey square read as a glyph the font was missing, and the accent's text tone read as
-        // a disabled box in dark.
+        .border_color(hsla(if done { s.accent_fill } else { s.border }))
+        // A ticked box is the accent fill with a drawn check in it, as a native checkbox is.
         .when(done, |b| {
-            b.bg(hsla(s.accent_fill))
-                .text_color(hsla(s.accent_ink))
-                .text_size(px(theme.typography.caption() * scale))
-                .line_height(px(side))
-                .child("\u{2713}")
+            b.bg(hsla(s.accent_fill)).child(
+                crate::icons::icon(theme, IconName::Check, IconSize::Inline, hsla(s.accent_ink))
+                    .size(px((side - TASK_CHECK_INSET).max(1.0))),
+            )
         });
     // The box is drawn at the text's size, but a finger or a pointer gets the density's
     // target round it: the pad spills into the gap and the margin, and moves nothing.
     let pad = (theme.density.hit.mul_add(scale, -side) / 2.0).max(spacing.xs * scale);
     let mut hit = div().id(ElementId::Name(format!("{text_id}-hit").into())).flex_none();
     if let Some(toggle) = toggle {
-        boxed = boxed.hover(move |st| st.bg(hsla_alpha(s.text, alpha::FAINT)));
+        if !done {
+            boxed = boxed.hover(move |st| st.border_color(hsla(s.text_muted)));
+        }
         hit = hit
             .p(px(pad))
             .m(px(-pad))
@@ -302,15 +328,24 @@ pub fn task_row(
             div()
                 .flex_1()
                 .min_w(px(0.0))
-                // A ticked task is set back and struck through, as a done item is in a list app:
-                // what is left to do reads first.
-                .when(done, |el| el.opacity(alpha::STRONG).line_through())
-                .child(TextView::markdown(
-                    ElementId::Name(text_id.into()),
-                    SharedString::from(text.to_owned()),
-                )
-                .style(style(theme, mono, scale))
-                .selectable(false)),
+                // A ticked task goes muted with a faint strike, as a done item does in a list
+                // app: what is left to do reads first, and the strike does not shout.
+                .when(done, |mut el| {
+                    el.text_style().strikethrough = Some(gpui::StrikethroughStyle {
+                        thickness: px(1.0),
+                        color: Some(hsla_alpha(s.text_muted, alpha::STRONG)),
+                    });
+                    el
+                })
+                .child(
+                    TextView::markdown(
+                        ElementId::Name(text_id.into()),
+                        SharedString::from(text.to_owned()),
+                    )
+                    .style(style(theme, mono, scale))
+                    .when(done, |text| text.text_color(hsla(s.text_muted)))
+                    .selectable(false),
+                ),
         )
         .into_any_element()
 }
@@ -321,8 +356,8 @@ pub fn task_row(
 /// code in the terminal mono at `small()` on the raised surface with `radii.xs` corners.
 /// Colours come from the gpui-kit theme, which [`crate::kit::sync`] keeps on the same tokens.
 ///
-/// `scale` multiplies every size, for a surface that is drawn at a zoom of its own (a canvas
-/// note); the chrome passes `1.0`.
+/// `scale` multiplies every size, for a surface that is drawn at a zoom of its own (a note
+/// in the overview); the chrome passes `1.0`.
 #[must_use]
 pub fn style(theme: &Theme, mono: &str, scale: f32) -> TextViewStyle {
     let small = theme.typography.small() * scale;
@@ -439,6 +474,56 @@ mod tests {
         );
     }
 
+    /// A task's box is Linear's and Things': a notch under the prose's size, the small radius
+    /// and a hairline, the done one the accent fill with a drawn check, not the font's tick in
+    /// a 12 pt box with a sharp corner.
+    #[gpui::test]
+    fn a_task_box_is_drawn_not_typed(cx: &mut gpui::TestAppContext) {
+        struct Rows;
+        impl Render for Rows {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let theme = Theme::default();
+                let row = |ix, done| {
+                    let task = Task { ix, done, text: "ship".to_owned() };
+                    task_row(format!("task-{ix}"), &task, &theme, "Menlo", 1.0, None)
+                };
+                div().p(px(40.0)).w(px(400.0)).child(row(0, false)).child(row(1, true))
+            }
+        }
+        cx.update(gpui_kit::init);
+        let (_rows, cx) = cx.add_window_view(|_window, _cx| Rows);
+        cx.run_until_parked();
+        let theme = Theme::default();
+        let side = theme.typography.prose() * TASK_BOX;
+        let (open, done) = (
+            cx.debug_bounds("task-0").expect("the open box"),
+            cx.debug_bounds("task-1").expect("the done box"),
+        );
+        for b in [open, done] {
+            assert!((f32::from(b.size.width) - side).abs() < 0.5, "{side} pt: {b:?}");
+        }
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let at = |b: gpui::Bounds<gpui::Pixels>| {
+            quads
+                .iter()
+                .find(|q| {
+                    (q.bounds.origin.y.0 / scale - f32::from(b.top())).abs() < 0.5
+                        && (q.bounds.size.width.0 / scale - f32::from(b.size.width)).abs() < 0.5
+                })
+                .copied()
+                .unwrap_or_else(|| panic!("a quad at {b:?}"))
+        };
+        let (open_q, done_q) = (at(open), at(done));
+        let s = &theme.surfaces;
+        assert_eq!(open_q.border_color, hsla(s.border), "a hairline");
+        assert!((open_q.corner_radii.top_left.0 / scale - theme.radii.xs).abs() < 0.01);
+        assert_eq!(done_q.background, gpui::Background::from(hsla(s.accent_fill)));
+    }
+
     #[test]
     fn a_task_line_is_a_mark_a_box_and_its_text() {
         assert_eq!(task_line("- [ ] ship"), Some((false, "ship")));
@@ -462,6 +547,21 @@ mod tests {
                 Segment::Code { lang: String::new(), body: "- [ ] not".to_owned() },
             ]
         );
+    }
+
+    #[test]
+    fn task_counts_agree_with_the_segments() {
+        let text = "- [x] a\n```\n- [ ] x\n```\n  - [x] b\n* [ ] c\n```rust\n- [x] unclosed";
+        let tasks: Vec<bool> = segments(text)
+            .into_iter()
+            .filter_map(|s| match s {
+                Segment::Task(task) => Some(task.done),
+                Segment::Prose(_) | Segment::Code { .. } => None,
+            })
+            .collect();
+        let done = tasks.iter().filter(|d| **d).count();
+        assert_eq!(task_counts(text), (done, tasks.len()));
+        assert_eq!(task_counts(text), (2, 3));
     }
 
     #[test]

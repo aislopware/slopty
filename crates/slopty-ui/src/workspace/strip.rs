@@ -7,14 +7,17 @@
 //! 16 points and kept for the gesture. The momentum macOS sends after the fingers lift is
 //! swallowed after a strip or workspace gesture, which has already snapped. A focused remote
 //! window takes every swipe over its picture (on a phone, every remote picture does). ⌘⌥ and
-//! the wheel steps columns and workspaces. A pinch in opens the overview; out closes it.
+//! the wheel steps columns and workspaces. A pinch in opens the overview; out closes it. A pinch
+//! that begins over a remote picture which would take a sideways swipe zooms that picture
+//! instead (`screen::zoom`), for the whole of the pinch.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Bounds, Context, DispatchPhase, FontWeight, InteractiveElement as _, IntoElement as _,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent,
-    Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
-    Styled as _, TouchPhase, Window, canvas, div, px,
+    Animation, AnimationExt as _, Bounds, Context, DispatchPhase, FontWeight,
+    InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement as _, Styled as _, TouchPhase, Window, canvas, div,
+    px,
 };
 use slopty_client::layout::{
     Axis, AxisLock, DropTarget, Frame, Rect, TileRef, WHEEL_TICK, WorkerKey,
@@ -84,6 +87,8 @@ pub(super) struct Gesture {
     swallow_coast: bool,
     /// Pinch travelled since it began.
     pinch: f32,
+    /// The pinch in progress began over a remote picture, which takes it.
+    pinch_to_content: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -236,6 +241,13 @@ impl WorkspaceView {
         }
     }
 
+    /// Whether a pinch beginning at `p` zooms the remote picture under it rather than the
+    /// strip: the picture that would keep a sideways swipe, with the overview closed (there
+    /// the tiles are miniatures, and a pinch is the overview's).
+    fn content_takes_pinch(&self, p: Point<Pixels>) -> bool {
+        !self.layout.overview_open() && self.content_takes(p, Axis::Horizontal)
+    }
+
     /// Every scroll over the strip, before the tiles see it (see the module docs).
     fn scroll_captured(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let (dx, dy) = match ev.delta {
@@ -349,7 +361,17 @@ impl WorkspaceView {
     fn pinch(&mut self, ev: &PinchEvent, _w: &mut Window, cx: &mut Context<Self>) {
         if ev.phase == TouchPhase::Started {
             self.gesture.pinch = 0.0;
+            self.gesture.pinch_to_content = self.content_takes_pinch(ev.position);
         }
+        let to_content = self.gesture.pinch_to_content;
+        if matches!(ev.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.gesture.pinch_to_content = false;
+        }
+        if to_content {
+            return;
+        }
+        // The overview's pinch: the picture under it must not zoom as well.
+        cx.stop_propagation();
         self.gesture.pinch += ev.delta;
         let open = self.layout.overview_open();
         let flip =
@@ -390,6 +412,7 @@ impl WorkspaceView {
             .map(|p| p.tile.item)
             .collect();
         self.note_visible(&visible);
+        self.on_screen = visible.into_iter().collect();
         let waiting = self.unseen.keys().any(|id| !self.parked.contains(id));
         if waiting && !self.park_pending {
             self.park_pending = true;
@@ -554,7 +577,7 @@ impl WorkspaceView {
     /// scrolled on, then the frame worked out once for the bar and the strip.
     pub(super) fn frame_at_clock(&mut self, window: &Window) -> Frame {
         self.tick();
-        // The overview's gaps hold the names drawn in them, and the cards' margins either side.
+        // The overview's gaps hold the names drawn in them, and the blocks' margins either side.
         let spacing = self.theme.spacing;
         self.layout.set_overview_label(2.0_f32.mul_add(spacing.sm, spacing.xl));
         if let Some(Drag::Move { moving: true, .. }) = self.drag {
@@ -609,8 +632,9 @@ impl WorkspaceView {
         }
         self.placed = placed;
         self.drawn_focus = self.layout.focused();
+        self.drawn_keys = window.focused(cx);
         let closing: Vec<gpui::AnyElement> =
-            frame.closing.iter().map(|c| self.render_closing(c.rect, c.alpha, c.scale)).collect();
+            frame.closing.iter().filter_map(|c| self.render_closing(c, chrome, cx)).collect();
         let backdrops =
             if frame.overview > 0.0 { self.overview_blocks(frame, cx) } else { Vec::new() };
         let hint = self.drop_hint(frame);
@@ -660,22 +684,25 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// The overview's cards, under the tiles: each workspace with tiles is one card on the
+    /// The overview's blocks, under the tiles: each workspace with tiles is one block on the
     /// content's surface holding its panes flush, a base unit wider all round so its corners
     /// (`radii.lg`, the radius of what floats) clear theirs, with a hairline. Only the active
-    /// one floats: it takes the one elevation and the 2 pt accent ring outside a 2 pt gap, the
-    /// keyboard's ring, so "where you are" reads the way focus does. A shadow under every card
-    /// would say they all float. Each name sits above its card at the medium weight, its count
-    /// in the meta size. The empty workspace kept at the end is where the next one goes: a
-    /// ghost "New workspace" button under the last card, on its left edge, which opens it.
+    /// one floats: it takes the one elevation and a 1.5 pt accent edge flush with it, as a
+    /// selected thumbnail has. A shadow under every block would say they all float. Each name
+    /// sits above its block at the medium weight, its count in the meta size. The empty
+    /// workspace kept at the end is where the next one goes: a ghost "New workspace" button
+    /// under the last block, on its left edge, which opens it.
     fn overview_blocks(&self, frame: &Frame, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        // A base unit, so the panes' square corners sit well inside the card's round ones.
+        // A base unit, so the panes' square corners sit well inside the block's round ones.
         let pad = theme.spacing.sm;
         let workspaces = self.layout.workspaces();
         let active = self.layout.active_workspace();
         let fade = frame.overview;
+        let (opening, moves) = (self.layout.overview_open(), self.chrome_moves(cx));
+        // The words start on the panes' glyphs' edge: a miniature's label pads its glyph by `pad`.
+        let glyph_slot = theme.typography.icon_large();
         let mut left = None;
         let mut out = Vec::new();
         for (ix, r) in frame.workspaces.iter().map(|(ix, r)| (*ix, *r)) {
@@ -694,13 +721,12 @@ impl WorkspaceView {
                     .role(gpui::accesskit::Role::Button)
                     .aria_label(NEW_WORKSPACE)
                     .absolute()
-                    // On the card's edge, its glyph where the names above the cards start.
-                    .left(px(x - pad))
+                    // Its glyph where the panes' glyphs and the names above the blocks start.
+                    .left(px(x))
                     .top(px(r.y - pad))
                     .h(px(theme.density.row))
                     .px(px(pad))
                     .rounded(px(theme.radii.sm))
-                    .opacity(fade)
                     .flex()
                     .items_center()
                     .gap(px(theme.spacing.xs))
@@ -711,13 +737,15 @@ impl WorkspaceView {
                     .font_family(theme.typography.ui_family.clone())
                     .text_color(hsla(s.text_secondary))
                     .child(
-                        crate::icons::icon(
-                            theme,
-                            IconName::Plus,
-                            crate::icons::IconSize::Inline,
-                            muted,
-                        )
-                        .size(px(theme.typography.icon())),
+                        div().size(px(glyph_slot)).flex().items_center().justify_center().child(
+                            crate::icons::icon(
+                                theme,
+                                IconName::Plus,
+                                crate::icons::IconSize::Inline,
+                                muted,
+                            )
+                            .size(px(theme.typography.icon())),
+                        ),
                     )
                     .child(
                         div()
@@ -730,12 +758,14 @@ impl WorkspaceView {
                         this.go_to_workspace(ix, cx);
                     },
                 ));
-                out.push(new.into_any_element());
+                // Its own wrapper, so the button keeps its placement while the words fade.
+                let new = div().absolute().inset_0().child(new);
+                out.extend(overview_words(new, "overview-new-workspace-in", opening, moves));
                 continue;
             }
             left = Some(r.x);
             let here = ix == active;
-            let card = div()
+            let block = div()
                 .debug_selector(move || format!("overview-block-{ix}"))
                 .absolute()
                 .left(px(r.x - pad))
@@ -746,20 +776,28 @@ impl WorkspaceView {
                 .opacity(fade)
                 .map(|el| {
                     if here {
-                        kit::elevate(el, theme).outline(crate::a11y::ring(s.accent))
+                        // Where you are: an edge of the full accent flush with the block, as a
+                        // selected thumbnail has it. The keyboard's ring outside a gap read as
+                        // focus round a block, not as the block chosen.
+                        let ring = gpui::Outline {
+                            color: hsla(s.accent),
+                            width: px(OVERVIEW_EDGE),
+                            offset: px(0.0),
+                        };
+                        kit::elevate(el, theme).outline(ring)
                     } else {
                         el.border_1().border_color(hsla(s.border))
                     }
                 })
-                // The panes' own surface, lifted or not: the card is what they sit on.
+                // The panes' own surface, lifted or not: the block is what they sit on.
                 .bg(hsla(theme.content()));
             let ink = if here { s.text } else { s.text_secondary };
             let count = if tiles == 1 { "1 tile".to_owned() } else { format!("{tiles} tiles") };
             let label = div()
                 .absolute()
-                .left(px(r.x))
+                .left(px(r.x + pad))
                 .top(px(label_top))
-                .w(px(r.w))
+                .w(px(r.w - pad))
                 .h(px(theme.spacing.xl))
                 .flex()
                 .items_center()
@@ -775,14 +813,14 @@ impl WorkspaceView {
                         .text_ellipsis()
                         .text_size(px(theme.typography.ui_size))
                         .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                        .text_color(hsla_alpha(ink, fade))
+                        .text_color(hsla(ink))
                         .child(SharedString::from(self.workspace_name_at(ix))),
                 )
                 .child(
                     kit::tabular(div())
                         .flex_none()
                         .text_size(px(theme.typography.meta()))
-                        .text_color(hsla_alpha(s.text_muted, fade))
+                        .text_color(hsla(s.text_muted))
                         .child(SharedString::from(count)),
                 )
                 .child(super::rollup::rollup_slot(
@@ -791,8 +829,9 @@ impl WorkspaceView {
                     self.workspace_rollup(ix, cx).0,
                     true,
                 ));
-            out.push(card.into_any_element());
-            out.push(label.into_any_element());
+            out.push(block.into_any_element());
+            let words = SharedString::from(format!("overview-words-{ix}"));
+            out.extend(overview_words(label, words, opening, moves));
         }
         out
     }
@@ -942,7 +981,7 @@ impl WorkspaceView {
                 .child(section("empty-workers", "Workers").children(workers))
         };
         // The strip is the content step with or without a tile on it: the empty workspace is
-        // the page a tile would be, not a hole down to the bars' canvas.
+        // the page a tile would be, not a hole down to the bars' `canvas`.
         let top = f32::from(self.viewport.size.height) * kit::MODAL_ANCHOR;
         div()
             .id("empty-workspace")
@@ -1041,8 +1080,16 @@ impl WorkspaceView {
         crate::a11y::tab_stop(row, s.accent)
     }
 
-    /// One way to begin: its icon, what it does and, with a keyboard to press it on, its keys;
-    /// `primary` wears the palette's selected fill, the row Enter would run there.
+    /// The worker a way to begin opens on: the one "+" chose, else the one in context.
+    fn begin_target(&self) -> Option<String> {
+        let chosen = self.new_on.filter(|k| self.workers.contains_key(k));
+        let key = chosen.or_else(|| self.context_worker())?;
+        self.workers.get(&key).map(|w| w.name.clone())
+    }
+
+    /// One way to begin: its icon, what it does, where it opens and, with a keyboard to press
+    /// it on, its keys; `primary` wears the palette's selected fill, the row Enter would run
+    /// there.
     fn begin_row(
         &self,
         id: &'static str,
@@ -1066,7 +1113,20 @@ impl WorkspaceView {
             .when(!primary, |el| el.hover(|st| st.bg(hsla(s.raised))))
             .active(|st| st.bg(hsla(s.overlay)))
             .child(crate::palette::icon_slot(theme, icon, hsla(icon_ink)))
-            .child(div().flex_1().text_color(hsla(s.text)).child(label))
+            .child(div().flex_none().text_color(hsla(s.text)).child(label))
+            // Where it opens, as its meta: the worker "+" chose, else the one in context.
+            .children(self.begin_target().map(|worker| {
+                div()
+                    .debug_selector(move || format!("{id}-target"))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(format!("on {worker}")))
+            }))
+            .child(div().flex_1())
             // A chord is only worth printing where there are keys to press it on.
             .when(self.hardware_keyboard, |el| {
                 el.child(
@@ -1081,6 +1141,9 @@ impl WorkspaceView {
         crate::a11y::tab_stop(row, s.accent)
     }
 }
+
+/// The active overview block's accent edge, in points.
+const OVERVIEW_EDGE: f32 = 1.5;
 
 /// How wide the empty workspace's column stands: room for a directory beside its branch and
 /// worker, narrow enough to read as one block down the strip.
@@ -1101,6 +1164,37 @@ pub(super) struct RecentPlace {
     /// What it is called: the repository and the path within it, else the path's tail.
     pub name: String,
     pub branch: Option<String>,
+}
+
+/// How long the keyed overview takes to land: the layout's critically damped spring, read to
+/// where it stops moving to the eye.
+const OVERVIEW_LANDS: std::time::Duration = std::time::Duration::from_millis(280);
+
+/// The overview's words (names, counts, "New workspace") fading in over the last
+/// [`kit::Pace::Fade`] of the zoom, drawn at the type scale once the blocks have all but landed,
+/// so no text is ever seen scaling. `el` is drawn at once where chrome does not move, and not
+/// at all while the overview closes: words over a zoom on its way in read as debris.
+pub(super) fn overview_words(
+    el: gpui::Div,
+    id: impl Into<gpui::ElementId>,
+    opening: bool,
+    moves: bool,
+) -> Option<gpui::AnyElement> {
+    if !opening {
+        return None;
+    }
+    if !moves {
+        return Some(el.into_any_element());
+    }
+    let lands = OVERVIEW_LANDS.as_secs_f32();
+    let wait = (lands - kit::Pace::Fade.duration().as_secs_f32()) / lands;
+    let curve = kit::Pace::Fade.curve();
+    Some(
+        el.with_animation(id, Animation::new(OVERVIEW_LANDS), move |el, t| {
+            el.opacity(curve.at(((t - wait) / (1.0 - wait)).clamp(0.0, 1.0)))
+        })
+        .into_any_element(),
+    )
 }
 
 /// What the empty workspace says.

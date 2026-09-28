@@ -29,7 +29,7 @@ pub struct Connected {
 }
 
 fn known() -> Result<KnownWorkers> {
-    Ok(KnownWorkers::open_in(&slopty_settings::data_dir())?)
+    Ok(KnownWorkers::open_in(&slopty_platform::dirs::data_dir())?)
 }
 
 /// The app's one endpoint, bound on first use.

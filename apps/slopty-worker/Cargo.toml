@@ -46,9 +46,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-objc2-application-services.workspace = true
-objc2-core-foundation.workspace = true
-objc2-core-video.workspace = true
 slopty-codec.workspace = true
 serde_json.workspace = true
 slopty-worker.workspace = true
@@ -56,3 +53,8 @@ slopty-media.workspace = true
 slopty-shape.workspace = true
 slopty-client.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+objc2-application-services.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-video.workspace = true

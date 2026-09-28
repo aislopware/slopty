@@ -25,6 +25,9 @@ pub enum CaptureError {
     /// The stream stopped on its own (window closed, display unplugged, permission revoked).
     #[error("stream stopped: {0}")]
     Stopped(String),
+    /// This platform has no screen capture (`docs/decisions/platform.md`, "Linux seams").
+    #[error("screen capture is unsupported on this platform")]
+    Unsupported,
 }
 
 /// A rectangle in global display points (origin top-left, y down, as `CGWindow` reports).
@@ -223,6 +226,9 @@ pub enum AxError {
     /// The accessibility API refused to set an attribute (an `AXError` code).
     #[error("accessibility attribute write failed with AXError {0}")]
     Attribute(i32),
+    /// This platform has no window accessibility.
+    #[error("window accessibility is unsupported on this platform")]
+    Unsupported,
 }
 
 /// Where a worker's pictures come from: the displays and windows it can stream, a stream of

@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: line
+---
+{"reply":"ok","changed":true}

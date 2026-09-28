@@ -17,7 +17,7 @@ pub struct WhoIs {
     /// Its owner (for a tagged node, the placeholder `tagged-devices` profile).
     pub user_profile: UserProfile,
     /// Application capabilities by name, each with the JSON values the grants gave it.
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde(default, deserialize_with = "crate::null_as_default")]
     pub cap_map: BTreeMap<String, Vec<serde_json::Value>>,
 }
 
@@ -30,10 +30,10 @@ pub struct WhoNode {
     /// The user it belongs to.
     pub user: i64,
     /// Its tags; a tagged node belongs to no user.
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde(default, deserialize_with = "crate::null_as_default")]
     pub tags: Vec<String>,
     /// Its tailnet addresses as prefixes (`100.64.0.3/32`).
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde(default, deserialize_with = "crate::null_as_default")]
     pub addresses: Vec<String>,
 }
 
@@ -57,14 +57,6 @@ impl WhoIs {
     pub const fn tagged(&self) -> bool {
         !self.node.tags.is_empty()
     }
-}
-
-fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Default + Deserialize<'de>,
-{
-    Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
 }
 
 /// Whois fixtures, shared with the other modules' tests.

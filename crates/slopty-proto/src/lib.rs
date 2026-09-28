@@ -17,6 +17,8 @@
 //! * **Echo copies** — a keystroke's input request and the small frame that answers it also go once
 //!   as a datagram each ([`datagram`]), taken only in order, so a lost packet costs a datagram's
 //!   trip rather than QUIC's probe timeout.
+//! * **The worker's control socket** — local only, between the worker and the CLI, the hook relay
+//!   and the app on the same Mac: one line of JSON each way ([`ctl`]).
 //!
 //! Encoded bytes of representative messages are pinned as insta goldens under `tests/snapshots`;
 //! a changed golden is a wire change.
@@ -26,8 +28,10 @@
 pub mod agent;
 pub mod codec;
 pub mod conversation;
+pub mod ctl;
 pub mod datagram;
 pub mod file;
+pub mod folder;
 pub mod handshake;
 pub mod input;
 pub mod items;
@@ -68,7 +72,7 @@ pub enum ClientMsg {
     /// Register the `slopty hook` relay in the worker's Claude Code settings, so agents there
     /// report precisely instead of being guessed at; answered with `WorkerMsg::HooksInstalled`.
     InstallHooks,
-    /// Read a file on the worker for a file card; answered with `WorkerMsg::File`.
+    /// Read a file on the worker for a file tile; answered with `WorkerMsg::File`.
     ReadFile {
         /// Absolute path on the worker.
         path: String,
@@ -88,9 +92,9 @@ pub enum ClientMsg {
         /// The item.
         item: slopty_core::ItemId,
     },
-    /// The files this client's file cards show, the whole set each time it changes: the worker
+    /// The files this client's file tiles show, the whole set each time it changes: the worker
     /// looks at each one every so often and answers with `WorkerMsg::File` again when one has
-    /// changed on disk. Empty when the last card goes.
+    /// changed on disk. Empty when the last file tile goes.
     WatchFiles {
         /// Absolute paths on the worker.
         paths: Vec<String>,
@@ -111,6 +115,11 @@ pub enum ClientMsg {
     Xfer(transfer::XferMsg),
     /// Follow an agent's conversation, answer its permission prompts.
     Conversation(conversation::ConversationRequest),
+    /// List a directory for a folder tile; answered with `WorkerMsg::Folder`.
+    ListFolder {
+        /// An absolute directory on the worker, or `~/…` in its home.
+        path: String,
+    },
 }
 
 impl ClientMsg {
@@ -133,6 +142,7 @@ impl ClientMsg {
             Self::Clip(_) => "Clip",
             Self::Xfer(_) => "Xfer",
             Self::Conversation(_) => "Conversation",
+            Self::ListFolder { .. } => "ListFolder",
         }
     }
 }
@@ -218,6 +228,13 @@ pub enum WorkerMsg {
     Caps(server::WorkerCaps),
     /// A permission prompt of a session this client follows, or its end.
     Permission(conversation::PermissionEvent),
+    /// The answer to `ClientMsg::ListFolder`.
+    Folder {
+        /// The path asked for, as asked.
+        path: String,
+        /// What was there.
+        listing: folder::Listing,
+    },
 }
 
 impl WorkerMsg {
@@ -243,6 +260,7 @@ impl WorkerMsg {
             Self::Path(_) => "Path",
             Self::Caps(_) => "Caps",
             Self::Permission(_) => "Permission",
+            Self::Folder { .. } => "Folder",
         }
     }
 }

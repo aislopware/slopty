@@ -9,9 +9,11 @@ mod golden {
     };
     use slopty_proto::datagram::{ClientDatagram, term_datagram};
     use slopty_proto::handshake::Hello;
-    use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
+    use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods, MouseButton};
     use slopty_proto::orchestration::Port;
-    use slopty_proto::screen::{Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenRequest};
+    use slopty_proto::screen::{
+        Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest,
+    };
     use slopty_proto::terminal::{
         ColorOverrides, Frame, PixelRect, Placement, SearchMatch, TermColors, TermEvent,
         TermRequest,
@@ -184,6 +186,27 @@ mod golden {
         insta::assert_snapshot!("client_input_copy", hex(&bytes));
     }
 
+    /// A window stream's input copy: the stream, its place among the stream's numbered
+    /// requests, how many of those apply only in order, the input.
+    #[test]
+    fn screen_input_copy() {
+        let copy = ClientDatagram::ScreenInput {
+            stream: StreamId(7),
+            seq: 12,
+            ordered: 3,
+            input: ScreenInput::Button {
+                button: MouseButton::Left,
+                down: true,
+                x: 10.5,
+                y: 20.0,
+                clicks: 1,
+                mods: Mods::SUPER,
+            },
+        };
+        let bytes = codec::encode_body(&copy).expect("encodes");
+        insta::assert_snapshot!("client_screen_input_copy", hex(&bytes));
+    }
+
     /// An echo's copy: a `Term` media header, then the session and the event.
     #[test]
     fn frame_copy() {
@@ -341,8 +364,8 @@ mod golden {
         );
     }
 
-    /// File cards and the palette's quick open (protocol 20+): a read, a watch, a search
-    /// and their answers, and a file item on the canvas.
+    /// File tiles and the palette's quick open (protocol 20+): a read, a watch, a search
+    /// and their answers, and a file item in the registry.
     #[test]
     fn files() {
         snap("client_read_file", &ClientMsg::ReadFile { path: "/w/slopty/src/main.rs".to_owned() });
@@ -370,12 +393,57 @@ mod golden {
                 path: "/w/slopty/src/main.rs".to_owned(),
                 read: slopty_proto::file::FileRead::Text {
                     text: "fn main() {}\n// more".to_owned(),
-                    more_lines: 3,
                     size: 4096,
                     modified_ms: 1_788_000_000_000,
                     final_newline: false,
                 },
             },
+        );
+        snap(
+            "worker_file_streamed",
+            &WorkerMsg::File {
+                path: "/w/slopty/src/big.rs".to_owned(),
+                read: slopty_proto::file::FileRead::Streamed {
+                    xfer: XferId::from_uuid(Uuid::from_u128(0x0f11e)),
+                    size: 1_400_000,
+                    modified_ms: 1_788_000_000_000,
+                    final_newline: true,
+                },
+            },
+        );
+        snap(
+            "worker_file_too_large",
+            &WorkerMsg::File {
+                path: "/w/logs/huge.log".to_owned(),
+                read: slopty_proto::file::FileRead::TooLarge { size: 40 << 20 },
+            },
+        );
+        snap(
+            "uni_bulk_file_text",
+            &UniHead::Bulk(BulkHeader {
+                xfer: XferId::from_uuid(Uuid::from_u128(0x0f11e)),
+                purpose: Purpose::FileText,
+                name: String::new(),
+                size: 1_399_999,
+                mtime_ms: 1_788_000_000_000,
+                mode: 0,
+                offset: 0,
+            }),
+        );
+        snap(
+            "uni_bulk_save",
+            &UniHead::Bulk(BulkHeader {
+                xfer: XferId::from_uuid(Uuid::from_u128(0x5a7e)),
+                purpose: Purpose::Save {
+                    path: "/w/slopty/src/big.rs".to_owned(),
+                    base_modified_ms: Some(1_788_000_000_000),
+                },
+                name: String::new(),
+                size: 1_400_001,
+                mtime_ms: 0,
+                mode: 0,
+                offset: 0,
+            }),
         );
         snap(
             "worker_file_missing",
@@ -463,6 +531,83 @@ mod golden {
                 id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7a)),
                 text: "# Plan\n".to_owned(),
             }),
+        );
+        snap(
+            "client_item_set_url",
+            &ClientMsg::Items(slopty_proto::items::ItemOp::SetUrl {
+                id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7b)),
+                url: "http://localhost:3000/docs".to_owned(),
+            }),
+        );
+    }
+
+    /// Folder tiles: the item, a move to another directory, the listing asked for and its
+    /// three answers.
+    #[test]
+    fn folders() {
+        use slopty_proto::folder::{FolderEntry, Listing};
+        use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
+        use slopty_proto::orchestration::FileKind;
+
+        let id = slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7c));
+        snap(
+            "worker_item_folder",
+            &WorkerMsg::Items(ItemSync::Delta {
+                version: 12,
+                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                op: ItemOp::Add(Item {
+                    id,
+                    kind: ItemKind::Folder { path: "/w/slopty".to_owned() },
+                    sleeping: false,
+                    name: None,
+                }),
+            }),
+        );
+        snap(
+            "client_item_set_folder",
+            &ClientMsg::Items(ItemOp::SetFolder { id, path: "/w/slopty/src".to_owned() }),
+        );
+        snap("client_list_folder", &ClientMsg::ListFolder { path: "~/src".to_owned() });
+        snap(
+            "worker_folder_listed",
+            &WorkerMsg::Folder {
+                path: "~/src".to_owned(),
+                listing: Listing::Listed {
+                    dir: "/Users/w/src".to_owned(),
+                    entries: vec![
+                        FolderEntry {
+                            name: ".git".to_owned(),
+                            kind: FileKind::Dir,
+                            link: false,
+                            hidden: true,
+                            size: 0,
+                            items: Some(12),
+                            modified_ms: 1_788_000_000_000,
+                        },
+                        FolderEntry {
+                            name: "main.rs".to_owned(),
+                            kind: FileKind::File,
+                            link: true,
+                            hidden: false,
+                            size: 4096,
+                            items: None,
+                            modified_ms: 1_788_000_000_500,
+                        },
+                    ],
+                    total: 3,
+                },
+            },
+        );
+        snap(
+            "worker_folder_not_folder",
+            &WorkerMsg::Folder { path: "/w/a.txt".to_owned(), listing: Listing::NotFolder },
+        );
+        snap(
+            "worker_folder_missing",
+            &WorkerMsg::Folder {
+                path: "/w/gone".to_owned(),
+                listing: Listing::Missing { error: "No such file or directory".to_owned() },
+            },
         );
     }
 
@@ -608,6 +753,15 @@ mod golden {
             }),
         );
         snap(
+            "client_xfer_begin_attachment",
+            &ClientMsg::Xfer(XferMsg::Begin {
+                xfer,
+                dest: Some(Dest::Attachment),
+                files: 1,
+                bytes: 2048,
+            }),
+        );
+        snap(
             "worker_xfer_done",
             &WorkerMsg::Xfer(XferMsg::Done {
                 xfer,
@@ -743,6 +897,37 @@ mod golden {
         );
     }
 
+    /// ⌘V and ⌃V with a picture on the client's clipboard: the offer is placed on the
+    /// worker's pasteboard, then the chord applied.
+    #[test]
+    fn paste_picture() {
+        use slopty_proto::terminal::PasteChord;
+        snap(
+            "client_term_paste_picture_command",
+            &ClientMsg::Term {
+                session: session(),
+                req: TermRequest::PastePicture(PasteChord::Command),
+            },
+        );
+        snap(
+            "client_term_paste_picture_control",
+            &ClientMsg::Term {
+                session: session(),
+                req: TermRequest::PastePicture(PasteChord::Control(KeyEvent {
+                    seq: 8,
+                    action: KeyAction::Press,
+                    code: KeyCode::V,
+                    mods: Mods::CTRL,
+                    consumed_mods: Mods::empty(),
+                    text: None,
+                    unshifted: Some('v'),
+                    composing: false,
+                    option_as_alt: false,
+                })),
+            },
+        );
+    }
+
     #[test]
     fn term_image() {
         snap(
@@ -752,7 +937,7 @@ mod golden {
                 generation: 4,
                 width: 2,
                 height: 1,
-                rgba: vec![255, 0, 0, 255, 0, 0, 255, 128],
+                bgra: vec![255, 0, 0, 255, 0, 0, 255, 128],
             },
         );
     }
@@ -803,6 +988,7 @@ mod golden {
             "server_request",
             &FromServer::Request {
                 id: 7,
+                key: None,
                 verb: Verb::ReadOutput { term, since: Some(1200), max_lines: 200 },
             },
         );
@@ -837,8 +1023,8 @@ mod orchestration {
     use slopty_proto::codec;
     use slopty_proto::items::{Item, ItemKind};
     use slopty_proto::orchestration::{
-        DirEntry, EventFilter, FileKind, FileStat, Happening, HubEvent, ItemRef, Outcome, Size,
-        TermRef, Verb,
+        DirEntry, ErrorCode, EventFilter, FileKind, FileStat, Happening, HubEvent, IdempotencyKey,
+        Input, ItemRef, Outcome, Size, TermRef, Verb,
     };
     use slopty_proto::screen::{DisplayInfo, WindowInfo};
     use slopty_proto::server::{FromServer, ToServer};
@@ -868,7 +1054,7 @@ mod orchestration {
     }
 
     fn request(verb: Verb) -> FromServer {
-        FromServer::Request { id: 8, verb }
+        FromServer::Request { id: 8, key: None, verb }
     }
 
     fn reply(outcome: Outcome) -> ToServer {
@@ -922,6 +1108,7 @@ mod orchestration {
     fn events_and_forgetting() {
         let asked = ToServer::Request {
             id: 9,
+            key: None,
             verb: Verb::Events {
                 since: Some(41),
                 timeout_ms: 60_000,
@@ -941,8 +1128,9 @@ mod orchestration {
         };
         let answer = Outcome::Events { events: vec![event], next: 42, missed: 0 };
         snap("server_reply_events", &FromServer::Reply { id: 9, outcome: answer });
+        let key = Some(IdempotencyKey::new("0199a1b1-c3d4-7000-8000-00000000cafe").expect("a key"));
         let forget =
-            ToServer::Request { id: 10, verb: Verb::ForgetWorker { worker: term().worker } };
+            ToServer::Request { id: 10, key, verb: Verb::ForgetWorker { worker: term().worker } };
         snap("server_request_forget", &forget);
         let exited = HubEvent {
             seq: 43,
@@ -951,6 +1139,21 @@ mod orchestration {
         };
         let answer = Outcome::Events { events: vec![exited], next: 44, missed: 0 };
         snap("server_reply_session_exited", &FromServer::Reply { id: 11, outcome: answer });
+    }
+
+    #[test]
+    fn idempotency_keys() {
+        let key = IdempotencyKey::new("retry-me").expect("a key");
+        let send = Verb::SendInput { term: term(), input: Input::Text("make\n".to_owned()) };
+        snap("server_request_keyed", &FromServer::Request { id: 12, key: Some(key), verb: send });
+        let lost = Outcome::Error { code: ErrorCode::Interrupted, message: String::new() };
+        snap("server_reply_interrupted", &reply(lost));
+        let bad: Result<IdempotencyKey, _> =
+            codec::decode_body(&codec::encode_body(&"").expect("encodes"));
+        assert!(bad.is_err(), "an empty key does not decode");
+        assert!(
+            IdempotencyKey::new("a b").is_err() && IdempotencyKey::new("x".repeat(129)).is_err()
+        );
     }
 
     #[test]
@@ -983,6 +1186,96 @@ mod orchestration {
         let display = DisplayInfo { id: 1, w: 2560.0, h: 1440.0, scale: 2.0, hz: 120.0 };
         let screens = Outcome::Screens { windows: vec![window], displays: vec![display] };
         snap("server_reply_screens", &reply(screens));
+    }
+
+    /// The verbs an orchestrating agent reaches another agent and the screen with: a page of
+    /// the conversation and the prompt held in it, the answer, a still picture or the refusal of
+    /// one, and a file sent up in parts.
+    #[test]
+    fn agent_verbs() {
+        use slopty_core::XferId;
+        use slopty_proto::conversation::{
+            Body, Clipped, Entry, Meters, Origin, PermissionPrompt, Prompt, Task, ThreadId,
+            ToolDetail, Verdict,
+        };
+        use slopty_proto::orchestration::{ConversationPage, ThreadInfo, UploadPart};
+        use slopty_proto::screen::CaptureTarget;
+
+        let worker = term().worker;
+        let read = Verb::ReadConversation {
+            term: term(),
+            thread: ThreadId::Main,
+            since: Some(40),
+            max: 50,
+        };
+        snap("server_request_read_conversation", &request(read));
+        let text = |s: &str| Clipped { text: s.to_owned(), lines: 1, chars: 7, full: None };
+        let prompt =
+            Body::Prompt(Prompt { text: text("fix it"), images: Vec::new(), command: None });
+        let page = ConversationPage {
+            threads: vec![
+                ThreadInfo { id: ThreadId::Main, origin: None, entries: 41 },
+                ThreadInfo {
+                    id: ThreadId::Agent("a1".to_owned()),
+                    origin: Some(Origin {
+                        tool_use_id: Some("t1".to_owned()),
+                        agent_type: Some("Explore".to_owned()),
+                        description: None,
+                    }),
+                    entries: 3,
+                },
+            ],
+            thread: ThreadId::Main,
+            entries: vec![Entry { id: "u1".to_owned(), at_ms: 7, body: prompt }],
+            start: 40,
+            next: 41,
+            total: 41,
+            tasks: vec![Task {
+                id: "1".to_owned(),
+                subject: "Build".to_owned(),
+                status: "in_progress".to_owned(),
+            }],
+            meters: Some(Meters { model: Some("Opus".to_owned()), ..Meters::default() }),
+            held: vec![PermissionPrompt {
+                session: term().session,
+                ask: 3,
+                tool: "Bash".to_owned(),
+                detail: ToolDetail::Other { input: text("{}") },
+                suggestions: Vec::new(),
+                mode: Some("default".to_owned()),
+                asked_ms: 1_790_000_000_000,
+                until_ms: 1_790_000_595_000,
+            }],
+        };
+        snap("server_reply_conversation", &reply(Outcome::Conversation(Box::new(page))));
+        let key = Some(IdempotencyKey::new("answer-3").expect("a key"));
+        let answer = Verb::AnswerPermission {
+            term: term(),
+            ask: 3,
+            verdict: Verdict::Deny { message: "not on main".to_owned(), interrupt: false },
+        };
+        snap("server_request_answer_permission", &FromServer::Request { id: 8, key, verb: answer });
+
+        let still = Verb::CaptureStill { worker, target: CaptureTarget::Window(WindowId(4242)) };
+        snap("server_request_capture_still", &request(still));
+        let png = Outcome::Still { png: b"\x89PNG".to_vec(), width: 2560, height: 1600 };
+        snap("server_reply_still", &reply(png));
+        let refused = Outcome::Error {
+            code: ErrorCode::Unsupported,
+            message: "no Screen Recording".to_owned(),
+        };
+        snap("server_reply_unsupported", &reply(refused));
+
+        let upload = XferId::from_uuid(Uuid::from_u128(0x0bad_cafe));
+        let path = "~/build/app.tar".to_owned();
+        let part = UploadPart::Bytes { offset: 1 << 20, bytes: vec![1, 2, 3] };
+        let part = Verb::Upload { worker, path: path.clone(), upload, part };
+        snap("server_request_upload_part", &request(part));
+        let finish = UploadPart::Finish { size: 3 << 20, digest: [0xab; 32], mode: Some(0o755) };
+        let key = Some(IdempotencyKey::new("push-app").expect("a key"));
+        let finish = Verb::Upload { worker, path, upload, part: finish };
+        assert!(finish.changes(), "the finish is the step a key guards");
+        snap("server_request_upload_finish", &FromServer::Request { id: 8, key, verb: finish });
     }
 }
 
@@ -1048,10 +1341,10 @@ mod size_report {
 mod conversation {
     use slopty_core::{ClientId, SessionId};
     use slopty_proto::conversation::{
-        AgentDetail, AgentRun, Answer, BashDetail, Body, Change, Clipped, Compact,
+        AgentDetail, AgentRun, Answer, BashDetail, Blob, Body, Change, Clipped, Compact,
         ConversationEvent, ConversationRequest, EditDetail, Entry, GlobDetail, Grant, GrepDetail,
-        Hunk, Link, Live, LiveId, LiveKind, McpDetail, Meters, Note, NoteKind, Part, Patch,
-        PermissionEvent, PermissionPrompt, Prompt, Question, QuestionDetail, RateWindow,
+        Hunk, Image, Link, Live, LiveId, LiveKind, McpDetail, Meters, Note, NoteKind, Output, Part,
+        Patch, PermissionEvent, PermissionPrompt, Prompt, Question, QuestionDetail, RateWindow,
         ReadDetail, ResultStatus, Retry, Settled, ShellStatus, Suggestion, Task, TaskCreateDetail,
         TaskUpdateDetail, TextRef, ThreadId, ToolCall, ToolDetail, ToolResult, Turn, Usage,
         Verdict, WebFetchDetail, WebSearchDetail, WriteDetail, WriteKind,
@@ -1113,12 +1406,36 @@ mod conversation {
         }
     }
 
+    fn image(part: Part) -> Image {
+        Image {
+            digest: "af1349b9".to_owned(),
+            media_type: "image/png".to_owned(),
+            bytes: 2_048,
+            width: 640,
+            height: 480,
+            at: reference(part),
+        }
+    }
+
     fn tool(id: &str, name: &str, detail: ToolDetail, status: ResultStatus) -> Change {
-        let result = ToolResult { status, text: Some(text("out")), at_ms: 9 };
+        let result = ToolResult { status, text: Some(text("out")), at_ms: 9, images: Vec::new() };
         entry(
             id,
             Body::Tool(Box::new(ToolCall { name: name.to_owned(), detail, result: Some(result) })),
         )
+    }
+
+    /// `change`, a tool's upsert, with an image in its result.
+    fn pictured(mut change: Change) -> Change {
+        if let Change::Upsert { entry, .. } = &mut change
+            && let Body::Tool(call) = &mut entry.body
+            && let Some(result) = &mut call.result
+        {
+            result
+                .images
+                .push(image(Part::Image { tool_use_id: Some(entry.id.clone()), index: 0 }));
+        }
+        change
     }
 
     #[test]
@@ -1148,6 +1465,14 @@ mod conversation {
                     tool_use_id: "t1".to_owned(),
                     field: "command".to_owned(),
                 }),
+            }),
+        );
+        snap(
+            "client_expand_image",
+            &ClientMsg::Conversation(ConversationRequest::Expand {
+                session,
+                thread: ThreadId::Main,
+                reference: reference(Part::Image { tool_use_id: None, index: 2 }),
             }),
         );
     }
@@ -1244,6 +1569,28 @@ mod conversation {
             ]),
         );
         snap(
+            "conversation_output",
+            &ConversationEvent::Output(vec![Output {
+                thread: ThreadId::Main,
+                call: "t6".to_owned(),
+                tail: clipped("ready in 2 s", Part::Output { tool_use_id: "t6".to_owned() }),
+                bytes: 90_000,
+            }]),
+        );
+        let picture = reference(Part::Image { tool_use_id: Some("t3".to_owned()), index: 0 });
+        snap(
+            "conversation_image",
+            &ConversationEvent::Image {
+                thread: ThreadId::Main,
+                reference: picture.clone(),
+                blob: Some(Blob { digest: "af1349b9".to_owned(), data: vec![0x89, b'P', b'N'] }),
+            },
+        );
+        snap(
+            "conversation_image_gone",
+            &ConversationEvent::Image { thread: ThreadId::Main, reference: picture, blob: None },
+        );
+        snap(
             "conversation_expanded",
             &ConversationEvent::Expanded {
                 thread: ThreadId::Main,
@@ -1270,7 +1617,7 @@ mod conversation {
                     "u1",
                     Body::Prompt(Prompt {
                         text: clipped("do it", Part::Block { index: 0 }),
-                        images: 1,
+                        images: vec![image(Part::Image { tool_use_id: None, index: 1 })],
                         command: Some("/compact".to_owned()),
                     }),
                 ),
@@ -1345,6 +1692,7 @@ mod conversation {
             stdout: Some(clipped("…ok", Part::Stdout)),
             stderr: Some(clipped("…err", Part::Stderr)),
             output_file: Some("/tmp/b1.out".to_owned()),
+            finished_ms: Some(12),
         };
         snap(
             "conversation_tools",
@@ -1371,7 +1719,7 @@ mod conversation {
                     }),
                     ok,
                 ),
-                tool(
+                pictured(tool(
                     "t3",
                     "Read",
                     ToolDetail::Read(ReadDetail {
@@ -1383,7 +1731,7 @@ mod conversation {
                         total_lines: Some(300),
                     }),
                     ok,
-                ),
+                )),
                 tool(
                     "t4",
                     "Grep",
@@ -1516,5 +1864,198 @@ mod conversation {
                 ),
             ]),
         );
+    }
+}
+
+/// The worker's local control socket: one JSON line per request and reply, as the CLI, the hook
+/// relay and the app write and read them.
+#[cfg(test)]
+mod ctl {
+    use std::net::IpAddr;
+
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+    use slopty_core::{SessionId, WindowId, WorkerId};
+    use slopty_proto::ctl::{
+        CtlReply, CtlRequest, Decision, Health, LtrStats, NotUp, PermissionAnswer, PermissionAsk,
+        Quantiles, ScreenStats, ScreenSummary, Tailscale,
+    };
+    use slopty_proto::screen::CaptureTarget;
+    use slopty_proto::terminal::{SessionState, SessionSummary};
+    use uuid::Uuid;
+
+    fn session() -> SessionId {
+        SessionId::from_uuid(Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10))
+    }
+
+    /// Pins the line and reads it back to the same value.
+    #[track_caller]
+    fn snap<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(name: &str, msg: &T) {
+        let line = serde_json::to_string(msg).expect("encodes");
+        assert_eq!(serde_json::from_str::<T>(&line).ok().as_ref(), Some(msg), "{name} reads back");
+        insta::assert_snapshot!(name, line);
+    }
+
+    fn health() -> Health {
+        Health {
+            version: "0.1.0".to_owned(),
+            exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
+            screen_recording: true,
+            post_events: false,
+            listen: "[::]:45550".to_owned(),
+            allow: vec!["10.0.0.0/8".to_owned()],
+            tailscale: Tailscale::Up {
+                node: "mac-studio.tail1234.ts.net".to_owned(),
+                ip: Some(IpAddr::from([100, 64, 0, 7])),
+            },
+            clients: 2,
+            sessions: 5,
+            uptime_secs: 86_400,
+        }
+    }
+
+    const fn quantiles(p50_us: u64, p95_us: u64, max_us: u64) -> Quantiles {
+        Quantiles { n: 600, p50_us, p95_us, max_us }
+    }
+
+    #[test]
+    fn requests() {
+        snap("ctl_request_status", &CtlRequest::Status);
+        snap("ctl_request_doctor", &CtlRequest::Doctor);
+        snap("ctl_request_screens", &CtlRequest::Screens);
+        snap(
+            "ctl_request_hook",
+            &CtlRequest::Hook {
+                session: session(),
+                payload: r#"{"hook_event_name":"Stop"}"#.to_owned(),
+            },
+        );
+        snap(
+            "ctl_request_permission",
+            &CtlRequest::Permission(PermissionAsk {
+                session: session(),
+                payload: r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#.to_owned(),
+                wait_ms: 595_000,
+            }),
+        );
+    }
+
+    #[test]
+    fn status_and_doctor() {
+        snap(
+            "ctl_reply_status",
+            &CtlReply::Status {
+                id: WorkerId::from_uuid(Uuid::from_u128(0x77)),
+                name: "mac-studio".to_owned(),
+                sessions: vec![SessionSummary {
+                    id: session(),
+                    title: "zsh".to_owned(),
+                    cwd: Some("/w/slopty".to_owned()),
+                    repo: None,
+                    branch: None,
+                    changes: None,
+                    started_ms: 1_790_000_000_000,
+                    cols: 80,
+                    rows: 24,
+                    state: SessionState::Exited { status: 1 },
+                    viewers: 0,
+                    command: vec!["/bin/zsh".to_owned()],
+                    agent: None,
+                }],
+            },
+        );
+        snap("ctl_reply_doctor", &CtlReply::Doctor(health()));
+        snap("ctl_health_without_tailscale", &Health { tailscale: Tailscale::Absent, ..health() });
+        snap("ctl_tailscale_down", &Tailscale::Down { backend: NotUp::NeedsLogin });
+        let error = "tailscale's local API did not answer within 2s".to_owned();
+        snap("ctl_tailscale_unreachable", &Tailscale::Unreachable { error });
+    }
+
+    #[test]
+    fn screens() {
+        let stats = ScreenStats {
+            captured: 1_200,
+            dropped: 3,
+            withheld: 4,
+            suspected: 5,
+            suspicions: 6,
+            siblings: 7,
+            encoded: 1_190,
+            datagrams: 9_000,
+            queue_full: 1,
+            heartbeats: 40,
+            refreshes: 2,
+            keyframes_deferred: 1,
+            latency_max_us: 9_000,
+            latency_sum_us: 4_000_000,
+            audio_packets: 500,
+            bitrate_bps: 20_000_000,
+            capture: quantiles(1_000, 2_000, 5_000),
+            encode: quantiles(2_000, 4_000, 10_000),
+            beat_gap: quantiles(250_000, 500_000, 1_250_000),
+            bounds: quantiles(300, 600, 1_500),
+            beat_gap_worst_us: 1_300_000,
+            cropped: 10,
+            ltr: LtrStats {
+                offered: 30,
+                acked: 28,
+                refreshes_idr: 1,
+                refreshes_delta: 2,
+                usable: true,
+                usable_age_us: 150_000,
+            },
+            encoder_bps: 18_000_000,
+            repaired: 11,
+            laned: 12,
+            on_crop: true,
+        };
+        snap(
+            "ctl_reply_screens",
+            &CtlReply::Screens {
+                live: vec![ScreenSummary {
+                    client: "iPad".to_owned(),
+                    stream: 3,
+                    target: CaptureTarget::Window(WindowId(4_242)),
+                    stats,
+                }],
+                closed: vec![ScreenSummary {
+                    client: "MacBook".to_owned(),
+                    stream: 1,
+                    target: CaptureTarget::Display(1),
+                    stats: ScreenStats::default(),
+                }],
+            },
+        );
+    }
+
+    /// Every decision a permission request can get.
+    #[test]
+    fn permissions() {
+        let reply = |decision| CtlReply::Permission(PermissionAnswer { decision });
+        snap("ctl_reply_permission_pass", &reply(Decision::Pass));
+        snap("ctl_reply_permission_allow", &reply(Decision::Allow));
+        snap(
+            "ctl_reply_permission_always",
+            &reply(Decision::AllowAlways {
+                // Keys in sorted order: whether a `Value` keeps insertion order depends on
+                // serde_json's `preserve_order`, which feature unification turns on in some
+                // builds and not others.
+                updated_permissions: vec![serde_json::json!({
+                    "behavior": "allow", "destination": "localSettings",
+                    "rules": [{ "ruleContent": "cargo test:*", "toolName": "Bash" }],
+                    "type": "addRules"
+                })],
+            }),
+        );
+        snap(
+            "ctl_reply_permission_deny",
+            &reply(Decision::Deny { message: "Not now.".to_owned(), interrupt: true }),
+        );
+    }
+
+    #[test]
+    fn outcomes() {
+        snap("ctl_reply_ok", &CtlReply::Ok { changed: true });
+        snap("ctl_reply_error", &CtlReply::Error { message: "no such session".to_owned() });
     }
 }

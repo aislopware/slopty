@@ -36,7 +36,7 @@ pub fn last_assistant_line(path: &Path) -> Option<String> {
 /// [`last_assistant_line`] over text already in memory; `cut` says the first line may be a
 /// fragment (the read started mid-record) and must be skipped.
 #[must_use]
-pub fn last_assistant_line_in(tail: &str, cut: bool) -> Option<String> {
+fn last_assistant_line_in(tail: &str, cut: bool) -> Option<String> {
     let mut lines: Vec<&str> = tail.lines().collect();
     if cut {
         lines.drain(..1.min(lines.len()));
@@ -180,7 +180,7 @@ fn line_progress(line: &str) -> Option<Progress> {
 /// The progress one parsed record implies; `None` for bookkeeping, sidechains and empty
 /// turns. The records Claude Code streams over stdio have the same shape as the file's.
 #[must_use]
-pub fn record_progress(record: &Value) -> Option<Progress> {
+fn record_progress(record: &Value) -> Option<Progress> {
     if is_subagent(record) {
         return None;
     }
@@ -283,7 +283,7 @@ fn assistant_progress(message: &Value, content: &Value) -> Option<Progress> {
 /// under the call that spawned it over stream-json (`parent_tool_use_id`). Neither is the
 /// agent's conversation.
 #[must_use]
-pub fn is_subagent(record: &Value) -> bool {
+fn is_subagent(record: &Value) -> bool {
     record.get("isSidechain").and_then(Value::as_bool) == Some(true)
         || record.get("parent_tool_use_id").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
 }
@@ -291,7 +291,7 @@ pub fn is_subagent(record: &Value) -> bool {
 /// One line saying what a tool call is about: the command, the file, the pattern, the URL,
 /// the subagent's brief; for anything else the first string in the input.
 #[must_use]
-pub fn tool_summary(name: &str, input: Option<&Value>) -> String {
+fn tool_summary(name: &str, input: Option<&Value>) -> String {
     let field = |key: &str| input?.get(key)?.as_str().map(str::to_owned);
     let text = match name {
         "Bash" => field("command"),

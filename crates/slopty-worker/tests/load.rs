@@ -6,6 +6,8 @@
 //! cargo nextest run -p slopty-worker --release --test load --run-ignored only
 //! ```
 
+#![cfg(target_vendor = "apple")]
+
 #[cfg(test)]
 mod spin {
     use std::time::{Duration, Instant};

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WorkerId};
 
 use crate::agent::AgentEvent;
-use crate::orchestration::{Outcome, Verb};
+use crate::orchestration::{IdempotencyKey, Outcome, Verb};
 use crate::screen::VideoCodec;
 use crate::terminal::{CloseReason, SessionSummary};
 
@@ -158,6 +158,8 @@ pub enum ToServer {
     Request {
         /// Echoed in the reply.
         id: RequestId,
+        /// The caller's name for the verb's effect, so a repeat does not do it twice.
+        key: Option<IdempotencyKey>,
         /// What.
         verb: Verb,
     },
@@ -197,6 +199,8 @@ pub enum FromServer {
     Request {
         /// The server's id.
         id: RequestId,
+        /// The caller's key, passed on: the worker does the verb once per key.
+        key: Option<IdempotencyKey>,
         /// What.
         verb: Verb,
     },

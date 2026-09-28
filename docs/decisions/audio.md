@@ -92,7 +92,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   golden `client_clipboard_image`.
 
 - ✅ **Playback holds about 40 ms, and a stall's burst is trimmed rather than kept** (2026-09-24;
-  the fixed 40 ms and the hard trim superseded 2026-09-25 by "Playback is a jitter buffer").
+  the fixed 40 ms and the hard trim superseded 2026-09-25 by "Playback is a jitter buffer", the
+  three device buffers 2026-09-28 by "Playback renders straight from the ring").
   The ring kept up to 200 ms behind three 20 ms device buffers, and only an overrun past
   200 ms trimmed it. After a stall, the held-up packets land together and the listener stayed
   that far behind the picture for good (a simulated 250 ms stall: 260 ms behind, still 260 ms a
@@ -201,6 +202,44 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `files_copied_here_and_pasted_into_a_shell_land_there`,
     `files_copied_on_the_worker_paste_into_its_shell_as_their_paths`,
     `a_path_dragged_out_of_a_shell_is_kept_by_a_download`.
+
+- ✅ **A shell's paste of a picture puts it on the worker's pasteboard first, held as a
+  window's paste is** (2026-09-28, no protocol version change; `TermRequest::PastePicture`,
+  `Dest::Attachment`).
+  - Claude Code reads a pasted picture off its own machine's pasteboard. It looks on ⌃V, and on
+    an empty paste, which is what a ⌘V with no text sends. Before this, the client's clipboard reached
+    the worker's pasteboard only on a window's ⌘V, so a screenshot taken on the Mac or iPad
+    running the app never reached an agent in a shell.
+  - ⌘V or ⌃V in a shell, with a picture copied here (PNG or TIFF) and no text beside it, sends
+    this client's offer when the worker has not heard it, then `PastePicture(PasteChord)` on
+    the same ordered control stream. ⌘V carries `Command`, which the worker applies as an empty
+    paste (bracketed when the program asked for it). ⌃V carries the key as typed. Files
+    copied here still paste as a drop, and text still pastes as it did, confirm strip and all.
+  - The chord is a numbered terminal input rather than a `ClipMsg`, so it keeps its place
+    among the session's keystrokes, and the worker holds it the way it holds a window's ⌘V:
+    the same `Held` in `conn.rs`, now keyed by a window or a session. The session's input
+    behind it waits in order until the pasteboard holds the offer, or 3 s, like a window's. A
+    `ClipMsg` would have had to name the session and fence off the next keystroke's datagram
+    copy by other means. The client sends no datagram copy of the request either. A copy could
+    reach the worker before the offer it follows and paste whatever the pasteboard held.
+  - The client never sends back up a picture that came from a worker's offer. That picture
+    sits on a worker's pasteboard already.
+  - The conversation face attaches a picture pasted into its composer, and any file dropped on
+    the face, by its path, as Claude Code takes one dropped on a terminal. It goes up with
+    `Dest::Attachment` to a fresh `~/.slopty/drop/<xfer>/` on the worker (the drop directory,
+    `--drop-dir` in tests), with nothing put on the pasteboard. The session's working tree was
+    the other choice. It was rejected because a screenshot there shows in `git status`, can be
+    committed, and a second one called the same would land elsewhere. A chip in the composer
+    shows the upload, and once it lands the path is typed at the composer's cursor. Nothing
+    reaches the PTY until the message is sent.
+  - Tests: goldens `client_term_paste_picture_command`, `client_term_paste_picture_control`,
+    `client_xfer_begin_attachment`; client `a_picture_paste_follows_its_offer_and_has_no_copy`;
+    worker `a_picture_paste_holds_its_shells_input_behind_it` and
+    `a_shells_picture_paste_sets_the_pasteboard_before_the_chord_goes_on` (named pasteboard);
+    terminal view `a_picture_goes_to_the_worker_ahead_of_the_paste_chord`; composer
+    `an_attachment_is_a_chip_until_its_path_is_typed`; workspace
+    `a_picture_pasted_into_the_composer_uploads_and_its_path_is_typed`; e2e app
+    `a_picture_copied_here_is_on_the_workers_pasteboard_before_a_shells_paste`.
 
 - ✅ **Playback is a jitter buffer that aims for the lateness it measures** (2026-09-25, no
   protocol change; `slopty_codec::audio::{Jitter, Ring}`).
@@ -342,3 +381,135 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     writes from another. `slopty_input::pasteboard::MacBoard` now holds one process-wide lock
     across every `NSPasteboard` call. Test: `threads_take_turns_on_the_pasteboard` (four
     threads writing and reading a private pasteboard).
+
+- ✅ **iOS moves files through other apps: an iPad drags a row out as an item provider, and the
+  Files picker uploads and saves** (2026-09-28, `.research/gap-audit-2026-09-28.md`, "Behind
+  these").
+  - Drag out (iPad): a `UIDragInteraction` on the window's view (`file_drop::out::offer`). At the
+    lift its delegate asks the workspace what is under the touch (`WorkspaceView::drag_offers`:
+    the folder row there, found by the bounds the rows were drawn at). Each file becomes an
+    `NSItemProvider` whose file representation is registered, not written (`public.data`, a
+    folder as `public.folder`). A receiver's load brings the file down through the download the
+    Mac's promise uses, on a thread of its own, into `$TMPDIR/slopty-out/<pid>-<n>/`. That goes
+    once the receiver has the files (`sessionDidTransferItems`) or the drop is cancelled, and a
+    gone run's are swept. The lift shows the kind's symbol under the finger, since by default it
+    lifts a picture of the whole window. UIKit leaves drags off on an iPhone, where they stay in
+    one app.
+  - A shell's path lifts too (2026-09-28). The delegate asks the terminal what path it printed
+    under the touch (`TerminalView::path_at`). That is the detector ⌘-click uses, not a second
+    one, so a wrapped path and a `:line` suffix read the same way. The workspace makes the path
+    absolute against the shell's directory, as it does for ⌘-drag, except one under `~`, which
+    the worker expands to its own home (every caller used to turn `~/.zshrc` into
+    `<cwd>/~/.zshrc`). A path printed with a trailing `/` is offered as a folder. Off a path, a held touch still goes to GPUI's long
+    press, which selects a word. Test:
+    `a_path_a_shell_printed_is_offered_under_a_held_touch`.
+  - Drop in (iPad): a folder from Files was refused, since it conforms to `public.folder` and
+    not `public.data`, and would then have failed in `fs::copy`, which takes no directory. The
+    drop now takes both, loads the representation that conforms to either, and moves what the
+    system hands over into the landing whole (`file_drop::arrive`), under a name reserved as a
+    file or as a directory. A move, since the copy is the app's to take; across volumes, a copy.
+  - Files picker (iOS): "Upload from Files…" (the palette, and the folder's path bar) shows
+    `UIDocumentPickerViewController` in import mode. The copies it hands over are moved into a
+    landing and go to the tile as a drop on it would (`WorkspaceView::files_picked`), so the
+    upload deletes them when it ends. "Save to Files…" (the palette, and the selected row's
+    button) brings the row down into the outbox off the main thread and shows the picker in
+    export mode; the copy goes once it is done. Import uses the string-typed initialiser, which
+    is deprecated, because the content-type one takes a `UTType` and nothing here binds
+    UniformTypeIdentifiers yet (the Mac's drag icon makes the same trade). A `FilesSeam` global
+    takes the picker's asks in tests, so none shows a real one.
+  - Tests: `an_offer_is_named_by_its_path_and_typed_by_its_kind`,
+    `a_fetch_lands_in_a_directory_of_its_own`,
+    `a_dropped_file_or_folder_arrives_whole_under_a_name_of_its_own` (`slopty-platform`);
+    `a_row_under_a_held_touch_is_offered_as_the_workers_file`,
+    `the_files_picker_is_offered_on_ios_only`,
+    `the_files_picker_is_asked_through_its_seam_and_its_files_go_up` (headless workspace).
+
+- ✅ **Playback renders straight from the ring on the device's I/O thread** (2026-09-28, no
+  protocol change; `slopty_codec::audio::Player`).
+  - The `AudioQueue` kept three 10 ms buffers enqueued ahead of the ring and refilled one each
+    time the device took one, so 20 to 30 ms always sat between the ring and the device. Offline,
+    a queue renders exactly what was enqueued, from frame 0, and adds nothing of its own. So the
+    queue cost exactly those 20 to 30 ms, on top of the ring and the device's 17.3 ms (the Mac
+    Studio's speakers: a 512-frame I/O buffer, then 317 frames of safety offset and device and
+    stream latency). Video is presented on arrival, so sound trailed the picture by that much
+    more than the network made it (`docs/MEASUREMENTS.md`, 2026-09-28).
+  - The player is now an output audio unit: the default output on macOS, which follows the
+    device the user picks, and RemoteIO on iOS. Its render callback fills each I/O buffer from
+    the ring, as many frames as the device asks for, so nothing waits between the ring and the
+    device's own buffer.
+  - Fewer or smaller queue buffers were the other choice. A queue's callback runs on a thread of
+    its own after the device has taken a buffer, not in step with the device, and 480-frame
+    buffers do not divide a 512-frame I/O cycle. Two buffers would leave one I/O cycle for that
+    thread to refill before the device reads past what is enqueued, and would still hold 10 to
+    20 ms. The render callback holds none and has no refill thread to wait on.
+    `AVAudioSourceNode` does the same through an engine and its graph; the unit is the layer the
+    engine sits on, with nothing between.
+  - The render callback takes the ring's lock on the device's real-time thread. What runs under
+    it is bounded already: no sort, since the jitter estimate runs outside it (2026-09-25). The
+    ring now starts with room for 260 ms, past the deepest it holds (the 120 ms ceiling, a
+    stall's backlog while it is cut, 60 ms of concealment), so it does not grow under the lock
+    either. Superseded the same day by "The device's thread never waits on the decoder's":
+    the callback takes no lock now.
+  - The ring's depth policy is unchanged. Its one device buffer is still counted as 10 ms, and
+    512-frame renders sit within that on the synthetic traces. iOS renders 1 024 frames at a
+    time unless the audio session asks for fewer: on a 20 s trace with 1 ms of scatter that
+    starves nothing either, with the ring 18 ms deep. Asking the session for a 10 ms I/O buffer
+    (`setPreferredIOBufferDuration`, where `slopty_platform::playback_audio_session` sets the
+    category) would take up to 11 ms more off on iOS, and is the next step there.
+  - The worker's encoder now encodes each 20 ms packet from its pending samples in place rather
+    than collecting them into a new vector per packet.
+  - Not verified here: the unit running on a real device, since that plays through this
+    machine's output. `player_starts_and_drains` starts it on silence and waits for the ring to
+    drain. Tests: `the_output_unit_opens_without_starting` (found, given the ring's format and
+    callback, initialised, not started),
+    `the_render_callback_plays_the_ring_in_order_at_the_devices_size`,
+    `a_device_rendering_1024_frames_is_not_starved`; the latency traces now render 512 frames at
+    a time and count the ring alone.
+
+- ✅ **The device's thread never waits on the decoder's** (2026-09-28, no protocol change;
+  `slopty_codec::audio::{Ring, Steer, Feed}`).
+  - Before, the render callback locked the ring, a `parking_lot` mutex the decoder's thread took
+    twice per packet. Under it the device drained its buffer out of a `VecDeque`, marked a dry
+    ring and kept its ramp. Under the same lock the decoder appended each packet and steered the
+    depth. A dropped slice made the deque contiguous, crossfaded it and drained it. A repeated
+    one resized, rotated and copied it. A start faded in the front, and a mute cleared it. If the
+    decoder was preempted while it held the lock, the real-time thread parked behind it with no
+    priority inheritance and could miss its deadline. With the decoder pushing on a thread of its
+    own, a 512-frame render took up to 4.1 µs at p99, 31 µs at p99.9 and 813 µs at worst
+    (`docs/MEASUREMENTS.md`, 2026-09-28).
+  - The ring is now single-producer, single-consumer and allocated once: 2^15 samples, 341 ms.
+    The device's side is wait-free. It does a few atomic loads and stores, one compare-and-swap
+    it never retries, and the copy. The decoder's side (`Feed`: the jitter estimate and
+    `Steer`) sits behind a mutex the callback never takes.
+  - Steering moved into the arriving packet. The decoder drops a slice from the packet, or plays
+    one twice in it, before publishing it. A 960-frame packet has room for the 240-frame slice
+    and its 120-frame crossfade. The depth changes by the same amount wherever the slice comes
+    out; the listener hears the correction one ring depth later, which a ±100 ppm drift never
+    notices. A stall's backlog is cut from each packet as it arrives, all of it but the
+    crossfade (17.5 ms a packet), instead of from the ring's front. Every synthetic trace gives
+    the numbers it gave before.
+  - A run word says whether the device plays: an epoch and a playing bit. The decoder starts a
+    run once the ring holds the target, fading in the front first, which it may write because
+    the device reads nothing while stopped. The device stops a run when it runs dry. The decoder
+    stops one on a mute and moves the run's start past what is queued. The device frees that at
+    its next render and ramps down from what it last played. Each start takes a new epoch, so a
+    stale compare-and-swap cannot stop a newer run. The decoder sees a dry run in the word on its
+    next packet and counts the underrun then, by the loudness of the last packet, as before.
+  - A mute can land while a render copies. The render then reads `run` a second time, sees it
+    changed and plays a ramp instead of what it copied. A `write` it saw past the mute would
+    show in that second read, so no sample of the next run gets out early.
+  - Samples are `f32` bits in `AtomicU32`s, loaded and stored relaxed. On Apple silicon those
+    are the plain loads and stores a `memcpy` makes, and any race outside the protocol stays
+    defined behaviour. The copy is not vectorised: a render's median went from 417 to 500 ns,
+    0.005% of a 10.7 ms buffer. Under a concurrent decoder its p99.9 fell from 22–31 µs to
+    1.6–2.4 µs.
+  - `try_lock` with silence when the lock is taken was the other choice. That still hands the
+    device's buffer to the decoder's scheduling: a render that loses the race plays silence,
+    which is the glitch, only shorter. The lock was also held across whole-ring memmoves. Going
+    wait-free cost nothing measurable.
+  - A full ring drops what does not fit and counts it as trimmed. That only happens when the
+    device has stopped rendering.
+  - Tests: `the_render_callback_never_waits_on_the_decoder` (another thread holds the decoder's
+    whole side while the callback plays the queue in order, runs dry, stops the run and ramps to
+    silence), `a_mute_discards_the_queue_and_the_next_run_starts_after_it`, and the latency
+    traces unchanged. Measurement: `render_cost`, ignored.

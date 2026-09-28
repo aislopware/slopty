@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use slopty_proto::conversation::{Body, Entry, Meters, ResultStatus, ThreadId, ToolDetail, Turn};
+use slopty_proto::conversation::{
+    AgentRun, Body, Entry, Meters, ResultStatus, ShellStatus, ThreadId, ToolDetail, Turn,
+};
 
 use super::{rows, tools};
 
@@ -41,8 +43,8 @@ pub fn model_name(id: &str) -> String {
 
 /// The right edge of a turn's fold: the model and the tokens it wrote.
 ///
-/// "Opus 5.5 · 3.1k tokens". `session_model` is the status line's; a turn answered by it alone
-/// leaves the name out, since the header says it.
+/// "Opus 5.5 · 3.1k tokens". `session_model` is the one the composer names; a turn answered by
+/// it alone leaves the name out, since the composer says it.
 #[must_use]
 pub fn turn_meta(turn: &Turn, session_model: Option<&str>) -> Option<String> {
     let names: Vec<String> = turn.models.iter().map(|m| model_name(m)).collect();
@@ -232,6 +234,104 @@ pub fn files<'a>(entries: impl IntoIterator<Item = (&'a ThreadId, &'a Entry)>) -
     out
 }
 
+/// When an entry's record was last added to: a call's result, else its own stamp.
+fn settled_ms(entry: &Entry) -> u64 {
+    match &entry.body {
+        Body::Tool(call) => call.result.as_ref().map_or(entry.at_ms, |r| r.at_ms.max(entry.at_ms)),
+        _ => entry.at_ms,
+    }
+}
+
+/// How long the model thought before writing the thinking block at `at`: from what it was
+/// answering (the entry before it) to the block. `None` when the records carry no time.
+#[must_use]
+pub fn thought_ms(entries: &[Entry], at: usize) -> Option<u64> {
+    let this = entries.get(at)?.at_ms;
+    let before = settled_ms(entries.get(at.checked_sub(1)?)?);
+    (before > 0 && this > before).then(|| this.saturating_sub(before))
+}
+
+/// When each task went in progress and when it was done, by task id, from the calls that
+/// kept the list: a task update, or a whole list written at once.
+#[must_use]
+pub fn task_times(entries: &[Entry]) -> HashMap<String, (Option<u64>, Option<u64>)> {
+    let mut times: HashMap<String, (Option<u64>, Option<u64>)> = HashMap::new();
+    let mut mark = |id: &str, status: &str, at: u64| {
+        let slot = times.entry(id.to_owned()).or_default();
+        match status {
+            "in_progress" => slot.0 = slot.0.or(Some(at)),
+            "completed" => slot.1 = slot.1.or(Some(at)),
+            _ => {}
+        }
+    };
+    for entry in entries {
+        let Body::Tool(call) = &entry.body else { continue };
+        if call.result.as_ref().is_none_or(|r| r.status != ResultStatus::Ok) {
+            continue;
+        }
+        let at = settled_ms(entry);
+        match &call.detail {
+            ToolDetail::TaskUpdate(update) => {
+                if let Some(to) = &update.to {
+                    mark(&update.task_id, to, at);
+                }
+            }
+            ToolDetail::TodoWrite { todos } => {
+                for todo in todos {
+                    mark(&todo.id, &todo.status, at);
+                }
+            }
+            _ => {}
+        }
+    }
+    times
+}
+
+/// Work running in the background, or that finished since the person's last prompt: the
+/// Bash calls and subagents started with `run_in_background`, oldest first.
+#[must_use]
+pub fn background(entries: &[Entry]) -> Vec<&Entry> {
+    let since =
+        entries.iter().rev().find(|e| matches!(e.body, Body::Prompt(_))).map_or(0, |e| e.at_ms);
+    entries
+        .iter()
+        .filter(|entry| {
+            let Body::Tool(call) = &entry.body else { return false };
+            match &call.detail {
+                ToolDetail::Bash(bash) if bash.background && bash.task_id.is_some() => {
+                    bash.status == ShellStatus::Running
+                        || bash.finished_ms.unwrap_or(entry.at_ms) >= since
+                }
+                ToolDetail::Agent(agent) if agent.background => {
+                    let ended = agent.duration_ms.map(|d| entry.at_ms.saturating_add(d));
+                    agent.status == AgentRun::Running || ended.unwrap_or(entry.at_ms) >= since
+                }
+                _ => false,
+            }
+        })
+        .collect()
+}
+
+/// The longest a title from a prompt runs, in characters, its ellipsis included.
+pub const TITLE_CHARS: usize = 48;
+
+/// What a session is about, as a tile with no title of its own is named: the first line of its
+/// first prompt, cut at [`TITLE_CHARS`]. A slash command is not a task, so it is passed over.
+#[must_use]
+pub fn first_prompt(entries: &[Entry]) -> Option<String> {
+    let line = entries.iter().find_map(|entry| match &entry.body {
+        Body::Prompt(prompt) if prompt.command.is_none() => {
+            prompt.text.text.lines().map(str::trim).find(|l| !l.is_empty())
+        }
+        _ => None,
+    })?;
+    if line.chars().count() <= TITLE_CHARS {
+        return Some(line.to_owned());
+    }
+    let cut: String = line.chars().take(TITLE_CHARS.saturating_sub(1)).collect();
+    Some(format!("{}\u{2026}", cut.trim_end()))
+}
+
 /// The directory part of `path` as a list shows it beside the name: the last two components,
 /// "src/conversation" rather than "/home/user/work/crates/slopty-ui/src/conversation".
 #[must_use]
@@ -248,6 +348,38 @@ mod tests {
 
     use super::*;
     use crate::conversation::fixtures::scenario;
+
+    /// A session is named by its first prompt's first line, cut short; a slash command
+    /// before it names nothing.
+    #[test]
+    fn a_session_is_named_by_its_first_prompt() {
+        let prompt = |id: &str, text: &str, command: Option<&str>| Entry {
+            id: id.to_owned(),
+            at_ms: 0,
+            body: Body::Prompt(slopty_proto::conversation::Prompt {
+                text: slopty_proto::conversation::Clipped {
+                    text: text.to_owned(),
+                    lines: 1,
+                    chars: 1,
+                    full: None,
+                },
+                images: Vec::new(),
+                command: command.map(str::to_owned),
+            }),
+        };
+        assert_eq!(first_prompt(&[]), None);
+        let short =
+            [prompt("p0", "", Some("/clear")), prompt("p1", "\nFix the header\nmore", None)];
+        assert_eq!(first_prompt(&short).as_deref(), Some("Fix the header"));
+        let long = [prompt(
+            "p1",
+            "Let the header's chips give way from the right on a narrow window",
+            None,
+        )];
+        let title = first_prompt(&long).unwrap_or_default();
+        assert_eq!(title, "Let the header's chips give way from the right\u{2026}");
+        assert_eq!(title.chars().count(), TITLE_CHARS - 1, "the cut drops its trailing space");
+    }
 
     #[test]
     fn models_read_as_people_say_them() {
@@ -321,5 +453,26 @@ mod tests {
             Some("Context 34% used \u{b7} 68.0k of 200k tokens \u{b7} $1.24 this session")
         );
         assert_eq!(context_hint(&Meters::default(), None), None);
+    }
+
+    /// Thinking took from what it answered to when it was written; a task's times come from
+    /// the list that moved it; background work stays in view while it runs and after it ends
+    /// until the next prompt.
+    #[test]
+    fn the_work_session_reads_its_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut model = crate::conversation::model::Model::default();
+        for event in crate::conversation::fixtures::work(dir.path()) {
+            model.apply(event);
+        }
+        let entries = model.thread(&ThreadId::Main).unwrap().entries();
+        let thinking = entries.iter().position(|e| matches!(e.body, Body::Thinking(_))).unwrap();
+        assert_eq!(thought_ms(entries, thinking), Some(9_000));
+        assert_eq!(thought_ms(entries, 0), None, "nothing before the first entry");
+        let times = task_times(entries);
+        assert_eq!(times.values().filter(|(start, _)| start.is_some()).count(), 1, "{times:?}");
+        assert_eq!(times.values().filter(|(_, end)| end.is_some()).count(), 1, "{times:?}");
+        let work: Vec<&str> = background(entries).iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(work, ["t4"]);
     }
 }

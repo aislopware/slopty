@@ -70,7 +70,7 @@ mod tests {
                 period.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     period.tick().await;
-                    if stream.send_raw(&frame).await.is_err() {
+                    if stream.send_raw(frame.clone()).await.is_err() {
                         break;
                     }
                 }

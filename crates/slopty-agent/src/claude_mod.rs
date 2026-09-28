@@ -4,7 +4,7 @@
 //! The plugin is TypeScript because Claude Code runs it (docs/decisions/claude-code.md). The
 //! worker embeds its three files and writes them under its data directory, in a directory
 //! named by their digest, so an agent that is running keeps the files it loaded while a newer
-//! worker writes its own beside them. An agent gets the mod with [`with_mod`] and [`env()`].
+//! worker writes its own beside them. An agent gets the mod with [`Installed::args`] and [`env()`].
 //!
 //! Nothing it says is trusted until its `hello` passes [`crate::live::gate`], which names the
 //! Claude Code versions the mod was verified against ([`MOD_CLAUDE_VERSIONS`]); everywhere else
@@ -113,7 +113,7 @@ pub struct Installed {
 }
 
 impl Installed {
-    /// `claude` arguments that load the mod too ([`with_mod`]).
+    /// `claude` arguments that load the mod too, unless they already do.
     #[must_use]
     pub fn args(&self, args: Vec<String>) -> Vec<String> {
         with_mod(args, &self.dir)
@@ -137,14 +137,12 @@ impl Installed {
 }
 
 /// The flag that loads the mod at `dir`.
-#[must_use]
-pub fn plugin_flag(dir: &Path) -> String {
+fn plugin_flag(dir: &Path) -> String {
     format!("{PLUGIN_DIR_FLAG}={}", dir.display())
 }
 
 /// `claude` arguments that load the mod at `dir` too, unless they already do.
-#[must_use]
-pub fn with_mod(args: Vec<String>, dir: &Path) -> Vec<String> {
+fn with_mod(args: Vec<String>, dir: &Path) -> Vec<String> {
     let flag = plugin_flag(dir);
     if args.iter().take_while(|word| *word != "--").any(|word| *word == flag) {
         return args;

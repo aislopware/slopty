@@ -37,11 +37,30 @@ const _: () = assert!(
     "a checkpoint holds a full scrollback's worth of state"
 );
 
-/// Where the daemon listens: `$TMPDIR/slopty/ptyd.sock` (per-user, mode 0700 on macOS).
+/// Where the daemon listens: `$SLOPTY_PTYD_SOCKET`, else `ptyd.sock` in this user's own directory.
+///
+/// ptyd makes that directory 0700. It is `$TMPDIR/slopty` on macOS, whose `$TMPDIR` is
+/// per-user, and `$XDG_RUNTIME_DIR/slopty` on Linux, else `/tmp/slopty-<uid>`.
+///
+/// The same rule as `slopty_platform::dirs::runtime_dir`, spelled here because ptyd stays
+/// clear of that crate and the AppKit it links on macOS.
 #[must_use]
 pub fn socket_path() -> PathBuf {
-    std::env::var_os("SLOPTY_PTYD_SOCKET")
-        .map_or_else(|| std::env::temp_dir().join("slopty").join("ptyd.sock"), PathBuf::from)
+    if let Some(path) = std::env::var_os("SLOPTY_PTYD_SOCKET") {
+        return PathBuf::from(path);
+    }
+    let tmp = std::env::temp_dir();
+    #[cfg(target_os = "linux")]
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|run| run.is_absolute())
+        .map_or_else(
+            || tmp.join(format!("slopty-{}", rustix::process::getuid().as_raw())),
+            |run| run.join("slopty"),
+        );
+    #[cfg(not(target_os = "linux"))]
+    let dir = tmp.join("slopty");
+    dir.join("ptyd.sock")
 }
 
 /// The worker → ptyd. Nothing is versioned: ptyd and the worker are built and installed

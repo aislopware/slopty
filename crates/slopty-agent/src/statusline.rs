@@ -4,7 +4,7 @@
 //! JSON on stdin: the model, how full the context window is, the session's cost, the rate
 //! limits. An agent Slopty starts gets a wrapper in that place (`slopty hook statusline`, put on
 //! `--settings` by [`crate::hooks::with_relay`]). The wrapper forwards the [`Meters`] to the
-//! worker as a [`STATUSLINE_EVENT`] hook, the same way the relay posts hooks, then runs the
+//! worker as a [`HookEvent::Statusline`] hook, the same way the relay posts hooks, then runs the
 //! person's own status-line command and passes its output through unchanged, so their line
 //! looks as it did.
 //!
@@ -22,10 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::Hook;
-
-/// The hook event the wrapper forwards; the tracker passes it over.
-pub const STATUSLINE_EVENT: &str = "Statusline";
+use crate::{Hook, HookEvent};
 
 /// The wrapper's words after the `slopty` binary.
 const WRAPPER_WORDS: &str = "hook statusline";
@@ -60,7 +57,7 @@ pub fn meters(status: &Value) -> Meters {
 pub fn hook(status: &Value) -> Hook {
     let text = |path: &str| status.pointer(path).and_then(Value::as_str).map(str::to_owned);
     Hook {
-        event: STATUSLINE_EVENT.to_owned(),
+        event: HookEvent::Statusline,
         session_id: text("/session_id"),
         transcript_path: text("/transcript_path"),
         cwd: text("/workspace/current_dir").or_else(|| text("/cwd")),
@@ -82,8 +79,7 @@ pub fn wrapper_command(slopty: &str, theirs: Option<&str>) -> String {
 }
 
 /// Whether a status-line command is the wrapper (never run it from itself).
-#[must_use]
-pub fn is_wrapper(command: &str) -> bool {
+fn is_wrapper(command: &str) -> bool {
     command.contains(&format!(" {WRAPPER_WORDS}"))
 }
 
@@ -151,7 +147,7 @@ mod tests {
             }
         });
         let hook = hook(&status);
-        assert_eq!(hook.event, STATUSLINE_EVENT);
+        assert_eq!(hook.event, HookEvent::Statusline);
         assert_eq!(
             (hook.session_id.as_deref(), hook.transcript_path.as_deref(), hook.cwd.as_deref()),
             (Some("s1"), Some("/t.jsonl"), Some("/w/sub"))

@@ -24,6 +24,13 @@ use slopty_proto::terminal::{SessionState, SessionSummary};
 
 use crate::ops::{Chunk, EventPage};
 
+mod agents;
+
+pub use agents::{
+    ConversationView, HeldView, MovedView, StillView, ThreadView, conversation, conversation_text,
+    moved, still, thread_key, thread_named,
+};
+
 /// The shortest session-id prefix text output uses. `UUIDv7`s start with their creation time,
 /// so ids minted close together share more than this and get longer prefixes.
 const MIN_PREFIX: usize = 8;
@@ -990,6 +997,7 @@ const fn kind_word(kind: &ItemKind) -> &'static str {
         ItemKind::Display { .. } => "display",
         ItemKind::Note { .. } => "note",
         ItemKind::File { .. } => "file",
+        ItemKind::Folder { .. } => "folder",
         ItemKind::Browser { .. } => "browser",
     }
 }
@@ -1018,7 +1026,7 @@ pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
                 ItemKind::Window { window } => view.window = Some(window.0),
                 ItemKind::Display { display } => view.display = Some(*display),
                 ItemKind::Note { text } => view.text = Some(text),
-                ItemKind::File { path } => view.path = Some(path),
+                ItemKind::File { path } | ItemKind::Folder { path } => view.path = Some(path),
                 ItemKind::Browser { url } => view.url = Some(url),
             }
             view
@@ -1041,7 +1049,7 @@ pub fn items_text(worker: WorkerId, items: &[Item]) -> String {
                 ItemKind::Window { window } => window.0.to_string(),
                 ItemKind::Display { display } => display.to_string(),
                 ItemKind::Note { text } => text.lines().next().unwrap_or_default().to_owned(),
-                ItemKind::File { path } => path.clone(),
+                ItemKind::File { path } | ItemKind::Folder { path } => path.clone(),
                 ItemKind::Browser { url } => url.clone(),
             };
             vec![
@@ -1185,7 +1193,7 @@ mod tests {
         }
     }
 
-    pub fn overview() -> Overview {
+    fn overview() -> Overview {
         let workers = vec![
             WorkerInfo {
                 worker: worker(1),

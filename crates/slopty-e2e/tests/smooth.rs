@@ -14,6 +14,7 @@
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::time::{Duration, Instant};
 
     use slopty_e2e::harness::Simulator;
@@ -46,7 +47,7 @@ mod tests {
     const TYPED_MIN: u64 = TYPED as u64 - 2;
     /// The guard: scrolling the strip across twenty streaming shells keeps its p95 draw under this,
     /// one and a half 60 Hz periods (measured 3.9 ms on the Mac Studio with other sessions
-    /// building; see MEASUREMENTS "canvas frame time").
+    /// building; see MEASUREMENTS 2026-09-05, frame time under streaming load).
     const PAN_P95_LIMIT: Duration = Duration::from_millis(25);
     /// Round trips the shaped typing scenario runs at: under the tailnet's echo p50 of 10–12 ms,
     /// at it, and a refresh or more past it.
@@ -269,17 +270,76 @@ mod tests {
         );
     }
 
-    /// A file tile holding the most a tile carries (2 000 lines) beside five streaming
-    /// shells: the tile's rows are a `uniform_list`, so scrolling the strip should cost what
-    /// the rows on screen cost, not the file.
+    /// Lines in the file scenario's tile (`SLOPTY_SMOOTH_FILE_LINES` overrides it, for the
+    /// 2 000-line baseline and the 200 000-line run).
+    const FILE_LINES: usize = 20_000;
+
+    fn file_lines() -> usize {
+        std::env::var("SLOPTY_SMOOTH_FILE_LINES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(FILE_LINES)
+    }
+
+    /// How often the file scenario pages its editor: about as often as a held key repeats.
+    const PAGE_STEP: Duration = Duration::from_millis(60);
+
+    /// Page the focused editor down (`pagedown`) and back up for `run`, every [`PAGE_STEP`];
+    /// the caret's line must have moved, so the frames are of a scrolling editor.
+    async fn page_through(drv: &mut Driver, run: Duration) -> FrameInfo {
+        let line = |d: &Dump| d.item("file").and_then(|i| i.file.as_ref()).and_then(|f| f.line);
+        let before = line(&drv.dump().await.unwrap());
+        drv.frames_reset().await.unwrap();
+        let mut clock = clock(PAGE_STEP);
+        let start = Instant::now();
+        let (mut step, mut moved) = (0_u32, false);
+        while start.elapsed() < run {
+            clock.tick().await;
+            // Twenty pages one way, then twenty back.
+            drv.keys(if step % 40 < 20 { "pageup" } else { "pagedown" }).await.unwrap();
+            step = step.saturating_add(1);
+            if step == 20 {
+                moved = line(&drv.dump().await.unwrap()) != before;
+            }
+        }
+        assert!(moved, "the editor did not scroll");
+        drv.dump().await.unwrap().frames
+    }
+
+    /// Type [`TYPED`] letters into the focused editor at [`TYPING_CPS`]; the frames drawn while
+    /// the tile takes them.
+    async fn type_into_file(drv: &mut Driver) -> FrameInfo {
+        let period = Duration::from_millis(1000 / TYPING_CPS);
+        drv.frames_reset().await.unwrap();
+        for i in 0..TYPED {
+            let at = Instant::now();
+            let ch = char::from(b'a'.saturating_add(u8::try_from(i % 26).unwrap()));
+            drv.type_text(&ch.to_string()).await.unwrap();
+            tokio::time::sleep(period.saturating_sub(at.elapsed())).await;
+        }
+        let dump = drv
+            .wait_for("the typing in the file", STEP, |d| {
+                d.item("file").and_then(|i| i.file.as_ref()).is_some_and(|f| f.edited)
+            })
+            .await
+            .unwrap();
+        dump.frames
+    }
+
+    /// A file tile beside five streaming shells, [`FILE_LINES`] lines of source by default: the
+    /// editor draws the rows on screen, so paging through it, typing into it and scrolling the
+    /// strip past it should cost what those rows cost, not the file.
     #[tokio::test]
-    async fn a_full_file_tile_beside_five_shells_scrolls_on_the_mac() {
+    async fn a_large_file_tile_beside_five_shells_scrolls_and_types_on_the_mac() {
         if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
             return;
         }
+        let lines = file_lines();
         let mut stack = Stack::launch("e2e-smooth-file").await.unwrap();
-        let file = stack.dir.path().join("big.rs");
-        let body: String = (0..2_000)
+        // `SLOPTY_SMOOTH_FILE_NAME=big.txt` measures the same text uncoloured.
+        let name = std::env::var("SLOPTY_SMOOTH_FILE_NAME").unwrap_or_else(|_| "big.rs".to_owned());
+        let file = stack.dir.path().join(name);
+        let body: String = (0..lines)
             .map(|i| {
                 format!(
                     "fn line_{i}() -> u32 {{ {i} * 2 + 1 }} // padding to a source-like width\n"
@@ -292,23 +352,24 @@ mod tests {
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         ready(drv).await;
         load(drv, SHELLS_WITH_DISPLAY).await;
-        drv.open_file(file.to_str().unwrap(), Some(1_000)).await.unwrap();
-        drv.wait_for("the file tile full", STEP, |d| {
-            d.item("file").is_some_and(|i| i.file.as_ref().is_some_and(|f| f.lines == 2_000))
+        let near_end = u32::try_from(lines.saturating_sub(10)).unwrap();
+        drv.open_file(file.to_str().unwrap(), Some(near_end)).await.unwrap();
+        drv.wait_for("the file tile full, with the keyboard", STEP, |d| {
+            d.item("file").is_some_and(|i| i.file.as_ref().is_some_and(|f| f.lines == lines))
+                && d.focused.starts_with("file:")
         })
         .await
         .unwrap();
+        let label = format!("1 file tile of {lines} lines + 5 streaming shells");
+        let typed = type_into_file(drv).await;
+        measure(&format!("(k) mac: {label}, typing into the file"), &typed);
+        let paged = page_through(drv, RUN).await;
+        measure(&format!("(j) mac: {label}, paging through the file"), &paged);
         focus_first_shell(drv).await;
         let panned = pan(drv, RUN).await;
-        measure(
-            "(e) mac: 1 file tile of 2 000 lines + 5 streaming shells, strip column to column",
-            &panned,
-        );
+        measure(&format!("(e) mac: {label}, strip column to column"), &panned);
         let overview = overview_cycle(drv, RUN).await;
-        measure(
-            "(f) mac: 1 file tile of 2 000 lines + 5 streaming shells, overview in and out",
-            &overview,
-        );
+        measure(&format!("(f) mac: {label}, overview in and out"), &overview);
         stack.shutdown().await;
         assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
     }
@@ -404,6 +465,131 @@ mod tests {
             &format!("(i) mac: 1 streaming shell beside {still} still ones in the overview"),
             &after.frames,
         );
+        stack.shutdown().await;
+        assert!(after.frames.frames >= 100, "too few frames to judge: {:?}", after.frames);
+    }
+
+    /// Springs of the overview timed each way in the mixed scenario.
+    const SPRINGS: usize = 6;
+    /// How long one spring is given to land before its frames are read: past its zoom and the
+    /// words' fade.
+    const SPRING: Duration = Duration::from_millis(500);
+    /// The mixed scenario's tiles besides its twelve shells: files, then notes.
+    const MIXED_FILES: usize = 4;
+    const MIXED_NOTES: usize = 4;
+
+    /// One spring of the overview: ⌘⌥O, then the frames drawn while it lands.
+    async fn spring(drv: &mut Driver, open: bool) -> FrameInfo {
+        drv.frames_reset().await.unwrap();
+        drv.keys("cmd-alt-o").await.unwrap();
+        tokio::time::sleep(SPRING).await;
+        let d = drv.dump().await.unwrap();
+        assert_eq!(d.overview, open, "the overview did not follow ⌘⌥O");
+        d.frames
+    }
+
+    /// The springs as one row: the median of their medians, the worst of the rest, and every
+    /// frame counted.
+    fn springs_row(springs: &[FrameInfo]) -> FrameInfo {
+        let mut p50: Vec<u64> = springs.iter().map(|f| f.draw_p50_us).collect();
+        p50.sort_unstable();
+        let worst = |f: fn(&FrameInfo) -> u64| springs.iter().map(f).max().unwrap_or(0);
+        FrameInfo {
+            frames: springs.iter().map(|f| f.frames).sum(),
+            over_budget: springs.iter().map(|f| f.over_budget).sum(),
+            dropped: springs.iter().map(|f| f.dropped).sum(),
+            draw_p50_us: p50.get(p50.len() / 2).copied().unwrap_or(0),
+            draw_p95_us: worst(|f| f.draw_p95_us),
+            draw_p99_us: worst(|f| f.draw_p99_us),
+            draw_max_us: worst(|f| f.draw_max_us),
+            interval_p50_us: worst(|f| f.interval_p50_us),
+            interval_p95_us: worst(|f| f.interval_p95_us),
+            interval_p99_us: worst(|f| f.interval_p99_us),
+            nominal_us: worst(|f| f.nominal_us),
+        }
+    }
+
+    /// Twenty tiles of every text kind (twelve shells, five of them streaming, six still after
+    /// a screen of output; four file tiles; four notes): the overview's springs in and out,
+    /// [`SPRINGS`] each way, and the overview held open for [`RUN`]. What the overview's
+    /// miniatures cost (MEASUREMENTS 2026-09-28, "the overview's miniatures").
+    #[tokio::test]
+    async fn twenty_mixed_tiles_open_hold_and_close_the_overview_on_the_mac() {
+        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-smooth-mixed").await.unwrap();
+        let files: Vec<String> = (0..MIXED_FILES)
+            .map(|n| {
+                let path = stack.dir.path().join(format!("mixed_{n}.rs"));
+                let body = (0..400).fold(String::new(), |mut body, i| {
+                    writeln!(body, "fn line_{i}() -> u32 {{ {i} * {n} + 1 }}").unwrap();
+                    body
+                });
+                std::fs::write(&path, body).unwrap();
+                path.to_str().unwrap().to_owned()
+            })
+            .collect();
+        let drv = &mut stack.driver;
+        drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        ready(drv).await;
+        load(drv, 6).await;
+        let still = 6;
+        drv.open(STILL, still).await.unwrap();
+        let shells = usize::try_from(still).unwrap().saturating_add(6);
+        drv.wait_for("the still shells full", STEP, |d| {
+            d.terminals.len() == shells
+                && d.terminals.iter().filter(|t| t.rows.iter().any(|r| r == "60")).count()
+                    == usize::try_from(still).unwrap()
+        })
+        .await
+        .unwrap();
+        for path in &files {
+            drv.open_file(path, None).await.unwrap();
+        }
+        drv.wait_for("the file tiles read", STEP, |d| {
+            d.items.iter().filter(|i| i.file.as_ref().is_some_and(|f| f.lines >= 400)).count()
+                == MIXED_FILES
+        })
+        .await
+        .unwrap();
+        for n in 0..MIXED_NOTES {
+            let notes = n.saturating_add(1);
+            drv.keys("cmd-shift-n").await.unwrap();
+            drv.wait_for("a new note", STEP, |d| {
+                d.items.iter().filter(|i| i.kind == "note").count() == notes
+            })
+            .await
+            .unwrap();
+            drv.type_text(&format!(
+                "Release {n}\n\n- [x] build the bundle\n- [ ] notarise\n- [ ] tag"
+            ))
+            .await
+            .unwrap();
+        }
+        let tiles = shells.saturating_add(MIXED_FILES).saturating_add(MIXED_NOTES);
+        drv.wait_for("twenty tiles, the notes written", STEP, |d| {
+            d.items.len() == tiles
+                && d.items
+                    .iter()
+                    .filter(|i| i.note.as_deref().is_some_and(|t| t.ends_with("tag")))
+                    .count()
+                    == MIXED_NOTES
+        })
+        .await
+        .unwrap();
+        focus_first_shell(drv).await;
+        let (mut opening, mut closing) = (Vec::new(), Vec::new());
+        for _ in 0..SPRINGS {
+            opening.push(spring(drv, true).await);
+            closing.push(spring(drv, false).await);
+        }
+        let label = format!("{tiles} mixed tiles (5 streaming shells)");
+        measure(&format!("(m) mac: {label}, overview opening"), &springs_row(&opening));
+        measure(&format!("(m) mac: {label}, overview closing"), &springs_row(&closing));
+        let (before, after) = overview_still(drv).await;
+        assert_floods_advanced(&before, &after);
+        measure(&format!("(m) mac: {label}, overview held open"), &after.frames);
         stack.shutdown().await;
         assert!(after.frames.frames >= 100, "too few frames to judge: {:?}", after.frames);
     }

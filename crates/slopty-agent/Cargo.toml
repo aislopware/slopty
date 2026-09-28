@@ -13,9 +13,12 @@ workspace = true
 [dependencies]
 # The Claude mod's directory is named by its files' digest (`claude_mod`).
 blake3.workspace = true
+# The pictures in a transcript are base64; the worker sends their bytes.
+data-encoding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slopty-core.workspace = true
+slopty-platform.workspace = true
 slopty-proto.workspace = true
 
 [dev-dependencies]

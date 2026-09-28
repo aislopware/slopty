@@ -6,16 +6,16 @@
 2. **Headless GPUI**, `#[gpui::test]` in `slopty-ui`: a `VisualTestContext` window with real
    layout, `simulate_keystrokes`/`simulate_click`, a channel for the worker. Read the UI like
    a DOM: `cx.debug_bounds("item-<uuid>")` (set with `.debug_selector`), `window.painted_quads()`
-   for colours and borders, view accessors (`rows()`, `zoom()`, `active_item()`),
+   for colours and borders, view accessors (`rows()`, `active_item()`, a stream's `zoom()`),
    `slopty_ui::a11y::tree(window)` after `window.set_a11y_active(true)` for roles, labels and
    the focused node. No pixels, no process, runs under `cargo gate`. Every workspace/terminal
    behaviour gets a test here first.
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`, gate `SLOPTY_APP_E2E`):
    launches ptyd + the worker + the app (built with `--features slopty/e2e`) in a temp dir, pairs
    them, and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,
-   dump, render). `dump` is the structured state (items, focus, zoom, terminal rows, and
-   `a11y`: the accessibility tree as role/label/value/focused/bounds in reading order,
-   from the frame that painted the state in the same dump);
+   dump, render). `dump` is the structured state (tiles, focus, whether the overview is open,
+   terminal rows, and `a11y`: the accessibility tree as role/label/value/focused/bounds in
+   reading order, from the frame that painted the state in the same dump);
    `render` is GPUI drawing its own window to a PNG, compared numerically with
    `crates/slopty-e2e/golden` (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden, and `--review` writes none and fails on none, leaving each changed frame's render and diff in the artifacts, so a design review sees every golden in one run). The temp dir
    is named for its test, not at random, because a golden draws the paths under it. Nothing touches another app.
@@ -55,6 +55,18 @@
    `slopty hook` must badge the pill. The far worker is killed and restarted twice, as soon as
    it shows down and again after the server has called it unreachable. It must show down within
    5 s and be connected within 2 s of each restart. Golden `through-server`.
+   `cargo xtask linux e2e` (gate `SLOPTY_LINUX_E2E`, serial) is a terminal-only Linux worker.
+   ptyd, the worker and the `slopty` relay are cross-built for `aarch64-unknown-linux-gnu`
+   and run in a Debian container on Docker Desktop, as an account with bash for its shell,
+   on the paths a Linux install takes. The worker's UDP port is published on this Mac's
+   loopback, and its `[worker] allow` admits the bridge gateway its packets come from. From
+   this Mac, `tests/linux.rs` connects with the client core's link and a `TermState`. The
+   greeting must say Linux, aarch64 and Debian, with no capture, input, encoder or display.
+   The login shell from passwd must echo a typed command and run it. A folder made there must
+   list through `ListFolder`, and a file in it must read through `ReadFile`. A
+   `UserPromptSubmit` hook played through the Linux `slopty hook` inside the container must
+   reach the client as `Working`. It also times 300 keystrokes into `cat` to their echo and
+   prints the percentiles. The container is capped at two CPUs and removed at the end.
 4. **Live desktop**, `cargo xtask e2e worker|screen|input|all` (gates `SLOPTY_SCREEN_E2E`,
    `SLOPTY_INPUT_E2E`): real capture and real event posting, own data dir under `target/e2e/`.
    The assertions live inside those tests.

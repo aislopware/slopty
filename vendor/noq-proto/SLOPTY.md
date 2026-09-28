@@ -1,4 +1,4 @@
-# noq-proto, vendored with seven patches
+# noq-proto, vendored with eight patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -71,6 +71,19 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    failed three gates with another job on every performance core (docs/decisions/testing.md).
    This crate's own tests do not run in Slopty's gate, so patch 6's unit test cannot guard it
    there.
+
+8. `feat(proto): Add TransportConfig::stream_priority_unpaced`
+
+   With `Some(t)`, a datagram is started without the pacing check while a stream at priority
+   `t` or above has data pending. The congestion window still applies, and the pacer is charged
+   for the packet as usual. The pacer's timer runs on the runtime's clock, and tokio's is a
+   millisecond wheel that macOS coalesces on top, so a packet the rate earns in half a
+   millisecond waited one or two. Slopty sets it to the echo's priority, so an echo behind paced
+   video leaves at once: p90 1.4 ms fell to 0.25 ms at 20 Mbit/s (docs/MEASUREMENTS.md, "an
+   echo behind paced video"). Tests: `stream_priority_unpaced_skips_the_pacer`,
+   `stream_priority_unpaced_below_the_stream_waits`,
+   `stream_priority_unpaced_off_waits_for_the_pacer`. Slopty's gate holds it through
+   `an_echo_does_not_wait_for_the_pacer` (`crates/slopty-net/tests/pacer_wait.rs`).
 
 Commits 2 and 3 share `VideoSim` in the `bbr3` tests: a screen encoder's frames through one
 bottleneck, paced by noq's token bucket. `video_through_one_bottleneck` (ignored) prints what

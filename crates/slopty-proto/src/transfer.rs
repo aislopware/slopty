@@ -139,6 +139,9 @@ pub enum Dest {
     Staging,
     /// This directory.
     Path(String),
+    /// A fresh `~/.slopty/drop/<xfer>/`, with nothing put on the pasteboard: a file attached
+    /// to an agent's prompt, whose path the conversation's composer types.
+    Attachment,
 }
 
 /// What a bulk stream's bytes are for.
@@ -154,6 +157,18 @@ pub enum Purpose {
         generation: u64,
         /// Which representation.
         uti: String,
+    },
+    /// Worker → client: the text of a file read too big to inline, announced on the control
+    /// stream by [`crate::file::FileRead::Streamed`] with the same transfer.
+    FileText,
+    /// Client → worker: a file tile's save too big to inline, the whole new text; answered as
+    /// [`crate::ClientMsg::WriteFile`] is, with `WorkerMsg::Written`.
+    Save {
+        /// Absolute path on the worker.
+        path: String,
+        /// The modification time of the version the edit started from; `None` writes
+        /// regardless.
+        base_modified_ms: Option<u64>,
     },
 }
 

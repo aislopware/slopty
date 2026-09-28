@@ -53,7 +53,6 @@ fn the_unsaved_dot_follows_the_title(cx: &mut TestAppContext) {
     let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
     let text = slopty_proto::file::FileRead::Text {
         text: "# Notes".to_owned(),
-        more_lines: 0,
         size: 8,
         modified_ms: 1_000,
         final_newline: true,

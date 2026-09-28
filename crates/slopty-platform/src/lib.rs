@@ -8,27 +8,48 @@
 //! quiet long enough for the other side to drop the link. An [`Activity`] with
 //! `LatencyCritical` tells the system this process must keep its timers sharp; the app and the
 //! worker daemon hold one for their whole run.
+//!
+//! The worker's and the server's half of this crate also builds for Linux: [`Activity`],
+//! [`user_interactive_thread`], [`open_url`], [`dirs`], [`fs`] and [`service`]. What Linux
+//! cannot do yet says so where it is asked (`docs/decisions/platform.md`, "Linux seams"). The
+//! client's half (the pasteboard, drops, the browser tile, the Dock) is Apple-only.
 
-#![cfg(any(target_os = "macos", target_os = "ios"))]
-
+pub mod dirs;
 #[cfg(target_os = "macos")]
 pub mod drag;
+#[cfg(target_vendor = "apple")]
 pub mod file_drop;
+pub mod fs;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_vendor = "apple")]
+pub mod notify;
+#[cfg(target_vendor = "apple")]
 pub mod pasteboard;
+pub mod privacy;
 #[cfg(target_os = "macos")]
 pub mod proc_files;
+pub mod service;
+#[cfg(target_vendor = "apple")]
 pub mod web;
 
+#[cfg(target_os = "linux")]
+pub use linux::{Activity, open_url, user_interactive_thread};
+#[cfg(target_vendor = "apple")]
 use objc2::rc::Retained;
+#[cfg(target_vendor = "apple")]
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+#[cfg(target_vendor = "apple")]
 use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
 
 /// A live `NSProcessInfo` activity; dropping it ends the activity.
+#[cfg(target_vendor = "apple")]
 #[derive(Debug)]
 pub struct Activity {
     token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
 }
 
+#[cfg(target_vendor = "apple")]
 impl Activity {
     /// Declare user-interactive, latency-critical work with a human-readable reason (shown by
     /// Activity Monitor and `pmset -g assertions`). Allows idle system sleep.
@@ -62,6 +83,7 @@ impl Activity {
     }
 }
 
+#[cfg(target_vendor = "apple")]
 #[expect(
     clippy::non_send_fields_in_send_ty,
     reason = "the token is only ever handed back to NSProcessInfo, which is thread-safe"
@@ -70,9 +92,11 @@ impl Activity {
 // since macOS 10.7) and `endActivity:` takes its token back from any thread; the token is an
 // opaque object Foundation owns and this type only ever hands it back.
 unsafe impl Send for Activity {}
+#[cfg(target_vendor = "apple")]
 // SAFETY: as above; the only shared access is `Drop`, which needs `&mut self`.
 unsafe impl Sync for Activity {}
 
+#[cfg(target_vendor = "apple")]
 impl Drop for Activity {
     fn drop(&mut self) {
         // SAFETY: `token` is exactly the object `beginActivityWithOptions:reason:` returned,
@@ -90,6 +114,7 @@ impl Drop for Activity {
 /// 166–270 ms to 20–23 ms (MEASUREMENTS.md, "the keystroke path under an all-core spin").
 /// Never called on a thread that is already realtime (audio) or on the main thread of an app,
 /// which the system runs user-interactive already.
+#[cfg(target_vendor = "apple")]
 pub fn user_interactive_thread() {
     // SAFETY: `pthread_set_qos_class_self_np` (pthread/qos.h) changes only the calling thread's
     // own class, and a relative priority of 0 is within every class's range
@@ -108,6 +133,7 @@ pub fn user_interactive_thread() {
 /// engine's "warning" notification pattern (`UINotificationFeedbackGenerator`, main thread
 /// only, a no-op on the simulator and on a phone whose haptics are off); off the main thread
 /// the old vibration pattern, which any thread may ask for.
+#[cfg(target_vendor = "apple")]
 pub fn attention() {
     #[cfg(target_os = "ios")]
     if let Some(mtm) = objc2::MainThreadMarker::new() {
@@ -142,6 +168,7 @@ pub fn attention() {
 /// typed. A no-op on iOS (no pointer to hide; an iPad's pointer is the system's), and
 /// without a running `NSApplication` (a headless test: the call then stalls for seconds
 /// waiting on a window server connection).
+#[cfg(target_vendor = "apple")]
 #[cfg_attr(target_os = "ios", expect(clippy::missing_const_for_fn, reason = "a no-op here"))]
 pub fn hide_pointer_until_moved() {
     #[cfg(target_os = "macos")]
@@ -158,6 +185,7 @@ pub fn hide_pointer_until_moved() {
 /// iOS. Read from its most frames a second, so a `ProMotion` panel reads 8.3 ms whatever rate
 /// it idles at. Main thread only (AppKit, UIKit); `None` off it, and before a screen or scene
 /// exists.
+#[cfg(target_vendor = "apple")]
 #[must_use]
 pub fn display_refresh() -> Option<std::time::Duration> {
     let mtm = objc2::MainThreadMarker::new()?;
@@ -178,6 +206,7 @@ pub fn display_refresh() -> Option<std::time::Duration> {
 /// AppKit's `modifierFlags` carry the device-dependent side bits GPUI drops; read off the
 /// application's current event, so only meaningful from a key handler on the main thread.
 /// `false` on iOS (no sides) and off the main thread.
+#[cfg(target_vendor = "apple")]
 #[cfg_attr(target_os = "ios", expect(clippy::missing_const_for_fn, reason = "a no-op here"))]
 #[must_use]
 pub fn right_option_held() -> bool {
@@ -196,10 +225,12 @@ pub fn right_option_held() -> bool {
 
 /// Show how many sessions are waiting on the human on the app icon.
 ///
-/// The Dock badge on macOS (cleared at zero). iOS keeps the count inside the app; its icon
-/// badge needs notification authorisation, which nothing else here asks for.
+/// The Dock badge on macOS (cleared at zero). On iOS the icon badge needs notification
+/// authorisation, which `notify::System` asks for with its first note; until then the count
+/// shows only inside the app.
 ///
 /// Main thread only (AppKit); called from GPUI's main-thread callbacks. Off it, this is a no-op.
+#[cfg(target_vendor = "apple")]
 pub fn set_badge(count: usize) {
     #[cfg(target_os = "macos")]
     if let Some(mtm) = objc2::MainThreadMarker::new() {
@@ -218,6 +249,7 @@ pub fn set_badge(count: usize) {
 ///
 /// macOS only, and a no-op when the app is already active. Pairs with [`attention`] for an
 /// agent that needs the human.
+#[cfg(target_vendor = "apple")]
 #[cfg_attr(target_os = "ios", expect(clippy::missing_const_for_fn, reason = "a no-op here"))]
 pub fn bounce() {
     #[cfg(target_os = "macos")]
@@ -232,10 +264,15 @@ pub fn bounce() {
     }
 }
 
+/// The device I/O buffer playback asks iOS for: 10 ms, half a 20 ms Opus packet.
+#[cfg(target_os = "ios")]
+const IO_BUFFER_SECONDS: f64 = 0.01;
+
 /// Put the process in the `Playback` audio session category, mixing with other apps.
 ///
 /// Remote-window audio then plays through the ring switch and alongside music. macOS has no
 /// audio session; the call is a no-op there.
+#[cfg(target_vendor = "apple")]
 #[cfg_attr(target_os = "macos", expect(clippy::missing_const_for_fn, reason = "a no-op here"))]
 pub fn playback_audio_session() {
     #[cfg(target_os = "ios")]
@@ -260,6 +297,13 @@ pub fn playback_audio_session() {
             tracing::warn!(error = %e, "audio session category");
             return;
         }
+        // The player renders straight from its jitter ring on the device's I/O thread, so the
+        // I/O buffer is latency the listener hears; iOS defaults to about 23 ms (1024 frames).
+        // SAFETY: AVFoundation rule: a preferred duration may be set on the shared session
+        // before it is activated; the hardware may pick a different one, which is only a hint lost.
+        if let Err(e) = unsafe { session.setPreferredIOBufferDuration_error(IO_BUFFER_SECONDS) } {
+            tracing::warn!(error = %e, "audio session I/O buffer");
+        }
         // SAFETY: activating the configured shared session.
         if let Err(e) = unsafe { session.setActive_error(true) } {
             tracing::warn!(error = %e, "audio session activate");
@@ -271,6 +315,7 @@ pub fn playback_audio_session() {
 /// and passwords come with it).
 ///
 /// Main thread only on iOS (`UIApplication`); a no-op off it there.
+#[cfg(target_vendor = "apple")]
 pub fn open_url(url: &str) {
     let Some(url) = objc2_foundation::NSURL::URLWithString(&NSString::from_str(url)) else {
         tracing::warn!(url, "not a URL");
@@ -293,17 +338,34 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// The name a person gave this machine, as a client lists it: the computer name on macOS
+/// (`scutil --get ComputerName`), the host name on Linux. `None` when it cannot be read.
+#[must_use]
+pub fn computer_name() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    let name = rustix::system::uname().nodename().to_string_lossy().into_owned();
+    #[cfg(not(target_os = "linux"))]
+    let name = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())?;
+    Some(name.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
 /// How long [`reduce_motion`] trusts its last read of the system setting.
 pub const REDUCE_MOTION_FRESH: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Whether the system asks for motion to be reduced, as read at most [`REDUCE_MOTION_FRESH`]
 /// ago.
 ///
-/// The canvas and the terminal ask on every frame, so the answer is kept rather than asked of
-/// AppKit each time; a change in System Settings shows within a second. This crate does not
-/// watch the system's change notification, so a clock it is. The canvas is what the setting
-/// governs: pan momentum and zoom settling are the only motion Slopty invents, and a person
-/// who turned this on wants the view where they put it rather than gliding there.
+/// The workspace and the terminal ask on every frame, so the answer is kept rather than asked
+/// of AppKit each time; a change in System Settings shows within a second. This crate does not
+/// watch the system's change notification, so a clock it is. The workspace is what the setting
+/// governs: its springs (a column settling, the view offset gliding along the strip, the
+/// overview opening and closing) are the motion Slopty invents, and a person who turned this on
+/// wants the view where it is going rather than gliding there.
 pub fn reduce_motion() -> bool {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     static KEPT: Kept = Kept::new();
@@ -411,6 +473,7 @@ mod tests {
 
     /// A thread that asks is user-interactive afterwards, and one that did not keeps the class
     /// it was spawned with.
+    #[cfg(target_vendor = "apple")]
     #[test]
     fn a_thread_asks_for_user_interactive() {
         fn class() -> libc::qos_class_t {

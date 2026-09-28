@@ -145,14 +145,14 @@ async fn session(
     let why = loop {
         tokio::select! {
             msg = rx.recv() => match msg {
-                Ok(FromServer::Request { id, verb }) => {
+                Ok(FromServer::Request { id, key, verb }) => {
                     let (orchestrator, out) = (orchestrator.clone(), out.clone());
                     requests.spawn(async move {
                         let resized = match &verb {
                             Verb::ResizeTerminal { term, .. } => Some(term.session),
                             _ => None,
                         };
-                        let outcome = orchestrator.serve(verb).await;
+                        let outcome = orchestrator.serve(key, verb).await;
                         // The server lists each terminal's size from its summaries: the new one
                         // goes ahead of the answer, so a listing after it shows the size.
                         if let (Some(session), Outcome::Done) = (resized, &outcome)

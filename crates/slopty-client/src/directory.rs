@@ -197,8 +197,8 @@ impl Directory {
         }
     }
 
-    /// Write the directory to `path` for the next launch without the server: to a temporary
-    /// file beside it, flushed, then renamed over it, so a crash leaves the old one or the new.
+    /// Write the directory to `path` for the next launch without the server, replacing the file
+    /// whole (`slopty_platform::fs::replace`), so a crash leaves the old one or the new.
     ///
     /// # Errors
     ///
@@ -210,14 +210,7 @@ impl Directory {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        {
-            use std::io::Write as _;
-            let mut file = std::fs::File::create(&tmp)?;
-            file.write_all(&json)?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp, path)
+        slopty_platform::fs::replace(path, &json)
     }
 
     /// The workers cached at `path` for `server`; none when the file is absent, unreadable, or

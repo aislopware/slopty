@@ -338,7 +338,7 @@ fn a_note_is_titled_by_its_first_line() {
 
 /// A file's title is its name; the directory it is in is the header's context after it.
 #[test]
-fn a_file_card_is_titled_by_its_name_and_placed_by_its_directory() {
+fn a_file_tile_is_titled_by_its_name_and_placed_by_its_directory() {
     assert_eq!(file_title("/w/src/main.rs"), "main.rs");
     assert_eq!(tile::file_dir("/w/src/main.rs").as_deref(), Some("src"));
     assert_eq!(file_title("main.rs"), "main.rs");
@@ -362,7 +362,6 @@ fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
     );
     let text = slopty_proto::file::FileRead::Text {
         text: "# Notes".to_owned(),
-        more_lines: 0,
         size: 8,
         modified_ms: 1_000,
         final_newline: true,
@@ -997,7 +996,7 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Maximize column ⇧⌘↩"))), "{tree:#?}");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("palette").is_none(), "Esc closes it");
+    assert!(!view.read_with(cx, |v, _| v.palette_open()), "Esc closes it");
 
     cx.simulate_keystrokes("cmd-shift-p");
     cx.run_until_parked();
@@ -1037,7 +1036,7 @@ fn a_tile_is_named_from_its_header(cx: &mut TestAppContext) {
     let api = ClientMsg::Items(ItemOp::Rename { id: tile.item, name: Some("api".to_owned()) });
     assert_eq!(sent, vec![api], "the name alone");
     assert!(cx.debug_bounds(selector("rename", tile.item)).is_none(), "and it closed");
-    let title = view.read_with(cx, |v, cx| v.card_title(tile, v.item(tile).unwrap(), cx));
+    let title = view.read_with(cx, |v, cx| v.tile_title(tile, v.item(tile).unwrap(), cx));
     assert_eq!(title, "api");
 }
 
@@ -1385,22 +1384,31 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+mod address;
 mod away;
 mod bars;
 mod bodies;
 mod cwd;
 mod faces;
 mod facts;
+mod focus_cache;
+mod folders;
 mod frame;
 mod measure;
+mod miniatures;
 mod nav_list;
 mod nav_rows;
+mod niri_keys;
 mod overlays;
+mod page_chrome;
 mod palette;
 mod remote;
+mod save_copy;
+mod shell_drag;
 mod strip_marks;
 mod tab_strip;
 mod tiles;
+mod touch;
 
 /// A worker that comes up with nothing on it is given a shell beside the rest, and the focus
 /// stays where the human is typing: keys meant for one machine never land on another. The

@@ -16,8 +16,8 @@ use slopty_net::worker::AcceptedClient;
 use slopty_net::{ClientMsg, Connection, NetError, WorkerMsg};
 use slopty_proto::conversation::{ConversationRequest, PermissionEvent, PermissionPrompt};
 use slopty_proto::datagram::ClientDatagram;
+use slopty_proto::folder::Listing;
 use slopty_proto::handshake::HelloAck;
-use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::items::ItemSync;
 use slopty_proto::screen::{Feedback, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest};
 use slopty_proto::terminal::{CloseReason, SessionSummary, TermEvent, TermRequest, TermSize};
@@ -54,23 +54,47 @@ const REPORT_DEPTH: usize = 64;
 /// lands in the drop directory instead.
 const CWD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long a paste chord waits for the client's clipboard to arrive before it goes to the
-/// window anyway (and pastes what the worker had).
+/// window or shell anyway (and pastes what the worker had).
 const PASTE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Whether `input` is ⌘V, the chord a paste into a streamed window is.
-fn is_paste_chord(input: &ScreenInput) -> bool {
-    matches!(
-        input,
-        ScreenInput::Key { code: KeyCode::V, action: KeyAction::Press, mods, .. }
-            if mods.contains(Mods::SUPER) && !mods.intersects(Mods::CTRL | Mods::ALT)
-    )
+/// Where an input goes: a streamed window, or a shell.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Target {
+    Window(StreamId),
+    Session(SessionId),
 }
 
-/// Input for the windows a paste went to, held back in order while the client's clipboard is
-/// put on the pasteboard. Every other window, and every terminal, carries on.
+/// One input for a window or a shell, as a paste may hold it back.
+#[derive(Debug, PartialEq)]
+enum Input {
+    Window(StreamId, ScreenInput),
+    /// A request that writes to the PTY (`TermRequest::is_input`).
+    Term(SessionId, TermRequest),
+}
+
+impl Input {
+    const fn target(&self) -> Target {
+        match self {
+            Self::Window(stream, _) => Target::Window(*stream),
+            Self::Term(session, _) => Target::Session(*session),
+        }
+    }
+
+    /// Whether this input is a paste that must find the client's clipboard on the pasteboard:
+    /// ⌘V to a window, or a shell's paste of a picture.
+    fn is_paste(&self) -> bool {
+        match self {
+            Self::Window(_, input) => input.is_paste_chord(),
+            Self::Term(_, req) => matches!(req, TermRequest::PastePicture(_)),
+        }
+    }
+}
+
+/// Input for the windows and shells a paste went to, held back in order while the client's
+/// clipboard is put on the pasteboard. Every other window and shell carries on.
 struct Held {
-    streams: HashSet<StreamId>,
-    inputs: Vec<(StreamId, ScreenInput)>,
+    targets: HashSet<Target>,
+    inputs: Vec<Input>,
     stage: Stage,
 }
 
@@ -84,31 +108,31 @@ enum Stage {
     Writing,
 }
 
-/// Where one window input goes while pastes may be holding some back.
+/// Where one input goes while pastes may be holding some back.
 #[derive(Debug, PartialEq)]
 enum Route {
-    /// To its window now.
-    Now(ScreenInput),
+    /// To its window or shell now.
+    Now(Input),
     /// Behind the paste its window is waiting on.
     Held,
     /// A paste chord that starts a hold: the clipboard is to be asked what it needs.
     Began,
 }
 
-/// Route one input for `stream`. A paste chord holds its window, and joins a hold already under
-/// way; input for a held window queues behind the chord, in order; anything else goes now.
-fn route(held: &mut Option<Held>, stream: StreamId, input: ScreenInput) -> Route {
-    let chord = is_paste_chord(&input);
+/// Route one input. A paste holds its window or shell, and joins a hold already under way;
+/// input for a held target queues behind the paste, in order; anything else goes now.
+fn route(held: &mut Option<Held>, input: Input) -> Route {
+    let (paste, target) = (input.is_paste(), input.target());
     match held {
-        Some(held) if chord || held.streams.contains(&stream) => {
-            held.streams.insert(stream);
-            held.inputs.push((stream, input));
+        Some(held) if paste || held.targets.contains(&target) => {
+            held.targets.insert(target);
+            held.inputs.push(input);
             Route::Held
         }
-        None if chord => {
+        None if paste => {
             *held = Some(Held {
-                streams: HashSet::from([stream]),
-                inputs: vec![(stream, input)],
+                targets: HashSet::from([target]),
+                inputs: vec![input],
                 stage: Stage::Deciding,
             });
             Route::Began
@@ -250,7 +274,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         async move { paths.report(remote, out).await }
     });
     let (watch_files, watched) = watch::channel(Vec::new());
-    tasks.spawn(crate::files::watch(hello.client, out.clone(), watched));
+    tasks.spawn(crate::files::watch(hello.client, conn.clone(), out.clone(), watched));
     let (told, mut told_rx) = mpsc::unbounded_channel();
     let mut peer = Peer {
         daemon,
@@ -271,6 +295,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         held: None,
         link,
         order: InputOrder::default(),
+        screen_order: ScreenOrder::default(),
         copies: slopty_net::echo::Copies::from_env(),
         follows: HashMap::new(),
     };
@@ -308,7 +333,8 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         }
     };
     let InputOrder { taken, late, .. } = peer.order;
-    tracing::info!(client = %peer.client, taken, late, "input copies");
+    let ScreenOrder { taken: window_taken, late: window_late, .. } = peer.screen_order;
+    tracing::info!(client = %peer.client, taken, late, window_taken, window_late, "input copies");
     // Nothing more goes to this client, and nothing the streams still say may wait on it.
     writer.abort();
     peer.close_screens().await;
@@ -337,7 +363,7 @@ async fn install_hooks() -> (bool, String) {
         return (false, "the slopty command is not installed beside the worker".to_owned());
     };
     let installed = tokio::task::spawn_blocking(move || {
-        let path = slopty_agent::hooks::settings_path(&slopty_agent::hooks::home_dir());
+        let path = slopty_agent::hooks::settings_path(&slopty_platform::dirs::home());
         let outcome = slopty_agent::hooks::install_at(&path, &relay.to_string_lossy())?;
         Ok::<_, std::io::Error>((outcome, path))
     })
@@ -354,11 +380,13 @@ async fn install_hooks() -> (bool, String) {
     }
 }
 
-/// A copy of one of a session's inputs (`ClientDatagram::Input`).
-struct InputCopy {
-    session: SessionId,
-    seq: u64,
-    req: TermRequest,
+/// A copy of one input from a datagram.
+#[derive(Debug)]
+enum InputCopy {
+    /// A session's (`ClientDatagram::Input`).
+    Term { session: SessionId, seq: u64, req: TermRequest },
+    /// A window stream's (`ClientDatagram::ScreenInput`).
+    Window { stream: StreamId, seq: u64, ordered: u64, input: ScreenInput },
 }
 
 /// Read the client's datagrams until the connection ends: loss feedback for the loop, and
@@ -383,16 +411,100 @@ async fn read_datagrams(
                 }
             }
             Ok(ClientDatagram::Input { session, seq, req }) if req.is_input() => {
-                match copies.try_send(InputCopy { session, seq, req }) {
-                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
-                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                if !hand_on(&copies, InputCopy::Term { session, seq, req }) {
+                    break;
                 }
             }
             Ok(ClientDatagram::Input { .. }) => {
                 tracing::debug!(len = datagram.len(), "input copy of a request that is not input");
             }
+            Ok(ClientDatagram::ScreenInput { stream, seq, ordered, input }) => {
+                if !hand_on(&copies, InputCopy::Window { stream, seq, ordered, input }) {
+                    break;
+                }
+            }
             Err(e) => tracing::debug!(error = %e, len = datagram.len(), "bad datagram"),
         }
+    }
+}
+
+/// Queue a copy for the loop; one that finds the queue full is dropped, since its stream copy
+/// comes regardless. `false` once the loop is gone.
+fn hand_on(copies: &mpsc::Sender<InputCopy>, copy: InputCopy) -> bool {
+    !matches!(copies.try_send(copy), Err(mpsc::error::TrySendError::Closed(_)))
+}
+
+/// Where each window stream's input stands on this connection, numbered as
+/// `ScreenRequest::numbered` says both ends number it: every input and quality change, and
+/// apart, those that apply only in their turn (all but moves). The stream brings every one, in
+/// order; a datagram copy may bring an input sooner.
+///
+/// An in-order copy is applied only when it is the next in-order request not yet applied. A
+/// move's copy is applied when every in-order request before it is and nothing newer has been,
+/// so a move may overtake older moves, never a click, a key or a change of scale. From the
+/// stream, an in-order request is skipped when its copy was applied, and a move when anything
+/// newer was. Each click and key therefore reaches the window once and in order, and the
+/// pointer never goes back to a place it left.
+#[derive(Debug, Default)]
+struct ScreenOrder {
+    streams: HashMap<StreamId, Placed>,
+    /// Copies applied ahead of their stream copy.
+    taken: u64,
+    /// Copies dropped: their stream copy had come, something before them had not, or a newer
+    /// input had been applied.
+    late: u64,
+}
+
+/// One stream's numbered requests: how many the stream has brought, and of those how many are
+/// in order; how many in-order ones have been applied, and the highest number applied.
+#[derive(Clone, Copy, Debug, Default)]
+struct Placed {
+    heard: u64,
+    heard_in_order: u64,
+    in_order: u64,
+    latest: u64,
+}
+
+impl ScreenOrder {
+    /// The stream brought `stream`'s next numbered request: whether it is to be applied.
+    fn stream(&mut self, stream: StreamId, in_order: bool) -> bool {
+        let at = self.streams.entry(stream).or_default();
+        at.heard = at.heard.saturating_add(1);
+        let fresh = if in_order {
+            at.heard_in_order = at.heard_in_order.saturating_add(1);
+            let fresh = at.heard_in_order > at.in_order;
+            at.in_order = at.in_order.max(at.heard_in_order);
+            fresh
+        } else {
+            at.heard > at.latest
+        };
+        at.latest = at.latest.max(at.heard);
+        fresh
+    }
+
+    /// A datagram brought a copy of `stream`'s request `seq`, the `ordered`-th in order:
+    /// whether it is to be applied.
+    fn copy(&mut self, stream: StreamId, seq: u64, ordered: u64, in_order: bool) -> bool {
+        let at = self.streams.entry(stream).or_default();
+        let goes = if in_order {
+            ordered == at.in_order.saturating_add(1)
+        } else {
+            ordered == at.in_order && seq > at.latest
+        };
+        if goes {
+            if in_order {
+                at.in_order = ordered;
+            }
+            at.latest = at.latest.max(seq);
+            self.taken = self.taken.saturating_add(1);
+        } else {
+            self.late = self.late.saturating_add(1);
+        }
+        goes
+    }
+
+    fn forget(&mut self, stream: StreamId) {
+        self.streams.remove(&stream);
     }
 }
 
@@ -673,7 +785,7 @@ async fn pump(
                 && event.is_echo()
                 && !depended_on
             {
-                copy_frame(&conn, copies, session, event.wire());
+                copy_frame(&conn, copies, session, &event.wire());
             }
             depended_on = false;
         } else if event.goes_ahead_of_frames() {
@@ -704,16 +816,18 @@ struct Peer<'d> {
     tasks: JoinSet<()>,
     done: mpsc::UnboundedSender<Done>,
     told: mpsc::UnboundedSender<Told>,
-    /// The files behind this client's file cards, for the task that watches them.
+    /// The files behind this client's file tiles, for the task that watches them.
     watch_files: watch::Sender<Vec<String>>,
     /// Files going down, by transfer.
     downloads: HashMap<XferId, JoinHandle<()>>,
-    /// Window input waiting for a paste's clipboard.
+    /// Window and shell input waiting for a paste's clipboard.
     held: Option<Held>,
     /// This connection, as clipboard sync tells clients apart.
     link: slopty_worker::clip::Link,
     /// Which inputs of each session have been applied, from the stream or a copy.
     order: InputOrder,
+    /// The same for each window stream.
+    screen_order: ScreenOrder,
     /// How echoes' datagram copies go, if they do.
     copies: Option<slopty_net::echo::Copies>,
     /// The agents' conversations this client follows: each one's task takes its requests
@@ -817,9 +931,23 @@ impl Peer<'_> {
             }
             ClientMsg::ReadFile { path } => {
                 // An admitted client can open a shell here; a read is nothing it could not do.
+                let (client, conn, out) = (self.client, self.conn.clone(), self.out.clone());
+                self.tasks.spawn(async move {
+                    crate::files::send_file(client, &conn, &out, path).await;
+                });
+            }
+            ClientMsg::ListFolder { path } => {
                 let (client, out) = (self.client, self.out.clone());
                 self.tasks.spawn(async move {
-                    crate::files::send_file(client, &out, path).await;
+                    let dir = std::path::PathBuf::from(&path);
+                    let listing =
+                        tokio::task::spawn_blocking(move || slopty_worker::listing::folder(&dir))
+                            .await
+                            .unwrap_or_else(|_| Listing::Missing {
+                                error: "list failed".to_owned(),
+                            });
+                    tracing::info!(%client, %path, "list folder");
+                    let _sent = out.send(WorkerMsg::Folder { path, listing }).await;
                 });
             }
             ClientMsg::WatchFiles { paths } => {
@@ -828,7 +956,8 @@ impl Peer<'_> {
             ClientMsg::WriteFile { path, text, base_modified_ms } => {
                 let (client, out) = (self.client, self.out.clone());
                 self.tasks.spawn(async move {
-                    crate::files::write(client, &out, path, text, base_modified_ms).await;
+                    crate::files::write(client, &out, path, text.into_bytes(), base_modified_ms)
+                        .await;
                 });
             }
             ClientMsg::Clip(msg) => self.clip(msg),
@@ -886,6 +1015,7 @@ impl Peer<'_> {
             }
             Told::Gone(id) => {
                 self.screens.remove(&id);
+                self.screen_order.forget(id);
             }
         }
     }
@@ -998,19 +1128,19 @@ impl Peer<'_> {
         });
     }
 
-    /// Send the held input on to its windows, in the order it came.
+    /// Send the held input on to its windows and shells, in the order it came.
     fn release_held(&mut self) {
         let Some(held) = self.held.take() else { return };
-        for (stream, input) in held.inputs {
-            self.command(stream, Command::Input(input));
+        for input in held.inputs {
+            self.deliver(input);
         }
     }
 
-    /// Input for a window. A paste chord first puts the client's clipboard on the pasteboard;
-    /// until it is there, input for that window waits behind the chord.
-    fn input(&mut self, stream: StreamId, input: ScreenInput) {
-        match route(&mut self.held, stream, input) {
-            Route::Now(input) => self.command(stream, Command::Input(input)),
+    /// Input for a window or a shell. A paste first puts the client's clipboard on the
+    /// pasteboard; until it is there, input for that window or shell waits behind it.
+    fn input(&mut self, input: Input) {
+        match route(&mut self.held, input) {
+            Route::Now(input) => self.deliver(input),
             Route::Held => {}
             Route::Began => {
                 let (clip, link) = (Arc::clone(&self.daemon.clip), self.link);
@@ -1020,6 +1150,14 @@ impl Peer<'_> {
                     let _sent = done.send(Done::PastePlan(plan.ok()));
                 });
             }
+        }
+    }
+
+    /// Hand one input to its window or its session's actor.
+    fn deliver(&self, input: Input) {
+        match input {
+            Input::Window(stream, input) => self.command(stream, Command::Input(input)),
+            Input::Term(session, req) => self.request(session, req),
         }
     }
 
@@ -1034,7 +1172,7 @@ impl Peer<'_> {
             XferMsg::Begin { xfer, dest: Some(dest), files, bytes } => {
                 let in_session = match &dest {
                     Dest::SessionCwd(session) => Some(*session),
-                    Dest::Staging | Dest::Path(_) => None,
+                    Dest::Staging | Dest::Path(_) | Dest::Attachment => None,
                 };
                 let (daemon, client) = (self.daemon.clone(), self.client);
                 let begin = move |cwd: Option<String>| {
@@ -1128,11 +1266,15 @@ impl Peer<'_> {
                 self.streams.spawn(crate::screens::run(link, id, target, quality, rx));
             }
             ScreenRequest::Close(id) => {
+                self.screen_order.forget(id);
                 if let Some(screen) = self.screens.remove(&id) {
                     let _gone = screen.commands.send(Command::Close);
                 }
             }
             ScreenRequest::SetQuality { stream, quality } => {
+                if self.screens.contains_key(&stream) {
+                    self.screen_order.stream(stream, true);
+                }
                 self.command(stream, Command::SetQuality(quality));
             }
             ScreenRequest::Report { stream, report } => {
@@ -1143,7 +1285,16 @@ impl Peer<'_> {
                     }
                 }
             }
-            ScreenRequest::Input { stream, input } => self.input(stream, input),
+            ScreenRequest::Input { stream, input } => {
+                // Only a live stream's input is numbered; any other still goes the way input
+                // goes (a paste chord still fetches the clipboard), and reaches no window.
+                let known = self.screens.contains_key(&stream);
+                if known && !self.screen_order.stream(stream, input.in_order()) {
+                    tracing::trace!(client = %self.client, %stream, "window input: its copy came first");
+                    return;
+                }
+                self.input(Input::Window(stream, input));
+            }
             ScreenRequest::Focus(stream) => self.command(stream, Command::Focus),
             ScreenRequest::Resize { stream, width, height } => {
                 self.command(stream, Command::Resize { width, height });
@@ -1153,10 +1304,23 @@ impl Peer<'_> {
 
     /// A datagram copy of an input: applied now if it is the session's next, else left to its
     /// stream copy.
-    fn input_copy(&mut self, InputCopy { session, seq, req }: InputCopy) {
-        if self.order.copy(session, seq) {
-            tracing::trace!(client = %self.client, %session, seq, "term input copy received");
-            self.term(session, req);
+    fn input_copy(&mut self, copy: InputCopy) {
+        match copy {
+            InputCopy::Term { session, seq, req } => {
+                if self.order.copy(session, seq) {
+                    tracing::trace!(client = %self.client, %session, seq, "term input copy received");
+                    self.term(session, req);
+                }
+            }
+            InputCopy::Window { stream, seq, ordered, input } => {
+                if !self.screens.contains_key(&stream) {
+                    return;
+                }
+                if self.screen_order.copy(stream, seq, ordered, input.in_order()) {
+                    tracing::trace!(client = %self.client, %stream, seq, "window input copy received");
+                    self.input(Input::Window(stream, input));
+                }
+            }
         }
     }
 
@@ -1214,13 +1378,16 @@ impl Peer<'_> {
                     }
                 });
             }
-            other => {
-                let outcome =
-                    self.daemon.worker.get(session).and_then(|h| h.request(self.client, other));
-                if let Err(e) = outcome {
-                    self.fail(session, &e);
-                }
-            }
+            input if input.is_input() => self.input(Input::Term(session, input)),
+            other => self.request(session, other),
+        }
+    }
+
+    /// Hand `req` to `session`'s actor.
+    fn request(&self, session: SessionId, req: TermRequest) {
+        let outcome = self.daemon.worker.get(session).and_then(|h| h.request(self.client, req));
+        if let Err(e) = outcome {
+            self.fail(session, &e);
         }
     }
 
@@ -1265,7 +1432,7 @@ mod tests {
     use slopty_proto::screen::ScreenInput;
     use slopty_proto::terminal::{CloseReason, RepoChanges, SessionState, SessionSummary};
 
-    use super::{Heard, InputOrder, Route, StreamId, route};
+    use super::{Heard, Input, InputOrder, Route, ScreenOrder, StreamId, route};
 
     fn key(code: KeyCode, mods: Mods) -> ScreenInput {
         ScreenInput::Key { code, action: KeyAction::Press, mods, text: None }
@@ -1372,30 +1539,486 @@ mod tests {
         assert_eq!((order.taken, order.late), (3, 4));
     }
 
+    /// A window's copy is applied once and its stream copy skipped; a click or key never goes
+    /// ahead of one before it, and a move never ahead of a click or key before it nor after
+    /// anything newer.
+    #[test]
+    fn a_window_input_copy_applies_once_and_clicks_and_keys_only_in_turn() {
+        let (a, b) = (StreamId(1), StreamId(2));
+        let mut order = ScreenOrder::default();
+        // Stream a: 1 move, 2 click, 3 move, 4 move, 5 key; stream b: 1 key.
+        // (from the stream, stream, in order, seq, ordered), and whether it is applied.
+        let arrivals = [
+            (false, a, true, 2, 1, true), // the click's copy: the move before it can wait
+            (true, a, false, 1, 0, false), // that move, from the stream: older than the click
+            (false, a, true, 5, 2, true), // the key's copy, next in turn
+            (false, a, false, 4, 1, false), // an older move than the key
+            (false, b, true, 1, 1, true), // another stream counts apart
+            (true, a, true, 2, 1, false), // the click from the stream: its copy came
+            (true, a, false, 3, 1, false), // older than the key
+            (true, a, false, 4, 1, false),
+            (true, a, true, 5, 2, false),  // the key from the stream
+            (false, a, true, 5, 2, false), // a duplicate copy
+            (true, b, true, 1, 1, false),
+        ];
+        for (i, (stream_copy, stream, in_order, seq, ordered, expected)) in
+            arrivals.into_iter().enumerate()
+        {
+            let goes = if stream_copy {
+                order.stream(stream, in_order)
+            } else {
+                order.copy(stream, seq, ordered, in_order)
+            };
+            assert_eq!(goes, expected, "arrival {i}");
+        }
+        assert_eq!((order.taken, order.late), (3, 2));
+
+        // A key waits for the click before it; a move waits for the key before it.
+        let mut order = ScreenOrder::default();
+        assert!(!order.copy(a, 2, 2, true), "the key after a click not yet here");
+        assert!(!order.copy(a, 3, 2, false), "a move after that key");
+        assert!(order.stream(a, true), "the click");
+        assert!(order.copy(a, 2, 2, true), "the key, once its turn came again");
+        assert!(order.copy(a, 3, 2, false), "and the move after it");
+    }
+
+    /// Inputs sent through a link that loses and delays the stream and races datagram copies
+    /// against it, in many random orders: every click and key reaches the window once and in
+    /// order, the pointer never goes back, and the last move always lands.
+    #[test]
+    fn window_input_through_any_race_lands_in_order_and_never_goes_back() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut draw = |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        for _round in 0..500 {
+            let count = 1 + draw(40);
+            // (seq, ordered, in order) as the client numbers them.
+            let mut inputs = Vec::new();
+            let mut ordered = 0;
+            for seq in 1..=count {
+                let in_order = draw(3) == 0;
+                if in_order {
+                    ordered += 1;
+                }
+                inputs.push((seq, ordered, in_order));
+            }
+            // (arrival time, from the stream, input); the stream keeps its order and holds
+            // everything behind a lost packet.
+            let mut events = Vec::new();
+            let mut stream_at = 0;
+            for (i, &input) in inputs.iter().enumerate() {
+                let sent = u64::try_from(i).unwrap() * 10;
+                let held = if draw(5) == 0 { 50 + draw(100) } else { 0 };
+                stream_at = (sent + 1 + held).max(stream_at);
+                events.push((stream_at, true, input));
+                if draw(4) != 0 {
+                    events.push((sent + 2 + draw(60), false, input));
+                }
+            }
+            events.sort_by_key(|&(at, from_stream, _)| (at, !from_stream));
+            let mut order = ScreenOrder::default();
+            let stream = StreamId(1);
+            let mut applied = Vec::new();
+            for (_at, from_stream, (seq, ordered, in_order)) in events {
+                let goes = if from_stream {
+                    order.stream(stream, in_order)
+                } else {
+                    order.copy(stream, seq, ordered, in_order)
+                };
+                if goes {
+                    applied.push((seq, in_order));
+                }
+            }
+            assert!(applied.windows(2).all(|w| w[0].0 < w[1].0), "went back: {applied:?}");
+            let clicks: Vec<u64> =
+                applied.iter().filter(|(_, in_order)| *in_order).map(|(seq, _)| *seq).collect();
+            let sent: Vec<u64> = inputs.iter().filter(|i| i.2).map(|i| i.0).collect();
+            assert_eq!(clicks, sent, "every click and key once, in order");
+            assert_eq!(applied.last().map(|a| a.0), Some(count), "the last input lands");
+        }
+    }
+
     /// A paste holds only the window it went to, in order; another window's input goes on, and a
     /// second paste joins the hold behind the first. The release hands the held input back in the
     /// order it came.
     #[test]
     fn a_paste_holds_its_own_window_and_no_other() {
         let (a, b, c) = (StreamId(1), StreamId(2), StreamId(3));
-        let paste = || key(KeyCode::V, Mods::SUPER);
-        let typed = |code| key(code, Mods::empty());
+        let paste = |s| Input::Window(s, key(KeyCode::V, Mods::SUPER));
+        let typed = |s, code| Input::Window(s, key(code, Mods::empty()));
         let mut held = None;
 
-        assert_eq!(route(&mut held, a, typed(KeyCode::A)), Route::Now(typed(KeyCode::A)));
-        assert_eq!(route(&mut held, a, paste()), Route::Began);
-        assert_eq!(route(&mut held, a, typed(KeyCode::B)), Route::Held, "behind the chord");
-        assert_eq!(route(&mut held, b, typed(KeyCode::C)), Route::Now(typed(KeyCode::C)));
-        assert_eq!(route(&mut held, c, paste()), Route::Held, "a second paste waits too");
-        assert_eq!(route(&mut held, c, typed(KeyCode::D)), Route::Held);
-        assert_eq!(route(&mut held, b, typed(KeyCode::E)), Route::Now(typed(KeyCode::E)));
-        let with_ctrl = key(KeyCode::V, Mods::SUPER | Mods::CTRL);
-        assert_eq!(route(&mut held, b, with_ctrl.clone()), Route::Now(with_ctrl), "not a paste");
+        assert_eq!(route(&mut held, typed(a, KeyCode::A)), Route::Now(typed(a, KeyCode::A)));
+        assert_eq!(route(&mut held, paste(a)), Route::Began);
+        assert_eq!(route(&mut held, typed(a, KeyCode::B)), Route::Held, "behind the chord");
+        assert_eq!(route(&mut held, typed(b, KeyCode::C)), Route::Now(typed(b, KeyCode::C)));
+        assert_eq!(route(&mut held, paste(c)), Route::Held, "a second paste waits too");
+        assert_eq!(route(&mut held, typed(c, KeyCode::D)), Route::Held);
+        assert_eq!(route(&mut held, typed(b, KeyCode::E)), Route::Now(typed(b, KeyCode::E)));
+        let with_ctrl = || Input::Window(b, key(KeyCode::V, Mods::SUPER | Mods::CTRL));
+        assert_eq!(route(&mut held, with_ctrl()), Route::Now(with_ctrl()), "not a paste");
 
         let released = held.take().map(|h| h.inputs).unwrap_or_default();
-        assert_eq!(
-            released,
-            [(a, paste()), (a, typed(KeyCode::B)), (c, paste()), (c, typed(KeyCode::D)),]
+        assert_eq!(released, [paste(a), typed(a, KeyCode::B), paste(c), typed(c, KeyCode::D)],);
+    }
+
+    /// A shell's paste of a picture holds that shell's input behind it, in order, as a
+    /// window's ⌘V holds the window's: a keystroke typed after ⌃V cannot reach Claude Code
+    /// before the picture is on the pasteboard. Another shell, and a plain paste of text, go on.
+    #[test]
+    fn a_picture_paste_holds_its_shells_input_behind_it() {
+        use slopty_proto::terminal::{PasteChord, TermRequest};
+
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let picture = |s| Input::Term(s, TermRequest::PastePicture(PasteChord::Command));
+        let raw = |s, text: &str| Input::Term(s, TermRequest::Raw(text.as_bytes().to_vec()));
+        let text = |s| Input::Term(s, TermRequest::Paste("words".to_owned()));
+        let mut held = None;
+
+        assert_eq!(route(&mut held, text(a)), Route::Now(text(a)), "text pastes at once");
+        assert_eq!(route(&mut held, picture(a)), Route::Began);
+        assert_eq!(route(&mut held, raw(a, "x")), Route::Held, "behind the picture");
+        assert_eq!(route(&mut held, raw(b, "y")), Route::Now(raw(b, "y")), "another shell");
+        let window = || Input::Window(StreamId(1), key(KeyCode::A, Mods::empty()));
+        assert_eq!(route(&mut held, window()), Route::Now(window()), "a window");
+        assert_eq!(route(&mut held, text(a)), Route::Held, "in order");
+
+        let released = held.take().map(|h| h.inputs).unwrap_or_default();
+        assert_eq!(released, [picture(a), raw(a, "x"), text(a)]);
+    }
+}
+
+/// Window input from the real client link through a lossy shaper to the worker's datagram
+/// reader and its ordering, and on through a stream's task to the point its input thread would
+/// take each event. The stream runs on the test platform of `crate::screens::fake`: nothing
+/// reaches the screen or the worker's input. The loop here does what [`Peer::screen`] and
+/// [`Peer::input_copy`] do with window input, without a daemon behind it.
+#[cfg(test)]
+#[cfg(target_vendor = "apple")]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "measurement arithmetic on small counts"
+)]
+mod lossy {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use slopty_core::{ClientId, StreamId, WorkerId};
+    use slopty_net::worker::{AcceptedClient, WorkerListener};
+    use slopty_net::{ClientMsg, WorkerMsg};
+    use slopty_proto::handshake::{Hello, HelloAck};
+    use slopty_proto::input::{Mods, MouseButton};
+    use slopty_proto::screen::{CaptureTarget, Quality, ScreenInput, ScreenRequest};
+    use slopty_worker::screen::Pipeline;
+    use tokio::sync::mpsc;
+
+    use super::{COPY_DEPTH, FEEDBACK_DEPTH, InputCopy, ScreenOrder, read_datagrams};
+    use crate::screens::fake::{Fake, Gated, Nowhere, Queued, note};
+    use crate::screens::{Command, serve};
+
+    const STREAM: StreamId = StreamId(1);
+
+    /// How the inputs come.
+    #[derive(Clone, Copy, Debug)]
+    enum Pattern {
+        /// A pointer moving at about 160 Hz, with a press or a release every tenth input.
+        Drag,
+        /// A click every 50 ms and nothing between, as keys typed into a window come: each is a
+        /// lone packet, and nothing behind it tells QUIC it was lost.
+        Clicks,
+    }
+
+    impl Pattern {
+        const fn every(self) -> Duration {
+            match self {
+                Self::Drag => Duration::from_millis(6),
+                Self::Clicks => Duration::from_millis(50),
+            }
+        }
+
+        /// The input sent `i`-th. Its x is its index, which is how its hand-over is matched to
+        /// its send.
+        fn input(self, i: usize) -> ScreenInput {
+            let x = i as f32;
+            let button = |down| ScreenInput::Button {
+                button: MouseButton::Left,
+                down,
+                x,
+                y: 0.0,
+                clicks: 1,
+                mods: Mods::empty(),
+            };
+            match (self, i % 10) {
+                (Self::Drag, 4) => button(true),
+                (Self::Drag, 5) => button(false),
+                (Self::Drag, _) => ScreenInput::Move { x, y: 0.0 },
+                (Self::Clicks, _) => button(i.is_multiple_of(2)),
+            }
+        }
+    }
+
+    /// What one run measured.
+    struct Run {
+        /// Sent → handed to the input thread, per click and per move that was handed over.
+        clicks: Vec<Duration>,
+        moves: Vec<Duration>,
+        /// Moves the ordering passed over for a newer one.
+        moves_skipped: usize,
+        taken: u64,
+        late: u64,
+        carried: slopty_shape::relay::Carried,
+    }
+
+    const fn x_of(input: &ScreenInput) -> f32 {
+        match input {
+            ScreenInput::Move { x, .. } | ScreenInput::Button { x, .. } => *x,
+            _other => -1.0,
+        }
+    }
+
+    /// The worker's end: the datagram reader, the ordering, and the stream's commands.
+    async fn worker(
+        accepted: AcceptedClient,
+        commands: mpsc::UnboundedSender<Command>,
+    ) -> (u64, u64) {
+        let AcceptedClient { conn, mut rx, .. } = accepted;
+        let (feedback, _feedback) = mpsc::channel(FEEDBACK_DEPTH);
+        let (copies_tx, mut copies) = mpsc::channel(COPY_DEPTH);
+        tokio::spawn(read_datagrams(conn.clone(), feedback, copies_tx));
+        let mut order = ScreenOrder::default();
+        loop {
+            tokio::select! {
+                msg = rx.recv() => match msg {
+                    Ok(ClientMsg::Screen(ScreenRequest::Input { stream, input })) => {
+                        if order.stream(stream, input.in_order()) {
+                            let _gone = commands.send(Command::Input(input));
+                        }
+                    }
+                    Ok(_other) => {}
+                    Err(_closed) => break,
+                },
+                Some(copy) = copies.recv() => {
+                    if let InputCopy::Window { stream, seq, ordered, input } = copy
+                        && order.copy(stream, seq, ordered, input.in_order())
+                    {
+                        let _gone = commands.send(Command::Input(input));
+                    }
+                }
+            }
+        }
+        (order.taken, order.late)
+    }
+
+    /// Send `count` inputs through a shaper of `link` and time each to its hand-over.
+    async fn run(display: u32, pattern: Pattern, count: usize, link: slopty_shape::Link) -> Run {
+        let mut queued = note(display);
+        let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+        let (mut stream, _opened) = Pipeline::<Fake<Gated>>::open(
+            STREAM,
+            CaptureTarget::Display(display),
+            Quality::default(),
+            sink,
+            |_event| {},
+        )
+        .await
+        .unwrap();
+        let (commands, mut commanded) = mpsc::unbounded_channel();
+        let (out, mut told) = mpsc::channel(64);
+        tokio::spawn(async move { while told.recv().await.is_some() {} });
+        let serving = tokio::spawn(async move {
+            serve(&mut stream, ClientId::new(), &mut commanded, &out).await;
+            stream.close().await;
+        });
+
+        let listener = WorkerListener::bind(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            slopty_net::admission::Admission::default(),
+        )
+        .unwrap();
+        let worker_addr = listener.local_addr().unwrap();
+        let endpoint = slopty_net::client::bind_client().unwrap();
+        // A handshake that the loss starves is given up and tried again over a shaper with
+        // other draws: what is measured is the connection's life after it.
+        let mut attempt = 0;
+        let (relay, shaping, dialed, mut accepted) = loop {
+            attempt += 1;
+            assert!(attempt <= 8, "no handshake got through in 8 tries");
+            let seed = u64::from(display) * 100 + attempt;
+            let at = SocketAddr::from(([0, 0, 0, 0], 0));
+            let relay = Arc::new(
+                slopty_shape::relay::Relay::bind(at, worker_addr, link, seed).await.unwrap(),
+            );
+            let relay_addr = relay.addr().unwrap();
+            let shaping = tokio::spawn({
+                let relay = Arc::clone(&relay);
+                async move { relay.run().await }
+            });
+            let hello = Hello { client: ClientId::new(), name: "lossy".to_owned() };
+            let dialing = endpoint.clone();
+            let dialed = tokio::spawn(async move {
+                slopty_net::client::connect_addr(&dialing, relay_addr, hello).await
+            });
+            if let Ok(Some(accepted)) =
+                tokio::time::timeout(Duration::from_secs(6), listener.accept()).await
+            {
+                break (relay, shaping, dialed, accepted);
+            }
+            dialed.abort();
+            shaping.abort();
+        };
+        let ack = HelloAck {
+            worker: WorkerId::new(),
+            name: "lossy".to_owned(),
+            home: String::new(),
+            caps: slopty_proto::server::WorkerCaps::default(),
+            sessions: Vec::new(),
+        };
+        accepted.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
+        let worker_end = tokio::spawn(worker(accepted, commands));
+        let mut link = slopty_client::WorkerLink::start(dialed.await.unwrap().unwrap());
+
+        let sender = link.sender();
+        let mut sent = Vec::with_capacity(count);
+        let mut ticks = tokio::time::interval(pattern.every());
+        for i in 0..count {
+            ticks.tick().await;
+            sent.push(Instant::now());
+            let input = pattern.input(i);
+            let msg = ClientMsg::Screen(ScreenRequest::Input { stream: STREAM, input });
+            sender.send(msg).await.unwrap();
+        }
+        let mut handed: Vec<Option<Instant>> = vec![None; count];
+        let mut order = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while handed.last().is_some_and(Option::is_none) {
+            let Ok(Some(Queued { at, input, .. })) =
+                tokio::time::timeout_at(deadline, queued.recv()).await
+            else {
+                panic!("the last input never arrived; {} of {count} did", order.len());
+            };
+            let i = x_of(&input) as usize;
+            assert!(handed[i].is_none(), "input {i} handed over twice");
+            handed[i] = Some(at);
+            order.push(i);
+        }
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "out of order: {order:?}");
+        let (mut clicks, mut moves, mut moves_skipped) = (Vec::new(), Vec::new(), 0);
+        for (i, at) in handed.iter().enumerate() {
+            let is_move = !pattern.input(i).in_order();
+            match (at, is_move) {
+                (Some(at), true) => moves.push(at.saturating_duration_since(sent[i])),
+                (Some(at), false) => clicks.push(at.saturating_duration_since(sent[i])),
+                (None, true) => moves_skipped += 1,
+                (None, false) => panic!("click {i} never handed over"),
+            }
+        }
+        let carried = relay.carried().await;
+        let mut worst: Vec<(Duration, usize)> = handed
+            .iter()
+            .enumerate()
+            .filter_map(|(i, at)| Some((at.as_ref()?.saturating_duration_since(sent[i]), i)))
+            .collect();
+        worst.sort_unstable();
+        let worst: Vec<String> = worst
+            .iter()
+            .rev()
+            .take(8)
+            .map(|(d, i)| format!("#{i} {:.0} ms", d.as_secs_f64() * 1e3))
+            .collect();
+        eprintln!("DIAG worst {worst:?}; client path {}", link.health());
+        link.close();
+        let (taken, late) = worker_end.await.unwrap();
+        shaping.abort();
+        endpoint.close(0_u32.into(), b"done");
+        serving.abort();
+        Run { clicks, moves, moves_skipped, taken, late, carried }
+    }
+
+    fn describe(label: &str, samples: &mut [Duration]) -> String {
+        samples.sort_unstable();
+        let at = |q: f64| {
+            let i = ((samples.len().saturating_sub(1)) as f64 * q).round() as usize;
+            samples.get(i).map_or(0.0, |d| d.as_secs_f64() * 1e3)
+        };
+        let over = samples.iter().filter(|d| **d > Duration::from_millis(50)).count();
+        format!(
+            "{label} {}: p50 {:.1} / p90 {:.1} / p99 {:.1} / max {:.1} ms, over 50 ms {:.1} %",
+            samples.len(),
+            at(0.5),
+            at(0.9),
+            at(0.99),
+            at(1.0),
+            over as f64 * 100.0 / samples.len().max(1) as f64,
+        )
+    }
+
+    /// The shaped loopback of the keystroke copies' measurement: 8 ms round trip, a share of
+    /// packets lost each way (`SLOPTY_E2E_LOSS`, default 0.13). `SLOPTY_E2E_PATTERN=clicks`
+    /// sends lone clicks instead of a drag. Run once as it is and once with
+    /// `SLOPTY_ECHO_COPY=off`, which sends no copies: the control stream alone. Prints the
+    /// hand-over times and the eight worst inputs with the client's path at the end.
+    /// `window input through a lossy link` in MEASUREMENTS.md.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "measurement"]
+    async fn window_input_through_a_lossy_link() {
+        let loss: f32 =
+            std::env::var("SLOPTY_E2E_LOSS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.13);
+        let copies = slopty_net::echo::Copies::from_env().is_some();
+        let link = slopty_shape::Link {
+            delay: Duration::from_millis(4),
+            loss,
+            ..slopty_shape::Link::CLEAR
+        };
+        let pattern = match std::env::var("SLOPTY_E2E_PATTERN").as_deref() {
+            Ok("clicks") => Pattern::Clicks,
+            _drag => Pattern::Drag,
+        };
+        let count = match pattern {
+            Pattern::Drag => 1500,
+            Pattern::Clicks => 200,
+        };
+        let mut run = run(21, pattern, count, link).await;
+        eprintln!(
+            "MEASURE window input, {pattern:?}, loss {:.0} % each way, copies {}: {}; {}; {} moves \
+             passed over; copies taken {} late {}; relay {:?}",
+            loss * 100.0,
+            if copies { "on" } else { "off" },
+            describe("clicks", &mut run.clicks),
+            describe("moves", &mut run.moves),
+            run.moves_skipped,
+            run.taken,
+            run.late,
+            run.carried
         );
+    }
+
+    /// Through a link that loses a fifth of its packets each way, every click reaches the
+    /// window once and in order, nothing is handed over out of order or twice, the last move
+    /// lands, and some input was taken from its copy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn window_input_through_a_lossy_link_lands_once_in_order() {
+        let link = slopty_shape::Link {
+            delay: Duration::from_millis(4),
+            loss: 0.2,
+            ..slopty_shape::Link::CLEAR
+        };
+        let run = run(22, Pattern::Drag, 300, link).await;
+        assert!(
+            run.carried.up.lost > 0 && run.carried.down.lost > 0,
+            "the link lost packets: {:?}",
+            run.carried
+        );
+        if slopty_net::echo::Copies::from_env().is_some() {
+            assert!(run.taken > 0, "no input was taken from its copy (late {})", run.late);
+        }
+        assert_eq!(run.clicks.len(), 60, "every click");
     }
 }

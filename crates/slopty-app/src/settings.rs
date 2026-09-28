@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use gpui::WindowAppearance;
 use slopty_settings::{
     Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Loaded, OptionAsAlt, Settings,
-    SettingsError,
+    SettingsError, bounds,
 };
 use slopty_theme::{Density, Rgb, TerminalPalette, Theme, Variant};
 
@@ -64,19 +64,6 @@ pub fn save(path: &Path, text: &str, seen: &mut Seen) -> Result<Loaded, String> 
     seen.0 = Stamp::of(path);
     Ok(loaded)
 }
-/// Sizes outside this range are typos; the default applies instead.
-const MONO_SIZE: std::ops::RangeInclusive<f32> = 6.0..=72.0;
-const UI_SIZE: std::ops::RangeInclusive<f32> = 8.0..=32.0;
-/// Half the font's line height packs rows past reading; twice it is a list, not a grid.
-const LINE_HEIGHT: std::ops::RangeInclusive<f32> = 0.5..=2.0;
-/// A tenth of a line per wheel line is glacial; ten is a page.
-const SCROLL: std::ops::RangeInclusive<f32> = 0.1..=10.0;
-/// WCAG ratios run from 1 (the same colour) to 21 (black on white).
-const CONTRAST: std::ops::RangeInclusive<f32> = 1.0..=21.0;
-/// Below 15 the stream is a slideshow; above 120 no display here refreshes.
-const FPS: std::ops::RangeInclusive<u16> = 15..=120;
-/// Under a megabit nothing decodes; 200 Mbit/s is past what one stream ever grows to.
-const MBPS: std::ops::RangeInclusive<u16> = 1..=200;
 
 /// Whether a window appearance is one of the dark ones.
 #[must_use]
@@ -106,10 +93,11 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
         families.extend(defaults.mono_families.iter().filter(|f| *f != family).cloned());
         theme.typography.mono_families = families;
     }
-    theme.typography.mono_size = sized(settings.font.mono_size, &MONO_SIZE, defaults.mono_size);
-    theme.typography.ui_size = sized(settings.font.ui_size, &UI_SIZE, defaults.ui_size);
+    theme.typography.mono_size =
+        sized(settings.font.mono_size, &bounds::MONO_SIZE, defaults.mono_size);
+    theme.typography.ui_size = sized(settings.font.ui_size, &bounds::UI_SIZE, defaults.ui_size);
     theme.typography.mono_line_height =
-        sized(settings.font.mono_line_height, &LINE_HEIGHT, defaults.mono_line_height);
+        sized(settings.font.mono_line_height, &bounds::LINE_HEIGHT, defaults.mono_line_height);
     theme.typography.ligatures = settings.font.ligatures;
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
     colour_the_terminal(&mut theme.terminal, &settings.colors);
@@ -134,7 +122,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     theme.behaviour.hide_pointer_while_typing = settings.terminal.hide_pointer_while_typing;
     theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;
     theme.behaviour.scroll_multiplier =
-        hundredths(sized(settings.terminal.scroll_multiplier, &SCROLL, 1.0));
+        hundredths(sized(settings.terminal.scroll_multiplier, &bounds::SCROLL, 1.0));
     theme.behaviour.cursor_blink = match settings.terminal.cursor_blink {
         CursorBlink::Program => slopty_theme::CursorBlink::Program,
         CursorBlink::Always => slopty_theme::CursorBlink::Always,
@@ -143,8 +131,8 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     let remote = &settings.remote;
     let defaults = slopty_theme::StreamPrefs::default();
     theme.behaviour.stream = slopty_theme::StreamPrefs {
-        fps: if FPS.contains(&remote.fps) { remote.fps } else { defaults.fps },
-        max_bitrate_bps: if MBPS.contains(&remote.max_bitrate_mbps) {
+        fps: if bounds::FPS.contains(&remote.fps) { remote.fps } else { defaults.fps },
+        max_bitrate_bps: if bounds::MBPS.contains(&remote.max_bitrate_mbps) {
             u32::from(remote.max_bitrate_mbps).saturating_mul(1_000_000)
         } else {
             defaults.max_bitrate_bps
@@ -162,7 +150,7 @@ fn hundredths(ratio: f32) -> u16 {
         clippy::cast_sign_loss,
         reason = "the ratio is clamped to 1..=21 first, so ×100 fits a u16 and is positive"
     )]
-    let hundredths = (sized(ratio, &CONTRAST, default) * 100.0).round() as u16;
+    let hundredths = (sized(ratio, &bounds::CONTRAST, default) * 100.0).round() as u16;
     hundredths
 }
 

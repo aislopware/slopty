@@ -1,14 +1,14 @@
 //! The face's chrome around the list: the bar over a subagent's thread or the session's
-//! changes, the prompt rail, the way back to the newest row, the find bar, the task card, the
-//! line about the last permission prompt, and the composer's floating shell, which holds the
-//! permission prompt while one is asked.
+//! changes, the way back to the newest row, the find bar, the line about the last permission
+//! prompt, and the composer's floating shell, which holds the background work and the task
+//! list over the field, and the permission prompt in the field's place while one is asked.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Bounds, Context, ElementId, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, PathBuilder, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, canvas, div, point, px,
+    AnyElement, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, PathBuilder, Pixels, SharedString, StatefulInteractiveElement as _,
+    Styled as _, canvas, div, point, px,
 };
 use gpui_kit::component::input::{Input, Textarea};
 use slopty_proto::conversation::{ThreadId, ToolDetail, Verdict};
@@ -22,78 +22,10 @@ use crate::conversation::rows;
 use crate::icons::IconName;
 use crate::kit::{self, ButtonKind};
 
-impl ConversationView {
-    /// A tick per prompt down the right edge, at its place in the list: a click goes there,
-    /// the pointer on one shows its words. Only with two prompts or more.
-    pub(super) fn rail(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let prompts: Vec<(usize, String)> =
-            rows::prompts(&self.rows).map(|(ix, id)| (ix, id.to_owned())).collect();
-        if prompts.len() < 2 {
-            return None;
-        }
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let total = self.rows.len().max(1);
-        let thread = self.model.thread(&self.thread);
-        let ticks = prompts.into_iter().enumerate().map(|(n, (ix, id))| {
-            #[expect(clippy::cast_precision_loss, reason = "a position on screen")]
-            let at = ix as f32 / total as f32;
-            let words = thread
-                .and_then(|t| t.entry(&id))
-                .and_then(|e| match &e.body {
-                    slopty_proto::conversation::Body::Prompt(p) => Some(p.text.text.clone()),
-                    _ => None,
-                })
-                .map(|t| super::entries::first_line(&t))
-                .unwrap_or_default();
-            let hint = SharedString::from(words.chars().take(80).collect::<String>());
-            let hint_theme = std::rc::Rc::clone(&self.hint_theme);
-            let selector = format!("rail-{n}");
-            div()
-                .id(ElementId::Name(SharedString::from(selector.clone())))
-                .debug_selector(move || selector)
-                .role(Role::Button)
-                .aria_label(SharedString::from(format!("Prompt {}: {hint}", n.saturating_add(1))))
-                .absolute()
-                .top(gpui::relative(at))
-                .right_0()
-                .w(self.z(theme.spacing.md))
-                .h(self.z(theme.spacing.sm))
-                .flex()
-                .items_center()
-                .justify_end()
-                .cursor_pointer()
-                .group("tick")
-                .child(
-                    div()
-                        .w(self.z(theme.spacing.sm))
-                        .h(px(2.0))
-                        .rounded_full()
-                        .bg(hsla(s.border))
-                        .group_hover("tick", |el| {
-                            el.bg(hsla(s.accent_fill)).w(self.z(theme.spacing.md))
-                        }),
-                )
-                .tooltip(move |_window, cx| {
-                    let hint = hint.clone();
-                    let theme = std::rc::Rc::clone(&hint_theme);
-                    cx.new(|_| kit::Hint::new(hint, "", theme)).into()
-                })
-                .on_click(cx.listener(move |this, _ev, _w, cx| this.scroll_to_row(ix, cx)))
-        });
-        Some(
-            div()
-                .debug_selector(|| "prompt-rail".to_owned())
-                .absolute()
-                .top(self.z(theme.spacing.md))
-                .bottom(self.z(theme.spacing.md))
-                .right(self.z(theme.spacing.xxs))
-                .w(self.z(theme.spacing.md))
-                .children(ticks)
-                .into_any_element(),
-        )
-    }
+/// The widest an attachment's chip grows, in points at zoom 1; a longer name is cut short.
+const ATTACHMENT_WIDTH: f32 = 240.0;
 
+impl ConversationView {
     /// Over the list once the reader scrolled up: back to the newest row.
     pub(super) fn latest_pill(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
@@ -124,88 +56,14 @@ impl ConversationView {
             .bottom(self.z(theme.spacing.md))
             .flex()
             .justify_center()
-            .child(kit::fade_in(pill, "latest", cx))
+            .child(kit::slide_fade(
+                pill,
+                "latest",
+                theme.spacing.xs * self.zoom,
+                kit::Pace::Fade,
+                cx,
+            ))
             .into_any_element()
-    }
-
-    /// The agent's task list, while any task is open: one line (how many are done, the one in
-    /// progress) that opens to all of them.
-    fn tasks_card(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let tasks = self.model.thread(&self.thread)?.tasks();
-        if tasks.is_empty() || tasks.iter().all(|t| t.status == "completed") {
-            return None;
-        }
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let done = tasks.iter().filter(|t| t.status == "completed").count();
-        let current = tasks
-            .iter()
-            .find(|t| t.status == "in_progress")
-            .or_else(|| tasks.iter().find(|t| t.status == "pending"));
-        let open = self.tasks_open;
-        let head = crate::a11y::tab_stop(
-            kit::tabular(div())
-                .id("tasks-head")
-                .debug_selector(|| "tasks-head".to_owned())
-                .role(Role::Button)
-                .aria_label(SharedString::from(format!("Tasks: {done} of {} done", tasks.len())))
-                .aria_expanded(open)
-                .flex()
-                .items_center()
-                .gap(self.z(theme.spacing.sm))
-                .h(self.z(theme.density.row))
-                .px(self.z(theme.spacing.sm))
-                .cursor_pointer()
-                .child(self.icon(IconName::ListTodo, s.text_secondary))
-                .child(
-                    div()
-                        .text_color(hsla(s.text_secondary))
-                        .child(SharedString::from(format!("{done} of {}", tasks.len()))),
-                )
-                .children(current.map(|t| {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .text_color(hsla(s.text))
-                        .child(SharedString::from(t.subject.clone()))
-                }))
-                .child(self.icon(
-                    if open { IconName::ChevronDown } else { IconName::ChevronUp },
-                    s.text_muted,
-                )),
-            s.accent,
-        )
-        .on_click(cx.listener(|this, _ev, _w, cx| {
-            this.tasks_open = !this.tasks_open;
-            cx.notify();
-        }));
-        Some(
-            div()
-                .id("tasks")
-                .debug_selector(|| "tasks".to_owned())
-                .role(Role::Group)
-                .aria_label("Tasks")
-                .flex()
-                .flex_col()
-                .rounded(self.z(theme.radii.md))
-                .border_1()
-                .border_color(hsla(s.border_subtle))
-                .bg(hsla(s.panel))
-                .text_size(self.z(theme.typography.small()))
-                .child(head)
-                .when(open, |el| {
-                    el.child(
-                        div()
-                            .px(self.z(theme.spacing.sm))
-                            .pb(self.z(theme.spacing.sm))
-                            .child(self.task_lines(tasks, false)),
-                    )
-                })
-                .into_any_element(),
-        )
     }
 
     /// How the last permission prompt ended; when the terminal took it back, the way there.
@@ -248,9 +106,9 @@ impl ConversationView {
         )
     }
 
-    /// Everything under the list, on the reading column: the task card, how the last prompt
-    /// ended, and the composer's floating shell (which holds a permission prompt while one is
-    /// asked).
+    /// Everything under the list, on the reading column: how the last prompt ended, and the
+    /// composer's floating shell, which holds the background work and the task list over the
+    /// field (or over a permission prompt while one is asked).
     pub(super) fn foot(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if *self.pane() != Pane::Conversation {
             return None;
@@ -258,17 +116,46 @@ impl ConversationView {
         let (spacing, zoom) = (self.theme.spacing, self.zoom);
         let z = |v: f32| px(v * zoom);
         let tasks = self.tasks_card(cx);
+        let tray = self.tray(cx);
         let settled = self.settled_line(cx);
-        let inside = match self.approvals.prompt() {
-            Some(_) => self.approval(cx),
-            None => self.composer_box(cx),
+        let asking = self.approvals.prompt().is_some();
+        let inside = if asking { self.approval(cx) } else { self.composer_box(cx) };
+        // The shell stays; what it holds cross-fades between the composer and a prompt, on the
+        // sheet's curve asked in, on the settle's answered. Reduce Motion swaps at once.
+        let inside = match self.morph {
+            Some((generation, asked)) if asked == asking && kit::motion(cx) => {
+                let pace = if asked { kit::Pace::Sheet } else { kit::Pace::Settle };
+                gpui::AnimationExt::with_animation(
+                    div().child(inside),
+                    ("composer-morph", generation),
+                    pace.animation(),
+                    // The new contents come in over the last two thirds, as T3's morph does.
+                    |el, t| el.opacity(((t - 0.35) / 0.65).clamp(0.0, 1.0)),
+                )
+                .into_any_element()
+            }
+            _ => inside,
         };
+        // The work in the background and the task list are the shell's top sections, over the
+        // field, a hairline apart, as T3's composer holds pending work: one surface, not three.
+        let s = self.theme.surfaces;
+        let sections = tray.into_iter().chain(tasks).map(|section| {
+            div()
+                .border_b_1()
+                .border_color(hsla(s.border_subtle))
+                .px(z(spacing.xs))
+                .py(z(spacing.xxs))
+                .child(section)
+        });
         let shell = kit::elevate(div(), &self.theme)
+            .id("composer-shell")
             .debug_selector(|| "composer-shell".to_owned())
             .w_full()
+            .flex()
+            .flex_col()
             .rounded(z(self.theme.radii.lg))
-            .p(z(spacing.md))
-            .child(inside);
+            .children(sections)
+            .child(div().p(z(spacing.md)).child(inside));
         Some(
             div()
                 .flex_none()
@@ -285,7 +172,6 @@ impl ConversationView {
                         .flex()
                         .flex_col()
                         .gap(z(spacing.sm))
-                        .children(tasks)
                         .children(settled)
                         .child(shell),
                 )
@@ -293,22 +179,17 @@ impl ConversationView {
         )
     }
 
-    /// The list's lower edge fading into the canvas over the composer, so rows slide under it
-    /// rather than stop at a line: the one gradient the face draws.
-    pub(super) fn list_fade(&self) -> AnyElement {
-        let solid = hsla(self.theme.content());
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .h(self.z(self.theme.spacing.xl))
-            .bg(gpui::linear_gradient(
-                180.0,
-                gpui::linear_color_stop(gpui::Hsla { a: 0.0, ..solid }, 0.0),
-                gpui::linear_color_stop(solid, 1.0),
-            ))
-            .into_any_element()
+    /// The list's lower edge fading into the body's surface over the composer, so rows slide under
+    /// it rather than stop at a line, and its top edge once the list is scrolled off its start,
+    /// so a row is not sliced by the header: the one gradient the face draws, as a mask.
+    pub(super) fn list_fade(&self) -> Vec<AnyElement> {
+        let surface = self.theme.content();
+        let bottom = kit::edge_fade(kit::Edge::Bottom, surface, self.z(self.theme.spacing.xl));
+        let top = self.list.logical_scroll_top();
+        let scrolled = top.item_ix > 0 || top.offset_in_item > px(0.0);
+        let top = scrolled
+            .then(|| kit::edge_fade(kit::Edge::Top, surface, self.z(self.theme.spacing.md)));
+        std::iter::once(bottom).chain(top).map(gpui::IntoElement::into_any_element).collect()
     }
 
     /// The held permission prompt, in the composer's shell: a statement of what Claude wants,
@@ -326,13 +207,17 @@ impl ConversationView {
             ToolDetail::Bash(bash) => bash.description.clone(),
             _ => None,
         };
-        let grants = approval::grants(&prompt.suggestions);
+        let scope = approval::always_line(&prompt.suggestions);
         let mode = prompt
             .mode
             .as_deref()
             .filter(|m| *m != "default")
             .map(|m| format!("{} mode", approval::mode_label(m)));
-        let facts: Vec<String> = [mode, Self::wait_left(&prompt)].into_iter().flatten().collect();
+        let facts: Vec<String> = mode.into_iter().collect();
+        let wait = self
+            .held
+            .filter(|(ask, _)| *ask == prompt.ask)
+            .and_then(|(_, since)| wait_left(&prompt, since, super::now_ms()));
         let allow = kit::button(&theme, "allow-once", "Allow once", ButtonKind::Primary)
             .when(busy, |el| el.opacity(slopty_theme::alpha::PRESSED))
             .on_click(cx.listener(|this, _ev, _w, cx| this.answer(Verdict::Allow, cx)));
@@ -353,53 +238,46 @@ impl ConversationView {
                 },
             ))
         };
-        let open = self.grants_open;
-        let grants_toggle = (!grants.is_empty()).then(|| {
-            let label = if open { "Hide what always allows" } else { "What always allows" };
-            crate::a11y::tab_stop(
-                div()
-                    .id("always-what")
-                    .debug_selector(|| "always-what".to_owned())
-                    .role(Role::Button)
-                    .aria_label(label)
-                    .aria_expanded(open)
-                    .flex()
-                    .items_center()
-                    .gap(self.z(theme.spacing.xxs))
-                    .text_size(self.z(theme.typography.meta()))
-                    .text_color(hsla(s.text_muted))
-                    .cursor_pointer()
-                    .hover(move |el| el.text_color(hsla(s.text_secondary)))
-                    .child(label)
-                    .child(self.icon(
-                        if open { IconName::ChevronUp } else { IconName::ChevronDown },
-                        s.text_muted,
-                    )),
-                s.accent,
-            )
-            .on_click(cx.listener(|this, _ev, _w, cx| {
-                this.grants_open = !this.grants_open;
-                cx.notify();
-            }))
-        });
-        let grants_list = (open && !grants.is_empty()).then(|| {
+        // What "Always allow" grants, said before it is pressed rather than folded away: one
+        // paragraph that wraps as prose, the rules and paths in the mono face.
+        let scope = (always.is_some() && !scope.is_empty()).then(|| {
+            let (words_font, code_font) =
+                (gpui::font(theme.typography.ui_family.clone()), gpui::font(self.mono()));
+            let run = |said: &approval::Said| {
+                let (font, tone) = match said {
+                    approval::Said::Words(_) => (words_font.clone(), s.text_muted),
+                    approval::Said::Code(_) => (code_font.clone(), s.text_secondary),
+                };
+                gpui::TextRun {
+                    len: said.text().len(),
+                    font,
+                    color: hsla(tone),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }
+            };
+            let runs: Vec<gpui::TextRun> = scope.iter().map(run).collect();
+            let plain =
+                SharedString::from(scope.iter().map(approval::Said::text).collect::<String>());
             div()
-                .debug_selector(|| "always-grants".to_owned())
-                .flex()
-                .flex_col()
-                .gap(self.z(theme.spacing.xxs))
-                .text_size(self.z(theme.typography.small()))
-                .text_color(hsla(s.text_secondary))
-                .children(grants.iter().map(|g| div().child(SharedString::from(g.clone()))))
+                .id("always-scope")
+                .debug_selector(|| "always-scope".to_owned())
+                .role(Role::Note)
+                .aria_label(plain.clone())
+                .text_size(self.z(theme.typography.meta()))
+                .child(gpui::StyledText::new(plain).with_runs(runs))
         });
         let reason_field = self
             .deny_open
             .then(|| div().w_full().child(Input::new(&self.deny).aria_label("Why, for Claude")));
+        // The prompt's words start on the composer's text edge, so the swap does not jump.
         div()
             .id("approval")
             .debug_selector(|| "approval".to_owned())
             .role(Role::AlertDialog)
             .aria_label(SharedString::from(statement.clone()))
+            .px(self.z(kit::FIELD_INSET))
             .flex()
             .flex_col()
             .gap(self.z(theme.spacing.sm))
@@ -416,7 +294,7 @@ impl ConversationView {
                             .flex_none()
                             .size(self.z(theme.spacing.sm))
                             .rounded_full()
-                            .bg(hsla(s.warn)),
+                            .bg(hsla(s.warn_fill)),
                     )
                     .child(
                         div()
@@ -443,9 +321,8 @@ impl ConversationView {
                     .text_color(hsla(s.text_secondary))
                     .child(SharedString::from(r))
             }))
-            .children(grants_toggle)
-            .children(grants_list)
             .children(reason_field)
+            .children(scope)
             .child(
                 div()
                     .flex()
@@ -453,6 +330,15 @@ impl ConversationView {
                     .justify_end()
                     .items_center()
                     .gap(self.z(theme.spacing.sm))
+                    .children(wait.map(|wait| {
+                        kit::tabular(div())
+                            .debug_selector(|| "approval-wait".to_owned())
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(self.z(theme.typography.meta()))
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(wait))
+                    }))
                     .child(deny)
                     .children(always)
                     .child(allow),
@@ -537,17 +423,99 @@ impl ConversationView {
         })
     }
 
-    /// How long until the worker hands the prompt back to the terminal, by the gap the worker
-    /// gave when it asked.
-    fn wait_left(prompt: &slopty_proto::conversation::PermissionPrompt) -> Option<String> {
-        let window = prompt.until_ms.checked_sub(prompt.asked_ms)?;
-        let minutes = window / 60_000;
-        (minutes > 0).then(|| format!("The terminal asks in {minutes} min"))
+    /// The model the session runs, one name wherever the face says it: the one that answered
+    /// the last turn, else (before any answer) the status line's.
+    pub(super) fn running_model(&self) -> Option<String> {
+        self.model
+            .thread(&ThreadId::Main)
+            .and_then(|t| t.last_turn())
+            .and_then(|t| t.models.last())
+            .map(|id| crate::conversation::figures::model_name(id))
+            .or_else(|| self.model.meters().and_then(|m| m.model.clone()))
     }
 
-    /// The field that types into the agent's terminal, and under it the density, the mode
-    /// when it is not the default, and the way to send (or, while the agent works and nothing
-    /// is typed, to stop it).
+    /// The chips of what is attached to the draft and still uploading, in a wrapping row over
+    /// the field: each file's name, how far it got, and a way to take it off the draft. `None`
+    /// while nothing uploads. The chip is the one place the upload is said: the tile's header
+    /// leaves an attachment's out.
+    fn attachment_chips(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let chips = self.attachments();
+        if chips.is_empty() {
+            return None;
+        }
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let k = self.zoom;
+        let row = div()
+            .id("composer-attachments")
+            .debug_selector(|| "composer-attachments".to_owned())
+            .flex()
+            .flex_wrap()
+            .gap(self.z(theme.spacing.xs))
+            .pl(self.z(kit::FIELD_INSET))
+            .children(chips.iter().map(|chip| {
+                let id = chip.id;
+                let side = (-2.0_f32).mul_add(theme.spacing.xxs, kit::PILL_HEIGHT);
+                let remove = div()
+                    .id(SharedString::from(format!("attachment-remove-{id}")))
+                    .debug_selector(|| "composer-attachment-remove".to_owned())
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!("Remove {}", chip.name)))
+                    .flex_none()
+                    .size(self.z(side))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(self.z(theme.radii.xs))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.overlay)))
+                    .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.detach(id, cx)))
+                    .child(
+                        crate::icons::icon(
+                            theme,
+                            IconName::X,
+                            crate::icons::IconSize::Inline,
+                            hsla(s.text_muted),
+                        )
+                        .size(self.z(theme.typography.small())),
+                    );
+                kit::pill_frame(theme, k)
+                    .id(SharedString::from(format!("attachment-{id}")))
+                    .debug_selector(|| "composer-attachment".to_owned())
+                    .role(Role::Status)
+                    .aria_label(SharedString::from(format!(
+                        "Attaching {}, {}",
+                        chip.name,
+                        chip.progress()
+                    )))
+                    .max_w(self.z(ATTACHMENT_WIDTH))
+                    // The way off sits in the pill's own end, a pad's width from its edge.
+                    .pr(self.z(theme.spacing.xxs))
+                    .bg(hsla(s.raised))
+                    .text_color(hsla(s.text_secondary))
+                    .child(self.icon(IconName::File, s.text_muted))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(SharedString::from(chip.name.clone())),
+                    )
+                    .child(
+                        kit::tabular(div())
+                            .flex_none()
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(chip.progress())),
+                    )
+                    .child(crate::a11y::tab_stop(remove, s.accent))
+            }));
+        Some(row.into_any_element())
+    }
+
+    /// The field that types into the agent's terminal, and under it the permission mode and
+    /// the model it runs (read-only: the terminal is where either changes), and the way to
+    /// send (or, while the agent works and nothing is typed, to stop it).
     fn composer_box(&self, cx: &Context<Self>) -> AnyElement {
         let theme = self.theme.clone();
         let s = theme.surfaces;
@@ -589,48 +557,67 @@ impl ConversationView {
                 }
             },
         ));
-        let density = div()
-            .id("density")
-            .debug_selector(|| "density".to_owned())
-            .role(Role::Button)
-            .aria_label(SharedString::from(format!("Density: {}", self.density.label())))
-            .flex()
-            .items_center()
-            .gap(self.z(theme.spacing.xxs))
-            .px(self.z(theme.spacing.xs))
-            .h(self.z(theme.density.hit))
-            .rounded(self.z(theme.radii.sm))
-            .text_size(self.z(theme.typography.small()))
-            .text_color(hsla(s.text_muted))
-            .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text_secondary)))
-            .child(self.density.label())
-            .child(self.icon(IconName::ChevronsUpDown, s.text_muted));
-        let density = crate::a11y::tab_stop(density, s.accent)
-            .on_click(cx.listener(|this, _ev, _w, cx| this.cycle_density(cx)));
+        // What the agent runs under, read-only: the terminal is where either changes.
         let mode = self
             .model
             .thread(&ThreadId::Main)
             .and_then(|t| t.last_turn())
             .and_then(|t| t.mode.clone())
-            .filter(|m| m != "default")
-            .map(|m| {
+            .unwrap_or_else(|| "default".to_owned());
+        let model = self.running_model();
+        let setting = div()
+            .id("composer-setting")
+            .debug_selector(|| "composer-setting".to_owned())
+            .role(Role::Status)
+            .aria_label(SharedString::from(match &model {
+                Some(model) => {
+                    format!("Permissions: {}, model: {model}", approval::mode_label(&mode))
+                }
+                None => format!("Permissions: {}", approval::mode_label(&mode)),
+            }))
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .min_w_0()
+            .text_size(self.z(theme.typography.small()))
+            .child(
                 div()
-                    .text_size(self.z(theme.typography.small()))
+                    .flex_none()
+                    .text_color(hsla(s.text_secondary))
+                    .child(SharedString::from(approval::mode_label(&mode).to_owned())),
+            )
+            .children(model.map(|model| {
+                div()
+                    .flex()
+                    .gap(self.z(theme.spacing.xs))
+                    .min_w_0()
                     .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(format!("{} mode", approval::mode_label(&m))))
-            });
+                    .child(kit::separator(&self.theme))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(model)),
+                    )
+            }));
+        let face = cx.weak_entity();
         div()
             .debug_selector(|| "composer".to_owned())
             .flex()
             .flex_col()
             .gap(self.z(theme.spacing.sm))
+            .children(self.attachment_chips(cx))
             .child(
                 div().text_size(self.z(theme.typography.prose())).child(
                     Textarea::new(&self.composer)
                         .appearance(false)
                         .bordered(false)
-                        .aria_label("Message"),
+                        .aria_label("Message")
+                        .on_paste(move |item, _window, cx| {
+                            face.update(cx, |v, cx| v.paste_attachment(item, cx)).unwrap_or(false)
+                        }),
                 ),
             )
             .child(
@@ -638,10 +625,9 @@ impl ConversationView {
                     .flex()
                     .items_center()
                     .gap(self.z(theme.spacing.xs))
-                    // The density's words start where the field's do.
-                    .pl(self.z(FIELD_INSET - theme.spacing.xs))
-                    .child(density)
-                    .children(mode)
+                    // The words start where the field's do.
+                    .pl(self.z(kit::FIELD_INSET))
+                    .child(setting)
                     .child(div().flex_1())
                     .child(send),
             )
@@ -708,7 +694,13 @@ impl ConversationView {
                 .absolute()
                 .top(self.z(theme.spacing.sm))
                 .right(self.z(theme.spacing.lg))
-                .child(kit::fade_in(bar, "conversation-find", cx))
+                .child(kit::slide_fade(
+                    bar,
+                    "conversation-find",
+                    -theme.spacing.xs * self.zoom,
+                    kit::Pace::Fade,
+                    cx,
+                ))
                 .into_any_element(),
         )
     }
@@ -719,10 +711,6 @@ const ASK_LINES: usize = 5;
 
 /// The tallest a held call's preview grows, in points: a diff past it is cut.
 const ASK_HEIGHT: f32 = 320.0;
-
-/// How far a multi-line field sets its text in from its edge, in points: gpui-kit's
-/// medium `input_px`, which the field keeps even without its frame.
-const FIELD_INSET: f32 = 10.0;
 
 /// The find bar's width, in points.
 const FIND_WIDTH: f32 = 320.0;
@@ -741,10 +729,16 @@ impl ConversationView {
                 });
                 (
                     "Changes".to_owned(),
-                    Some(format!(
-                        "{} \u{b7} +{added} \u{2212}{removed}",
-                        crate::conversation::tools::count(files.len() as u64, "file", "files")
-                    )),
+                    Some(
+                        std::iter::once(crate::conversation::tools::count(
+                            files.len() as u64,
+                            "file",
+                            "files",
+                        ))
+                        .chain(kit::changes_text(added, removed))
+                        .collect::<Vec<_>>()
+                        .join(" \u{b7} "),
+                    ),
                     "Back to the conversation",
                 )
             }
@@ -780,6 +774,7 @@ impl ConversationView {
                 .items_center()
                 .gap(self.z(theme.spacing.xs))
                 .px(self.z(theme.spacing.xs))
+                .bg(hsla(theme.content()))
                 .border_b_1()
                 .border_color(hsla(s.border_subtle))
                 .text_size(self.z(theme.typography.small()))
@@ -796,7 +791,11 @@ impl ConversationView {
                         .child(SharedString::from(name)),
                 )
                 .children(kind.map(|k| {
-                    kit::tabular(div()).text_color(hsla(s.text_muted)).child(SharedString::from(k))
+                    kit::tabular(div())
+                        .flex_none()
+                        .text_size(self.z(theme.typography.meta()))
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(k))
                 }))
                 .into_any_element(),
         )
@@ -841,19 +840,7 @@ impl ConversationView {
                         .cursor_pointer()
                         .when(open, |el| el.bg(hsla(s.raised)))
                         .hover(move |el| el.bg(hsla(s.raised)))
-                        .text_color(hsla(s.text_secondary))
-                        .child(
-                            div()
-                                .flex()
-                                .child(div().text_color(hsla(s.success)).child("+"))
-                                .child(SharedString::from(added.to_string())),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .child(div().text_color(hsla(s.error)).child("\u{2212}"))
-                                .child(SharedString::from(removed.to_string())),
-                        ),
+                        .children(kit::changes_at(theme, added, removed, k)),
                     s.accent,
                 )
                 .on_click(move |_ev, _window, cx| {
@@ -890,15 +877,19 @@ impl ConversationView {
                     .into_any_element(),
             );
         }
-        if let Some(model) = meters.and_then(|m| m.model.clone()) {
-            out.push(
-                chip("chip-model")
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(model))
-                    .into_any_element(),
-            );
+        if out.is_empty() {
+            return out;
         }
-        out
+        // The readouts stand apart from each other as the tile's other items do.
+        vec![
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.sm * k))
+                .children(out)
+                .into_any_element(),
+        ]
     }
 }
 
@@ -949,4 +940,57 @@ pub fn context_ring(theme: &Theme, used_pct: f64, side: f32) -> AnyElement {
     .size(px(side))
     .flex_none()
     .into_any_element()
+}
+
+/// When the worker hands the prompt back to the terminal, once that is five minutes off or
+/// less: "Falls back to the terminal in 4 min". The minutes count on the worker's own
+/// window, counted from `since_ms`, when this client saw it.
+#[must_use]
+pub fn wait_left(
+    prompt: &slopty_proto::conversation::PermissionPrompt,
+    since_ms: u64,
+    now_ms: u64,
+) -> Option<String> {
+    let window = prompt.until_ms.checked_sub(prompt.asked_ms)?;
+    let held = now_ms.saturating_sub(since_ms);
+    let left = window.saturating_sub(held);
+    let minutes = left.div_ceil(60_000);
+    match minutes {
+        1 => Some("Falls back to the terminal in under a minute".to_owned()),
+        2..=5 => Some(format!("Falls back to the terminal in {minutes} min")),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_core::SessionId;
+
+    use super::*;
+    use crate::conversation::fixtures;
+
+    /// The fallback shows from five minutes left, counts down a minute at a time on this
+    /// client's clock from when the prompt came, and goes once the time is up.
+    #[test]
+    fn the_fallback_counts_down_from_five_minutes() {
+        let mut prompt = fixtures::bash_prompt(SessionId::new(), 1);
+        prompt.asked_ms = 1_000_000;
+        prompt.until_ms = prompt.asked_ms + 10 * 60_000;
+        let seen = 50;
+        let at = |minutes: u64| seen + minutes * 60_000;
+        assert_eq!(wait_left(&prompt, seen, at(0)), None, "ten minutes off");
+        assert_eq!(
+            wait_left(&prompt, seen, at(5)).as_deref(),
+            Some("Falls back to the terminal in 5 min")
+        );
+        assert_eq!(
+            wait_left(&prompt, seen, at(8) + 1).as_deref(),
+            Some("Falls back to the terminal in 2 min")
+        );
+        assert_eq!(
+            wait_left(&prompt, seen, at(9) + 30_000).as_deref(),
+            Some("Falls back to the terminal in under a minute")
+        );
+        assert_eq!(wait_left(&prompt, seen, at(10)), None, "the terminal has it");
+    }
 }

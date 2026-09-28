@@ -1,6 +1,6 @@
 //! Identifier newtypes.
 //!
-//! Durable identities (sessions, canvas items, workers) are `UUIDv7` so they sort by creation time
+//! Durable identities (sessions, items, workers) are `UUIDv7` so they sort by creation time
 //! and never collide across workers. Connection-scoped identities (streams) are small integers
 //! allocated by the worker and only meaningful for one connection.
 

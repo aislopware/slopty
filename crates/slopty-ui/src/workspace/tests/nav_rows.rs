@@ -72,8 +72,9 @@ fn the_filter_keeps_the_rows_that_match(cx: &mut TestAppContext) {
 
 /// A shell's row reads two lines: its title, ended by its age from the session's start, then
 /// what its agent says, its directory and its branch, in the order every second line keeps. Once
-/// the agent waits on the human, the state takes the age's place in a word, and the row is not
-/// washed: the word is the one mark it needs. Folded away, *Needs you* lists it.
+/// the agent waits on the human, the state takes the age's place in a word and the second line
+/// says what it asks, not the state again; the row is not washed: the word is the one mark it
+/// needs. Folded away, *Needs you* lists it.
 #[gpui::test]
 fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -114,17 +115,21 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
 
     // Focus the other shell, so the waiting one's row is not the selected one.
     click(cx, selector("nav-tile", other.item));
-    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
+    let asks = AgentEvent {
+        status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
+        detail: Some("$ touch refused.txt".into()),
+        ..blocked(session)
+    };
+    view.update_in(cx, |v, _w, cx| v.agent_event(asks, cx));
     cx.run_until_parked();
-    let words = agent_status_text(&blocked(session));
     let lines = view.read_with(cx, WorkspaceView::navigator_lines);
     assert!(
         lines.contains(&(
             "Claude Code".to_owned(),
-            format!("{words} \u{b7} oss/slopty \u{b7} main"),
+            "Run touch refused.txt \u{b7} oss/slopty \u{b7} main".to_owned(),
             Some("5m".into())
         )),
-        "{lines:#?}"
+        "what it asks, not its state again: {lines:#?}"
     );
     assert!(cx.debug_bounds(leak(format!("nav-age-{id}"))).is_none(), "the state takes its place");
     let word = cx.debug_bounds(leak(format!("nav-status-{id}"))).expect("the state's word");
@@ -382,4 +387,106 @@ fn a_rows_two_lines_sit_in_its_middle(cx: &mut TestAppContext) {
             "{density:?}: {above:?} over, {below:?} under"
         );
     }
+}
+
+/// The focused tile's row sits on the navigator's plate, with no fill of its own; a click on
+/// another row puts the plate there (at once, under Reduce Motion).
+#[gpui::test]
+fn the_selected_row_sits_on_the_plate(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let second = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    let plate = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.navigator_plate());
+    for tile in [first, second, first] {
+        click(cx, selector("nav-tile", tile.item));
+        assert_eq!(focused(&view, cx), Some(tile));
+        let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row");
+        assert_eq!(plate(cx), Some(row), "under the focused row");
+    }
+}
+
+/// One agent is one row. At work with its tile's row in view, *Working* does not list it again:
+/// the row ends in "Working" already. Folded away, *Working* lists it. Waiting, its row ends in
+/// the state's own word ("Needs approval"), not the section's "Needs you".
+#[gpui::test]
+fn an_agent_in_view_is_listed_once_in_its_own_word(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let (busy, asking) = (SessionId::new(), SessionId::new());
+    let _busy = opens(&view, cx, &studio, busy, studio.me, 1);
+    let _asking = opens(&view, cx, &studio, asking, studio.me, 2);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(busy) }, cx);
+        let status = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() });
+        v.agent_event(AgentEvent { status, ..blocked(asking) }, cx);
+    });
+    cx.run_until_parked();
+    assert!(!shown(cx, "nav-working"), "its row says it works");
+    assert!(view.read_with(cx, |v, _| v.navigator_working().is_empty()));
+    let words: Vec<Option<String>> =
+        view.read_with(cx, WorkspaceView::navigator_words).into_iter().map(|(_, w)| w).collect();
+    assert!(words.contains(&Some("Working".to_owned())), "{words:?}");
+    assert!(words.contains(&Some("Needs approval".to_owned())), "the state's word: {words:?}");
+    assert!(!words.contains(&Some("Needs you".to_owned())), "not the section's: {words:?}");
+
+    click(cx, leak(format!("nav-worker-{}", studio.key)));
+    assert!(shown(cx, "nav-working"), "folded away, the section lists it");
+    assert_eq!(view.read_with(cx, |v, _| v.navigator_working()), [busy]);
+}
+
+/// An agent at rest says what it last said, a lone word quoted, and no state: never "Idle".
+/// Its age runs from when it came to rest, not from when its shell started.
+#[gpui::test]
+fn a_resting_agent_reads_its_last_word_and_its_age(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let _tile = opens_in(&view, cx, &studio, session, studio.me, 1, Some("/w/oss/slopty"));
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let since_ms = u64::try_from(now.saturating_sub(120_000)).unwrap();
+    view.update_in(cx, |v, _w, cx| {
+        let rest = AgentEvent {
+            status: AgentStatus::Idle,
+            detail: Some("done".into()),
+            since_ms,
+            ..blocked(session)
+        };
+        v.agent_event(rest, cx);
+    });
+    cx.run_until_parked();
+    let lines = view.read_with(cx, WorkspaceView::navigator_lines);
+    let (_, meta, age) = lines.first().expect("its row");
+    assert_eq!(meta, "\u{201c}done\u{201d} \u{b7} oss/slopty", "{lines:#?}");
+    assert!(!meta.contains("Idle"), "{meta:?}");
+    assert_eq!(age.as_deref(), Some("2m"), "from its rest: {lines:#?}");
+}
+
+/// A phone's title bar has no tabs, so its drawer heads the list with *Workspaces*: a row per
+/// workspace, the active one on a plate of its own, and "New workspace", which goes to the empty
+/// one the layout keeps last. A desktop's navigator has no such section.
+#[gpui::test]
+fn a_phone_drawer_lists_the_workspaces(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    assert!(!shown(cx, "nav-workspaces"), "the title bar's tabs say it on a desktop");
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    let heading = cx.debug_bounds("nav-workspaces").expect("the section heads the drawer");
+    let space = cx.debug_bounds("nav-space-0").expect("the workspace's row");
+    let new = cx.debug_bounds("nav-new-space").expect("and a way to a new one");
+    let worker = cx.debug_bounds(leak(format!("nav-worker-{}", studio.key))).expect("the worker");
+    assert!(heading.bottom() <= space.top() && space.bottom() <= new.top(), "in that order");
+    assert!(new.bottom() <= worker.top(), "above the workers");
+    let plate = view.read_with(cx, |v, _| v.navigator_space_plate()).expect("a plate");
+    assert!((plate.top() - space.top()).abs() < px(0.5), "the active one on it: {plate:?}");
+    click(cx, "nav-new-space");
+    let (active, last) = view.read_with(cx, |v, _| {
+        (v.layout().active_workspace(), v.layout().workspaces().len().saturating_sub(1))
+    });
+    assert_eq!(active, last, "the empty workspace kept last");
 }

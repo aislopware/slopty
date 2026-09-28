@@ -12,8 +12,9 @@
 //!
 //! When the agent stops or waits on the human, the event's `detail` says what it wants: the
 //! question it asked, the elicitation's message, or (on `Stop`) the last line it said, from the
-//! payload's `last_assistant_message`; when a payload carries none of those but names a
-//! transcript, the daemon reads the transcript tail ([`transcript`]) and fills the detail in.
+//! payload's `last_assistant_message`; when a question or an elicitation comes without its
+//! text but names a transcript, the daemon reads the transcript tail ([`transcript`]) and fills
+//! the detail in.
 //!
 //! Hooks are only the strongest of four signals. A `claude` the human started by hand in any
 //! Slopty terminal — or one running before `slopty hook install` — is attributed from what the
@@ -61,27 +62,116 @@ use crate::transcript::Progress;
 /// stopping (with their transcripts), the task list, compaction, and a turn that ended on an
 /// API error. `MessageDisplay` is left out on purpose: Claude Code holds the TUI's paint until
 /// that hook returns, so it is measured before it is ever registered.
-pub const HOOK_EVENTS: [&str; 19] = [
-    "SessionStart",
-    "SessionEnd",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "PostToolUseFailure",
-    "PermissionRequest",
-    "PermissionDenied",
-    "Notification",
-    "Elicitation",
-    "ElicitationResult",
-    "Stop",
-    "StopFailure",
-    "SubagentStart",
-    "SubagentStop",
-    "TaskCreated",
-    "TaskCompleted",
-    "PreCompact",
-    "PostCompact",
+pub const HOOK_EVENTS: [HookEvent; 19] = [
+    HookEvent::SessionStart,
+    HookEvent::SessionEnd,
+    HookEvent::UserPromptSubmit,
+    HookEvent::PreToolUse,
+    HookEvent::PostToolUse,
+    HookEvent::PostToolUseFailure,
+    HookEvent::PermissionRequest,
+    HookEvent::PermissionDenied,
+    HookEvent::Notification,
+    HookEvent::Elicitation,
+    HookEvent::ElicitationResult,
+    HookEvent::Stop,
+    HookEvent::StopFailure,
+    HookEvent::SubagentStart,
+    HookEvent::SubagentStop,
+    HookEvent::TaskCreated,
+    HookEvent::TaskCompleted,
+    HookEvent::PreCompact,
+    HookEvent::PostCompact,
 ];
+
+/// A hook's event (`hook_event_name`): Claude Code's own, and the two that `slopty hook` posts
+/// on the same path for itself. Each is spelled on the wire as its variant is named.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+pub enum HookEvent {
+    /// A session started, resumed, was cleared or compacted (`source`).
+    SessionStart,
+    /// The session ended.
+    SessionEnd,
+    /// The person sent a prompt.
+    UserPromptSubmit,
+    /// A tool call is about to run.
+    PreToolUse,
+    /// A tool call returned.
+    PostToolUse,
+    /// A tool call failed.
+    PostToolUseFailure,
+    /// A tool call waits on the person's permission; the one event Claude Code waits on.
+    PermissionRequest,
+    /// A tool call was refused.
+    PermissionDenied,
+    /// Claude Code notified the person (`notification_type`).
+    Notification,
+    /// An MCP server asked the person for input.
+    Elicitation,
+    /// The person answered an elicitation.
+    ElicitationResult,
+    /// A turn finished.
+    Stop,
+    /// A turn ended on an API error.
+    StopFailure,
+    /// A subagent started.
+    SubagentStart,
+    /// A subagent finished.
+    SubagentStop,
+    /// A task was added to the list.
+    TaskCreated,
+    /// A task was completed.
+    TaskCompleted,
+    /// A compaction is about to run.
+    PreCompact,
+    /// A compaction finished.
+    PostCompact,
+    /// `slopty hook report`: any program's own word on its status.
+    Report,
+    /// `slopty hook statusline`: the status line's meters, which say nothing about the turn.
+    Statusline,
+    /// An event this build does not know, such as one a newer Claude Code adds; ignored.
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+impl HookEvent {
+    /// The event's name on the wire and in the settings' `hooks` keys.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionStart => "SessionStart",
+            Self::SessionEnd => "SessionEnd",
+            Self::UserPromptSubmit => "UserPromptSubmit",
+            Self::PreToolUse => "PreToolUse",
+            Self::PostToolUse => "PostToolUse",
+            Self::PostToolUseFailure => "PostToolUseFailure",
+            Self::PermissionRequest => "PermissionRequest",
+            Self::PermissionDenied => "PermissionDenied",
+            Self::Notification => "Notification",
+            Self::Elicitation => "Elicitation",
+            Self::ElicitationResult => "ElicitationResult",
+            Self::Stop => "Stop",
+            Self::StopFailure => "StopFailure",
+            Self::SubagentStart => "SubagentStart",
+            Self::SubagentStop => "SubagentStop",
+            Self::TaskCreated => "TaskCreated",
+            Self::TaskCompleted => "TaskCompleted",
+            Self::PreCompact => "PreCompact",
+            Self::PostCompact => "PostCompact",
+            Self::Report => "Report",
+            Self::Statusline => "Statusline",
+            Self::Other => "Other",
+        }
+    }
+}
+
+impl std::fmt::Display for HookEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Longest `detail` string sent to clients.
 pub const DETAIL_MAX: usize = 60;
@@ -104,7 +194,7 @@ pub struct Hook {
     pub session_id: Option<String>,
     /// The event (`hook_event_name`).
     #[serde(default, rename = "hook_event_name")]
-    pub event: String,
+    pub event: HookEvent,
     /// The agent's working directory.
     #[serde(default)]
     pub cwd: Option<String>,
@@ -264,14 +354,15 @@ impl Hook {
 }
 
 /// Whether an event's `detail` should be recovered from the transcript when the payload gave
-/// none: the states where the badge is read as "what does it want?".
+/// none: a question or an elicitation raised by a notification that does not spell it out.
+///
+/// A `Stop` always carries `last_assistant_message`, so a finished turn never needs the read.
 #[must_use]
 pub const fn wants_transcript(event: &AgentEvent) -> bool {
     event.detail.is_none()
         && matches!(
             event.status,
             AgentStatus::Blocked(BlockReason::Question | BlockReason::Elicitation)
-                | AgentStatus::Done
         )
 }
 
@@ -503,7 +594,7 @@ impl Tracker {
     /// (a restart after a crash) or when the human started it (`/clear`, `/resume`).
     pub fn apply(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
         // The status line's meters ride the hook path but say nothing about the turn.
-        if hook.event == statusline::STATUSLINE_EVENT || !self.owns(hook) {
+        if hook.event == HookEvent::Statusline || !self.owns(hook) {
             return None;
         }
         self.hooked = true;
@@ -680,7 +771,7 @@ impl Tracker {
         let at_rest =
             matches!(self.status, AgentStatus::None | AgentStatus::Idle | AgentStatus::Done);
         let by_the_human =
-            hook.event == "SessionStart" && hook.source.as_deref() != Some("startup");
+            hook.event == HookEvent::SessionStart && hook.source.as_deref() != Some("startup");
         at_rest || by_the_human
     }
 
@@ -690,26 +781,29 @@ impl Tracker {
     fn ledger(&mut self, hook: &Hook) {
         let Some(id) = hook.tool_use_id.as_ref() else {
             if matches!(
-                hook.event.as_str(),
-                "SessionStart"
-                    | "SessionEnd"
-                    | "UserPromptSubmit"
-                    | "Stop"
-                    | "StopFailure"
-                    | "Report"
+                hook.event,
+                HookEvent::SessionStart
+                    | HookEvent::SessionEnd
+                    | HookEvent::UserPromptSubmit
+                    | HookEvent::Stop
+                    | HookEvent::StopFailure
+                    | HookEvent::Report
             ) {
                 self.blocks.clear();
             }
             return;
         };
-        match hook.event.as_str() {
-            "PermissionRequest" => {
+        match hook.event {
+            HookEvent::PermissionRequest => {
                 self.blocks.insert(id.clone());
             }
-            "PreToolUse" if hook.tool_name.as_deref() == Some("AskUserQuestion") => {
+            HookEvent::PreToolUse if hook.tool_name.as_deref() == Some("AskUserQuestion") => {
                 self.blocks.insert(id.clone());
             }
-            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
+            HookEvent::PreToolUse
+            | HookEvent::PostToolUse
+            | HookEvent::PostToolUseFailure
+            | HookEvent::PermissionDenied => {
                 self.blocks.remove(id);
             }
             _ => {}
@@ -719,27 +813,28 @@ impl Tracker {
     /// The transition for a hook, if it means anything to us.
     fn next(&self, hook: &Hook) -> Option<(AgentStatus, Option<String>)> {
         let tool = || hook.tool_name.clone().unwrap_or_default();
-        Some(match hook.event.as_str() {
-            "SessionStart" => (AgentStatus::Idle, None),
-            "SessionEnd" => (AgentStatus::None, None),
-            "UserPromptSubmit" => {
+        Some(match hook.event {
+            HookEvent::SessionStart => (AgentStatus::Idle, None),
+            HookEvent::SessionEnd => (AgentStatus::None, None),
+            HookEvent::UserPromptSubmit => {
                 (AgentStatus::Working, hook.prompt.as_deref().map(first_line).map(truncate))
             }
-            "PreToolUse" if hook.tool_name.as_deref() == Some("AskUserQuestion") => {
+            HookEvent::PreToolUse if hook.tool_name.as_deref() == Some("AskUserQuestion") => {
                 (AgentStatus::Blocked(BlockReason::Question), hook.question())
             }
-            "PreToolUse" => (AgentStatus::Tool { tool: tool() }, hook.tool_detail()),
-            "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" | "ElicitationResult" => {
-                (AgentStatus::Working, None)
-            }
-            "PermissionRequest" => {
+            HookEvent::PreToolUse => (AgentStatus::Tool { tool: tool() }, hook.tool_detail()),
+            HookEvent::PostToolUse
+            | HookEvent::PostToolUseFailure
+            | HookEvent::PermissionDenied
+            | HookEvent::ElicitationResult => (AgentStatus::Working, None),
+            HookEvent::PermissionRequest => {
                 (AgentStatus::Blocked(BlockReason::Permission { tool: tool() }), hook.tool_detail())
             }
-            "Elicitation" => (
+            HookEvent::Elicitation => (
                 AgentStatus::Blocked(BlockReason::Elicitation),
                 hook.message.as_deref().map(first_line).map(truncate),
             ),
-            "Notification" => match hook.notification_type.as_deref()? {
+            HookEvent::Notification => match hook.notification_type.as_deref()? {
                 // Follows a `PermissionRequest` a few seconds later and, as of Claude Code
                 // 2.1.261, says only "Claude needs your permission": when the request already
                 // put the tool and its arguments on the badge, keep them.
@@ -768,10 +863,10 @@ impl Tracker {
             },
             // A turn that ended on an API error ends as surely as one that finished; the detail is
             // the error as shown.
-            "Stop" | "StopFailure" => (AgentStatus::Done, hook.last_said()),
+            HookEvent::Stop | HookEvent::StopFailure => (AgentStatus::Done, hook.last_said()),
             // Any program's own word (`slopty hook report`): a wrapper around another agent
             // gets the same pill, badge and attention as Claude Code's hooks buy it.
-            "Report" => {
+            HookEvent::Report => {
                 let said = hook.message.as_deref().map(first_line).map(truncate);
                 match hook.status.as_deref()? {
                     "working" => (AgentStatus::Working, said),
@@ -782,7 +877,15 @@ impl Tracker {
                     _ => return None,
                 }
             }
-            _ => return None,
+            // The conversation face reads these; the status does not move.
+            HookEvent::SubagentStart
+            | HookEvent::SubagentStop
+            | HookEvent::TaskCreated
+            | HookEvent::TaskCompleted
+            | HookEvent::PreCompact
+            | HookEvent::PostCompact
+            | HookEvent::Statusline
+            | HookEvent::Other => return None,
         })
     }
 }
@@ -1203,6 +1306,20 @@ mod tests {
         assert!(!e.attention, "already blocked: no second alert");
     }
 
+    /// Every event reads and writes as its name; one a newer Claude Code adds, or none at all,
+    /// reads as `Other`.
+    #[test]
+    fn an_event_is_spelled_as_its_name_and_a_new_one_reads_as_other() {
+        let ours = [HookEvent::Report, HookEvent::Statusline, HookEvent::Other];
+        for event in HOOK_EVENTS.into_iter().chain(ours) {
+            let name = serde_json::json!(event.as_str());
+            assert_eq!(serde_json::to_value(event).expect("json"), name, "{event}");
+            assert_eq!(serde_json::from_value::<HookEvent>(name).expect("json"), event);
+        }
+        assert_eq!(hook(r#"{"hook_event_name":"MessageDisplay"}"#).event, HookEvent::Other);
+        assert_eq!(hook("{}").event, HookEvent::Other);
+    }
+
     #[test]
     fn unknown_events_and_duplicates_are_silent() {
         let sid = SessionId::new();
@@ -1274,16 +1391,27 @@ mod tests {
         assert_eq!(e.status, AgentStatus::Done);
         assert_eq!(e.detail.as_deref(), Some("Done. `opened-enter` was created."));
 
-        // An older Claude Code without `last_assistant_message`: the daemon asks the transcript.
-        let mut t = Tracker::default();
-        let e = t
+        // A stop always carries its message, so even one that said nothing is not looked up.
+        let e = Tracker::default()
             .apply(sid, &hook(r#"{"hook_event_name":"Stop","transcript_path":"/x.jsonl"}"#))
             .expect("stop");
+        assert!(!wants_transcript(&e));
+
+        // A question the payload does not spell out: the daemon asks the transcript.
+        let mut t = Tracker::default();
+        let e = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"Notification","notification_type":"agent_needs_input","transcript_path":"/x.jsonl"}"#,
+                ),
+            )
+            .expect("question");
         assert_eq!(e.detail, None);
         assert!(wants_transcript(&e));
-        assert!(t.set_detail("Running the tests now."));
-        assert!(!t.set_detail("Running the tests now."));
-        assert_eq!(t.event(sid).detail.as_deref(), Some("Running the tests now."));
+        assert!(t.set_detail("Which framework?"));
+        assert!(!t.set_detail("Which framework?"));
+        assert_eq!(t.event(sid).detail.as_deref(), Some("Which framework?"));
     }
 
     #[test]

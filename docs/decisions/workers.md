@@ -392,3 +392,48 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `apps/slopty-worker/tests/server_link.rs` (a real ptyd and worker, a bash in a repository,
     a checkout typed through the verb), and the start surviving a reattach in `slopty-ptyd`'s
     `spawn_attach_detach_reattach_close`.
+
+- ✅ **A followed session's transcripts are read once, whoever follows it** (2026-09-28). Each
+  follow task used to own a `Transcripts` of its own and decode the session's files every
+  250 ms and at every hook, so two clients following one agent decoded it twice. The follows
+  board (`slopty_worker::conversation::Board::reader`) now keeps one `Reader` per followed
+  session, held weakly: it lives while a follower holds it and goes with the last one. A task
+  of the session's own, started by the first follower, reads on the tick and at each hook and
+  broadcasts each read's `Read` (changes and outputs). A follower that joins takes the reader's
+  async lock and reads what the files gained, which the others are sent. It then takes the
+  conversation as it stands, rebuilt from the decoder (a reset of every thread, then entries,
+  tasks, turns and the outputs' tails), and subscribes, all under the one lock, so no read
+  falls between its snapshot and its first change. A follower more than 64 reads behind is sent
+  the whole conversation again rather than a gap. Expanding a clipped text reads through the
+  same reader. Each follower keeps its own live-block overlay and meters, which are per stream.
+  Measured (MEASUREMENTS.md, "one transcript read for every follower"): with 4 followers an
+  idle tick costs about 53 µs instead of 210, an appended record about 130 µs instead of 335.
+  Test: `followers_share_one_read_and_a_late_one_gets_it_whole` counts the reads. The follow
+  e2e (`a_followed_conversation_streams_and_holds_permission_for_the_follower`) runs on it.
+
+- ✅ **The item registry is written by one writer, compact, as it stands** (2026-09-28). Every
+  item change used to start its own blocking task that cloned the whole registry and wrote it
+  as pretty JSON, so a burst of N changes made N full writes. Now a change marks the registry
+  dirty and starts a writer only when none is at work. The writer writes the latest state,
+  writes again only if something changed during its write, and then stands down. A burst is one
+  or two writes of its final state. Without a runtime the write stays inline, so a tool or a
+  test sees each change on disk when the call returns. The file is compact JSON: nobody edits
+  it by hand. Test: `a_burst_of_changes_is_written_once_as_it_ended` holds a write under way
+  across 50 changes and counts one write of the final state.
+
+- ✅ **An item edit is applied by one function on both sides** (2026-09-28). The client's
+  `ItemDoc::apply_op` and the worker's registry each applied an `ItemOp` to an `Item` in their
+  own code, and they had drifted. On an op the item's kind does not take, the client changed
+  nothing and the worker refused; a `SetUrl` or `SetFolder` to the value already held counted
+  as a change on the worker and not on the client, while a same-value rename or sleep counted
+  on both. Now `slopty_proto::items::Item::apply` makes every edit and says whether the value
+  moved, or refuses an edit the kind does not take (`Refused::WrongKind`); adds and removes stay
+  with each registry, whose rules differ (the worker refuses an add for an id it holds, and a
+  client takes the echo of its own). The client maps "no change" and a refusal to
+  `ItemChange::Echo`. So a client redraws only for what moved, and the echo of its own
+  optimistic op is an echo unless the worker trimmed it, when the worker's version wins. The
+  worker maps a refusal to `WorkerError::Items` ("not a note", as before) and still broadcasts
+  an edit that changed nothing, since the delta is how the proposer hears its op was taken.
+  - Tests: `an_edit_changes_only_what_moves_and_only_where_it_fits` in `slopty-proto`; the
+    client's `snapshot_then_deltas_and_echoes` checks an echo that the worker trimmed and one
+    it did not.

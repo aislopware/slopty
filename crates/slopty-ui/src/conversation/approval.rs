@@ -128,27 +128,95 @@ fn destination(where_: Option<&str>) -> Option<&'static str> {
     }
 }
 
-/// What "always" grants, one line per update: "Bash(npm test:*) in this project".
+/// A piece of the line that says what "Always allow" grants: words, or a rule or command as
+/// Claude Code writes it, set in the mono face.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Said {
+    /// Prose.
+    Words(String),
+    /// A command, rule or path, as typed.
+    Code(String),
+}
+
+impl Said {
+    /// The text, whichever face it is set in.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Words(text) | Self::Code(text) => text,
+        }
+    }
+}
+
+/// What "Always allow" grants, as one sentence from the updates Claude Code suggested.
+///
+/// "Always allow stops asking for `npm test` commands in this project, for you". Empty when
+/// nothing is suggested, and the button is not offered then.
 #[must_use]
-pub fn grants(suggestions: &[Suggestion]) -> Vec<String> {
-    suggestions
-        .iter()
-        .map(|s| {
-            let what = match &s.grant {
-                Grant::Rules { behavior, rules } if behavior == "allow" => rules.join(", "),
-                Grant::Rules { behavior, rules } => format!("{behavior} {}", rules.join(", ")),
-                Grant::Mode { mode } => format!("{} mode", mode_label(mode)),
-                Grant::Directories { directories } => {
-                    format!("Work in {}", directories.join(", "))
+pub fn always_line(suggestions: &[Suggestion]) -> Vec<Said> {
+    fn words(out: &mut Vec<Said>, text: &str) {
+        match out.last_mut() {
+            Some(Said::Words(last)) => last.push_str(text),
+            _ => out.push(Said::Words(text.to_owned())),
+        }
+    }
+    let mut out: Vec<Said> = Vec::new();
+    let kept = suggestions.first().map(|first| &first.destination);
+    let shared = suggestions.iter().all(|s| Some(&s.destination) == kept);
+    for (i, suggestion) in suggestions.iter().enumerate() {
+        words(&mut out, if i == 0 { "Always allow " } else { " and " });
+        match &suggestion.grant {
+            Grant::Rules { behavior, rules } => {
+                if behavior == "allow" {
+                    words(&mut out, "stops asking for ");
+                } else {
+                    words(&mut out, &format!("sets {behavior} for "));
                 }
-                Grant::Other { kind } => kind.clone(),
-            };
-            match destination(s.destination.as_deref()) {
-                Some(place) => format!("{what} {place}"),
-                None => what,
+                for (j, rule) in rules.iter().enumerate() {
+                    if j > 0 {
+                        words(&mut out, ", ");
+                    }
+                    match bash_rule(rule) {
+                        Some((command, true)) => {
+                            out.push(Said::Code(command.to_owned()));
+                            words(&mut out, " commands");
+                        }
+                        Some((command, false)) => out.push(Said::Code(command.to_owned())),
+                        None => out.push(Said::Code(rule.clone())),
+                    }
+                }
             }
-        })
-        .collect()
+            Grant::Mode { mode } => {
+                words(&mut out, &format!("switches to {} mode", mode_label(mode)));
+            }
+            Grant::Directories { directories } => {
+                words(&mut out, "lets Claude work in ");
+                out.push(Said::Code(directories.join(", ")));
+            }
+            Grant::Other { kind } => words(&mut out, kind),
+        }
+        if !shared && let Some(place) = destination(suggestion.destination.as_deref()) {
+            words(&mut out, &format!(" {place}"));
+        }
+    }
+    // Where every grant is kept alike, it is said once, at the end.
+    if shared
+        && let Some(place) =
+            suggestions.first().and_then(|first| destination(first.destination.as_deref()))
+    {
+        words(&mut out, &format!(" {place}"));
+    }
+    out
+}
+
+/// A `Bash(…)` rule's command, and whether it covers every command that starts with it
+/// (`Bash(npm test:*)`).
+fn bash_rule(rule: &str) -> Option<(&str, bool)> {
+    let inner = rule.strip_prefix("Bash(")?.strip_suffix(')')?;
+    Some(match inner.strip_suffix(":*").or_else(|| inner.strip_suffix(" *")) {
+        Some(prefix) => (prefix, true),
+        None => (inner, false),
+    })
 }
 
 /// What a held prompt asks, as a statement rather than a question: "Claude wants to run a
@@ -174,14 +242,15 @@ pub fn statement(prompt: &PermissionPrompt) -> String {
     format!("Claude wants to {what}")
 }
 
-/// A permission mode's name as Claude Code's own footer says it.
+/// A permission mode's name as Claude Code's own footer says it; the default mode, which that
+/// footer leaves unsaid, by what it does.
 #[must_use]
 pub fn mode_label(mode: &str) -> &str {
     match mode {
         "acceptEdits" => "Accept edits",
         "plan" => "Plan",
         "bypassPermissions" => "Bypass permissions",
-        "default" => "Default",
+        "default" => "Asks permission",
         "dontAsk" => "Don't ask",
         other => other,
     }
@@ -269,14 +338,15 @@ mod tests {
         assert_eq!(outcome.text(tool), "The terminal asks about Bash now");
     }
 
-    /// What "always" grants reads as the rule and where it is kept.
+    /// What "always" grants reads as one sentence: the command a rule covers in the mono
+    /// face, the mode by its name, and where each is kept.
     #[test]
     fn always_says_what_it_grants() {
         let suggestions = vec![
             Suggestion {
                 grant: Grant::Rules {
                     behavior: "allow".to_owned(),
-                    rules: vec!["Bash(npm test:*)".to_owned()],
+                    rules: vec!["Bash(npm test:*)".to_owned(), "Read(/etc/**)".to_owned()],
                 },
                 destination: Some("localSettings".to_owned()),
             },
@@ -289,13 +359,31 @@ mod tests {
                 destination: None,
             },
         ];
+        let said: String = always_line(&suggestions)
+            .iter()
+            .map(|s| match s {
+                Said::Words(w) => w.clone(),
+                Said::Code(c) => format!("`{c}`"),
+            })
+            .collect();
         assert_eq!(
-            grants(&suggestions),
-            [
-                "Bash(npm test:*) in this project, for you",
-                "Accept edits mode for this session",
-                "Work in /work",
-            ]
+            said,
+            "Always allow stops asking for `npm test` commands, `Read(/etc/**)` in this project, \
+             for you and switches to Accept edits mode for this session and lets Claude work in \
+             `/work`"
         );
+        let kept_alike = [
+            suggestions[1].clone(),
+            Suggestion { destination: Some("session".to_owned()), ..suggestions[2].clone() },
+        ];
+        let said: String = always_line(&kept_alike).iter().map(Said::text).collect();
+        assert_eq!(
+            said,
+            "Always allow switches to Accept edits mode and lets Claude work in /work for this \
+             session",
+            "where both are kept, said once"
+        );
+        assert!(always_line(&[]).is_empty());
+        assert_eq!(mode_label("default"), "Asks permission", "a behaviour, not a key");
     }
 }

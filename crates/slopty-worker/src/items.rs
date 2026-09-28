@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -41,9 +42,16 @@ pub struct ItemStore {
 struct Inner {
     path: PathBuf,
     registry: Mutex<Registry>,
-    /// Serialises writers: each takes the latest registry under this lock, so concurrent
-    /// persists never race on the temp file and the last write always holds the newest state.
+    /// Serialises writes: each takes the latest registry under this lock, so a write never
+    /// races another on the temp file and the last one holds the newest state.
     io: Mutex<()>,
+    /// The registry changed since it was last written.
+    dirty: AtomicBool,
+    /// A writer is at work, and will see `dirty`.
+    writing: AtomicBool,
+    /// Writes so far.
+    #[cfg(test)]
+    writes: std::sync::atomic::AtomicU64,
 }
 
 impl ItemStore {
@@ -60,6 +68,10 @@ impl ItemStore {
                 path: path.to_path_buf(),
                 registry: Mutex::new(registry),
                 io: Mutex::new(()),
+                dirty: AtomicBool::new(false),
+                writing: AtomicBool::new(false),
+                #[cfg(test)]
+                writes: std::sync::atomic::AtomicU64::new(0),
             }),
         })
     }
@@ -154,39 +166,62 @@ impl ItemStore {
         deltas
     }
 
-    /// Write the registry to disk (atomic rename). On a tokio runtime the write goes to a
-    /// blocking thread; elsewhere (tests, tools) it runs inline.
+    /// Have the registry written to disk (atomic rename) by one writer, which writes the latest
+    /// state and writes again only if something changed meanwhile: a burst of changes is a write
+    /// or two, not one each. On a tokio runtime the writer runs on a blocking thread; elsewhere
+    /// (tests, tools) it runs inline, so the change is on disk before this returns.
     fn persist(&self) {
+        self.inner.dirty.store(true, Ordering::SeqCst);
+        if self.inner.writing.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let inner = Arc::clone(&self.inner);
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
-                let _task = handle.spawn_blocking(move || inner.write_latest());
+                let _task = handle.spawn_blocking(move || inner.drain());
             }
-            Err(_no_runtime) => inner.write_latest(),
+            Err(_no_runtime) => inner.drain(),
         }
     }
 
-    /// Block until every pending write has landed (tests and shutdown).
+    /// Block until every change so far is on disk (tests and shutdown).
     pub fn flush(&self) {
-        self.inner.write_latest();
+        self.inner.write_if_dirty();
     }
 }
 
 impl Inner {
-    fn write_latest(&self) {
-        let _writer = self.io.lock();
-        let snapshot = self.registry.lock().clone();
-        if let Err(e) = write_atomic(&self.path, &snapshot) {
-            tracing::warn!(path = %self.path.display(), error = %e, "persist items");
+    /// Write until nothing is left unwritten, then stand down. A change that marks the registry
+    /// dirty just as the writer stands down found `writing` still set and left it to this
+    /// writer, so it looks once more after letting go.
+    fn drain(&self) {
+        loop {
+            while self.write_if_dirty() {}
+            self.writing.store(false, Ordering::SeqCst);
+            if !self.dirty.load(Ordering::SeqCst) || self.writing.swap(true, Ordering::SeqCst) {
+                return;
+            }
         }
     }
-}
 
-fn write_atomic(path: &Path, registry: &Registry) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(registry).map_err(std::io::Error::other)?;
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    /// Write the registry as it is now if it changed since the last write; `false` when it had
+    /// not.
+    fn write_if_dirty(&self) -> bool {
+        let _writer = self.io.lock();
+        if !self.dirty.swap(false, Ordering::SeqCst) {
+            return false;
+        }
+        let bytes = serde_json::to_vec(&*self.registry.lock());
+        let written = bytes
+            .map_err(std::io::Error::other)
+            .and_then(|b| slopty_platform::fs::replace(&self.path, &b));
+        if let Err(e) = written {
+            tracing::warn!(path = %self.path.display(), error = %e, "persist items");
+        }
+        #[cfg(test)]
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        true
+    }
 }
 
 /// Reject nonsense before it reaches the registry.
@@ -202,15 +237,27 @@ fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
             check_note(&text)?;
             ItemOp::SetNote { id, text }
         }
-        other @ (ItemOp::Remove(_) | ItemOp::Sleep { .. }) => other,
+        ItemOp::SetUrl { url, .. } if !web_address(&url) => {
+            return Err(WorkerError::Items("bad url".to_owned()));
+        }
+        ItemOp::SetFolder { path, .. } if !good_path(&path) => {
+            return Err(WorkerError::Items("bad folder path".to_owned()));
+        }
+        other @ (ItemOp::Remove(_)
+        | ItemOp::Sleep { .. }
+        | ItemOp::SetUrl { .. }
+        | ItemOp::SetFolder { .. }) => other,
     })
 }
 
 fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
     match kind {
         ItemKind::Note { text } => check_note(text),
-        ItemKind::File { path } if path.is_empty() || path.len() > PATH_MAX => {
+        ItemKind::File { path } if !good_path(path) => {
             Err(WorkerError::Items("bad file path".to_owned()))
+        }
+        ItemKind::Folder { path } if !good_path(path) => {
+            Err(WorkerError::Items("bad folder path".to_owned()))
         }
         ItemKind::Browser { url } if !web_address(url) => {
             Err(WorkerError::Items("bad url".to_owned()))
@@ -219,8 +266,14 @@ fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
         | ItemKind::Window { .. }
         | ItemKind::Display { .. }
         | ItemKind::File { .. }
+        | ItemKind::Folder { .. }
         | ItemKind::Browser { .. } => Ok(()),
     }
+}
+
+/// A path a file or folder item may name: something, [`PATH_MAX`] bytes at most.
+const fn good_path(path: &str) -> bool {
+    !path.is_empty() && path.len() <= PATH_MAX
 }
 
 fn check_note(text: &str) -> Result<(), WorkerError> {
@@ -251,10 +304,6 @@ fn web_address(url: &str) -> bool {
         && !host.is_empty()
 }
 
-fn known(items: &mut BTreeMap<ItemId, Item>, id: ItemId) -> Result<&mut Item, WorkerError> {
-    items.get_mut(&id).ok_or(WorkerError::NoSuchItem)
-}
-
 fn apply_in(registry: &mut Registry, op: &ItemOp) -> Result<(), WorkerError> {
     match op {
         ItemOp::Add(item) => match registry.items.entry(item.id) {
@@ -266,12 +315,16 @@ fn apply_in(registry: &mut Registry, op: &ItemOp) -> Result<(), WorkerError> {
         ItemOp::Remove(id) => {
             registry.items.remove(id).ok_or(WorkerError::NoSuchItem)?;
         }
-        ItemOp::Sleep { id, sleeping } => known(&mut registry.items, *id)?.sleeping = *sleeping,
-        ItemOp::Rename { id, name } => known(&mut registry.items, *id)?.name.clone_from(name),
-        ItemOp::SetNote { id, text } => match &mut known(&mut registry.items, *id)?.kind {
-            ItemKind::Note { text: note } => note.clone_from(text),
-            _ => return Err(WorkerError::Items("not a note".to_owned())),
-        },
+        // An edit that changes nothing is still taken and broadcast: the delta is how the
+        // proposer hears its op went through.
+        ItemOp::Sleep { id, .. }
+        | ItemOp::Rename { id, .. }
+        | ItemOp::SetNote { id, .. }
+        | ItemOp::SetUrl { id, .. }
+        | ItemOp::SetFolder { id, .. } => {
+            let item = registry.items.get_mut(id).ok_or(WorkerError::NoSuchItem)?;
+            item.apply(op).map_err(|e| WorkerError::Items(e.to_string()))?;
+        }
     }
     Ok(())
 }
@@ -401,6 +454,61 @@ mod tests {
         assert_eq!(store.get(item.id), Some(item));
     }
 
+    /// An address is set only on a browser, and only an `http` or `https` one.
+    #[test]
+    fn an_address_takes_only_a_browser_and_a_web_address() {
+        let (_dir, store) = store();
+        let by = ClientId::new();
+        let shell = added(store.ensure_terminal(SessionId::new(), by).unwrap());
+        let set = |id, url: &str| ItemOp::SetUrl { id, url: url.to_owned() };
+        let err = store.apply(set(shell.id, "http://a.test/"), by).unwrap_err();
+        assert!(matches!(&err, WorkerError::Items(m) if m == "not a browser"), "{err:?}");
+        let page = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Browser { url: "http://localhost:5173/".to_owned() },
+            sleeping: false,
+            name: None,
+        };
+        let _added = store.apply(ItemOp::Add(page.clone()), by).unwrap();
+        for bad in ["javascript:alert(1)", "file:///etc/passwd", "http://", "http://a b/"] {
+            let err = store.apply(set(page.id, bad), by).unwrap_err();
+            assert!(matches!(&err, WorkerError::Items(m) if m == "bad url"), "{bad}: {err:?}");
+        }
+        store.apply(set(page.id, "http://localhost:3000/docs"), by).unwrap();
+        let url = "http://localhost:3000/docs".to_owned();
+        assert_eq!(store.get(page.id).map(|i| i.kind), Some(ItemKind::Browser { url }));
+    }
+
+    /// A folder moves only as a folder, to a path that is something and not too long, and
+    /// where it went is what the registry reopens with.
+    #[test]
+    fn a_folder_moves_and_is_reopened_where_it_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("items.json");
+        let store = ItemStore::open(&file).unwrap();
+        let by = ClientId::new();
+        let shell = added(store.ensure_terminal(SessionId::new(), by).unwrap());
+        let folder = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Folder { path: "/w".to_owned() },
+            sleeping: false,
+            name: None,
+        };
+        let _added = store.apply(ItemOp::Add(folder.clone()), by).unwrap();
+        let set = |id, path: &str| ItemOp::SetFolder { id, path: path.to_owned() };
+        let err = store.apply(set(shell.id, "/w/src"), by).unwrap_err();
+        assert!(matches!(&err, WorkerError::Items(m) if m == "not a folder"), "{err:?}");
+        for bad in [String::new(), "a".repeat(PATH_MAX + 1)] {
+            let err = store.apply(set(folder.id, &bad), by).unwrap_err();
+            assert!(matches!(&err, WorkerError::Items(m) if m == "bad folder path"), "{err:?}");
+        }
+        store.apply(set(folder.id, "/w/src"), by).unwrap();
+        drop(store);
+        let reopened = ItemStore::open(&file).unwrap();
+        let path = "/w/src".to_owned();
+        assert_eq!(reopened.get(folder.id).map(|i| i.kind), Some(ItemKind::Folder { path }));
+    }
+
     /// A note's text is set only on a note, is bounded like a new note's, and an unknown item
     /// is refused.
     #[test]
@@ -481,6 +589,35 @@ mod tests {
             panic!("snapshot")
         };
         assert_eq!((version, items.len()), (2, 0));
+    }
+
+    /// On a runtime a burst of changes made while a write is under way is written once, as the
+    /// burst left the registry, in compact JSON.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_burst_of_changes_is_written_once_as_it_ended() {
+        let (dir, store) = store();
+        let path = dir.path().join("items.json");
+        let by = ClientId::new();
+        let under_way = store.inner.io.lock();
+        for _ in 0..50 {
+            let _delta = store.ensure_terminal(SessionId::new(), by).unwrap();
+        }
+        drop(under_way);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while store.inner.writing.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "the writer never stood down");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert_eq!(store.inner.writes.load(Ordering::SeqCst), 1, "one write for the burst");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains('\n'), "compact, not pretty");
+        let ItemSync::Snapshot { version, items } = ItemStore::open(&path).unwrap().snapshot()
+        else {
+            panic!("snapshot")
+        };
+        assert_eq!((version, items.len()), (50, 50));
+        store.flush();
+        assert_eq!(store.inner.writes.load(Ordering::SeqCst), 1, "nothing left to flush");
     }
 
     /// A note and a file path have their byte limits.

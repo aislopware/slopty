@@ -12,6 +12,9 @@
 //! view took the drop. Otherwise it is [`Dropped::landing`], for whoever uploads the files to
 //! [`discard`] once the upload ends. Landings a run of the app left behind (it quit mid-upload,
 //! or crashed) are swept when the next one starts ([`sweep`]).
+//!
+//! The other way on iOS, [`out`]: a worker's file dragged out of an iPad, or saved to Files. The
+//! Files picker, both ways, is `picker` (iOS).
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -19,6 +22,10 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+pub mod out;
+#[cfg(target_os = "ios")]
+pub mod picker;
 
 /// Files a drop brought here, ready to upload.
 #[derive(Clone, Debug, PartialEq)]
@@ -92,6 +99,27 @@ fn alive(pid: rustix::process::Pid) -> bool {
 ///
 /// When a file cannot be created in `dir` for another reason than the name being taken.
 pub fn reserve(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    claim(dir, name, |path| {
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path).map(drop)
+    })
+}
+
+/// [`reserve`] for a folder: the name is taken by an empty directory.
+///
+/// # Errors
+///
+/// As [`reserve`].
+pub fn reserve_dir(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    #[expect(clippy::create_dir, reason = "an existing directory is another file's name")]
+    claim(dir, name, |path| std::fs::create_dir(path))
+}
+
+/// The first of `name`, `name 2`, `name 3`… in `dir` that `make` creates.
+fn claim(
+    dir: &Path,
+    name: &str,
+    make: impl Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
         _ => (name, String::new()),
@@ -99,13 +127,82 @@ pub fn reserve(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     let candidates = std::iter::once(dir.join(name))
         .chain((2..=u32::MAX).map(|n| dir.join(format!("{stem} {n}{ext}"))));
     for path in candidates {
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_file) => return Ok(path),
+        match make(&path) {
+            Ok(()) => return Ok(path),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
     }
     Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("every {name} is taken")))
+}
+
+/// Move the file or folder at `from` into `dir` as `name`, numbered when the name is taken.
+///
+/// What the system hands over for a drop or a pick is a temporary copy that is the app's to
+/// take, so it is moved rather than copied; across volumes it is copied. The error names what
+/// was written, for [`Landing::resolve`] to remove.
+///
+/// # Errors
+///
+/// When no name can be taken in `dir`, or the move and the copy both fail.
+pub fn arrive(dir: &Path, from: &Path, name: &str) -> Result<PathBuf, (Option<PathBuf>, String)> {
+    let folder = from.is_dir();
+    let to = if folder { reserve_dir(dir, name) } else { reserve(dir, name) }
+        .map_err(|e| (None, format!("{name}: {e}")))?;
+    match std::fs::rename(from, &to) {
+        Ok(()) => Ok(to),
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => match copy_tree(from, &to) {
+            Ok(()) => Ok(to),
+            Err(e) => Err((Some(to), e.to_string())),
+        },
+        Err(e) => Err((Some(to), e.to_string())),
+    }
+}
+
+/// Copy the file or folder at `from` to `to`, which may exist empty.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    if !from.is_dir() {
+        return std::fs::copy(from, to).map(drop);
+    }
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+/// Remove what a file that failed wrote: a file, or a folder and all in it.
+fn remove_partial(path: &Path) {
+    let gone =
+        if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    if let Err(e) = gone
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %path.display(), error = %e, "remove a partial file");
+    }
+}
+
+/// A fresh directory under `root` (made if missing), named `<pid>-<n>` for this process, so
+/// [`sweep`] can tell a run that is gone.
+///
+/// # Errors
+///
+/// When `root` or the directory cannot be made.
+pub fn fresh_dir(root: &Path) -> std::io::Result<PathBuf> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    std::fs::create_dir_all(root)?;
+    loop {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = root.join(format!("{}-{n}", std::process::id()));
+        #[expect(clippy::create_dir, reason = "an existing directory is another drop's")]
+        let made = std::fs::create_dir(&dir);
+        match made {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// One drop's files arriving, each resolved once: whole, or failed.
@@ -121,20 +218,12 @@ pub struct Landing {
 
 impl Landing {
     /// A fresh directory under `root` for a drop of `expected` files at `at`.
+    ///
+    /// # Errors
+    ///
+    /// As [`fresh_dir`].
     pub fn new(root: &Path, expected: usize, at: (f64, f64)) -> std::io::Result<Self> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        std::fs::create_dir_all(root)?;
-        let dir = loop {
-            let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let dir = root.join(format!("{}-{n}", std::process::id()));
-            #[expect(clippy::create_dir, reason = "an existing directory is another drop's")]
-            let made = std::fs::create_dir(&dir);
-            match made {
-                Ok(()) => break dir,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
-            }
-        };
+        let dir = fresh_dir(root)?;
         Ok(Self { dir, expected, resolved: 0, paths: Vec::new(), failed: Vec::new(), at })
     }
 
@@ -158,7 +247,7 @@ impl Landing {
                     .and_then(Path::file_name)
                     .map_or_else(|| "A file".to_owned(), |n| n.to_string_lossy().into_owned());
                 if let Some(partial) = partial.filter(|p| p.starts_with(&self.dir)) {
-                    let _gone = std::fs::remove_file(partial);
+                    remove_partial(&partial);
                 }
                 tracing::warn!(%name, %why, "a dropped file did not arrive");
                 self.failed.push(format!("{name}: {why}"));
@@ -447,17 +536,17 @@ mod ios {
     use objc2::rc::Retained;
     use objc2::runtime::{NSObjectProtocol, ProtocolObject};
     use objc2::{DefinedClass as _, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-    use objc2_foundation::{NSArray, NSError, NSObject, NSString, NSURL};
+    use objc2_foundation::{
+        NSArray, NSError, NSItemProviderFileOptions, NSObject, NSString, NSURL,
+    };
     use objc2_ui_kit::{
         UIDragDropSession as _, UIDropInteraction, UIDropInteractionDelegate, UIDropOperation,
         UIDropProposal, UIDropSession, UIInteraction as _, UIView,
     };
     use parking_lot::Mutex;
 
-    use super::{Landing, deliver, reserve, root};
-
-    /// The type every file representation conforms to.
-    const DATA_UTI: &str = "public.data";
+    use super::out::{DATA_UTI, FOLDER_UTI};
+    use super::{Landing, arrive, deliver, root};
 
     pub struct Ivars {
         host: usize,
@@ -482,7 +571,10 @@ mod ios {
                 _interaction: &UIDropInteraction,
                 session: &ProtocolObject<dyn UIDropSession>,
             ) -> bool {
-                let types = NSArray::from_retained_slice(&[NSString::from_str(DATA_UTI)]);
+                let types = NSArray::from_retained_slice(&[
+                    NSString::from_str(DATA_UTI),
+                    NSString::from_str(FOLDER_UTI),
+                ]);
                 session.hasItemsConformingToTypeIdentifiers(&types)
             }
 
@@ -517,7 +609,7 @@ mod ios {
     }
 
     impl Delegate {
-        /// Load each item's first file representation into a landing of their own.
+        /// Load each item, a file or a folder, into a landing of their own.
         fn receive(
             &self,
             interaction: &UIDropInteraction,
@@ -542,9 +634,16 @@ mod ios {
             for item in &items {
                 let provider = item.itemProvider();
                 let suggested = provider.suggestedName().map(|n| n.to_string());
-                let types = provider.registeredTypeIdentifiers();
                 let (landing, dir) = (Arc::clone(&landing), dir.clone());
-                let Some(uti) = types.iter().next() else {
+                // Loaded as a file or a folder, whatever its own type (a photo's HEIC, a PDF):
+                // the provider brings the representation that conforms.
+                let uti = [DATA_UTI, FOLDER_UTI].into_iter().map(NSString::from_str).find(|t| {
+                    provider.hasRepresentationConformingToTypeIdentifier_fileOptions(
+                        t,
+                        NSItemProviderFileOptions::empty(),
+                    )
+                });
+                let Some(uti) = uti else {
                     let dropped = landing.lock().resolve(Err((None, "nothing to read".to_owned())));
                     if let Some(dropped) = dropped {
                         deliver(host, dropped);
@@ -553,7 +652,7 @@ mod ios {
                 };
                 let copied = RcBlock::new(move |url: *mut NSURL, error: *mut NSError| {
                     // SAFETY: Foundation rule: the URL is null or valid for the call; the
-                    // file at it is removed once the call returns, so it is copied here.
+                    // file at it is removed once the call returns, so it is moved out here.
                     let url = unsafe { url.as_ref() };
                     // SAFETY: Foundation rule: the error is null or valid for the call.
                     let error = unsafe { error.as_ref() };
@@ -565,13 +664,7 @@ mod ios {
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .or_else(|| suggested.clone())
                                 .unwrap_or_else(|| "dropped".to_owned());
-                            match reserve(&dir, &name) {
-                                Ok(to) => match std::fs::copy(&from, &to) {
-                                    Ok(_bytes) => Ok(to),
-                                    Err(e) => Err((Some(to), e.to_string())),
-                                },
-                                Err(e) => Err((None, format!("{name}: {e}"))),
-                            }
+                            arrive(&dir, &from, &name)
                         }
                         (_from, Some(error)) => {
                             Err((None, error.localizedDescription().to_string()))
@@ -583,7 +676,7 @@ mod ios {
                         deliver(host, dropped);
                     }
                 });
-                // SAFETY: Foundation rule: a registered type identifier and a completion
+                // SAFETY: Foundation rule: a type some representation conforms to and a completion
                 // called once, off the main thread, which it may be: it holds only `Send`
                 // values. The progress may be ignored.
                 let _progress = unsafe {
@@ -692,6 +785,34 @@ mod tests {
         assert_eq!(reserve(dir, ".env").unwrap(), dir.join(".env"));
         assert_eq!(reserve(dir, ".env").unwrap(), dir.join(".env 2"));
         reserve(&dir.join("missing"), "a").unwrap_err();
+    }
+
+    /// What the system hands over, a file or a folder, is moved into the landing whole under a
+    /// name of its own, and a second of one name is numbered rather than overwriting the first.
+    #[test]
+    fn a_dropped_file_or_folder_arrives_whole_under_a_name_of_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let landing = Landing::new(&tmp.path().join("drops"), 3, (0.0, 0.0)).unwrap();
+        let given = tmp.path().join("given");
+        std::fs::create_dir_all(given.join("src/deep")).unwrap();
+        std::fs::write(given.join("src/deep/a.rs"), b"fn a() {}").unwrap();
+        std::fs::write(given.join("notes.txt"), b"one").unwrap();
+        let folder = arrive(landing.dir(), &given.join("src"), "src").unwrap();
+        assert_eq!(folder, landing.dir().join("src"));
+        assert_eq!(std::fs::read(folder.join("deep/a.rs")).unwrap(), b"fn a() {}");
+        assert!(!given.join("src").exists(), "moved, not copied");
+        let first = arrive(landing.dir(), &given.join("notes.txt"), "notes.txt").unwrap();
+        std::fs::write(given.join("notes.txt"), b"two").unwrap();
+        let second = arrive(landing.dir(), &given.join("notes.txt"), "notes.txt").unwrap();
+        assert_eq!(second, landing.dir().join("notes 2.txt"));
+        assert_eq!(std::fs::read(first).unwrap(), b"one");
+        assert_eq!(std::fs::read(second).unwrap(), b"two");
+        let (partial, _why) = arrive(landing.dir(), &given.join("gone"), "gone").unwrap_err();
+        let mut failing = Landing::new(&tmp.path().join("drops"), 1, (0.0, 0.0)).unwrap();
+        let moved_in = partial.map(|p| failing.dir().join(p.file_name().unwrap()));
+        std::fs::create_dir_all(moved_in.clone().unwrap().join("half")).unwrap();
+        failing.resolve(Err((moved_in.clone(), "cut".to_owned())));
+        assert!(!moved_in.unwrap().exists(), "a partial folder is removed whole");
     }
 
     /// A landing is deleted once it is done with, and nothing outside the drops' root ever is;

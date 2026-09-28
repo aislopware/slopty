@@ -8,6 +8,7 @@ use bytes::Bytes;
 use slopty_core::{ClientId, XferId};
 use slopty_net::streams::{self, RawRecv, Uni};
 use slopty_net::{Connection, NetError, WorkerMsg};
+use slopty_proto::file::{FILE_BYTES, WriteResult};
 use slopty_proto::transfer::{BulkHeader, Hash, INLINE_CLIP_BYTES, Purpose, XferMsg};
 use slopty_worker::clip::MAX_REP_BYTES;
 use slopty_worker::xfer::{Landed, Receiving, Transfers, XferError, outgoing};
@@ -81,22 +82,36 @@ async fn take(
         Uni::Bulk { header, mut rx } => match header.purpose.clone() {
             Purpose::Upload => receive(daemon, header, rx, out).await,
             Purpose::Clip { generation, uti } => {
-                if let Some(bytes) = read_clip(&header, &mut rx).await {
+                if let Some(bytes) = read_whole(&header, &mut rx, MAX_REP_BYTES).await {
                     let _sent = clips.send(ClipData { generation, uti, bytes }).await;
                 }
             }
-            Purpose::Download => {
-                tracing::debug!(%client, "a download sent up; refused");
+            Purpose::Save { path, base_modified_ms } => {
+                if let Some(text) = read_whole(&header, &mut rx, FILE_BYTES).await {
+                    crate::files::write(client, &out, path, text, base_modified_ms).await;
+                } else {
+                    tracing::info!(%client, %path, size = header.size, "save stream refused");
+                    let error = if header.size > FILE_BYTES {
+                        format!("{} bytes is past the {FILE_BYTES}-byte cap", header.size)
+                    } else {
+                        "the save was cut off".to_owned()
+                    };
+                    let result = WriteResult::Failed { error };
+                    let _sent = out.send(WorkerMsg::Written { path, result }).await;
+                }
+            }
+            Purpose::Download | Purpose::FileText => {
+                tracing::debug!(%client, "a download or a file's text sent up; refused");
                 rx.stop();
             }
         },
     }
 }
 
-/// A clipboard representation's bytes, when the stream carries all it announced and no more
-/// than [`MAX_REP_BYTES`].
-async fn read_clip(header: &BulkHeader, rx: &mut RawRecv) -> Option<Vec<u8>> {
-    if header.size > MAX_REP_BYTES {
+/// A stream's bytes, when it carries all its header announced and that is no more than `max`
+/// (a clipboard representation, a file tile's save).
+async fn read_whole(header: &BulkHeader, rx: &mut RawRecv, max: u64) -> Option<Vec<u8>> {
+    if header.size > max {
         rx.stop();
         return None;
     }

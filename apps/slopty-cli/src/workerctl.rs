@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
-use slopty_worker::ctl::{CtlReply, CtlRequest};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::UnixStream;
+use slopty_proto::ctl::{CtlReply, CtlRequest, Tailscale};
 
 use crate::service;
 
@@ -20,17 +18,20 @@ pub enum WorkerCmd {
     /// Screen streams open right now (and the last few closed) with the worker-side counters:
     /// capture and encode latency, capture path, drops.
     Screens,
-    /// Run `slopty-ptyd` and `slopty-worker` as `LaunchAgents` (starts now and at every login).
+    /// Run `slopty-ptyd` and `slopty-worker` as services of this session (`LaunchAgents` on macOS,
+    /// systemd user units on Linux): they start now and at every login.
     Install(service::InstallOpts),
-    /// Stop the `LaunchAgents` and remove them (open sessions die with ptyd).
+    /// Stop the services and remove them (open sessions die with ptyd).
     Uninstall,
-    /// Whether the `LaunchAgents` are installed and running.
+    /// Whether the services are installed and running.
     Service,
 }
 
+/// The worker's control socket, for every verb and relay that talks to it:
 /// `$SLOPTY_WORKER_SOCKET`, else the installed agents' socket under `data_dir` when it
-/// exists, else the dev default `$TMPDIR/slopty/worker.sock`.
-fn socket(data_dir: &Path) -> PathBuf {
+/// exists, else the dev default in the platform's socket directory
+/// (`slopty_platform::dirs::runtime_dir`: `$TMPDIR/slopty` on macOS).
+pub fn socket(data_dir: &Path) -> PathBuf {
     socket_in(std::env::var_os("SLOPTY_WORKER_SOCKET"), data_dir)
 }
 
@@ -43,7 +44,7 @@ fn socket_in(env: Option<std::ffi::OsString>, data_dir: &Path) -> PathBuf {
     if installed.exists() {
         return installed;
     }
-    std::env::temp_dir().join("slopty").join("worker.sock")
+    slopty_platform::dirs::runtime_dir().join("worker.sock")
 }
 
 pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path) -> Result<()> {
@@ -52,9 +53,9 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path) -> Resul
         WorkerCmd::Doctor => CtlRequest::Doctor,
         WorkerCmd::Screens => CtlRequest::Screens,
         WorkerCmd::Install(opts) => return service::install(&opts, server, data_dir).await,
-        WorkerCmd::Uninstall => return service::uninstall(data_dir).await,
+        WorkerCmd::Uninstall => return service::uninstall().await,
         WorkerCmd::Service => {
-            service::status(data_dir);
+            service::status();
             return Ok(());
         }
     };
@@ -69,8 +70,8 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path) -> Resul
             }
         }
         CtlReply::Doctor(health) => {
-            print!("{}", doctor_report(&health));
-            if !(health.screen_recording && health.post_events) {
+            print!("{}", doctor_report(&health, DESKTOP));
+            if DESKTOP && !(health.screen_recording && health.post_events) {
                 bail!("permissions missing; see above");
             }
         }
@@ -108,22 +109,22 @@ pub async fn call(data_dir: &Path, req: CtlRequest) -> Result<CtlReply> {
 
 /// One request over the daemon's control socket at `path`.
 pub async fn call_at(path: &Path, req: CtlRequest) -> Result<CtlReply> {
-    let stream = UnixStream::connect(path)
-        .await
-        .with_context(|| format!("is slopty-worker running? ({})", path.display()))?;
-    let (rd, mut wr) = stream.into_split();
     let mut line = serde_json::to_vec(&req)?;
     line.push(b'\n');
-    wr.write_all(&line).await?;
-    wr.shutdown().await?;
-    let mut reply = String::new();
-    BufReader::new(rd).read_line(&mut reply).await?;
-    Ok(serde_json::from_str(reply.trim())?)
+    let reply = slopty_platform::service::ask(path, &line)
+        .await
+        .with_context(|| format!("is slopty-worker running? ({})", path.display()))?;
+    Ok(serde_json::from_str(&reply)?)
 }
 
+/// Whether this machine's worker streams its desktop, so the doctor checks the grants that
+/// takes. A Mac's does; a Linux worker runs terminals, files and agents only
+/// (`docs/decisions/platform.md`, "Linux seams"). The daemon is on the machine the CLI runs on.
+const DESKTOP: bool = cfg!(target_os = "macos");
+
 /// The doctor's checklist. Permissions are granted to the daemon *binary*, so the report
-/// names the path to add in System Settings.
-fn doctor_report(h: &slopty_worker::ctl::Health) -> String {
+/// names the path to add in System Settings; a worker with no `desktop` to stream needs none.
+fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
     let mark = |ok: bool| if ok { "✔" } else { "✘" };
     let screen = if h.screen_recording {
         String::new()
@@ -139,16 +140,20 @@ fn doctor_report(h: &slopty_worker::ctl::Health) -> String {
             .to_owned()
     };
     let tailscale = match &h.tailscale {
-        Some(t) if t.state == "Running" => format!(
-            "{} Tailscale: {} ({}); its nodes are let in as its grants say",
-            mark(true),
-            t.node,
-            t.ip
-        ),
-        Some(t) => {
-            format!("{} Tailscale is {}: no tailnet peer reaches this worker", mark(false), t.state)
+        Tailscale::Up { node, ip } => {
+            let ip = ip.map_or_else(|| "no IPv4".to_owned(), |ip| ip.to_string());
+            format!(
+                "{} Tailscale: {node} ({ip}); its nodes are let in as its grants say",
+                mark(true)
+            )
         }
-        None => {
+        Tailscale::Down { backend } => {
+            format!("{} Tailscale is {backend}: no tailnet peer reaches this worker", mark(false))
+        }
+        Tailscale::Unreachable { error } => {
+            format!("{} Tailscale did not answer ({error}): no tailnet peer gets in", mark(false))
+        }
+        Tailscale::Absent => {
             format!("{} no Tailscale this daemon can read: no tailnet peer gets in", mark(false))
         }
     };
@@ -157,15 +162,25 @@ fn doctor_report(h: &slopty_worker::ctl::Health) -> String {
     } else {
         format!("admits loopback, the tailnet, and by address {}", h.allow.join(", "))
     };
+    let grants = if desktop {
+        vec![
+            format!("{} Screen Recording{screen}", mark(h.screen_recording)),
+            format!("{} Accessibility (remote-window input){post}", mark(h.post_events)),
+        ]
+    } else {
+        vec!["no desktop to stream here: terminals, files and agents only".to_owned()]
+    };
     let lines = [
-        format!("slopty-worker {}  ({})", h.version, h.exe),
-        format!("up {} s · listening on {}", h.uptime_secs, h.listen),
-        ranges,
-        tailscale,
-        format!("{} Screen Recording{screen}", mark(h.screen_recording)),
-        format!("{} Accessibility (remote-window input){post}", mark(h.post_events)),
-        format!("{} clients connected, {} sessions", h.clients, h.sessions),
-    ];
+        vec![
+            format!("slopty-worker {}  ({})", h.version, h.exe),
+            format!("up {} s · listening on {}", h.uptime_secs, h.listen),
+            ranges,
+            tailscale,
+        ],
+        grants,
+        vec![format!("{} clients connected, {} sessions", h.clients, h.sessions)],
+    ]
+    .concat();
     let mut out = lines.join("\n");
     out.push('\n');
     out
@@ -173,13 +188,15 @@ fn doctor_report(h: &slopty_worker::ctl::Health) -> String {
 
 #[cfg(test)]
 mod tests {
+    use slopty_proto::ctl::NotUp;
+
     use super::*;
 
     /// `--data-dir` names the installed daemon's socket, unless the environment names one.
     #[test]
     fn the_socket_is_the_data_dirs_when_its_daemon_is_installed() {
         let data = tempfile::tempdir().unwrap();
-        let dev = std::env::temp_dir().join("slopty").join("worker.sock");
+        let dev = slopty_platform::dirs::runtime_dir().join("worker.sock");
         assert_eq!(socket_in(None, data.path()), dev, "nothing installed there");
         let installed = data.path().join("run").join("worker.sock");
         std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
@@ -190,23 +207,22 @@ mod tests {
 
     #[test]
     fn doctor_report_names_the_binary_and_flags_missing_permissions() {
-        let h = slopty_worker::ctl::Health {
+        let h = slopty_proto::ctl::Health {
             version: "0.3.0".to_owned(),
             exe: "/opt/slopty/bin/slopty-worker".to_owned(),
             screen_recording: true,
             post_events: false,
             listen: "[::]:45550".to_owned(),
             allow: vec!["10.0.0.0/8".to_owned()],
-            tailscale: Some(slopty_worker::ctl::Tailscale {
-                state: "Running".to_owned(),
+            tailscale: Tailscale::Up {
                 node: "studio.tail1234.ts.net".to_owned(),
-                ip: "100.64.0.3".to_owned(),
-            }),
+                ip: Some([100, 64, 0, 3].into()),
+            },
             clients: 2,
             sessions: 3,
             uptime_secs: 61,
         };
-        let report = doctor_report(&h);
+        let report = doctor_report(&h, true);
         assert!(report.contains("/opt/slopty/bin/slopty-worker"));
         assert!(report.contains("✔ Screen Recording"));
         assert!(report.contains("✘ Accessibility"));
@@ -217,16 +233,22 @@ mod tests {
             "{report}"
         );
         assert!(report.contains("✔ Tailscale: studio.tail1234.ts.net (100.64.0.3)"), "{report}");
-        let alone = slopty_worker::ctl::Health { allow: Vec::new(), tailscale: None, ..h.clone() };
-        let report = doctor_report(&alone);
+        let alone = slopty_proto::ctl::Health {
+            allow: Vec::new(),
+            tailscale: Tailscale::Absent,
+            ..h.clone()
+        };
+        let report = doctor_report(&alone, true);
         assert!(report.contains("admits loopback and the tailnet\n"), "{report}");
         assert!(report.contains("✘ no Tailscale this daemon can read"), "{report}");
-        let stopped = slopty_worker::ctl::Tailscale {
-            state: "Stopped".to_owned(),
-            node: String::new(),
-            ip: String::new(),
-        };
-        let report = doctor_report(&slopty_worker::ctl::Health { tailscale: Some(stopped), ..h });
-        assert!(report.contains("✘ Tailscale is Stopped"), "{report}");
+        let with =
+            |tailscale| doctor_report(&slopty_proto::ctl::Health { tailscale, ..h.clone() }, true);
+        let report = with(Tailscale::Down { backend: NotUp::Stopped });
+        assert!(report.contains("✘ Tailscale is Stopped:"), "{report}");
+        let report = with(Tailscale::Unreachable { error: "timed out".to_owned() });
+        assert!(report.contains("✘ Tailscale did not answer (timed out)"), "{report}");
+        let linux = doctor_report(&h, false);
+        assert!(!linux.contains("Screen Recording") && !linux.contains("Accessibility"), "{linux}");
+        assert!(linux.contains("no desktop to stream here"), "{linux}");
     }
 }

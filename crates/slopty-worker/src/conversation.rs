@@ -16,23 +16,38 @@
 //! `R` is what the caller keeps with a held prompt (the reply channel, the prompt as shown);
 //! the machine only ever hands it back once.
 //!
+//! Orchestration follows as [`ORCHESTRATION`], a link no connection has: from the first verb
+//! that reads a session's conversation or starts its agent until the session ends
+//! ([`Holds::forget`]).
+//!
 //! **What followers watch.** [`Board`] keeps each session's [`Seen`] behind a watch: the hooks
 //! heard, the latest meters, the subagent files named, and the blocks Slopty's Claude Code mod
 //! reports as the model writes them. The mod is heard only after its `hello` passed
 //! `slopty_agent::live::gate`; a session whose mod was refused says so in the log once and is
 //! followed from the transcript alone.
+//!
+//! **One read for every follower.** The board also keeps each followed session's [`Reader`]:
+//! the session's transcripts, decoded once however many clients follow, each read's changes
+//! broadcast to all of them, and the conversation as it stands handed to one that joins.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use slopty_agent::Hook;
+use slopty_agent::conversation::Transcripts;
+use slopty_agent::conversation::output::Outputs;
 use slopty_agent::live::{self, ModEvent};
 use slopty_core::SessionId;
-use slopty_proto::conversation::Meters;
-use tokio::sync::watch;
+use slopty_proto::conversation::{Change, Meters, Output};
+use tokio::sync::{broadcast, watch};
 
 use crate::clip::Link;
+
+/// The follower orchestration's verbs are: no connection's link, which is the address of its
+/// state and never zero.
+pub const ORCHESTRATION: Link = 0;
 
 /// A prompt being held, and for which session.
 #[derive(Debug, PartialEq, Eq)]
@@ -91,6 +106,12 @@ impl<R> Holds<R> {
         self.held.extract_if(.., |_id, held| deserted.contains(&held.session)).collect()
     }
 
+    /// `session` ended: nobody follows it any more, and every prompt held for it is handed back.
+    pub fn forget(&mut self, session: SessionId) -> Vec<(u64, Held<R>)> {
+        self.followers.remove(&session);
+        self.held.extract_if(.., |_id, held| held.session == session).collect()
+    }
+
     /// Whether `link` follows `session`.
     #[must_use]
     pub fn follows(&self, link: Link, session: SessionId) -> bool {
@@ -127,7 +148,8 @@ impl<R> Holds<R> {
     }
 
     /// The prompts held for `session`, oldest first.
-    pub fn held_for(&self, session: SessionId) -> impl Iterator<Item = (u64, &R)> {
+    #[cfg(test)]
+    fn held_for(&self, session: SessionId) -> impl Iterator<Item = (u64, &R)> {
         self.held
             .iter()
             .filter(move |(_id, held)| held.session == session)
@@ -173,12 +195,104 @@ pub enum Trust {
     Refused,
 }
 
+/// Reads a follower may fall behind by before it is sent the conversation whole again.
+const BEHIND: usize = 64;
+
+/// What one read of a session's transcripts changed, as every follower is sent it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Read {
+    /// The conversation's changes, in order.
+    pub changes: Vec<Change>,
+    /// What the background commands printed since the last read.
+    pub outputs: Vec<Output>,
+}
+
+/// A session's transcripts, read once for every follower of the session.
+///
+/// Each read's [`Read`] goes out on a broadcast; a follower that joins is handed the
+/// conversation as it stands and the reads after it ([`Self::join`]). Kept on the [`Board`]
+/// while anyone follows, behind an async lock that a read holds on the blocking pool, so a
+/// join lands between two reads and misses none.
+#[derive(Debug)]
+pub struct Reader {
+    transcripts: Transcripts,
+    sent: broadcast::Sender<Arc<Read>>,
+    reads: u64,
+}
+
+/// A [`Reader`] as its followers hold it.
+pub type SharedReader = Arc<tokio::sync::Mutex<Reader>>;
+
+impl Default for Reader {
+    fn default() -> Self {
+        Self { transcripts: Transcripts::default(), sent: broadcast::channel(BEHIND).0, reads: 0 }
+    }
+}
+
+impl Reader {
+    /// Read what the session's files gained (`Transcripts::read`, the main transcript `main`
+    /// and the subagent files `known`) and send it to every follower. Blocking.
+    pub fn read(&mut self, main: &Path, known: &[PathBuf]) {
+        self.reads = self.reads.wrapping_add(1);
+        let changes = self.transcripts.read(main, known);
+        let outputs = self.transcripts.outputs();
+        if !changes.is_empty() || !outputs.is_empty() {
+            // Nobody listening is no error: a joiner catching up before it subscribes.
+            let _heard = self.sent.send(Arc::new(Read { changes, outputs }));
+        }
+    }
+
+    /// A follower starts: the reads to come, and the conversation as it stands. That is a
+    /// reset of every thread, then each thread's entries, task list and turns, then the end of
+    /// every background command's output, as a first read would send them. Blocking: the
+    /// outputs are read from their files.
+    #[must_use]
+    pub fn join(&self) -> (broadcast::Receiver<Arc<Read>>, Read) {
+        let conversation = self.transcripts.conversation();
+        let mut changes = vec![Change::Reset { thread: None }];
+        for thread in conversation.threads() {
+            changes.extend(
+                conversation
+                    .entries(thread)
+                    .iter()
+                    .map(|entry| Change::Upsert { thread: thread.clone(), entry: entry.clone() }),
+            );
+            let tasks = conversation.tasks(thread);
+            if !tasks.is_empty() {
+                changes.push(Change::Tasks { thread: thread.clone(), tasks: tasks.to_vec() });
+            }
+            changes.extend(
+                conversation
+                    .turns(thread)
+                    .iter()
+                    .map(|turn| Change::Turn { thread: thread.clone(), turn: turn.clone() }),
+            );
+        }
+        let outputs = Outputs::default().read(conversation);
+        (self.sent.subscribe(), Read { changes, outputs })
+    }
+
+    /// The transcripts as read so far, for a follower that asks for a whole text or a picture.
+    #[must_use]
+    pub const fn transcripts(&self) -> &Transcripts {
+        &self.transcripts
+    }
+
+    /// How many times the files were read.
+    #[must_use]
+    pub const fn reads(&self) -> u64 {
+        self.reads
+    }
+}
+
 /// Every session's [`Seen`], each behind a watch its followers wait on.
 #[derive(Debug, Default)]
 pub struct Board {
     sessions: HashMap<SessionId, watch::Sender<Seen>>,
     /// Each session's mod, once it said hello.
     mods: HashMap<SessionId, Trust>,
+    /// Each followed session's reader, alive while a follower holds it.
+    readers: HashMap<SessionId, Weak<tokio::sync::Mutex<Reader>>>,
 }
 
 impl Board {
@@ -236,15 +350,34 @@ impl Board {
         }
     }
 
+    /// What has been seen of `session` so far, without watching it.
+    #[must_use]
+    pub fn current(&self, session: SessionId) -> Seen {
+        self.sessions.get(&session).map(|seen| seen.borrow().clone()).unwrap_or_default()
+    }
+
     /// Watch `session`: the receiver holds what has been seen so far and wakes on each hook.
     pub fn watch(&mut self, session: SessionId) -> watch::Receiver<Seen> {
         self.seen(session).subscribe()
+    }
+
+    /// The reader of `session`'s transcripts, and whether it is new: a new one has read nothing
+    /// yet, and nothing reads it on a tick until its taker sees to that. It lasts while a
+    /// follower holds it.
+    pub fn reader(&mut self, session: SessionId) -> (SharedReader, bool) {
+        if let Some(reader) = self.readers.get(&session).and_then(Weak::upgrade) {
+            return (reader, false);
+        }
+        let reader = SharedReader::default();
+        self.readers.insert(session, Arc::downgrade(&reader));
+        (reader, true)
     }
 
     /// The session is gone; its watchers see the sender close.
     pub fn forget(&mut self, session: SessionId) {
         self.sessions.remove(&session);
         self.mods.remove(&session);
+        self.readers.remove(&session);
     }
 
     fn seen(&mut self, session: SessionId) -> &watch::Sender<Seen> {
@@ -254,6 +387,8 @@ impl Board {
 
 #[cfg(test)]
 mod tests {
+    use slopty_proto::conversation::{Entry, Task, ThreadId, Turn};
+
     use super::*;
 
     const A: Link = 1;
@@ -355,6 +490,24 @@ mod tests {
         assert!(holds.ask(s, |_| ()).is_some_and(|three| three > two), "a fresh id");
     }
 
+    /// Orchestration follows like a connection: it holds a prompt, answers it, and a client
+    /// that follows too sees what is held; the session's end lets both go and releases the rest.
+    #[test]
+    fn orchestration_follows_until_the_session_ends() {
+        let mut holds = Holds::default();
+        let (s, t) = (session(1), session(2));
+        assert!(holds.follow(s, ORCHESTRATION).is_empty());
+        let first = holds.ask(s, |_| "first").expect("held for orchestration");
+        assert_eq!(holds.follow(s, A), [first], "a client that follows later is shown it");
+        assert_eq!(holds.answer(ORCHESTRATION, s, first).map(|h| h.reply), Some("first"));
+        let second = holds.ask(s, |_| "second").expect("held");
+        holds.follow(t, ORCHESTRATION);
+        assert_eq!(holds.forget(s), [(second, Held { session: s, reply: "second" })]);
+        assert!(!holds.follows(ORCHESTRATION, s) && !holds.follows(A, s), "nobody follows s");
+        assert!(holds.follows(ORCHESTRATION, t), "t is unaffected");
+        assert!(holds.unfollow(s, A).is_empty(), "the connection's own unfollow finds nothing");
+    }
+
     /// The board keeps the latest meters and the named subagent files, and wakes a watcher on
     /// every hook.
     #[test]
@@ -380,6 +533,203 @@ mod tests {
         );
         board.forget(s);
         assert!(seen.has_changed().is_err(), "the watch closes with the session");
+    }
+
+    fn append(path: &Path, text: &str) {
+        use std::io::Write as _;
+        let mut file =
+            std::fs::OpenOptions::new().create(true).append(true).open(path).expect("open");
+        file.write_all(text.as_bytes()).expect("write");
+    }
+
+    fn prompt(uuid: &str, parent: Option<&str>, text: &str) -> String {
+        let record = serde_json::json!({
+            "type": "user", "uuid": uuid, "parentUuid": parent,
+            "timestamp": "2026-09-27T03:15:25.849Z",
+            "message": { "role": "user", "content": text },
+        });
+        format!("{record}\n")
+    }
+
+    /// The entries' ids, in order, and the resets.
+    fn ids(changes: &[Change]) -> Vec<String> {
+        changes
+            .iter()
+            .filter_map(|change| match change {
+                Change::Upsert { thread, entry } => Some(format!("{thread:?} {}", entry.id)),
+                Change::Reset { thread } => Some(format!("reset {thread:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    type Model = BTreeMap<ThreadId, (Vec<Entry>, Vec<Task>, BTreeMap<String, Turn>)>;
+
+    /// The conversation a client holds once it applied `changes`.
+    fn applied(changes: &[Change]) -> Model {
+        let mut model = Model::new();
+        for change in changes.iter().cloned() {
+            match change {
+                Change::Upsert { thread, entry } => {
+                    let entries = &mut model.entry(thread).or_default().0;
+                    match entries.iter_mut().find(|e| e.id == entry.id) {
+                        Some(old) => *old = entry,
+                        None => entries.push(entry),
+                    }
+                }
+                Change::Remove { thread, id } => {
+                    model.entry(thread).or_default().0.retain(|e| e.id != id);
+                }
+                Change::Tasks { thread, tasks } => model.entry(thread).or_default().1 = tasks,
+                Change::Turn { thread, turn } => {
+                    model.entry(thread).or_default().2.insert(turn.prompt.clone(), turn);
+                }
+                Change::Reset { thread: Some(thread) } => {
+                    model.remove(&thread);
+                }
+                Change::Reset { thread: None } => model.clear(),
+            }
+        }
+        model
+    }
+
+    /// Two followers of a session are sent the same changes from one read of its files, a read
+    /// that finds nothing sends nothing, and a follower that comes later is handed the
+    /// conversation as a first read of the files would give it. The reader lasts while a
+    /// follower holds it.
+    #[test]
+    fn followers_share_one_read_and_a_late_one_gets_it_whole() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("s1.jsonl");
+        append(&main, &prompt("u1", None, "hello"));
+        let mut board = Board::default();
+        let s = session(1);
+        let (reader, fresh) = board.reader(s);
+        assert!(fresh, "nobody followed yet");
+        let mut read = reader.try_lock().expect("unlocked");
+        read.read(&main, &[]);
+        let (mut a, first) = read.join();
+        assert_eq!(ids(&first.changes), ["reset None", "Main u1"]);
+        let (again, fresh) = board.reader(s);
+        assert!(!fresh && Arc::ptr_eq(&again, &reader), "the second follower shares it");
+        let (mut b, _now) = read.join();
+
+        append(&main, &prompt("u2", Some("u1"), "and then"));
+        read.read(&main, &[]);
+        let (to_a, to_b) = (a.try_recv().expect("A is sent it"), b.try_recv().expect("B too"));
+        assert!(Arc::ptr_eq(&to_a, &to_b), "one read for both");
+        assert_eq!(ids(&to_a.changes), ["Main u2"]);
+        read.read(&main, &[]);
+        assert!(a.try_recv().is_err(), "a read that finds nothing sends nothing");
+        assert_eq!(read.reads(), 3);
+
+        let (_c, late) = read.join();
+        assert_eq!(ids(&late.changes), ["reset None", "Main u1", "Main u2"]);
+        let whole = Transcripts::default().read(&main, &[]);
+        assert_eq!(applied(&late.changes), applied(&whole), "as a first read gives it");
+        assert!(applied(&late.changes).values().all(|(_, _, turns)| !turns.is_empty()));
+
+        drop(read);
+        drop((again, reader));
+        assert!(board.reader(s).1, "the last follower gone, the next starts afresh");
+        board.forget(s);
+        assert!(board.readers.is_empty());
+    }
+
+    /// What following one session costs per tick with `FOLLOWERS` clients: each decoding the
+    /// transcripts on its own (the path this replaced, `Transcripts` per follower) against one
+    /// shared read sent to all. On the captured `tools` session with its subagent: a tick that
+    /// finds nothing new, and the second half of the session appended a record per tick.
+    #[test]
+    #[ignore = "measurement"]
+    fn follower_read_cost() {
+        const FOLLOWERS: usize = 4;
+        const IDLE_TICKS: u32 = 2_000;
+        const REPLAYS: u32 = 20;
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../slopty-agent/tests/fixtures/conversation/tools");
+        let captured = std::fs::read_to_string(fixture.join("transcript.jsonl")).expect("fixture");
+        let lines: Vec<&str> = captured.lines().collect();
+        let (first, rest) = lines.split_at(lines.len() / 2);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("s1.jsonl");
+        let subagents = slopty_agent::conversation::subagents_dir(&main);
+        std::fs::create_dir_all(&subagents).expect("mkdir");
+        for entry in std::fs::read_dir(fixture.join("subagents")).expect("subagents") {
+            let path = entry.expect("entry").path();
+            std::fs::copy(&path, subagents.join(path.file_name().expect("name"))).expect("copy");
+        }
+        let start = || std::fs::write(&main, format!("{}\n", first.join("\n"))).expect("write");
+        let micros = |d: std::time::Duration| d.as_secs_f64() * 1e6;
+
+        for round in 1..=3 {
+            start();
+            let mut own: Vec<Transcripts> =
+                std::iter::repeat_with(Transcripts::default).take(FOLLOWERS).collect();
+            for t in &mut own {
+                let _all = (t.read(&main, &[]), t.outputs());
+            }
+            let clock = Instant::now();
+            for _ in 0..IDLE_TICKS {
+                for t in &mut own {
+                    let _nothing = (t.read(&main, &[]), t.outputs());
+                }
+            }
+            let idle_own = micros(clock.elapsed()) / f64::from(IDLE_TICKS);
+
+            let mut reader = Reader::default();
+            reader.read(&main, &[]);
+            let _listening: Vec<_> =
+                std::iter::repeat_with(|| reader.join().0).take(FOLLOWERS).collect();
+            let clock = Instant::now();
+            for _ in 0..IDLE_TICKS {
+                reader.read(&main, &[]);
+            }
+            let idle_shared = micros(clock.elapsed()) / f64::from(IDLE_TICKS);
+
+            let (mut grow_own, mut grow_shared) = (0.0, 0.0);
+            for _ in 0..REPLAYS {
+                start();
+                let mut own: Vec<Transcripts> =
+                    std::iter::repeat_with(Transcripts::default).take(FOLLOWERS).collect();
+                for t in &mut own {
+                    let _all = (t.read(&main, &[]), t.outputs());
+                }
+                let clock = Instant::now();
+                for line in rest {
+                    append(&main, &format!("{line}\n"));
+                    for t in &mut own {
+                        let _grown = (t.read(&main, &[]), t.outputs());
+                    }
+                }
+                grow_own += micros(clock.elapsed());
+
+                start();
+                let mut reader = Reader::default();
+                reader.read(&main, &[]);
+                let mut followers: Vec<_> =
+                    std::iter::repeat_with(|| reader.join().0).take(FOLLOWERS).collect();
+                let clock = Instant::now();
+                for line in rest {
+                    append(&main, &format!("{line}\n"));
+                    reader.read(&main, &[]);
+                    for follower in &mut followers {
+                        while let Ok(read) = follower.try_recv() {
+                            let _sent = Arc::unwrap_or_clone(read);
+                        }
+                    }
+                }
+                grow_shared += micros(clock.elapsed());
+            }
+            let per_record =
+                f64::from(REPLAYS) * f64::from(u32::try_from(rest.len()).expect("few"));
+            eprintln!(
+                "round {round}, {FOLLOWERS} followers: idle tick {idle_own:.1} -> {idle_shared:.1} µs, \
+                 a record appended {:.1} -> {:.1} µs",
+                grow_own / per_record,
+                grow_shared / per_record,
+            );
+        }
     }
 
     fn mod_event(value: &serde_json::Value) -> ModEvent {

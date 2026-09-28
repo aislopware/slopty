@@ -19,7 +19,8 @@
 //!   loopback, each connection a tunnel stream.
 //! * [`remote`] — [`remote::Remote`]: what the UI asks of a worker beyond the control stream.
 //! * [`screen`] — [`screen::ScreenHandle`]: one remote window stream, reassembled, decoded, and
-//!   published as its newest frame plus the worker's cursor position.
+//!   published as its newest frame plus the worker's cursor position. Apple only: it decodes with
+//!   `VideoToolbox`, so a Linux client (the CLI) has terminals and no screens.
 //! * [`pacing`] — [`pacing::Pacer`]: when a decoded frame goes on screen, and the arrival → present
 //!   numbers the overlay and the tests read.
 
@@ -32,6 +33,7 @@ pub mod layout;
 pub mod link;
 pub mod pacing;
 pub mod remote;
+#[cfg(target_vendor = "apple")]
 pub mod screen;
 pub mod server;
 pub mod term;
@@ -39,7 +41,10 @@ pub mod tunnel;
 pub mod xfer;
 
 pub use items::{ItemChange, ItemDoc};
-pub use link::{LinkEvent, WorkerLink, warm_up_decoder};
+#[cfg(target_vendor = "apple")]
+pub use link::warm_up_decoder;
+pub use link::{LinkEvent, WorkerLink};
 pub use pacing::{Clock, FrameStamp, Pace, Pacer, PacingStats, SystemClock};
+#[cfg(target_vendor = "apple")]
 pub use screen::{CursorState, Presentable, ScreenHandle, ScreenStats};
 pub use term::{Effect, TermState, ViewRow};

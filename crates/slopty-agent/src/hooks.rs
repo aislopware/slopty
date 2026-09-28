@@ -15,13 +15,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use crate::{HOOK_EVENTS, permission, statusline};
+use crate::{HOOK_EVENTS, HookEvent, permission, statusline};
 
 /// Hook `timeout` written to settings (seconds).
 const HOOK_TIMEOUT_S: u32 = 5;
-
-/// The event whose entry waits for the relay.
-const PERMISSION_EVENT: &str = "PermissionRequest";
 
 /// What editing the settings did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -36,12 +33,6 @@ pub enum Outcome {
 #[must_use]
 pub fn settings_path(home: &Path) -> PathBuf {
     home.join(".claude").join("settings.json")
-}
-
-/// `$HOME`, or `/tmp` when the environment does not say.
-#[must_use]
-pub fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)
 }
 
 /// Register the relay at `command` for every event in the settings at `path`.
@@ -81,7 +72,7 @@ pub fn relay_beside_this_binary() -> Option<PathBuf> {
 /// replaces, travels on the wrapper's command line.
 #[must_use]
 pub fn with_relay(args: Vec<String>, command: &str, cwd: &Path) -> Vec<String> {
-    with_relay_for(args, command, cwd, &statusline::user_settings(&home_dir()))
+    with_relay_for(args, command, cwd, &statusline::user_settings(&slopty_platform::dirs::home()))
 }
 
 /// [`with_relay`] with the user settings file named.
@@ -164,9 +155,9 @@ pub fn uninstall_at(path: &Path) -> std::io::Result<Outcome> {
 /// # Errors
 ///
 /// As [`install_at`].
-pub fn registered(path: &Path) -> std::io::Result<Vec<&'static str>> {
+pub fn registered(path: &Path) -> std::io::Result<Vec<HookEvent>> {
     let doc = read(path)?;
-    Ok(HOOK_EVENTS.iter().copied().filter(|event| has_relay(&doc, event)).collect())
+    Ok(HOOK_EVENTS.into_iter().filter(|event| has_relay(&doc, *event)).collect())
 }
 
 /// Read the settings document; a missing or empty file is an empty object.
@@ -198,7 +189,8 @@ pub fn read(path: &Path) -> std::io::Result<Value> {
     Ok(doc)
 }
 
-/// Write via a sibling temp file so a crash never leaves a half-written settings file.
+/// Replace the settings file whole (`slopty_platform::fs::replace`), so a crash never leaves
+/// half of one, and a settings file that is a link into a dotfiles repository stays one.
 ///
 /// # Errors
 ///
@@ -207,45 +199,28 @@ pub fn write(path: &Path, doc: &Value) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("json.slopty-tmp");
     let mut text = serde_json::to_string_pretty(doc)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     text.push('\n');
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
+    slopty_platform::fs::replace(path, text.as_bytes())
 }
 
-/// Is a hook entry ours? Any `slopty` binary with the single argument `hook`: the program in
-/// `command` with `args: ["hook"]`, or, without `args`, a shell command line `<program> hook`.
+/// Is a hook entry ours? Any `slopty` binary as `command` with `args: ["hook"]`.
 ///
-/// The program is the whole `command` in the first form, spaces and all: the standard install
-/// lives under `~/Library/Application Support`. In the shell form it may be quoted.
+/// That is the form [`install`] writes. The program is the whole `command`, spaces and all:
+/// the standard install lives under `~/Library/Application Support`.
 #[must_use]
 pub fn is_relay(entry: &Value) -> bool {
     let command = entry.get("command").and_then(Value::as_str).unwrap_or("");
-    let program = match entry.get("args").and_then(Value::as_array) {
-        Some(args) if args.len() == 1 && args.first() == Some(&json!("hook")) => command,
-        Some(_) => return false,
-        None => match command.trim_end().strip_suffix(" hook") {
-            Some(program) => unquote(program.trim()),
-            None => return false,
-        },
-    };
-    Path::new(program).file_name().is_some_and(|n| n == "slopty")
-}
-
-/// A shell word without the one pair of quotes around it, if it has them.
-fn unquote(word: &str) -> &str {
-    ['"', '\'']
-        .iter()
-        .find_map(|q| word.strip_prefix(*q).and_then(|w| w.strip_suffix(*q)))
-        .unwrap_or(word)
+    let args = entry.get("args").and_then(Value::as_array).map(Vec::as_slice);
+    matches!(args, Some([word]) if word == "hook")
+        && Path::new(command).file_name().is_some_and(|n| n == "slopty")
 }
 
 /// The relay's entry for `event`: asynchronous, except for a permission request, which waits
 /// for a decision.
-fn relay_entry(command: &str, event: &str) -> Value {
-    if event == PERMISSION_EVENT {
+fn relay_entry(command: &str, event: HookEvent) -> Value {
+    if event == HookEvent::PermissionRequest {
         return json!({
             "type": "command",
             "command": command,
@@ -264,12 +239,14 @@ fn relay_entry(command: &str, event: &str) -> Value {
 
 /// Whether `doc` registers the relay for `event`.
 #[must_use]
-pub fn has_relay(doc: &Value, event: &str) -> bool {
-    doc.get("hooks").and_then(|h| h.get(event)).and_then(Value::as_array).is_some_and(|groups| {
-        groups.iter().any(|g| {
-            g.get("hooks").and_then(Value::as_array).is_some_and(|hs| hs.iter().any(is_relay))
-        })
-    })
+pub fn has_relay(doc: &Value, event: HookEvent) -> bool {
+    doc.get("hooks").and_then(|h| h.get(event.as_str())).and_then(Value::as_array).is_some_and(
+        |groups| {
+            groups.iter().any(|g| {
+                g.get("hooks").and_then(Value::as_array).is_some_and(|hs| hs.iter().any(is_relay))
+            })
+        },
+    )
 }
 
 /// Add (or repoint) the relay for every event. Returns whether the document changed.
@@ -287,7 +264,7 @@ pub fn install(doc: &mut Value, command: &str) -> bool {
         return changed;
     };
     for event in HOOK_EVENTS {
-        let groups = hooks.entry(event).or_insert_with(|| Value::Array(Vec::new()));
+        let groups = hooks.entry(event.as_str()).or_insert_with(|| Value::Array(Vec::new()));
         if !groups.is_array() {
             *groups = Value::Array(Vec::new());
             changed = true;
@@ -295,36 +272,22 @@ pub fn install(doc: &mut Value, command: &str) -> bool {
         let Some(groups) = groups.as_array_mut() else {
             continue;
         };
-        // The first relay entry is repointed and any later ones go, with a group they leave
-        // empty: settings an older install duplicated collapse to one entry per event.
         let wanted = relay_entry(command, event);
-        let mut found = false;
-        groups.retain_mut(|group| {
-            let Some(entries) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                return true;
-            };
-            let before = entries.len();
-            entries.retain_mut(|entry| {
-                if !is_relay(entry) {
-                    return true;
-                }
-                if found {
-                    return false;
-                }
-                found = true;
-                if *entry != wanted {
-                    entry.clone_from(&wanted);
-                    changed = true;
-                }
-                true
-            });
-            let shrank = entries.len() != before;
-            changed |= shrank;
-            !(shrank && entries.is_empty())
-        });
-        if !found {
-            groups.push(json!({ "hooks": [wanted] }));
-            changed = true;
+        let ours = groups
+            .iter_mut()
+            .filter_map(|group| group.get_mut("hooks").and_then(Value::as_array_mut))
+            .flatten()
+            .find(|entry| is_relay(entry));
+        match ours {
+            Some(entry) if *entry == wanted => {}
+            Some(entry) => {
+                *entry = wanted;
+                changed = true;
+            }
+            None => {
+                groups.push(json!({ "hooks": [wanted] }));
+                changed = true;
+            }
         }
     }
     changed
@@ -384,7 +347,10 @@ mod tests {
         for ev in HOOK_EVENTS {
             assert!(has_relay(&doc, ev), "{ev} registered");
         }
-        assert!(!has_relay(&doc, "MessageDisplay"), "held TUI paint: measured before registered");
+        assert!(
+            doc["hooks"].get("MessageDisplay").is_none(),
+            "held TUI paint: measured before registered"
+        );
         // A moved binary is repointed, not duplicated.
         assert!(install(&mut doc, "/usr/local/bin/slopty"));
         let pre = doc["hooks"]["PreToolUse"].as_array().expect("array");
@@ -417,12 +383,12 @@ mod tests {
             assert_eq!(out.first().map(String::as_str), Some(SETTINGS_FLAG));
             serde_json::from_str(out.get(1).expect("value")).expect("json")
         };
-        let registers = |doc: &Value| HOOK_EVENTS.iter().all(|event| has_relay(doc, event));
+        let registers = |doc: &Value| HOOK_EVENTS.into_iter().all(|event| has_relay(doc, event));
 
         let out = with_relay(words(&["--model", "opus"]), relay, dir.path());
         let doc = settings(&out);
         assert!(registers(&doc));
-        assert_eq!(doc["hooks"]["Stop"][0]["hooks"][0], relay_entry(relay, "Stop"));
+        assert_eq!(doc["hooks"]["Stop"][0]["hooks"][0], relay_entry(relay, HookEvent::Stop));
         assert_eq!(out.get(2..), Some(words(&["--model", "opus"]).as_slice()));
 
         let args = ["--settings", r#"{"model":"haiku"}"#, "-p", "--settings={\"theme\":\"dark\"}"];
@@ -495,38 +461,26 @@ mod tests {
         );
     }
 
+    /// Ours is a `slopty` program with the one argument `hook`, the form [`install`] writes;
+    /// a shell command line is somebody else's.
     #[test]
-    fn recognises_both_forms_of_our_command() {
+    fn recognises_our_command() {
         assert!(is_relay(&json!({"type":"command","command":"/a/b/slopty","args":["hook"]})));
-        assert!(is_relay(&json!({"type":"command","command":"/a/b/slopty hook"})));
         assert!(!is_relay(
             &json!({"type":"command","command":"/a/b/slopty","args":["worker","status"]})
         ));
-        assert!(!is_relay(&json!({"type":"command","command":"/a/b/other hook"})));
-        // Both conditions of each form must hold: one argument that is `hook`, or no
-        // arguments and a command line that ends in ` hook`.
+        assert!(!is_relay(&json!({"type":"command","command":"/a/b/other","args":["hook"]})));
         assert!(!is_relay(&json!({"type":"command","command":"/a/b/slopty","args":["hook","x"]})));
-        assert!(!is_relay(
-            &json!({"type":"command","command":"/a/b/slopty hook","args":["worker"]})
-        ));
+        assert!(!is_relay(&json!({"type":"command","command":"/a/b/slopty hook"})));
         assert!(!is_relay(&json!({"type":"command","command":"/a/b/slopty"})));
     }
 
     /// The standard install lives under `~/Library/Application Support`: a space in the path
-    /// is still our relay, in either form, so installing twice adds nothing and uninstalling
-    /// finds it.
+    /// is still our relay, so installing twice adds nothing and uninstalling finds it.
     #[test]
     fn a_relay_under_a_path_with_spaces_is_recognised_installed_once_and_removed() {
         let spaced = "/Users/me/Library/Application Support/Slopty/bin/slopty";
         assert!(is_relay(&json!({"type":"command","command":spaced,"args":["hook"]})));
-        for shell in
-            [format!("{spaced} hook"), format!("\"{spaced}\" hook"), format!("'{spaced}' hook")]
-        {
-            assert!(is_relay(&json!({"type":"command","command":shell})), "{shell}");
-        }
-        assert!(!is_relay(
-            &json!({"type":"command","command":"/Users/me/Application Support/other hook"})
-        ));
 
         let home = tempfile::tempdir().expect("tempdir");
         let path = settings_path(home.path());
@@ -534,34 +488,12 @@ mod tests {
         assert_eq!(install_at(&path, spaced).expect("install"), Outcome::Unchanged);
         let doc = read(&path).expect("read");
         for event in HOOK_EVENTS {
-            assert_eq!(doc["hooks"][event].as_array().map(Vec::len), Some(1), "{event}");
+            assert_eq!(doc["hooks"][event.as_str()].as_array().map(Vec::len), Some(1), "{event}");
         }
         assert_eq!(registered(&path).expect("read").len(), HOOK_EVENTS.len());
         assert_eq!(uninstall_at(&path).expect("uninstall"), Outcome::Changed);
         assert!(registered(&path).expect("read").is_empty());
         assert_eq!(read(&path).expect("read"), json!({}));
-    }
-
-    /// Settings an older install filled with one relay group per run collapse to one entry;
-    /// a user's hook sharing a group with a duplicate stays.
-    #[test]
-    fn install_collapses_duplicate_relays() {
-        let spaced = "/Users/me/Library/Application Support/Slopty/bin/slopty";
-        let ours = json!({"type":"command","command":spaced,"args":["hook"]});
-        let mut doc = json!({ "hooks": { "Stop": [
-            { "hooks": [ours] },
-            { "hooks": [ours] },
-            { "matcher": "x", "hooks": [ { "type": "command", "command": "echo hi" }, ours ] },
-        ] } });
-        assert!(install(&mut doc, spaced));
-        assert_eq!(
-            doc["hooks"]["Stop"],
-            json!([
-                { "hooks": [relay_entry(spaced, "Stop")] },
-                { "matcher": "x", "hooks": [ { "type": "command", "command": "echo hi" } ] },
-            ])
-        );
-        assert!(!install(&mut doc, spaced), "collapsed for good");
     }
 
     #[test]
@@ -572,7 +504,7 @@ mod tests {
                 "PreToolUse": [
                     { "matcher": "Bash", "hooks": [
                         { "type": "command", "command": "echo hi" },
-                        { "type": "command", "command": "/opt/slopty hook" }
+                        { "type": "command", "command": "/opt/slopty", "args": ["hook"] }
                     ] }
                 ]
             }
@@ -593,10 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn the_home_is_the_environments_and_a_directory_is_not_a_settings_file() {
-        let expected =
-            std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-        assert_eq!(home_dir(), expected);
+    fn a_directory_is_not_a_settings_file() {
         // Only a missing file reads as empty settings; any other error is reported.
         let dir = tempfile::tempdir().expect("tempdir");
         assert_eq!(read(&dir.path().join("none.json")).expect("missing"), json!({}));

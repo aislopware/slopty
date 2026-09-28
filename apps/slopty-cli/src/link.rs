@@ -3,10 +3,14 @@
 //! Requests are pipelined: each gets an id, the server answers in any order, and the one task
 //! that owns the stream matches replies to callers. Everything else the server pushes
 //! (directory, worker changes, events) fans out on a broadcast channel.
+//!
+//! A verb that changes something always goes with an idempotency key, the caller's or a fresh
+//! one, and a verb whose answer a dropped link lost ([`ErrorCode::Interrupted`]) is sent again
+//! under the same key, which the worker does not do twice.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use slopty_net::endpoint::SERVER_PORT;
@@ -14,7 +18,7 @@ use slopty_net::redial::Redial;
 use slopty_net::server::{DialError, ServerLink, connect};
 use slopty_net::{Endpoint, HostAddr, NetError};
 use slopty_proto::codec::CodecError;
-use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
+use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, Verb};
 use slopty_proto::server::{FromServer, RequestId, Role, ToServer};
 use slopty_tools::Dispatch;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -70,11 +74,45 @@ fn choose(
     }
 }
 
-/// A verb on its way, and where its answer goes.
+/// Between the attempts of a verb whose answer a dropped link lost: the server notices a
+/// worker gone within its 5 s idle timeout, and a worker or server back redials in a second or
+/// two, so the last try goes about 8 s after the first loss.
+const RETRY_PAUSES: [Duration; 5] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+
+/// A verb on its way, and where its answer goes. The answer brings the verb back, so a retry
+/// sends it again without copying it.
 #[derive(Debug)]
 struct Call {
+    key: Option<IdempotencyKey>,
     verb: Verb,
-    reply: oneshot::Sender<Result<Outcome>>,
+    reply: oneshot::Sender<Answer>,
+}
+
+impl Call {
+    fn answer(self, outcome: Outcome) {
+        let _gone = self.reply.send((outcome, Some(self.verb)));
+    }
+}
+
+/// An outcome, and the verb it answers while that is still in hand.
+type Answer = (Outcome, Option<Verb>);
+
+/// A verb sent and waiting on its reply.
+struct Waiter {
+    verb: Option<Verb>,
+    reply: oneshot::Sender<Answer>,
+}
+
+impl Waiter {
+    fn answer(self, outcome: Outcome) {
+        let _gone = self.reply.send((outcome, self.verb));
+    }
 }
 
 /// A handle on the connection to the server; cheap to clone, every clone shares the stream.
@@ -92,15 +130,32 @@ enum Ended {
 }
 
 impl Link {
-    /// Connect once, failing when the server does not answer. After a loss every call fails.
-    /// What the server pushes unasked goes unheard.
+    /// Connect, failing when the server does not answer. After a loss the next call dials
+    /// again. What the server pushes unasked goes unheard.
     pub async fn connect(endpoint: &Endpoint, server: &HostAddr, role: Role) -> Result<Self> {
-        let link = dial(endpoint, server, role).await?;
+        let mut link = dial(endpoint, server, role.clone()).await?;
+        let (endpoint, server) = (endpoint.clone(), server.clone());
         let (calls, mut rx) = mpsc::channel(64);
         let (unheard, _) = broadcast::channel(1);
         tokio::spawn(async move {
-            if let Ended::Lost(e) = serve(link, None, &mut rx, &unheard).await {
-                tracing::debug!(error = %e, "server link lost");
+            let mut held = None;
+            loop {
+                match serve(link, held.take(), &mut rx, &unheard).await {
+                    Ended::Released => return,
+                    Ended::Lost(e) => tracing::debug!(error = %e, "server link lost"),
+                }
+                link = loop {
+                    let Some(call) = rx.recv().await else { return };
+                    match dial(&endpoint, &server, role.clone()).await {
+                        Ok(link) => {
+                            held = Some(call);
+                            break link;
+                        }
+                        Err(e) => {
+                            call.answer(unreachable(&e));
+                        }
+                    }
+                };
             }
         });
         Ok(Self { calls })
@@ -135,7 +190,7 @@ impl Link {
                     Err(e) => {
                         tracing::debug!(%server, error = %e, "server unreachable");
                         if let Some(call) = held.take() {
-                            let _gone = call.reply.send(Err(e));
+                            call.answer(unreachable(&e));
                         }
                     }
                 }
@@ -151,26 +206,86 @@ impl Link {
         (Self { calls }, heard)
     }
 
-    /// Send `verb` and wait for its outcome, or for the reason it could not be sent.
-    async fn request(&self, verb: Verb) -> Result<Outcome> {
+    /// Send `verb` once and wait for its outcome, or for the reason it could not be sent.
+    async fn request(&self, key: Option<IdempotencyKey>, verb: Verb) -> Answer {
         let (reply, answer) = oneshot::channel();
-        self.calls
-            .send(Call { verb, reply })
-            .await
-            .map_err(|_closed| anyhow!("the connection to the server is closed"))?;
-        answer.await.map_err(|_dropped| anyhow!("the connection to the server was lost"))?
+        if let Err(mpsc::error::SendError(call)) = self.calls.send(Call { key, verb, reply }).await
+        {
+            let closed = unreachable(&anyhow!("the connection to the server is closed"));
+            return (closed, Some(call.verb));
+        }
+        answer.await.unwrap_or_else(|_dropped| (interrupted(), None))
     }
 }
 
 /// A link that cannot carry the verb answers with why, as a failure the caller reads like any
 /// other.
 impl Dispatch for Link {
-    async fn call(&self, verb: Verb) -> Outcome {
-        self.request(verb).await.unwrap_or_else(|e| Outcome::Error {
-            code: ErrorCode::ServerUnreachable,
-            message: format!("{e:#}"),
-        })
+    async fn send(&self, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
+        retried(key, verb, |key, verb| self.request(key, verb)).await
     }
+}
+
+/// `verb` sent by `attempt`, under `key` or a fresh key when it changes something, and sent
+/// again under the same key while a link lost its answer, or cannot reach where it goes after
+/// such a loss, for as long as [`RETRY_PAUSES`] lasts.
+async fn retried<F: Future<Output = Answer>>(
+    key: Option<IdempotencyKey>,
+    mut verb: Verb,
+    mut attempt: impl FnMut(Option<IdempotencyKey>, Verb) -> F,
+) -> Outcome {
+    let key = key.or_else(|| verb.changes().then(fresh_key));
+    let mut pauses = RETRY_PAUSES.into_iter();
+    let mut lost = false;
+    loop {
+        let (outcome, back) = attempt(key.clone(), verb).await;
+        let Outcome::Error { code, message } = &outcome else { return outcome };
+        lost |= *code == ErrorCode::Interrupted;
+        let again = matches!(
+            code,
+            ErrorCode::Interrupted | ErrorCode::ServerUnreachable | ErrorCode::WorkerUnreachable
+        );
+        match pauses.next() {
+            Some(pause) if lost && again => {
+                // The link went down holding the verb, so there is nothing to send again.
+                let Some(back) = back else { return outcome };
+                verb = back;
+                tokio::time::sleep(pause).await;
+            }
+            _ if lost && again => {
+                let key = key.as_ref().map_or_else(String::new, |k| {
+                    format!("; sent again under idempotency key {k}, it is not done twice")
+                });
+                return Outcome::Error {
+                    code: ErrorCode::Interrupted,
+                    message: format!("{message}, and the answer to it was lost{key}"),
+                };
+            }
+            _ => return outcome,
+        }
+    }
+}
+
+/// A key for one call and its retries.
+fn fresh_key() -> IdempotencyKey {
+    IdempotencyKey::from_id(uuid::Uuid::new_v4().as_u128())
+}
+
+fn unreachable(why: &anyhow::Error) -> Outcome {
+    Outcome::Error { code: ErrorCode::ServerUnreachable, message: format!("{why:#}") }
+}
+
+fn interrupted() -> Outcome {
+    Outcome::Error {
+        code: ErrorCode::Interrupted,
+        message: "the connection to the server was lost before the answer came".to_owned(),
+    }
+}
+
+/// The verb a request carried, back from the message that sent it.
+fn sent_verb(request: ToServer) -> Option<Verb> {
+    let ToServer::Request { verb, .. } = request else { return None };
+    Some(verb)
 }
 
 async fn dial(endpoint: &Endpoint, server: &HostAddr, role: Role) -> Result<ServerLink> {
@@ -188,7 +303,7 @@ async fn serve(
     pushed: &broadcast::Sender<FromServer>,
 ) -> Ended {
     let ServerLink { conn, mut tx, mut rx, .. } = link;
-    let mut pending: HashMap<RequestId, oneshot::Sender<Result<Outcome>>> = HashMap::new();
+    let mut pending: HashMap<RequestId, Waiter> = HashMap::new();
     let mut next: RequestId = 0;
     let mut queued = first;
     let ended = loop {
@@ -204,7 +319,7 @@ async fn serve(
                     match msg {
                         Ok(FromServer::Reply { id, outcome }) => {
                             if let Some(waiter) = pending.remove(&id) {
-                                let _gone = waiter.send(Ok(outcome));
+                                waiter.answer(outcome);
                             }
                         }
                         Ok(other) => {
@@ -216,23 +331,27 @@ async fn serve(
                 }
             }
         };
-        if let Some(Call { verb, reply }) = call {
+        if let Some(Call { key, verb, reply }) = call {
             next = next.wrapping_add(1);
-            match tx.send(&ToServer::Request { id: next, verb }).await {
+            let request = ToServer::Request { id: next, key, verb };
+            let sent = tx.send(&request).await;
+            let waiter = Waiter { verb: sent_verb(request), reply };
+            match sent {
                 Ok(()) => {
-                    pending.insert(next, reply);
+                    pending.insert(next, waiter);
                 }
                 // Refused before a byte went out, so the link carries on.
                 Err(NetError::Codec(CodecError::TooLarge { len, max })) => {
-                    let _gone = reply.send(Ok(Outcome::Error {
+                    waiter.answer(Outcome::Error {
                         code: ErrorCode::Invalid,
                         message: format!(
                             "the message is {len} bytes, more than the {max} one message carries"
                         ),
-                    }));
+                    });
                 }
+                // Part of it may have gone out, and the server may act on it.
                 Err(e) => {
-                    let _gone = reply.send(Err(anyhow!("the connection to the server was lost")));
+                    waiter.answer(interrupted());
                     break Ended::Lost(e.into());
                 }
             }
@@ -240,7 +359,7 @@ async fn serve(
     };
     conn.close(0_u32.into(), b"bye");
     for (_, waiter) in pending {
-        let _gone = waiter.send(Err(anyhow!("the connection to the server was lost")));
+        waiter.answer(interrupted());
     }
     ended
 }
@@ -250,6 +369,54 @@ mod tests {
     use anyhow::bail;
 
     use super::*;
+
+    /// A verb whose answer was lost goes again under the same key, a fresh one when the caller
+    /// gave none, through a worker still coming back, and as the same bytes rather than a copy;
+    /// one never sent is not retried, and one the link dropped is not sent again.
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_answer_is_asked_again_under_the_same_key() {
+        use slopty_core::{SessionId, WorkerId};
+        use slopty_proto::orchestration::TermRef;
+
+        let error = |code| Outcome::Error { code, message: "x".to_owned() };
+        let mut answers =
+            vec![Outcome::Done, error(ErrorCode::WorkerUnreachable), error(ErrorCode::Interrupted)];
+        let mut keys = Vec::new();
+        let mut sent = Vec::new();
+        let write =
+            Verb::WriteFile { worker: WorkerId::new(), path: "/f".to_owned(), bytes: vec![7; 64] };
+        let outcome = retried(None, write, |key, verb| {
+            keys.push(key);
+            if let Verb::WriteFile { bytes, .. } = &verb {
+                sent.push(bytes.as_ptr());
+            }
+            std::future::ready((answers.pop().unwrap(), Some(verb)))
+        })
+        .await;
+        assert_eq!(outcome, Outcome::Done);
+        assert_eq!(keys.len(), 3);
+        assert!(keys[0].is_some() && keys.iter().all(|k| *k == keys[0]), "{keys:?}");
+        assert!(sent.len() == 3 && sent.iter().all(|p| *p == sent[0]), "copied: {sent:?}");
+
+        let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
+        let mut tries = 0;
+        let outcome = retried(None, Verb::Close { term }, |_key, verb| {
+            tries += 1;
+            std::future::ready((error(ErrorCode::WorkerUnreachable), Some(verb)))
+        })
+        .await;
+        assert!(matches!(outcome, Outcome::Error { code: ErrorCode::WorkerUnreachable, .. }));
+        assert_eq!(tries, 1, "an unreachable worker did nothing");
+
+        let mut tries = 0;
+        let outcome = retried(None, Verb::Close { term }, |_key, _verb| {
+            tries += 1;
+            std::future::ready((error(ErrorCode::Interrupted), None))
+        })
+        .await;
+        assert!(matches!(outcome, Outcome::Error { code: ErrorCode::Interrupted, .. }));
+        assert_eq!(tries, 1, "the verb went down with the link");
+    }
 
     #[test]
     fn the_flag_beats_the_environment_beats_the_settings() {

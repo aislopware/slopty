@@ -824,6 +824,28 @@ done
         let _killed = child.kill().await;
     }
 
+    /// A title set again unchanged (a prompt that sets it on every draw) is not sent again;
+    /// a new one is.
+    #[tokio::test]
+    async fn a_title_is_sent_once_until_it_changes() {
+        let script = "printf '\\033]2;one\\a'; printf '\\033]0;one\\a'; printf '\\033]2;one\\a'; \
+                      printf '\\033]2;two\\a'; printf 'MARK\\n'; sleep 30";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let (tx, mut rx) = viewer(64);
+        session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("MARK")).await;
+        let titles: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TermEvent::Title(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, ["one", "two"]);
+        session.close();
+        let _killed = child.kill().await;
+    }
+
     /// The branches a viewer was told, in order.
     fn branches(events: &[TermEvent]) -> Vec<Option<&str>> {
         events

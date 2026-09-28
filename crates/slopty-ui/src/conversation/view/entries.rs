@@ -7,6 +7,8 @@
 //! in the secondary tone, its subject in the text tone at the medium weight, a fact at the far
 //! right. What a call shows under its title starts where the verb does.
 
+use std::time::Duration;
+
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -34,6 +36,9 @@ pub(super) const READING: f32 = 720.0;
 
 /// A call's line: its least height and the square its mark sits in.
 pub(super) const TOOL_ROW: f32 = 24.0;
+
+/// A changed file's row, whose hover shows the way into its diff.
+const CHANGED_GROUP: &str = "changed-file";
 
 /// The widest a prompt's bubble grows, as a share of the column: what is left beside it holds
 /// the prompt's time and copy.
@@ -72,6 +77,19 @@ impl ConversationView {
             Row::Live { id } => self.live_row(id, cx),
             Row::Working => self.working_row(),
             Row::Pending { index } => self.pending_row(*index),
+        };
+        // A row a fold just opened settles in; the list lays it out at its full height from
+        // the first frame, so only its ink moves.
+        let settling = (!self.settling.is_empty()).then(|| self.settling.get(&row.key())).flatten();
+        let body = match settling {
+            Some(generation) if crate::kit::motion(cx) => gpui::AnimationExt::with_animation(
+                div().child(body),
+                ElementId::NamedInteger(format!("settle-{}", row.key()).into(), *generation),
+                crate::kit::Pace::Settle.animation(),
+                gpui::Styled::opacity,
+            )
+            .into_any_element(),
+            _ => body,
         };
         let last = ix.saturating_add(1) == self.rows.len();
         let found = self.find_row() == Some(ix);
@@ -369,16 +387,8 @@ impl ConversationView {
                 .text_color(hsla(s.accent))
                 .child(SharedString::from(command))
         });
-        let images = (prompt.images > 0).then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .text_size(self.z(theme.typography.meta()))
-                .text_color(hsla(s.text_muted))
-                .child(self.icon(IconName::Image, s.text_muted))
-                .child(SharedString::from(tools::count(prompt.images.into(), "image", "images")))
-        });
+        let images = (!prompt.images.is_empty())
+            .then(|| self.thumbnails(&format!("prompt-{key}"), &prompt.images, cx));
         let expand = self.expand_link(&format!("prompt-{key}"), &prompt.text, cx);
         div()
             .id(ElementId::Name(SharedString::from(format!("prompt-card-{key}"))))
@@ -396,21 +406,25 @@ impl ConversationView {
             .bg(hsla(s.raised))
             .text_size(self.z(theme.typography.prose()))
             .line_height(relative(theme.typography.markdown_line_height))
-            .child(
-                div().flex().items_baseline().gap(self.z(theme.spacing.sm)).children(command).when(
-                    !text.is_empty(),
-                    |el| {
-                        el.child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .child(SharedString::from(text)),
-                        )
-                    },
-                ),
-            )
             .children(images)
+            .when(command.is_some() || !text.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(self.z(theme.spacing.sm))
+                        .children(command)
+                        .when(!text.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .child(SharedString::from(text)),
+                            )
+                        }),
+                )
+            })
             .children(expand)
     }
 
@@ -468,7 +482,7 @@ impl ConversationView {
         let s = theme.surfaces;
         let key = rows::fold_key(id);
         let selector = format!("fold-{id}");
-        let dot = || div().text_color(hsla(s.text_muted)).child("\u{b7}").into_any_element();
+        let dot = || crate::kit::separator(theme).into_any_element();
         let mut parts: Vec<AnyElement> = vec![
             div()
                 .text_color(hsla(s.text_secondary))
@@ -492,8 +506,8 @@ impl ConversationView {
             );
         }
         let figures = self.shown_thread().and_then(|t| t.turn(id));
-        let session_model = self.model.meters().and_then(|m| m.model.as_deref());
-        let meta = figures.and_then(|t| figures::turn_meta(t, session_model));
+        let running = self.running_model();
+        let meta = figures.and_then(|t| figures::turn_meta(t, running.as_deref()));
         let hint = figures
             .map(|t| figures::turn_detail(t, self.model.meters().and_then(|m| m.context_window)))
             .filter(|h| !h.is_empty());
@@ -546,20 +560,10 @@ impl ConversationView {
             .into_any_element()
     }
 
-    /// `+a −r` in the success and error tones.
+    /// `+a −r` as chrome draws it everywhere ([`crate::kit::changes`]), at the face's zoom.
     pub(super) fn changes_label(&self, added: u32, removed: u32) -> AnyElement {
-        let s = self.theme.surfaces;
-        crate::kit::tabular(div())
-            .flex_none()
-            .flex()
-            .gap(self.z(self.theme.spacing.xs))
-            .child(div().text_color(hsla(s.success)).child(SharedString::from(format!("+{added}"))))
-            .child(
-                div()
-                    .text_color(hsla(s.error))
-                    .child(SharedString::from(format!("\u{2212}{removed}"))),
-            )
-            .into_any_element()
+        crate::kit::changes_at(&self.theme, added, removed, self.zoom)
+            .map_or_else(|| div().into_any_element(), gpui::IntoElement::into_any_element)
     }
 
     /// An answer: prose on the column, no frame. The last of a settled turn ends on its time
@@ -625,6 +629,7 @@ impl ConversationView {
             (a.saturating_add(f.added), r.saturating_add(f.removed))
         });
         let many = files.len() > 1;
+        let touch = theme.density == slopty_theme::Density::TOUCH;
         let head = div()
             .flex()
             .items_center()
@@ -652,6 +657,7 @@ impl ConversationView {
                 div()
                     .id(ElementId::Name(selector.clone().into()))
                     .debug_selector(move || selector)
+                    .group(CHANGED_GROUP)
                     .role(Role::Button)
                     .aria_label(SharedString::from(format!(
                         "{}, {} lines added, {} removed",
@@ -679,7 +685,6 @@ impl ConversationView {
                     )
                     .child(
                         div()
-                            .flex_1()
                             .min_w_0()
                             .overflow_hidden()
                             .text_ellipsis()
@@ -687,11 +692,21 @@ impl ConversationView {
                             .text_color(hsla(s.text_muted))
                             .child(SharedString::from(dir)),
                     )
+                    // The figures follow their file; only the way into the diff sits right.
                     .child(
                         div()
+                            .flex_none()
                             .text_size(self.z(theme.typography.meta()))
                             .child(self.changes_label(file.added, file.removed)),
-                    ),
+                    )
+                    .child(div().flex_1())
+                    .children((!touch).then(|| {
+                        div()
+                            .flex_none()
+                            .invisible()
+                            .group_hover(CHANGED_GROUP, gpui::Styled::visible)
+                            .child(self.icon(IconName::ArrowRight, s.text_muted))
+                    })),
                 s.accent,
             )
             .on_click(cx.listener(move |this, _ev, _w, cx| this.open_changes(Some(&path), cx)))
@@ -857,6 +872,7 @@ impl ConversationView {
                 code: false,
                 failed: false,
                 meta: None,
+                took: None,
                 changes: None,
                 expandable: Some(open),
             },
@@ -871,8 +887,27 @@ impl ConversationView {
         let s = theme.surfaces;
         match &entry.body {
             Body::Text(_) => self.answer_row(id, false, cx),
-            Body::Thinking(text) => self.thinking_block(id, self.text_of(text)),
-            Body::Tool(call) => self.tool_row(entry, call, level, cx),
+            Body::Thinking(text) => {
+                let took = self
+                    .shown_thread()
+                    .and_then(|t| figures::thought_ms(t.entries(), t.position(id)?));
+                let open = level == Level::Full;
+                self.thinking_row(
+                    id,
+                    self.text_of(text),
+                    took,
+                    open,
+                    false,
+                    rows::entry_key(id),
+                    cx,
+                )
+            }
+            Body::Tool(call) => match &call.detail {
+                slopty_proto::conversation::ToolDetail::Plan { plan } => {
+                    self.plan_card(entry, call, plan, level, cx)
+                }
+                _ => self.tool_row(entry, call, level, cx),
+            },
             Body::Compact(compact) => self.compact_row(id, compact, level, cx),
             Body::Interrupted { during_tool } => {
                 let words =
@@ -936,39 +971,6 @@ impl ConversationView {
             .child(self.icon(icon, s.text_muted))
             .child(SharedString::from(words.to_owned()))
             .child(rule())
-            .into_any_element()
-    }
-
-    /// Thinking, where the density shows it: the prose's size a step down, in the muted tone,
-    /// behind a hairline, set upright (italic made a wall of it).
-    fn thinking_block(&self, id: &str, text: &str) -> AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        div()
-            .id(ElementId::Name(SharedString::from(format!("thinking-row-{id}"))))
-            .role(Role::Article)
-            .aria_label("Thinking")
-            .py(self.z(theme.spacing.xs))
-            .flex()
-            .gap(self.z(theme.spacing.xs))
-            .child(self.slot().child(self.icon(IconName::Brain, s.text_muted)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .pl(self.z(theme.spacing.sm))
-                    .border_l_1()
-                    .border_color(hsla(s.border))
-                    .text_size(self.z(theme.typography.small()))
-                    .line_height(relative(theme.typography.markdown_line_height))
-                    .text_color(hsla(s.text_muted))
-                    .whitespace_normal()
-                    .debug_selector({
-                        let id = id.to_owned();
-                        move || format!("thinking-{id}")
-                    })
-                    .child(SharedString::from(text.to_owned())),
-            )
             .into_any_element()
     }
 
@@ -1049,7 +1051,7 @@ impl ConversationView {
             NoteKind::Info => (IconName::Info, s.text_muted),
         };
         let retry = note.retry.map(|r| {
-            let wait = rows::took(r.in_ms);
+            let wait = crate::kit::duration(Duration::from_millis(r.in_ms));
             if r.max > 0 {
                 format!("Retrying in {wait}, attempt {} of {}", r.attempt, r.max)
             } else {
@@ -1142,7 +1144,6 @@ impl ConversationView {
             (ToolKind::Change, Some(meta)) if meta.starts_with('+') => None,
             (_, meta) => meta,
         };
-        let meta = [meta, Self::took_of(entry, call)].into_iter().flatten().collect::<Vec<_>>();
         let line = self.title_line(
             &format!("tool-{}", entry.id),
             TitleParts {
@@ -1152,7 +1153,8 @@ impl ConversationView {
                 subject_quiet: false,
                 code: title.code,
                 failed: title.state == State::Failed,
-                meta: (!meta.is_empty()).then(|| meta.join(" \u{b7} ")),
+                meta,
+                took: Self::took_of(entry, call),
                 changes,
                 expandable: expandable.then_some(level == Level::Full),
             },
@@ -1180,9 +1182,15 @@ impl ConversationView {
         if !matches!(kind, ToolKind::Shell) {
             return None;
         }
-        let ended = call.result.as_ref()?.at_ms;
+        let ended = match &call.detail {
+            // A background command's result comes at once; it ends on its notice.
+            slopty_proto::conversation::ToolDetail::Bash(bash) if bash.background => {
+                bash.finished_ms?
+            }
+            _ => call.result.as_ref()?.at_ms,
+        };
         let ms = ended.checked_sub(entry.at_ms).filter(|ms| *ms >= 1_000 && entry.at_ms > 0)?;
-        Some(rows::took(ms))
+        Some(crate::kit::duration(Duration::from_millis(ms)))
     }
 
     /// Whether a click on a call's title shows more or less of it.
@@ -1190,8 +1198,10 @@ impl ConversationView {
         level == Level::Full || super::blocks::has_body(call)
     }
 
-    /// A title line: the mark in its slot, the verb, the subject, a ✕ when it failed, a fact at
-    /// the far right, and the chevron when a click opens it. The whole line is the button.
+    /// A title line: the mark in its slot (the chevron there while the pointer is on it or it
+    /// is open, when a click opens it), the verb, the subject, a ✕ when it failed, then its
+    /// facts after the subject; only how long it took sits at the far right. The whole line is
+    /// the button.
     pub(super) fn title_line(
         &self,
         id: &str,
@@ -1202,12 +1212,17 @@ impl ConversationView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let failed_word = parts.failed.then(|| "failed".to_owned());
-        let label =
-            [Some(parts.verb.clone()), parts.subject.clone(), parts.meta.clone(), failed_word]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(" ");
+        let label = [
+            Some(parts.verb.clone()),
+            parts.subject.clone(),
+            parts.meta.clone(),
+            parts.took.clone(),
+            failed_word,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
         let mark = match parts.mark {
             Mark::Running => crate::icons::status_icon(
                 theme,
@@ -1217,9 +1232,14 @@ impl ConversationView {
             ),
             Mark::Icon(icon) => self.icon(icon, s.text_muted),
         };
+        let slot = match parts.expandable {
+            Some(open) => self.disclosure_slot(mark, open, "title"),
+            None => self.slot().child(mark).into_any_element(),
+        };
         let subject = parts.subject.map(|subject| {
             div()
                 .min_w_0()
+                .flex_shrink(1.0)
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
@@ -1237,27 +1257,19 @@ impl ConversationView {
                 .size(self.z(theme.typography.meta()))
                 .flex_none()
         });
-        let meta = parts.meta.map(|meta| {
+        let quiet = |text: String| {
             crate::kit::tabular(div())
                 .flex_none()
+                .whitespace_nowrap()
                 .text_size(self.z(theme.typography.meta()))
                 .text_color(hsla(s.text_muted))
-                .child(SharedString::from(meta))
-        });
+                .child(SharedString::from(text))
+        };
         let changes = parts.changes.map(|(added, removed)| {
             div()
+                .flex_none()
                 .text_size(self.z(theme.typography.meta()))
                 .child(self.changes_label(added, removed))
-        });
-        let chevron = parts.expandable.map(|open| {
-            self.slot()
-                .invisible()
-                .group_hover("title", gpui::Styled::visible)
-                .when(open, gpui::Styled::visible)
-                .child(self.icon(
-                    if open { IconName::ChevronDown } else { IconName::ChevronRight },
-                    s.text_muted,
-                ))
         });
         let selector = id.to_owned();
         let line = div()
@@ -1274,9 +1286,10 @@ impl ConversationView {
             .gap(self.z(theme.spacing.xs))
             .min_h(self.z(TOOL_ROW))
             .my(self.z(theme.spacing.xxs / 2.0))
+            .pr(self.z(theme.spacing.xs))
             .rounded(self.z(theme.radii.sm))
             .text_size(self.z(theme.typography.ui_size))
-            .child(self.slot().child(mark))
+            .child(slot)
             .child(
                 div()
                     .flex_1()
@@ -1292,12 +1305,21 @@ impl ConversationView {
                     )
                     .children(subject)
                     .children(failed)
+                    .when(changes.is_some() || parts.meta.is_some(), |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(self.z(theme.spacing.xs))
+                                .pl(self.z(theme.spacing.xs))
+                                .children(changes)
+                                .children(parts.meta.map(quiet)),
+                        )
+                    })
                     .child(div().flex_1().min_w(self.z(theme.spacing.sm)))
-                    .children(changes)
-                    .children(meta),
-            )
-            .children(chevron)
-            .when(parts.expandable.is_none(), |el| el.pr(self.z(theme.spacing.xs)));
+                    .children(parts.took.map(quiet)),
+            );
         match parts.expandable {
             Some(_) => crate::a11y::tab_stop(
                 line.cursor_pointer().hover(move |el| el.bg(hsla(s.raised))),
@@ -1337,11 +1359,24 @@ impl ConversationView {
                         .stream_fade(crate::kit::motion(cx)),
                 )
                 .into_any_element(),
-            LiveKind::Thinking => div()
-                .id(ElementId::Name(SharedString::from(format!("live-{key}"))))
-                .debug_selector(move || format!("live-{key}"))
-                .child(self.thinking_block(&format!("live-{}", id.block), &block.text))
-                .into_any_element(),
+            LiveKind::Thinking => {
+                let toggle = rows::entry_key(&format!("live-{key}"));
+                let open =
+                    (self.density == rows::Density::Verbose) != self.toggled.contains(&toggle);
+                div()
+                    .id(ElementId::Name(SharedString::from(format!("live-{key}"))))
+                    .debug_selector(move || format!("live-{key}"))
+                    .child(self.thinking_row(
+                        &format!("live-{}", id.block),
+                        &block.text,
+                        None,
+                        open,
+                        true,
+                        toggle,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
             LiveKind::Tool { name, .. } => {
                 let input = tools::preparing(&block.text);
                 let (verb, subject, code) =
@@ -1391,7 +1426,9 @@ impl ConversationView {
         let s = theme.surfaces;
         let thinking = self.model.live(&ThreadId::Main).any(|(_, b)| b.kind == LiveKind::Thinking);
         let since = self.agent.as_ref().map_or(0, |a| a.since_ms);
-        let elapsed = (since > 0).then(|| rows::took(super::now_ms().saturating_sub(since)));
+        let elapsed = (since > 0).then(|| {
+            crate::kit::duration(Duration::from_millis(super::now_ms().saturating_sub(since)))
+        });
         let written = self
             .model
             .thread(&ThreadId::Main)
@@ -1493,8 +1530,11 @@ pub(super) struct TitleParts {
     pub code: bool,
     /// It failed: a ✕ after the subject, and nothing else turns red.
     pub failed: bool,
+    /// A fact about what it did, after the subject: a count, an exit code, a range.
     pub meta: Option<String>,
-    /// Lines added and removed, before the meta.
+    /// How long it took, at the far right.
+    pub took: Option<String>,
+    /// Lines added and removed, after the subject.
     pub changes: Option<(u32, u32)>,
     /// `Some(open)` when a click opens or closes it.
     pub expandable: Option<bool>,

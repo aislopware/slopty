@@ -88,7 +88,7 @@ const fn refused_status(why: Refusal) -> &'static str {
 
 /// Where the cached directory lives: the client's data directory.
 pub fn cache_path() -> std::path::PathBuf {
-    slopty_settings::data_dir().join(directory::CACHE_FILE)
+    slopty_platform::dirs::data_dir().join(directory::CACHE_FILE)
 }
 
 /// What the cached directory should hold next.
@@ -387,7 +387,9 @@ mod tests {
         }
         let last = server(49).to_string();
         assert_eq!(cached_server(&path, Some(&last)).await.as_deref(), Some(last.as_str()));
-        assert!(!path.with_extension("json.tmp").exists(), "no temporary file is left behind");
+        let left: Vec<_> =
+            std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, [directory::CACHE_FILE], "no temporary file is left behind");
 
         tx.send_replace(Cache::Remove);
         assert_eq!(cached_server(&path, None).await, None);

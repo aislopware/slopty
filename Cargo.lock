@@ -1133,7 +1133,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -1589,7 +1589,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2504,7 +2504,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2574,8 +2574,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-base"
-version = "0.6.5"
-source = "git+https://github.com/aislopware/gpui-kit.git#aaa0f2a6d6d50becedd9ed981a95c56c71387500"
+version = "0.7.0"
+source = "git+https://github.com/aislopware/gpui-kit.git#f3e0328d5bba3abc24a0d028cc47a85bb61028ac"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2588,9 +2588,11 @@ dependencies = [
  "gpui_macros",
  "html5ever",
  "instant",
+ "itertools 0.13.0",
  "lsp-types",
  "markdown",
  "markup5ever_rcdom",
+ "num-traits",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -2611,8 +2613,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-component"
-version = "0.6.5"
-source = "git+https://github.com/aislopware/gpui-kit.git#aaa0f2a6d6d50becedd9ed981a95c56c71387500"
+version = "0.7.0"
+source = "git+https://github.com/aislopware/gpui-kit.git#f3e0328d5bba3abc24a0d028cc47a85bb61028ac"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2654,8 +2656,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-component-macros"
-version = "0.6.5"
-source = "git+https://github.com/aislopware/gpui-kit.git#aaa0f2a6d6d50becedd9ed981a95c56c71387500"
+version = "0.7.0"
+source = "git+https://github.com/aislopware/gpui-kit.git#f3e0328d5bba3abc24a0d028cc47a85bb61028ac"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2665,8 +2667,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-kit"
-version = "0.6.5"
-source = "git+https://github.com/aislopware/gpui-kit.git#aaa0f2a6d6d50becedd9ed981a95c56c71387500"
+version = "0.7.0"
+source = "git+https://github.com/aislopware/gpui-kit.git#f3e0328d5bba3abc24a0d028cc47a85bb61028ac"
 dependencies = [
  "gpui",
  "gpui-base",
@@ -2678,8 +2680,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-kit-assets"
-version = "0.6.5"
-source = "git+https://github.com/aislopware/gpui-kit.git#aaa0f2a6d6d50becedd9ed981a95c56c71387500"
+version = "0.7.0"
+source = "git+https://github.com/aislopware/gpui-kit.git#f3e0328d5bba3abc24a0d028cc47a85bb61028ac"
 dependencies = [
  "anyhow",
  "gpui",
@@ -2693,7 +2695,7 @@ dependencies = [
 [[package]]
 name = "gpui_apple"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -2716,7 +2718,7 @@ dependencies = [
 [[package]]
 name = "gpui_ios"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2746,7 +2748,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2782,7 +2784,6 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-plasma",
  "wayland-protocols-wlr",
- "x11-clipboard",
  "x11rb",
  "xkbcommon",
  "zed-scap",
@@ -2792,7 +2793,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -2838,7 +2839,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -2849,7 +2850,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -2865,7 +2866,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "schemars",
  "serde",
@@ -2875,7 +2876,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "anyhow",
  "log",
@@ -2885,7 +2886,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -2913,7 +2914,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2940,7 +2941,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3177,7 +3178,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -4388,9 +4389,9 @@ dependencies = [
 
 [[package]]
 name = "notify-rust"
-version = "4.18.0"
+version = "4.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5b4c1b4f2aa9f25f63a7a49d3dd0ed567b3670da15330a66b29434be899b891"
+checksum = "fe430c879247371c47fdedd328ad4e301e6b30b533c5fd5db1c06d75253d0e46"
 dependencies = [
  "futures-lite",
  "log",
@@ -5185,7 +5186,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "collections",
  "serde",
@@ -6072,7 +6073,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "derive_refineable",
 ]
@@ -6186,9 +6187,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.4.1"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b6317cd8c13e3ec9033cf2aa5aa92cd743f0f4f8a93cddc42ea0ae6ce3b8898"
+checksum = "fae7019994ae0fe4ada40b732f798f3ff26f0f04facb1477f1bf37eb4f18a2d3"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6218,9 +6219,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.4.1"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2ee366004e5f87c103be91c6c09337811517ae8d2f919ece9da7c21444b85c5"
+checksum = "c7e66877136e969d5a2d561ee5841b17717a0619aebd64abb47a2a2f46e34683"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -6292,9 +6293,9 @@ dependencies = [
 
 [[package]]
 name = "rust-i18n"
-version = "4.2.2"
+version = "4.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c43fd69c20da13756643a5bf51ae799965465c78e05c57a1242a736aaa56527"
+checksum = "68abb338402a175bc93faba6a7d7f7e57adc48bc607b93ec86a57447f9edf6fb"
 dependencies = [
  "globwalk",
  "regex",
@@ -6305,9 +6306,9 @@ dependencies = [
 
 [[package]]
 name = "rust-i18n-macro"
-version = "4.2.2"
+version = "4.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "086ec8a9eaa6afda33919b9bc1661c1f4e017c40e99bbd33ca98f6e1cb6ca91f"
+checksum = "746fe7815ad5d74ff5012fc653c4d1a208878536cc2d5d81f5d58a2f35f53272"
 dependencies = [
  "glob",
  "proc-macro2",
@@ -6320,12 +6321,13 @@ dependencies = [
 
 [[package]]
 name = "rust-i18n-support"
-version = "4.2.2"
+version = "4.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac02dcb9a01ec145d0a5534ea9554a966050ca250b346bb2a9ab0fcdafab5979"
+checksum = "65d8776635f9d13887dc2eb41da7ea624e7e401ecc7da6e82eb7ff29339b252a"
 dependencies = [
  "arc-swap",
  "base62",
+ "foldhash 0.2.0",
  "globwalk",
  "itertools 0.11.0",
  "normpath",
@@ -6496,7 +6498,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "async-task",
  "backtrace",
@@ -6914,10 +6916,12 @@ name = "slopty-agent"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "data-encoding",
  "insta",
  "serde",
  "serde_json",
  "slopty-core",
+ "slopty-platform",
  "slopty-proto",
  "tempfile",
 ]
@@ -6979,7 +6983,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "plist",
  "rmcp",
  "rustix",
  "serde",
@@ -6995,11 +6998,11 @@ dependencies = [
  "slopty-server",
  "slopty-settings",
  "slopty-tools",
- "slopty-worker",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -7018,6 +7021,7 @@ dependencies = [
  "slopty-grid",
  "slopty-media",
  "slopty-net",
+ "slopty-platform",
  "slopty-proto",
  "slopty-shape",
  "tempfile",
@@ -7031,6 +7035,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "objc2-audio-toolbox",
+ "objc2-core-audio",
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-core-media",
@@ -7066,8 +7071,12 @@ dependencies = [
  "serde",
  "serde_json",
  "slopty-agent",
+ "slopty-client",
+ "slopty-core",
  "slopty-media",
+ "slopty-net",
  "slopty-platform",
+ "slopty-proto",
  "slopty-pty",
  "slopty-shape",
  "tempfile",
@@ -7164,6 +7173,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slopty-core",
+ "slopty-platform",
  "slopty-proto",
  "slopty-shape",
  "slopty-tailnet",
@@ -7189,11 +7199,14 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-game-controller",
  "objc2-ui-kit",
+ "objc2-user-notifications",
  "objc2-web-kit",
  "parking_lot",
+ "plist",
  "rustix",
  "slopty-proto",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -7216,6 +7229,8 @@ dependencies = [
  "postcard",
  "proptest 1.11.0",
  "serde",
+ "serde_bytes",
+ "serde_json",
  "slopty-core",
  "slopty-grid",
  "thiserror 2.0.21",
@@ -7269,6 +7284,7 @@ dependencies = [
  "serde_json",
  "slopty-core",
  "slopty-net",
+ "slopty-platform",
  "slopty-proto",
  "slopty-tailnet",
  "slopty-tools",
@@ -7287,6 +7303,7 @@ dependencies = [
  "clap",
  "serde_json",
  "slopty-net",
+ "slopty-platform",
  "slopty-server",
  "slopty-settings",
  "tempfile",
@@ -7300,8 +7317,11 @@ name = "slopty-settings"
 version = "0.1.0"
 dependencies = [
  "pretty_assertions",
+ "schemars",
  "serde",
+ "serde_json",
  "slopty-net",
+ "slopty-platform",
  "tempfile",
  "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
@@ -7348,6 +7368,7 @@ dependencies = [
 name = "slopty-tools"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "data-encoding",
  "insta",
  "parking_lot",
@@ -7357,8 +7378,10 @@ dependencies = [
  "serde_json",
  "slopty-core",
  "slopty-proto",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7383,6 +7406,7 @@ dependencies = [
  "slopty-platform",
  "slopty-predict",
  "slopty-proto",
+ "slopty-settings",
  "slopty-theme",
  "syntect",
  "tempfile",
@@ -7403,6 +7427,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-video-toolbox",
  "parking_lot",
+ "png 0.18.1",
  "regex",
  "rustix",
  "serde",
@@ -7648,7 +7673,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "heapless",
  "log",
@@ -7903,12 +7928,12 @@ dependencies = [
 
 [[package]]
 name = "tauri-winrt-notification"
-version = "0.7.3"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ed071c670382e85fc2f48ae706492d8c338f4f89bf72520d32f8abfe880aade"
+checksum = "f37a6c354fd28fc9e322ed9bd47e3959576dad28c9d58ea1cf888cce1c7ccb36"
 dependencies = [
  "thiserror 2.0.21",
- "windows 0.61.3",
+ "windows 0.62.2",
  "windows-version",
 ]
 
@@ -8144,9 +8169,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.5"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",
@@ -8646,7 +8671,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "perf",
  "quote",
@@ -9822,6 +9847,7 @@ dependencies = [
  "gpui_platform",
  "http_client",
  "image",
+ "indexmap",
  "insta",
  "itertools 0.13.0",
  "libc",
@@ -9839,6 +9865,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
  "objc2-ui-kit",
+ "objc2-user-notifications",
  "once_cell",
  "ppv-lite86",
  "proc-macro2",
@@ -9886,16 +9913,6 @@ checksum = "502da5464ccd04011667b11c435cb992822c2c0dbde1770c988480d312a0db2e"
 dependencies = [
  "libc",
  "pkg-config",
-]
-
-[[package]]
-name = "x11-clipboard"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "662d74b3d77e396b8e5beb00b9cad6a9eccf40b2ef68cc858784b14c41d535a3"
-dependencies = [
- "libc",
- "x11rb",
 ]
 
 [[package]]
@@ -10399,7 +10416,7 @@ checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 [[package]]
 name = "zlog"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10416,7 +10433,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -10427,7 +10444,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git#cfaa21a0ec140181f120afa509cb76147b1fc5b5"
+source = "git+https://github.com/aislopware/zed.git#3a7675542b9fa5fd13fba68d1c003bc69db52b6f"
 
 [[package]]
 name = "zune-core"

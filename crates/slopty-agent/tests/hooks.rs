@@ -8,9 +8,11 @@
 mod hooks {
     use std::path::Path;
 
+    use serde::Deserialize as _;
     use serde_json::{Value, json};
-    use slopty_agent::permission::Decision;
-    use slopty_agent::{HOOK_EVENTS, HOOK_JSON_BUDGET, Hook};
+    use slopty_agent::permission::hook_output;
+    use slopty_agent::{HOOK_EVENTS, HOOK_JSON_BUDGET, Hook, HookEvent};
+    use slopty_proto::ctl::Decision;
 
     fn records(scenario: &str) -> Vec<Value> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -41,8 +43,9 @@ mod hooks {
     fn every_captured_event_is_one_the_relay_registers() {
         for scenario in ["edit", "tools", "interrupt", "compact", "permission"] {
             for record in records(scenario) {
-                let event = record["input"]["hook_event_name"].as_str().expect("event");
-                assert!(HOOK_EVENTS.contains(&event), "{scenario}: {event}");
+                let name = &record["input"]["hook_event_name"];
+                let event = HookEvent::deserialize(name).expect("event");
+                assert!(HOOK_EVENTS.contains(&event), "{scenario}: {name}");
             }
         }
     }
@@ -147,7 +150,7 @@ mod hooks {
             } else {
                 Decision::Allow
             };
-            assert_eq!(decision.hook_output().as_ref(), Some(&record["output"]), "{command}");
+            assert_eq!(hook_output(&decision).as_ref(), Some(&record["output"]), "{command}");
         }
     }
 }

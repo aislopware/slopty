@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: line
+---
+{"version":"0.1.0","exe":"/Applications/Slopty.app/Contents/MacOS/slopty-worker","screen_recording":true,"post_events":false,"listen":"[::]:45550","allow":["10.0.0.0/8"],"tailscale":{"state":"absent"},"clients":2,"sessions":5,"uptime_secs":86400}

@@ -48,8 +48,10 @@ fn crowd(
 }
 
 /// What one frame costs when only a terminal changed (an echo) and when the workspace itself
-/// did, over 60 shells and 60 notes with the navigator docked. Run by hand (it prints, it does
-/// not judge); `docs/MEASUREMENTS.md` has the numbers and the command.
+/// did, over 60 shells and 60 notes with the navigator docked. The last shell is off screen in
+/// this crowd, so its echo is a change nothing draws; then a neighbour's echo beside a focused
+/// shell full of text. Run by hand (it prints, it does not judge); `docs/MEASUREMENTS.md` has
+/// the numbers and the command.
 #[gpui::test]
 #[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
 fn measure_an_echo_frame_beside_the_chrome(cx: &mut TestAppContext) {
@@ -86,6 +88,62 @@ fn measure_an_echo_frame_beside_the_chrome(cx: &mut TestAppContext) {
          {:.3} ms p95 {:.3} ms; workspace p50 {:.3} ms p95 {:.3} ms",
         echo.0, echo.1, own.0, own.1
     );
+
+    // A neighbour's echo while the focused shell holds a dense screen: whether the focused
+    // grid is replayed or drawn again with every frame another tile causes.
+    let focused_tile = view.read_with(cx, |v, _| v.tile_of_session(last)).expect("its tile");
+    let neighbour = *sessions.iter().rev().nth(1).expect("two shells");
+    let dense = dense_screen(DENSE_ROWS);
+    let dense: Vec<&str> = dense.iter().map(String::as_str).collect();
+    view.update_in(cx, |v, _w, cx| {
+        v.term_event(last, frame(&dense), cx);
+        v.focus_tile(focused_tile, cx);
+    });
+    cx.run_until_parked();
+    assert!(terminal_focused(&view, cx, last), "the dense shell has the keyboard");
+    let beside = view.read_with(cx, |v, _| v.terminal(neighbour).cloned()).expect("attached");
+    assert!(cx.debug_bounds(selector("item", focused_tile.item)).is_some(), "drawn");
+    let mut took = Vec::with_capacity(FRAMES);
+    let drawn = terminal.read_with(cx, |t, _| t.renders());
+    for n in 0..WARM + FRAMES {
+        let start = Instant::now();
+        beside.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        if n >= WARM {
+            took.push(start.elapsed());
+        }
+    }
+    took.sort_unstable();
+    let pct = |p: usize| slopty_client::pacing::percentile(&took, p).as_secs_f64() * 1e3;
+    let redrawn = terminal.read_with(cx, |t, _| t.renders()).saturating_sub(drawn);
+    println!(
+        "MEASURE neighbour echo beside a focused dense grid (80 × {DENSE_ROWS}), {FRAMES} \
+         frames: p50 {:.3} ms p95 {:.3} ms; the focused grid rendered {redrawn} times",
+        pct(50),
+        pct(95)
+    );
+}
+
+/// Rows in [`dense_screen`].
+const DENSE_ROWS: usize = 40;
+
+/// `rows` rows of 80 columns, every cell a word's letter or the space between two.
+fn dense_screen(rows: usize) -> Vec<String> {
+    const WORDS: [&str; 8] =
+        ["cargo", "build", "--release", "target", "slopty", "ok", "0.47", "µs"];
+    (0..rows)
+        .map(|row| {
+            let mut line = String::new();
+            for word in WORDS.iter().cycle().skip(row) {
+                if line.chars().count().saturating_add(word.chars().count()) >= 80 {
+                    break;
+                }
+                line.push_str(word);
+                line.push(' ');
+            }
+            line
+        })
+        .collect()
 }
 
 /// How many times each region has drawn: the navigator, the title bar, the status bar.
@@ -116,6 +174,47 @@ fn an_echo_leaves_the_chrome_as_it_was_drawn(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let after = renders(&view, cx);
     assert!(after.iter().zip(before).all(|(a, b)| *a > b), "{before:?} → {after:?}");
+}
+
+/// A program's title is news for the chrome only when the tile's title follows it: the shell's
+/// own name leaves "Terminal 2" as it was, an editor's title renames the tile (and ends the
+/// twin's number). A command starting names its shell and renumbers what read alike, though
+/// only the navigator is told.
+#[gpui::test]
+fn a_programs_title_draws_the_chrome_only_when_the_tiles_title_follows(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let (one, two) = (SessionId::new(), SessionId::new());
+    let first = opens(&view, cx, &studio, one, studio.me, 1);
+    let second = opens(&view, cx, &studio, two, studio.me, 2);
+    let titles = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, cx| [first, second].map(|t| v.tile_title(t, v.item(t).unwrap(), cx)))
+    };
+    assert_eq!(titles(cx), ["Terminal", "Terminal 2"]);
+    let before = renders(&view, cx);
+    view.update_in(cx, |v, _w, cx| v.term_event(two, TermEvent::Title("zsh".into()), cx));
+    cx.run_until_parked();
+    assert_eq!(renders(&view, cx), before, "the shell's own name changes no title");
+    assert_eq!(titles(cx), ["Terminal", "Terminal 2"]);
+
+    view.update_in(cx, |v, _w, cx| v.term_event(two, TermEvent::Title("vim notes.md".into()), cx));
+    cx.run_until_parked();
+    let after = renders(&view, cx);
+    assert!(after.iter().zip(before).all(|(a, b)| *a > b), "{before:?} → {after:?}");
+    assert_eq!(titles(cx), ["Terminal", "vim notes.md"]);
+
+    view.update_in(cx, |v, _w, cx| v.term_event(two, TermEvent::Title("zsh".into()), cx));
+    cx.run_until_parked();
+    assert_eq!(titles(cx), ["Terminal", "Terminal 2"], "back to reading alike");
+    let prompt = SemanticMark::Prompt { exit: None, input: Some(2) };
+    let rows = [("$ make", prompt), ("building", SemanticMark::Output)];
+    view.update_in(cx, |v, _w, cx| v.term_event(one, marked_frame(1, &rows, 1), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        titles(cx),
+        ["make", "Terminal"],
+        "the command names the first; the second is alone"
+    );
 }
 
 /// A command starting in a shell is news for its navigator row, and only for the navigator.
@@ -188,9 +287,9 @@ fn ms_ago(ago: Duration) -> u64 {
     u64::try_from(now.as_millis()).unwrap()
 }
 
-/// While agents are at their turn, *Working* lists the first four under a heading that counts
-/// them all, with "Show N more" for the rest. Its turn times tick once a second by the
-/// navigator's own clock, which draws the navigator alone.
+/// While agents are at their turn out of sight (their worker folded), *Working* lists the first
+/// four under a heading that counts them all, with "Show N more" for the rest. Its turn times tick
+/// once a second by the navigator's own clock, which draws the navigator alone.
 #[gpui::test]
 fn working_lists_the_agents_at_their_turn_and_ticks_their_time(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -213,6 +312,8 @@ fn working_lists_the_agents_at_their_turn_and_ticks_their_time(cx: &mut TestAppC
         }
     });
     cx.run_until_parked();
+    assert!(cx.debug_bounds("nav-working").is_none(), "their rows say it while in view");
+    click_at(cx, leak(format!("nav-worker-{}", studio.key)));
     assert!(cx.debug_bounds("nav-working").is_some(), "the heading");
     assert!(cx.debug_bounds("nav-workers").is_some(), "the workers' own heading under it");
     assert_eq!(view.read_with(cx, |v, _| v.navigator_working().len()), 4, "the first four");

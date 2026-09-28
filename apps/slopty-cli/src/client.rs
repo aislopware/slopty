@@ -1,6 +1,6 @@
 //! Known workers, adding one by address, and connecting as a client.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
@@ -12,11 +12,6 @@ use slopty_proto::handshake::Hello;
 
 /// How long a closing endpoint may take to tell its peers.
 const CLOSE_GRACE: Duration = Duration::from_millis(500);
-
-/// `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty`.
-pub fn data_dir() -> PathBuf {
-    slopty_settings::data_dir()
-}
 
 fn known(data_dir: &Path) -> Result<KnownWorkers> {
     Ok(KnownWorkers::open_in(data_dir)?)
@@ -86,6 +81,10 @@ pub struct Session {
     /// The connection.
     pub conn: WorkerConn,
     /// Who we are to the worker (the key of its per-client registries).
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        expect(dead_code, reason = "read by the screen bench, which is Apple's")
+    )]
     pub client: ClientId,
     /// Our endpoint (closed with the session).
     pub endpoint: Endpoint,
@@ -102,6 +101,7 @@ impl Session {
 }
 
 pub async fn connect_to(data_dir: &Path, needle: Option<&str>) -> Result<Session> {
+    #[cfg(target_vendor = "apple")]
     slopty_client::warm_up_decoder();
     let me = known(data_dir)?;
     let address = pick(&me, needle)?;

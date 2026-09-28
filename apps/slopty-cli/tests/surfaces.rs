@@ -98,7 +98,7 @@ mod tests {
     /// Answer every request the server forwards, until the link ends.
     async fn work(mut link: ServerLink) {
         while let Ok(msg) = link.rx.recv().await {
-            if let FromServer::Request { id, verb } = msg {
+            if let FromServer::Request { id, verb, .. } = msg {
                 let reply = ToServer::Reply { id, outcome: answer(&verb) };
                 if link.tx.send(&reply).await.is_err() {
                     return;

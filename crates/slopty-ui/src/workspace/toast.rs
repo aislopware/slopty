@@ -1,15 +1,18 @@
 //! The notices in the strip's bottom-right corner: another client's pointing, a closed tile to
 //! take back, a word to this client. Each is one line, marked with what it is about when it is
 //! about something, with at most one action; they stay [`SAY_FOR`] and no more than [`SHOWN`]
-//! are up at once. They stack over every other layer, dialogs included.
+//! are up at once. They stack over every other layer, dialogs included. A notice rises 4 pt
+//! into place as it fades in, and fades where it stands when its time is up; under Reduce
+//! Motion it comes and goes at once.
 
 use std::time::Duration;
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    Animation, AnimationExt as _, Context, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    px,
 };
 use slopty_client::layout::TileRef;
 use slopty_proto::ClientMsg;
@@ -41,6 +44,8 @@ pub(super) struct Toast {
 struct Shown {
     seq: u64,
     what: ToastKind,
+    /// Its time is up and it is fading out: no longer counted as up.
+    leaving: bool,
 }
 
 /// What a toast is.
@@ -79,19 +84,48 @@ impl WorkspaceView {
         let toast = self.toast.get_or_insert_with(Toast::default);
         toast.seq = toast.seq.wrapping_add(1);
         let seq = toast.seq;
-        toast.shown.push(Shown { seq, what });
+        // One on its way out gives its place at once to the one coming in.
+        toast.shown.retain(|shown| !shown.leaving);
+        toast.shown.push(Shown { seq, what, leaving: false });
         let over = toast.shown.len().saturating_sub(SHOWN);
         toast.shown.drain(..over);
         cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(during).await;
-            let _gone = this.update(cx, |this, cx| {
-                if this.drop_toasts(|shown| shown.seq == seq) {
-                    cx.notify();
-                }
-            });
+            let fades = this
+                .update(cx, |this, cx| {
+                    let fades = this.chrome_moves(cx);
+                    let went = if fades {
+                        this.leave_toast(seq)
+                    } else {
+                        this.drop_toasts(|shown| shown.seq == seq)
+                    };
+                    if went {
+                        cx.notify();
+                    }
+                    fades && went
+                })
+                .unwrap_or(false);
+            if fades {
+                cx.background_executor().timer(crate::kit::Pace::Fade.duration()).await;
+                let _gone = this.update(cx, |this, cx| {
+                    if this.drop_toasts(|shown| shown.seq == seq) {
+                        cx.notify();
+                    }
+                });
+            }
         })
         .detach();
+    }
+
+    /// Start notice `seq` fading out; `true` when it was up.
+    fn leave_toast(&mut self, seq: u64) -> bool {
+        let Some(toast) = self.toast.as_mut() else { return false };
+        let Some(shown) = toast.shown.iter_mut().find(|s| s.seq == seq && !s.leaving) else {
+            return false;
+        };
+        shown.leaving = true;
+        true
     }
 
     /// Take down the notices `which` picks; `true` when one went.
@@ -114,7 +148,7 @@ impl WorkspaceView {
         Some(match what {
             ToastKind::Pointed { name, tile } => {
                 let item = self.item(*tile)?;
-                format!("{name} points at {}", self.card_title(*tile, item, cx))
+                format!("{name} points at {}", self.tile_title(*tile, item, cx))
             }
             ToastKind::Closed { title, .. } => format!("Closed {title}"),
             ToastKind::Said(text) => text.clone(),
@@ -124,7 +158,7 @@ impl WorkspaceView {
     /// The text of the newest notice up now, for tests and the self-test dump.
     #[must_use]
     pub fn toast_text(&self, cx: &gpui::App) -> Option<String> {
-        let shown = self.toast.as_ref()?.shown.last()?;
+        let shown = self.toast.as_ref()?.shown.iter().rev().find(|shown| !shown.leaving)?;
         self.toast_line(&shown.what, cx)
     }
 
@@ -132,7 +166,11 @@ impl WorkspaceView {
     #[must_use]
     pub fn toast_texts(&self, cx: &gpui::App) -> Vec<String> {
         self.toast.as_ref().map_or_else(Vec::new, |t| {
-            t.shown.iter().filter_map(|s| self.toast_line(&s.what, cx)).collect()
+            t.shown
+                .iter()
+                .filter(|s| !s.leaving)
+                .filter_map(|s| self.toast_line(&s.what, cx))
+                .collect()
         })
     }
 
@@ -153,7 +191,7 @@ impl WorkspaceView {
     }
 
     pub(super) fn point_at(&mut self, tile: TileRef, cx: &mut Context<Self>) {
-        let Some(title) = self.item(tile).map(|i| self.card_title(tile, i, cx)) else { return };
+        let Some(title) = self.item(tile).map(|i| self.tile_title(tile, i, cx)) else { return };
         self.send(tile.worker, ClientMsg::Point { item: tile.item });
         self.show_toast(ToastKind::Said(format!("Pointed the others at {title}")), cx);
     }
@@ -206,40 +244,57 @@ impl WorkspaceView {
             ToastKind::Said(_) => ("said", None, None),
         };
         let line = SharedString::from(line);
-        Some(
-            crate::kit::elevate(div(), theme)
-                .id(("toast", shown.seq))
-                .debug_selector(move || part.to_owned())
-                .role(Role::Status)
-                .aria_label(line.clone())
-                .occlude()
-                .max_w(px(TOAST_MAX_W))
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.sm))
-                .pl(px(theme.spacing.inset()))
-                .pr(px(if action.is_some() { theme.spacing.xs } else { theme.spacing.inset() }))
-                .py(px(theme.spacing.xs))
-                .rounded(px(theme.radii.lg))
-                .text_color(hsla(s.text))
-                .text_size(px(theme.typography.small()))
-                .font_family(theme.typography.ui_family.clone())
-                .children(icon.map(|icon| {
-                    crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary))
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(line),
-                )
-                .when_some(action, gpui::ParentElement::child)
-                .into_any_element(),
-        )
+        let notice = crate::kit::elevate(div(), theme)
+            .id(("toast", shown.seq))
+            .debug_selector(move || part.to_owned())
+            .role(Role::Status)
+            .aria_label(line.clone())
+            .occlude()
+            .max_w(px(TOAST_MAX_W))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm))
+            .pl(px(theme.spacing.inset()))
+            .pr(px(if action.is_some() { theme.spacing.xs } else { theme.spacing.inset() }))
+            .py(px(theme.spacing.xs))
+            .rounded(px(theme.radii.lg))
+            .text_color(hsla(s.text))
+            .text_size(px(theme.typography.small()))
+            .font_family(theme.typography.ui_family.clone())
+            .children(icon.map(|icon| {
+                crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary))
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(line),
+            )
+            .when_some(action, gpui::ParentElement::child);
+        if !self.chrome_moves(cx) {
+            return Some(notice.into_any_element());
+        }
+        if shown.leaving {
+            let out = Animation::new(crate::kit::Pace::Fade.duration())
+                .with_easing(crate::kit::ease_out());
+            return Some(
+                notice
+                    .with_animation(("toast-out", shown.seq), out, |el, t| el.opacity(1.0 - t))
+                    .into_any_element(),
+            );
+        }
+        let rise = theme.spacing.xs;
+        Some(crate::kit::slide_fade(
+            notice,
+            ("toast-in", shown.seq),
+            rise,
+            crate::kit::Pace::Fade,
+            cx,
+        ))
     }
 
     /// A pointing at `tile` has been followed.

@@ -77,6 +77,38 @@ impl Rep {
     }
 }
 
+// Off macOS there are no AppKit statics to read, so the names are spelled out; on macOS a test
+// holds them to AppKit's.
+#[cfg(any(not(target_os = "macos"), test))]
+impl Rep {
+    /// The uniform type identifier this representation travels as.
+    const fn wire_uti(self) -> &'static str {
+        match self {
+            Self::FileUrl => "public.file-url",
+            Self::Png => "public.png",
+            Self::Tiff => "public.tiff",
+            Self::Rtf => "public.rtf",
+            Self::Html => "public.html",
+            Self::Text => "public.utf8-plain-text",
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl Rep {
+    /// The uniform type identifier, as the wire spells it.
+    #[must_use]
+    pub fn uti(self) -> String {
+        self.wire_uti().to_owned()
+    }
+
+    /// The representation `uti` names, if clipboard sync carries it.
+    #[must_use]
+    pub fn of(uti: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|rep| rep.wire_uti() == uti)
+    }
+}
+
 /// One pasteboard item: its representations, as (type, bytes).
 pub type Item = Vec<(String, Vec<u8>)>;
 
@@ -94,6 +126,36 @@ pub trait Board: Send + Sync {
     /// Replace the contents with `items`. The `changeCount` the write left, `None` when it
     /// failed.
     fn write(&self, items: &[Item]) -> Option<isize>;
+}
+
+/// The board of a worker that has no clipboard to sync yet.
+///
+/// That is Linux, where no Wayland or X11 board is wired up. It never changes and holds
+/// nothing, so nothing is sent from it, and every write fails, so a paste into it is refused
+/// rather than lost.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Unsupported;
+
+impl Board for Unsupported {
+    fn change_count(&self) -> isize {
+        0
+    }
+
+    fn types(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn data(&self, _uti: &str) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn file_urls(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn write(&self, _items: &[Item]) -> Option<isize> {
+        None
+    }
 }
 
 /// Held across every `NSPasteboard` call in this process. AppKit documents no thread rule for it,
@@ -219,9 +281,33 @@ impl Board for MacBoard {
 }
 
 #[cfg(test)]
+mod unsupported_tests {
+    use super::{Board as _, Rep, Unsupported};
+
+    /// A board with no clipboard behind it offers nothing and refuses a paste.
+    #[test]
+    fn an_unsupported_board_holds_nothing_and_refuses_writes() {
+        let board = Unsupported;
+        let text = vec![(Rep::Text.uti(), b"hi".to_vec())];
+        assert_eq!(board.write(&[text]), None);
+        assert_eq!(board.change_count(), 0);
+        assert!(board.types().is_empty() && board.file_urls().is_empty());
+        assert_eq!(board.data(&Rep::Text.uti()), None);
+    }
+}
+
+#[cfg(test)]
 #[cfg(target_os = "macos")]
 mod tests {
     use super::*;
+
+    /// The names another platform spells out are AppKit's, which the wire carries.
+    #[test]
+    fn the_spelled_out_type_names_are_appkits() {
+        for rep in Rep::ALL {
+            assert_eq!(rep.uti(), rep.wire_uti(), "{rep:?}");
+        }
+    }
 
     /// Readers and writers on several threads at once, as the worker's poller and a paste are,
     /// each see whole contents and nothing crashes.

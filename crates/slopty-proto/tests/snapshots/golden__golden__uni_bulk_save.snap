@@ -1,0 +1,8 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: hex(&bytes)
+---
+36 00 00 00 01 10 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 5a 7e 04 14 2f 77 2f 73 6c 6f 70 74
+79 2f 73 72 63 2f 62 69 67 2e 72 73 01 80 b0 eb
+e8 84 34 00 c1 b9 55 00 00 00

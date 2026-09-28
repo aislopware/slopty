@@ -1,12 +1,12 @@
-//! Item chrome text: a label shaped once at its base size and painted at the item's zoom.
+//! Tile chrome text: a label shaped once at its base size and painted at the overview's zoom.
 //!
 //! GPUI's text element shapes at the painted size and measures itself through taffy, so a zoom
-//! step re-shapes every title and pill on the canvas and lays each out again; and since every
+//! step re-shapes every title and pill in the workspace and lays each out again; and since every
 //! step of a zoom is a new font size, the glyph atlas rasterises every glyph again too. This
 //! element shapes the label at its base size once (a global cache swept per frame, like the
 //! terminal's words), sizes itself by arithmetic (`shaped width × k`) instead of a measure
 //! callback, paints each glyph at `base × k` through `Window::paint_glyph`, and while the
-//! canvas says the zoom is in motion draws from a raster on the size ladder stretched to the
+//! workspace says the zoom is in motion draws from a raster on the size ladder stretched to the
 //! painted size (`Window::paint_glyph_scaled`, the fork), exact again on the frame the motion
 //! settles. At `k = 1` and at rest it paints what GPUI's text element paints: the same
 //! shaping, the same baseline, the same glyph origins.
@@ -149,7 +149,7 @@ fn boundaries(line: &ShapedLine) -> Vec<Pixels> {
 /// label that fits exactly reads as a fraction of a pixel too wide — "shell" was shaped at
 /// 26.27 pt and given a 26 pt box. Cutting on that is not a near miss: the ellipsis needs room
 /// of its own, so the text loses several glyphs to save a quarter of one, and every filled title
-/// on the canvas came out as two letters and a dot. Half a pixel of overrun is invisible; the
+/// in the workspace came out as two letters and a dot. Half a pixel of overrun is invisible; the
 /// cut it used to cause was not.
 const SUBPIXEL: Pixels = px(0.5);
 
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(tail, [point(px(120.0), px(54.0))], "from the second glyph, where it was");
     }
 
-    /// "shell", shaped at 26.27 and handed a 26 pt box: the numbers the canvas actually had.
+    /// "shell", shaped at 26.27 and handed a 26 pt box: the numbers the workspace actually had.
     fn shell() -> (Vec<Pixels>, Pixels) {
         (vec![px(0.0), px(6.0), px(12.0), px(18.0), px(24.0), px(26.26758)], px(26.26758))
     }

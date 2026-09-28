@@ -43,7 +43,7 @@ pub fn digest(bytes: &[u8]) -> Hash {
 
 /// `path` as a `file://` URL, the bytes of a `public.file-url` item.
 #[must_use]
-pub fn file_url(path: &Path) -> String {
+fn file_url(path: &Path) -> String {
     use std::fmt::Write as _;
     use std::os::unix::ffi::OsStrExt as _;
     let mut url = String::from("file://");

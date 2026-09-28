@@ -3,41 +3,54 @@
 //!
 //! **The stream.** Each followed session gets a task of its own on the connection
 //! ([`stream`]). It opens a conversation stream below the terminals and video
-//! (`slopty_net::streams::CONVERSATION_PRIORITY`), then reads the session's transcripts
-//! (`slopty_agent::conversation::Transcripts`, off the runtime on the blocking pool) and sends
-//! what changed: first everything there is, behind a reset and closed by
-//! `ConversationEvent::Current`, then each change. It reads on a tick and at once when a hook
-//! fires in the session, and sends the status line's meters when they move. Where the agent
-//! runs Slopty's mod, it also sends the blocks the model is writing
-//! (`ConversationEvent::Live`) as the mod reports them (`slopty_agent::live::Overlay`), each
-//! cleared after the transcript change that settles it. Nothing here is on a terminal's path:
-//! no lock is held across a read or a send, and the stream's writes wait on nobody but this
-//! client.
+//! (`slopty_net::streams::CONVERSATION_PRIORITY`) and sends the conversation: first everything
+//! there is, behind a reset and closed by `ConversationEvent::Current`, then each change, and
+//! the status line's meters when they move. The session's transcripts are read once for all
+//! its followers (`slopty_worker::conversation::Reader`, off the runtime on the blocking pool):
+//! a follower that joins reads what they gained and takes the conversation as it stands, and a
+//! task of the session's own reads them on a tick and at once when a hook fires, sending each
+//! read's changes to every follower. A follower that falls too far behind is sent everything
+//! again. Where the agent runs Slopty's mod, a follower also sends the blocks the model is
+//! writing (`ConversationEvent::Live`) as the mod reports them (`slopty_agent::live::Overlay`),
+//! each cleared after the transcript change that settles it. The same reads tail the files the
+//! session's background commands write (`slopty_agent::conversation::output`), and a follower
+//! sends what they printed (`ConversationEvent::Output`) and answers a request for an image's
+//! bytes (`ConversationEvent::Image`). Nothing here is on a terminal's path: only the reader's
+//! own lock, which only the session's followers wait on, is held across a read, none across a
+//! send, every file is read on the blocking pool, and the stream's writes wait on nobody but
+//! this client.
 //!
-//! **Held prompts.** The relay's `CtlRequest::Permission` comes to [`ask`]. The daemon's
+//! **Held prompts.** The relay's `CtlRequest::Permission`, once the control socket has taken
+//! its hook in, comes to [`ask`]. The daemon's
 //! [`Follows::holds`] (`slopty_worker::conversation::Holds`) decides: undecided at once when
 //! nobody follows, else held and shown to the followers (`WorkerMsg::Permission`, on the control
 //! stream: small and urgent), until a follower answers ([`answer`]), the last one leaves, the
 //! wait runs out or the relay goes away ([`release`]).
+//!
+//! **Orchestration** follows too, as `ORCHESTRATION` ([`Orchestrated`]): the sessions whose
+//! conversation a verb read or whose agent a verb started, until they end.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use slopty_agent::Hook;
-use slopty_agent::conversation::Transcripts;
 use slopty_agent::live::Overlay;
-use slopty_agent::permission::{self, Decision, PermissionAsk};
+use slopty_agent::{Hook, permission};
 use slopty_core::{ClientId, SessionId};
 use slopty_net::framed::FramedSend;
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::codec::CodecError;
 use slopty_proto::conversation::{
-    Cap, Change, Clipped, ConversationEvent, EXPAND_CHARS, Meters, PermissionEvent,
+    Blob, Cap, Change, Clipped, ConversationEvent, EXPAND_CHARS, Meters, Part, PermissionEvent,
     PermissionPrompt, Settled, TextRef, ThreadId, Verdict,
 };
+use slopty_proto::ctl::Decision;
 use slopty_worker::clip::Link;
-use slopty_worker::conversation::{Board, Held, Holds, Seen};
-use tokio::sync::{mpsc, oneshot, watch};
+use slopty_worker::conversation::{
+    Board, Held, Holds, ORCHESTRATION, Read, Reader, Seen, SharedReader,
+};
+use slopty_worker::orchestrate::{Conversations, Sources};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::Daemon;
 
@@ -57,7 +70,8 @@ const HOLD_MARGIN: Duration = Duration::from_secs(1);
 pub struct Follows {
     /// Followers and held prompts.
     pub holds: Holds<Pending>,
-    /// Each session's latest meters and named subagent files, and a wake-up per hook.
+    /// Each session's latest meters and named subagent files, a wake-up per hook, and the
+    /// reader its followers share.
     pub board: Board,
 }
 
@@ -91,26 +105,24 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// The decision the relay waiting on a permission prompt gets.
+/// The decision the relay waiting on `session`'s permission prompt `hook`, for at most
+/// `relay_wait`, gets.
 ///
 /// Undecided at once when nobody follows the session. Held, it is decided by a follower's
 /// answer, or released undecided when the last follower leaves or the wait is up;
 /// `relay_gone` finishing means Claude Code gave up on the hook, and the prompt is withdrawn.
 pub async fn ask(
     daemon: &Daemon,
-    ask: PermissionAsk,
+    session: SessionId,
+    hook: &Hook,
+    relay_wait: Duration,
     relay_gone: impl Future<Output = ()>,
 ) -> Decision {
-    let session = ask.session;
-    let Ok(hook) = Hook::parse(&ask.payload) else { return Decision::Pass };
-    if daemon.worker.get(session).is_err() {
-        return Decision::Pass;
-    }
-    let wait = Duration::from_millis(ask.wait_ms).saturating_sub(HOLD_MARGIN);
+    let wait = relay_wait.saturating_sub(HOLD_MARGIN);
     let asked_ms = now_ms();
     let until_ms = asked_ms.saturating_add(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
     let (reply, decided) = oneshot::channel();
-    let Some(prompt) = hold(daemon, session, &hook, reply, (asked_ms, until_ms)) else {
+    let Some(prompt) = hold(daemon, session, hook, reply, (asked_ms, until_ms)) else {
         return Decision::Pass;
     };
     let id = prompt.ask;
@@ -153,7 +165,7 @@ fn hold(
 }
 
 /// A follower answers: the first answer to a prompt still held goes to its relay, and the
-/// followers hear it was answered. Any other answer is dropped.
+/// followers hear it was answered. Any other answer is dropped; `false` says so.
 pub fn answer(
     daemon: &Daemon,
     link: Link,
@@ -161,11 +173,11 @@ pub fn answer(
     session: SessionId,
     ask: u64,
     verdict: Verdict,
-) {
+) -> bool {
     let taken = daemon.follows.lock().holds.answer(link, session, ask);
     let Some(held) = taken else {
         tracing::debug!(%session, ask, %by, "an answer to a prompt no longer held");
-        return;
+        return false;
     };
     tracing::info!(%session, ask, %by, ?verdict, "permission answered");
     let decision = permission::decision(&verdict, held.reply.suggestions.as_ref());
@@ -176,6 +188,49 @@ pub fn answer(
         ask,
         outcome,
     }));
+    true
+}
+
+/// The daemon's followed conversations as orchestration's verbs reach them: orchestration
+/// follows, reads and answers as [`ORCHESTRATION`], by the nil client.
+pub struct Orchestrated(pub Daemon);
+
+impl std::fmt::Debug for Orchestrated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Orchestrated").field("worker", &self.0.id).finish_non_exhaustive()
+    }
+}
+
+impl Conversations for Orchestrated {
+    fn follow(&self, session: SessionId) -> Vec<PermissionPrompt> {
+        let mut follows = self.0.follows.lock();
+        let ids = follows.holds.follow(session, ORCHESTRATION);
+        let held = ids
+            .into_iter()
+            .filter_map(|ask| follows.holds.get(ask).map(|held| held.reply.prompt.clone()))
+            .collect();
+        drop(follows);
+        held
+    }
+
+    fn sources(&self, session: SessionId) -> Sources {
+        let main = self.0.agents.lock().transcript_path(session);
+        let seen = self.0.follows.lock().board.current(session);
+        Sources { main, subagents: seen.subagents.into_iter().collect(), meters: seen.meters }
+    }
+
+    fn answer(&self, session: SessionId, ask: u64, verdict: Verdict) -> bool {
+        answer(&self.0, ORCHESTRATION, ClientId::nil(), session, ask, verdict)
+    }
+
+    fn forget(&self, session: SessionId) {
+        let released = {
+            let mut follows = self.0.follows.lock();
+            follows.board.forget(session);
+            follows.holds.forget(session)
+        };
+        release(&self.0, released);
+    }
 }
 
 /// Hand back prompts the last follower left undecided: each relay answers nothing, and Claude
@@ -233,43 +288,21 @@ async fn follow(
     seen: &mut watch::Receiver<Seen>,
     commands: &mut mpsc::UnboundedReceiver<Command>,
 ) -> Result<&'static str, NetError> {
-    let mut transcripts = Transcripts::default();
-    let mut first = true;
+    let reader = shared_reader(daemon, session, seen);
+    let Some((mut reads, whole)) = join(daemon, session, seen, &reader).await else {
+        return Ok("the read failed");
+    };
+    let mut pending = Some(whole);
     let mut current = false;
     let mut meters_sent: Option<Meters> = None;
     let mut overlay = Overlay::default();
-    // The transcript is read on the tick and when a hook fired, not for every piece the mod
-    // reports.
-    let mut read_due = true;
-    let mut hooks_read = None;
+    // Live blocks the mod stops reporting expire on this tick; the reader has its own.
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let (known, meters, hooks) = {
-            let now = seen.borrow_and_update();
-            let known = now.subagents.iter().cloned().collect::<Vec<PathBuf>>();
-            (known, now.meters.clone(), now.hooks)
-        };
-        read_due |= hooks_read != Some(hooks);
-        hooks_read = Some(hooks);
-        let main = if read_due { daemon.agents.lock().transcript_path(session) } else { None };
-        let changes = match main {
-            Some(main) => {
-                let read = tokio::task::spawn_blocking(move || {
-                    let changes = transcripts.read(&main, &known);
-                    (transcripts, changes)
-                })
-                .await;
-                let Ok((back, changes)) = read else { return Ok("the read failed") };
-                transcripts = back;
-                changes
-            }
-            // No transcript yet: the conversation is empty until the agent writes one.
-            None if first => vec![Change::Reset { thread: None }],
-            None => Vec::new(),
-        };
-        first = false;
-        read_due = false;
+        let meters = seen.borrow_and_update().meters.clone();
+        let Read { changes, outputs } =
+            pending.take().map(Arc::unwrap_or_clone).unwrap_or_default();
         let whole = changes.iter().any(|c| matches!(c, Change::Reset { thread: None }));
         // Live blocks go after the changes, so a block is cleared only once its entry is there.
         let mut live = Vec::new();
@@ -290,6 +323,9 @@ async fn follow(
         if !live.is_empty() {
             out.send(&ConversationEvent::Live(live)).await?;
         }
+        if !outputs.is_empty() {
+            out.send(&ConversationEvent::Output(outputs)).await?;
+        }
         if meters.is_some() && meters != meters_sent {
             if let Some(meters) = &meters {
                 out.send(&ConversationEvent::Meters(meters.clone())).await?;
@@ -297,18 +333,30 @@ async fn follow(
             meters_sent = meters;
         }
         tokio::select! {
-            _ = tick.tick() => read_due = true,
+            _ = tick.tick() => {}
             changed = seen.changed() => {
                 if changed.is_err() {
                     return Ok("the session is gone");
                 }
             }
+            read = reads.recv() => match read {
+                Ok(read) => pending = Some(read),
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::debug!(%session, missed, "a follower fell behind; sending it all again");
+                    let Some((again, whole)) = join(daemon, session, seen, &reader).await else {
+                        return Ok("the read failed");
+                    };
+                    reads = again;
+                    pending = Some(whole);
+                }
+                Err(broadcast::error::RecvError::Closed) => return Ok("the reader is gone"),
+            },
             command = commands.recv() => match command {
                 None => return Ok("unfollowed"),
                 Some(Command::Expand { thread, reference }) => {
-                    let (back, event) = expand(transcripts, thread, reference).await;
-                    let Some(back) = back else { return Ok("the read failed") };
-                    transcripts = back;
+                    let Some(event) = expand(&reader, thread, reference).await else {
+                        return Ok("the read failed");
+                    };
                     out.send(&event).await?;
                 }
             },
@@ -316,24 +364,112 @@ async fn follow(
     }
 }
 
-/// Resolve a clipped text on the blocking pool; the transcripts come back with the answer.
+/// The reader of `session`'s transcripts that its followers share; the first follower's call
+/// starts the task that reads them on the tick.
+fn shared_reader(
+    daemon: &Daemon,
+    session: SessionId,
+    seen: &watch::Receiver<Seen>,
+) -> SharedReader {
+    let (reader, fresh) = daemon.follows.lock().board.reader(session);
+    if fresh {
+        tokio::spawn(read_for_followers(
+            daemon.clone(),
+            session,
+            Arc::downgrade(&reader),
+            seen.clone(),
+        ));
+    }
+    reader
+}
+
+/// Join the followers of `session`: read what the files gained, which the others are sent,
+/// then take the conversation as it stands and the reads to come. `None` when the read failed.
+async fn join(
+    daemon: &Daemon,
+    session: SessionId,
+    seen: &watch::Receiver<Seen>,
+    reader: &SharedReader,
+) -> Option<(broadcast::Receiver<Arc<Read>>, Arc<Read>)> {
+    let main = daemon.agents.lock().transcript_path(session);
+    let known = seen.borrow().subagents.iter().cloned().collect::<Vec<PathBuf>>();
+    let mut reader = Arc::clone(reader).lock_owned().await;
+    let joined = tokio::task::spawn_blocking(move || {
+        if let Some(main) = main {
+            reader.read(&main, &known);
+        }
+        let (reads, whole) = reader.join();
+        (reads, Arc::new(whole))
+    });
+    joined.await.ok()
+}
+
+/// Read `session`'s transcripts for its followers on every tick, and at once when a hook fires
+/// in the session, until the last follower lets go of the reader or the session goes. A read
+/// that finds nothing sends nothing.
+async fn read_for_followers(
+    daemon: Daemon,
+    session: SessionId,
+    reader: Weak<tokio::sync::Mutex<Reader>>,
+    mut seen: watch::Receiver<Seen>,
+) {
+    let mut hooks_read = seen.borrow_and_update().hooks;
+    let mut tick = tokio::time::interval(TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first follower reads as it joins.
+    tick.tick().await;
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            changed = seen.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                // The mod's blocks and the meters are the followers' to send, not a reason to
+                // read.
+                if seen.borrow_and_update().hooks == hooks_read {
+                    continue;
+                }
+            }
+        }
+        let Some(reader) = reader.upgrade() else { return };
+        let Some(main) = daemon.agents.lock().transcript_path(session) else { continue };
+        let known = {
+            let now = seen.borrow_and_update();
+            hooks_read = now.hooks;
+            now.subagents.iter().cloned().collect::<Vec<PathBuf>>()
+        };
+        let mut reader = reader.lock_owned().await;
+        if tokio::task::spawn_blocking(move || reader.read(&main, &known)).await.is_err() {
+            tracing::warn!(%session, "the conversation read failed; its followers hear no more");
+            return;
+        }
+    }
+}
+
+/// Resolve a clipped text, or an image's bytes, on the blocking pool; `None` when the read
+/// failed.
 async fn expand(
-    transcripts: Transcripts,
+    reader: &SharedReader,
     thread: ThreadId,
     reference: TextRef,
-) -> (Option<Transcripts>, ConversationEvent) {
+) -> Option<ConversationEvent> {
+    let reader = Arc::clone(reader).lock_owned().await;
     let read = tokio::task::spawn_blocking(move || {
+        let transcripts = reader.transcripts();
+        if matches!(reference.part, Part::Image { .. }) {
+            let blob = transcripts
+                .image(&thread, &reference)
+                .map(|data| Blob { digest: blake3::hash(&data).to_hex().to_string(), data });
+            return ConversationEvent::Image { thread, reference, blob };
+        }
         let text = transcripts.full_text(&thread, &reference).map(|text| {
             let cap = Cap { lines: usize::MAX, chars: EXPAND_CHARS };
             Clipped::head(&text, cap, Some(reference.clone()))
         });
-        (transcripts, ConversationEvent::Expanded { thread, reference, text })
-    })
-    .await;
-    match read {
-        Ok((transcripts, event)) => (Some(transcripts), event),
-        Err(_panicked) => (None, ConversationEvent::Current),
-    }
+        ConversationEvent::Expanded { thread, reference, text }
+    });
+    read.await.ok()
 }
 
 /// Send `changes` in frames of [`FRAME_CHANGES`]. A frame past the codec's limit (a patch of

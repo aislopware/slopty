@@ -10,6 +10,7 @@
 //! * `commands` — what the actions do.
 //! * `agents` — coding agents in terminals: badges, banners, "needs you".
 //! * `browsers` — web pages in tiles: opening them, and the native view over each.
+//! * `folders` — folders in tiles, and a path opened as whatever it turns out to be.
 //! * `overlays` — the command palette, find in every tile, the window picker.
 //! * `toast` — the one-line notices, undo close, pointing.
 //! * [`remote`] — the clipboard shared with the workers, files dropped on tiles, forwarded ports.
@@ -27,10 +28,13 @@
 
 pub mod actions;
 mod agents;
+pub mod attention;
 mod browsers;
 mod commands;
 mod faces;
+mod folders;
 mod inbox;
+mod miniature;
 mod navigator;
 mod overlays;
 pub mod remote;
@@ -81,6 +85,7 @@ pub use titlebar::{TITLEBAR_H, titlebar_height};
 use tokio::sync::mpsc;
 
 use crate::file::FileView;
+use crate::folder::FolderView;
 use crate::note::NoteView;
 use crate::palette::{CommandPalette, PaletteItem, PaletteRun};
 use crate::picker::WindowPicker;
@@ -230,7 +235,9 @@ impl WorkerStatus {
         match self {
             Self::Connecting => "connecting…".to_owned(),
             Self::Connected => "connected".to_owned(),
-            Self::Silent(secs) => format!("silent {secs} s"),
+            Self::Silent(secs) => {
+                format!("silent {}", crate::kit::duration(Duration::from_secs(*secs)))
+            }
             Self::Reconnecting(why) => format!("{why}; reconnecting…"),
             Self::Unreachable => "unreachable".to_owned(),
             Self::Gone => "gone".to_owned(),
@@ -283,7 +290,7 @@ struct Worker {
     caps: Option<WorkerCaps>,
     /// `slopty hook install` has been offered on this worker once.
     hooks_offered: bool,
-    /// The paths the worker was last asked to watch for its file cards, sorted.
+    /// The paths the worker was last asked to watch for its file tiles, sorted.
     watched: Vec<String>,
     /// A `List` is in flight to name restored window items.
     titles_requested: bool,
@@ -374,10 +381,10 @@ pub struct Finished {
 }
 
 impl Finished {
-    /// The badge text: "Done · 3.2 s", "Exit 1 · 1 m 04 s" (the row caption's clock).
+    /// The badge text: "Done · 3.2 s", "Exit 1 · 1m 4s", in [`crate::kit::duration`]'s words.
     #[must_use]
     pub fn label(&self) -> String {
-        let took = crate::terminal::took_label(self.elapsed);
+        let took = crate::kit::duration(self.elapsed);
         match self.exit {
             Some(0) | None => format!("Done · {took}"),
             Some(code) => format!("Exit {code} · {took}"),
@@ -424,9 +431,19 @@ impl std::fmt::Debug for MenuEntry {
     }
 }
 
-/// The name field open in a tile's header.
+/// What the field open in a tile's header edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    /// The tile's name.
+    Name,
+    /// A page's address.
+    Address,
+}
+
+/// The field open in a tile's header: its name, or a page's address.
 struct Rename {
     tile: TileRef,
+    field: Field,
     input: Entity<gpui_kit::component::input::InputState>,
     /// Who had the keyboard before the field: it goes back there after ↩ or Esc.
     return_to: Option<FocusHandle>,
@@ -468,6 +485,10 @@ pub struct WorkspaceView {
     screens: HashMap<ItemId, Entity<ScreenView>>,
     notes: HashMap<ItemId, Entity<NoteView>>,
     files: HashMap<ItemId, Entity<FileView>>,
+    folders: HashMap<ItemId, Entity<FolderView>>,
+    /// Paths asked of a worker to learn whether they are folders before a tile opens for them
+    /// ([`WorkspaceView::open_path_on`]), with the line a file lands on.
+    probes: Vec<(WorkerKey, String, Option<u32>)>,
     browsers: HashMap<ItemId, Entity<crate::browser::BrowserView>>,
     /// The link each browser tile's port is served by: a new link serves it anew.
     browser_links: HashMap<ItemId, std::sync::Weak<dyn slopty_client::remote::Remote>>,
@@ -477,17 +498,25 @@ pub struct WorkspaceView {
     frames_drawn: u64,
     /// Where the toast was drawn, and in which frame: pages stop above it.
     toast_drawn: crate::browser::Drawn,
-    /// The line a file card opened at, for a view not made yet.
+    /// The line a file tile opened at, for a view not made yet.
     file_focus: HashMap<ItemId, u32>,
-    /// A registry or a link changed since the notes, file cards and pages were last matched
+    /// A registry or a link changed since the notes, file tiles and pages were last matched
     /// to the items: the next frame matches them. Only then, since a frame comes with every
     /// terminal and video update, and the matching walks every item.
     items_dirty: bool,
     /// Who needs the human, worked out once per frame for everything that frame draws.
     drawn_waiting: Vec<agents::Waiting>,
     /// The number each unnamed tile that reads like an earlier one of its worker carries after
-    /// its title ("Terminal 2"), worked out once a frame.
+    /// its title ("Terminal 2"), worked out in the frame after [`Self::titles_dirty`].
     twins: HashMap<ItemId, u32>,
+    /// Every item's derived title, as the twins were last worked out from.
+    derived: HashMap<ItemId, String>,
+    /// A title may have changed since the twins were worked out: the workspace changed (its
+    /// own notify), a shell's command started or ended, a window was named. A frame another
+    /// tile causes (an echo, a video frame) changes no title, and works nothing out.
+    titles_dirty: bool,
+    /// Each note's title and task count, worked out when its text changes.
+    note_facts: HashMap<ItemId, tile::NoteFacts>,
     /// The active workspace's strip as this frame lays it out: the title bar's column dots.
     drawn_strip: slopty_client::layout::Strip,
     /// The navigator, the title bar and the status bar, each a view of its own.
@@ -522,8 +551,12 @@ pub struct WorkspaceView {
     stream_grace: Duration,
     /// Remote tiles whose streams were let go for being off screen.
     parked: std::collections::HashSet<ItemId>,
+    /// Tiles on screen in the frame last drawn: what the status bar need not count again.
+    on_screen: std::collections::HashSet<ItemId>,
     picker: Option<(WorkerKey, Entity<WindowPicker>)>,
     palette: Option<Entity<CommandPalette>>,
+    /// A dismissed palette still drawing its way out, dropped once that has played.
+    palette_leaving: Option<Entity<CommandPalette>>,
     find_needle: Option<String>,
     find_hits: HashMap<ItemId, (u32, PaletteRun)>,
     pending_find: Option<(SessionId, String)>,
@@ -573,6 +606,8 @@ pub struct WorkspaceView {
     width_inset: f32,
     /// The tile focused when the tiles were last drawn.
     drawn_focus: Option<TileRef>,
+    /// What had the keyboard when the tiles were last drawn.
+    drawn_keys: Option<FocusHandle>,
     /// The zoom the tiles were last drawn at (the overview's).
     drawn_zoom: f32,
     /// A timer is out to park the streams of remote tiles off screen.
@@ -584,6 +619,8 @@ pub struct WorkspaceView {
     pending_focus_note: Option<ItemId>,
     /// A file tile whose editor takes the keyboard on the next frame.
     pending_focus_file: Option<ItemId>,
+    /// A folder tile that takes the keyboard on the next frame.
+    pending_focus_folder: Option<ItemId>,
     pending_focus_picker: bool,
     pending_focus_self: bool,
     /// Where the layout is saved (`layout.json` in the client's data directory), if anywhere.
@@ -648,9 +685,13 @@ impl WorkspaceView {
             Some(saved) => Layout::restore(saved, LayoutConfig::default()),
             None => Layout::new(LayoutConfig::default()),
         };
-        // Whatever the workspace changes, its chrome may show; a terminal's own change (an
-        // echo) is not the workspace's, and leaves the chrome as it was drawn.
-        cx.observe_self(|this, cx| this.chrome.notify(cx)).detach();
+        // Whatever the workspace changes, its chrome may show, and a tile's title may follow;
+        // a terminal's own change (an echo) is not the workspace's, and leaves both as they were.
+        cx.observe_self(|this, cx| {
+            this.titles_dirty = true;
+            this.chrome.notify(cx);
+        })
+        .detach();
         let this = cx.weak_entity();
         let keys = cx.intercept_keystrokes(move |event, window, cx| {
             if event.keystroke.modifiers.platform {
@@ -673,6 +714,8 @@ impl WorkspaceView {
             screens: HashMap::new(),
             notes: HashMap::new(),
             files: HashMap::new(),
+            folders: HashMap::new(),
+            probes: Vec::new(),
             browsers: HashMap::new(),
             browser_links: HashMap::new(),
             covered: false,
@@ -682,6 +725,9 @@ impl WorkspaceView {
             items_dirty: true,
             drawn_waiting: Vec::new(),
             twins: HashMap::new(),
+            derived: HashMap::new(),
+            titles_dirty: true,
+            note_facts: HashMap::new(),
             drawn_strip: slopty_client::layout::Strip::default(),
             chrome: Chrome::new(cx),
             running: HashMap::new(),
@@ -698,8 +744,10 @@ impl WorkspaceView {
             unseen: HashMap::new(),
             stream_grace: STREAM_GRACE,
             parked: std::collections::HashSet::new(),
+            on_screen: std::collections::HashSet::new(),
             picker: None,
             palette: None,
+            palette_leaving: None,
             find_needle: None,
             find_hits: HashMap::new(),
             pending_find: None,
@@ -731,12 +779,14 @@ impl WorkspaceView {
             viewport: Bounds::default(),
             width_inset: 0.0,
             drawn_focus: None,
+            drawn_keys: None,
             drawn_zoom: 1.0,
             park_pending: false,
             pending_focus: None,
             faces: faces::Faces::default(),
             pending_focus_note: None,
             pending_focus_file: None,
+            pending_focus_folder: None,
             pending_focus_picker: false,
             pending_focus_self: false,
             layout_path: None,
@@ -845,10 +895,16 @@ impl WorkspaceView {
         self.screens.get(&item)
     }
 
-    /// The file cards, for tests and the self-test dump.
+    /// The file tiles, for tests and the self-test dump.
     #[must_use]
     pub fn file(&self, id: ItemId) -> Option<&Entity<FileView>> {
         self.files.get(&id)
+    }
+
+    /// The folder tiles, for tests and the self-test dump.
+    #[must_use]
+    pub fn folder(&self, id: ItemId) -> Option<&Entity<FolderView>> {
+        self.folders.get(&id)
     }
 
     /// What the worker last said about a session's agent, else what the server relayed.
@@ -1018,7 +1074,7 @@ impl WorkspaceView {
     }
 
     /// Swap the theme everywhere: every terminal (which re-fits its grid to the new font on
-    /// its next frame), every window's chrome, every note, file card and the picker.
+    /// its next frame), every window's chrome, every note, file tile and the picker.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.base_theme = theme;
         self.apply_font(cx);
@@ -1046,6 +1102,9 @@ impl WorkspaceView {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         for view in self.files.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
+        for view in self.folders.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         for view in self.browsers.values() {
@@ -1123,6 +1182,8 @@ impl WorkspaceView {
         if now != was {
             let started = now.is_some();
             self.running.insert(session, now.map(str::to_owned));
+            // A running command is its shell's title.
+            self.titles_dirty = true;
             App::notify(cx, self.chrome.navigator.entity_id());
             // Still running at the threshold, the tile and its row say so; from then on the
             // calm mark and the navigator's tick keep the time.
@@ -1238,6 +1299,11 @@ impl WorkspaceView {
         {
             view.update(cx, |v, cx| v.focus(window, cx));
         }
+        if let Some(id) = self.pending_focus_folder.take()
+            && let Some(view) = self.folders.get(&id)
+        {
+            view.update(cx, |v, cx| v.focus(window, cx));
+        }
     }
 }
 
@@ -1266,7 +1332,9 @@ impl gpui::Render for WorkspaceView {
         // frame draws: the bar's column dots and the strip agree, and none is worked out twice.
         let frame = self.frame_at_clock(window);
         self.drawn_waiting = self.needs_you();
-        self.twins = self.number_twins(cx);
+        if std::mem::take(&mut self.titles_dirty) {
+            self.number_twins(cx);
+        }
         if self.drawn_strip != frame.strip {
             self.drawn_strip.clone_from(&frame.strip);
         }
@@ -1279,9 +1347,12 @@ impl gpui::Render for WorkspaceView {
         let toast = self.render_toast(cx);
         let menu = self.render_menu(window, cx);
         let picker = self.picker.as_ref().map(|(_, p)| p.clone());
-        let palette = self.palette.clone();
+        let palette = self.palette.clone().or_else(|| self.palette_leaving.clone());
         let mut key_context = gpui::KeyContext::new_with_defaults();
         key_context.add("Workspace");
+        if self.page_keys(cx) {
+            key_context.add("Page");
+        }
         let root = gpui::div()
             .id("workspace")
             .debug_selector(|| "workspace".to_owned())
@@ -1303,6 +1374,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::open_file_palette))
+            .on_action(cx.listener(Self::open_folder_palette))
             .on_action(cx.listener(Self::open_url_palette))
             .on_action(cx.listener(Self::list_workers))
             .on_action(cx.listener(Self::list_ports))
@@ -1311,11 +1383,18 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::next_attention))
             .on_action(cx.listener(Self::toggle_mute))
             .on_action(cx.listener(Self::toggle_stats))
+            .on_action(cx.listener(Self::toggle_trackpad))
             .on_action(cx.listener(Self::find_in_active))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::rename_item))
+            .on_action(cx.listener(Self::edit_address))
+            .on_action(cx.listener(Self::page_back))
+            .on_action(cx.listener(Self::page_forward))
+            .on_action(cx.listener(Self::reload_page))
             .on_action(cx.listener(Self::point_others))
             .on_action(cx.listener(Self::find_everywhere))
+            .on_action(cx.listener(Self::upload_from_files))
+            .on_action(cx.listener(Self::save_copy))
             // Esc in the name field: the input's own action, taken here so the field closes
             // without a change and the workspace has the keyboard.
             .capture_action(cx.listener(
@@ -1543,9 +1622,7 @@ fn write_layout(path: &std::path::Path, saved: &Saved) {
             return;
         }
     };
-    let tmp = path.with_extension("json.tmp");
-    let written = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
-    if let Err(e) = written {
+    if let Err(e) = slopty_platform::fs::replace(path, &bytes) {
         tracing::warn!(path = %path.display(), error = %e, "layout save");
     }
 }

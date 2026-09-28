@@ -8,7 +8,7 @@ use slopty_core::{ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::handshake::HelloAck;
-use slopty_proto::items::{ItemKind, ItemSync};
+use slopty_proto::items::{Item, ItemKind, ItemSync};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
 use slopty_proto::server::WorkerCaps;
 use slopty_proto::tailnet::LinkPath;
@@ -66,14 +66,14 @@ impl WorkspaceView {
         self.items_dirty = true;
         self.reset_remote(key, &known, cx);
         self.seed_agents(&agents, cx);
-        // The disk may have moved on while the worker was away: every card of it reads again,
-        // and one holding an edit weighs it against what is there now.
-        let cards: Vec<ItemId> = self
+        // The disk may have moved on while the worker was away: every file tile of it reads
+        // again, and one holding an edit weighs it against what is there now.
+        let files: Vec<ItemId> = self
             .workers
             .get(&key)
             .map(|w| w.doc.items().map(|i| i.id).filter(|id| self.files.contains_key(id)).collect())
             .unwrap_or_default();
-        for id in cards {
+        for id in files {
             self.request_file(id);
         }
         cx.notify();
@@ -81,7 +81,7 @@ impl WorkspaceView {
 
     /// The link to `key` dropped (or never came up): its tiles stay where they are and say
     /// the worker is away; the views that spoke to the old link go, and come back with the
-    /// next one. Notes and file cards keep what they show.
+    /// next one. Notes and file tiles keep what they show.
     pub fn disconnect_worker(
         &mut self,
         key: WorkerKey,
@@ -95,6 +95,7 @@ impl WorkspaceView {
         w.path = None;
         w.pending_opens.clear();
         w.picker_wanted = false;
+        self.probes.retain(|(k, ..)| *k != key);
         w.display_wanted = false;
         let sessions: Vec<SessionId> = w.sessions.keys().copied().collect();
         let items: Vec<ItemId> = w.doc.items().map(|i| i.id).collect();
@@ -110,6 +111,10 @@ impl WorkspaceView {
             if let Some(view) = self.files.get(item) {
                 view.update(cx, FileView::link_lost);
             }
+            // Asked again on the next link: what is in it may have changed meanwhile.
+            if let Some(view) = self.folders.get(item) {
+                view.update(cx, |v, _| v.refresh());
+            }
         }
         for closed in self.closed.iter().filter(|c| c.tile.worker == key) {
             if let Some(view) = &closed.file {
@@ -123,7 +128,7 @@ impl WorkspaceView {
         }
         // The focused shell's or window's view went with the link: the workspace takes the
         // keyboard, so ⌘W, ⌘T and the rest still answer while the worker is away. A note or a
-        // file card keeps its view, and the keyboard with it.
+        // file tile keeps its view, and the keyboard with it.
         let viewless = self.focused().filter(|t| t.worker == key).and_then(|t| self.item(t));
         if viewless.is_some_and(|i| {
             matches!(
@@ -300,6 +305,7 @@ impl WorkspaceView {
     ) {
         self.items_dirty = true;
         self.tick();
+        self.note_changed(key, change);
         match change {
             ItemChange::Reset => {
                 let Some(w) = self.workers.get(&key) else { return };
@@ -324,6 +330,7 @@ impl WorkspaceView {
                     .notes
                     .keys()
                     .chain(self.files.keys())
+                    .chain(self.folders.keys())
                     .chain(self.screens.keys())
                     .copied()
                     .filter(|id| self.tile_of(*id).is_none())
@@ -358,6 +365,30 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Keep the notes' facts with their texts: every change to a registry comes through
+    /// [`Self::item_changed`].
+    fn note_changed(&mut self, key: WorkerKey, change: ItemChange) {
+        let Some(w) = self.workers.get(&key) else { return };
+        let facts = |item: &Item| match &item.kind {
+            ItemKind::Note { text } => Some((item.id, super::tile::NoteFacts::of(text))),
+            _ => None,
+        };
+        match change {
+            // What the snapshot dropped goes with the next reconcile.
+            ItemChange::Reset => self.note_facts.extend(w.doc.items().filter_map(facts)),
+            ItemChange::Added { id, .. } | ItemChange::Changed(id) => {
+                match w.doc.get(id).and_then(facts) {
+                    Some((id, facts)) => self.note_facts.insert(id, facts),
+                    None => self.note_facts.remove(&id),
+                };
+            }
+            ItemChange::Removed(id) => {
+                self.note_facts.remove(&id);
+            }
+            ItemChange::Echo | ItemChange::Pointed(_) => {}
+        }
+    }
+
     /// A worker's first snapshot since its link came up: a worker with nothing on it gets one
     /// shell, once per run, so a newly added worker has something to type into (there is no
     /// other way to open the first tile on a worker, since a new tile goes to the focused
@@ -374,6 +405,7 @@ impl WorkspaceView {
     fn drop_item_views(&mut self, id: ItemId) {
         self.notes.remove(&id);
         self.files.remove(&id);
+        self.folders.remove(&id);
         self.screens.remove(&id);
         self.titles.remove(&id);
         self.unseen.remove(&id);
@@ -511,23 +543,23 @@ impl WorkspaceView {
             ..TermSize::default()
         });
         let theme = self.theme.clone();
-        let files = self.files_hook();
+        let clip = self.clip_hook(key);
         let view = cx.new(|cx| {
             let mut view = TerminalView::new(session, size, link.out.clone(), theme, cx);
-            if let Some(files) = files {
-                view.set_files_hook(files);
+            if let Some(clip) = clip {
+                view.set_clip_hook(clip);
             }
             view
         });
         let sid = session;
         cx.subscribe(&view, move |this, _view, event, cx| match event {
             TerminalViewEvent::Bell => cx.emit(WorkspaceEvent::Bell(sid)),
-            TerminalViewEvent::Notification { title, body } => {
-                this.notify_program(sid, title, body, cx);
-            }
+            // The Dock bounce; the banner while the app is away is the app's
+            // (`attention::Attention::program`).
+            TerminalViewEvent::Notification { .. } => cx.emit(WorkspaceEvent::Attention(sid)),
             TerminalViewEvent::Exited(status) => this.session_exited(sid, *status, cx),
             TerminalViewEvent::CloseConfirmed => this.close_shell(sid, cx),
-            TerminalViewEvent::Title(_) => cx.notify(),
+            TerminalViewEvent::Title(_) => this.retitled(sid, cx),
             TerminalViewEvent::Cwd { path, repo, branch } => {
                 this.session_moved(sid, path, repo.as_deref(), branch.as_deref());
                 cx.notify();
@@ -542,7 +574,9 @@ impl WorkspaceView {
             TerminalViewEvent::NoteBlock(text) => this.note_beside(sid, text.clone(), cx),
             TerminalViewEvent::ViewFile { path, line } => {
                 let path = this.absolute_in_session(sid, path);
-                this.open_file_on(this.worker_of_session(sid), &path, *line, cx);
+                if let Some(worker) = this.worker_of_session(sid) {
+                    this.open_path_on(worker, &path, *line, cx);
+                }
             }
             TerminalViewEvent::DragOut { path } => {
                 let path = this.absolute_in_session(sid, path);
@@ -619,6 +653,7 @@ impl WorkspaceView {
                     ItemKind::Terminal { .. }
                     | ItemKind::Note { .. }
                     | ItemKind::File { .. }
+                    | ItemKind::Folder { .. }
                     | ItemKind::Browser { .. } => None,
                 })
                 .collect();
@@ -765,6 +800,7 @@ impl WorkspaceView {
                 let title =
                     if info.title.is_empty() { info.app.clone() } else { info.title.clone() };
                 self.titles.insert(item.id, title);
+                self.titles_dirty = true;
             }
         }
     }
@@ -803,7 +839,7 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// Editors for note items and cards for file items; the ones whose items are gone go.
+    /// Editors for note items and views for file items; the ones whose items are gone go.
     /// Needs the window (a note's editor does), so it runs from `render`, and only on a frame
     /// after a registry or a link changed ([`WorkspaceView::items_dirty`]).
     pub(super) fn reconcile_notes_and_files(
@@ -842,7 +878,7 @@ impl WorkspaceView {
             })
             .map(|(key, id, path)| (*key, *id, (*path).to_owned()))
             .collect();
-        // Each worker watches the set behind its cards and re-reads one that changes on disk.
+        // Each worker watches the set behind its file tiles and re-reads one that changes on disk.
         let mut watch: Vec<(WorkerKey, Vec<String>)> = Vec::new();
         for (key, w) in &self.workers {
             if w.link.is_none() {
@@ -867,10 +903,12 @@ impl WorkspaceView {
             self.make_note(id, &text, window, cx);
         }
         self.notes.retain(|id, _| notes.contains(id));
+        self.note_facts.retain(|id, _| notes.contains(id));
         for (key, id, path) in new_files {
             self.make_file(key, id, path, window, cx);
         }
         self.files.retain(|id, _| file_ids.contains(id));
+        self.reconcile_folders(cx);
     }
 
     /// The editor of note `id`.
@@ -890,7 +928,7 @@ impl WorkspaceView {
         self.notes.insert(id, view);
     }
 
-    /// The card of file item `id` at `path` on `worker`, which it asks for the text.
+    /// The view of file item `id` at `path` on `worker`, which it asks for the text.
     fn make_file(
         &mut self,
         worker: WorkerKey,
@@ -921,12 +959,17 @@ impl WorkspaceView {
                     }
                 }
                 FileViewEvent::Reload => this.request_file(id),
+                FileViewEvent::Run(line) => {
+                    let dir = file.rsplit_once('/').map(|(dir, _)| dir.to_owned());
+                    let command = crate::file::terminal_command(line);
+                    this.open_session_on(worker, dir.filter(|d| !d.is_empty()), command, None, cx);
+                }
             }
             cx.notify();
         })
         .detach();
         // The status bar says where the focused file's caret is: it draws again as it moves,
-        // and only for the focused card.
+        // and only for the focused file.
         cx.observe(&view, move |this, _view, cx| {
             if this.focused().is_some_and(|t| t.item == id) {
                 App::notify(cx, this.chrome.statusbar.entity_id());

@@ -237,13 +237,159 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod imp {
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    use super::{Foreground, procfs};
+
+    /// Everything `/proc` will say about `pid`.
+    pub fn describe(pid: i32) -> Option<Foreground> {
+        let dir = PathBuf::from(format!("/proc/{pid}"));
+        let stat = procfs::Stat::parse(&std::fs::read_to_string(dir.join("stat")).ok()?)?;
+        let exe = std::fs::read_link(dir.join("exe")).ok();
+        let name = procfs::name(stat.comm, exe.as_deref())?;
+        let argv = std::fs::read(dir.join("cmdline"))
+            .map(|line| procfs::split_cmdline(&line))
+            .unwrap_or_default();
+        let started = boot_time()
+            .zip(clock_ticks())
+            .and_then(|(boot, hz)| boot.checked_add(procfs::since_boot(stat.start_ticks, hz)));
+        Some(Foreground { pid, name, argv, cwd: std::fs::read_link(dir.join("cwd")).ok(), started })
+    }
+
+    /// When the machine booted, to the second: `btime` in `/proc/stat`. Whole seconds, so a
+    /// process's start reads the same every time and can tell it from its pid's next owner.
+    fn boot_time() -> Option<SystemTime> {
+        let secs = procfs::btime(&std::fs::read_to_string("/proc/stat").ok()?)?;
+        SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs))
+    }
+
+    /// The clock `/proc/<pid>/stat` counts a start time in.
+    fn clock_ticks() -> Option<u64> {
+        // SAFETY: `sysconf` (unistd.h) has no preconditions; `_SC_CLK_TCK` is a name it knows.
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        u64::try_from(hz).ok().filter(|hz| *hz > 0)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod imp {
     use super::Foreground;
 
     /// No process table to read here; the caller treats `None` as "the platform would not say".
     pub const fn describe(_pid: i32) -> Option<Foreground> {
         None
+    }
+}
+
+/// The parts of `/proc/<pid>` a foreground process is described from. Pure text in, so the
+/// parsing is tested on any host.
+#[cfg(any(target_os = "linux", test))]
+mod procfs {
+    use std::path::Path;
+    use std::time::Duration;
+
+    /// The kernel's `TASK_COMM_LEN` less its NUL: a longer name is cut to this in `comm`.
+    const COMM_MAX: usize = 15;
+
+    /// What `/proc/<pid>/stat` holds that is needed here.
+    #[derive(PartialEq, Eq, Debug)]
+    pub(super) struct Stat {
+        /// The name the process was started as (`comm`), cut to [`COMM_MAX`] bytes.
+        pub comm: String,
+        /// When it started, in clock ticks after boot (field 22).
+        pub start_ticks: u64,
+    }
+
+    impl Stat {
+        /// Parse the one line of `/proc/<pid>/stat`. `comm` is in parentheses and may itself
+        /// hold spaces and parentheses, so it runs to the last `)`.
+        pub(super) fn parse(line: &str) -> Option<Self> {
+            let open = line.find('(')?;
+            let close = line.rfind(')')?;
+            let comm = line.get(open.checked_add(1)?..close)?.to_owned();
+            // Field 3 (the state) is the first after `comm`, so field 22 is the 20th.
+            let start_ticks = line.get(close.checked_add(1)?..)?.split_whitespace().nth(19)?;
+            Some(Self { comm, start_ticks: start_ticks.parse().ok()? })
+        }
+    }
+
+    /// The process's name: `comm`, or the executable's own name when `comm` is a cut-off
+    /// start of it. `comm` comes first because it is the name the program was started by (a
+    /// symlink's, as macOS reports it), where `exe` is the file the link resolves to.
+    pub(super) fn name(comm: String, exe: Option<&Path>) -> Option<String> {
+        let exe = exe
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().trim_end_matches(" (deleted)").to_owned());
+        let name = match exe {
+            Some(exe) if comm.len() == COMM_MAX && exe.starts_with(&comm) => exe,
+            _ => comm,
+        };
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// `/proc/<pid>/cmdline`: NUL-separated arguments, the last one NUL-terminated.
+    pub(super) fn split_cmdline(line: &[u8]) -> Vec<String> {
+        let line = line.strip_suffix(b"\0").unwrap_or(line);
+        if line.is_empty() {
+            return Vec::new();
+        }
+        line.split(|b| *b == 0).map(|word| String::from_utf8_lossy(word).into_owned()).collect()
+    }
+
+    /// The `btime` line of `/proc/stat`: the boot time in seconds since the epoch.
+    pub(super) fn btime(stat: &str) -> Option<u64> {
+        stat.lines().find_map(|line| line.strip_prefix("btime ")?.trim().parse().ok())
+    }
+
+    /// `ticks` of a clock running at `hz`, as a duration.
+    pub(super) fn since_boot(ticks: u64, hz: u64) -> Duration {
+        let whole = ticks.checked_div(hz).unwrap_or(0);
+        let part = ticks.checked_rem(hz).unwrap_or(0);
+        let nanos = part.saturating_mul(1_000_000_000).checked_div(hz).unwrap_or(0);
+        Duration::from_secs(whole).saturating_add(Duration::from_nanos(nanos))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::path::Path;
+        use std::time::Duration;
+
+        use super::*;
+
+        /// A process is read off `/proc` text as Linux writes it: a `comm` with spaces and
+        /// parentheses, a cut-off name completed from the executable, the command line split on
+        /// NULs, and the start time counted from boot.
+        #[test]
+        fn a_process_is_read_off_procfs() {
+            let stat = "4242 (tmux: (srv) x) S 1 4242 4242 0 -1 4194560 1 0 0 0 3 1 0 0 20 0 1 \
+                        0 987654 1234 56 18446744073709551615";
+            let parsed = Stat::parse(stat).expect("a stat line");
+            assert_eq!(parsed, Stat { comm: "tmux: (srv) x".into(), start_ticks: 987_654 });
+            assert_eq!(Stat::parse("4242 (cut"), None);
+
+            let exe = Path::new("/opt/bin/a-rather-long-program (deleted)");
+            assert_eq!(
+                name("a-rather-long-p".into(), Some(exe)).as_deref(),
+                Some("a-rather-long-program")
+            );
+            let versioned = Path::new("/home/me/.local/share/claude/versions/2.1.3");
+            assert_eq!(name("claude".into(), Some(versioned)).as_deref(), Some("claude"));
+            assert_eq!(name(String::new(), None), None);
+
+            assert_eq!(
+                split_cmdline(b"node\0/opt/cli.js\0--resume\0"),
+                ["node", "/opt/cli.js", "--resume"]
+            );
+            assert_eq!(split_cmdline(b"a\0\0b\0"), ["a", "", "b"], "an empty argument stays");
+            assert!(split_cmdline(b"").is_empty());
+
+            assert_eq!(btime("cpu  1 2 3\nbtime 1790000000\nprocesses 9\n"), Some(1_790_000_000));
+            assert_eq!(since_boot(987_654, 100), Duration::from_millis(9_876_540));
+            assert_eq!(since_boot(5, 0), Duration::ZERO);
+        }
     }
 }
 

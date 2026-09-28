@@ -66,7 +66,7 @@ mod tests {
                 stream.send(&TermEvent::Bell).await.unwrap();
                 // A pre-encoded frame (the fan-out path), then a graceful end.
                 let raw = slopty_proto::codec::encode(&TermEvent::Bell).unwrap();
-                stream.send_raw(&raw).await.unwrap();
+                stream.send_raw(raw).await.unwrap();
                 stream.finish().unwrap();
                 client.conn.closed().await;
             })

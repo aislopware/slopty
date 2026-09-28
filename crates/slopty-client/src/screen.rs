@@ -173,14 +173,23 @@ impl ScreenRouter {
         roll < permille
     }
 
-    /// Deliver one datagram that arrived at `now` (called by the connection's datagram reader).
+    /// Deliver one datagram that arrived at `now`.
     pub fn route(&self, datagram: Bytes, now: Instant) {
-        if self.inject_loss() {
-            return;
+        self.route_many([datagram], now);
+    }
+
+    /// Deliver datagrams that arrived together at `now`, in order, under one lock of the
+    /// routes (called by the connection's datagram reader with each read's worth).
+    pub fn route_many(&self, datagrams: impl IntoIterator<Item = Bytes>, now: Instant) {
+        let mut routes = None;
+        for datagram in datagrams {
+            if self.inject_loss() {
+                continue;
+            }
+            let Some((header, _payload)) = MediaHeader::parse(&datagram) else { continue };
+            let stream = StreamId(header.stream.get());
+            routes.get_or_insert_with(|| self.inner.lock()).deliver(stream, (now, datagram));
         }
-        let Some((header, _payload)) = MediaHeader::parse(&datagram) else { return };
-        let stream = StreamId(header.stream.get());
-        self.inner.lock().deliver(stream, (now, datagram));
     }
 
     /// Start receiving `stream`'s datagrams, backlog first.
@@ -566,6 +575,8 @@ pub fn spawn_screen(
     let decoded_at = Arc::clone(&first_decoded);
     let inflight = Arc::new(Mutex::new(Inflight::default()));
     let parked = Arc::clone(&inflight);
+    let news = Arc::new(AtomicBool::new(false));
+    let left = Arc::clone(&news);
     let failed = Arc::new(Notify::new());
     let wake = Arc::clone(&failed);
     // Counted here, on the decoder's side of the newest-only channel, so the element can tell
@@ -577,6 +588,7 @@ pub fn spawn_screen(
             Ok(frame) => frame,
             Err(failure) => {
                 parked.lock().failed(failure);
+                left.store(true, Ordering::Release);
                 wake.notify_one();
                 return;
             }
@@ -586,6 +598,7 @@ pub fn spawn_screen(
         // A picture whose arrival is no longer parked (a duplicate from the decoder, or one
         // that outlived the ring) is still shown; its timing simply does not enter the ring.
         let arrived = parked.lock().decoded(frame.pts_us).unwrap_or(decoded);
+        left.store(true, Ordering::Release);
         let stamp = FrameStamp {
             pts_us: frame.pts_us,
             decode_seq: seq.fetch_add(1, Ordering::Relaxed),
@@ -594,6 +607,7 @@ pub fn spawn_screen(
         };
         let _no_receiver = frames_tx.send(Some(Arc::new(Presentable { frame, stamp })));
     });
+    let rtt = (uplink.rtt)().unwrap_or(DEFAULT_RTT);
     let worker = Worker {
         stream,
         datagrams,
@@ -607,11 +621,13 @@ pub fn spawn_screen(
         ),
         decoder,
         inflight,
+        news,
         failed,
         restart_pts: None,
         out: uplink.control,
         feedback: uplink.feedback,
-        rtt: uplink.rtt,
+        path_rtt: uplink.rtt,
+        rtt,
         cursor: cursor_tx,
         stats: stats_tx,
         cursor_seq: None,
@@ -635,6 +651,9 @@ struct Worker {
     decoder: Decoder,
     /// Frames parked for the decoder callback, and what the callback left behind.
     inflight: Arc<Mutex<Inflight>>,
+    /// Set by the decoder callback once it has left something in [`Self::inflight`], so a wake
+    /// with nothing back from the decoder does not take the lock the callback takes.
+    news: Arc<AtomicBool>,
     /// The decoder callback failed on a frame.
     failed: Arc<Notify>,
     /// Timestamp of the last frame that restarts decoding (a keyframe or an LTR refresh). A
@@ -642,7 +661,10 @@ struct Worker {
     restart_pts: Option<u64>,
     out: mpsc::Sender<ClientMsg>,
     feedback: Box<dyn Fn(Bytes) -> bool + Send>,
-    rtt: Box<dyn Fn() -> Option<Duration> + Send>,
+    /// Reads the path's round trip off the connection, under its lock: once a report.
+    path_rtt: Box<dyn Fn() -> Option<Duration> + Send>,
+    /// The round trip as of the last report, which the reassembler's timers go by.
+    rtt: Duration,
     cursor: watch::Sender<CursorState>,
     stats: watch::Sender<ScreenStats>,
     cursor_seq: Option<u32>,
@@ -733,9 +755,16 @@ impl Worker {
     async fn run(mut self) {
         let mut report = tokio::time::interval(REPORT_EVERY);
         report.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // One timer for the task's life, moved on each wake: a deadline pushed later is one
+        // atomic update, where a sleep made anew registered with the timer wheel and the one
+        // dropped unregistered, each under the wheel's lock.
+        let tick = tokio::time::sleep(IDLE_TICK);
+        tokio::pin!(tick);
         loop {
             let busy = self.reassembler.queue_depth() > 0 || self.reassembler.awaiting_refresh();
-            let tick = tokio::time::sleep(if busy { TICK } else { IDLE_TICK });
+            let period = if busy { TICK } else { IDLE_TICK };
+            let now = tokio::time::Instant::now();
+            tick.as_mut().reset(now.checked_add(period).unwrap_or(now));
             tokio::select! {
                 arrival = self.datagrams.recv() => {
                     let Some((at, datagram)) = arrival else { break };
@@ -747,7 +776,7 @@ impl Worker {
                         self.ingest(&datagram, at);
                     }
                 }
-                () = tick => {}
+                () = &mut tick => {}
                 () = self.failed.notified() => {}
                 _instant = report.tick() => self.report(),
             }
@@ -830,6 +859,9 @@ impl Worker {
     /// Take what the decoder callback left: acknowledge the references it decoded, and ask for a
     /// refresh when it failed on a frame the last restart did not already replace.
     fn outcomes(&mut self) {
+        if !self.news.swap(false, Ordering::Acquire) {
+            return;
+        }
         let (acks, failed) = {
             let mut inflight = self.inflight.lock();
             (std::mem::take(&mut inflight.acks), inflight.failed.take())
@@ -853,8 +885,7 @@ impl Worker {
             self.source_hint = hint;
             self.reassembler.set_source_live(hint);
         }
-        let rtt = (self.rtt)().unwrap_or(DEFAULT_RTT);
-        for action in self.reassembler.tick(Instant::now(), rtt) {
+        for action in self.reassembler.tick(Instant::now(), self.rtt) {
             let stream = self.stream;
             let feedback = match action {
                 Action::Nack { frame, fragments } => {
@@ -878,6 +909,7 @@ impl Worker {
     /// next report, [`REPORT_EVERY`] later, rather than holding reassembly and decode behind it.
     fn report(&mut self) {
         self.outcomes();
+        self.rtt = (self.path_rtt)().unwrap_or(DEFAULT_RTT);
         let now = Instant::now();
         let report = self.reassembler.take_report(now, 0);
         let stats = self.reassembler.stats();
@@ -955,7 +987,7 @@ fn encode_feedback(feedback: Feedback) -> Bytes {
 fn decode_feedback(bytes: &[u8]) -> Option<Feedback> {
     match slopty_proto::codec::decode_body(bytes).ok()? {
         ClientDatagram::Feedback(feedback) => Some(feedback),
-        ClientDatagram::Input { .. } => None,
+        ClientDatagram::Input { .. } | ClientDatagram::ScreenInput { .. } => None,
     }
 }
 
@@ -1102,6 +1134,33 @@ mod tests {
 
     fn frame_of(arrival: &Arrival) -> u32 {
         MediaHeader::parse(&arrival.1).map_or(u32::MAX, |(h, _)| h.frame.get())
+    }
+
+    /// A read's worth of datagrams is routed in one call: each stream gets its own, in the
+    /// order they came, a stream not attached yet keeps them as its backlog, and one that does
+    /// not parse is dropped without holding up the rest.
+    #[test]
+    fn a_batch_fans_out_in_order_and_skips_what_does_not_parse() {
+        let router = ScreenRouter::with_loss(0);
+        let mut first = router.attach(StreamId(1));
+        let now = Instant::now();
+        let batch = [
+            datagram(1, 10),
+            datagram(2, 20),
+            Bytes::from_static(b"short"),
+            datagram(1, 11),
+            datagram(2, 21),
+            datagram(1, 12),
+        ];
+        router.route_many(batch, now);
+        let taken = |rx: &mut mpsc::Receiver<Arrival>| {
+            std::iter::from_fn(|| rx.try_recv().ok()).map(|a| (a.0, frame_of(&a))).collect()
+        };
+        let got: Vec<(Instant, u32)> = taken(&mut first);
+        assert_eq!(got, [(now, 10), (now, 11), (now, 12)]);
+        let mut second = router.attach(StreamId(2));
+        let got: Vec<(Instant, u32)> = taken(&mut second);
+        assert_eq!(got, [(now, 20), (now, 21)], "backlogged until attached, in order");
     }
 
     #[test]
@@ -1443,6 +1502,141 @@ mod worker_tests {
         );
     }
 
+    /// What a frame costs the stream's worker between the router and the decoder, and how long
+    /// after its last datagram was routed the worker has handed it to the decoder: 62 KB
+    /// keyframes (51 datagrams) at 60 a second, each routed as the connection's reader routes
+    /// what one read takes off the connection. The decoder rejects each, as everywhere here,
+    /// and a rejected keyframe does not hold back the next. The hand-over is read off a cursor
+    /// datagram routed behind each frame: the worker takes it only after the frame's last
+    /// datagram went to the decoder. A measurement, run by hand: `docs/MEASUREMENTS.md`, "the
+    /// client's datagram path".
+    #[test]
+    #[ignore = "a measurement; run with --run-ignored only --no-capture"]
+    #[expect(clippy::cast_precision_loss, reason = "measurement arithmetic")]
+    fn frame_path_cost() {
+        const FRAMES: u32 = 1_200;
+        /// Frames per round: the busy time is read per round, and the quietest round is the
+        /// figure least disturbed by the rest of the machine.
+        const ROUND: u32 = 60;
+        const EVERY: Duration = Duration::from_micros(16_667);
+        let h = Harness::start();
+        let data: Vec<u8> = {
+            let mut data = frame_bytes();
+            data.resize(62_000, 0xaa);
+            data
+        };
+        let mut packetizer = Packetizer::new(STREAM);
+        packetizer.set_parity_permille(0);
+        let metrics = h.rt.metrics();
+        let workers = metrics.num_workers();
+        let busy = || (0..workers).map(|w| metrics.worker_total_busy_duration(w)).sum::<Duration>();
+        let parks = || (0..workers).map(|w| metrics.worker_park_count(w)).sum::<u64>();
+        let mut cursor = h.handle.cursor();
+        let (busy_before, parks_before) = (busy(), parks());
+        let (mut submitted, mut routing, mut missed) = (Vec::new(), Duration::ZERO, 0_u32);
+        let (mut rounds, mut round_busy) = (Vec::new(), busy_before);
+        for n in 0..FRAMES {
+            if n % ROUND == 0 && n > 0 {
+                let now = busy();
+                rounds.push(now.saturating_sub(round_busy).as_secs_f64() * 1e6 / f64::from(ROUND));
+                round_busy = now;
+            }
+            let started = Instant::now();
+            let frame = EncodedFrame {
+                data: &data,
+                keyframe: true,
+                ltr_token: None,
+                ltr_refresh: false,
+                capture_ts_us: n.saturating_mul(16_667),
+            };
+            let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();
+            let x = i32::try_from(n).unwrap();
+            let marker = cursor_datagram(STREAM, n.saturating_add(1), 0, x, 0, true);
+            let routed = Instant::now();
+            h.router.route_many(datagrams, routed);
+            let handed = Instant::now();
+            routing = routing.saturating_add(handed.saturating_duration_since(routed));
+            h.router.route(marker, handed);
+            let waited = async {
+                while cursor.borrow_and_update().x != x {
+                    if cursor.changed().await.is_err() {
+                        return;
+                    }
+                }
+            };
+            let seen =
+                h.rt.block_on(async { tokio::time::timeout(Duration::from_secs(1), waited).await });
+            if seen.is_ok() {
+                submitted.push(handed.elapsed().as_secs_f64() * 1e6);
+            } else {
+                missed = missed.saturating_add(1);
+            }
+            #[expect(clippy::disallowed_methods, reason = "the frame clock of a measurement")]
+            std::thread::sleep(EVERY.saturating_sub(started.elapsed()));
+        }
+        let busy = busy().saturating_sub(busy_before);
+        let parks = parks().saturating_sub(parks_before);
+        let stats = h.handle.stats();
+        submitted.sort_by(f64::total_cmp);
+        rounds.sort_by(f64::total_cmp);
+        let q = |p: usize| {
+            submitted.get(submitted.len().saturating_sub(1).saturating_mul(p) / 100).copied()
+        };
+        let per = |d: Duration| d.as_secs_f64() * 1e6 / f64::from(FRAMES);
+        eprintln!(
+            "MEASURE frame path: {} frames at the decoder, {missed} missed; per frame: routing {:.1} µs on the caller, worker runtime busy {:.1} µs (rounds: quietest {:.1}, median {:.1}), {:.2} parks; last routed → at the decoder p50 {:.0} / p99 {:.0} / max {:.0} µs",
+            stats.frames,
+            per(routing),
+            per(busy),
+            rounds.first().copied().unwrap_or(0.0),
+            rounds.get(rounds.len() / 2).copied().unwrap_or(0.0),
+            parks as f64 / f64::from(FRAMES),
+            q(50).unwrap_or(0.0),
+            q(99).unwrap_or(0.0),
+            submitted.last().copied().unwrap_or(0.0),
+        );
+    }
+
+    /// What the worker's loop pays on each wake for its timer: a sleep made anew, registered
+    /// and dropped unfired, as the loop did, against one sleep whose deadline is pushed later.
+    /// A measurement, run by hand: `docs/MEASUREMENTS.md`, "the client's datagram path".
+    #[test]
+    #[ignore = "a measurement; run with --run-ignored only --no-capture"]
+    fn wake_timer_cost() {
+        const WAKES: u32 = 200_000;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            for round in 0..3 {
+                let started = Instant::now();
+                for _ in 0..WAKES {
+                    let tick = tokio::time::sleep(IDLE_TICK);
+                    tokio::select! {
+                        biased;
+                        () = tick => {}
+                        () = std::future::ready(()) => {}
+                    }
+                }
+                let fresh = started.elapsed().checked_div(WAKES).unwrap_or_default();
+                let tick = tokio::time::sleep(IDLE_TICK);
+                tokio::pin!(tick);
+                let started = Instant::now();
+                for _ in 0..WAKES {
+                    let now = tokio::time::Instant::now();
+                    tick.as_mut().reset(now.checked_add(IDLE_TICK).unwrap_or(now));
+                    tokio::select! {
+                        biased;
+                        () = &mut tick => {}
+                        () = std::future::ready(()) => {}
+                    }
+                }
+                let moved = started.elapsed().checked_div(WAKES).unwrap_or_default();
+                eprintln!(
+                    "MEASURE timer per wake, round {round}: made anew {fresh:?}, moved {moved:?}"
+                );
+            }
+        });
+    }
+
     #[test]
     fn a_worker_reassembles_nacks_reports_and_stops_with_the_connection() {
         let mut h = Harness::start();
@@ -1561,6 +1755,54 @@ mod worker_tests {
         let late = h.settle();
         assert_eq!(late.audio_lost, after.audio_lost + 1, "too late to play");
         assert_eq!(late.audio_packets, after.audio_packets, "not played");
+    }
+
+    /// The round trip is read off the connection once a report, not on every wake: the read
+    /// takes the connection's lock, which its driver holds while it receives. Two hundred
+    /// wakes, one per cursor datagram, read it no more often than the reports went out.
+    #[test]
+    fn the_round_trip_is_read_once_a_report() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let router = ScreenRouter::with_loss(0);
+        let (control_tx, mut control) = mpsc::channel(256);
+        let reads = Arc::new(AtomicU32::new(0));
+        let counted = Arc::clone(&reads);
+        let uplink = Uplink {
+            control: control_tx,
+            feedback: Box::new(|_bytes| true),
+            rtt: Box::new(move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+                Some(Duration::from_millis(10))
+            }),
+        };
+        let handle = spawn_screen(rt.handle(), &router, STREAM, VideoCodec::Hevc, uplink);
+        let mut cursor = handle.cursor();
+        rt.block_on(async {
+            for n in 0..200_u32 {
+                let x = i32::try_from(n).unwrap();
+                router.route(
+                    cursor_datagram(STREAM, n.saturating_add(1), 0, x, 0, true),
+                    Instant::now(),
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let last = async {
+                while cursor.borrow_and_update().x != 199 {
+                    cursor.changed().await.unwrap();
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(3), last).await.unwrap();
+        });
+        let reports =
+            u32::try_from(std::iter::from_fn(|| control.try_recv().ok()).count()).unwrap();
+        let reads = reads.load(Ordering::Relaxed);
+        assert!(reports >= 2, "{reports} reports");
+        // One read as the stream starts, and one for a report sent after the count.
+        assert!(reads <= reports.saturating_add(2), "{reads} reads for {reports} reports");
     }
 
     /// A control channel nobody drains fills up; the worker drops its reports and goes on

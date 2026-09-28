@@ -377,7 +377,7 @@ fn the_inbox_reads_like_a_mailbox(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("inbox-unread").is_some() && cx.debug_bounds("inbox-all").is_some());
     let names = labels(&view, cx);
     assert!(
-        names.iter().any(|l| l == "cargo build · Done · 40.0 s · studio · oss/slopty"),
+        names.iter().any(|l| l == "cargo build · Done · 40 s · studio · oss/slopty"),
         "two lines: the command, then its outcome, worker and directory: {names:#?}"
     );
     let (newest, older) = (
@@ -442,4 +442,29 @@ fn a_palette_row_says_where_the_tile_is(cx: &mut TestAppContext) {
     assert!(context.right() <= row.right(), "inside the row: {context:?} {row:?}");
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Image", Some("Needs you"))), "the mark leads: {tree:#?}");
+}
+
+/// A long command that ends on the focused tile while the app is away was not watched: it
+/// enters the inbox and counts in the badge, as the note that went out for it says. With the
+/// app in front, the same end on the focused tile is seen as it happens and leaves no row.
+#[gpui::test]
+fn a_command_ending_on_the_focused_tile_while_away_enters_the_inbox(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let (seen, missed) = (SessionId::new(), SessionId::new());
+    let first = opens(&view, cx, &studio, seen, studio.me, 1);
+    let second = opens(&view, cx, &studio, missed, studio.me, 2);
+    view.update_in(cx, |v, _w, cx| {
+        v.focus_tile(first, cx);
+        v.command_finished(seen, finished("cargo build", 0), cx);
+        v.focus_tile(second, cx);
+        v.set_app_active(false, cx);
+        v.command_finished(missed, finished("cargo test", 0), cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |v, _| {
+        assert!(v.finished(seen).is_none(), "watched in front: no row");
+        assert!(v.finished(missed).is_some(), "on the focused tile, but the app was away");
+        assert_eq!(v.inbox_count(), 1);
+    });
 }

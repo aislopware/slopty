@@ -14,16 +14,6 @@ pub trait Holds: Send {
     fn display(&mut self, hold: bool);
 }
 
-impl Holds for Box<dyn Holds> {
-    fn system(&mut self, hold: bool) {
-        (**self).system(hold);
-    }
-
-    fn display(&mut self, hold: bool) {
-        (**self).display(hold);
-    }
-}
-
 /// Attached clients and live streams, and the holds they imply.
 pub struct Wake<H> {
     clients: usize,
@@ -133,16 +123,5 @@ mod tests {
         wake.client_joined();
         assert_eq!(wake.counts(), (1, 0));
         assert_eq!(wake.holds.0, ["system off", "system on"]);
-    }
-
-    /// The daemon holds its assertions behind a box; the box forwards both.
-    #[test]
-    fn a_boxed_holder_forwards_both_holds() {
-        let mut wake: Wake<Box<dyn Holds>> = Wake::new(Box::new(Log::default()));
-        wake.client_joined();
-        wake.streams(1);
-        assert_eq!(format!("{wake:?}"), "Wake { clients: 1, streams: 1, .. }");
-        wake.holds.system(false);
-        wake.holds.display(false);
     }
 }

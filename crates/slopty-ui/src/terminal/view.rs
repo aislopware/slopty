@@ -23,14 +23,16 @@ use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
-use slopty_proto::terminal::{Placement, SearchMatch, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{
+    PasteChord, Placement, SearchMatch, TermEvent, TermRequest, TermSize,
+};
 use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
 use crate::kit::FIND_PLACEHOLDER;
-use crate::terminal::element::{CellMetrics, FailedLook, TerminalElement, separator_color};
+use crate::terminal::element::{CellMetrics, FailedLook, RowCache, TerminalElement, head_color};
 use crate::terminal::scrollbar::Visibility;
 use crate::terminal::{latency, url};
 
@@ -104,7 +106,7 @@ mod actions {
             CopyLastOutput,
             /// Run the last command again: a paste of what was typed, then ↩.
             RerunLast,
-            /// Save the last command and its output as a note card beside the shell.
+            /// Save the last command and its output as a note tile beside the shell.
             NoteLastBlock,
             /// Clear the screen and the history (⌘K, as in every Mac terminal).
             ClearScreen,
@@ -243,12 +245,12 @@ pub enum TerminalViewEvent {
     Exited(i32),
     /// Something the human should read in the top bar for a moment (a picture refused).
     Notice(String),
-    /// The human confirmed closing this shell while its command runs: the canvas sends
+    /// The human confirmed closing this shell while its command runs: the workspace sends
     /// the worker `Close`.
     CloseConfirmed,
     /// A shell command finished (shell integration marks): what was typed, its status, and how
     /// long it ran from the frame the cursor left its prompt to the frame the next prompt
-    /// arrived. The canvas badges the item when that was long and nobody was watching.
+    /// arrived. The workspace badges the item when that was long and nobody was watching.
     CommandFinished {
         /// What was typed.
         command: String,
@@ -258,10 +260,10 @@ pub enum TerminalViewEvent {
         elapsed: Duration,
     },
     /// "Save as note" on a block's menu: the block as a note's Markdown (`block_note`); the
-    /// canvas puts a note card with it beside the shell.
+    /// workspace puts a note tile with it beside the shell.
     NoteBlock(String),
     /// "View" on a tool call that named a file, or ⌘-click on a path while a command runs:
-    /// the canvas opens (or reveals) a file card for it, a relative path made absolute
+    /// the workspace opens (or reveals) a file tile for it, a relative path made absolute
     /// against the session's directory, landing on `line` (1-based) when one is known.
     ViewFile {
         /// The path as the tool or the text gave it.
@@ -269,19 +271,41 @@ pub enum TerminalViewEvent {
         /// The line to land on.
         line: Option<u32>,
     },
-    /// ⌘-drag on a path: the canvas drags that file out of the app (a file promise the
+    /// ⌘-drag on a path: the workspace drags that file out of the app (a file promise the
     /// worker keeps), a relative path made absolute against the session's directory.
     DragOut {
         /// The path as the text gave it.
         path: String,
     },
-    /// ⌘V with files on the clipboard: the canvas sends them to the shell's directory and
+    /// ⌘V with files on the clipboard: the workspace sends them to the shell's directory and
     /// types their paths, as a drop does.
     PasteFiles(crate::clipboard::ClipFiles),
 }
 
-/// Asked by ⌘V before it pastes text: the files on the clipboard, pasted instead.
-pub type FilesHook = std::rc::Rc<dyn Fn() -> Option<crate::clipboard::ClipFiles>>;
+/// What the clipboard holds for a shell's paste, as the workspace reads it.
+#[derive(Debug)]
+pub enum ClipPaste {
+    /// Nothing but what the view reads itself: text pastes as it always has.
+    Text,
+    /// Files, pasted as a drop ([`TerminalViewEvent::PasteFiles`]).
+    Files(crate::clipboard::ClipFiles),
+    /// A picture and no text. The worker's pasteboard must hold it before the chord goes on,
+    /// since a program there (Claude Code) reads the picture off it. `offer` is this client's
+    /// clipboard offer when the worker has not heard it, sent ahead of the chord.
+    Picture {
+        /// The offer, for the control stream ahead of the chord.
+        offer: Option<ClientMsg>,
+    },
+}
+
+/// Asked by ⌘V and ⌃V before they go on: what the clipboard holds.
+pub type ClipHook = std::rc::Rc<dyn Fn() -> ClipPaste>;
+
+/// Whether `keystroke` is ⌃V, the key Claude Code pastes a picture on.
+fn is_control_v(keystroke: &Keystroke) -> bool {
+    let m = keystroke.modifiers;
+    keystroke.key == "v" && m.control && !m.alt && !m.platform && !m.shift && !m.function
+}
 
 /// A placed image with the texture the element paints it from.
 #[derive(Clone, Debug)]
@@ -324,8 +348,10 @@ pub struct TerminalView {
     metrics: Option<CellMetrics>,
     pending_size: Option<TermSize>,
     font_family: Option<SharedString>,
+    /// What the element built of each row last frame, for the next one to reuse.
+    row_cache: RowCache,
     zoom: f32,
-    /// The canvas zoom is in motion this frame (set by the canvas before each frame).
+    /// The overview's zoom is in motion this frame (set by the workspace before each frame).
     zooming: bool,
     /// Frames drawn while zooming (tests).
     #[cfg(test)]
@@ -357,8 +383,8 @@ pub struct TerminalView {
     /// A ⌘-press on a path, acted on when the button comes up (open it) or when the pointer
     /// moves off far enough first (drag the file out).
     path_press: Option<(url::PathSpan, bool, gpui::Point<Pixels>)>,
-    /// Asked by ⌘V for files on the clipboard.
-    files_hook: Option<FilesHook>,
+    /// Asked by ⌘V and ⌃V for what the clipboard holds.
+    clip_hook: Option<ClipHook>,
     /// A ⌘C whose history is still arriving.
     copying: Option<Copying>,
     /// The buttons whose press went to the program (one bit each, as [`button_bit`]): their
@@ -428,7 +454,7 @@ pub struct TerminalView {
     agent: Option<AgentStatus>,
     /// The search mode the next bar opens with (regex or plain).
     search_regex: bool,
-    /// What waits on a confirmation at the card's foot: a paste held back by paste
+    /// What waits on a confirmation at the tile's foot: a paste held back by paste
     /// protection, or the close of a shell whose command is still running.
     pending: Option<Pending>,
     /// The tile shows a pill of its own at the body's foot (the worker away, the program
@@ -514,6 +540,7 @@ impl TerminalView {
             metrics: None,
             pending_size: None,
             font_family: None,
+            row_cache: RowCache::default(),
             zoom: 1.0,
             zooming: false,
             #[cfg(test)]
@@ -535,7 +562,7 @@ impl TerminalView {
             selected_by_press: false,
             click_at: None,
             path_press: None,
-            files_hook: None,
+            clip_hook: None,
             copying: None,
             program_buttons: 0,
             reported_cell: None,
@@ -570,7 +597,7 @@ impl TerminalView {
 
     /// Type `text` into this session and run it: a paste (bracketed when the shell asks, as
     /// any paste, so a multi-line block arrives whole), then ↩ as a key, the way the human
-    /// would have. Shared by the block menu's "rerun" and the canvas's "run in shell".
+    /// would have. Shared by the block menu's "rerun" and the workspace's "run in shell".
     pub fn run_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.paste(text);
         if let Ok(enter) = Keystroke::parse("enter") {
@@ -637,7 +664,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Open the find bar on `needle` (a find in every card chose this one): the field holds
+    /// Open the find bar on `needle` (a find in every tile chose this one): the field holds
     /// it and the newest hit is revealed when the worker answers.
     pub fn find_with(&mut self, needle: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.find(&Find, window, cx);
@@ -865,11 +892,13 @@ impl TerminalView {
 
     /// ⌘-click on a file path: open it in the shell's editor (`$EDITOR`, else `vi`, at the
     /// line the text named) by typing the command at the prompt. While a command runs the
-    /// prompt is not there to type at, so the path opens as a file card on the canvas
-    /// instead (the canvas makes it absolute against this shell's directory); so does a tap
+    /// prompt is not there to type at, so the path opens as a file tile
+    /// instead (the workspace makes it absolute against this shell's directory); so does a tap
     /// the key bar's ⌘ armed (`sticky`), since a phone has no comfortable editor to type into.
+    /// A path printed with a trailing `/` is a directory, which no editor opens: it goes to the
+    /// workspace too, as a folder tile.
     fn open_path(&mut self, span: &url::PathSpan, sticky: bool, cx: &mut Context<Self>) {
-        if sticky || self.state.command_running() {
+        if sticky || self.state.command_running() || span.path.ends_with('/') {
             tracing::info!(path = %span.path, sticky, "path viewed");
             cx.emit(TerminalViewEvent::ViewFile { path: span.path.clone(), line: span.line });
             return;
@@ -894,6 +923,21 @@ impl TerminalView {
                 Some(path.line.map_or_else(|| path.path.clone(), |n| format!("{}:{n}", path.path)))
             }
         }
+    }
+
+    /// The file path printed under `at` (window points), as the text gave it (relative ones
+    /// are the shell's directory's to resolve), and whether it names a directory: printed
+    /// with a trailing `/`, which the path returned drops. The same path ⌘-click opens; a
+    /// link there is not one.
+    #[must_use]
+    pub fn path_at(&self, at: gpui::Point<Pixels>) -> Option<(String, bool)> {
+        let (col, row) = self.metrics?.cell_at(at)?;
+        let Under::Path(span) = self.under(self.state.index_at_row(row), col)?.1 else {
+            return None;
+        };
+        let file = span.path.trim_end_matches('/');
+        let folder = file.len() < span.path.len();
+        Some((if file.is_empty() { "/" } else { file }.to_owned(), folder))
     }
 
     /// The strip that asks before a paste that could run: what it holds, Paste and Cancel.
@@ -966,7 +1010,7 @@ impl TerminalView {
         )
     }
 
-    /// The chip at the card's bottom-left naming the ⌘-hovered link's target.
+    /// The chip at the tile's bottom-left naming the ⌘-hovered link's target.
     fn render_link_preview(&self) -> Option<gpui::Div> {
         let target = self.link_target()?;
         let theme = &self.theme;
@@ -1104,10 +1148,10 @@ impl TerminalView {
         self.selection = Some(Selection::run(start, end));
     }
 
-    /// A touch long press over the terminal. On the phone a plain drag pans the canvas, so
+    /// A touch long press over the terminal. On the phone a plain drag scrolls the strip, so
     /// selection follows the platform convention: hold to select the word under the finger,
     /// keep holding and move to extend it. Returns whether the press was claimed (the element
-    /// then keeps the gesture away from the canvas).
+    /// then keeps the gesture away from the strip).
     pub fn long_press(
         &mut self,
         event: &LongPressEvent,
@@ -1391,13 +1435,17 @@ impl TerminalView {
         if self.state.line(top).is_none_or(|line| line.mark.is_prompt()) {
             return None;
         }
-        let head = self.state.block_head(top)?;
-        (head.prompt < top && head.command.as_deref().is_some_and(|c| !c.is_empty()))
-            .then_some(head)
+        // Whether it shows is read from the marks; the command's text only once it does.
+        let (prompt, typed) = self.state.block_prompt(top)?;
+        if prompt >= top || !typed {
+            return None;
+        }
+        self.state.block_head(top)
     }
 
     /// One row over the grid's top naming the command whose output the viewport is inside,
-    /// so a long output is never anonymous; a click scrolls its prompt back to the top. Its
+    /// so a long output is never anonymous; a click scrolls its prompt back to the top. It sits
+    /// on the head surface the prompt rows had in the grid. Its
     /// text starts at the grid's first column, and a failed block carries its bar and wash on
     /// up into it. Under the pointer it shows the block's facts in place of the duration.
     fn render_block_header(
@@ -1424,7 +1472,7 @@ impl TerminalView {
                     .debug_selector(|| "block-header-took".to_owned())
                     .flex_none()
                     .pl(px(theme.spacing.sm))
-                    .child(SharedString::from(took_label(elapsed)))
+                    .child(SharedString::from(crate::kit::duration(elapsed)))
                     .into_any_element()
             })
         };
@@ -1451,9 +1499,7 @@ impl TerminalView {
                 .items_center()
                 .justify_between()
                 .px(inset)
-                .bg(hsla(theme.content()))
-                .border_b_1()
-                .border_color(separator_color(theme))
+                .bg(head_color(theme))
                 .font_family(family)
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
@@ -1507,7 +1553,9 @@ impl TerminalView {
             }
             None => None,
         };
-        let took = self.duration(prompt).map(|d| (SharedString::from(took_label(d)), s.text_muted));
+        let took = self
+            .duration(prompt)
+            .map(|d| (SharedString::from(crate::kit::duration(d)), s.text_muted));
         status.into_iter().chain(took).collect()
     }
 
@@ -1670,8 +1718,8 @@ impl TerminalView {
         }
     }
 
-    /// The palette's "Keep last block as a card": the last finished command's block (the one
-    /// before the newest prompt) as a note card beside the shell; nothing without one.
+    /// The palette's "Keep last block as a note": the last finished command's block (the one
+    /// before the newest prompt) as a note tile beside the shell; nothing without one.
     pub fn note_last_block(
         &mut self,
         _: &NoteLastBlock,
@@ -1777,21 +1825,37 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Where ⌘V asks for files on the clipboard.
-    pub fn set_files_hook(&mut self, hook: FilesHook) {
-        self.files_hook = Some(hook);
+    /// Where ⌘V and ⌃V ask what the clipboard holds.
+    pub fn set_clip_hook(&mut self, hook: ClipHook) {
+        self.clip_hook = Some(hook);
+    }
+
+    /// What the clipboard holds, as the workspace reads it; text when nobody asks.
+    fn clip_paste(&self) -> ClipPaste {
+        self.clip_hook.as_ref().map_or(ClipPaste::Text, |hook| hook())
     }
 
     /// ⌘V, or the phone key bar's "paste": the clipboard into the session (the worker brackets
     /// it when the program asked). Files on it go to the shell's directory instead, and their
-    /// paths are typed.
+    /// paths are typed. A picture with no text goes to the worker's pasteboard, and then an
+    /// empty paste tells the program to read it there.
     pub fn paste_clipboard(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(files) = self.files_hook.as_ref().and_then(|hook| hook()) {
-            self.selection = None;
-            self.state.scroll_to_bottom();
-            cx.emit(TerminalViewEvent::PasteFiles(files));
-            cx.notify();
-            return;
+        match self.clip_paste() {
+            ClipPaste::Files(files) => {
+                self.selection = None;
+                self.state.scroll_to_bottom();
+                cx.emit(TerminalViewEvent::PasteFiles(files));
+                cx.notify();
+                return;
+            }
+            ClipPaste::Picture { offer } => {
+                self.selection = None;
+                self.state.scroll_to_bottom();
+                self.paste_picture(offer, PasteChord::Command);
+                cx.notify();
+                return;
+            }
+            ClipPaste::Text => {}
         }
         let Some(item) = cx.read_from_clipboard() else { return };
         let Some(text) = item.text() else { return };
@@ -1806,8 +1870,20 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// The offer, when the worker has not heard it, and then `chord`, which the worker holds
+    /// with the input behind it until its pasteboard holds the picture. Both go on the one
+    /// outbound queue, so the offer is ahead on the wire.
+    fn paste_picture(&mut self, offer: Option<ClientMsg>, chord: PasteChord) {
+        if let Some(offer) = offer
+            && let Err(e) = self.out.try_send(offer)
+        {
+            tracing::warn!(session = %self.session, error = %e, "outbound queue");
+        }
+        self.send(TermRequest::PastePicture(chord));
+    }
+
     /// What waits goes through (↩, or the bar's first button): the paste is sent, the
-    /// close is confirmed to the canvas.
+    /// close is confirmed to the workspace.
     pub fn confirm_pending(&mut self, cx: &mut Context<Self>) {
         match self.pending.take() {
             Some(Pending::Paste(text)) => self.send(TermRequest::Paste(text)),
@@ -1833,7 +1909,7 @@ impl TerminalView {
         }
     }
 
-    /// The canvas is about to close this shell: with a command running and the setting
+    /// The workspace is about to close this shell: with a command running and the setting
     /// on, the bar asks first and this says so (`true`); otherwise nothing stands in the
     /// way. A shell whose program exited has nothing left to lose.
     pub fn ask_close(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1905,12 +1981,22 @@ impl TerminalView {
         self.font_family = Some(family);
     }
 
-    /// Paint scale (set by the canvas before each frame).
+    /// The rows the element built last frame, lent to it while it builds the next.
+    pub(super) fn take_row_cache(&mut self) -> RowCache {
+        std::mem::take(&mut self.row_cache)
+    }
+
+    /// The rows the element built this frame.
+    pub(super) fn put_row_cache(&mut self, rows: RowCache) {
+        self.row_cache = rows;
+    }
+
+    /// The overview's zoom, which the grid is drawn at (set by the workspace before each frame).
     pub const fn set_zoom(&mut self, zoom: f32) {
         self.zoom = zoom;
     }
 
-    /// Whether the zoom is in motion this frame (set by the canvas before each frame): the
+    /// Whether the zoom is in motion this frame (set by the workspace before each frame): the
     /// grid paints from the raster ladder instead of rasterising every glyph at a new size.
     /// Returns whether that changed: the grid then paints differently at the same bounds, so a
     /// cached drawing of it is stale.
@@ -2067,7 +2153,15 @@ impl TerminalView {
         );
         let shows = self.predictor.visible(now);
         self.latency.pressed(self.key_seq, now, guess.is_some() && shows);
-        self.send(TermRequest::Key(key));
+        // ⌃V with a picture on the clipboard: Claude Code reads it off the worker's pasteboard
+        // on this key, so the picture goes there first.
+        if is_control_v(&keystroke)
+            && let ClipPaste::Picture { offer } = self.clip_paste()
+        {
+            self.paste_picture(offer, PasteChord::Control(key));
+        } else {
+            self.send(TermRequest::Key(key));
+        }
         unstuck || scrolled || guessing || shows
     }
 
@@ -2080,23 +2174,6 @@ impl TerminalView {
             .iter()
             .map(|row| row.line.map(|l| l.text().trim_end().to_owned()).unwrap_or_default())
             .collect()
-    }
-
-    /// The last `n` visible rows that hold anything, top to bottom, trailing spaces trimmed:
-    /// what the overview's cover shows of the screen.
-    #[must_use]
-    pub fn tail(&self, n: usize) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .state
-            .view()
-            .iter()
-            .rev()
-            .filter_map(|row| row.line.filter(|l| !l.is_blank()))
-            .take(n)
-            .map(|l| l.text().trim_end().to_owned())
-            .collect();
-        out.reverse();
-        out
     }
 
     /// Program title (OSC 0/2), if set.
@@ -2370,10 +2447,10 @@ impl TerminalView {
         let rows = ((at.y - m.origin.y) / m.line_height).floor();
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
         let row = rows.clamp(0.0, f32::from(m.rows.saturating_sub(1))) as u16;
-        let head = self.state.block_head(self.state.index_at_row(row))?;
-        let done = self.state.prompt_after(head.prompt).is_some();
+        let (prompt, typed) = self.state.block_prompt(self.state.index_at_row(row))?;
+        let done = self.state.prompt_after(prompt).is_some();
         let running = self.state.command_running() && !done;
-        head.command.is_some().then_some(head.prompt).filter(|_| done || running)
+        typed.then_some(prompt).filter(|_| done || running)
     }
 
     /// The pointer moved over the grid's element (`Some`, wherever it is covered) or left it:
@@ -2530,7 +2607,8 @@ impl TerminalView {
     fn send(&mut self, req: TermRequest) {
         // Bytes the predictor never saw as keys (a line-editing chord, a paste) move the
         // cursor where its guesses cannot follow.
-        if matches!(req, TermRequest::Raw(_) | TermRequest::Paste(_)) {
+        if matches!(req, TermRequest::Raw(_) | TermRequest::Paste(_) | TermRequest::PastePicture(_))
+        {
             self.predictor.interrupt();
         }
         self.post(req);
@@ -2666,12 +2744,6 @@ impl TerminalView {
             }
         };
         let lines = lines * f32::from(self.theme.behaviour.scroll_multiplier) / 100.0;
-        // ⌘-wheel is the canvas's zoom, never the grid's.
-        if event.modifiers.platform {
-            self.wheel_remainder = 0.0;
-            self.wheel_gesture = None;
-            return;
-        }
         // A program that asked for the mouse gets the wheel (⇧ keeps it for scrolling, as
         // in every terminal); so does anything on the alternate screen, which has no
         // history here to scroll — the worker turns it into cursor keys (alternate scroll).
@@ -2679,13 +2751,13 @@ impl TerminalView {
         let to_program = (modes.contains(TermModes::MOUSE_TRACKING) && !event.modifiers.shift)
             || modes.contains(TermModes::ALT_SCREEN);
         // The grid can take the wheel while it has somewhere to go with it — a program wants
-        // it, or there is history that way — and otherwise lets it through, so the canvas pans
+        // it, or there is history that way — and otherwise lets it through, so the strip scrolls
         // under a grid at the end of its history rather than swallowing the gesture.
         let can_use = to_program
             || (lines > 0.0 && self.state.view_offset() < self.state.history_len())
             || (lines < 0.0 && self.state.view_offset() > 0);
         // A gesture goes to whichever surface could use its first *movement* and keeps it to
-        // the last. Deciding per event instead would hand a fling's momentum to the canvas the
+        // the last. Deciding per event instead would hand a fling's momentum to the strip the
         // moment the grid ran out of scrollback, and the whole workspace would slide out from
         // under a terminal that was merely flicked too hard.
         //
@@ -3293,12 +3365,7 @@ impl EntityInputHandler for TerminalView {
 
 impl TerminalView {
     /// The search bar: field, "n/total", close. Sits over the top-right corner of the grid.
-    fn render_search(
-        &self,
-        search: &Search,
-        focused: bool,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_search(&self, search: &Search, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
@@ -3343,8 +3410,6 @@ impl TerminalView {
             .py(px(spacing.xs))
             .rounded(px(radii.sm))
             .map(|el| crate::kit::elevate(el, theme))
-            // The focus ring: accent while the field has the caret, the hairline otherwise.
-            .when(focused, |el| el.border_color(hsla(s.accent)))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text))
             .font_family(self.theme.typography.ui_family.clone())
@@ -3411,11 +3476,7 @@ impl Render for TerminalView {
                 self.motion_frames = self.motion_frames.saturating_add(1);
             }
         }
-        let search_focused = self
-            .search
-            .as_ref()
-            .is_some_and(|s| s.input.read(cx).focus_handle(cx).is_focused(window));
-        let search = self.search.as_ref().map(|s| self.render_search(s, search_focused, cx));
+        let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         let block = self.block_header();
         let hovered = self.render_hovered_block(block.as_ref(), cx);
         let header = block.and_then(|block| self.render_block_header(&block, cx));
@@ -3577,7 +3638,7 @@ struct BlockMenu {
     at: gpui::Point<Pixels>,
 }
 
-/// What waits on a confirmation at the card's foot.
+/// What waits on a confirmation at the tile's foot.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Pending {
     /// A paste held back by paste protection until ↩ or the Paste button sends it.
@@ -3595,7 +3656,7 @@ enum BlockMenuItem {
     CopyOutput,
     /// Type the command again and press ↩.
     Rerun,
-    /// The block as a note card beside the shell: the command runnable, the output under it.
+    /// The block as a note tile beside the shell: the command runnable, the output under it.
     Note,
     /// Select the whole block, prompt to last output row.
     SelectBlock,
@@ -3611,22 +3672,6 @@ enum BlockMenuItem {
 
 /// The shortest command whose row gets a "took" caption.
 pub const TOOK_MIN: Duration = Duration::from_secs(1);
-
-/// A command's duration for its row's caption: `40 ms` under a second (what a hovered quick
-/// block says), `1.4 s` under a minute, `2 m 03 s` under an hour, `1 h 02 m` from there.
-#[must_use]
-pub fn took_label(elapsed: Duration) -> String {
-    let secs = elapsed.as_secs();
-    if secs == 0 {
-        format!("{} ms", elapsed.as_millis())
-    } else if secs < 60 {
-        format!("{:.1} s", elapsed.as_secs_f64())
-    } else if secs < 3600 {
-        format!("{} m {:02} s", secs / 60, secs % 60)
-    } else {
-        format!("{} h {:02} m", secs / 3600, (secs % 3600) / 60)
-    }
-}
 
 /// A command block as a note: the command as a heading and a runnable `sh` fence, the
 /// output as a plain fence under it; either half alone when the block has only that.
@@ -3681,21 +3726,10 @@ impl BlockMenuItem {
     }
 }
 
-/// A GPUI texture of the pixels: BGRA with the alpha premultiplied, as the renderer samples.
+/// A GPUI texture of the pixels, which the worker sent in the renderer's format (BGRA with the
+/// alpha premultiplied): a copy, since the image owns its buffer and the state keeps its own.
 fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
-    let bgra: Vec<u8> = pixels
-        .rgba
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .flat_map(|&[r, g, b, a]| {
-            let pre = |c: u8| {
-                u8::try_from(u32::from(c).saturating_mul(u32::from(a)) / 255).unwrap_or(255)
-            };
-            [pre(b), pre(g), pre(r), a]
-        })
-        .collect();
-    let buffer = image::RgbaImage::from_raw(pixels.width, pixels.height, bgra)?;
+    let buffer = image::RgbaImage::from_raw(pixels.width, pixels.height, pixels.bgra.clone())?;
     Some(Arc::new(gpui::RenderImage::new([image::Frame::new(buffer)])))
 }
 
@@ -3706,6 +3740,7 @@ mod tests {
     use slopty_proto::terminal::{Frame, TermRequest};
 
     use super::*;
+    use crate::terminal::element::separator_color;
 
     /// A focused terminal in a headless window with the Terminal bindings, drawn once.
     fn terminal(
@@ -3819,6 +3854,59 @@ mod tests {
         out
     }
 
+    /// The view rows on the head surface, as `(first row, rows)`, each with its index in the
+    /// scene: the bands of [`head_color`] spanning the element edge to edge, on row edges.
+    fn head_bands(
+        view: &Entity<TerminalView>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<((u16, u16), usize)> {
+        let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
+        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
+        let head = head_color(&Theme::default());
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
+            f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
+        };
+        let row_at = |y: gpui::ScaledPixels| {
+            (0..=metrics.rows)
+                .find(|&row| near(y, metrics.origin.y + metrics.line_height * f32::from(row)))
+                .expect("a head band sits on row edges")
+        };
+        quads
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| {
+                near(q.bounds.origin.x, bounds.origin.x)
+                    && near(q.bounds.size.width, bounds.size.width)
+                    && q.background.as_solid() == Some(head)
+            })
+            .map(|(i, q)| {
+                let first = row_at(q.bounds.origin.y);
+                let bottom = gpui::ScaledPixels(q.bounds.origin.y.0 + q.bounds.size.height.0);
+                ((first, row_at(bottom).saturating_sub(first)), i)
+            })
+            .collect()
+    }
+
+    /// The scene index of the first 1 px rule spanning the element on `row`'s top edge.
+    fn rule_index(view: &Entity<TerminalView>, cx: &mut VisualTestContext, row: u16) -> usize {
+        let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
+        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
+            f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
+        };
+        let top = metrics.origin.y + metrics.line_height * f32::from(row);
+        quads
+            .iter()
+            .position(|q| {
+                near(q.bounds.size.height, px(1.0))
+                    && near(q.bounds.size.width, bounds.size.width)
+                    && near(q.bounds.origin.y, top)
+            })
+            .expect("a rule on the row's top edge")
+    }
+
     /// The view rows a failed block covers, as `(first row, rows)`: the error bar down the
     /// element's left edge and the wash edge to edge, as the block separators run, read from
     /// the scene. Each bar must have its wash.
@@ -3858,7 +3946,7 @@ mod tests {
     }
 
     /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport. A neutral rule is
-    /// drawn on every prompt-start row but the first line and the viewport's top row; a block
+    /// drawn only where a prompt follows a head that printed nothing; a block
     /// whose command failed wears the error bar and wash over its rows, with the status from
     /// the prompt below it even when that prompt is out of view.
     #[gpui::test]
@@ -3874,7 +3962,7 @@ mod tests {
         assert_eq!(look.bar_width, px(theme.spacing.xxs), "a 2 pt bar");
 
         assert_eq!(top_line(&view, cx), LineIndex(6), "following output");
-        assert_eq!(separators(&view, cx), vec![(2, rule)], "the newest prompt, after `seq 2`");
+        assert_eq!(separators(&view, cx), vec![], "the newest prompt follows output: its band");
         assert_eq!(failed_bands(&view, cx), vec![], "`seq 2` succeeded");
 
         cx.simulate_keystrokes("cmd-up");
@@ -3884,7 +3972,7 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(3));
-        assert_eq!(separators(&view, cx), vec![(1, rule)], "neutral, not doubling the header");
+        assert_eq!(separators(&view, cx), vec![(1, rule)], "`false` printed nothing: two heads");
         assert_eq!(failed_bands(&view, cx), vec![(0, 1)], "`false` failed: its one row");
 
         cx.simulate_keystrokes("cmd-up");
@@ -3903,18 +3991,24 @@ mod tests {
         assert!(view.read_with(cx, |view, _| view.state.view_offset() == 0), "following again");
     }
 
-    /// A shell whose prompt opens with a blank line (a common prompt theme) draws no rule over
-    /// that first prompt: only blank rows are above it, and a rule there would sit right under
-    /// the tile header's hairline. The prompt after a command still gets its rule.
+    /// A block's head, the rows its command was typed on, sits on the band edge to edge, and
+    /// after output the band's top edge is the only boundary: no rule underlines the output.
+    /// A wrapped command and a two-row prompt are one head; two heads with nothing between
+    /// share a band and a rule parts them, drawn over it; an `Input` row under output is not
+    /// a head.
     #[gpui::test]
-    fn the_prompt_that_opens_a_terminal_has_no_rule_over_it(cx: &mut TestAppContext) {
+    fn a_heads_band_is_its_own_edge_and_a_rule_parts_heads_that_touch(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
-        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let prompt = |exit, input| SemanticMark::Prompt { exit, input };
         let screen = [
-            ("", SemanticMark::Output),
-            ("$ echo hi", prompt(None)),
+            ("$ echo \\", prompt(None, Some(2))),
+            ("  hi", SemanticMark::Input),
             ("hi", SemanticMark::Output),
-            ("$ ", prompt(Some(0))),
+            ("~/src", prompt(Some(0), None)),
+            ("$ cd a", SemanticMark::PromptContinuation { input: Some(2) }),
+            ("$ ", prompt(Some(0), None)),
+            ("out", SemanticMark::Output),
+            ("stray", SemanticMark::Input),
         ];
         view.update_in(cx, |view, _window, cx| {
             view.apply(
@@ -3923,12 +4017,12 @@ mod tests {
                     full: true,
                     epoch: 0,
                     cols: 10,
-                    rows: 4,
+                    rows: 8,
                     cursor: Cursor::default(),
                     modes: TermModes::empty(),
                     oldest_line: LineIndex(0),
                     first_visible_line: LineIndex(0),
-                    total_lines: 4,
+                    total_lines: 8,
                     input_ack: 0,
                     images: Vec::new(),
                     updates: screen
@@ -3944,8 +4038,15 @@ mod tests {
             );
         });
         cx.run_until_parked();
-        let rule = separator_color(&Theme::default());
-        assert_eq!(separators(&view, cx), vec![(3, rule)], "only the prompt after `echo hi`");
+        let theme = Theme::default();
+        assert_eq!(head_color(&theme), hsla(theme.surfaces.band), "the band, not the header's");
+        let heads = head_bands(&view, cx);
+        let bands: Vec<(u16, u16)> = heads.iter().map(|(band, _)| *band).collect();
+        assert_eq!(bands, vec![(0, 2), (3, 3)], "`echo` wrapped; `cd` and the next prompt");
+        let rule = separator_color(&theme);
+        assert_eq!(separators(&view, cx), vec![(5, rule)], "only between heads that touch");
+        let (_, band) = heads[1];
+        assert!(rule_index(&view, cx, 5) > band, "the rule lies on the band, not under it");
     }
 
     /// A block whose prompt rows have scrolled above the viewport keeps its command in a
@@ -3997,6 +4098,93 @@ mod tests {
         assert!(cx.debug_bounds("block-header").is_none());
     }
 
+    /// What making the texture of a 12 MiB image (the largest the worker ships) costs the UI
+    /// thread: `placed_images` on a new generation, against the RGBA → premultiplied BGRA
+    /// conversion it made before the worker sent the texture's format. Prints the numbers
+    /// MEASUREMENTS records; run by hand, in release:
+    /// `cargo test -p slopty-ui --release --lib image_texture_cost -- --ignored --nocapture`.
+    #[gpui::test]
+    #[ignore = "measurement, run by hand"]
+    fn image_texture_cost(cx: &mut TestAppContext) {
+        use slopty_proto::terminal::PixelRect;
+        const W: u32 = 2048;
+        const H: u32 = 1536;
+        let (view, _rx, cx) = terminal(cx);
+        let pixels: Vec<u8> = (0..=u8::MAX).cycle().take(12 << 20).collect();
+        let converted = |rgba: &[u8]| -> Vec<u8> {
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|&[r, g, b, a]| {
+                    let pre = |c: u8| {
+                        u8::try_from(u32::from(c).saturating_mul(u32::from(a)) / 255).unwrap_or(255)
+                    };
+                    [pre(b), pre(g), pre(r), a]
+                })
+                .collect()
+        };
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        for generation in 1..=12_u64 {
+            let started = Instant::now();
+            std::hint::black_box(converted(&pixels));
+            before.push(started.elapsed());
+            let placement = Placement {
+                image: 1,
+                generation,
+                col: 0,
+                row: 0,
+                cols: 1,
+                rows: 1,
+                x_offset: 0,
+                y_offset: 0,
+                width: W,
+                height: H,
+                source: PixelRect { x: 0, y: 0, width: W, height: H },
+                z: 0,
+            };
+            view.update_in(cx, |view, _window, cx| {
+                let bgra = pixels.clone();
+                view.apply(TermEvent::Image { id: 1, generation, width: W, height: H, bgra }, cx);
+                view.apply(
+                    TermEvent::Frame(Frame {
+                        seq: generation,
+                        full: true,
+                        epoch: 0,
+                        cols: 10,
+                        rows: 3,
+                        cursor: Cursor::default(),
+                        modes: TermModes::empty(),
+                        oldest_line: LineIndex(0),
+                        first_visible_line: LineIndex(0),
+                        total_lines: 3,
+                        input_ack: 0,
+                        images: vec![placement],
+                        updates: Vec::new(),
+                    }),
+                    cx,
+                );
+            });
+            let took = view.update_in(cx, |view, window, _cx| {
+                // The frame's own draw already made it: make it again, timed.
+                view.textures.clear();
+                let started = Instant::now();
+                assert_eq!(view.placed_images(window).len(), 1);
+                started.elapsed()
+            });
+            after.push(took);
+        }
+        let spread = |v: &mut Vec<Duration>| {
+            v.sort_unstable();
+            format!("{:?} / {:?} / {:?}", v[0], v[v.len() / 2], v[v.len().saturating_sub(1)])
+        };
+        println!(
+            "MEASURE 12 MiB image texture on the UI thread (min / median / max, 12 each): \
+             converting RGBA {} · as sent {}",
+            spread(&mut before),
+            spread(&mut after)
+        );
+    }
+
     /// A placed image gets one texture, kept across frames while its generation holds and
     /// dropped when the frame stops placing it and the state forgets the pixels.
     #[gpui::test]
@@ -4039,7 +4227,7 @@ mod tests {
             generation: 3,
             width: 2,
             height: 1,
-            rgba: vec![255, 0, 0, 255, 0, 0, 255, 128],
+            bgra: vec![0, 0, 255, 255, 128, 0, 0, 128],
         };
         view.update_in(cx, |view, _window, cx| {
             view.apply(image, cx);
@@ -4050,7 +4238,7 @@ mod tests {
         assert_eq!((placed[0].width, placed[0].height), (2, 1));
         assert_eq!(placed[0].placement, placement);
         let first = Arc::clone(&placed[0].image);
-        // Half-transparent blue premultiplied to BGRA.
+        // The texture holds the premultiplied BGRA the worker sent, as it came.
         assert_eq!(first.as_bytes(0), Some(&[0, 0, 255, 255, 128, 0, 0, 128][..]));
         // The next frame places it again: the same texture.
         view.update_in(cx, |view, _window, cx| view.apply(frame(2, vec![placement]), cx));
@@ -4065,7 +4253,7 @@ mod tests {
         let newer = Placement { generation: 4, ..placement };
         view.update_in(cx, |view, _window, cx| {
             view.apply(
-                TermEvent::Image { id: 7, generation: 4, width: 1, height: 1, rgba: vec![9; 4] },
+                TermEvent::Image { id: 7, generation: 4, width: 1, height: 1, bgra: vec![9; 4] },
                 cx,
             );
             view.apply(frame(4, vec![newer]), cx);
@@ -4118,13 +4306,53 @@ mod tests {
         assert_eq!(words(cx), 3, "baz is new; foo and bar are kept");
     }
 
+    /// The row cache: a frame builds only the rows whose line changed, or whose styling did
+    /// (a guess typed into one); a selection marks rows without building them again.
+    #[gpui::test]
+    fn a_frame_builds_only_the_rows_that_changed(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let built = |cx: &mut VisualTestContext| {
+            cx.update(|_window, cx| crate::terminal::element::rows_built(cx))
+        };
+        cursor_at_the_prompt(&view, cx);
+        // The first key switches the window to keyboard modality, which GPUI redraws for once.
+        cx.simulate_keystrokes("z");
+        view.update(cx, |view, _cx| view.predictor.set_policy(Policy::Always));
+        echoed_at_the_prompt(&view, cx, "z");
+        assert_eq!(built(cx), 3, "a whole screen builds every row");
+        view.update_in(cx, |_view, _window, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(built(cx), 0, "an unchanged frame builds none");
+        view.update_in(cx, |view, _window, cx| {
+            let rows = ["3".to_owned(), String::new(), "$ z".to_owned()];
+            let TermEvent::Frame(mut frame) = screen_of(4, 10, &rows) else { panic!("a frame") };
+            frame.full = false;
+            frame.updates.truncate(1);
+            frame.first_visible_line = LineIndex(6);
+            frame.total_lines = 9;
+            frame.cursor = Cursor { row: 2, col: 3, visible: true, ..Cursor::default() };
+            frame.input_ack = view.key_seq;
+            view.apply(TermEvent::Frame(frame), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(built(cx), 1, "only the row that changed");
+        assert_eq!(view.read_with(cx, |view, _| view.rows()), ["3", "", "$ z"]);
+        cx.simulate_keystrokes("c");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.predictions().is_some()), "a guess on screen");
+        assert_eq!(built(cx), 1, "the row the guess went into");
+        view.update_in(cx, |view, window, cx| view.select_all(&SelectAll, window, cx));
+        cx.run_until_parked();
+        assert_eq!(built(cx), 0, "a selection is marked over the rows as they were");
+    }
+
     /// The blink clock runs only while a painted frame blinks: a frame with SGR 5 text (or a
     /// blinking cursor, while focused) starts it, each half-blink flips the phase, a keystroke
     /// pins the phase on for a half, and a frame with nothing to blink stops it, phase on.
     /// BEL tints the grid for a flash and then leaves it alone; a second bell inside the
     /// flash restarts it rather than ending it early.
     /// ⌘ over a printed URL previews it; over an OSC 8 label, the target the label hides;
-    /// over a path, the path with its line. The chip sits in the card while it applies.
+    /// over a path, the path with its line. The chip sits in the tile while it applies.
     #[gpui::test]
     fn a_cmd_hover_previews_the_links_target(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
@@ -4180,8 +4408,8 @@ mod tests {
         cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), MouseButton::Left, cmd);
         cx.run_until_parked();
         let chip = cx.debug_bounds("link-preview").expect("the chip is drawn");
-        let card = cx.debug_bounds("terminal").expect("the card");
-        assert!(chip.bottom() <= card.bottom() && chip.left() >= card.left(), "inside the card");
+        let body = cx.debug_bounds("terminal").expect("the body");
+        assert!(chip.bottom() <= body.bottom() && chip.left() >= body.left(), "inside the body");
         cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), MouseButton::Left, plain);
         cx.run_until_parked();
         assert!(cx.debug_bounds("link-preview").is_none(), "gone with ⌘");
@@ -4409,8 +4637,75 @@ mod tests {
         assert_eq!(pastes(&mut rx).len(), 1, "protection off: straight through");
     }
 
-    /// ⌘W on a shell whose command is running asks first: the canvas's `ask_close` puts the
-    /// bar up and says so; ↩ confirms (the canvas hears `CloseConfirmed`), Esc keeps the
+    /// A picture copied here with no text reaches the worker's pasteboard ahead of ⌘V and ⌃V:
+    /// this client's offer goes on the outbound queue first, then the chord as a paste of a
+    /// picture, which the worker holds until the picture is there. ⌃V after the worker heard
+    /// the offer sends no second one. With text on the clipboard nothing changes: ⌃V is the
+    /// key, ⌘V the text.
+    #[gpui::test]
+    fn a_picture_goes_to_the_worker_ahead_of_the_paste_chord(cx: &mut TestAppContext) {
+        use slopty_platform::pasteboard::{Memory, Pasteboard, TEXT_UTI};
+        use slopty_proto::terminal::PasteChord;
+        use slopty_proto::transfer::ClipMsg;
+
+        let (view, mut rx, cx) = terminal(cx);
+        let board = std::rc::Rc::new(Memory::default());
+        let shared: std::rc::Rc<dyn Pasteboard> = std::rc::Rc::<Memory>::clone(&board);
+        let sync =
+            std::rc::Rc::new(std::cell::RefCell::new(crate::clipboard::ClipSync::new(shared)));
+        let (me, worker) = (slopty_core::ClientId::new(), slopty_client::layout::WorkerKey::new(1));
+        view.update(cx, |view, _cx| {
+            view.set_clip_hook(std::rc::Rc::new(move || sync.borrow_mut().shell_paste(worker, me)));
+        });
+        let sent = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|msg| match msg {
+                    ClientMsg::Clip(ClipMsg::Offer(offer)) => {
+                        let utis: Vec<String> = offer.items.into_iter().map(|i| i.uti).collect();
+                        format!("offer {}", utis.join(","))
+                    }
+                    ClientMsg::Term {
+                        req: TermRequest::PastePicture(PasteChord::Command), ..
+                    } => "picture then cmd-v".to_owned(),
+                    ClientMsg::Term {
+                        req: TermRequest::PastePicture(PasteChord::Control(key)),
+                        ..
+                    } => format!("picture then {:?}-{:?}", key.mods, key.code),
+                    ClientMsg::Term { req: TermRequest::Key(key), .. } => {
+                        format!("key {:?}-{:?}", key.mods, key.code)
+                    }
+                    ClientMsg::Term { req: TermRequest::Paste(text), .. } => {
+                        format!("paste {text}")
+                    }
+                    other => other.kind().to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        cx.run_until_parked();
+        let _before = sent(&mut rx);
+        board.copy(&[("public.png", b"\x89PNG a screenshot")]);
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        assert_eq!(sent(&mut rx), ["offer public.png", "picture then cmd-v"], "the offer first");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.run_until_parked();
+        assert_eq!(sent(&mut rx), ["picture then Mods(CTRL)-V"], "heard already: no second offer");
+
+        board.copy(&[(TEXT_UTI, b"words"), ("public.png", b"\x89PNG with text")]);
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("words".into())));
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        assert_eq!(
+            sent(&mut rx),
+            ["key Mods(CTRL)-V", "paste words"],
+            "text pastes as it always has"
+        );
+    }
+
+    /// ⌘W on a shell whose command is running asks first: the workspace's `ask_close` puts the
+    /// bar up and says so; ↩ confirms (the workspace hears `CloseConfirmed`), Esc keeps the
     /// shell, any other key keeps it and goes to the program; an idle shell, a shell with
     /// the setting off, never ask.
     #[gpui::test]
@@ -4955,19 +5250,6 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.search.is_some()), "the find field opened");
     }
 
-    #[test]
-    fn a_took_label_reads_as_a_clock_would() {
-        assert_eq!(took_label(Duration::from_millis(40)), "40 ms", "a quick one, when hovered");
-        assert_eq!(took_label(Duration::from_millis(1_040)), "1.0 s");
-        assert_eq!(took_label(Duration::from_millis(3_260)), "3.3 s", "a tenth, rounded");
-        assert_eq!(took_label(Duration::from_secs(59)), "59.0 s");
-        assert_eq!(took_label(Duration::from_secs(60)), "1 m 00 s");
-        assert_eq!(took_label(Duration::from_secs(123)), "2 m 03 s");
-        assert_eq!(took_label(Duration::from_secs(3_599)), "59 m 59 s");
-        assert_eq!(took_label(Duration::from_secs(3_600)), "1 h 00 m");
-        assert_eq!(took_label(Duration::from_mins(362)), "6 h 02 m");
-    }
-
     /// A finished command's row says how long it took, at its right end, once it took a
     /// second or more; the caption follows the row through history and a new epoch (a
     /// reflow renumbers the rows) forgets them all.
@@ -4995,7 +5277,7 @@ mod tests {
         cx.simulate_keystrokes("cmd-up");
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(0));
-        assert_eq!(captions(cx), ["3.3 s"], "`$ ls` leaves room: its row says how long it took");
+        assert_eq!(captions(cx), ["3.2 s"], "`$ ls` leaves room: its row says how long it took");
         // A new epoch renumbers the rows: nothing said before applies.
         view.update_in(cx, |view, _window, cx| {
             let prompt = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
@@ -5677,7 +5959,7 @@ mod tests {
         assert_eq!(offset(cx), 0, "and down again");
         wheel(cx, -0.7, mods, TouchPhase::Started);
         wheel(cx, -0.7, mods, TouchPhase::Moved);
-        assert_eq!(offset(cx), 0, "no history below: the wheel passes to the canvas");
+        assert_eq!(offset(cx), 0, "no history below: the wheel passes to the strip");
         assert!(
             view.read_with(cx, |v, _| v.wheel_remainder).abs() < f32::EPSILON,
             "and carries nothing"
@@ -5707,19 +5989,19 @@ mod tests {
         assert_eq!(
             owner(cx),
             Some(true),
-            "the momentum after the fingers lift is still the grid's, not a canvas pan"
+            "the momentum after the fingers lift is still the grid's, not the strip's"
         );
-        // And the other way: a pan the canvas began is not taken back the moment the grid
-        // could use it, so dragging the canvas past a terminal never snags halfway across.
+        // And the other way: a scroll the strip began is not taken back the moment the grid
+        // could use it, so sliding the strip past a terminal never snags halfway across.
         pan(cx, 0.0, TouchPhase::Started);
         pan(cx, -1.0, TouchPhase::Moved);
-        assert_eq!(owner(cx), Some(false), "nothing below: the gesture is the canvas's");
+        assert_eq!(owner(cx), Some(false), "nothing below: the gesture is the strip's");
         pan(cx, 99.0, TouchPhase::Moved);
         assert_eq!(offset(cx), 0, "the grid stays out of a gesture it did not take");
         pan(cx, 0.0, TouchPhase::Ended);
         pan(cx, 99.0, TouchPhase::Moved);
         assert_eq!(offset(cx), 0, "momentum the other way round, and still not the grid's");
-        // A mouse wheel has no gesture: the latch says "canvas" and the notch scrolls anyway.
+        // A mouse wheel has no gesture: the latch says "the strip's" and the notch scrolls anyway.
         wheel(cx, 3.0, mods, TouchPhase::Moved);
         assert_eq!(offset(cx), 3, "a wheel notch belongs to nothing and is judged on its own");
         wheel(cx, -3.0, mods, TouchPhase::Started);
@@ -5727,7 +6009,8 @@ mod tests {
 
         let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
         wheel(cx, 3.0, cmd, TouchPhase::Started);
-        assert_eq!(offset(cx), 0, "⌘-wheel is the canvas's zoom");
+        assert_eq!(offset(cx), 3, "⌘ held, the wheel still scrolls the history");
+        wheel(cx, -3.0, mods, TouchPhase::Started);
         let wheels = |rx: &mut mpsc::Receiver<ClientMsg>| {
             std::iter::from_fn(|| rx.try_recv().ok())
                 .filter_map(|msg| match msg {
@@ -5753,7 +6036,7 @@ mod tests {
         assert_eq!(offset(cx), 0, "and the viewport stays");
         // A finger landing inside a program that wants the mouse takes the gesture there and
         // then: the program has it whichever way it goes, so there is nothing to wait to see,
-        // and the canvas never gets an event out of the middle of it.
+        // and the strip never gets an event out of the middle of it.
         pan(cx, 0.0, TouchPhase::Started);
         assert_eq!(owner(cx), Some(true), "the program owns it from the landing");
         let shift = gpui::Modifiers { shift: true, ..gpui::Modifiers::default() };
@@ -6052,7 +6335,7 @@ mod tests {
     }
 
     /// ⌘-press on a path and a pull past the slop drags the file out instead of opening it:
-    /// the canvas hears `DragOut` with the path, and nothing is typed.
+    /// the workspace hears `DragOut` with the path, and nothing is typed.
     #[gpui::test]
     fn cmd_drag_on_a_path_drags_the_file_out(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
@@ -6160,8 +6443,60 @@ mod tests {
         assert_eq!(keys, 1, "then ↩");
     }
 
-    /// While a command runs there is no prompt to type at: ⌘-click on a path asks the canvas
-    /// for a file card instead (`ViewFile` with the path as printed), and types nothing.
+    /// ⌘-click at the prompt on a directory `ls -F` printed asks the workspace for it (a folder
+    /// tile) and types no editor command, since no editor opens a directory.
+    #[gpui::test]
+    fn cmd_click_on_a_directory_views_it_instead_of_typing(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let viewed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&viewed);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::ViewFile { path, line } = event {
+                    seen.borrow_mut().push((path.clone(), *line));
+                }
+            })
+            .detach();
+        });
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 30,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    images: Vec::new(),
+                    updates: vec![RowUpdate {
+                        row: 0,
+                        line: Line::from_text("src/  target/  a.rs", 30, Style::DEFAULT),
+                    }],
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        let metrics = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let cell = metrics.origin + point(metrics.cell_width * 8.5, metrics.line_height * 0.5);
+        let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
+        cx.simulate_click(cell, cmd);
+        cx.run_until_parked();
+        assert_eq!(*viewed.borrow(), [("target/".to_owned(), None)]);
+        let typed = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|msg| matches!(msg, ClientMsg::Term { .. }))
+            .count();
+        assert_eq!(typed, 0, "nothing typed at the prompt");
+    }
+
+    /// While a command runs there is no prompt to type at: ⌘-click on a path asks the workspace
+    /// for a file tile instead (`ViewFile` with the path as printed), and types nothing.
     #[gpui::test]
     fn cmd_click_on_a_path_while_a_command_runs_views_it(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
@@ -6281,7 +6616,7 @@ mod tests {
         assert_eq!(cx.opened_url().as_deref(), Some("http://a.b"), "one tap, one link");
     }
 
-    /// The key bar's ⌘ then a tap on a path at a prompt views the file as a card, not the
+    /// The key bar's ⌘ then a tap on a path at a prompt views the file as a file tile, not the
     /// editor: a phone has no comfortable `vi`.
     #[gpui::test]
     fn sticky_command_views_the_path_under_the_next_tap(cx: &mut TestAppContext) {
@@ -6410,7 +6745,7 @@ mod tests {
         assert!(underline > row * 0.75, "the underline is below the baseline: {strokes:?}");
     }
 
-    /// However far the canvas has zoomed, the painted grid stays inside the item: the columns
+    /// However far the overview has zoomed, the painted grid stays inside the tile: the columns
     /// were counted with the unzoomed cell, so the zoomed cell is that one scaled, never one
     /// derived again and rounded up (which clipped the last column at small zooms).
     #[gpui::test]
@@ -6665,7 +7000,7 @@ mod tests {
     }
 
     /// A long press on something drawn over the grid (the find bar) is not the grid's: it
-    /// selects nothing, and the canvas may have it; one on the text selects the word.
+    /// selects nothing, and the strip may have it; one on the text selects the word.
     #[gpui::test]
     fn a_long_press_over_an_overlay_is_not_the_grids(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
@@ -6725,7 +7060,7 @@ mod tests {
         };
         view.update_in(cx, |view, _window, cx| {
             view.apply(
-                TermEvent::Image { id: 7, generation: 3, width: 2, height: 1, rgba: vec![255; 8] },
+                TermEvent::Image { id: 7, generation: 3, width: 2, height: 1, bgra: vec![255; 8] },
                 cx,
             );
             let TermEvent::Frame(mut frame) = history_frame(0, &["a", "b", "c"]) else {

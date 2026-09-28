@@ -1,0 +1,188 @@
+//! The focused tile under the view cache: replayed while other tiles draw; drawn afresh for its
+//! own changes, when the focus moves, for what is typed into a face's or a note's field, and with
+//! every frame while a shell's find bar has the keyboard.
+
+use super::*;
+
+/// 80 columns of words, `rows` deep.
+fn dense(rows: usize, seed: usize) -> Vec<String> {
+    (0..rows).map(|row| format!("{:<80}", format!("{seed} {row} ").repeat(12))).collect()
+}
+
+/// A focused shell full of text is left as it was drawn while a neighbour's output draws a
+/// hundred frames; its own output draws it, and so do the focus leaving and coming back.
+#[gpui::test]
+fn the_focused_shell_is_replayed_while_a_neighbour_draws(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let [(busy, beside), (quiet, mine), _] = three_shells(&view, cx, &fake);
+    let screen = dense(40, 0);
+    let screen: Vec<&str> = screen.iter().map(String::as_str).collect();
+    view.update_in(cx, |v, _w, cx| {
+        v.term_event(quiet, frame(&screen), cx);
+        v.focus_tile(mine, cx);
+    });
+    cx.run_until_parked();
+    assert!(terminal_focused(&view, cx, quiet), "the dense shell has the keyboard");
+    assert!(cx.debug_bounds(selector("item", beside.item)).is_some(), "the neighbour is drawn");
+    let term = |s: SessionId, cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| v.terminal(s).cloned()).expect("attached")
+    };
+    let (focused, loud) = (term(quiet, cx), term(busy, cx));
+    let renders =
+        |t: &Entity<TerminalView>, cx: &mut VisualTestContext| t.read_with(cx, |t, _| t.renders());
+    // GPUI draws the whole window afresh once after a focus lands.
+    view.update_in(cx, |v, _w, cx| v.term_event(busy, frame(&["line", ""]), cx));
+    cx.run_until_parked();
+    let (before, loud_before) = (renders(&focused, cx), renders(&loud, cx));
+    for i in 0..100 {
+        let line = format!("line {i}");
+        view.update_in(cx, |v, _w, cx| v.term_event(busy, frame(&[&line, ""]), cx));
+        cx.run_until_parked();
+    }
+    assert!(renders(&loud, cx) >= loud_before.saturating_add(100), "the neighbour drew");
+    assert_eq!(renders(&focused, cx), before, "the focused shell was replayed, not rendered");
+
+    let screen = dense(40, 1);
+    let screen: Vec<&str> = screen.iter().map(String::as_str).collect();
+    view.update_in(cx, |v, _w, cx| v.term_event(quiet, frame(&screen), cx));
+    cx.run_until_parked();
+    let own = renders(&focused, cx);
+    assert!(own > before, "its own output draws it: {before} → {own}");
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(beside, cx));
+    cx.run_until_parked();
+    let left = renders(&focused, cx);
+    assert!(left > own, "the focus leaving draws it: {own} → {left}");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(mine, cx));
+    cx.run_until_parked();
+    assert!(terminal_focused(&view, cx, quiet));
+    assert!(renders(&focused, cx) > left, "and coming back");
+}
+
+/// While the focused shell's find bar has the keyboard, the shell is still left as it was
+/// drawn while a neighbour's output draws frames: the field is a view, so what is typed there
+/// draws the shell.
+#[gpui::test]
+fn a_focused_shell_whose_find_bar_has_the_keys_is_replayed_until_it_is_typed_in(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let [(busy, _), (quiet, mine), _] = three_shells(&view, cx, &fake);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(mine, cx));
+    cx.run_until_parked();
+    let focused = view.read_with(cx, |v, _| v.terminal(quiet).cloned()).expect("attached");
+    cx.update(|window, cx| focused.update(cx, |t, cx| t.find_with("line", window, cx)));
+    cx.run_until_parked();
+    assert!(!terminal_focused(&view, cx, quiet), "the find bar has the keyboard");
+    // The keyboard moved inside the tile since its body was drawn, so the next frame draws the
+    // shell once more; a replay would hand keys to the grid.
+    view.update_in(cx, |v, _w, cx| v.term_event(busy, frame(&["line", ""]), cx));
+    cx.run_until_parked();
+    let before = focused.read_with(cx, |t, _| t.renders());
+    for i in 0..100 {
+        let line = format!("line {i}");
+        view.update_in(cx, |v, _w, cx| v.term_event(busy, frame(&[&line, ""]), cx));
+        cx.run_until_parked();
+    }
+    assert_eq!(focused.read_with(cx, |t, _| t.renders()), before, "replayed");
+    cx.simulate_input(" 7");
+    cx.run_until_parked();
+    let typed = focused.read_with(cx, |t, _| t.renders());
+    assert!(typed > before, "the typing draws the shell: {before} → {typed}");
+}
+
+/// A focused face, its composer holding the keyboard, is left as it was drawn while a
+/// neighbour's output draws a hundred frames. The face observes its composer, so what is typed
+/// there draws it: the send button lights for the draft.
+#[gpui::test]
+fn the_focused_face_is_replayed_while_a_neighbour_draws(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let busy = SessionId::new();
+    let beside = opens(&view, cx, &fake, busy, fake.me, 1);
+    let agent = SessionId::new();
+    let mine = opens(&view, cx, &fake, agent, fake.me, 2);
+    view.update_in(cx, |v, _w, cx| {
+        let idle = AgentEvent { status: AgentStatus::Idle, attention: false, ..blocked(agent) };
+        v.agent_event(idle, cx);
+        v.focus_tile(mine, cx);
+        v.show_face(agent, true, cx);
+    });
+    cx.run_until_parked();
+    let face = view.read_with(cx, |v, _| v.conversation(agent).cloned()).expect("a face");
+    let composing = cx.update(|window, cx| face.read(cx).focus_handle(cx).is_focused(window));
+    assert!(composing, "the composer has the keyboard");
+    assert!(cx.debug_bounds(selector("item", beside.item)).is_some(), "the neighbour is drawn");
+    let renders = |cx: &mut VisualTestContext| face.read_with(cx, |f, _| f.renders());
+    // GPUI draws the whole window afresh once after a focus lands.
+    view.update_in(cx, |v, _w, cx| v.term_event(busy, frame(&["line", ""]), cx));
+    cx.run_until_parked();
+    let before = renders(cx);
+    for i in 0..100 {
+        let line = format!("line {i}");
+        view.update_in(cx, |v, _w, cx| v.term_event(busy, frame(&[&line, ""]), cx));
+        cx.run_until_parked();
+    }
+    assert_eq!(renders(cx), before, "the focused face was replayed, not rendered");
+
+    let lit = |cx: &mut VisualTestContext| {
+        let send = cx.debug_bounds("composer-send").expect("the send button");
+        let fill = crate::colors::hsla(Theme::default().surfaces.accent_fill);
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        quads.iter().any(|q| {
+            q.background == gpui::Background::from(fill)
+                && (q.bounds.origin.x.0 / scale - f32::from(send.left())).abs() < 0.5
+                && (q.bounds.origin.y.0 / scale - f32::from(send.top())).abs() < 0.5
+        })
+    };
+    assert!(!lit(cx), "an empty draft leaves send unlit");
+    cx.simulate_input("ship it");
+    cx.run_until_parked();
+    assert!(renders(cx) > before, "typing draws the face");
+    assert_eq!(face.read_with(cx, crate::conversation::ConversationView::draft), "ship it");
+    assert!(lit(cx), "and the painted send button lights for the draft");
+}
+
+/// A focused note, its editor holding the keyboard, is left as it was drawn while a neighbour's
+/// output draws a hundred frames. The note observes its editor, so what is typed draws it.
+#[gpui::test]
+fn the_focused_note_is_replayed_while_a_neighbour_draws(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.update(|window, _| window.activate_window());
+    let mut fake = connect(&view, cx, 1, "studio");
+    let busy = SessionId::new();
+    let beside = opens(&view, cx, &fake, busy, fake.me, 1);
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    let id = fake
+        .drain()
+        .iter()
+        .find_map(|m| match m {
+            ClientMsg::Items(ItemOp::Add(i)) if matches!(i.kind, ItemKind::Note { .. }) => {
+                Some(i.id)
+            }
+            _ => None,
+        })
+        .expect("the note went to the worker");
+    let note = view.read_with(cx, |v, _| v.notes.get(&id).cloned()).expect("the note's view");
+    let editing = cx.update(|window, cx| note.read(cx).editing(window, cx));
+    assert!(editing, "the note's editor has the keyboard");
+    assert!(cx.debug_bounds(selector("item", beside.item)).is_some(), "the neighbour is drawn");
+    let renders = |cx: &mut VisualTestContext| note.read_with(cx, |n, _| n.renders());
+    view.update_in(cx, |v, _w, cx| v.term_event(busy, frame(&["line", ""]), cx));
+    cx.run_until_parked();
+    let before = renders(cx);
+    for i in 0..100 {
+        let line = format!("line {i}");
+        view.update_in(cx, |v, _w, cx| v.term_event(busy, frame(&[&line, ""]), cx));
+        cx.run_until_parked();
+    }
+    assert_eq!(renders(cx), before, "the focused note was replayed, not rendered");
+
+    cx.simulate_input("ship it");
+    cx.run_until_parked();
+    assert!(renders(cx) > before, "typing draws the note");
+    assert_eq!(note.read_with(cx, |n, _| n.drawn().to_owned()), "ship it", "with the new text");
+}

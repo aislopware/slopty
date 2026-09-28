@@ -81,8 +81,10 @@ pub enum Effect {
 pub struct ViewRow<'a> {
     /// Absolute index (for selection anchoring).
     pub index: LineIndex,
-    /// The line, or `None` while it is being fetched.
-    pub line: Option<&'a Line>,
+    /// The line, or `None` while it is being fetched. Shared with the screen and history: a
+    /// line is replaced whole, never changed in place while shared, so the allocation names
+    /// its contents (a renderer keys its row cache by it).
+    pub line: Option<&'a Arc<Line>>,
 }
 
 /// The state of one attached terminal session.
@@ -155,8 +157,8 @@ pub struct TermImage {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
-    /// RGBA, row-major; shared with whatever texture the view makes of it.
-    pub rgba: Arc<[u8]>,
+    /// BGRA with the alpha premultiplied, row-major, as the worker sent it: the texture format.
+    pub bgra: Vec<u8>,
     /// The frame that last placed it (the cache drops the least recently placed first).
     pub last: u64,
 }
@@ -255,10 +257,10 @@ impl TermState {
     /// (`IMAGE_CACHE_BYTES`), so both sides forget the same images.
     fn keep_image(&mut self, id: u32, image: TermImage) {
         if let Some(old) = self.images.insert(id, image) {
-            self.image_bytes = self.image_bytes.saturating_sub(old.rgba.len());
+            self.image_bytes = self.image_bytes.saturating_sub(old.bgra.len());
         }
         if let Some(new) = self.images.get(&id) {
-            self.image_bytes = self.image_bytes.saturating_add(new.rgba.len());
+            self.image_bytes = self.image_bytes.saturating_add(new.bgra.len());
         }
         self.prune_images();
     }
@@ -267,7 +269,7 @@ impl TermState {
         while self.image_bytes > IMAGE_CACHE_BYTES {
             let Some((&id, _)) = self.images.iter().min_by_key(|(_, i)| i.last) else { break };
             if let Some(gone) = self.images.remove(&id) {
-                self.image_bytes = self.image_bytes.saturating_sub(gone.rgba.len());
+                self.image_bytes = self.image_bytes.saturating_sub(gone.bgra.len());
             }
         }
     }
@@ -402,9 +404,9 @@ impl TermState {
             }
             TermEvent::Bell => vec![Effect::Bell],
             TermEvent::Notification { title, body } => vec![Effect::Notification { title, body }],
-            TermEvent::Image { id, generation, width, height, rgba } => {
+            TermEvent::Image { id, generation, width, height, bgra } => {
                 let last = self.frames;
-                let image = TermImage { generation, width, height, rgba: rgba.into(), last };
+                let image = TermImage { generation, width, height, bgra, last };
                 self.keep_image(id, image);
                 Vec::new()
             }
@@ -776,12 +778,7 @@ impl TermState {
     /// integration).
     #[must_use]
     pub fn block_head(&self, index: LineIndex) -> Option<BlockHead> {
-        let prompt = if self.line(index).is_some_and(|l| l.mark.starts_prompt()) {
-            index
-        } else {
-            self.prompt_before(index)?
-        };
-        self.line(prompt)?;
+        let prompt = self.block_start(index)?;
         let exit = self.block_exit(prompt);
         let body = self.block_body(prompt);
         // From each prompt row its input column on; an `Input` row whole.
@@ -803,6 +800,38 @@ impl TermState {
             command: (!command.trim().is_empty()).then_some(command),
             body,
         })
+    }
+
+    /// The prompt row of the command block a line belongs to, and whether a command was typed
+    /// at it: [`Self::block_head`]'s `prompt` and `command.is_some()`, without building the
+    /// command's text. What the per-frame and per-move readers (the hovered block) ask.
+    #[must_use]
+    pub fn block_prompt(&self, index: LineIndex) -> Option<(LineIndex, bool)> {
+        let prompt = self.block_start(index)?;
+        let typed = |line: &Line, from: u16| {
+            line.cells
+                .iter()
+                .skip(usize::from(from))
+                .filter(|cell| cell.width.draws_text())
+                .any(|cell| cell.text.as_str().chars().any(|c| !c.is_whitespace()))
+        };
+        let command = (prompt.0..self.block_body(prompt).0).any(|i| {
+            self.line(LineIndex(i)).is_some_and(|line| match line.mark.input_col() {
+                Some(col) => typed(line, col),
+                None => line.mark == SemanticMark::Input && typed(line, 0),
+            })
+        });
+        Some((prompt, command))
+    }
+
+    /// The held prompt row a line's block starts at.
+    fn block_start(&self, index: LineIndex) -> Option<LineIndex> {
+        let prompt = if self.line(index).is_some_and(|l| l.mark.starts_prompt()) {
+            index
+        } else {
+            self.prompt_before(index)?
+        };
+        self.line(prompt).map(|_| prompt)
     }
 
     /// The status of the command typed at `prompt`: the shell reports it (`OSC 133;D`) on the
@@ -998,7 +1027,7 @@ impl TermState {
                 .enumerate()
                 .map(|(i, line)| ViewRow {
                     index: self.first_visible.offset(u64::try_from(i).unwrap_or(u64::MAX)),
-                    line: Some(line.as_ref()),
+                    line: Some(line),
                 })
                 .collect();
         }
@@ -1009,9 +1038,9 @@ impl TermState {
                 let line = if index >= self.first_visible {
                     let row = usize::try_from(index.0.saturating_sub(self.first_visible.0))
                         .unwrap_or(usize::MAX);
-                    self.screen.lines().get(row).map(AsRef::as_ref)
+                    self.screen.lines().get(row)
                 } else {
-                    self.scrollback.get(index)
+                    self.scrollback.get_shared(index)
                 };
                 ViewRow { index, line }
             })
@@ -1414,6 +1443,13 @@ mod tests {
         assert_eq!((block.prompt, block.end, block.exit), (LineIndex(3), LineIndex(4), Some(1)));
         assert_eq!((block.command.as_deref(), block.output.as_str()), (Some("false"), ""));
         assert_eq!(state.command_block(LineIndex(0)).map(|b| b.output), Some("a\nb".to_owned()));
+        // The head's prompt and whether anything was typed, without its text: the same answer
+        // on every row, the bare prompt at 8 included.
+        for i in 0..=9 {
+            let head = state.block_head(LineIndex(i)).map(|h| (h.prompt, h.command.is_some()));
+            assert_eq!(state.block_prompt(LineIndex(i)), head, "row {i}");
+        }
+        assert_eq!(state.block_prompt(LineIndex(8)), Some((LineIndex(8), false)));
         let newest = state.command_block(LineIndex(8)).expect("the open prompt");
         assert_eq!((newest.prompt, newest.end), (LineIndex(8), LineIndex(9)));
         assert_eq!(newest.command, None, "nothing typed after the prompt");
@@ -1575,7 +1611,7 @@ mod tests {
     }
 
     fn texts(state: &TermState) -> Vec<Option<String>> {
-        state.view().into_iter().map(|r| r.line.map(Line::text)).collect()
+        state.view().into_iter().map(|r| r.line.map(|l| l.text())).collect()
     }
 
     #[test]
@@ -1727,7 +1763,7 @@ mod tests {
             generation,
             width: 1,
             height: 1,
-            rgba: vec![7; bytes],
+            bgra: vec![7; bytes],
         };
         let placement = |image: u32, generation: u64| Placement {
             image,
@@ -1748,7 +1784,7 @@ mod tests {
         first.images = vec![placement(1, 1)];
         let _effects = t.apply(TermEvent::Frame(first));
         assert_eq!(t.placements().len(), 1);
-        assert_eq!(t.image(&placement(1, 1)).map(|i| i.rgba.to_vec()), Some(vec![7; 4]));
+        assert_eq!(t.image(&placement(1, 1)).map(|i| i.bgra.clone()), Some(vec![7; 4]));
         assert_eq!(t.image(&placement(1, 2)), None, "a newer generation is not held");
         assert!(t.holds(1, 1) && !t.holds(1, 2) && !t.holds(2, 1), "what a refresh must ask for");
         // Image 2 arrives, then frame 2 places image 1 again: image 2 is now the least

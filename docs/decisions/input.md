@@ -306,6 +306,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   after clamping. Tests: `a_window_streams_pointer_is_where_its_input_put_it`,
   `a_window_streams_cursor_is_where_its_input_put_the_pointer`. A hardware check is still owed.
   Stream a window, hover and click, and see the pointer follow.
+  - Amended 2026-09-28: **the client draws the pointer where it put it.** On a window stream
+    the worker's sample is only the `PointerWatch` echo of this client's own input. Drawing it
+    cost a round trip, up to a cursor tick and a frame for a point the client already had,
+    about 30 to 67 ms to glass on a 10 to 40 ms mesh against 19 ms now (MEASUREMENTS, "a remote
+    pointer drawn where the client put it"). The objection above does not hold for the way it
+    is now done. The overlay still draws the worker's cursor picture (`ScreenEvent::Cursor`),
+    only at the client's point. The point is clamped to the stream's bounds, as the release
+    already was, and rounded to whole stream pixels, as the worker's sample is. So a click is
+    shown where the worker puts it. `ScreenView` draws its `pointer_at` on a window stream
+    once this client has put the pointer somewhere, and a move redraws the view with the
+    pointer in that frame. A display is different: the worker's own hand, another client or an
+    app's warp moves the real pointer. There the client's point is drawn for `LOCAL_HOLD`
+    (200 ms) plus the round trip after its last move, which covers the echo of its own moves.
+    Outside that hold the worker's sample is drawn, and a sample that differs from the
+    client's point when the hold ends redraws the view then. Trackpad mode keeps drawing the
+    trackpad's pointer. What is left between this and a local pointer is one app frame: the
+    overlay is drawn by the app, not by the hardware cursor. A fork `CursorStyle` that carries
+    the worker's picture would remove that, and is not built. Tests:
+    `a_window_streams_pointer_is_drawn_where_this_client_put_it_in_the_same_frame`,
+    `a_displays_pointer_follows_the_worker_unless_this_client_moves_it`.
 
 - ✅ **The worker's pointer is drawn at the scale input maps with** (2026-09-25). The cursor
   overlay and the IME caret divided the worker's sample by the size of the frame on screen.
@@ -340,3 +360,91 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   nothing else can reach them. Tests: `the_census_lets_go_of_every_stream_before_the_process_ends`
   and `the_census_wait_is_bounded`. The signal wiring in `apps/slopty-worker/src/main.rs` has
   no test; it is checked by reading.
+
+- ✅ **A remote picture zooms inside its tile, and fingers can be a trackpad** (2026-09-28). On
+  a phone a 5K display drawn at fit is unreadable and a 12 pt control is smaller than a
+  fingertip, and a pinch over the picture opened the workspace overview. Four rulings, all on
+  the client, with no wire change:
+  1. *The pinch belongs to what it starts on.* The strip's capture handler decides at the
+     pinch's `Started` and keeps the decision for the whole pinch. A pinch that begins on the
+     body of a remote picture that would keep a sideways swipe (every picture on a phone, the
+     focused one on the Mac) goes on to the picture, with the overview closed. Anything else,
+     and any pinch while the overview is open, is the overview's, and the strip now stops it
+     there so the picture under it does not zoom as well.
+  2. *The zoom is a fraction of the body.* `screen::Zoom` holds a scale over fit and the
+     picture's top-left, both in fractions of the tile's body. A tile that changes size keeps
+     the same part of the picture in view, and the picture is placed with `relative()` lengths,
+     so a body that changed between the zoom and the draw needs no correction. The scale runs
+     from fit to twice one to one (never less than twice fit). The origin is clamped so a zoomed
+     picture always covers the body. A pinch keeps the point under the fingers where it is,
+     and the centroid's travel pans. A double tap goes to one to one about the tapped point,
+     or to twice fit where fit already magnifies, and back. Its second tap is not sent, since
+     the first has clicked; a remote double click by touch is trackpad mode's. The zoom lives
+     on the view, so it is per tile and lasts as long as the tile. Everything the view maps goes
+     through it: a tap, a click, a release off the body, the worker's drawn pointer and the IME
+     caret. A zoomed picture asks the worker for the scale it is drawn at (the existing
+     `SetQuality`, bucketed and rate-limited as before), so it sharpens up to native as it grows.
+  3. *Trackpad mode is per tile.* One finger claims gpui's touch drag, so it is neither a tap
+     nor a pan, and moves a pointer relatively. The gain is 1 up to 150 pt/s, so aiming is point
+     for point, and rises linearly to 3× at 1500 pt/s. A point of finger travel is a point of
+     pointer travel on the drawn picture, so zoomed in the same stroke covers fewer of the
+     target's pixels. A tap clicks at the pointer, a quick second tap double-clicks, a still
+     finger held for 500 ms right-clicks, and a tap followed at once by a drag drags with the
+     button held. Two fingers lock to a pinch (6 % of scale) or a drag (10 pt), whichever comes
+     first: the pinch zooms, the drag scrolls at the pointer with the phases a trackpad sends.
+     The pointer is drawn where the fingers put it, not one round trip later where the worker
+     says it is. Zoomed in, the view pans to keep it `spacing.xl` inside the body's edges.
+     Turning the mode off lets go of a held drag.
+  4. *Two fingers tapped right-click*, on glass only, at the pointer in trackpad mode and under
+     the fingers otherwise. It relies on UIKit's pinch recognizer reporting a two-finger tap
+     that barely moves (under 8 pt and 6 % in 300 ms); a device run has to confirm that it does.
+  A zoom puts a small readout up (`Fit`, or the size against one to one, so `100 %` is pixel for
+  pixel) for 700 ms, which then fades over `kit::FADE`, or goes at once under Reduce Motion. The
+  toggle is `screen::ToggleTrackpad`: "Trackpad mode" in the palette, handled by the focused
+  picture and otherwise by the workspace for the active one, and `ScreenView::trackpad_button`
+  is its header control on glass, filled while the mode is on
+  (`the_palettes_trackpad_mode_reaches_the_active_picture`).
+  Tests: `screen::zoom::tests` (mapping at fit, about the fingers, at the edges, clamps, the
+  double tap, revealing, the readout), `screen::touch::tests` (the acceleration curve, relative
+  moves, taps, hold, tap-drag, the two-finger lock), `a_tap_lands_on_the_pixel_drawn_under_it_at_any_zoom`,
+  `a_double_tap_toggles_fit_and_one_to_one_on_glass`, `two_fingers_zoom_pan_and_tap`,
+  `trackpad_mode_moves_a_pointer_and_clicks_where_it_is`,
+  `the_zoom_readout_fades_and_the_stream_follows_the_zoom`, and the workspace's
+  `a_pinch_over_a_stream_zooms_it_and_over_a_shell_opens_the_overview`. The iOS simulator
+  harness can deliver a pinch (`UiPinch`) but has no streamed picture to aim it at, so these
+  run at the slopty-ui layer on gpui's own pinch and touch-drag events. The frame cost is in
+  MEASUREMENTS ("a zoomed stream's frame"). Not built: panning a zoomed picture on the Mac,
+  where a trackpad pinch reports no centroid travel.
+
+- ✅ **⌘-scroll is the tile's, no longer held back for a zoom** (2026-09-28). The canvas zoomed
+  on ⌘-scroll, so the terminal dropped a ⌘-wheel and a remote picture never sent one. The
+  scrolling workspace has no such zoom (its own wheel chord is ⌘⌥, taken before the tiles see
+  it), and the guards had become a dead key: ⌘-scroll did nothing anywhere. A terminal now
+  scrolls its history on ⌘-scroll as on a plain one, and a remote picture forwards it with ⌘
+  held, as the same gesture on that Mac would arrive. Tests:
+  `the_wheel_adds_up_fractions_and_reaches_a_program_that_wants_it`,
+  `pointer_and_scroll_reach_the_worker_in_stream_pixels`.
+
+- ✅ **A move with another move queued behind it is not posted** (2026-09-28). The input thread
+  posted every job in turn. After a stall (the owner lookup before a press, up to 17 ms, or a
+  bounds read no probe spared) it posted each move handed over meanwhile, replaying a path the
+  client had left, before the click or key behind them. Now the thread takes what is queued
+  before it posts a move. It drops the move when the next job, skipping new bounds and a new
+  scale, is another move. Every other job keeps its turn. Only the pointer's place is lost, and
+  a drag keeps its button state because the next move posts as the same drag. With a 17 ms stall
+  at 500 Hz moves, 257–264 of 6 000 moves are passed over and every post's p99 drops from 18.8 to
+  10.1–10.7 ms (MEASUREMENTS, "moves queued behind a stall"). A drawing app behind a stall gets a
+  straight segment where the client drew a curve. That is the price. Test:
+  `moves_queued_behind_a_stall_post_as_one_before_the_click`.
+
+- ✅ **A window's input is applied from whichever copy comes first, clicks and keys in order and
+  moves latest-wins** (2026-09-28). Window input now has datagram copies beside the control
+  stream (`docs/decisions/transport.md`, same date). The worker applies each click, key, scroll
+  and pinch exactly once and in the order sent. A move may overtake older moves but never a
+  click, key or quality change sent before it, and a move older than anything applied is
+  dropped, so the pointer never jumps back. Every ordered input carries its own position, so
+  skipping the moves before a click changes nothing the click does. Tests:
+  `a_window_input_copy_applies_once_and_clicks_and_keys_only_in_turn`,
+  `window_input_through_any_race_lands_in_order_and_never_goes_back` (500 random races of
+  stream delay and copy loss), `window_input_through_a_lossy_link_lands_once_in_order` (the real
+  link through a shaper losing a fifth of its packets each way).

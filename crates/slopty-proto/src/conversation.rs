@@ -25,6 +25,15 @@
 //! thinking and tool input as the model writes them, before the transcript has them. They go
 //! as [`ConversationEvent::Live`]: uncommitted text a client shows at the end of its thread,
 //! cleared once the transcript settles it.
+//!
+//! **Background output.** A command Claude Code runs in the background writes to a file of its
+//! own, not to the transcript. The worker tails that file while the command runs and sends its
+//! end as [`ConversationEvent::Output`]; how the command ended comes with its entry.
+//!
+//! **Images.** An entry names a picture ([`Image`]) by its digest and its size, never with its
+//! bytes. A client asks for the bytes when the picture comes into view
+//! ([`ConversationRequest::Expand`] of its [`Image::at`]) and keeps them by digest, so a picture
+//! that shows twice travels once.
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, SessionId};
@@ -83,6 +92,21 @@ pub enum Part {
     Stderr,
     /// An edit's whole diff (`toolUseResult.structuredPatch`), as unified hunks.
     Patch,
+    /// An image: the message's content block at `index`, or, with `tool_use_id`, the block at
+    /// `index` of that call's result (a result with no image block keeps its picture in
+    /// `toolUseResult.file`, as block 0). Its bytes come as [`ConversationEvent::Image`].
+    Image {
+        /// The call whose result holds it; `None` for a picture in a prompt.
+        tool_use_id: Option<String>,
+        /// The block's position.
+        index: u32,
+    },
+    /// What a background command printed, read from the end of the file it writes (the
+    /// record is the one that named the file).
+    Output {
+        /// The command's call.
+        tool_use_id: String,
+    },
 }
 
 /// A text, cut to a cap when it is longer.
@@ -216,7 +240,7 @@ pub struct Prompt {
     /// The words, or a command's arguments.
     pub text: Clipped,
     /// Images pasted with it.
-    pub images: u32,
+    pub images: Vec<Image>,
     /// A slash command (`/compact`), or `!` for a shell command typed in bash mode.
     pub command: Option<String>,
 }
@@ -290,6 +314,28 @@ pub struct ToolResult {
     pub text: Option<Clipped>,
     /// When the result was written.
     pub at_ms: u64,
+    /// Images it returned: a screenshot, a picture read from a file.
+    pub images: Vec<Image>,
+}
+
+/// Most bytes of an image a worker sends; a larger one is described and never sent.
+pub const IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// A picture in the conversation, described; its bytes are sent only when asked for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Image {
+    /// BLAKE3 of its bytes, in hex: the same picture has the same digest wherever it shows.
+    pub digest: String,
+    /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
+    pub media_type: String,
+    /// Its size in bytes.
+    pub bytes: u64,
+    /// Its width in pixels, as its header gives it; 0 when it does not.
+    pub width: u32,
+    /// Its height in pixels; 0 when its header does not give it.
+    pub height: u32,
+    /// Where it is in the transcript ([`Part::Image`]).
+    pub at: TextRef,
 }
 
 /// How a call ended.
@@ -484,6 +530,8 @@ pub struct BashDetail {
     pub stderr: Option<Clipped>,
     /// Where a background command's output goes; the worker tails it.
     pub output_file: Option<String>,
+    /// When a background command finished, by Claude Code's notice of it.
+    pub finished_ms: Option<u64>,
 }
 
 /// Where a shell command stands.
@@ -848,8 +896,8 @@ pub enum ConversationRequest {
         verdict: Verdict,
     },
     /// Send the whole of a clipped text (one whose `full` is set), as
-    /// [`ConversationEvent::Expanded`] on the session's conversation stream. Only while
-    /// following.
+    /// [`ConversationEvent::Expanded`] on the session's conversation stream, or an image's
+    /// bytes ([`Part::Image`]) as [`ConversationEvent::Image`]. Only while following.
     Expand {
         /// The session.
         session: SessionId,
@@ -885,6 +933,42 @@ pub enum ConversationEvent {
     /// Blocks the model is writing now, ahead of the transcript, in order. Only where the
     /// agent runs Slopty's Claude Code mod, and only after [`ConversationEvent::Current`].
     Live(Vec<Live>),
+    /// What background commands have printed since they were last sent, each as the end of
+    /// its output now. Sent after [`ConversationEvent::Current`], and all again after a
+    /// [`Change::Reset`] of every thread.
+    Output(Vec<Output>),
+    /// The answer to [`ConversationRequest::Expand`] for an image.
+    Image {
+        /// The thread asked about.
+        thread: ThreadId,
+        /// The image asked for.
+        reference: TextRef,
+        /// Its bytes; `None` when the transcript no longer has it or it is larger than
+        /// [`IMAGE_BYTES`].
+        blob: Option<Blob>,
+    },
+}
+
+/// The end of what a background command has printed.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Output {
+    /// The thread of the call that started it.
+    pub thread: ThreadId,
+    /// That call's `tool_use_id`.
+    pub call: String,
+    /// The last lines, colour codes taken out; `full` asks for more of it ([`Part::Output`]).
+    pub tail: Clipped,
+    /// Bytes it has written.
+    pub bytes: u64,
+}
+
+/// An image's bytes, named by their digest.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Blob {
+    /// BLAKE3 of `data`, in hex, as [`Image::digest`].
+    pub digest: String,
+    /// The encoded picture, as its [`Image::media_type`] says.
+    pub data: Vec<u8>,
 }
 
 /// A block the model is writing, not yet in the transcript.

@@ -5,10 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Process-level platform helpers shared by the Slopty apps and daemons (macOS, iOS)"
+description = "Process-level platform helpers shared by the Slopty apps and daemons (macOS, iOS, Linux)"
 
 [lints]
 workspace = true
+
+[dependencies]
+# Whose runtime directory a Linux socket falls back to (`dirs`); on Apple, also whether the run
+# that left a drop's landing behind is still alive (`file_drop::sweep`).
+rustix.workspace = true
+tracing.workspace = true
+# The daemons' `LaunchAgent` definitions (`service`), written and read back.
+plist.workspace = true
+# The wait for launchd to let go of an agent before it is loaded again (`service`).
+tokio.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2.workspace = true
@@ -20,8 +30,6 @@ block2.workspace = true
 dispatch2.workspace = true
 # A drop's landing, shared by the callbacks its files arrive on (`file_drop`).
 parking_lot.workspace = true
-# Whether the run that left a drop's landing behind is still alive (`file_drop::sweep`).
-rustix.workspace = true
 # A thread's QoS class (`user_interactive_thread`): pthread/qos.h, which rustix does not wrap.
 libc.workspace = true
 objc2-foundation = { workspace = true, features = [
@@ -37,8 +45,22 @@ objc2-foundation = { workspace = true, features = [
     "block2",
     # A page's ⌘Z and ⇧⌘Z go to its own undo manager (`web`).
     "NSUndoManager",
+    # Whether the app runs from a bundle, which the notification centre needs (`notify`).
+    "NSBundle",
 ] }
-tracing.workspace = true
+# Local notifications, their taps and the icon badge (`notify`).
+objc2-user-notifications = { workspace = true, features = [
+    "bitflags",
+    "block2",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSettings",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { workspace = true, features = [
@@ -82,6 +104,17 @@ objc2-ui-kit = { workspace = true, features = [
     "UIDragItem",
     "UIDragSession",
     "UIInteraction",
+    # Worker files dragged out of an iPad, lifted as their kind's icon (`file_drop::out`).
+    "UIDragInteraction",
+    "UITargetedDragPreview",
+    "UITargetedPreview",
+    "UIDragPreviewParameters",
+    "UIPreviewParameters",
+    "UIImageView",
+    # The Files picker, shown over the key window's controller (`file_drop::picker`).
+    "UIDocumentPickerViewController",
+    "UIViewController",
+    "UIWindow",
     # The browser tile (`web`): its views, the tap that focuses it, the snapshot.
     "UIView",
     "UIEvent",

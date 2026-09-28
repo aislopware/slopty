@@ -134,7 +134,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the same type, and renaming either side would have changed the tests.
   - **Left macOS-only in the core.** Capabilities (`caps.rs`: sysctl, `Os::MacOs`) and the
     listening ports (`ports.rs`: libproc) are not seams. A Linux worker adds its platform, its
-    `Native`, and those two probes.
+    `Native`, and those two probes, which it has since 2026-09-28.
 
 - ✅ **The CLI and `slopty mcp` name a terminal `worker/session` and resolve names on the
   client** (2026-09-25).
@@ -198,8 +198,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **MCP.** Streamable HTTP on TCP 45561 (`MCP_PORT`, next to `SERVER_PORT`), path `/mcp`,
     stateless, with JSON responses.
     - The listener binds `[::]` dual-stack and admits each TCP peer with the QUIC listener's
-      check (loopback, the tailnet, private LANs). It answers the same peers that binding
-      127.0.0.1 plus the tailnet and LAN addresses would, and it also reaches interfaces that
+      check (loopback, the tailnet, and any `allow` ranges). It answers the same peers that
+      binding 127.0.0.1 plus the tailnet address would, and it also reaches interfaces that
       come up after the server does, such as Tailscale starting late at boot.
     - It does not check `Host`, since tailnet names and IP literals are as legitimate as
       `localhost`. It refuses any request that carries `Origin` with a 403 instead. A browser
@@ -392,10 +392,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       carrying the time on disk, and nothing is written. `None` writes regardless. A missing
       file is created, since an editor saving over a deleted file expects that.
     - A directory, a pipe or any other non-regular file is `Failed` before it is opened, as a
-      read is. So is a text past `FILE_BYTES` (512 KiB), and a file on disk past it: the card
-      only ever held the first part of such a file, and saving it would cut the file there.
-    - The write is `file::replace`, the same path orchestration's `write_file` takes: a
-      temporary file beside the target, fsync, rename over, the old mode kept. A symbolic
+      read is. So is a text past `FILE_BYTES` (16 MiB since 2026-09-28, when a tile began to
+      hold whole files; a save larger than 64 KiB goes up a bulk stream, workspace.md "A file
+      tile edits any file up to 16 MiB").
+    - The write is `slopty_platform::fs::replace`, the same path orchestration's `write_file`
+      takes: a temporary file beside the target, its data ordered ahead of the rename, rename
+      over, the old mode kept. A symbolic
       link is followed and the file it names is replaced, so the link survives; renaming over
       the link would have swapped it for a copy.
     - `Saved` carries the new size and modification time, the base of the next save. The
@@ -622,7 +624,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     not checked: clippy stops before it, and a cross linker is a release concern.
   - Not yet: the worker and the CLI. The CLI takes the worker's and the client's crates, which
     call libproc, ScreenCaptureKit, VideoToolbox and the pasteboard directly; a Linux worker
-    needs those behind platform seams first (`slopty-platform` is where they go).
+    needs those behind platform seams first (`slopty-platform` is where they go). Both joined the
+    lane on 2026-09-28, and the terminal-only Linux worker runs (`platform.md`, "Linux proven in a
+    container").
 
 - ✅ **A worker is published where it listens, and the server admits a VPN** (2026-09-27). Two
   gaps the through-server e2e found once it ran on a Mac with Tailscale up:
@@ -657,3 +661,126 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     greeting, the resync after a lagged broadcast and the server link all read.
   - Tests: the `worker_hello_ack` and `worker_caps` goldens, and the worker's
     `the_greeting_names_the_home_and_what_the_worker_can_do`.
+
+- ✅ **A verb that changes something is done once per idempotency key, and the worker keeps
+  the table** (2026-09-27). An agent whose HTTP call timed out, or whose link dropped mid-verb,
+  sends the verb again, and a second open, keystroke or write was a second effect.
+  - **The key.** `ToServer::Request` and `FromServer::Request` carry an optional
+    `IdempotencyKey`, the caller's name for the effect: a UUID, or up to 128 printable ASCII
+    characters. It rides the envelope rather than each verb, since it names the call, not what
+    the call does. `Verb::changes` says which verbs honour it: the opens, `SendInput`, `Close`,
+    `WriteFile`, `ResizeTerminal`, the item changes, `ForgetWorker`, and `WaitFor`, whose met
+    wait moves the session's mark so a repeat would wait for the next match. A read ignores
+    the key and is answered afresh.
+  - **The worker keeps the table** (`slopty_worker::orchestrate::idempotency::Ledger`). The
+    effects happen there, and the worker outlives both of the failures that make a caller
+    retry: a server restart, and a dropped server link, after which the worker redials with
+    its table intact. A table on the server would forget on restart. It could not tell a
+    verb lost on a dropped worker link from one the worker had done. The first attempt runs on
+    a task of its own, so it finishes and its answer is kept even when the link that asked is
+    gone. A repeat arrives while it runs and waits for that answer. The same key with other
+    arguments (compared by a BLAKE3 digest of the encoded verb) is `Invalid`. Every outcome
+    is kept, a failure included; a new attempt takes a new key.
+  - **Bounds.** A key lives `KEY_LIFETIME` (10 min) after its answer, beyond any caller's
+    retries of one call. At most 4096 keys stay per worker. When full, the key answered
+    longest ago goes first. A running verb is never dropped: with every slot running, a new
+    key is refused rather than left unguarded.
+  - **The server keeps one small list** for the one effect it owns: forgetting a worker. A
+    forget repeated under its key answers `Done`, not `UnknownWorker`.
+  - **`Interrupted`.** A new `ErrorCode` for a verb that went out and whose answer a dropped
+    link lost, so it may have been done. The server answers it when a worker's link drops
+    under a forwarded verb, and the CLI's link when its own does. `WorkerUnreachable` and
+    `ServerUnreachable` now mean the verb never went out.
+  - **The surfaces.** The CLI takes `--idempotency-key`. Its link gives every changing verb a
+    fresh key when none is given, and it redials after a loss. On `Interrupted` it sends the
+    verb again under the same key, through a worker or server still coming back, for about
+    8 s. `slopty mcp` shares that link. The MCP tools that change something take an optional
+    `idempotency_key`.
+  - Tests: the ledger's five (repeat, in flight, reuse, lapse, bound), the hub's
+    `a_keyed_forget_repeats_its_answer`, the CLI's
+    `a_lost_answer_is_asked_again_under_the_same_key`, the `idempotency_keys` goldens, and the
+    server e2e, where an open repeated under one key over the CLI and over MCP opens one
+    terminal.
+
+- ✅ **An orchestrating agent reads and answers another, sees a screen, and moves any file**
+  (2026-09-28). An agent could see another was blocked but could not answer it except by typing
+  its menu's digits, read only its screen, take no picture of a window, and move no file past
+  one 8 MiB read. Four verbs close that, on every surface (tools `read_conversation`,
+  `answer_permission`, `capture_still`, `upload_file`, `download_file`; CLI `slopty agent
+  conversation|answer`, `slopty capture`, `slopty push|pull`).
+  - **The conversation** (`ReadConversation`) is the face's projection, decoded by the same
+    `Transcripts` on the worker's blocking pool: one thread's entries from a place (or its last
+    `max`, at most 500 and a frame's worth), with every thread, the tasks, the meters and the
+    prompts held now (`ConversationPage`).
+  - **The answer** (`AnswerPermission`) goes through the held `PermissionRequest` hook the face
+    uses (`Holds`), never through the TUI. A prompt is held only while someone follows, so
+    orchestration follows as a link of its own (`conversation::ORCHESTRATION`) from the first
+    read of a session's conversation, or from the `SpawnAgent` that started it, until the
+    session ends (`Holds::forget`, also on a client's close). Reading is what a person does
+    when they open the face, and it holds prompts the same way. An answer to a prompt no
+    longer held fails. It is keyed, so a repeat answers the first outcome.
+  - **The still** (`CaptureStill`) is `SCScreenshotManager` at native size, PNG-encoded on the
+    worker and halved until it fits a reply. A worker without Screen Recording, or without a
+    desktop, answers the new `ErrorCode::Unsupported` from the preflight, which prompts nobody.
+    MCP returns it as an image block.
+  - **Files of any size** go in 1 MiB parts, four in flight, over the verb link
+    (`slopty_tools::bulk`). Up, `Upload` writes parts where they go in a partial beside the
+    target, named for the upload, and a finish checks size and BLAKE3 before it renames. A
+    file replaced keeps its mode, and a new one takes the caller's, as `scp` does. Down, they
+    are `ReadFile` ranges into a partial here, with the file's size and time compared before
+    and after. Only the finish takes the key. The upload is named for the key, so a retried
+    call writes into the same parts, and an abort after the finish sweeps what a repeat wrote
+    again. The parts ride the server's links rather than the client's bulk streams, because
+    every surface, the server's MCP endpoint included, runs the same ops over `Dispatch`. A
+    1 MiB part holds the link's other verbs and events for a moment at most. The server's
+    endpoint runs on another machine than its caller, so it answers `upload_file` and
+    `download_file` with `Unsupported` (`Dispatch::local_files`).
+  - Tests: the `agent_verbs` goldens; `Holds`'
+    `orchestration_follows_until_the_session_ends`; the worker's page, upload and still
+    tests (`orchestrate::{conversation, upload, still}`); `bulk`'s three against an
+    in-memory worker; the tools' `a_conversation_is_read_and_its_prompt_answered` and
+    `a_still_is_an_image_and_files_move_only_where_they_are`; the hub's
+    `the_agent_screen_and_upload_verbs_go_to_their_worker`; and the server e2e. There a
+    9 MiB file is pushed and pulled, a conversation played through `slopty hook` is read, and
+    its `PermissionRequest` relay prints the denial answered over MCP. The still is asked of a
+    window no worker has, so no picture is ever taken.
+
+- ✅ **The worker's control protocol lives in `slopty-proto`** (2026-09-28). The worker's Unix
+  socket is a wire between processes: the CLI asks it for status, doctor and screen counters,
+  `slopty hook` relays hooks and waits on permission decisions, and the app reads the doctor to
+  make this Mac a worker. Its types sat in `slopty-worker` (`CtlRequest`, `CtlReply`, `Health`,
+  `Tailscale`, the screen counters) and `slopty-agent` (`PermissionAsk`, `PermissionAnswer`,
+  `Decision`). The app only wanted the doctor, yet it had to depend on `slopty-worker`, and that
+  pulled libghostty-vt, capture, the engine, the PTY, the agent and input into it. They now
+  sit together in `slopty_proto::ctl`, and the app no longer depends on the worker.
+  - **What stayed.** What the worker does with its counters (the latency ring, the registry)
+    stays in `slopty_worker::screen`. The Claude Code side of a decision stays in
+    `slopty_agent::permission`: the hook output it prints (`hook_output`), the prompt, the
+    verdict's decision, and the relay's timeouts.
+  - **Still JSON.** `Decision::AllowAlways` carries Claude Code's `updatedPermissions` as the JSON
+    they came in, and the enums are tagged by field, so these types are JSON lines, not
+    postcard. For that `slopty-proto` takes `serde_json`. The lines are unchanged.
+  - Tests: the `ctl` goldens in `slopty-proto`'s `tests/golden.rs`, one line per request and
+    reply variant, every decision, and a `Health` with and without Tailscale, each read back;
+    `ctl`'s `a_permission_request_and_its_decision_are_single_json_lines`, moved from the
+    worker unchanged.
+
+- ✅ **Tailscale's state is a type, in the tailnet crate and on the control socket**
+  (2026-09-28). `slopty_tailnet::Status::backend_state` was a string compared with `"Running"`
+  in three places, and the doctor's `ctl::Tailscale.state` held either that string or the text
+  of the error when the `LocalAPI` did not answer, so a reader could not tell a state from a
+  failure. Now the tailnet crate reads `BackendState`, one variant per `ipn.State` Tailscale
+  1.102 writes (`NoState`, `InUseOtherUser`, `NeedsLogin`, `NeedsMachineAuth`, `Stopped`,
+  `Starting`, `Running`) and `Other` for one it adds later. The doctor's `Health.tailscale` is
+  the enum `ctl::Tailscale`: `Up { node, ip }`, `Down { backend: NotUp }`,
+  `Unreachable { error }` or `Absent`. It took the place of the `Option` that said absent.
+  `NotUp` is the backend state without `Running`, so an up node always carries its name. The
+  worker maps one enum to the other with an exhaustive match, since `slopty-proto` cannot depend
+  on the tailnet crate. The CLI's doctor and the app's checklist match on the variants; the app
+  says "not answering" for an unreachable daemon instead of "not up".
+  - Wire: the ctl goldens `ctl_reply_doctor` and `ctl_health_without_tailscale` changed, and
+    `ctl_tailscale_down` and `ctl_tailscale_unreachable` are new.
+  - Tests: `each_backend_state_reads_by_name` (tailnet), the worker's
+    `the_doctor_reads_tailscale_as_up_down_or_absent`, the CLI's
+    `doctor_report_names_the_binary_and_flags_missing_permissions` and the app's
+    `a_health_report_reads_as_the_checklists_doctor`.

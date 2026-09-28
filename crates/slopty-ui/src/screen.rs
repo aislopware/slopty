@@ -4,14 +4,21 @@
 //! plus the instants that got it here. GPUI's `surface` element samples it through
 //! `CVMetalTextureCache`, so nothing is copied on the client, and a `slopty_client::Pacer`
 //! decides when it goes up (present on arrival, never a queue) and measures how long the
-//! journey took. The worker's cursor is drawn here from the cursor channel (one RTT behind the
-//! pointer, not one video pipeline). Pointer, scroll and key events inside the view go to the
-//! worker as
-//! `ScreenInput` in stream pixels; the worker injects them. ⌘ chords the canvas binds (⌘T/⌘O/⌘W,
-//! zoom) never reach the view because GPUI runs key bindings before key listeners; every other
-//! chord (⌘C, ⌘V, ⌘Z, ⌘S…) is forwarded to the remote window. The view also asks the worker for a
-//! smaller stream when it is painted small (canvas zoomed out), quantised so the encoder is
-//! not rebuilt on every wheel tick.
+//! journey took. The pointer is drawn here in the worker's cursor picture: at this client's own
+//! pointer while this client drives it (always on a window stream), else where the cursor
+//! channel says the worker's is. Pointer, scroll and key events inside the view go to the worker
+//! as `ScreenInput` in stream pixels; the worker injects them. ⌘ chords the workspace binds
+//! (⌘T/⌘O/⌘W, the text size) never reach the view because GPUI runs key bindings before key
+//! listeners; every other chord (⌘C, ⌘V, ⌘Z, ⌘S…) is forwarded to the remote window. The view also
+//! asks the worker for a smaller stream when it is painted small (a narrow column, the overview),
+//! quantised so the encoder is not rebuilt on every step.
+//!
+//! On a phone or an iPad the picture zooms inside its tile: a pinch magnifies it about the
+//! fingers from fit to twice one-to-one, two fingers pan it, and a double tap goes between fit
+//! and one to one (`zoom`). A zoomed picture asks the worker for the scale it is drawn at, so it
+//! sharpens as it grows. Trackpad mode turns the fingers into an iPad trackpad over the remote
+//! pointer (`touch`). Every point sent to the worker goes through the zoom, so a tap lands on
+//! the pixel under the finger.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -22,14 +29,15 @@ use std::time::{Duration, Instant};
 use core_foundation::base::TCFType as _;
 use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::{
-    App, Autocapitalize, Bounds, Context, CursorStyle, ElementInputHandler, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
-    KeyUpEvent, Keystroke, LongPressEvent, Modifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder,
-    Pixels, Point, Render, RenderImage, ScrollDelta, ScrollWheelEvent, Size,
+    Animation, AnimationExt as _, App, Autocapitalize, Bounds, Context, CursorStyle,
+    ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, LongPressEvent,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, ParentElement as _, Path, PathBuilder, PinchEvent, Pixels, Point, Render,
+    RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, TextInputAction,
-    TextInputConfiguration, TouchPhase, UTF16Selection, Window, canvas, div, point, px, size,
-    surface,
+    TextInputConfiguration, TouchDragEvent, TouchPhase, UTF16Selection, Window, canvas, div, point,
+    px, relative, size, surface,
 };
 use slopty_client::pacing::{Pace, Pacer, PacingStats};
 use slopty_client::{CursorState, Presentable, ScreenHandle, ScreenStats};
@@ -41,10 +49,45 @@ use slopty_proto::screen::{
     SourceState, VideoCodec,
 };
 use slopty_theme::{Theme, alpha};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::colors::hsla;
-use crate::keys;
+use crate::{keys, kit};
+
+mod touch;
+mod zoom;
+
+pub use zoom::Zoom;
+
+#[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
+mod actions {
+    gpui::actions!(
+        screen,
+        [
+            /// Turn the focused remote picture's fingers into a trackpad, or back.
+            ToggleTrackpad,
+        ]
+    );
+}
+pub use actions::ToggleTrackpad;
+
+/// What the header's trackpad control and the palette's command call trackpad mode: one name,
+/// on or off.
+pub const TRACKPAD_MODE: &str = "Trackpad mode";
+
+/// How long the zoom readout stays before it fades.
+const READOUT_HOLD: Duration = Duration::from_millis(700);
+
+/// Whether fingers are this device's pointer: a double tap zooms, two fingers tapped
+/// right-click, and trackpad mode is offered in the tile's header.
+const TOUCH: bool = cfg!(target_os = "ios");
+
+/// The zoom readout: up, or fading out under the generation that started the fade.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Readout {
+    Shown,
+    Fading(u64),
+}
 
 /// Asked when a paste chord goes to the worker: what must reach it first.
 pub type PasteHook = Rc<dyn Fn() -> PasteAhead>;
@@ -71,13 +114,13 @@ const MIN_SCALE: f32 = 0.25;
 /// nothing is dropped (moves never count: they coalesce).
 const OUTBOX_DEPTH: usize = 256;
 
-/// Things the canvas may react to.
+/// Things the workspace may react to.
 #[derive(Clone, Debug)]
 pub enum ScreenViewEvent {
     /// First frame painted.
     Ready,
-    /// Pressed: the canvas should make this item active. (The view stops the mouse event so
-    /// the canvas does not pan, which also keeps it from the item's own activate handler.)
+    /// Pressed: the workspace should make this tile active. (The view stops the mouse event,
+    /// which keeps it from the tile's own activate handler.)
     Pressed,
     /// A paste of files: the view holds its input, the paste chord first, until
     /// [`ScreenView::release_paste`] once the files are on the worker's pasteboard.
@@ -148,6 +191,62 @@ fn pointer_bounds(at: Point<Pixels>, size: Size<Pixels>, hot: Point<Pixels>) -> 
     Bounds { origin: point(at.x - hot.x, at.y - hot.y), size }
 }
 
+/// The drawn arrow, its tip at the origin: an outline in the canvas colour under a fill in the
+/// text colour. Tessellated once per thread and moved into place for each paint.
+struct Arrow {
+    outline: Path<Pixels>,
+    fill: Path<Pixels>,
+}
+
+impl Arrow {
+    fn build() -> Option<Self> {
+        let arrow = |inset: f32, scale: f32| {
+            let mut path = PathBuilder::fill();
+            let at =
+                |x: f32, y: f32| point(px(x.mul_add(scale, inset)), px(y.mul_add(scale, inset)));
+            path.move_to(at(0.0, 0.0));
+            path.line_to(at(0.0, 16.0));
+            path.line_to(at(4.0, 12.5));
+            path.line_to(at(7.0, 18.5));
+            path.line_to(at(9.5, 17.5));
+            path.line_to(at(6.5, 11.5));
+            path.line_to(at(11.5, 11.5));
+            path.close();
+            path.build().ok()
+        };
+        Some(Self { outline: arrow(-1.0, 1.15)?, fill: arrow(0.0, 1.0)? })
+    }
+
+    /// The arrow's extent, its tip at the origin.
+    const fn bounds(&self) -> Bounds<Pixels> {
+        self.outline.bounds
+    }
+}
+
+thread_local! {
+    static ARROW: Option<Rc<Arrow>> = Arrow::build().map(Rc::new);
+}
+
+/// `path` moved by `by`.
+fn moved(path: &Path<Pixels>, by: Point<Pixels>) -> Path<Pixels> {
+    let mut path = path.clone();
+    path.bounds.origin += by;
+    for vertex in &mut path.vertices {
+        vertex.xy_position += by;
+    }
+    path
+}
+
+/// How long after this client last put a display's pointer somewhere its own point is drawn
+/// rather than the worker's sample, on top of the round trip. The samples that come back in
+/// that time are the echo of this client's moves, a round trip old. After it, a sample is where
+/// the pointer went without this client (another user, an app's warp).
+const LOCAL_HOLD: Duration = Duration::from_millis(200);
+
+/// Half a 60 Hz refresh: how late past its due time a frame may be before a pointer change that
+/// waits for it is drawn on its own.
+const FOLD: Duration = Duration::from_micros(8_333);
+
 /// How long a fling may go quiet before the worker is told its momentum ended. Both platforms say
 /// so themselves, so this is the backstop for a lost or dropped close. Momentum events arrive
 /// about a frame apart, which makes this several frames of silence.
@@ -176,8 +275,9 @@ pub struct ScreenView {
     stream: StreamId,
     target: CaptureTarget,
     handle: ScreenHandle,
-    /// Newest frame and its Metal-ready wrapper.
-    latest: Option<(Arc<Presentable>, CVPixelBuffer)>,
+    /// The newest frame's picture. The wrapper holds its own retain on the decoder's buffer, so
+    /// the frame it came in needs no keeping.
+    latest: Option<CVPixelBuffer>,
     /// Stream size in pixels as opened.
     size: (u32, u32),
     /// Native pixel size of the target (stream size at scale 1).
@@ -187,9 +287,24 @@ pub struct ScreenView {
     /// The painted width a change asked for inside the cooldown, taken when it ends: without
     /// it a window left at a small scale by the overview stays there until something repaints.
     wanted_width: Option<f32>,
+    /// The worker's last cursor sample.
     cursor: CursorState,
-    /// The worker's cursor as it is drawn at that position.
+    /// The worker's cursor picture, drawn wherever the pointer is drawn.
     pointer: Pointer,
+    /// When this client last put the worker's pointer somewhere (a move, a press or a release
+    /// over the picture), on the executor's clock.
+    placed: Option<Instant>,
+    /// Where the last render drew the pointer, in fractions of the picture; `None` when it drew
+    /// none.
+    drawn: Option<(f32, f32)>,
+    /// When the last frame went up, on the executor's clock.
+    last_frame: Option<Instant>,
+    /// When a pointer change waiting for a frame to carry it is drawn on its own.
+    fold: Option<Instant>,
+    /// The picture's accessible label.
+    label: SharedString,
+    /// Renders so far.
+    renders: u32,
     /// The stream size the worker maps input with: the size last asked for, or last told by
     /// `Geometry`. The worker takes a new scale in order with the input behind it, so frames
     /// still in flight at the old scale must not move it (unlike `size`, the picture's).
@@ -203,14 +318,15 @@ pub struct ScreenView {
     /// reads it every draw, and it is worked out at most once a second.
     fps_sample: std::cell::Cell<(Instant, u64, f32)>,
     /// Keys whose press went to the worker, so a release for a locally-handled chord (its press
-    /// was eaten by a canvas binding) is not forwarded as a stray key-up.
+    /// was eaten by a workspace binding) is not forwarded as a stray key-up.
     held: Vec<KeyCode>,
     /// Buttons whose press went to the worker. gpui reports a release only over the element that
     /// saw the press, so one let go elsewhere, or never seen at all (focus gone mid-drag), is
     /// released from here: a button left down turns every later hover into a drag.
     buttons: Vec<ProtoButton>,
-    /// Where the pointer was last sent, in stream pixels: where a button is let go when the
-    /// real release has no position on the picture.
+    /// Where the pointer was last sent, in stream pixels: where it is drawn while this client
+    /// drives it, and where a button is let go when the real release has no position on the
+    /// picture.
     pointer_at: (f32, f32),
     /// Asked before a paste chord goes, so the worker pastes what this client copied.
     paste_hook: Option<PasteHook>,
@@ -230,7 +346,7 @@ pub struct ScreenView {
     /// Decides when a decoded frame goes up and measures arrival → present. The element only
     /// feeds it: a frame on one side, a paint on the other.
     pacer: Pacer,
-    /// Link RTT from the canvas, for the overlay.
+    /// Link RTT from the workspace, for the overlay.
     rtt: Option<Duration>,
     /// Holds the device out of idle sleep (the Mac) or its screen on (the phone) for as long as
     /// this window streams; dropping the view lets go.
@@ -250,6 +366,25 @@ pub struct ScreenView {
     /// Fires [`MOMENTUM_GAP`] after the last momentum event to close the fling. Replaced (so
     /// cancelled) by every event that keeps it alive.
     momentum_end: Option<Task<()>>,
+    /// How the picture is drawn over the body: kept while the view lives, so per tile.
+    zoom: Zoom,
+    /// The body's width in device pixels at fit, as the workspace last reported it.
+    painted: f32,
+    /// The window's backing scale as last drawn, for one to one.
+    scale_factor: f32,
+    /// Two fingers on the picture, from the pinch recognizer.
+    two: Option<touch::Two>,
+    /// Whether a two-finger drag has begun a scroll on the worker (trackpad mode).
+    two_scrolling: bool,
+    /// Trackpad mode: the pointer the fingers move, while it is on.
+    trackpad: Option<touch::Trackpad>,
+    /// Fingers are the pointer here (see [`TOUCH`]); tests turn it on.
+    touch: bool,
+    /// The zoom readout while it shows, the generation of the last change, and the timer that
+    /// takes it down.
+    readout: Option<Readout>,
+    readout_gen: u64,
+    readout_timer: Option<Task<()>>,
     _pump: Task<()>,
 }
 
@@ -258,7 +393,7 @@ pub struct ScreenView {
 struct Hud {
     sampled_at: Instant,
     sample: ScreenStats,
-    text: String,
+    text: SharedString,
 }
 
 /// What the overlay shows that is not in [`ScreenStats`].
@@ -459,7 +594,8 @@ pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32) -> Quality
 
 impl ScreenView {
     /// Swap the theme: chrome colours, and the stream settings, which a live stream asks
-    /// the worker for at once (the scale it holds stays; that follows the canvas).
+    /// the worker for at once (the scale it holds stays; that follows the width the tile is drawn
+    /// at).
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme == theme {
             return;
@@ -489,40 +625,7 @@ impl ScreenView {
         // A cursor picture's texture lives in every window's atlas until it is dropped from it.
         cx.on_release(|view, cx| view.pointer.drop_image(cx)).detach();
         handle.set_muted(theme.behaviour.stream.muted);
-        let mut frames = handle.frames();
-        let mut cursor = handle.cursor();
-        let pump = cx.spawn(async move |this, cx| {
-            loop {
-                tokio::select! {
-                    changed = frames.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        let frame = frames.borrow_and_update().clone();
-                        let alive = this.update(cx, |view, cx| {
-                            view.take_frame(frame, cx);
-                            cx.notify();
-                        });
-                        if alive.is_err() {
-                            break;
-                        }
-                    }
-                    changed = cursor.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        let state = *cursor.borrow_and_update();
-                        let alive = this.update(cx, |view, cx| {
-                            view.cursor = state;
-                            cx.notify();
-                        });
-                        if alive.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+        let pump = Self::pump(handle.frames(), handle.cursor(), Self::take_frame, cx);
         // Somebody is watching a remote window: the platform must not dim or sleep under it.
         let acquisition = cx.prevent_idle_sleep("Slopty remote window");
         let awake = cx.spawn(async move |_this, _cx| match acquisition.await {
@@ -547,6 +650,15 @@ impl ScreenView {
             wanted_width: None,
             cursor: CursorState::default(),
             pointer: Pointer::Arrow,
+            placed: None,
+            drawn: None,
+            last_frame: None,
+            fold: None,
+            label: match target {
+                CaptureTarget::Display(id) => format!("Remote display {id}").into(),
+                CaptureTarget::Window(id) => format!("Remote window {}", id.0).into(),
+            },
+            renders: 0,
             mapped: size,
             out: Outbox::new(out, cx),
             theme,
@@ -573,6 +685,16 @@ impl ScreenView {
             source: SourceState::Live,
             scrolling: Scrolling::Idle,
             momentum_end: None,
+            zoom: Zoom::FIT,
+            painted: 0.0,
+            scale_factor: 1.0,
+            two: None,
+            two_scrolling: false,
+            trackpad: None,
+            touch: TOUCH,
+            readout: None,
+            readout_gen: 0,
+            readout_timer: None,
             _pump: pump,
         }
     }
@@ -590,10 +712,180 @@ impl ScreenView {
     }
 
     /// The picture's accessible label.
-    fn a11y_label(&self) -> String {
+    const fn a11y_label(&self) -> &SharedString {
+        &self.label
+    }
+
+    /// Renders so far.
+    #[must_use]
+    pub const fn renders(&self) -> u32 {
+        self.renders
+    }
+
+    /// Take what the stream hands over: each frame `take` puts up draws the view, and a cursor
+    /// sample draws it only when the pointer drawn moves ([`Self::pointer_changed`]), at a time
+    /// that function picks. Generic over the frame so a test can feed pictures of its own.
+    fn pump<F: Clone + 'static>(
+        mut frames: watch::Receiver<F>,
+        mut cursor: watch::Receiver<CursorState>,
+        take: fn(&mut Self, F, &mut Context<Self>) -> bool,
+        cx: &Context<Self>,
+    ) -> Task<()> {
+        enum Step<F> {
+            Frame(F),
+            Cursor(CursorState),
+            Due,
+        }
+        cx.spawn(async move |this, cx| {
+            let executor = cx.background_executor().clone();
+            let mut due: Option<Instant> = None;
+            loop {
+                let wake = async {
+                    match due {
+                        Some(at) => {
+                            executor.timer(at.saturating_duration_since(executor.now())).await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                };
+                let step = tokio::select! {
+                    changed = frames.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        Step::Frame(frames.borrow_and_update().clone())
+                    }
+                    changed = cursor.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        Step::Cursor(*cursor.borrow_and_update())
+                    }
+                    () = wake => Step::Due,
+                };
+                let next = this.update(cx, |view, cx| {
+                    let now = cx.background_executor().now();
+                    match step {
+                        // A picture the pacer drops (late, or the one already up) changes
+                        // nothing on screen: no frame for it.
+                        Step::Frame(frame) => {
+                            if take(view, frame, cx) {
+                                view.last_frame = Some(now);
+                                cx.notify();
+                            }
+                            due
+                        }
+                        Step::Cursor(state) => {
+                            view.cursor = state;
+                            view.pointer_changed(now, cx)
+                        }
+                        Step::Due => view.pointer_changed(now, cx),
+                    }
+                });
+                match next {
+                    Ok(next) => due = next,
+                    Err(_gone) => break,
+                }
+            }
+        })
+    }
+
+    /// Something the drawn pointer follows changed: a cursor sample, a hold that ran out, a
+    /// fold that came due. The view draws again only when the pointer it would draw is not the
+    /// one on screen. While frames flow, the change waits for the next frame, which draws it
+    /// anyway, and draws on its own only when that frame is [`FOLD`] late: a draw of its own
+    /// just before a frame makes the frame the second in its refresh, and a `CAMetalLayer`
+    /// shows that a refresh late (`docs/MEASUREMENTS.md`, "echo, key → glass"). Returns when
+    /// to look again.
+    fn pointer_changed(&mut self, now: Instant, cx: &mut Context<Self>) -> Option<Instant> {
+        let recheck = match self.target {
+            CaptureTarget::Display(_) => self.hold_end().filter(|end| now < *end),
+            CaptureTarget::Window(_) => None,
+        };
+        if self.pointer_drawn(now) == self.drawn {
+            self.fold = None;
+            return recheck;
+        }
+        let fold =
+            self.fold.or_else(|| self.next_frame_due(now).and_then(|due| due.checked_add(FOLD)));
+        if let Some(at) = fold
+            && now < at
+        {
+            self.fold = Some(at);
+            return Some(recheck.map_or(at, |end| end.min(at)));
+        }
+        self.fold = None;
+        cx.notify();
+        recheck
+    }
+
+    /// When the next frame is due, one period of the rate asked for after the last; `None`
+    /// once two periods have passed without one (a still window sends none).
+    fn next_frame_due(&self, now: Instant) -> Option<Instant> {
+        let period = Duration::from_secs(1).checked_div(u32::from(self.quality.fps))?;
+        let last = self.last_frame?;
+        if now.saturating_duration_since(last) >= period.saturating_mul(2) {
+            return None;
+        }
+        last.checked_add(period)
+    }
+
+    /// When this client's hold on a display's pointer ends ([`LOCAL_HOLD`]).
+    fn hold_end(&self) -> Option<Instant> {
+        self.placed
+            .and_then(|at| at.checked_add(LOCAL_HOLD.saturating_add(self.rtt.unwrap_or_default())))
+    }
+
+    /// This client put the worker's pointer at `at` (stream pixels).
+    const fn place(&mut self, at: (f32, f32), now: Instant) {
+        self.pointer_at = at;
+        self.placed = Some(now);
+    }
+
+    /// Whether the pointer drawn is this client's own. On a window stream it always is once
+    /// this client has put it somewhere: input posted to a window's owner leaves the worker's
+    /// pointer alone, so the worker's sample is only the echo of this client's input, a round
+    /// trip and a cursor tick late. On a display it is for [`LOCAL_HOLD`] and a round trip
+    /// after this client last moved it; after that the worker's sample shows where it went.
+    fn local_drives(&self, now: Instant) -> bool {
         match self.target {
-            CaptureTarget::Display(id) => format!("Remote display {id}"),
-            CaptureTarget::Window(id) => format!("Remote window {}", id.0),
+            CaptureTarget::Window(_) => self.placed.is_some(),
+            CaptureTarget::Display(_) => self.hold_end().is_some_and(|end| now < end),
+        }
+    }
+
+    /// The pointer on the picture, in fractions of it, and whether it is drawn there: the
+    /// trackpad's in trackpad mode, this client's own while it drives it, else the worker's
+    /// last sample. The worker's samples are in the stream pixels it maps input with, so they
+    /// scale by the size input does, not by the size of the frame in flight.
+    fn pointer_spot(&self, now: Instant) -> ((f32, f32), bool) {
+        if let Some(pad) = self.trackpad {
+            return (pad.at(), true);
+        }
+        let (w, h) = self.mapped_f32();
+        let (w, h) = (w.max(1.0), h.max(1.0));
+        if self.local_drives(now) {
+            // Whole stream pixels, as the worker's sample has them: when the hold ends on a
+            // still pointer, the sample that takes over draws it where it was.
+            let (x, y) = self.pointer_at;
+            return (((x.round() / w).clamp(0.0, 1.0), (y.round() / h).clamp(0.0, 1.0)), true);
+        }
+        #[expect(clippy::cast_precision_loss, reason = "cursor coordinates are small")]
+        let at = (self.cursor.x as f32 / w, self.cursor.y as f32 / h);
+        (at, self.cursor.visible)
+    }
+
+    /// Where the pointer is drawn on the picture now, or `None` when none is (no picture yet,
+    /// or the worker's pointer is off the target).
+    fn pointer_drawn(&self, now: Instant) -> Option<(f32, f32)> {
+        let (at, shown) = self.pointer_spot(now);
+        (shown && self.latest.is_some()).then_some(at)
+    }
+
+    /// Draw again when the pointer this client just placed is not where the last render drew it.
+    fn redraw_pointer(&self, now: Instant, cx: &mut Context<Self>) {
+        if self.pointer_drawn(now) != self.drawn {
+            cx.notify();
         }
     }
 
@@ -635,7 +927,7 @@ impl ScreenView {
         self.hud = on.then(|| Hud {
             sampled_at: Instant::now(),
             sample: self.handle.stats(),
-            text: "…".to_owned(),
+            text: SharedString::new_static("…"),
         });
         cx.notify();
     }
@@ -696,7 +988,7 @@ impl ScreenView {
     }
 
     /// Recompute the overlay's rates when a second has passed; returns the text to draw.
-    fn hud_text(&mut self, cx: &App) -> Option<String> {
+    fn hud_text(&mut self, cx: &App) -> Option<SharedString> {
         let hud = self.hud.as_mut()?;
         let now = Instant::now();
         let elapsed = now.duration_since(hud.sampled_at);
@@ -721,7 +1013,8 @@ impl ScreenView {
                 stats: &stats,
                 pacing: &self.pacer.stats(),
                 ui: ui.as_ref(),
-            });
+            })
+            .into();
             hud.sample = stats;
             hud.sampled_at = now;
         }
@@ -742,16 +1035,20 @@ impl ScreenView {
     }
 
     /// Silence or resume this stream's audio on this client only.
-    /// The pill lives in the canvas title bar, so the caller notifies its own entity.
+    /// The pill lives in the tile's header, so the caller notifies its own entity.
     pub fn toggle_mute(&self) {
         self.handle.set_muted(!self.handle.muted());
     }
 
-    /// The canvas reports how wide the view is painted (device pixels) so the stream can be
-    /// downscaled at the worker when zoomed out. Quantised to quarter steps and rate limited: a
-    /// change inside the cooldown is taken when it ends, the latest width asked for winning.
+    /// The workspace reports how wide the view is painted (device pixels) so the stream can be
+    /// downscaled at the worker when it is drawn small. Quantised to quarter steps and rate
+    /// limited: a change inside the cooldown is taken when it ends, the latest width asked for
+    /// winning. A picture zoomed inside the tile is drawn wider than the tile, and asks for
+    /// that width.
     pub fn set_painted_width(&mut self, device_px: f32, cx: &Context<Self>) {
-        let wanted = (device_px / self.native.0).clamp(MIN_SCALE, 1.0);
+        self.painted = device_px;
+        let drawn = device_px * self.zoom.scale();
+        let wanted = (drawn / self.native.0).clamp(MIN_SCALE, 1.0);
         let bucket = (wanted * 4.0).ceil() / 4.0;
         if (bucket - self.quality.scale).abs() < f32::EPSILON {
             self.wanted_width = None;
@@ -789,6 +1086,12 @@ impl ScreenView {
         };
         self.cursor.x = rescale(self.cursor.x, self.mapped.0, self.size.0);
         self.cursor.y = rescale(self.cursor.y, self.mapped.1, self.size.1);
+        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
+        let rescale = |v: f32, from: u32, to: u32| v * to as f32 / from.max(1) as f32;
+        self.pointer_at = (
+            rescale(self.pointer_at.0, self.mapped.0, self.size.0),
+            rescale(self.pointer_at.1, self.mapped.1, self.size.1),
+        );
         self.mapped = self.size;
         self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
     }
@@ -813,10 +1116,11 @@ impl ScreenView {
     /// A decoded frame came off the stream. The pacer decides whether it goes up (it always
     /// does unless it is older than the picture already showing); nothing is queued for a later
     /// paint, so the frame on screen is always the newest one that had arrived by paint time.
-    fn take_frame(&mut self, frame: Option<Arc<Presentable>>, cx: &mut Context<Self>) {
-        let Some(frame) = frame else { return };
+    /// Whether it went up.
+    fn take_frame(&mut self, frame: Option<Arc<Presentable>>, cx: &mut Context<Self>) -> bool {
+        let Some(frame) = frame else { return false };
         if self.pacer.offer(frame.stamp) == Pace::Drop {
-            return;
+            return false;
         }
         let raw = std::ptr::from_ref(frame.frame.image.as_cv())
             .cast_mut()
@@ -824,14 +1128,27 @@ impl ScreenView {
         // SAFETY: `raw` is a live `CVPixelBufferRef` owned by `frame`; `wrap_under_get_rule`
         // takes its own retain, so the wrapper stays valid even if `frame` is dropped first.
         let buffer = unsafe { CVPixelBuffer::wrap_under_get_rule(raw) };
+        self.show(buffer, cx);
+        true
+    }
+
+    /// Put `buffer` up as the picture.
+    fn show(&mut self, buffer: CVPixelBuffer, cx: &mut Context<Self>) {
         #[expect(clippy::cast_possible_truncation, reason = "pixel counts")]
-        let size = (frame.frame.image.width() as u32, frame.frame.image.height() as u32);
+        let size = (buffer.get_width() as u32, buffer.get_height() as u32);
         self.size = size;
-        self.latest = Some((frame, buffer));
+        self.latest = Some(buffer);
         self.frames = self.frames.saturating_add(1);
         if self.frames == 1 {
             cx.emit(ScreenViewEvent::Ready);
         }
+    }
+
+    /// Put `buffer` up as the picture, as a frame off the stream would (for the workspace's
+    /// frame measurements).
+    #[cfg(test)]
+    pub(crate) fn show_picture(&mut self, buffer: CVPixelBuffer, cx: &mut Context<Self>) {
+        self.show(buffer, cx);
     }
 
     /// Arrival → present numbers for the last frames (the overlay and the app self-test).
@@ -870,52 +1187,356 @@ impl ScreenView {
         self.paste_hold.0 > 0
     }
 
-    /// Window position → stream pixels, at the size the worker maps them with.
+    /// Window position → stream pixels, at the size the worker maps them with, through the
+    /// zoom: the pixel of the picture drawn under `position`.
     fn to_stream(&self, position: Point<Pixels>) -> (f32, f32) {
-        let width = f32::from(self.bounds.size.width).max(1.0);
-        let height = f32::from(self.bounds.size.height).max(1.0);
+        let (fx, fy) = self.zoom.to_picture(self.body_fraction(position));
         let (stream_w, stream_h) = self.mapped_f32();
-        let x = (f32::from(position.x) - f32::from(self.bounds.origin.x)) / width * stream_w;
-        let y = (f32::from(position.y) - f32::from(self.bounds.origin.y)) / height * stream_h;
+        let (x, y) = (fx * stream_w, fy * stream_h);
         tracing::trace!(?position, bounds = ?self.bounds, mapped = ?self.mapped, x, y, "to_stream");
         (x, y)
+    }
+
+    /// Window position → a point of the body, in fractions of its size.
+    fn body_fraction(&self, position: Point<Pixels>) -> (f32, f32) {
+        let (w, h) = self.body_size();
+        (
+            (f32::from(position.x) - f32::from(self.bounds.origin.x)) / w,
+            (f32::from(position.y) - f32::from(self.bounds.origin.y)) / h,
+        )
+    }
+
+    /// The body's size in points, never zero.
+    fn body_size(&self) -> (f32, f32) {
+        (f32::from(self.bounds.size.width).max(1.0), f32::from(self.bounds.size.height).max(1.0))
+    }
+
+    /// How the picture is drawn over the body.
+    #[must_use]
+    pub const fn zoom(&self) -> Zoom {
+        self.zoom
+    }
+
+    /// The scale at which a pixel of the target is a pixel of this device.
+    fn one_to_one(&self) -> f32 {
+        zoom::one_to_one(self.native.0, self.body_size().0, self.scale_factor)
+    }
+
+    /// Draw the picture as `zoom` (held to its limits), say so, and ask the worker for the
+    /// scale it is now drawn at.
+    fn set_zoom(&mut self, zoom: Zoom, cx: &mut Context<Self>) {
+        let zoom = zoom.clamped(zoom::max_scale(self.one_to_one()));
+        if zoom == self.zoom {
+            return;
+        }
+        let scaled = (zoom.scale() - self.zoom.scale()).abs() > f32::EPSILON;
+        self.zoom = zoom;
+        if scaled {
+            self.show_readout(cx);
+            if self.painted > 0.0 {
+                self.set_painted_width(self.painted, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Put the zoom readout up, and take it down after [`READOUT_HOLD`]: fading over
+    /// [`kit::FADE`], or at once under Reduce Motion.
+    fn show_readout(&mut self, cx: &Context<Self>) {
+        self.readout = Some(Readout::Shown);
+        self.readout_gen = self.readout_gen.wrapping_add(1);
+        let generation = self.readout_gen;
+        let fade = kit::motion(cx);
+        self.readout_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(READOUT_HOLD).await;
+            if fade {
+                let _gone = this.update(cx, |v, cx| {
+                    v.readout = Some(Readout::Fading(generation));
+                    cx.notify();
+                });
+                cx.background_executor().timer(kit::FADE).await;
+            }
+            let _gone = this.update(cx, |v, cx| {
+                v.readout = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    /// What the zoom readout says while it is up.
+    #[must_use]
+    pub fn readout(&self) -> Option<String> {
+        self.readout.map(|_| zoom::readout(self.zoom, self.one_to_one()))
+    }
+
+    /// Two fingers on the picture: a pinch zooms about them, and their drag pans the zoomed
+    /// picture (in trackpad mode it scrolls the remote app instead, and the two lock to
+    /// whichever they did first). Two fingers tapped and lifted right-click.
+    fn pinch(&mut self, ev: &PinchEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.two.is_none() && (ev.phase != TouchPhase::Started || !self.inside(ev.position)) {
+            return;
+        }
+        cx.stop_propagation();
+        let now = cx.background_executor().now();
+        let at = self.body_fraction(ev.position);
+        let (w, h) = self.body_size();
+        let points = (at.0 * w, at.1 * h);
+        match ev.phase {
+            TouchPhase::Started => {
+                self.two = Some(touch::Two::begin(points, now));
+                self.two_scrolling = false;
+                self.two_step(ev.delta, points, at, cx);
+            }
+            TouchPhase::Moved => self.two_step(ev.delta, points, at, cx),
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                let Some(two) = self.two.take() else { return };
+                if self.two_scrolling {
+                    self.two_scrolling = false;
+                    self.trackpad_scroll((0.0, 0.0), ScrollPhase::Ended);
+                }
+                if ev.phase == TouchPhase::Ended && self.touch && two.tapped(now) {
+                    let (x, y) = match self.trackpad {
+                        Some(pad) => self.picture_to_stream(pad.at()),
+                        None => self.to_stream(ev.position),
+                    };
+                    self.click_at(ProtoButton::Right, 1, (x, y), now);
+                }
+            }
+        }
+    }
+
+    /// One report of the two fingers: `delta` is the scale step less one, `points` and `at`
+    /// the centroid in the body's points and fractions.
+    fn two_step(&mut self, delta: f32, points: (f32, f32), at: (f32, f32), cx: &mut Context<Self>) {
+        let Some(two) = self.two.as_mut() else { return };
+        let step = two.step((1.0 + delta).max(0.01), points);
+        let max = zoom::max_scale(self.one_to_one());
+        let (w, h) = self.body_size();
+        if self.trackpad.is_some() {
+            match step.kind {
+                touch::TwoKind::Pinch => self.set_zoom(self.zoom.about(at, step.factor, max), cx),
+                touch::TwoKind::Drag => {
+                    let phase =
+                        if self.two_scrolling { ScrollPhase::Changed } else { ScrollPhase::Began };
+                    self.two_scrolling = true;
+                    self.trackpad_scroll(step.by, phase);
+                }
+                touch::TwoKind::Undecided => {}
+            }
+            return;
+        }
+        // The centroid's move pans the picture it holds; the zoom then keeps the point under
+        // the new centroid where it is.
+        let panned = self.zoom.panned((step.by.0 / w, step.by.1 / h), max);
+        self.set_zoom(panned.about(at, step.factor, max), cx);
+    }
+
+    /// A two-finger drag in trackpad mode: a precise scroll at the pointer.
+    fn trackpad_scroll(&mut self, by: (f32, f32), phase: ScrollPhase) {
+        let Some(pad) = self.trackpad else { return };
+        let (x, y) = self.picture_to_stream(pad.at());
+        self.input(ScreenInput::Scroll {
+            dx: by.0,
+            dy: by.1,
+            precise: true,
+            phase,
+            momentum: ScrollPhase::None,
+            x,
+            y,
+            mods: keys::mods(self.modifiers),
+        });
+    }
+
+    /// A point of the picture (0 to 1) in the stream pixels input maps with.
+    fn picture_to_stream(&self, f: (f32, f32)) -> (f32, f32) {
+        let (w, h) = self.mapped_f32();
+        (f.0 * w, f.1 * h)
+    }
+
+    /// A press and a release of `button` at `(x, y)`.
+    fn click_at(&mut self, button: ProtoButton, clicks: u8, (x, y): (f32, f32), now: Instant) {
+        self.place((x, y), now);
+        let mods = keys::mods(self.modifiers);
+        for down in [true, false] {
+            self.input(ScreenInput::Button { button, down, x, y, clicks, mods });
+        }
+    }
+
+    /// Whether trackpad mode is on.
+    #[must_use]
+    pub const fn trackpad(&self) -> bool {
+        self.trackpad.is_some()
+    }
+
+    /// Turn trackpad mode on or off. The pointer starts where it is drawn, or in the middle of
+    /// what is in view; turning it off lets go of a drag in progress.
+    pub fn set_trackpad(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.trackpad.is_some() {
+            return;
+        }
+        if on {
+            let (at, shown) = self.pointer_spot(cx.background_executor().now());
+            let start = if shown { at } else { self.zoom.to_picture((0.5, 0.5)) };
+            self.trackpad = Some(touch::Trackpad::new(start));
+        } else if let Some(mut pad) = self.trackpad.take() {
+            let acts = pad.cancelled();
+            self.trackpad_acts(pad, &acts, cx.background_executor().now());
+        }
+        cx.notify();
+    }
+
+    /// Flip trackpad mode (the palette's command and the header's control).
+    pub fn toggle_trackpad(&mut self, cx: &mut Context<Self>) {
+        self.set_trackpad(self.trackpad.is_none(), cx);
+    }
+
+    /// The header's trackpad control for `view`, on a device whose fingers are its pointer:
+    /// a quiet toggle beside the tile's other buttons, pressed while the mode is on.
+    #[must_use]
+    pub fn trackpad_button(
+        view: &gpui::Entity<Self>,
+        theme: &Theme,
+        k: f32,
+        cx: &App,
+    ) -> Option<gpui::AnyElement> {
+        let this = view.read(cx);
+        if !this.touch {
+            return None;
+        }
+        let id = format!("trackpad-{}", this.stream.0);
+        let icon = crate::icons::IconName::MousePointer2;
+        let button = kit::icon_toggle(theme, id, icon, TRACKPAD_MODE, this.trackpad(), k);
+        let view = view.clone();
+        Some(
+            button
+                .on_click(move |_ev, _w, cx| view.update(cx, Self::toggle_trackpad))
+                .into_any_element(),
+        )
+    }
+
+    /// Send what the trackpad asked for, at its pointer, and keep the pointer in view.
+    fn trackpad_acts(&mut self, pad: touch::Trackpad, acts: &[touch::Act], now: Instant) {
+        let (x, y) = self.picture_to_stream(pad.at());
+        let mods = keys::mods(self.modifiers);
+        for act in acts {
+            let (button, down, clicks) = match *act {
+                touch::Act::Move => {
+                    self.place((x, y), now);
+                    self.input(ScreenInput::Move { x, y });
+                    continue;
+                }
+                touch::Act::Press(b, clicks) => (b, true, clicks),
+                touch::Act::Release(b, clicks) => (b, false, clicks),
+            };
+            let button = match button {
+                touch::Button::Left => ProtoButton::Left,
+                touch::Button::Right => ProtoButton::Right,
+            };
+            if down && !self.buttons.contains(&button) {
+                self.buttons.push(button);
+            } else if !down {
+                self.buttons.retain(|b| *b != button);
+            }
+            self.place((x, y), now);
+            self.input(ScreenInput::Button { button, down, x, y, clicks, mods });
+        }
+    }
+
+    /// One finger in trackpad mode (a touch drag gpui offers before it is a tap or a pan; the
+    /// view claims it). Returns whether it was this view's.
+    fn touch_drag(
+        &mut self,
+        ev: &TouchDragEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(mut pad) = self.trackpad else { return false };
+        let now = cx.background_executor().now();
+        let (w, h) = self.body_size();
+        let at = self.body_fraction(ev.position);
+        let points = (at.0 * w, at.1 * h);
+        let acts = match ev.phase {
+            TouchPhase::Started => {
+                if !self.inside(ev.start_position) {
+                    return false;
+                }
+                self.take_focus(window, cx);
+                pad.begin(points, now);
+                Vec::new()
+            }
+            _ if !pad.touching() => return false,
+            TouchPhase::Moved => {
+                let span = (w * self.zoom.scale(), h * self.zoom.scale());
+                pad.moved(points, now, span)
+            }
+            TouchPhase::Ended => pad.ended(now),
+            TouchPhase::Cancelled => pad.cancelled(),
+        };
+        self.trackpad = Some(pad);
+        self.trackpad_acts(pad, &acts, now);
+        if acts.contains(&touch::Act::Move) {
+            let margin = self.theme.spacing.xl;
+            let max = zoom::max_scale(self.one_to_one());
+            let kept = self.zoom.revealing(pad.at(), (margin / w, margin / h), max);
+            self.set_zoom(kept, cx);
+        }
+        cx.notify();
+        true
+    }
+
+    /// The view takes the keys, and the worker raises its window, as a press on it does.
+    fn take_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) {
+            self.send(ScreenRequest::Focus(self.stream));
+        }
+        self.focus.focus(window, cx);
+        cx.emit(ScreenViewEvent::Pressed);
     }
 
     fn inside(&self, p: Point<Pixels>) -> bool {
         self.bounds.contains(&p)
     }
 
-    /// The worker's pointer from the picture's top-left, in view pixels. Its samples are in the
-    /// stream pixels the worker maps input with, so they scale by the same size input does,
-    /// not by the size of the frame in flight.
-    fn cursor_offset(&self) -> (Pixels, Pixels) {
-        let w = f32::from(self.bounds.size.width).max(1.0);
-        let h = f32::from(self.bounds.size.height).max(1.0);
-        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
-        let (sw, sh) = (self.mapped.0.max(1) as f32, self.mapped.1.max(1) as f32);
-        #[expect(clippy::cast_precision_loss, reason = "cursor coordinates are small")]
-        let (x, y) = (self.cursor.x as f32 / sw * w, self.cursor.y as f32 / sh * h);
-        (px(x), px(y))
+    /// The pointer from the body's top-left, in view pixels, through the zoom
+    /// ([`Self::pointer_spot`]).
+    fn cursor_offset(&self, now: Instant) -> (Pixels, Pixels) {
+        let (w, h) = self.body_size();
+        let (u, v) = self.zoom.to_body(self.pointer_spot(now).0);
+        (px(u * w), px(v * h))
     }
 
-    fn mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, _cx: &mut Context<Self>) {
+    /// The pointer moved over the picture: sent to the worker, and drawn there in the same
+    /// frame, not when the worker's sample of it comes back.
+    fn mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
         if !self.inside(ev.position) {
             return;
         }
+        let now = cx.background_executor().now();
         let (x, y) = self.to_stream(ev.position);
-        self.pointer_at = (x, y);
+        self.place((x, y), now);
+        let (w, h) = self.mapped_f32();
+        if let Some(pad) = self.trackpad.as_mut() {
+            pad.place((x / w.max(1.0), y / h.max(1.0)));
+        }
         self.input(ScreenInput::Move { x, y });
+        self.redraw_pointer(now, cx);
     }
 
     fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus.is_focused(window) {
-            self.send(ScreenRequest::Focus(self.stream));
+        self.take_focus(window, cx);
+        // On glass a double tap is the zoom's: the first tap has clicked already.
+        if self.touch && self.trackpad.is_none() && ev.click_count == 2 {
+            let target = zoom::double_tap_target(self.one_to_one());
+            let max = zoom::max_scale(self.one_to_one());
+            self.set_zoom(self.zoom.toggled(self.body_fraction(ev.position), target, max), cx);
+            cx.stop_propagation();
+            return;
         }
-        self.focus.focus(window, cx);
-        cx.emit(ScreenViewEvent::Pressed);
         let button = proto_button(ev.button);
+        let now = cx.background_executor().now();
         let (x, y) = self.to_stream(ev.position);
-        self.pointer_at = (x, y);
+        self.place((x, y), now);
+        self.redraw_pointer(now, cx);
         if !self.buttons.contains(&button) {
             self.buttons.push(button);
         }
@@ -932,14 +1553,16 @@ impl ScreenView {
 
     /// A button came up, over the picture or anywhere else in the window: released on the
     /// worker if its press went there, at the nearest point of the picture.
-    fn mouse_up(&mut self, ev: &MouseUpEvent, _w: &mut Window, _cx: &mut Context<Self>) {
+    fn mouse_up(&mut self, ev: &MouseUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
         let button = proto_button(ev.button);
         let Some(at) = self.buttons.iter().position(|&b| b == button) else { return };
         self.buttons.swap_remove(at);
         let (x, y) = self.to_stream(ev.position);
         let (w, h) = self.mapped_f32();
         let (x, y) = (x.clamp(0.0, w), y.clamp(0.0, h));
-        self.pointer_at = (x, y);
+        let now = cx.background_executor().now();
+        self.place((x, y), now);
+        self.redraw_pointer(now, cx);
         self.input(ScreenInput::Button {
             button,
             down: false,
@@ -958,10 +1581,6 @@ impl ScreenView {
     }
 
     fn scroll_wheel(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        if ev.modifiers.platform {
-            // ⌘-scroll is the canvas zoom gesture; let it through.
-            return;
-        }
         let (dx, dy, precise) = match ev.delta {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y), true),
             ScrollDelta::Lines(l) => (l.x, l.y, false),
@@ -1093,7 +1712,7 @@ impl ScreenView {
 
     /// Focus left the view or the window went inactive: release on the worker every button,
     /// key and modifier whose press went there, since the release never will (⌘-tab away with
-    /// ⌘ held, a click on another card while a key is down) — input stuck down on the worker
+    /// ⌘ held, a click on another tile while a key is down) — input stuck down on the worker
     /// is the one thing a remote desktop must never leave behind.
     fn let_go(&mut self, cx: &mut Context<Self>) {
         let (x, y) = self.pointer_at;
@@ -1211,7 +1830,7 @@ impl ScreenView {
     }
 
     /// Touch: a long press over the picture is a right click on the worker (context menus);
-    /// a plain drag stays a canvas pan. Returns whether the gesture was claimed.
+    /// a plain drag stays the strip's. Returns whether the gesture was claimed.
     fn long_press(&mut self, ev: &LongPressEvent, cx: &mut Context<Self>) -> bool {
         if ev.phase != TouchPhase::Started || !self.inside(ev.start_position) {
             return false;
@@ -1241,60 +1860,67 @@ impl ScreenView {
         self.press(chord("c"), cx);
     }
 
-    /// The worker's pointer in view coordinates: its own cursor picture when the worker has sent
-    /// one, else a drawn arrow.
-    fn cursor_overlay(&self) -> Option<impl IntoElement + use<>> {
-        if !self.cursor.visible || self.latest.is_none() {
-            return None;
-        }
-        let picture = match &self.pointer {
-            Pointer::Arrow => None,
-            Pointer::Image { image, size, hot } => Some((Arc::clone(image), *size, *hot)),
+    /// The pointer drawn at `spot`, a point of the picture: the worker's cursor picture when it
+    /// has sent one, else a drawn arrow. An element of the pointer's own extent, which tests
+    /// find where it is drawn (`screen-pointer`).
+    fn cursor_overlay(&self, spot: Option<(f32, f32)>) -> Option<impl IntoElement + use<>> {
+        let (w, h) = self.body_size();
+        let (u, v) = self.zoom.to_body(spot?);
+        let at = point(px(u * w), px(v * h));
+        let (bounds, paint) = match &self.pointer {
+            Pointer::Image { image, size, hot } => {
+                (pointer_bounds(at, *size, *hot), PointerPaint::Image(Arc::clone(image)))
+            }
+            Pointer::Arrow => {
+                let arrow = ARROW.with(Clone::clone)?;
+                let extent = arrow.bounds();
+                (
+                    Bounds { origin: at + extent.origin, size: extent.size },
+                    PointerPaint::Arrow(arrow),
+                )
+            }
         };
-        let (dx, dy) = self.cursor_offset();
         let fill = hsla(self.theme.surfaces.text);
         let outline = hsla(self.theme.surfaces.canvas);
         Some(
-            canvas(
-                |_bounds, _window, _cx| {},
-                move |bounds, (), window, _cx| {
-                    let origin = point(bounds.origin.x + dx, bounds.origin.y + dy);
-                    if let Some((image, size, hot)) = picture {
-                        let at = pointer_bounds(origin, size, hot);
-                        let _painted =
-                            window.paint_image(at, at, gpui::Corners::default(), image, 0, false);
-                        return;
-                    }
-                    let arrow = |inset: f32, scale: f32| {
-                        let mut path = PathBuilder::fill();
-                        let at = |x: f32, y: f32| {
-                            point(
-                                origin.x + px(x.mul_add(scale, inset)),
-                                origin.y + px(y.mul_add(scale, inset)),
-                            )
-                        };
-                        path.move_to(at(0.0, 0.0));
-                        path.line_to(at(0.0, 16.0));
-                        path.line_to(at(4.0, 12.5));
-                        path.line_to(at(7.0, 18.5));
-                        path.line_to(at(9.5, 17.5));
-                        path.line_to(at(6.5, 11.5));
-                        path.line_to(at(11.5, 11.5));
-                        path.close();
-                        path.build().ok()
-                    };
-                    if let Some(outline_path) = arrow(-1.0, 1.15) {
-                        window.paint_path(outline_path, outline);
-                    }
-                    if let Some(fill_path) = arrow(0.0, 1.0) {
-                        window.paint_path(fill_path, fill);
-                    }
-                },
-            )
-            .absolute()
-            .size_full(),
+            div()
+                .absolute()
+                .left(bounds.origin.x)
+                .top(bounds.origin.y)
+                .w(bounds.size.width)
+                .h(bounds.size.height)
+                .debug_selector(|| "screen-pointer".to_owned())
+                .child(
+                    canvas(
+                        |_bounds, _window, _cx| {},
+                        move |bounds, (), window, _cx| match paint {
+                            PointerPaint::Image(image) => {
+                                let _painted = window.paint_image(
+                                    bounds,
+                                    bounds,
+                                    gpui::Corners::default(),
+                                    image,
+                                    0,
+                                    false,
+                                );
+                            }
+                            PointerPaint::Arrow(arrow) => {
+                                let tip = bounds.origin - arrow.bounds().origin;
+                                window.paint_path(moved(&arrow.outline, tip), outline);
+                                window.paint_path(moved(&arrow.fill, tip), fill);
+                            }
+                        },
+                    )
+                    .size_full(),
+                ),
         )
     }
+}
+
+/// What the pointer overlay paints.
+enum PointerPaint {
+    Image(Arc<RenderImage>),
+    Arrow(Rc<Arrow>),
 }
 
 impl Drop for ScreenView {
@@ -1428,12 +2054,22 @@ impl Render for ScreenView {
             });
             self.let_go = Some([blur, inactive]);
         }
+        self.renders = self.renders.wrapping_add(1);
+        // Whatever asked for this render, it draws the pointer as it is now: a change that
+        // waited for a frame has it.
+        let drawn = self.pointer_drawn(cx.background_executor().now());
+        self.drawn = drawn;
+        self.fold = None;
         let entity = cx.entity();
         let handler = cx.entity();
         let focus = self.focus.clone();
         let record_bounds = canvas(
-            move |bounds, _window, cx| {
-                entity.update(cx, |this, _| this.bounds = bounds);
+            move |bounds, window, cx| {
+                let scale_factor = window.scale_factor();
+                entity.update(cx, |this, _| {
+                    this.bounds = bounds;
+                    this.scale_factor = scale_factor;
+                });
             },
             // Registering as a text input is what raises the soft keyboard on iOS and lets an
             // input method compose; typed text arrives in `replace_text_in_range`.
@@ -1446,6 +2082,16 @@ impl Render for ScreenView {
                     });
                 }
                 window.handle_input(&focus, ElementInputHandler::new(bounds, handler.clone()), cx);
+                let dragger = handler.clone();
+                window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Bubble {
+                        return;
+                    }
+                    if dragger.update(cx, |view, cx| view.touch_drag(event, window, cx)) {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                });
                 window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
                     if phase != gpui::DispatchPhase::Bubble {
                         return;
@@ -1485,10 +2131,53 @@ impl Render for ScreenView {
                     .child(text)
                     .into_any_element()
             },
-            |(_frame, buffer)| {
-                surface(buffer.clone()).object_fit(ObjectFit::Fill).size_full().into_any_element()
+            |buffer| {
+                let picture = surface(buffer.clone()).object_fit(ObjectFit::Fill);
+                if self.zoom.is_fit() {
+                    return picture.size_full().into_any_element();
+                }
+                // Placed in fractions of the body, so a body that changes size between the
+                // zoom and this draw keeps the same part of the picture in view.
+                let (s, (ox, oy)) = (self.zoom.scale(), self.zoom.origin());
+                picture
+                    .absolute()
+                    .left(relative(ox))
+                    .top(relative(oy))
+                    .w(relative(s))
+                    .h(relative(s))
+                    .into_any_element()
             },
         );
+        let readout = self.readout.zip(self.readout()).map(|(state, text)| {
+            let theme = &self.theme;
+            // A pill over a picture floats: over a remote desktop's own white or black a
+            // veil of the chrome's grey could vanish, and the lifted surface cannot.
+            let pill = kit::tabular(kit::elevate(kit::pill_frame(theme, 1.0), theme))
+                .id("zoom-readout")
+                .role(gpui::accesskit::Role::Status)
+                .aria_label(SharedString::from(text.clone()))
+                .text_color(hsla(theme.surfaces.text_secondary))
+                .font_family(theme.typography.ui_family.clone())
+                .child(text);
+            let pill = match state {
+                Readout::Shown => pill.into_any_element(),
+                Readout::Fading(generation) => pill
+                    .with_animation(
+                        ("zoom-readout-fade", generation),
+                        Animation::new(kit::FADE).with_easing(kit::ease_out()),
+                        |el, t| el.opacity(1.0 - t),
+                    )
+                    .into_any_element(),
+            };
+            div()
+                .absolute()
+                .top(px(theme.spacing.xs))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(pill)
+        });
 
         let hud = self.hud_text(cx).map(|text| {
             div()
@@ -1506,10 +2195,10 @@ impl Render for ScreenView {
         });
         div()
             .id("screen")
-            // While the view has the keys, the canvas's own chords stand back (`!Screen`).
+            // While the view has the keys, the workspace's own chords stand back (`!Screen`).
             .key_context("Screen")
             .role(gpui::accesskit::Role::Image)
-            .aria_label(gpui::SharedString::from(self.a11y_label()))
+            .aria_label(self.a11y_label().clone())
             .track_focus(&self.focus)
             .relative()
             .size_full()
@@ -1532,17 +2221,21 @@ impl Render for ScreenView {
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+            .on_pinch(cx.listener(Self::pinch))
+            .on_action(cx.listener(|this, _: &ToggleTrackpad, _window, cx| {
+                this.toggle_trackpad(cx);
+            }))
             .child(picture)
             .child(record_bounds)
-            .children(self.cursor_overlay())
+            .children(self.cursor_overlay(drawn))
+            .children(readout)
             .children(hud)
     }
 }
 
-/// The pointer the client shows over the card: none while a frame is up, since the worker's
-/// pointer is drawn on it (its picture, or an arrow, or nothing when the worker hides it, all
-/// one round trip behind — two pointers that far apart read as a lag), and the arrow before
-/// the first frame, when there is nothing to point at yet.
+/// The system pointer over the picture: none while a frame is up, since the pointer is drawn on
+/// it in the worker's cursor picture (or an arrow, or nothing when the worker's is off the
+/// target), and the arrow before the first frame, when there is nothing to point at yet.
 const fn local_pointer(showing: bool) -> CursorStyle {
     if showing { CursorStyle::None } else { CursorStyle::Arrow }
 }
@@ -1629,10 +2322,10 @@ impl EntityInputHandler for ScreenView {
         _range_utf16: std::ops::Range<usize>,
         _element_bounds: Bounds<Pixels>,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // The worker's pointer stands in for a caret: candidate windows hang there.
-        let (dx, dy) = self.cursor_offset();
+        // The pointer stands in for a caret: candidate windows hang there.
+        let (dx, dy) = self.cursor_offset(cx.background_executor().now());
         let origin = point(self.bounds.origin.x + dx, self.bounds.origin.y + dy);
         Some(Bounds::new(origin, size(px(1.0), px(16.0))))
     }
@@ -1814,7 +2507,10 @@ mod tests {
         };
         assert_eq!((quality.fps, quality.bitrate_bps), (30, 8_000_000));
         assert_eq!(quality.codec, VideoCodec::Hevc, "8-bit HEVC, the one stream format");
-        assert!((quality.scale - 1.0).abs() < f32::EPSILON, "the scale is the canvas's");
+        assert!(
+            (quality.scale - 1.0).abs() < f32::EPSILON,
+            "the scale follows the tile's width, not the theme"
+        );
         view.update(cx, |v, cx| v.set_theme(theme, cx));
         assert!(sent(&mut rx).is_empty(), "the same theme again asks nothing");
 
@@ -1862,7 +2558,7 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.pointer_picture().is_none()), "none: the arrow");
     }
 
-    /// The client's own pointer hides over a card that shows a frame, where the worker's is
+    /// The client's own pointer hides over a picture that shows a frame, where the worker's is
     /// drawn, and stays the arrow before the first frame.
     #[test]
     fn the_local_pointer_hides_once_a_frame_is_up() {
@@ -1961,7 +2657,7 @@ mod tests {
         out
     }
 
-    /// Zooming the card out asks the worker for a smaller picture, in quarter steps, not more
+    /// Drawing the tile smaller asks the worker for a smaller picture, in quarter steps, not more
     /// than once per cooldown; a resize from the worker keeps the native size consistent with
     /// the scale in force.
     #[gpui::test]
@@ -1971,7 +2667,7 @@ mod tests {
         let (view, mut rx) = view(cx);
         view.update(cx, |v, cx| {
             assert_eq!(v.native(), (800.0, 600.0));
-            assert_eq!(v.a11y_label(), "Remote display 2");
+            assert_eq!(v.a11y_label().as_ref(), "Remote display 2");
             // Pinned here, not left to `new`: a loaded machine can spend the cooldown before
             // the ask.
             v.quality_changed = Instant::now();
@@ -2095,7 +2791,7 @@ mod tests {
         assert!(kinds(&mut rx).iter().all(|k| *k == "Screen"), "heard already: the key alone");
     }
 
-    /// ⌘V with files on the clipboard asks the canvas to send them, and holds the chord and
+    /// ⌘V with files on the clipboard asks the workspace to send them, and holds the chord and
     /// everything typed after it until they are on the worker's pasteboard; then it all goes,
     /// in order.
     #[gpui::test]
@@ -2134,7 +2830,7 @@ mod tests {
         view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
         view.update(cx, |v, cx| v.press(chord("x"), cx));
         cx.run_until_parked();
-        assert_eq!(*asked.borrow(), [files], "the canvas is asked to send them");
+        assert_eq!(*asked.borrow(), [files], "the workspace is asked to send them");
         assert!(keys(&mut rx).is_empty(), "nothing goes before the files");
         assert!(view.read_with(cx, |v, _| v.paste_held()));
         view.update(cx, |v, _| v.release_paste());
@@ -2157,10 +2853,18 @@ mod tests {
     fn windowed(
         cx: &mut gpui::TestAppContext,
     ) -> (gpui::Entity<ScreenView>, mpsc::Receiver<ClientMsg>, &mut gpui::VisualTestContext) {
+        windowed_on(cx, CaptureTarget::Display(2))
+    }
+
+    /// [`windowed`], streaming `target`.
+    fn windowed_on(
+        cx: &mut gpui::TestAppContext,
+        target: CaptureTarget,
+    ) -> (gpui::Entity<ScreenView>, mpsc::Receiver<ClientMsg>, &mut gpui::VisualTestContext) {
         let (out, rx) = mpsc::channel(64);
         let opened = Opened {
             stream: StreamId(4),
-            target: CaptureTarget::Display(2),
+            target,
             size: (800, 600),
             quality: Quality { scale: 1.0, ..Quality::default() },
         };
@@ -2308,7 +3012,7 @@ mod tests {
     /// scales by the stream size over the picture's bounds. A press carries its button, click
     /// count and modifiers, a release the same, a move only while over the picture, and a
     /// scroll its deltas with the unit (pixels are precise, lines are not) and the phases a
-    /// `CGEvent` needs; ⌘-scroll is the canvas's zoom and sends nothing.
+    /// `CGEvent` needs, ⌘ included.
     #[gpui::test]
     fn pointer_and_scroll_reach_the_worker_in_stream_pixels(cx: &mut gpui::TestAppContext) {
         let (view, mut rx, cx) = windowed(cx);
@@ -2353,7 +3057,7 @@ mod tests {
         cx.run_until_parked();
 
         let got = inputs(&mut rx);
-        assert_eq!(got.len(), 5, "{got:?}");
+        assert_eq!(got.len(), 6, "{got:?}");
         match &got[0] {
             ScreenInput::Move { x, y } => assert!(near((*x, *y), 200.0, 300.0), "{got:?}"),
             other => panic!("expected a move, got {other:?}"),
@@ -2404,8 +3108,15 @@ mod tests {
             }
             other => panic!("expected a line scroll, got {other:?}"),
         }
+        match &got[5] {
+            ScreenInput::Scroll { dy, precise: false, mods, .. } => {
+                assert!((*dy - 1.0).abs() < f32::EPSILON, "{got:?}");
+                assert_eq!(*mods, Mods::SUPER, "⌘-scroll is the worker's, as it would be locally");
+            }
+            other => panic!("expected a ⌘ line scroll, got {other:?}"),
+        }
 
-        // Off the picture the pointer belongs to another card: a move there sends nothing.
+        // Off the picture the pointer belongs to another tile: a move there sends nothing.
         cx.simulate_mouse_move(
             point(bounds.origin.x - px(5.0), bounds.origin.y - px(5.0)),
             None,
@@ -2606,5 +3317,631 @@ mod tests {
         assert_eq!(caret(&view, cx), Some(half_quarter), "the sample sent before the ask");
         view.update(cx, |v, _| v.cursor = CursorState { x: 200, y: 75, visible: true });
         assert_eq!(caret(&view, cx), Some(half_quarter), "the first at the 400×300 asked for");
+    }
+
+    /// The button presses among `got`: button, down, and where.
+    fn presses(got: &[ScreenInput]) -> Vec<(ProtoButton, bool, f32, f32, u8)> {
+        got.iter()
+            .filter_map(|input| match input {
+                ScreenInput::Button { button, down, x, y, clicks, .. } => {
+                    Some((*button, *down, *x, *y, *clicks))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A point of the view's body at fractions `(fx, fy)` of it.
+    fn at_fraction(
+        view: &gpui::Entity<ScreenView>,
+        cx: &gpui::VisualTestContext,
+        fx: f32,
+        fy: f32,
+    ) -> Point<Pixels> {
+        let b = view.read_with(cx, |v, _| v.bounds);
+        point(b.origin.x + b.size.width * fx, b.origin.y + b.size.height * fy)
+    }
+
+    /// The pointer's offset from the body's top-left as it is drawn now, in points.
+    fn offset(view: &gpui::Entity<ScreenView>, cx: &gpui::VisualTestContext) -> (f32, f32) {
+        view.read_with(cx, |v, cx| {
+            let (dx, dy) = v.cursor_offset(cx.background_executor().now());
+            (f32::from(dx), f32::from(dy))
+        })
+    }
+
+    #[track_caller]
+    fn near_px(got: (f32, f32), want: (f32, f32)) {
+        assert!(
+            (got.0 - want.0).abs() < 0.5 && (got.1 - want.1).abs() < 0.5,
+            "{got:?} vs {want:?}"
+        );
+    }
+
+    /// A tap lands on the stream pixel drawn under it at any zoom and pan: at fit, zoomed about
+    /// the middle, zoomed into either corner (where the pan is held at the picture's edge
+    /// however far it is pushed), and a release off the body lands on the picture's edge.
+    #[gpui::test]
+    fn a_tap_lands_on_the_pixel_drawn_under_it_at_any_zoom(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        drop(sent(&mut rx));
+        let tap = |cx: &mut gpui::VisualTestContext, rx: &mut mpsc::Receiver<ClientMsg>, fx, fy| {
+            let at = at_fraction(&view, cx, fx, fy);
+            cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+            let got = presses(&inputs(rx));
+            assert_eq!(got.len(), 2, "{got:?}");
+            let (_, down, x, y, _) = got[0];
+            assert!(down);
+            (x, y)
+        };
+        let set = |cx: &mut gpui::VisualTestContext, zoom: Zoom| {
+            view.update(cx, |v, cx| {
+                v.zoom = zoom;
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        near_px(tap(cx, &mut rx, 0.25, 0.5), (200.0, 300.0));
+        set(cx, Zoom::FIT.about((0.5, 0.5), 2.0, 8.0));
+        near_px(tap(cx, &mut rx, 0.25, 0.5), (300.0, 300.0));
+        near_px(tap(cx, &mut rx, 0.5, 0.5), (400.0, 300.0));
+        set(cx, Zoom::FIT.about((0.0, 0.0), 4.0, 8.0).panned((5.0, 5.0), 8.0));
+        near_px(tap(cx, &mut rx, 0.0, 0.0), (0.0, 0.0));
+        // The body's far edge is not on it: just inside.
+        near_px(tap(cx, &mut rx, 0.99, 0.99), (198.0, 148.5));
+        set(cx, Zoom::FIT.about((1.0, 1.0), 4.0, 8.0).panned((-5.0, -5.0), 8.0));
+        near_px(tap(cx, &mut rx, 0.0, 0.0), (600.0, 450.0));
+        near_px(tap(cx, &mut rx, 0.99, 0.99), (798.0, 598.5));
+        near_px(tap(cx, &mut rx, 0.5, 0.5), (700.0, 525.0));
+
+        // Pressed on the body, let go far past its corner: at the picture's corner.
+        let inside = at_fraction(&view, cx, 0.5, 0.5);
+        let past = at_fraction(&view, cx, 3.0, 3.0);
+        cx.simulate_mouse_down(inside, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(past, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let got = presses(&inputs(&mut rx));
+        assert_eq!(got.last().map(|p| (p.1, p.2, p.3)), Some((false, 800.0, 600.0)), "{got:?}");
+
+        // The worker's pointer, once this client's taps no longer hold it, is drawn through
+        // the same zoom: its pixel is drawn where a tap would send it.
+        cx.executor().advance_clock(LOCAL_HOLD);
+        view.update(cx, |v, _| v.cursor = CursorState { x: 700, y: 525, visible: true });
+        near_px(offset(&view, cx), (200.0, 150.0));
+    }
+
+    /// On glass a double tap goes to one to one about the tapped point and back to fit, and its
+    /// second tap is not sent (the first has clicked); with a pointer, a double click is a
+    /// double click.
+    #[gpui::test]
+    fn a_double_tap_toggles_fit_and_one_to_one_on_glass(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        drop(sent(&mut rx));
+        let tap = |cx: &mut gpui::VisualTestContext, at, clicks| {
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::default(),
+                click_count: clicks,
+                first_mouse: false,
+            });
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::default(),
+                click_count: clicks,
+            });
+            cx.run_until_parked();
+        };
+        let at = at_fraction(&view, cx, 0.3, 0.6);
+        tap(cx, at, 2);
+        assert!(view.read_with(cx, |v, _| v.zoom.is_fit()), "a pointer's double click: no zoom");
+        assert_eq!(presses(&inputs(&mut rx)).len(), 2, "and it is sent");
+
+        view.update(cx, |v, _| v.touch = true);
+        tap(cx, at, 1);
+        tap(cx, at, 2);
+        let (zoom, one) = view.read_with(cx, |v, _| (v.zoom, v.one_to_one()));
+        let clicks = presses(&inputs(&mut rx));
+        assert_eq!(clicks.len(), 2, "the first tap clicked, the second did not: {clicks:?}");
+        assert!((zoom.scale() - zoom::double_tap_target(one)).abs() < 1e-4, "{zoom:?} at {one}");
+        let f = zoom.to_picture((0.3, 0.6));
+        assert!((f.0 - 0.3).abs() < 1e-4 && (f.1 - 0.6).abs() < 1e-4, "about the tap: {f:?}");
+        tap(cx, at, 1);
+        tap(cx, at, 2);
+        assert_eq!(view.read_with(cx, |v, _| v.zoom), Zoom::FIT, "and back");
+    }
+
+    /// Two fingers zoom about their centroid and pan the zoomed picture as the centroid moves;
+    /// tapped and lifted at once on glass they right-click where they were. A pinch that begins
+    /// off the picture is not the view's.
+    #[gpui::test]
+    fn two_fingers_zoom_pan_and_tap(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        drop(sent(&mut rx));
+        view.update(cx, |v, _| {
+            v.touch = true;
+            // A 4K target on this body, so the zoom has room.
+            v.native = (3200.0, 2400.0);
+        });
+        let pinch = |cx: &mut gpui::VisualTestContext, at, delta, phase| {
+            cx.simulate_event(PinchEvent {
+                position: at,
+                delta,
+                modifiers: Modifiers::default(),
+                phase,
+            });
+            cx.run_until_parked();
+        };
+        let middle = at_fraction(&view, cx, 0.5, 0.5);
+        pinch(cx, middle, 0.0, TouchPhase::Started);
+        pinch(cx, middle, 1.0, TouchPhase::Moved);
+        let z = view.read_with(cx, |v, _| v.zoom);
+        assert!((z.scale() - 2.0).abs() < 1e-4 && (z.origin().0 + 0.5).abs() < 1e-4, "{z:?}");
+        // The centroid goes 40 pt right with no scale: the picture follows it.
+        let right = at_fraction(&view, cx, 0.6, 0.5);
+        pinch(cx, right, 0.0, TouchPhase::Moved);
+        pinch(cx, right, 0.0, TouchPhase::Ended);
+        let z = view.read_with(cx, |v, _| v.zoom);
+        assert!((z.origin().0 + 0.4).abs() < 1e-4, "panned a tenth of the body: {z:?}");
+        assert!(presses(&inputs(&mut rx)).is_empty(), "a pinch clicks nothing");
+
+        pinch(cx, middle, 0.0, TouchPhase::Started);
+        pinch(cx, middle, 0.01, TouchPhase::Moved);
+        pinch(cx, middle, 0.0, TouchPhase::Ended);
+        let want = view.read_with(cx, |v, _| v.to_stream(middle));
+        let got = presses(&inputs(&mut rx));
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!((got[0].0, got[0].1), (ProtoButton::Right, true));
+        near_px((got[0].2, got[0].3), want);
+
+        let off = at_fraction(&view, cx, 1.5, 0.5);
+        let before = view.read_with(cx, |v, _| v.zoom);
+        pinch(cx, off, 0.0, TouchPhase::Started);
+        pinch(cx, off, 0.5, TouchPhase::Moved);
+        pinch(cx, off, 0.0, TouchPhase::Ended);
+        assert_eq!(view.read_with(cx, |v, _| v.zoom), before, "not over the picture");
+    }
+
+    /// Trackpad mode: a finger drag moves the pointer relatively (point for point while
+    /// aiming, further when fast), sends it to the worker and draws it there at once; a tap
+    /// clicks at the pointer, wherever the finger is; two fingers dragged scroll at the pointer;
+    /// zoomed in, the view pans to keep the pointer in sight. Turning the mode off lets go.
+    #[gpui::test]
+    fn trackpad_mode_moves_a_pointer_and_clicks_where_it_is(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        drop(sent(&mut rx));
+        view.update(cx, |v, cx| {
+            v.native = (3200.0, 2400.0);
+            v.toggle_trackpad(cx);
+            assert!(v.trackpad());
+        });
+        let drag =
+            |cx: &mut gpui::VisualTestContext, start, to: &[Point<Pixels>], wait: Duration| {
+                let ev =
+                    |phase, position| TouchDragEvent { phase, start_position: start, position };
+                cx.simulate_event(ev(TouchPhase::Started, start));
+                for p in to {
+                    cx.executor().advance_clock(wait);
+                    cx.simulate_event(ev(TouchPhase::Moved, *p));
+                }
+                cx.simulate_event(ev(TouchPhase::Ended, to.last().copied().unwrap_or(start)));
+                cx.run_until_parked();
+            };
+        let a = at_fraction(&view, cx, 0.1, 0.1);
+        // 10 pt in 100 ms: aiming, point for point. The pointer began in the middle.
+        drag(cx, a, &[point(a.x + px(10.0), a.y)], Duration::from_millis(100));
+        let got = inputs(&mut rx);
+        assert!(
+            matches!(got.as_slice(), [ScreenInput::Move { x, y }] if (x - 420.0).abs() < 0.5 && (y - 300.0).abs() < 0.5),
+            "{got:?}"
+        );
+        near_px(offset(&view, cx), (210.0, 150.0));
+
+        // A tap far from the pointer clicks at the pointer.
+        let far = at_fraction(&view, cx, 0.9, 0.9);
+        drag(cx, far, &[], Duration::ZERO);
+        let got = presses(&inputs(&mut rx));
+        assert_eq!(
+            got.iter().map(|p| (p.0, p.1, p.4)).collect::<Vec<_>>(),
+            [(ProtoButton::Left, true, 1), (ProtoButton::Left, false, 1)]
+        );
+        for p in &got {
+            near_px((p.2, p.3), (420.0, 300.0));
+        }
+
+        // 40 pt in 10 ms is a flick: three times as far.
+        cx.executor().advance_clock(Duration::from_secs(1));
+        drag(cx, a, &[point(a.x + px(40.0), a.y)], Duration::from_millis(10));
+        let x = view.read_with(cx, |v, _| v.trackpad.map(|p| p.at().0));
+        assert!(x.is_some_and(|x| (x - (0.525 + 120.0 / 400.0)).abs() < 1e-4), "{x:?}");
+        drop(inputs(&mut rx));
+
+        // Two fingers dragged: a scroll at the pointer, begun, changed and ended.
+        let pinch = |cx: &mut gpui::VisualTestContext, at, phase| {
+            cx.simulate_event(PinchEvent {
+                position: at,
+                delta: 0.0,
+                modifiers: Modifiers::default(),
+                phase,
+            });
+        };
+        pinch(cx, a, TouchPhase::Started);
+        pinch(cx, point(a.x, a.y + px(12.0)), TouchPhase::Moved);
+        pinch(cx, point(a.x, a.y + px(20.0)), TouchPhase::Moved);
+        pinch(cx, point(a.x, a.y + px(20.0)), TouchPhase::Ended);
+        cx.run_until_parked();
+        let scrolls: Vec<_> = inputs(&mut rx)
+            .into_iter()
+            .filter_map(|i| match i {
+                ScreenInput::Scroll { dy, phase, x, .. } => Some((dy, phase, x)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            scrolls.iter().map(|s| (s.0, s.1)).collect::<Vec<_>>(),
+            [(12.0, ScrollPhase::Began), (8.0, ScrollPhase::Changed), (0.0, ScrollPhase::Ended)]
+        );
+        assert!(scrolls.iter().all(|s| (s.2 / 800.0 - 0.825).abs() < 1e-3), "at the pointer");
+        assert!(view.read_with(cx, |v, _| v.zoom.is_fit()), "a drag does not zoom");
+
+        // Zoomed into the top-left quarter, the pointer pushed right past the view pans it.
+        view.update(cx, |v, cx| {
+            if let Some(pad) = v.trackpad.as_mut() {
+                pad.place((0.4, 0.2));
+            }
+            v.zoom = Zoom::FIT.about((0.0, 0.0), 2.0, 8.0);
+            cx.notify();
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        drag(cx, a, &[point(a.x + px(100.0), a.y)], Duration::from_millis(1000));
+        let (zoom, at) = view.read_with(cx, |v, _| (v.zoom, v.trackpad.map(|p| p.at())));
+        let at = at.unwrap_or_default();
+        let (u, _) = zoom.to_body(at);
+        let margin = view.read_with(cx, |v, _| v.theme.spacing.xl / 400.0);
+        assert!((u - (1.0 - margin)).abs() < 1e-4, "kept at the margin: {u} with {zoom:?}");
+        assert!(zoom.origin().0 < 0.0, "panned: {zoom:?}");
+
+        // A drag with the button held (tap, then drag) is let go when the mode goes off.
+        drag(cx, a, &[], Duration::ZERO);
+        let ev = |phase, position| TouchDragEvent { phase, start_position: a, position };
+        cx.simulate_event(ev(TouchPhase::Started, a));
+        cx.simulate_event(ev(TouchPhase::Moved, point(a.x + px(30.0), a.y)));
+        cx.run_until_parked();
+        drop(inputs(&mut rx));
+        view.update(cx, |v, cx| v.set_trackpad(false, cx));
+        let got = presses(&inputs(&mut rx));
+        assert!(matches!(got.as_slice(), [(ProtoButton::Left, false, ..)]), "{got:?}");
+        assert!(view.read_with(cx, |v, _| v.buttons.is_empty()));
+    }
+
+    /// A zoom puts its readout up, which fades after a moment and goes; under Reduce Motion it
+    /// goes at once, with no fade. A zoom also asks the worker for the scale it is drawn at.
+    #[gpui::test]
+    fn the_zoom_readout_fades_and_the_stream_follows_the_zoom(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        view.update(cx, |v, cx| {
+            v.native = (3200.0, 2400.0);
+            v.quality_changed = past_cooldown();
+            v.set_painted_width(800.0, cx);
+        });
+        let scale = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            sent(rx).into_iter().find_map(|r| match r {
+                ScreenRequest::SetQuality { quality, .. } => Some(quality.scale),
+                _ => None,
+            })
+        };
+        assert_eq!(scale(&mut rx), Some(0.25), "800 of 3200");
+        view.update(cx, |v, cx| {
+            v.quality_changed = past_cooldown();
+            v.set_zoom(Zoom::FIT.about((0.5, 0.5), 2.0, 8.0), cx);
+        });
+        assert_eq!(scale(&mut rx), Some(0.5), "drawn twice as wide");
+        let state = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |v, _| v.readout);
+        assert_eq!(state(cx), Some(Readout::Shown));
+        assert!(
+            view.read_with(cx, |v, _| v.readout())
+                .is_some_and(|r| r.ends_with('%') && !r.ends_with(" %"))
+        );
+        cx.executor().advance_clock(READOUT_HOLD);
+        cx.run_until_parked();
+        assert!(matches!(state(cx), Some(Readout::Fading(_))), "{:?}", state(cx));
+        cx.executor().advance_clock(kit::FADE);
+        cx.run_until_parked();
+        assert_eq!(state(cx), None);
+
+        cx.update(|_w, cx| cx.set_reduce_motion(true));
+        view.update(cx, |v, cx| v.set_zoom(Zoom::FIT, cx));
+        assert_eq!(state(cx), Some(Readout::Shown));
+        assert_eq!(view.read_with(cx, |v, _| v.readout()).as_deref(), Some("Fit"));
+        cx.executor().advance_clock(READOUT_HOLD);
+        cx.run_until_parked();
+        assert_eq!(state(cx), None, "gone at once, no fade");
+    }
+
+    /// Frame cost of the picture at fit, zoomed and still, and zoomed with a pinch moving it
+    /// every frame (its readout up), on a 5K-sized frame: the draw the window does for the view
+    /// alone. Blocks of each alternate so a loaded machine weighs on all three alike.
+    #[gpui::test]
+    #[ignore = "a measurement: prints MEASURE lines"]
+    fn measure_a_zoomed_stream_frame(cx: &mut gpui::TestAppContext) {
+        const BLOCK: usize = 100;
+        const BLOCKS: usize = 6;
+        const WARM: usize = 50;
+        let (view, _rx, cx) = windowed(cx);
+        cx.simulate_resize(size(px(1170.0), px(2532.0)));
+        let buffer = CVPixelBuffer::new(
+            core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            5120,
+            2880,
+            None,
+        )
+        .expect("pixel buffer");
+        view.update(cx, |v, _| {
+            v.latest = Some(buffer);
+            v.native = (5120.0, 2880.0);
+            v.cursor = CursorState { x: 400, y: 300, visible: true };
+        });
+        cx.run_until_parked();
+        let deep = Zoom::FIT.about((0.4, 0.6), 4.0, 8.0);
+        let mut took: [Vec<Duration>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for block in 0..(BLOCKS * 3) {
+            let case = block % 3;
+            view.update(cx, |v, _| v.zoom = if case == 0 { Zoom::FIT } else { deep });
+            for n in 0..(WARM + BLOCK) {
+                let start = Instant::now();
+                view.update(cx, |v, cx| {
+                    if case == 2 {
+                        let factor = if n % 2 == 0 { 1.01 } else { 1.0 / 1.01 };
+                        v.set_zoom(v.zoom.about((0.5, 0.5), factor, 8.0), cx);
+                    }
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                if n >= WARM {
+                    took[case].push(start.elapsed());
+                }
+            }
+        }
+        for (name, mut t) in ["fit", "zoomed", "pinching"].into_iter().zip(took) {
+            t.sort_unstable();
+            let at = |q: f64| {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    clippy::cast_precision_loss,
+                    reason = "an index"
+                )]
+                let i = ((t.len() as f64 * q).ceil() as usize).saturating_sub(1);
+                t[i].as_secs_f64() * 1e6
+            };
+            println!(
+                "MEASURE {name}: p50 {:.1} µs p95 {:.1} µs max {:.1} µs (n {})",
+                at(0.5),
+                at(0.95),
+                at(1.0),
+                t.len()
+            );
+        }
+    }
+
+    /// A picture of `w` × `h` for a test to put up.
+    fn picture(w: usize, h: usize) -> CVPixelBuffer {
+        CVPixelBuffer::new(
+            core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            w,
+            h,
+            None,
+        )
+        .expect("pixel buffer")
+    }
+
+    /// Senders for the frames and cursor samples the view's pump reads, as the stream's own.
+    fn pumped(
+        view: &gpui::Entity<ScreenView>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> (watch::Sender<Option<CVPixelBuffer>>, watch::Sender<CursorState>) {
+        fn take(
+            view: &mut ScreenView,
+            frame: Option<CVPixelBuffer>,
+            cx: &mut Context<ScreenView>,
+        ) -> bool {
+            let Some(buffer) = frame else { return false };
+            view.show(buffer, cx);
+            true
+        }
+        let (frames_tx, frames) = watch::channel(None);
+        let (cursor_tx, cursor) = watch::channel(CursorState::default());
+        #[expect(clippy::used_underscore_binding, reason = "the pump is kept, not read, but here")]
+        view.update(cx, |v, cx| v._pump = ScreenView::pump(frames, cursor, take, cx));
+        (frames_tx, cursor_tx)
+    }
+
+    /// Where the pointer is drawn, in window coordinates, when it is.
+    fn drawn_at(cx: &mut gpui::VisualTestContext) -> Option<Bounds<Pixels>> {
+        cx.debug_bounds("screen-pointer")
+    }
+
+    fn renders(view: &gpui::Entity<ScreenView>, cx: &gpui::VisualTestContext) -> u32 {
+        view.read_with(cx, |v, _| v.renders())
+    }
+
+    /// Where the drawn arrow's extent starts with its tip on `at` (layout rounds its size).
+    fn arrow_at(at: Point<Pixels>) -> Point<Pixels> {
+        let extent = ARROW.with(|arrow| arrow.as_ref().map(|a| a.bounds())).expect("the arrow");
+        at + extent.origin
+    }
+
+    /// Where the drawn pointer's extent starts, when one is drawn.
+    fn arrow_drawn(cx: &mut gpui::VisualTestContext) -> Option<Point<Pixels>> {
+        drawn_at(cx).map(|b| b.origin)
+    }
+
+    /// On a window stream the pointer is drawn where this client put it, in the worker's cursor
+    /// picture, by the frame the move itself draws: no cursor sample comes into it. A sample
+    /// that does come (the echo of an older move) neither moves it nor draws. Before the first
+    /// move there is none, as the worker says.
+    #[gpui::test]
+    fn a_window_streams_pointer_is_drawn_where_this_client_put_it_in_the_same_frame(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, mut rx, cx) = windowed_on(cx, CaptureTarget::Window(slopty_core::WindowId(9)));
+        let (_frames, cursor) = pumped(&view, cx);
+        let shape = CursorShape { w: 8, h: 8, hot_x: 2, hot_y: 2, bgra: vec![0; 256], scale: 2 };
+        view.update(cx, |v, cx| {
+            v.show_picture(picture(800, 600), cx);
+            v.set_cursor_shape(Some(shape), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(drawn_at(cx), None, "put nowhere yet: none");
+        let pictured = |at| pointer_bounds(at, size(px(4.0), px(4.0)), point(px(1.0), px(1.0)));
+
+        let first = at_fraction(&view, cx, 0.25, 0.5);
+        cx.simulate_mouse_move(first, None, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(drawn_at(cx), Some(pictured(first)));
+
+        let second = at_fraction(&view, cx, 0.75, 0.25);
+        let before = renders(&view, cx);
+        cx.simulate_mouse_move(second, None, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(renders(&view, cx), before.saturating_add(1), "one frame, the move's own");
+        assert_eq!(drawn_at(cx), Some(pictured(second)), "the worker's picture, at the new point");
+        let sample = view.read_with(cx, |v, _| v.cursor);
+        assert_eq!(sample, CursorState::default(), "with no sample come");
+        let moves = inputs(&mut rx);
+        assert!(
+            matches!(moves.as_slice(), [ScreenInput::Move { .. }, ScreenInput::Move { x, y }] if (*x - 600.0).abs() < 0.5 && (*y - 150.0).abs() < 0.5),
+            "both moves went: {moves:?}"
+        );
+
+        cursor.send(CursorState { x: 200, y: 300, visible: true }).expect("the pump listens");
+        cx.run_until_parked();
+        assert_eq!(drawn_at(cx), Some(pictured(second)), "the late echo moves nothing");
+        assert_eq!(renders(&view, cx), before.saturating_add(1), "and draws nothing");
+    }
+
+    /// On a display the worker's sample draws the pointer while this client is not moving it
+    /// (another user's hand, an app's warp), this client's own point draws it while it is, and
+    /// once the hold runs out the worker's sample takes over, drawn where the worker says the
+    /// pointer went.
+    #[gpui::test]
+    fn a_displays_pointer_follows_the_worker_unless_this_client_moves_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, _rx, cx) = windowed(cx);
+        let (_frames, cursor) = pumped(&view, cx);
+        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.run_until_parked();
+        assert_eq!(arrow_drawn(cx), None, "the worker's pointer is off the display");
+
+        cursor.send(CursorState { x: 400, y: 300, visible: true }).expect("the pump listens");
+        cx.run_until_parked();
+        assert_eq!(
+            arrow_drawn(cx),
+            Some(arrow_at(at_fraction(&view, cx, 0.5, 0.5))),
+            "the worker's"
+        );
+
+        let here = at_fraction(&view, cx, 0.25, 0.25);
+        cx.simulate_mouse_move(here, None, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(arrow_drawn(cx), Some(arrow_at(here)), "this client's, at once");
+
+        let drawn = renders(&view, cx);
+        cursor.send(CursorState { x: 600, y: 450, visible: true }).expect("the pump listens");
+        cx.run_until_parked();
+        assert_eq!(arrow_drawn(cx), Some(arrow_at(here)), "held while this client drives it");
+        assert_eq!(renders(&view, cx), drawn, "a sample under the hold draws nothing");
+
+        cx.executor().advance_clock(LOCAL_HOLD);
+        cx.run_until_parked();
+        let there = at_fraction(&view, cx, 0.75, 0.75);
+        assert_eq!(
+            arrow_drawn(cx),
+            Some(arrow_at(there)),
+            "the hold ran out: where the worker's went"
+        );
+
+        cursor.send(CursorState { x: 80, y: 60, visible: true }).expect("the pump listens");
+        cx.run_until_parked();
+        let warped = at_fraction(&view, cx, 0.1, 0.1);
+        assert_eq!(arrow_drawn(cx), Some(arrow_at(warped)), "moved on the worker alone");
+    }
+
+    /// Frames at 60 Hz with cursor samples at 120 Hz, the worker moving the pointer: each sample
+    /// rides the frame after it, so the view draws once a frame, not once a frame and once a
+    /// sample. A sample whose frame is late draws on its own, [`FOLD`] past the frame's due
+    /// time; with frames stopped, a sample draws at once.
+    #[gpui::test]
+    fn cursor_samples_ride_the_frames_while_they_flow(cx: &mut gpui::TestAppContext) {
+        const FRAMES: u64 = 60;
+        const SAMPLES: u64 = 120;
+        let (view, _rx, cx) = windowed(cx);
+        let (frames, cursor) = pumped(&view, cx);
+        let buffer = picture(800, 600);
+        let before = renders(&view, cx);
+        let mut events: Vec<(u64, bool)> = (0..FRAMES)
+            .map(|k| (k.saturating_mul(16_667), true))
+            .chain((0..SAMPLES).map(|k| (k.saturating_mul(8_333).saturating_add(4_000), false)))
+            .collect();
+        events.sort_unstable();
+        let (mut clock, mut x) = (0_u64, 0_i32);
+        for (at, frame) in events {
+            cx.executor().advance_clock(Duration::from_micros(at.saturating_sub(clock)));
+            clock = at;
+            if frame {
+                frames.send(Some(buffer.clone())).expect("the pump listens");
+            } else {
+                x = x.saturating_add(3);
+                cursor.send(CursorState { x, y: 300, visible: true }).expect("the pump listens");
+            }
+            cx.run_until_parked();
+        }
+        // The last two samples came after the last frame; it has no next, so they draw on their
+        // own once it is late.
+        cx.executor().advance_clock(Duration::from_millis(30));
+        cx.run_until_parked();
+        let draws = renders(&view, cx).saturating_sub(before);
+        println!("MEASURE {FRAMES} frames at 60 Hz and {SAMPLES} samples at 120 Hz: {draws} draws");
+        assert_eq!(draws, u32::try_from(FRAMES).expect("small").saturating_add(1));
+        #[expect(clippy::cast_precision_loss, reason = "a small coordinate")]
+        let last = x as f32 / 800.0;
+        near_px(offset(&view, cx), (last * 400.0, 150.0));
+
+        // A frame, then a sample, and the next frame late.
+        frames.send(Some(buffer)).expect("the pump listens");
+        cx.run_until_parked();
+        let drawn = renders(&view, cx);
+        cx.executor().advance_clock(Duration::from_millis(4));
+        cursor.send(CursorState { x: 100, y: 100, visible: true }).expect("the pump listens");
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(20));
+        cx.run_until_parked();
+        assert_eq!(renders(&view, cx), drawn, "waiting for the frame, 24 ms on");
+        cx.executor().advance_clock(Duration::from_millis(2));
+        cx.run_until_parked();
+        assert_eq!(
+            renders(&view, cx),
+            drawn.saturating_add(1),
+            "late by more than the fold: drawn alone"
+        );
+
+        // Frames stopped: a sample draws at once.
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cursor.send(CursorState { x: 200, y: 100, visible: true }).expect("the pump listens");
+        cx.run_until_parked();
+        assert_eq!(renders(&view, cx), drawn.saturating_add(2), "no frames: at once");
+
+        // A sample that moves nothing drawn draws nothing: the same place, or hidden and hidden.
+        cursor.send(CursorState { x: 200, y: 100, visible: true }).expect("the pump listens");
+        cx.run_until_parked();
+        cursor.send(CursorState { x: 0, y: 0, visible: false }).expect("the pump listens");
+        cx.run_until_parked();
+        cursor.send(CursorState { x: 5, y: 5, visible: false }).expect("the pump listens");
+        cx.run_until_parked();
+        assert_eq!(renders(&view, cx), drawn.saturating_add(3), "only the hiding drew");
     }
 }

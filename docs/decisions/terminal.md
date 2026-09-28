@@ -185,6 +185,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   reader), `cmd_click_on_a_path_opens_it_in_the_shells_editor` (the click, headless),
   `cmd_click_on_a_path_while_a_command_runs_views_it` (nothing typed, `ViewFile` raised),
   `a_shells_relative_path_opens_a_card_in_its_directory` (the canvas resolves it).
+  Amended 2026-09-28 with folder tiles: a path printed with a trailing `/` (`ls -F`, a
+  completion) is a directory, which no editor opens, so it too goes to the canvas as
+  `ViewFile`, and the canvas opens a folder tile
+  (`cmd_click_on_a_directory_views_it_instead_of_typing`).
 - ✅ **Links: OSC 8 first, text scan second** (2026-09-05). The engine reads the URI of every
   linked cell with `ghostty_grid_ref_hyperlink_uri`, gated on the row's `has_hyperlink` page
   flag (a false positive costs one extra check per cell, a clean row costs nothing) and on the
@@ -411,14 +415,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   was a guess. Rulings: (1) `Effect::CommandFinished` names the row the command was typed
   at (`prompt`), and the view keeps the elapsed time by that row (`TerminalView::set_took`
   / `took`), only from [`TOOK_MIN`] (1 s) up — a quick command says nothing worth a caption;
-  (2) the caption (`took_label`: `3.3 s`, `2 m 03 s`, `1 h 02 m`) is drawn at the right end
+  (2) the caption (now `kit::duration`: `3.2 s`, `2m 3s`, `1h 2m`; it was `took_label`'s
+  `3.3 s`, `2 m 03 s`) is drawn at the right end
   of that prompt row by the element's prepaint as an overlay glyph run, the foreground at
   `alpha::TINT`, flush with the grid's right edge, and left out when the command's
   text comes within a cell of it (the text wins); the row keeps it through history; (3) rows are numbered
   per epoch, so a new epoch (a reflow, a reset, the alt screen) empties the map; the host
   is not asked (the marks carry no time); (4) the sticky block header carries the same
   caption at its right end (`block-header-took`), so a long output scrolled past its prompt
-  still says how long its command took. Tests: `a_took_label_reads_as_a_clock_would`,
+  still says how long its command took. Tests: kit `a_duration_reads_one_way`,
   headless `a_slow_commands_row_says_how_long_it_took` (the element's captions read back
   through a test-only counter on the shape cache),
   `a_block_scrolled_past_its_prompt_keeps_its_command_in_a_sticky_header` (the header's
@@ -1804,3 +1809,120 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_prompt_steps_back_and_its_command_reads_first`; view
     `cmd_up_and_down_walk_the_prompts_and_separators_follow` and the failed-block tests, whose
     scene readers now want the rule and the wash edge to edge.
+
+- ✅ **A block's head is a surface, and its rule is that surface's top edge** (2026-09-27,
+  design critique round 2, finding 9). The rule over a prompt lay on the prompt row's top edge,
+  2 px over the prompt's capitals and 3 px under the output's baseline. It read as a line under
+  the output. Warp gives each block padding in line units (1.1 above, 0.5 between command and
+  output, 1.0 below) because every Warp block is its own grid. Slopty draws one grid whose rows
+  are the PTY's rows, so the options were weighed against that:
+  - **Pixels between rows: rejected.** With g points over each prompt on screen the grid is
+    `rows × line + g × prompts` tall, and the count of prompts changes as output scrolls. The
+    PTY would either give up the worst case for good (4 pt a prompt is a quarter of every row
+    at 17 pt) or overflow, so that the shell's top rows sit under the tile header even at the
+    bottom of history, where an inline program (fzf `--height`, a progress bar redrawn with
+    cursor-up) writes. Every pixel-to-cell map (mouse reports, selection, links, hover, the
+    input method's caret, images spanning rows, the cursor) would turn into a sum over the
+    marks, and a new line would scroll by one row or by one row plus g. That is uneven motion
+    on the path that comes first.
+  - **The rule in a gap row: rejected as the answer.** It has space only where the shell leaves
+    a blank row (starship's `add_newline`), which the client cannot add. Most prompts would
+    keep the old look.
+  - **Chosen: a head surface.** The rows a command was typed on, meaning its prompt rows and
+    any `Input` rows continuing the command under them, sit on `surfaces.panel` edge to edge
+    (`head_color`). That is the composer's step, the conversation face's input. The rule stays
+    where it was, drawn over the surface as its top edge. The space problem goes away because
+    a band fills whole rows: its edges fall outside the glyphs' ink by the cell's own leading.
+    The rule is enclosed with the command, so it reads with the command below it and no longer
+    with the output above. That is the common-region rule, and it outweighs nearness.
+    Heads with nothing between them, such as a `cd` followed by the next prompt, share one band
+    and are split by their rules. The prompt that opens a terminal and the one on the grid's
+    top row get the surface without a rule, as before. A failed block's wash lies over its
+    head. The alternate screen has no heads. The sticky header takes the same surface, so a
+    head that scrolls away is replaced by a header that looks like it. `raised` was not used:
+    it is the hover fill of the "…" button that sits on the head row. No row moves, so neither
+    the scroll mapping nor any hit test changes.
+  - Cost: about 1 µs a frame with ten heads on screen; the dense screen with no marks is
+    unchanged. Computing the heads inside the row loop cost the dense screen's
+    screen-a-frame case 80–100 µs, which is why they come from their own pass over the marks
+    (MEASUREMENTS, "a block's head on its own surface"). Test: view
+    `a_heads_band_is_its_own_edge_and_a_rule_parts_heads_that_touch` (bands and rules read
+    from the scene, rule painted over its band).
+  - Superseded in part on 2026-09-28 (next entry): the band is `surfaces.band`, not `panel`,
+    and a rule is drawn only between heads that touch.
+
+- ✅ **The head band is seen, and the rule parts only heads** (2026-09-28,
+  `.research/design-critique-round3-2026-09-28.md` §2 #2, #14). The band of the entry above
+  did not land in light. `panel` on white is `F9F9F9` on `FFFFFF`, which most displays do not
+  show, while the rule at `DFDFE0` is about eight times its contrast. The eye saw only the rule,
+  under the output as before. In an unfocused tile the band was the header's own `panel`, so
+  the tile read as two stacked headers.
+  - **The band is `surfaces.band`** (`head_color`), wave A's step: 3.5 L* off the content in
+    both variants and more than a unit off `panel`. The sticky header takes it too.
+  - **A rule only where two heads touch.** After output, the band's top edge is the boundary,
+    so the rule goes. It is drawn only where a prompt starts inside a head run, where the head
+    above printed nothing and no band edge parts them. The terminal's opening prompt needs no
+    rule of its own, because nothing precedes it. The sticky header loses its bottom rule for
+    the same reason: it is a band over output. Warp's separators are lighter than its blocks'
+    fill; here the fill does the work and the line comes only where fill cannot. A failed block
+    keeps its bar and wash.
+  - **The rules are a list from the head runs,** painted after the bands, not a field that
+    every prepared row carries. Deciding them in the row loop cost the dense screen's
+    screen-a-frame case about 100 µs with no prompt on screen, the codegen effect the 09-27
+    entry saw. From their own pass both benches are unchanged within the load
+    (MEASUREMENTS, "the head band on its own step").
+  - **One duration format.** The caption and the sticky header's time are `kit::duration`
+    ("6 s", "1m 5s"), so the terminal no longer writes "6.0 s" and "2 m 03 s" beside the
+    conversation's "1m 5s". `took_label` survives only as a wrapper for the workspace's callers
+    until they move.
+  - **The find bar's caret is its focus,** as for every other field: its accent border went
+    (`kit::the_accent_text_tone_is_never_a_fill` holds the terminal too).
+  - Tests: view `a_heads_band_is_its_own_edge_and_a_rule_parts_heads_that_touch`,
+    `cmd_up_and_down_walk_the_prompts_and_separators_follow` (a rule only under `false`, which
+    printed nothing), `a_slow_commands_row_says_how_long_it_took` ("3.2 s").
+
+- ✅ **A row the element built is kept while its line is** (2026-09-28, MEASUREMENTS "rows
+  kept across frames, pixels in the texture's format"). The terminal element keeps each
+  prepared row (cell backgrounds, strokes, sprites and the shaped words' places) keyed by the
+  row's `Arc<Line>`, which the screen and the history share and never change in place; the
+  cache holds the `Arc`, so the address cannot name another line while an entry lives. The key
+  adds what restyles a row besides its cells: the frame's font, size, cell, palette and stroke
+  geometry, the faint prompt's end, the local-echo guesses on it, the blink phase (only for a
+  row with SGR 5) and the sprite tiles' device geometry (only for a row with sprites). The
+  selection and search hits are per-frame marks painted over the kept backgrounds, so dragging
+  a selection builds nothing. Only the rows drawn in the last frame are kept.
+  - It pays where the 2026-09-06 ruling (ui.md, "the installed fonts are listed once per app")
+    measured it would not: that ruling timed the zoom cycle, where the per-cell loop was 0.4 %
+    of the main thread. On a dense 200 × 60 screen the loop is about half of an unchanged
+    frame, and the cache takes the unchanged frame from 450–470 µs to 247–258 µs, a line a
+    frame from 490–515 µs to 280–295 µs, a painted screen from 640–750 µs to 360–385 µs. A
+    screen replaced whole every frame is unchanged within the load.
+  - The prompt's faint copy and the guesses' copy of a row's cells (`faint_prompt`,
+    `predicted_cells`) are now made only when the row is built, so an unchanged prompt row
+    copies nothing.
+  - The four faces are built once per family and ligature setting on the `ShapeCache`, not per
+    terminal per frame.
+  - The hovered block and the sticky header's visibility read `TermState::block_prompt` (the
+    prompt row and whether a command was typed), not `block_head`, whose command `String` is
+    now built only for the header that shows it.
+  - Tests: view `a_frame_builds_only_the_rows_that_changed`, client
+    `prompt_navigation_and_last_output_follow_the_marks` (`block_prompt` agrees with
+    `block_head` on every row).
+
+- ✅ **An image travels as the texture's format, as one byte string** (2026-09-28,
+  MEASUREMENTS "rows kept across frames, pixels in the texture's format"). `TermEvent::Image`
+  carries premultiplied BGRA (`bgra`), made on the worker's session actor as the event is built;
+  the client keeps the `Vec` it decoded and the view copies it into the texture, with no
+  conversion on the UI thread. The pixels and the cursor shape's `bgra` are
+  `#[serde(with = "serde_bytes")]`: postcard writes a byte string as a length and the bytes,
+  which is what a sequence of `u8`s was, so the goldens are byte-identical; the per-byte
+  (de)serialiser calls are gone (a 12 MiB image 15–16.5 ms → 0.75–0.9 ms to encode and decode, and 1.6–1.8 ms → 0.4–0.5 ms
+  for its texture on the UI thread).
+  The field's meaning changed (RGBA → premultiplied BGRA), not its bytes on the wire.
+  - Tests: worker `an_image_is_sent_as_premultiplied_bgra`, proto
+    `a_byte_string_is_the_wire_a_sequence_of_bytes_was`, the `worker_term_image` and
+    `worker_screen_cursor` goldens unchanged.
+
+- ✅ **The worker sends a title once until it changes** (2026-09-28). A prompt that sets the
+  title on every draw no longer broadcasts the same `TermEvent::Title` to every viewer each
+  time. Test: session actor `a_title_is_sent_once_until_it_changes`.

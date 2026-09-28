@@ -3,6 +3,7 @@
 // must be Objective-C classes. The gpui_ios_* symbols come from the gpui_ios crate.
 #import <UIKit/UIKit.h>
 
+extern void slopty_ios_did_finish_launching(void);
 extern void slopty_ios_run(void);
 extern void gpui_ios_will_enter_foreground(void *application);
 extern void gpui_ios_did_become_active(void *application);
@@ -61,6 +62,9 @@ extern void gpui_ios_set_window_scene(void *scene);
 
 - (BOOL)application:(UIApplication *)application
     didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    // The notification delegate must be set before this returns, and GPUI starts only once
+    // the scene connects.
+    slopty_ios_did_finish_launching();
     return YES;
 }
 

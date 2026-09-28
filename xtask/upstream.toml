@@ -1,10 +1,10 @@
-# Where each fork branch sits on its upstream. `cargo xtask upstream check` reads this (and the
-# gate warns when a fork was last known current more than seven days ago); `cargo xtask upstream
-# sync` rebases the fork, pushes it, moves the workspace pins and rewrites the `base` /
-# `base_date` / `checked` lines here, so drift shows up in git history. `checked` is the day a
-# sync last confirmed the fork current: a quiet upstream keeps an old `base_date`, and the gate
-# warns from the later of the two dates. `checkout` is relative to the main checkout of this
-# repository (shared by every worktree) and is cloned on first use.
+# Where each fork branch sits on its upstream. `cargo xtask upstream check` reads this;
+# `cargo xtask upstream sync` rebases the fork, pushes it, moves the workspace pins and rewrites
+# the `base` / `base_date` / `checked` lines here, so drift shows up in git history. `checked` is
+# the day a sync last confirmed the fork current: a quiet upstream keeps an old `base_date`.
+# Once the later of the two dates is `check_every_days` old (0: always), the gate asks the upstream
+# for its branch head and warns when it moved past `base`. `checkout` is relative to the main
+# checkout of this repository (shared by every worktree) and is cloned on first use.
 
 [zed]
 upstream = "https://github.com/zed-industries/zed.git"
@@ -15,6 +15,7 @@ checkout = ".research/zed-main"
 base = "bda9c0bd43a8d235d82adb01ea5bc875b861ecfc"
 base_date = "2026-09-26"
 checked = "2026-09-27"
+check_every_days = 7
 
 [gpui-kit]
 upstream = "https://github.com/longbridge/gpui-kit.git"
@@ -22,9 +23,11 @@ upstream_branch = "main"
 fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
-base = "5059de47a6560fdbe24e32cd91b45d6aa6849695"
-base_date = "2026-09-27"
-checked = "2026-09-27"
+base = "17b2c6a269c3de51a2f0dc97d49f87f0dd9d6571"
+base_date = "2026-09-28"
+checked = "2026-09-28"
+# It lands several changes a day, so every gate asks.
+check_every_days = 0
 
 [libghostty-rs]
 upstream = "https://github.com/Uzaaft/libghostty-rs.git"
@@ -35,3 +38,4 @@ checkout = ".research/libghostty-rs"
 base = "5988a0b78b4aa804d1c12e66bbfe662bd97d81c0"
 base_date = "2026-09-01"
 checked = "2026-09-27"
+check_every_days = 7

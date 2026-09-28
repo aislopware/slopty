@@ -12,15 +12,115 @@
 //! The server answers [`Verb::Events`] and [`Verb::ForgetWorker`] itself, from its registry:
 //! events are what it heard from every worker, numbered in one sequence, so one long poll
 //! watches the whole fleet.
+//!
+//! A verb that [changes](Verb::changes) something may carry an [`IdempotencyKey`], so a caller
+//! whose answer was lost sends it again without doing it twice.
+//!
+//! An agent's conversation is read as the conversation face reads it ([`Verb::ReadConversation`]),
+//! and its permission prompts are answered through the same held hook
+//! ([`Verb::AnswerPermission`]). A file too large for one frame goes up in parts
+//! ([`Verb::Upload`]) and comes down in [`Verb::ReadFile`] ranges.
+
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ItemId, SessionId, WorkerId};
+use slopty_core::{ItemId, SessionId, WorkerId, XferId};
 
 use crate::agent::{AgentKind, AgentStatus, SessionAgent};
+use crate::conversation::{Entry, Meters, Origin, PermissionPrompt, Task, ThreadId, Verdict};
 use crate::items::{Item, ItemKind};
-use crate::screen::{DisplayInfo, WindowInfo};
+use crate::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use crate::server::{Liveness, WorkerInfo};
 use crate::terminal::SessionSummary;
+use crate::transfer::Hash;
+
+/// How long after its answer a key is still honoured: longer than any caller keeps retrying
+/// one call (a `WaitFor` runs at most four minutes), short enough that the tables stay small.
+pub const KEY_LIFETIME: Duration = Duration::from_mins(10);
+
+/// The caller's name for the effect of one verb, a UUID or any 1 to
+/// [`IdempotencyKey::MAX_LEN`] bytes of printable ASCII.
+///
+/// The component that does the verb (the worker, or the server for [`Verb::ForgetWorker`])
+/// answers a repeat of it under the same key for [`KEY_LIFETIME`] with the first answer, and
+/// does nothing again: a repeat that arrives while the first still runs waits for its answer.
+/// The same key with other arguments is [`ErrorCode::Invalid`]. A verb that only reads ignores
+/// the key and is answered afresh.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct IdempotencyKey(String);
+
+/// A string that is not an [`IdempotencyKey`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+#[error("an idempotency key is 1 to 128 printable ASCII characters")]
+pub struct BadKey;
+
+impl IdempotencyKey {
+    /// The longest key, in bytes.
+    pub const MAX_LEN: usize = 128;
+
+    /// `key`, if it is 1 to [`Self::MAX_LEN`] bytes of printable ASCII.
+    ///
+    /// # Errors
+    /// [`BadKey`] otherwise.
+    pub fn new(key: impl Into<String>) -> Result<Self, BadKey> {
+        let key = key.into();
+        let fits = (1..=Self::MAX_LEN).contains(&key.len());
+        if fits && key.bytes().all(|b| b.is_ascii_graphic()) { Ok(Self(key)) } else { Err(BadKey) }
+    }
+
+    /// A key spelled as the 32 hex digits of `id`: a fresh UUID's bits make a fresh key.
+    #[must_use]
+    pub fn from_id(id: u128) -> Self {
+        Self(format!("{id:032x}"))
+    }
+
+    /// The key as the caller spelled it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The answer to a verb whose key an earlier verb with other arguments holds.
+    #[must_use]
+    pub fn reused(&self) -> Outcome {
+        Outcome::Error {
+            code: ErrorCode::Invalid,
+            message: format!(
+                "idempotency key {:?} was used with other arguments; a new call takes a new key",
+                self.0
+            ),
+        }
+    }
+}
+
+impl TryFrom<String> for IdempotencyKey {
+    type Error = BadKey;
+
+    fn try_from(key: String) -> Result<Self, BadKey> {
+        Self::new(key)
+    }
+}
+
+impl From<IdempotencyKey> for String {
+    fn from(key: IdempotencyKey) -> Self {
+        key.0
+    }
+}
+
+impl std::str::FromStr for IdempotencyKey {
+    type Err = BadKey;
+
+    fn from_str(s: &str) -> Result<Self, BadKey> {
+        Self::new(s)
+    }
+}
+
+impl std::fmt::Display for IdempotencyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// A terminal on a worker.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -278,6 +378,121 @@ pub enum Verb {
         /// Where.
         worker: WorkerId,
     },
+    /// A page of the conversation of the agent in a terminal, as the conversation face shows
+    /// it; answered with [`Outcome::Conversation`].
+    ///
+    /// Orchestration follows the session from then on, as a client that shows its face does:
+    /// the agent's permission prompts are held for [`Verb::AnswerPermission`] rather than shown
+    /// in its TUI at once. Following twice is following once.
+    ReadConversation {
+        /// Which.
+        term: TermRef,
+        /// The session's own conversation, or one subagent's.
+        thread: ThreadId,
+        /// The first entry wanted, by its place in the thread; the last `max` when absent.
+        since: Option<u32>,
+        /// At most this many entries, capped by the worker.
+        max: u32,
+    },
+    /// Answer a permission prompt held for orchestration ([`ConversationPage::held`]), through
+    /// the agent's `PermissionRequest` hook as the conversation face answers it.
+    AnswerPermission {
+        /// Which.
+        term: TermRef,
+        /// [`PermissionPrompt::ask`].
+        ask: u64,
+        /// The answer.
+        verdict: Verdict,
+    },
+    /// One still picture of a window or a display; answered with [`Outcome::Still`], or
+    /// [`ErrorCode::Unsupported`] by a worker that may not capture its screen.
+    CaptureStill {
+        /// Where.
+        worker: WorkerId,
+        /// What, by an id from [`Verb::ListWindows`].
+        target: CaptureTarget,
+    },
+    /// One step of a file sent up in parts, for a file too large for [`Verb::WriteFile`]. The
+    /// parts land beside the file under the upload's name, and only a finished upload that adds
+    /// up replaces it.
+    Upload {
+        /// Where.
+        worker: WorkerId,
+        /// Absolute path, or `~/…`.
+        path: String,
+        /// The caller's name for this upload; a retried upload under the same name writes into
+        /// the same parts.
+        upload: XferId,
+        /// What this step does.
+        part: UploadPart,
+    },
+}
+
+/// One step of a [`Verb::Upload`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum UploadPart {
+    /// These bytes at `offset` of the upload. Parts may come in any order, and a part sent
+    /// again writes the same bytes again.
+    Bytes {
+        /// Where they go in the file.
+        offset: u64,
+        /// At most the worker's cap on one read.
+        bytes: Vec<u8>,
+    },
+    /// Every part is sent: the upload holds `size` bytes whose BLAKE3 digest is `digest`, and
+    /// replaces the file at the path. One that does not add up is dropped.
+    Finish {
+        /// The file's size.
+        size: u64,
+        /// Its BLAKE3 digest.
+        digest: Hash,
+        /// Permission bits for a new file, as `scp` gives them: a file replaced keeps its own.
+        mode: Option<u32>,
+    },
+    /// Drop what the upload holds.
+    Abort,
+}
+
+impl Verb {
+    /// Whether doing it twice differs from doing it once, so a repeat under the same
+    /// [`IdempotencyKey`] answers the first outcome. A [`Verb::WaitFor`] counts: a met wait
+    /// moves the session's mark past what met it, and a repeat would wait for the next match.
+    #[must_use]
+    pub const fn changes(&self) -> bool {
+        match self {
+            Self::OpenTerminal { .. }
+            | Self::SpawnAgent { .. }
+            | Self::SendInput { .. }
+            | Self::WaitFor { .. }
+            | Self::Close { .. }
+            | Self::WriteFile { .. }
+            | Self::ResizeTerminal { .. }
+            | Self::ForgetWorker { .. }
+            | Self::OpenItem { .. }
+            | Self::RenameItem { .. }
+            | Self::RemoveItem { .. }
+            | Self::PointAt { .. }
+            | Self::AnswerPermission { .. } => true,
+            // A part rewrites the same bytes and an abort finds nothing the second time; only
+            // the finish replaces the file.
+            Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
+            Self::ListWorkers
+            | Self::ListTerminals { .. }
+            | Self::ReadScreen { .. }
+            | Self::ReadOutput { .. }
+            | Self::ListCommands { .. }
+            | Self::AgentStatus { .. }
+            | Self::ReadFile { .. }
+            | Self::ListPorts { .. }
+            | Self::ListDir { .. }
+            | Self::Stat { .. }
+            | Self::Events { .. }
+            | Self::ListItems { .. }
+            | Self::ListWindows { .. }
+            | Self::ReadConversation { .. }
+            | Self::CaptureStill { .. } => false,
+        }
+    }
 }
 
 /// Which [`HubEvent`]s a [`Verb::Events`] returns.
@@ -492,6 +707,11 @@ pub enum ErrorCode {
     Failed,
     /// The caller lost its link to the server before the answer came.
     ServerUnreachable,
+    /// A link dropped after the verb went out and before its answer came back: it may have
+    /// been done. Sent again under the same [`IdempotencyKey`], it is not done twice.
+    Interrupted,
+    /// The worker cannot do this at all: it may not capture its screen, or has none.
+    Unsupported,
 }
 
 /// The answer to a [`Verb`].
@@ -531,7 +751,7 @@ pub enum Outcome {
     Ports(Vec<Port>),
     /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`], [`Verb::WriteFile`],
     /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::RenameItem`],
-    /// [`Verb::RemoveItem`], [`Verb::PointAt`]).
+    /// [`Verb::RemoveItem`], [`Verb::PointAt`], [`Verb::AnswerPermission`], [`Verb::Upload`]).
     Done,
     /// It failed.
     Error {
@@ -569,4 +789,52 @@ pub enum Outcome {
         /// Displays.
         displays: Vec<DisplayInfo>,
     },
+    /// For [`Verb::ReadConversation`].
+    Conversation(Box<ConversationPage>),
+    /// For [`Verb::CaptureStill`]: a PNG, at the target's native pixel size or halved until it
+    /// fits one reply.
+    Still {
+        /// The PNG file's bytes.
+        png: Vec<u8>,
+        /// Pixels across.
+        width: u32,
+        /// Pixels down.
+        height: u32,
+    },
+}
+
+/// A page of an agent's conversation: the entries of one thread from `start`, what the face
+/// shows beside them, and the permission prompts waiting for an answer.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ConversationPage {
+    /// Every thread there is, the session's own first.
+    pub threads: Vec<ThreadInfo>,
+    /// The thread the entries are of.
+    pub thread: ThreadId,
+    /// Its entries from `start`, oldest first.
+    pub entries: Vec<Entry>,
+    /// The place of the first entry in the thread.
+    pub start: u32,
+    /// The place to ask from next: one past the last entry returned.
+    pub next: u32,
+    /// How many entries the thread has.
+    pub total: u32,
+    /// Its task list.
+    pub tasks: Vec<Task>,
+    /// The status line's latest meters.
+    pub meters: Option<Meters>,
+    /// The permission prompts held now, oldest first, each answered with
+    /// [`Verb::AnswerPermission`].
+    pub held: Vec<PermissionPrompt>,
+}
+
+/// A thread of a conversation, as a [`ConversationPage`] lists it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ThreadInfo {
+    /// Which.
+    pub id: ThreadId,
+    /// For a subagent, the call that started it.
+    pub origin: Option<Origin>,
+    /// How many entries it has.
+    pub entries: u32,
 }

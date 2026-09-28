@@ -40,14 +40,13 @@ futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 gpui = { git = "https://github.com/aislopware/zed.git", features = ["test-support"] }
 http_client = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["test-support"] }
 image = { version = "0.25", default-features = false, features = ["dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "pnm", "qoi", "rayon", "tga", "tiff", "webp"] }
+indexmap = { version = "2", features = ["serde"] }
 insta = { version = "1", features = ["json", "redactions", "yaml"] }
 libc = { version = "0.2" }
 log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFBase", "CFCGTypes", "CFData", "CFDate", "CFDictionary", "CFMachPort", "CFNumber", "CFRunLoop", "CFString", "CFURL", "std"] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColorSpace", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "std"] }
-objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-core-graphics", "std"] }
 once_cell = { version = "1" }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
 rand = { version = "0.9" }
@@ -79,6 +78,7 @@ anstyle = { version = "1" }
 collections = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["test-support"] }
 crossbeam-utils = { version = "0.8" }
 derive_more-impl = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
+indexmap = { version = "2", features = ["serde"] }
 log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
@@ -112,11 +112,12 @@ objc2 = { version = "0.6" }
 objc2-app-kit = { version = "0.3" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGColor", "CGContext", "CGDisplayStream", "CGFont", "CGPath", "objc2"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColor", "CGColorSpace", "CGContext", "CGDataProvider", "CGDirectDisplay", "CGDisplayStream", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGFont", "CGGeometry", "CGImage", "CGPath", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "objc2", "std"] }
 objc2-core-media = { version = "0.3", default-features = false, features = ["CMAttachment", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSync", "CMTaggedBufferGroup", "CMTime", "CMTimeRange", "objc2", "objc2-core-audio-types", "objc2-core-video", "std"] }
-objc2-core-video = { version = "0.3", default-features = false, features = ["objc2"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "std"] }
 objc2-foundation = { version = "0.3" }
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["SCError", "SCScreenshotManager", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "std"] }
+objc2-user-notifications = { version = "0.3" }
 regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 semver = { version = "1", features = ["serde"] }
@@ -146,8 +147,10 @@ mio = { version = "1", features = ["net", "os-ext"] }
 objc2 = { version = "0.6" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLSession", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIDragItem", "UIDragSession", "UIDropInteraction", "UIEvent", "UIFeedbackGenerator", "UIImage", "UIInteraction", "UINotificationFeedbackGenerator", "UIPasteboard", "UIResponder", "UIScene", "UIScreen", "UIView", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColorSpace", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "std"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-core-graphics", "std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLSession", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIEvent", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UINotificationFeedbackGenerator", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 
 [target.aarch64-apple-ios.build-dependencies]
@@ -171,8 +174,10 @@ mio = { version = "1", features = ["net", "os-ext"] }
 objc2 = { version = "0.6" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLSession", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIDragItem", "UIDragSession", "UIDropInteraction", "UIEvent", "UIFeedbackGenerator", "UIImage", "UIInteraction", "UINotificationFeedbackGenerator", "UIPasteboard", "UIResponder", "UIScene", "UIScreen", "UIView", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColorSpace", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "std"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-core-graphics", "std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLSession", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIEvent", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UINotificationFeedbackGenerator", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 
 [target.aarch64-apple-ios-sim.build-dependencies]

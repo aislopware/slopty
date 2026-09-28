@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: line
+---
+{"reply":"doctor","version":"0.1.0","exe":"/Applications/Slopty.app/Contents/MacOS/slopty-worker","screen_recording":true,"post_events":false,"listen":"[::]:45550","allow":["10.0.0.0/8"],"tailscale":{"state":"up","node":"mac-studio.tail1234.ts.net","ip":"100.64.0.7"},"clients":2,"sessions":5,"uptime_secs":86400}

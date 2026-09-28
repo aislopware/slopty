@@ -14,7 +14,7 @@ expression: "decode(\"edit\").snapshot()"
             lines: 1
             chars: 269
             full: ~
-          images: 0
+          images: []
           command: ~
     - id: "00000000-0000-4000-8000-000000000015:0"
       at_ms: 1790482546185
@@ -49,6 +49,7 @@ expression: "decode(\"edit\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482546938
+            images: []
     - id: "00000000-0000-4000-8000-000000000021:0"
       at_ms: 1790482548207
       body:
@@ -94,6 +95,7 @@ expression: "decode(\"edit\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482549152
+            images: []
     - id: "00000000-0000-4000-8000-000000000027:0"
       at_ms: 1790482550294
       body:
@@ -140,6 +142,7 @@ expression: "decode(\"edit\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482550991
+            images: []
     - id: "00000000-0000-4000-8000-000000000032:0"
       at_ms: 1790482552316
       body:
@@ -173,6 +176,7 @@ expression: "decode(\"edit\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482553133
+            images: []
     - id: "00000000-0000-4000-8000-000000000037:0"
       at_ms: 1790482566496
       body:
@@ -206,6 +210,7 @@ expression: "decode(\"edit\").snapshot()"
             status: Ok
             text: ~
             at_ms: 1790482566524
+            images: []
     - id: "00000000-0000-4000-8000-000000000043:0"
       at_ms: 1790482567641
       body:

@@ -397,7 +397,6 @@ pub struct Frame {
 
 /// The saved form of a layout (`layout.json`).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
 pub struct Saved {
     /// Top to bottom.
     pub workspaces: Vec<SavedWorkspace>,
@@ -444,7 +443,6 @@ impl Default for Navigator {
 
 /// A saved workspace.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
 pub struct SavedWorkspace {
     /// Its name.
     pub name: Option<String>,
@@ -458,7 +456,6 @@ pub struct SavedWorkspace {
 
 /// A saved column.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(default)]
 pub struct SavedColumn {
     /// Top to bottom.
     pub tiles: Vec<SavedTile>,
@@ -474,26 +471,12 @@ pub struct SavedColumn {
     pub mode: DisplayMode,
 }
 
-impl Default for SavedColumn {
-    fn default() -> Self {
-        Self {
-            tiles: Vec::new(),
-            active_tile: 0,
-            width: ColumnWidth::Proportion(0.5),
-            preset: None,
-            full_width: false,
-            mode: DisplayMode::Normal,
-        }
-    }
-}
-
 /// A saved tile.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct SavedTile {
     /// Which.
     pub tile: TileRef,
     /// Its height.
-    #[serde(default)]
     pub height: TileHeight,
 }
 
@@ -714,7 +697,7 @@ impl Column {
     /// compact or the column is its workspace's only one. Deviations from niri, which keeps
     /// proportions at any size: in Split View a half column is 231 pt, a terminal of about 25
     /// columns nobody can use; and a lone half column on a wide window leaves half the strip
-    /// bare, a pane floating on the canvas where the panes are meant to meet every edge.
+    /// bare, a pane floating in empty space where the panes are meant to meet every edge.
     fn normal_width(&self, g: &Geom) -> f32 {
         if g.compact || g.lone { g.max_width() } else { self.stored_width(g) }
     }
@@ -1024,8 +1007,8 @@ impl Workspace {
     /// The offset that shows column `idx`: niri's fit. A lone column fills the working width,
     /// so it rests flush with both edges.
     ///
-    /// Unlike niri, the view never rests past the last column: where the fit would leave bare
-    /// canvas right of it (a column closed at the end, a window made wider), the view comes
+    /// Unlike niri, the view never rests past the last column: where the fit would leave the
+    /// strip bare right of it (a column closed at the end, a window made wider), the view comes
     /// back until the last column ends on the working area's right edge, or the first starts
     /// on its left when every column fits.
     fn fit_offset(&self, g: &Geom, target_x: Option<f32>, idx: usize) -> f32 {
@@ -1224,7 +1207,7 @@ impl Workspace {
             self.activate_column(ctx, self.active.min(last));
         }
         // Alone now, a column fills the width and the view comes to rest on it wherever it
-        // was; with the last column gone, the view comes back from the canvas it left bare.
+        // was; with the last column gone, the view comes back from the stretch it left bare.
         self.animate_view_to_column(ctx, None, self.active);
         Some(column)
     }
@@ -2487,16 +2470,25 @@ impl Layout {
 
     /// Move the active column to the workspace above, focused there.
     pub fn move_column_to_workspace_up(&mut self) {
-        self.move_column_to_workspace(false);
+        if let Some(target) = self.neighbour_workspace(false) {
+            self.move_column_to_workspace(target);
+        }
     }
 
     /// Move the active column to the workspace below, focused there.
     pub fn move_column_to_workspace_down(&mut self) {
-        self.move_column_to_workspace(true);
+        if let Some(target) = self.neighbour_workspace(true) {
+            self.move_column_to_workspace(target);
+        }
     }
 
-    fn move_column_to_workspace(&mut self, down: bool) {
-        let Some(target) = self.neighbour_workspace(down) else { return };
+    /// Move the active column to workspace `n` (0-based, clamped to the trailing empty one),
+    /// focused there.
+    pub fn move_column_to_workspace(&mut self, n: usize) {
+        let target = n.min(self.workspaces.len().saturating_sub(1));
+        if target == self.active {
+            return;
+        }
         let ctx = self.ctx();
         let Some(Some(column)) = self.in_active(|ws, ctx| ws.remove_column_by_idx(ctx, ws.active))
         else {
@@ -2603,8 +2595,9 @@ impl Layout {
             return;
         }
         self.fit_overview();
-        self.overview_open = open;
+        // Where it is drawn now: read before the flip, which a still overview's progress follows.
         let from = self.overview_progress();
+        self.overview_open = open;
         let velocity = self.overview.map_or(0.0, |a| a.velocity_at(self.now));
         let to = if open { 1.0 } else { 0.0 };
         self.overview = self.ctx().spring(from, to, velocity, view_spring());
@@ -2698,12 +2691,6 @@ impl Layout {
     #[must_use]
     pub fn view_gesture_active(&self) -> bool {
         self.workspaces.get(self.active).is_some_and(|ws| ws.view.is_gesture())
-    }
-
-    /// Whether a drag between workspaces is in progress.
-    #[must_use]
-    pub const fn ws_gesture_active(&self) -> bool {
-        matches!(self.switch, Some(Switch::Gesture(_)))
     }
 
     /// A vertical drag between workspaces begins.

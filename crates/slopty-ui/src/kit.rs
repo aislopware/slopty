@@ -21,7 +21,7 @@ use slopty_theme::{Motion, Rgb, Theme, Typography, Variant, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 
-/// What a find bar says before anything is typed. The terminal and the file card share it: the
+/// What a find bar says before anything is typed. The terminal and the file tile share it: the
 /// same bar, the same word.
 pub const FIND_PLACEHOLDER: &str = "Find";
 
@@ -84,6 +84,236 @@ where
     }
     el.with_animation(id, Animation::new(FADE).with_easing(ease_out()), Styled::opacity)
         .into_any_element()
+}
+
+/// How long a move takes and how it lands: one of [`Motion`]'s durations with its curve.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pace {
+    /// An overlay, a menu, a toast or a pill arriving: [`Motion::fade`], eased out.
+    Fade,
+    /// A fill, a width or a fold settling: [`Motion::settle`], eased out.
+    Settle,
+    /// A sheet, a drawer, the composer turning into an approval: [`Motion::sheet`] on the
+    /// drawer's curve.
+    Sheet,
+}
+
+impl Pace {
+    /// How long it takes.
+    #[must_use]
+    pub const fn duration(self) -> std::time::Duration {
+        let m = Motion::DEFAULT;
+        match self {
+            Self::Fade => m.fade,
+            Self::Settle => m.settle,
+            Self::Sheet => m.sheet,
+        }
+    }
+
+    /// The curve it follows.
+    #[must_use]
+    pub const fn curve(self) -> slopty_theme::Curve {
+        let m = Motion::DEFAULT;
+        match self {
+            Self::Fade | Self::Settle => m.ease_out,
+            Self::Sheet => m.drawer,
+        }
+    }
+
+    /// The one-shot GPUI animation on this pace. Gate it on [`motion`]: under Reduce Motion
+    /// the caller draws the end state instead.
+    #[must_use]
+    pub fn animation(self) -> Animation {
+        let curve = self.curve();
+        Animation::new(self.duration()).with_easing(move |t| curve.at(t))
+    }
+}
+
+/// `el` arriving from `from` points below its place (above, when negative) as it fades in
+/// from clear, on `pace`, the first time it is drawn under `id`.
+///
+/// Opacity and a small travel are all that move, never the size of text: the palette rising
+/// 4 pt, a menu dropping 4 pt from its button, a toast, a pill. Under Reduce Motion it is drawn
+/// in place and opaque at once, with no fade either. `el` sits in the flow: it is moved as a
+/// `relative` element by its `top`, so nothing round it shifts while it travels, and an
+/// absolutely placed element keeps its own placement by being wrapped in one that is not.
+pub fn slide_fade<E>(
+    el: E,
+    id: impl Into<gpui::ElementId>,
+    from: f32,
+    pace: Pace,
+    cx: &App,
+) -> gpui::AnyElement
+where
+    E: IntoElement + Styled + 'static,
+{
+    if !motion(cx) {
+        return el.into_any_element();
+    }
+    el.relative()
+        .with_animation(id, pace.animation(), move |el, t| el.top(px(from * (1.0 - t))).opacity(t))
+        .into_any_element()
+}
+
+/// How far a gpui-kit field at the medium size sets its text in from its edge, in points,
+/// with its frame or without it (`Size::Medium.input_px()`).
+///
+/// What has to line up with a field's text starts this far in: the approval that takes the
+/// composer's place, the foot under the composer's field. The approval sat at the shell's pad
+/// while the field's text sat this much further in, so the morph from one to the other jumped.
+pub const FIELD_INSET: f32 = 10.0;
+
+/// The edge of a region a fade runs along.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Edge {
+    /// Above: a list scrolled off its top, under a header.
+    Top,
+    /// Below: a list that runs on under a foot or a composer.
+    Bottom,
+    /// The left: a row scrolled off its start.
+    Leading,
+    /// The right: a row that runs on past the edge.
+    Trailing,
+}
+
+/// A band `depth` deep along `edge` of a scrolling region, from clear to `surface` at the edge,
+/// so what scrolls past the edge fades into the surface rather than stopping on a cut line.
+///
+/// The one gradient chrome draws: a functional mask saying there is more that way, never a
+/// wash on a surface. The palette's foot, the transcript's top and bottom and the key bar's
+/// ends draw it. The caller lays it last over the region (which is `relative`) and only while
+/// something lies past that edge. It takes no pointer, so the rows under it stay live.
+#[must_use]
+pub fn edge_fade(edge: Edge, surface: Rgb, depth: gpui::Pixels) -> Div {
+    let solid = hsla(surface);
+    let clear = Hsla { a: 0.0, ..solid };
+    let across = |el: Div| el.left_0().right_0().h(depth);
+    let along = |el: Div| el.top_0().bottom_0().w(depth);
+    // A CSS angle: the direction the gradient runs, from clear toward the edge.
+    let (angle, band) = match edge {
+        Edge::Top => (0.0, across(div().top_0())),
+        Edge::Bottom => (180.0, across(div().bottom_0())),
+        Edge::Leading => (270.0, along(div().left_0())),
+        Edge::Trailing => (90.0, along(div().right_0())),
+    };
+    band.absolute().bg(gpui::linear_gradient(
+        angle,
+        gpui::linear_color_stop(clear, 0.0),
+        gpui::linear_color_stop(solid, 1.0),
+    ))
+}
+
+/// A diff's size as words, `+12 −3`: the side that is zero left out, and nothing for no
+/// change. For a line of plain text (a fold's summary, a tool's facts); a readout draws
+/// [`changes`].
+#[must_use]
+pub fn changes_text(added: u32, removed: u32) -> Option<String> {
+    match (added, removed) {
+        (0, 0) => None,
+        (a, 0) => Some(format!("+{a}")),
+        (0, r) => Some(format!("\u{2212}{r}")),
+        (a, r) => Some(format!("+{a} \u{2212}{r}")),
+    }
+}
+
+/// A diff's size, `+12 −3`: only the signs in the diff's tones, the figures in
+/// `text_secondary` and tabular, the side that is zero left out. `None` for no change.
+///
+/// The one way a count of changed lines is drawn: in a tile's header, a diff's head, a fold, a
+/// navigator row and the status bar. A figure all in red read as an error, and a red "−0" as
+/// an error about nothing. The caller sets the size and adds an identity and a spoken label.
+#[must_use]
+pub fn changes(theme: &Theme, added: u32, removed: u32) -> Option<Div> {
+    changes_at(theme, added, removed, 1.0)
+}
+
+/// [`changes`] at the chrome's zoom `k`.
+#[must_use]
+pub fn changes_at(theme: &Theme, added: u32, removed: u32, k: f32) -> Option<Div> {
+    let s = &theme.surfaces;
+    let side = |sign: &'static str, tone: Rgb, n: u32| {
+        (n > 0).then(|| {
+            div()
+                .flex()
+                .child(div().text_color(hsla(tone)).child(sign))
+                .child(SharedString::from(n.to_string()))
+        })
+    };
+    (added > 0 || removed > 0).then(|| {
+        tabular(div())
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs * k))
+            .whitespace_nowrap()
+            .text_color(hsla(s.text_secondary))
+            .children(side("+", s.success, added))
+            .children(side("\u{2212}", s.error, removed))
+    })
+}
+
+/// The dot between two facts on one line ("Default · Opus 5.5", a bar's readouts): a middle
+/// dot in the separator's faint ink, so it parts the facts without reading as one. The caller's
+/// gap spaces it.
+#[must_use]
+pub fn separator(theme: &Theme) -> Div {
+    div().flex_none().text_color(crate::palette::separator_ink(theme)).child("\u{b7}")
+}
+
+/// A pill's height at zoom 1, in points: T3's badge (`h-5`), a notch over Linear's 18.
+///
+/// Fixed rather than grown from a pad round the text, so it sits centred in a 27 pt header with
+/// room above and below. Padded, the agent's pill stood 23 pt tall and touched the hairline.
+pub const PILL_HEIGHT: f32 = 20.0;
+
+/// A pill's shape without its fill, at the chrome's zoom `k`.
+///
+/// [`PILL_HEIGHT`] tall, the text centred on it at `small()`, `spacing.sm` at each end,
+/// `radii.xs`. A header's words that act (Take, Mute, the hooks' offer) wear it bare, so they
+/// stand as tall as the state's [`pill`] beside them.
+#[must_use]
+pub fn pill_frame(theme: &Theme, k: f32) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .h(px(PILL_HEIGHT * k))
+        .gap(px(theme.spacing.xs * k))
+        .px(px(theme.spacing.sm * k))
+        .rounded(px(theme.radii.xs * k))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_size(px(theme.typography.small() * k))
+}
+
+/// A state's pill at the chrome's zoom `k`: [`pill_frame`] filled with `tone` at
+/// `alpha::FAINT`, its words in `tone` at the medium weight.
+///
+/// A header holds one of these at most, the state's (an agent waiting, working), so it is the
+/// one shape there that stands out. The caller adds the identity, the role and the words.
+#[must_use]
+pub fn pill(theme: &Theme, tone: Rgb, k: f32) -> Div {
+    pill_frame(theme, k)
+        .bg(hsla_alpha(tone, alpha::FAINT))
+        .text_color(hsla(tone))
+        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+}
+
+/// How long something took or has run, the one way chrome says it: "850 ms", "6.2 s" (the
+/// tenth under ten seconds, left off when it is zero), "35 s", "1m 5s", "1h 4m".
+///
+/// Compact as Claude Code's own "1m 5s" and cargo's "1m 04s" are, so a line that sets one
+/// beside the other does not read two formats. A clock that ticks each second passes whole
+/// seconds and so never shows a tenth. Set it in [`tabular`] figures.
+#[must_use]
+pub fn duration(elapsed: std::time::Duration) -> String {
+    let (secs, ms) = (elapsed.as_secs(), elapsed.subsec_millis());
+    match secs {
+        0 => format!("{ms} ms"),
+        1..10 if ms >= 100 => format!("{secs}.{} s", ms / 100),
+        1..60 => format!("{secs} s"),
+        60..3_600 => format!("{}m {}s", secs / 60, secs % 60),
+        _ => format!("{}h {}m", secs / 3_600, (secs % 3_600) / 60),
+    }
 }
 
 /// How large an overlay grows on a desktop.
@@ -266,10 +496,10 @@ pub enum ButtonKind {
 /// A text button, the one every dialog, panel and empty state draws.
 ///
 /// Four had been written by hand, and the secondary among them filled itself with `raised`,
-/// which on the light canvas is one step from the canvas itself: "Add a window" and the phone's
-/// "Paste" were words floating on a smudge. Every kind wears a 1 pt border (clear on a ghost or
-/// a link) so they all stand the same height side by side. Its words are at the medium weight:
-/// a button is an action, and its label reads as one against the prose round it.
+/// which on the light theme's `canvas` is one step from `canvas` itself: "Add a window" and
+/// the phone's "Paste" were words floating on a smudge. Every kind wears a 1 pt border (clear on a
+/// ghost or a link) so they all stand the same height side by side. Its words are at the medium
+/// weight: a button is an action, and its label reads as one against the prose round it.
 #[must_use]
 pub fn button(
     theme: &Theme,
@@ -415,7 +645,20 @@ pub fn icon_button_at(
     k: f32,
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
-    let id: SharedString = id.into();
+    square_icon(theme, id.into(), icon, label, k, s.text_secondary)
+        .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+}
+
+/// The square an icon button is drawn in, its icon in `ink`, before its hover.
+fn square_icon(
+    theme: &Theme,
+    id: SharedString,
+    icon: crate::icons::IconName,
+    label: &'static str,
+    k: f32,
+    ink: Rgb,
+) -> gpui::Stateful<Div> {
+    let s = theme.surfaces;
     let selector = id.to_string();
     let side = icon_button_side(theme) * k;
     let el = div()
@@ -430,14 +673,138 @@ pub fn icon_button_at(
         .justify_center()
         .rounded(px(theme.radii.sm * k))
         .cursor_pointer()
-        .text_color(hsla(s.text_secondary))
-        .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+        .text_color(hsla(ink))
         .active(move |el| el.bg(hsla(s.overlay)))
         .child(
-            crate::icons::icon(theme, icon, crate::icons::IconSize::Inline, hsla(s.text_secondary))
+            crate::icons::icon(theme, icon, crate::icons::IconSize::Inline, hsla(ink))
                 .size(px(theme.typography.icon() * k)),
         );
     crate::a11y::tab_stop(el, s.accent)
+}
+
+/// [`icon_button_at`] that stays on until pressed again: a tile's trackpad mode.
+///
+/// One name whatever its state, said as pressed or not (`aria_toggled`), the way iOS and
+/// Zed say a toggle. A label that flipped with the state ("Use as a trackpad", then "Touch the
+/// picture directly") named one control two ways and the palette's command a third. On, it
+/// rests on the selected fill with its icon in `text`, and the pointer over it keeps that
+/// fill: the hover's lighter `raised` read as the toggle letting go.
+#[must_use]
+pub fn icon_toggle(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    icon: crate::icons::IconName,
+    label: &'static str,
+    on: bool,
+    k: f32,
+) -> gpui::Stateful<Div> {
+    if !on {
+        return icon_button_at(theme, id, icon, label, k)
+            .aria_toggled(gpui::accesskit::Toggled::False);
+    }
+    let s = theme.surfaces;
+    square_icon(theme, id.into(), icon, label, k, s.text)
+        .aria_toggled(gpui::accesskit::Toggled::True)
+        .bg(hsla(s.overlay))
+}
+
+/// What a tile's body says when it has nothing to show, as one block in its middle.
+///
+/// A mark, a line at `small()` in the medium weight saying what is so, and under it an optional
+/// `meta()` line saying why or where. The caller adds the identity and its actions under it.
+///
+/// A remote window on its way, a file that cannot be opened here and an empty or missing
+/// folder all say it this way. Before, a file printed its summary alone ("binary, 2 MB") and a
+/// reason ran as one clause ("Too large to edit here: 40 MB, past 16 MB"), each a lowercase
+/// sentence adrift in the body.
+#[must_use]
+pub fn notice(
+    theme: &Theme,
+    k: f32,
+    mark: impl IntoElement,
+    title: impl Into<SharedString>,
+    detail: Option<SharedString>,
+) -> Div {
+    let s = &theme.surfaces;
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(theme.spacing.xs * k))
+        .max_w_full()
+        .px(px(theme.spacing.inset() * k))
+        .font_family(theme.typography.ui_family.clone())
+        .text_center()
+        .child(div().mb(px(theme.spacing.xs * k)).child(mark))
+        .child(
+            div()
+                .text_size(px(theme.typography.small() * k))
+                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                .text_color(hsla(s.text_secondary))
+                .child(title.into()),
+        )
+        .children(detail.map(|detail| {
+            meta(div(), theme).text_size(px(theme.typography.meta() * k)).child(detail)
+        }))
+}
+
+/// A [`notice`]'s mark: a kind's icon at the large size in `text_muted`.
+#[must_use]
+pub fn notice_mark(theme: &Theme, icon: crate::icons::IconName, k: f32) -> gpui::Svg {
+    crate::icons::icon(theme, icon, crate::icons::IconSize::Large, hsla(theme.surfaces.text_muted))
+        .size(px(theme.typography.icon_large() * k))
+}
+
+/// What the app is called where it names itself.
+pub const APP_NAME: &str = "Slopty";
+
+/// The side of the app's mark, in points.
+pub const BRAND_MARK: f32 = 40.0;
+
+/// The app icon, `assets/icon.svg`, the one the bundles are built from. Declared at the mark's
+/// side at 3x rather than the source's 1024 px: an image is rasterised at its declared size and
+/// sampled down with no mipmaps, so 1024 px drawn at 40 pt would shimmer at its edges.
+static APP_ICON: LazyLock<Arc<gpui::Image>> = LazyLock::new(|| {
+    let side = BRAND_MARK * 3.0;
+    let svg = include_str!("../../../assets/icon.svg").replacen(
+        r#"width="1024" height="1024" viewBox"#,
+        &format!(r#"width="{side}" height="{side}" viewBox"#),
+        1,
+    );
+    Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Svg, svg.into_bytes()))
+});
+
+/// The app's mark where it names itself: the first run, the settings' About.
+///
+/// Its own icon, the one the Dock and the home screen show, at [`BRAND_MARK`] and `radii.lg`, then
+/// its name at the title size in the strong weight. A bare grey word there was the plainest thing
+/// on the plainest screen; an invented glyph on an accent tile read as a web page's logo over a
+/// form. `under` stands under the name, beside the mark (About's version line).
+#[must_use]
+pub fn brand(theme: &Theme, under: Option<gpui::AnyElement>) -> gpui::Stateful<Div> {
+    let mark = gpui::img(APP_ICON.clone())
+        .id("app-mark")
+        .debug_selector(|| "app-mark".to_owned())
+        .flex_none()
+        .size(px(BRAND_MARK))
+        .rounded(px(theme.radii.lg));
+    div()
+        .id("app-brand")
+        .debug_selector(|| "app-brand".to_owned())
+        .role(gpui::accesskit::Role::Label)
+        .aria_label(APP_NAME)
+        .flex()
+        .items_center()
+        .gap(px(theme.spacing.sm))
+        .child(mark)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme.spacing.xxs))
+                .child(title(theme, APP_NAME))
+                .children(under),
+        )
 }
 
 /// A key cap: the keys on a small plate, the way the empty workspace teaches its chords and the
@@ -530,7 +897,8 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.secondary_hover = hsla(s.overlay);
     c.secondary_active = hsla(s.overlay);
     // A primary button is a fill, so it takes the fill and its ink: the accent's text tone is
-    // a pale blue in dark, lifted for reading on the canvas, and a button in it read as disabled.
+    // a pale blue in dark, lifted for reading on the dark surfaces, and a button in it read as
+    // disabled.
     c.primary = hsla(s.accent_fill);
     c.primary_foreground = hsla(s.accent_ink);
     c.link = hsla(s.accent);
@@ -538,7 +906,7 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.link_active = hsla(s.accent);
     c.popover = hsla(s.elevated);
     c.popover_foreground = hsla(s.text);
-    // The surface order: bars on the canvas, side panels on the panel, content above both.
+    // The surface order: bars on `canvas`, side panels on `panel`, content above both.
     c.title_bar = hsla(s.canvas);
     c.title_bar_border = hsla(s.border);
     c.status_bar = hsla(s.canvas);
@@ -603,6 +971,16 @@ mod tests {
             crate::file::CHANGED_ON_DISK,
             crate::file::RELOAD,
             crate::file::OVERWRITE,
+            crate::folder::EMPTY_FOLDER,
+            crate::folder::NOT_A_FOLDER,
+            crate::folder::CANNOT_LIST,
+            crate::file::TOO_LARGE,
+            crate::file::NOT_TEXT,
+            crate::file::CANNOT_READ,
+            crate::file::OPEN_IN_EDITOR,
+            crate::file::OPEN_IN_PAGER,
+            crate::screen::TRACKPAD_MODE,
+            crate::folder::ENCLOSING_FOLDER,
             crate::palette::NO_COMMAND_MATCHES,
             crate::picker::FILTER_PLACEHOLDER,
             crate::picker::NOTHING_MATCHES,
@@ -730,7 +1108,10 @@ mod tests {
         if named || line.contains(".shadow(") {
             return Some("a shadow of its own, not `kit::elevate`");
         }
-        line.contains("alpha::SCRIM").then_some("a scrim of its own, not `kit::scrim`")
+        let dim = ["alpha::SCRIM", "elevation.scrim", "elevation.shade"];
+        dim.iter()
+            .any(|token| line.contains(token))
+            .then_some("a scrim of its own, not `kit::scrim`")
     }
 
     #[test]
@@ -743,6 +1124,9 @@ mod tests {
         assert!(own_elevation(".when(floats, gpui::Styled::shadow_sm)").is_some());
         assert!(own_elevation(".shadow_none()").is_none(), "taking a shadow off is fine");
         assert!(own_elevation("/// no `.shadow_sm()` here").is_none(), "a comment");
+        let dimmed = ".bg(hsla_alpha(theme.elevation.shade, alpha::DIM))";
+        assert!(own_elevation(dimmed).is_some(), "the shade dimmed by hand");
+        assert!(own_elevation(".bg(hsla_alpha(s.canvas, t.elevation.scrim))").is_some());
     }
 
     /// What floats wears the one elevation: [`elevate`] and [`scrim`] are the only places a
@@ -758,6 +1142,256 @@ mod tests {
                 }
             }
         }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Chrome lines under `slopty-ui/src` and `slopty-app/src` that `wrong` flags, outside
+    /// `kit.rs` and the files in `awaiting` (call sites the next wave moves onto the kit), as
+    /// `file:line: why`.
+    fn flagged(awaiting: &[&str], wrong: impl Fn(&str) -> Option<&'static str>) -> Vec<String> {
+        ["slopty-ui/src", "slopty-app/src"]
+            .into_iter()
+            .flat_map(chrome_lines)
+            .filter(|(file, ..)| {
+                !file.ends_with("slopty-ui/src/kit.rs")
+                    && !awaiting.iter().any(|f| file.ends_with(f))
+            })
+            .filter_map(|(file, line_no, line)| {
+                wrong(&line).map(|why| format!("{file}:{line_no}: {why}: {}", line.trim()))
+            })
+            .collect()
+    }
+
+    /// A diff's size spelled by hand: a minus sign written before a formatted figure, or drawn
+    /// apart from its figure. A diff's own sign column (`"\u{2212}"` beside its tone) is not a
+    /// size, and neither is a comment.
+    fn hand_rolled_changes(line: &str) -> Option<&'static str> {
+        let signed = literals(line).iter().any(|l| l.contains("\\u{2212}{") || l.contains("−{"));
+        let apart = [".child(\"\\u{2212}\")", ".child(\"−\")"].iter().any(|c| line.contains(c));
+        (signed || apart).then_some("a diff's size by hand, not `kit::changes`")
+    }
+
+    #[test]
+    fn the_changes_check_knows_a_size_from_a_sign() {
+        assert!(hand_rolled_changes(r#"format!("+{added} \u{2212}{removed}")"#).is_some());
+        assert!(hand_rolled_changes(r#"format!("\u{2212}{}", changes.removed)"#).is_some());
+        assert!(
+            hand_rolled_changes(r#".child(div().text_color(red).child("\u{2212}"))"#).is_some()
+        );
+        assert!(hand_rolled_changes(r#"Kind::Removed => (wash, "\u{2212}", s.error),"#).is_none());
+        assert!(hand_rolled_changes("/// `+a −r` in the diff's tones").is_none(), "a comment");
+        assert!(hand_rolled_changes("kit::changes(theme, added, removed)").is_none());
+    }
+
+    /// A count of changed lines is drawn by [`changes`] (or said by [`changes_text`]): the
+    /// signs in the diff's tones, the figures quiet, a zero side left out. Written by hand it
+    /// came out two ways, one of them a red "−0".
+    #[test]
+    fn a_diff_size_is_drawn_by_kit_changes() {
+        const AWAITING: [&str; 0] = [];
+        let wrong = flagged(&AWAITING, hand_rolled_changes);
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A duration spelled by hand: a format with a figure then seconds (`"{secs} s"`,
+    /// `"{:.1}s"`), or minutes or hours followed by a second figure (`"{} m {:02} s"`). A
+    /// latency in milliseconds is a readout, not a duration, and an age ("5m") is its own
+    /// format; neither is flagged.
+    fn hand_rolled_duration(line: &str) -> Option<&'static str> {
+        let spelled = |text: &String| {
+            let chars: Vec<char> = text.chars().collect();
+            chars.iter().enumerate().filter(|(_, c)| **c == '}').any(|(ix, _)| {
+                let at = |n: usize| chars.get(ix.saturating_add(n)).copied();
+                let skip = usize::from(at(1) == Some(' '));
+                let unit = at(skip.saturating_add(1));
+                let after = at(skip.saturating_add(2));
+                let seconds = unit == Some('s') && !after.is_some_and(char::is_alphanumeric);
+                let compound = matches!(unit, Some('m' | 'h'))
+                    && after == Some(' ')
+                    && at(skip.saturating_add(3)) == Some('{');
+                seconds || compound
+            })
+        };
+        literals(line)
+            .iter()
+            .any(spelled)
+            .then_some("a duration spelled by hand, not `kit::duration`")
+    }
+
+    #[test]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "the check's cases are format strings as they stand in the source"
+    )]
+    fn the_duration_check_knows_a_duration_from_a_readout() {
+        assert!(hand_rolled_duration(r#"1..60 => format!("{secs} s"),"#).is_some());
+        assert!(hand_rolled_duration(r#"format!("{:.1} s", elapsed.as_secs_f64())"#).is_some());
+        assert!(hand_rolled_duration(r#"format!("{} m {:02} s", secs / 60, secs % 60)"#).is_some());
+        assert!(hand_rolled_duration(r#"format!("{}h {}m", h, m)"#).is_some());
+        assert!(hand_rolled_duration(r#"format!("rtt {:.1} ms", ms(d))"#).is_none(), "latency");
+        assert!(hand_rolled_duration(r#"format!("{}m", secs / 60)"#).is_none(), "an age");
+        assert!(hand_rolled_duration(r#"format!("{n} steps")"#).is_none());
+        assert!(hand_rolled_duration(r#"/// "Worked for 3 m 12 s""#).is_none(), "a comment");
+        assert!(hand_rolled_duration("kit::duration(elapsed)").is_none());
+    }
+
+    /// How long something took is said by [`duration`]: three hand-made formats had put
+    /// "1 m 05 s" beside cargo's "1m 04s" on one line, and "6.0 s" in a header.
+    #[test]
+    fn a_duration_is_kit_duration() {
+        const AWAITING: [&str; 0] = [];
+        let wrong = flagged(&AWAITING, hand_rolled_duration);
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A pill made by hand: its height grown from a pad at the chrome's zoom, or a tone's
+    /// faint fill at rest (a hover is not a pill).
+    fn hand_rolled_pill(line: &str) -> Option<&'static str> {
+        if line.trim_start().starts_with("//") {
+            return None;
+        }
+        let squeezed: String = line.split_whitespace().collect();
+        if squeezed.contains(".py(px(theme.spacing.xxs*k))") {
+            return Some("a pill's height from its pad, not `kit::pill_frame`");
+        }
+        let fill = squeezed.contains(".bg(hsla_alpha(") && squeezed.contains("alpha::FAINT");
+        (fill && !squeezed.contains(".hover(")).then_some("a tone's pill by hand, not `kit::pill`")
+    }
+
+    #[test]
+    fn the_pill_check_knows_a_pill_from_a_hover() {
+        assert!(hand_rolled_pill(".py(px(theme.spacing.xxs * k))").is_some());
+        assert!(hand_rolled_pill(".bg(hsla_alpha(color, alpha::FAINT))").is_some());
+        let hover = ".hover(move |el| el.bg(hsla_alpha(quiet, alpha::FAINT)))";
+        assert!(hand_rolled_pill(hover).is_none(), "a hover fill");
+        assert!(hand_rolled_pill("kit::pill(theme, s.warn, k)").is_none());
+        assert!(hand_rolled_pill(".py(px(theme.spacing.xxs))").is_none(), "a hint, unzoomed");
+        assert!(hand_rolled_pill("// .py(px(theme.spacing.xxs * k))").is_none(), "a comment");
+    }
+
+    /// A header's pill is [`pill`] (or [`pill_frame`] for its bare words): [`PILL_HEIGHT`]
+    /// tall whatever its text, so it sits centred in the header rather than filling it.
+    #[test]
+    fn a_pill_is_kit_pill() {
+        const AWAITING: [&str; 0] = [];
+        let wrong = flagged(&AWAITING, hand_rolled_pill);
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A pill is its fixed height at any zoom, and the state's pill is the frame filled.
+    #[test]
+    fn a_pill_is_twenty_points_at_its_zoom() {
+        let theme = Theme::default();
+        for k in [1.0, 0.5] {
+            let mut frame = pill_frame(&theme, k);
+            let height = frame.style().size.height;
+            assert_eq!(height, Some(px(PILL_HEIGHT * k).into()), "zoom {k}");
+            let mut filled = pill(&theme, theme.surfaces.warn, k);
+            assert_eq!(filled.style().size.height, Some(px(PILL_HEIGHT * k).into()));
+            let fill = filled.style().background.clone();
+            let faint = gpui::Fill::from(hsla_alpha(theme.surfaces.warn, alpha::FAINT));
+            assert_eq!(fill, Some(faint), "the tone at the faint step");
+        }
+    }
+
+    /// A share written with a space before its sign: "150 %" beside the "34%" of the context
+    /// and the "↑ 42%" of an upload.
+    fn spaced_percent(line: &str) -> Option<&'static str> {
+        literals(line)
+            .iter()
+            .any(|l| l.contains("} %"))
+            .then_some("a share as \"{n} %\", where chrome writes \"{n}%\"")
+    }
+
+    #[test]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "the check's cases are format strings as they stand in the source"
+    )]
+    fn the_percent_check_knows_a_share_from_a_modulo() {
+        assert!(spaced_percent(r#"format!("{percent:.0} %")"#).is_some());
+        assert!(spaced_percent(r#"format!("{percent:.0}%")"#).is_none());
+        assert!(spaced_percent("let rest = secs % 60;").is_none(), "arithmetic");
+        assert!(spaced_percent(r#"// format!("{n} %")"#).is_none(), "a comment");
+    }
+
+    /// One way to write a share: the figure and the sign together, as macOS and the context
+    /// readout write it.
+    #[test]
+    fn a_percent_sits_against_its_figure() {
+        const AWAITING: [&str; 0] = [];
+        let wrong = flagged(&AWAITING, spaced_percent);
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A toggle is one control with one name: off it is a quiet icon button, on it rests on
+    /// the selected fill with its icon in `text`, and its width does not change.
+    #[test]
+    fn a_toggle_rests_on_the_selected_fill_only_while_on() {
+        let theme = Theme::default();
+        let icon = crate::icons::IconName::MousePointer2;
+        let mut off = icon_toggle(&theme, "t", icon, "Trackpad mode", false, 1.0);
+        let mut on = icon_toggle(&theme, "t", icon, "Trackpad mode", true, 1.0);
+        assert_eq!(off.style().background, None, "off is bare");
+        let selected = Some(gpui::Fill::from(hsla(theme.surfaces.overlay)));
+        assert_eq!(on.style().background, selected, "on rests on the selected fill");
+        assert_eq!(on.style().size.width, off.style().size.width, "one size either way");
+    }
+
+    /// The first run and About lead with one mark at one size.
+    #[test]
+    fn the_brand_is_the_app_icon_at_its_side() {
+        assert!(!APP_ICON.bytes().is_empty());
+        let svg = String::from_utf8_lossy(APP_ICON.bytes());
+        let side = BRAND_MARK * 3.0;
+        assert!(svg.contains(&format!(r#"width="{side}""#)), "declared at 3x the mark");
+    }
+
+    /// One duration format: milliseconds under a second, a tenth under ten seconds unless it
+    /// is zero, then whole seconds, minutes and seconds, hours and minutes.
+    #[test]
+    fn a_duration_reads_one_way() {
+        let ms = std::time::Duration::from_millis;
+        let cases = [
+            (850, "850 ms"),
+            (6_040, "6 s"),
+            (6_250, "6.2 s"),
+            (6_000, "6 s"),
+            (9_990, "9.9 s"),
+            (10_400, "10 s"),
+            (35_000, "35 s"),
+            (65_000, "1m 5s"),
+            (192_000, "3m 12s"),
+            (3_840_000, "1h 4m"),
+        ];
+        for (millis, said) in cases {
+            assert_eq!(duration(ms(millis)), said, "{millis} ms");
+        }
+    }
+
+    /// The one gradient chrome draws is the [`edge_fade`] mask: a gradient anywhere else is a
+    /// wash, the first tell of generated UI.
+    #[test]
+    fn a_gradient_is_an_edge_fade() {
+        const AWAITING: [&str; 0] = [];
+        let gradient = |line: &str| {
+            let code = !line.trim_start().starts_with("//");
+            (code && line.contains("linear_gradient("))
+                .then_some("a gradient, not `kit::edge_fade`")
+        };
+        let wrong = flagged(&AWAITING, gradient);
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A field's text inset is [`FIELD_INSET`], gpui-kit's medium field padding, and nothing
+    /// keeps a copy of it, so what lines up with a field's text cannot drift from it.
+    #[test]
+    fn the_field_inset_is_the_kits() {
+        const AWAITING: [&str; 0] = [];
+        let medium = gpui_kit::component::Size::Medium.input_px();
+        assert!((f32::from(medium) - FIELD_INSET).abs() < f32::EPSILON, "{medium:?}");
+        let copy = |line: &str| line.contains("const FIELD_INSET").then_some("a second inset");
+        let wrong = flagged(&AWAITING, copy);
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
@@ -787,8 +1421,8 @@ mod tests {
         ));
     }
 
-    /// The accent's text tone is never a fill: lifted for reading on the canvas, it is a pale
-    /// blue in dark, and a button or a ticked box in it read as disabled. A fill takes
+    /// The accent's text tone is never a fill: lifted for reading on the dark surfaces, it is a
+    /// pale blue in dark, and a button or a ticked box in it read as disabled. A fill takes
     /// `accent_fill` with the fills' ink.
     ///
     /// Nor is it a focused field's border: a field shows focus by its caret, and the accent is
@@ -796,9 +1430,7 @@ mod tests {
     /// mark.
     #[test]
     fn the_accent_text_tone_is_never_a_fill() {
-        // The terminal's find bar is the latency work's file; its accent border goes with the
-        // next change there.
-        const AWAITING: [&str; 1] = ["slopty-ui/src/terminal/view.rs"];
+        const AWAITING: [&str; 0] = [];
         let mut wrong = Vec::new();
         for dir in ["slopty-ui/src", "slopty-app/src"] {
             for (file, line_no, line) in chrome_lines(dir) {
@@ -1182,6 +1814,59 @@ mod tests {
         assert!(cx.update(|cx| motion(cx)), "motion by default");
         cx.update(|cx| cx.set_reduce_motion(true));
         assert!(!cx.update(|cx| motion(cx)), "still under Reduce Motion");
+    }
+
+    /// A block that slides 8 pt into place as it fades in.
+    struct Sliding;
+
+    impl Render for Sliding {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let block = div().debug_selector(|| "sliding".to_owned()).size(px(10.0));
+            div().child(slide_fade(block, "sliding", 8.0, Pace::Fade, cx))
+        }
+    }
+
+    /// Where the sliding block's top is on the first frame drawn.
+    fn first_top(cx: &mut TestAppContext) -> f32 {
+        let (_view, cx) = cx.add_window_view(|_, _| Sliding);
+        cx.run_until_parked();
+        f32::from(cx.debug_bounds("sliding").expect("drawn").top())
+    }
+
+    /// Something that slides in starts below its place and lands there; under Reduce Motion it
+    /// is in its place on the first frame.
+    #[gpui::test]
+    fn a_slide_starts_off_its_place_and_holds_still_under_reduce_motion(cx: &mut TestAppContext) {
+        assert!(first_top(cx) > 4.0, "the first frame is below its place");
+        cx.update(|cx| cx.set_reduce_motion(true));
+        assert!(first_top(cx).abs() < 0.5, "in place at once");
+    }
+
+    /// Each pace is the theme's: a fade and a settle ease out, a sheet takes the drawer's
+    /// curve, and only a sheet takes longer than a settle.
+    #[test]
+    fn the_paces_are_the_motion_tokens() {
+        let m = Motion::DEFAULT;
+        assert_eq!(Pace::Fade.duration(), m.fade);
+        assert_eq!(Pace::Settle.duration(), m.settle);
+        assert_eq!(Pace::Sheet.duration(), m.sheet);
+        assert_eq!(Pace::Fade.curve(), m.ease_out);
+        assert_eq!(Pace::Settle.curve(), m.ease_out);
+        assert_eq!(Pace::Sheet.curve(), m.drawer);
+        assert!(Pace::Fade.duration() < Pace::Settle.duration());
+        assert!(Pace::Settle.duration() < Pace::Sheet.duration());
+    }
+
+    /// A diff's size leaves out the side that is zero, and says nothing for no change.
+    #[test]
+    fn a_diff_size_drops_its_zero_side() {
+        assert_eq!(changes_text(2, 1).as_deref(), Some("+2 \u{2212}1"));
+        assert_eq!(changes_text(2, 0).as_deref(), Some("+2"), "no red zero");
+        assert_eq!(changes_text(0, 3).as_deref(), Some("\u{2212}3"));
+        assert_eq!(changes_text(0, 0), None);
+        let theme = Theme::default();
+        assert!(changes(&theme, 0, 0).is_none(), "nothing drawn for no change");
+        assert!(changes(&theme, 1, 0).is_some());
     }
 
     /// The two overlay sizes differ in both directions, and a list is the smaller of them: a

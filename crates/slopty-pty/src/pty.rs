@@ -24,7 +24,7 @@ use crate::shell_integration::ShellIntegration;
 pub struct SpawnSpec {
     /// Program and arguments. Empty → the user's login shell as a login shell.
     pub command: Vec<String>,
-    /// Working directory. `None` → `$HOME`.
+    /// Working directory. `None` → the user's home ([`home`]).
     pub cwd: Option<PathBuf>,
     /// Extra environment on top of the daemon's, `TERM`, `COLORTERM`, `TERM_PROGRAM`.
     pub env: Vec<(String, String)>,
@@ -109,7 +109,7 @@ impl Pty {
         if let Some(arg0) = arg0 {
             cmd.arg0(arg0);
         }
-        cmd.current_dir(spec.cwd.clone().unwrap_or_else(home_dir));
+        cmd.current_dir(spec.cwd.clone().unwrap_or_else(home));
         cmd.env("TERM", default_term());
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "slopty");
@@ -323,13 +323,21 @@ fn resolve_command(command: &[String]) -> (String, Vec<String>, Option<String>) 
     (shell, Vec::new(), Some(format!("-{base}")))
 }
 
-/// `$SHELL`, else the account's shell from the passwd database (a `LaunchAgent` gets no
-/// `SHELL`), else zsh.
+/// The shell of a user with neither `$SHELL` nor a passwd entry: what each system gives a new
+/// account.
+const FALLBACK_SHELL: &str = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" };
+
+/// `$SHELL`, else the account's shell from the passwd database (a `LaunchAgent` or a systemd
+/// user unit gets no `SHELL`), else [`FALLBACK_SHELL`].
 fn login_shell() -> String {
-    if let Some(shell) = std::env::var("SHELL").ok().filter(|s| !s.is_empty()) {
-        return shell;
-    }
-    account_shell().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".to_owned())
+    choose_shell(std::env::var("SHELL").ok(), account_shell)
+}
+
+/// [`login_shell`]'s order, an empty value counting as none.
+fn choose_shell(env: Option<String>, account: impl FnOnce() -> Option<String>) -> String {
+    env.filter(|s| !s.is_empty())
+        .or_else(|| account().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| FALLBACK_SHELL.to_owned())
 }
 
 /// This user's shell in the passwd database.
@@ -379,8 +387,16 @@ fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
-fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
+/// The user's home directory, by the rule of `slopty_platform::dirs::home`: `$HOME` when set
+/// and not empty, else the password-database entry, and `/` when neither is an absolute path.
+///
+/// Spelled here rather than called there because `slopty-ptyd` links this crate, and linking
+/// `slopty-platform` would load `AppKit`, `WebKit`, `UserNotifications` and `AudioToolbox` into
+/// the PTY custodian (otool -L), a few milliseconds a launch and their memory for its whole
+/// life, for one line.
+#[must_use]
+pub fn home() -> PathBuf {
+    std::env::home_dir().filter(|h| h.is_absolute()).unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// `xterm-ghostty` when its terminfo is installed (ghostty's entry is the most complete), else
@@ -534,6 +550,17 @@ mod tests {
     fn bare_program_on_path_runs_directly() {
         let (p, a, arg0) = resolve_command(&["ls".to_owned(), "-l".to_owned()]);
         assert_eq!((p.as_str(), a.as_slice(), arg0), ("ls", &["-l".to_owned()][..], None));
+    }
+
+    /// `$SHELL` first, then the passwd entry (all a systemd unit has), then the system's own.
+    #[test]
+    fn the_shell_is_the_environments_then_the_accounts_then_the_systems() {
+        let fish = || Some("/usr/bin/fish".to_owned());
+        assert_eq!(choose_shell(Some("/bin/sh".to_owned()), fish), "/bin/sh");
+        assert_eq!(choose_shell(Some(String::new()), fish), "/usr/bin/fish");
+        assert_eq!(choose_shell(None, || Some(String::new())), FALLBACK_SHELL);
+        let system = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" };
+        assert_eq!(choose_shell(None, || None), system);
     }
 
     #[test]

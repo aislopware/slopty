@@ -19,7 +19,7 @@ use std::time::SystemTime;
 
 /// Claude Code's per-project directory under the home directory.
 #[must_use]
-pub fn projects_dir(home: &Path) -> PathBuf {
+fn projects_dir(home: &Path) -> PathBuf {
     home.join(".claude").join("projects")
 }
 
@@ -44,7 +44,7 @@ pub fn escape(cwd: &Path) -> String {
 /// The newest `.jsonl` in `dir` modified at or after `since`, or `None` when the directory does
 /// not exist or holds no such file.
 #[must_use]
-pub fn newest_transcript(dir: &Path, since: SystemTime) -> Option<PathBuf> {
+fn newest_transcript(dir: &Path, since: SystemTime) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     let mut best: Option<(SystemTime, PathBuf)> = None;
     for entry in entries.flatten() {

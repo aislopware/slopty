@@ -1,46 +1,88 @@
 //! The files a client reads, writes and watches, answered on tasks of their own: a read, a
 //! quick-open walk or a look at the watched files touches the disk, and none of it may hold up a
-//! terminal's echo on the same connection.
+//! terminal's echo on the same connection. A text too big for the control stream goes on a
+//! bulk stream after its announcement (`slopty_worker::file::announce`).
 
 use std::collections::HashMap;
 
 use slopty_core::ClientId;
-use slopty_net::WorkerMsg;
+use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::file::{FileRead, WriteResult};
+use slopty_proto::transfer::{BulkHeader, Purpose};
 use tokio::sync::{mpsc, watch};
 
 /// Paths the palette's quick open is answered with at most.
 const FILES_LISTED: usize = 8;
-/// How often the files behind a client's file cards are looked at for a change.
+/// How often the files behind a client's file tiles are looked at for a change.
 const FILES_PERIOD: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// Read `path` and send what is there; `false` when the writer is gone.
-pub async fn send_file(client: ClientId, out: &mpsc::Sender<WorkerMsg>, path: String) -> bool {
+///
+/// A large text is announced on the control stream and then written to its bulk stream before
+/// this returns, so the watch sends one file's text at a time and a file rewritten faster than
+/// the link carries it is sent as it is when the last send ends, not once per change.
+pub async fn send_file(
+    client: ClientId,
+    conn: &Connection,
+    out: &mpsc::Sender<WorkerMsg>,
+    path: String,
+) -> bool {
     let target = path.clone();
     let read = tokio::task::spawn_blocking(move || {
         slopty_worker::file::read(std::path::Path::new(&target))
     })
     .await
     .unwrap_or_else(|_| FileRead::Missing { error: "read failed".to_owned() });
+    let (read, stream) = slopty_worker::file::announce(read);
     let kind = match &read {
         FileRead::Text { .. } => "text",
+        FileRead::Streamed { .. } => "streamed",
         FileRead::Binary { .. } => "binary",
         FileRead::Missing { .. } => "missing",
+        FileRead::TooLarge { .. } => "too large",
     };
     tracing::info!(%client, %path, kind, "read file");
-    out.send(WorkerMsg::File { path, read }).await.is_ok()
+    let modified_ms = match &read {
+        FileRead::Streamed { modified_ms, .. } => *modified_ms,
+        _ => 0,
+    };
+    if out.send(WorkerMsg::File { path: path.clone(), read }).await.is_err() {
+        return false;
+    }
+    if let Some((xfer, text)) = stream {
+        let header = BulkHeader {
+            xfer,
+            purpose: Purpose::FileText,
+            name: String::new(),
+            size: text.len() as u64,
+            mtime_ms: modified_ms,
+            mode: 0,
+            offset: 0,
+        };
+        let sent = async {
+            let mut send = slopty_net::streams::open_bulk(conn, header).await?;
+            send.write_all(text.as_bytes()).await.map_err(|e| NetError::Stream(e.to_string()))?;
+            send.finish().map_err(|e| NetError::Stream(e.to_string()))
+        };
+        // The client's link says the read broke; the connection's own end is its loop's to see.
+        if let Err(e) = sent.await {
+            tracing::info!(%client, %path, error = %e, "file text not sent");
+        }
+    }
+    true
 }
 
-/// Save a file card and answer how it went. Every watcher of the file, the writer's own
+/// Save a file tile and answer how it went. Every watcher of the file, the writer's own
 /// included, then hears the new contents from its next look ([`watch`]).
 pub async fn write(
     client: ClientId,
     out: &mpsc::Sender<WorkerMsg>,
     path: String,
-    text: String,
+    text: Vec<u8>,
     base_modified_ms: Option<u64>,
 ) {
     let target = path.clone();
+    let bytes = text.len();
     let result = tokio::task::spawn_blocking(move || {
         slopty_worker::file::write(std::path::Path::new(&target), &text, base_modified_ms)
     })
@@ -51,7 +93,7 @@ pub async fn write(
         WriteResult::Conflict { .. } => "conflict",
         WriteResult::Failed { .. } => "failed",
     };
-    tracing::info!(%client, %path, outcome, "write file");
+    tracing::info!(%client, %path, bytes, outcome, "write file");
     let _sent = out.send(WorkerMsg::Written { path, result }).await;
 }
 
@@ -71,10 +113,11 @@ pub async fn find(out: mpsc::Sender<WorkerMsg>, root: String, query: String) {
     let _sent = out.send(WorkerMsg::FoundFiles { root, query, paths }).await;
 }
 
-/// Watch the files behind a client's file cards: each list `lists` holds replaces the last, and a
+/// Watch the files behind a client's file tiles: each list `lists` holds replaces the last, and a
 /// file whose stamp moves is read and sent again. Ends with the connection.
 pub async fn watch(
     client: ClientId,
+    conn: Connection,
     out: mpsc::Sender<WorkerMsg>,
     mut lists: watch::Receiver<Vec<String>>,
 ) {
@@ -92,7 +135,7 @@ pub async fn watch(
                 tracing::debug!(%client, files = watched.len(), "watch files");
             }
             _ = tick.tick(), if !watched.is_empty() => {
-                if !poll(client, &out, &mut watched).await {
+                if !poll(client, &conn, &out, &mut watched).await {
                     return;
                 }
             }
@@ -101,7 +144,7 @@ pub async fn watch(
 }
 
 /// The new watch list: a path kept keeps its stamp; a new one is stamped as it is now (the
-/// card's own read shows that state).
+/// tile's own read shows that state).
 async fn restamp(
     mut old: HashMap<String, Option<(u64, u128)>>,
     paths: Vec<String>,
@@ -127,6 +170,7 @@ async fn restamp(
 /// writer is gone.
 async fn poll(
     client: ClientId,
+    conn: &Connection,
     out: &mpsc::Sender<WorkerMsg>,
     watched: &mut HashMap<String, Option<(u64, u128)>>,
 ) -> bool {
@@ -148,7 +192,7 @@ async fn poll(
             continue;
         }
         *seen = stamp;
-        if !send_file(client, out, path).await {
+        if !send_file(client, conn, out, path).await {
             return false;
         }
     }

@@ -8,6 +8,7 @@
 //! with bounds already read and waits on nothing (MEASUREMENTS.md, "input injection off the
 //! runtime").
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -175,6 +176,11 @@ impl InputSink for InputThread {
 
 /// The input thread: jobs in order until the handle is dropped, then the injector's drop lets
 /// go of what is held.
+///
+/// A move with another move queued behind it is passed over: after a stall (an owner lookup
+/// before a press, a bounds read no probe spared) the moves handed over meanwhile would
+/// otherwise each be posted, replaying a trail the client has left, before the click or key
+/// behind them. Only the pointer's place is lost; every other job keeps its turn.
 fn serve<B: Backend>(
     target: CaptureTarget,
     scale: f64,
@@ -184,7 +190,21 @@ fn serve<B: Backend>(
 ) {
     let mut injector = Injector::with_backend(target, scale, backend);
     injector.report_pointer(pointer);
-    while let Ok(job) = queue.recv() {
+    let mut queued = VecDeque::new();
+    loop {
+        let job = match queued.pop_front() {
+            Some(job) => job,
+            None => match queue.recv() {
+                Ok(job) => job,
+                Err(_gone) => break,
+            },
+        };
+        if matches!(job, Job::Input(ScreenInput::Move { .. })) {
+            queued.extend(queue.try_iter());
+            if superseded(&queued) {
+                continue;
+            }
+        }
         let done = match job {
             Job::Input(input) => injector.inject(&input),
             Job::Focus => injector.focus(),
@@ -208,6 +228,15 @@ fn serve<B: Backend>(
             tracing::debug!(?target, error = %e, "input");
         }
     }
+}
+
+/// Whether a move is made stale by what is queued behind it: another move comes before any
+/// job but a new scale or new bounds, which only change how that later move is mapped.
+fn superseded(behind: &VecDeque<Job>) -> bool {
+    behind
+        .iter()
+        .find(|job| !matches!(job, Job::Scale(_) | Job::Bounds(..)))
+        .is_some_and(|job| matches!(job, Job::Input(ScreenInput::Move { .. })))
 }
 
 #[cfg(test)]
@@ -426,8 +455,9 @@ mod tests {
 
     /// The bounds the stream's probe hands over are the only ones used: moves at 200 Hz for
     /// longer than the bounds live, with a hand-over every 100 ms as the probe does, read the
-    /// window server not once, and each move maps through the latest bounds handed over before
-    /// it, including after the target moved.
+    /// window server not once, and each move posted maps through the latest bounds handed over
+    /// before it, including after the target moved. (A move the thread fell behind on may be
+    /// passed over; each one lands on a row of its own, so its post names it.)
     #[test]
     fn the_probes_bounds_spare_every_read_in_front_of_the_pointer() {
         let unread = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
@@ -451,21 +481,107 @@ mod tests {
                 sink.set_bounds(probed(origin), Instant::now());
                 probe_at = probe_at.checked_add(Duration::from_millis(100)).unwrap();
             }
-            sink.inject(&ScreenInput::Move { x: 10.0, y: 0.0 }).unwrap();
+            let row = f32::from(u16::try_from(origins.len()).unwrap());
+            sink.inject(&ScreenInput::Move { x: 10.0, y: row }).unwrap();
             origins.push(origin);
             let _paced = pause.recv_timeout(Duration::from_millis(5));
         }
         drop(sink);
         let posted = drain(&posts);
         assert!(moved_at.is_some(), "the target moved mid-run");
-        assert_eq!(posted.len(), origins.len());
-        for (post, origin) in posted.iter().zip(&origins) {
-            assert!(
-                matches!(post.event, Event::Mouse { at, .. } if at == CGPoint::new(origin + 10.0, 0.0)),
-                "mapped through the bounds handed over: {post:?}, origin {origin}"
+        assert!(!posted.is_empty() && posted.len() <= origins.len());
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a row")]
+        let row = |at: CGPoint| at.y as usize;
+        for post in &posted {
+            let Event::Mouse { at, .. } = post.event else { panic!("{post:?}") };
+            let origin = origins[row(at)];
+            assert_eq!(
+                at,
+                CGPoint::new(origin + 10.0, at.y),
+                "mapped through the bounds handed over"
             );
         }
+        let last = posted.last().map(|p| &p.event);
+        assert!(
+            matches!(last, Some(Event::Mouse { at, .. }) if row(*at) == origins.len().saturating_sub(1)),
+            "the last move is never passed over: {last:?}"
+        );
         assert_eq!(reads.load(Ordering::Relaxed), 0, "reads in front of a move");
+    }
+
+    /// A stall on the input thread (a post held here until the test lets go, as an owner
+    /// lookup or a bounds read holds it on the worker) leaves the moves handed over meanwhile
+    /// queued. Only the last of each run of moves is posted, new bounds between them do not
+    /// break the run, and the press, the drag and the release behind them keep their order.
+    #[test]
+    fn moves_queued_behind_a_stall_post_as_one_before_the_click() {
+        /// Posts once the gate is dropped.
+        #[derive(Debug)]
+        struct Gated(Tap, Receiver<()>);
+        impl Backend for Gated {
+            fn owner_pid(&self, target: CaptureTarget) -> Option<i32> {
+                self.0.owner_pid(target)
+            }
+
+            fn bounds(&mut self, target: CaptureTarget) -> Option<Rect> {
+                self.0.bounds(target)
+            }
+
+            fn is_active(&mut self, pid: i32) -> bool {
+                self.0.is_active(pid)
+            }
+
+            fn activate(&mut self, pid: i32) -> Result<(), InputError> {
+                self.0.activate(pid)
+            }
+
+            fn post(&mut self, post: Post) -> Result<(), InputError> {
+                let _opened = self.1.recv();
+                self.0.post(post)
+            }
+        }
+        let bounds = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
+        let (tap, posts) = Tap::new(Recorder::window(7, bounds));
+        let (gate, held) = mpsc::channel();
+        let mut sink =
+            InputThread::spawn(CaptureTarget::Window(WindowId(3)), 1.0, Gated(tap, held));
+        let at = |x: f32| ScreenInput::Move { x, y: 0.0 };
+        let button = |down: bool, x: f32| ScreenInput::Button {
+            button: MouseButton::Left,
+            down,
+            clicks: 1,
+            x,
+            y: 0.0,
+            mods: Mods::empty(),
+        };
+        sink.inject(&key(KeyCode::C, KeyAction::Press)).unwrap();
+        sink.inject(&at(1.0)).unwrap();
+        sink.set_bounds(Some(bounds), Instant::now());
+        sink.inject(&at(2.0)).unwrap();
+        sink.inject(&at(3.0)).unwrap();
+        sink.inject(&button(true, 4.0)).unwrap();
+        sink.inject(&at(5.0)).unwrap();
+        sink.inject(&at(6.0)).unwrap();
+        sink.inject(&button(false, 6.0)).unwrap();
+        drop(gate);
+        drop(sink);
+
+        let got: Vec<(CGEventType, f64)> = drain(&posts)
+            .into_iter()
+            .filter_map(|p| match p.event {
+                Event::Mouse { kind, at, .. } => Some((kind, at.x)),
+                Event::Key { .. } | Event::Scroll { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (CGEventType::MouseMoved, 3.0),
+                (CGEventType::LeftMouseDown, 4.0),
+                (CGEventType::LeftMouseDragged, 6.0),
+                (CGEventType::LeftMouseUp, 6.0),
+            ]
+        );
     }
 
     /// A window stream's events go to its owner and leave the worker's pointer alone, so the

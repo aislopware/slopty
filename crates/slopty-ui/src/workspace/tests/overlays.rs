@@ -28,22 +28,30 @@ fn labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<Strin
     tree.into_iter().filter_map(|n| n.label).collect()
 }
 
-/// An inbox row is two lines on the navigator's rhythm. The first ends in how long ago, a
-/// waiting agent's too, counted from the worker's stamp so a reconnect keeps it. No word
-/// repeats the section heading over it ("Needs you" under *Needs you*); a failed command's
-/// exit leads the second line. The popover stands a base unit clear of the title bar, its right
-/// edge on the window's inset.
+/// An inbox row is two lines on the navigator's rhythm. A waiting agent's first line is what it
+/// asks, and it ends in how long ago, counted from the worker's stamp so a reconnect keeps it. No
+/// word repeats the section heading over it ("Needs you" under *Needs you*), and an agent the
+/// hook named only its tool for says what that tool does, not the tool; a failed command's
+/// exit leads the second line. The popover hangs flush from the title bar, so no tile header
+/// shows through a gap over it, its right edge on the window's inset.
 #[gpui::test]
 fn an_inbox_row_says_its_age_first_and_no_word_its_heading_does(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let (asking, failed) = (SessionId::new(), SessionId::new());
+    let (asking, failed, bare) = (SessionId::new(), SessionId::new(), SessionId::new());
     let _asking = opens(&view, cx, &studio, asking, studio.me, 1);
     let _failed = opens(&view, cx, &studio, failed, studio.me, 2);
-    let _here = opens(&view, cx, &studio, SessionId::new(), studio.me, 3);
+    let _bare = opens(&view, cx, &studio, bare, studio.me, 3);
+    let _here = opens(&view, cx, &studio, SessionId::new(), studio.me, 4);
     let since_ms = inbox::wall_ms().saturating_sub(5 * 60_000);
     view.update_in(cx, |v, _w, cx| {
-        v.agent_event(AgentEvent { since_ms, ..blocked(asking) }, cx);
+        let status = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() });
+        let detail = Some("$ touch refused.txt".into());
+        v.agent_event(
+            AgentEvent { since_ms, status: status.clone(), detail, ..blocked(asking) },
+            cx,
+        );
+        v.agent_event(AgentEvent { since_ms, status, detail: None, ..blocked(bare) }, cx);
         let done = Finished {
             command: "cargo clippy".into(),
             exit: Some(101),
@@ -52,11 +60,14 @@ fn an_inbox_row_says_its_age_first_and_no_word_its_heading_does(cx: &mut TestApp
         v.command_finished(failed, done, cx);
     });
     cx.run_until_parked();
+    // Where the popover rests, not its drop into place.
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
     click(cx, "bell");
 
     let theme = Theme::default();
     let inbox = bounds(cx, "inbox");
-    assert!(f32::from(inbox.top()) >= TITLEBAR_H + theme.spacing.xs - 0.5, "{inbox:?}");
+    let top = f32::from(inbox.top());
+    assert!(top >= TITLEBAR_H - 0.5 && top < TITLEBAR_H + theme.spacing.xs - 0.5, "{inbox:?}");
     let right = VIEWPORT.0 - theme.spacing.inset();
     assert!((f32::from(inbox.right()) - right).abs() < 0.5, "on the inset: {inbox:?}");
     let two = crate::kit::Row::Two.height(&theme);
@@ -72,7 +83,38 @@ fn an_inbox_row_says_its_age_first_and_no_word_its_heading_does(cx: &mut TestApp
     let exit = bounds(cx, leak(format!("inbox-finished-{failed}-word")));
     let age = bounds(cx, leak(format!("inbox-finished-{failed}-age")));
     assert!(exit.top() >= age.bottom() - px(0.5), "the exit on the second line: {exit:?}");
-    assert!(labels(&view, cx).iter().any(|l| l.contains("Exit 101")));
+    let names = labels(&view, cx);
+    assert!(names.iter().any(|l| l.contains("Exit 101")));
+    assert!(
+        names.iter().any(|l| l.starts_with("Run touch refused.txt")),
+        "what it asks, not \"Needs approval\" under Needs you: {names:#?}"
+    );
+    assert!(
+        names.iter().any(|l| l.starts_with("Wants to run a command \u{b7} ")),
+        "a bare tool says what it asks, not \"Bash\": {names:#?}"
+    );
+}
+
+/// The inbox drops the base unit from the bell as it fades in, and under Reduce Motion is in
+/// place at once. The fill under the view that is up is the one plate, and choosing *All* puts
+/// it there.
+#[gpui::test]
+fn the_inbox_drops_in_and_its_view_sits_on_the_plate(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let _studio = connect(&view, cx, 1, "studio");
+    click(cx, "bell");
+    let arriving = bounds(cx, "inbox");
+    click(cx, "bell");
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    click(cx, "bell");
+    let rest = bounds(cx, "inbox");
+    let drop = f32::from(rest.top() - arriving.top());
+    let unit = Theme::default().spacing.xs;
+    assert!(drop > unit - 1.0 && drop < unit + 0.01, "from a base unit above: {drop}");
+    let plate = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.inbox_plate());
+    assert_eq!(plate(cx), Some(bounds(cx, "inbox-unread")), "under the view that is up");
+    click(cx, "inbox-all");
+    assert_eq!(plate(cx), Some(bounds(cx, "inbox-all")), "gone to All");
 }
 
 /// The inbox's empty states come in two tiers: one that has never held anything says what
@@ -103,9 +145,9 @@ fn an_empty_inbox_explains_itself_once(cx: &mut TestAppContext) {
     assert!(read.size.height < fresh.size.height, "one quiet line: {read:?} {fresh:?}");
 }
 
-/// The Tiles section lists every tile the navigator does, an unnamed note included, by the
-/// title its header shows. Its context is the header's place, word for word, as the
-/// navigator's second line is: one way of saying how far a note got, not three.
+/// The Tiles section lists every tile the navigator does, an unnamed note included, by its
+/// title. Its context says how far the note got in the words the header's count and the
+/// navigator's second line use: one way of saying it, not three.
 #[gpui::test]
 fn the_palette_finds_an_unnamed_note(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -126,7 +168,8 @@ fn the_palette_finds_an_unnamed_note(cx: &mut TestAppContext) {
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("Label", Some("1 of 2 done"))), "the header: {tree:#?}");
+    assert!(tree.iter().any(|n| n.is("Heading", Some("note Release"))), "named: {tree:#?}");
+    assert!(tree.iter().any(|n| n.is("Status", Some("1 of 2 done"))), "counted: {tree:#?}");
     let rows = view.read_with(cx, WorkspaceView::navigator_lines);
     assert!(rows.iter().any(|(_, meta, _)| meta == "1 of 2 done"), "the navigator: {rows:#?}");
 }
@@ -147,4 +190,29 @@ fn opening_the_palette_puts_the_phone_drawer_away(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("palette").is_some());
     assert!(cx.debug_bounds("navigator").is_none(), "and put away for the palette");
+}
+
+/// A dismissed palette is closed at once, since the keys go back where they were, but it is
+/// drawn for its way out and only then dropped; under Reduce Motion it goes in the same frame.
+#[gpui::test]
+fn a_dismissed_palette_draws_its_way_out(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    cx.simulate_keystrokes("cmd-shift-p");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.palette_open()), "closed to the keys");
+    assert!(cx.debug_bounds("palette").is_some(), "still drawing its way out");
+    cx.executor().advance_clock(crate::kit::Pace::Fade.duration());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("palette").is_none(), "dropped once out");
+
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    cx.simulate_keystrokes("cmd-shift-p");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("palette").is_none(), "gone in the same frame");
 }

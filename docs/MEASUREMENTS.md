@@ -5924,6 +5924,29 @@ The quiet runs hold p99 where it was, or a little under it, while each row now d
 SLOPTY_SMOOTH_E2E=1 cargo xtask e2e app
 ```
 
+## 2026-09-27 — the conversation face with its work tray, pictures and plan card
+
+The same probe as the entry below (`the_face_draws_a_streaming_answer_within_a_frame`: 80 made-up turns, a word every 16 ms for 5 s, debug build, mac-studio, 1000 × 720), after the face gained the background tray, the task card over the composer, thumbnails, the thinking line, the plan card and the top fade.
+- Each frame now also works out the tray and the task card and reads the list's scroll top for the fade.
+- A row in view checks whether it still has pictures to fetch. The check is a lookup that allocates nothing unless one is missing, and a fold's settle is looked up only while a fold is settling.
+- The machine was shared with other builds throughout: load average 27 to 68, no quiet run was possible. Run 1 is inside the app suite; runs 2 and 3 are the probe alone.
+
+| face | scenario | draw p50 / p95 / p99 / max | frames, over 16.7 ms |
+| --- | --- | --- | --- |
+| run 1 (suite, load ~35–68) | (h) following | 2.4 / 2.8 / 3.0 / 4.1 ms | 344, 0 |
+| | (i) panning | 2.4 / 4.7 / 5.8 / 6.2 ms | 271, 0 |
+| run 2 (alone, load ~34) | (h) following | 2.5 / 2.9 / 3.1 / 3.2 ms | 338, 0 |
+| | (i) panning | 2.6 / 4.9 / 5.5 / 11.2 ms | 268, 0 |
+| run 3 (alone, load ~27) | (h) following | 2.5 / 3.0 / 3.1 / 3.2 ms | 338, 0 |
+| | (i) panning | 2.5 / 5.1 / 6.5 / 6.9 ms | 265, 0 |
+
+Following holds at 3.0–3.1 ms p99, the quiet figure of the entry below. Panning reads 5.5–6.5 ms p99, between that entry's quiet 5.4 and its loaded 6.7, as its loaded run did. No frame went over 16.7 ms. The session has no background work or pictures, so these numbers are the added per-frame cost of the new surfaces when there is nothing to show. A quiet re-run is still owed.
+
+```sh
+# the app suite, with the frame probe let in; its lines start with MEASURE
+SLOPTY_SMOOTH_E2E=1 cargo xtask e2e app
+```
+
 ## 2026-09-27 — a prompt set back, and blocks edge to edge
 
 The terminal paint now sets a prompt back (its default-coloured cells before the typed command
@@ -5957,3 +5980,1023 @@ target/bench-tiles/after failed_blocks_cost --ignored --nocapture --test-threads
 ```
 
 Logs: `target/logs/tiles-blocks-ab.log`, `target/logs/tiles-dense-ab.log`.
+
+## 2026-09-27 — a block's head on its own surface
+
+The terminal paint now lays a band of `surfaces.panel` under every block's head (its prompt
+rows and the `Input` rows continuing its command), edge to edge, with the rule over a prompt as
+the band's top edge (`docs/decisions/terminal.md`, "A block's head is a surface"). No row
+moves, so scrolling and hit testing are untouched: the cost is in the paint alone. Both benches
+are headless GPUI in release on mac-studio, so they measure the element's and the layout's own
+work, not CoreText's. "Before" and "after" are test binaries built from one scratch copy of
+the tree (`/tmp`, own target dir), which differ only in `terminal/element.rs` and
+`terminal/view.rs`. They ran alternately, four runs each, while other sessions built on the
+machine (load average 11 to 14).
+
+`failed_blocks_cost`: 100 × 40, ten four-row blocks, so ten one-row heads a frame. p50 / p99
+in µs:
+
+| build | pointer away | pointer over a failed block |
+| --- | --- | --- |
+| before | 99.3–105.2 / 156–161 | 112.9–119.6 / 175–192 |
+| after | 100.7–107.0 / 139–159 | 113.6–118.9 / 174–187 |
+
+That comes to about 1 µs a frame for ten heads: one pass over the view's marks and one quad a
+band. The p99 moved with the load, not with the build. `dense_screen_cost` (200 × 60, no
+prompt marks), p50 in µs: unchanged screen 437.7–456.6 before, 438.3–469.5 after; a line a
+frame 472.1–516.2 before, 473.8–509.7 after; a screen a frame 1 566–1 832 before, 1 596–1 834
+after. All three are the same within the load. A first version computed the heads inside the
+per-row loop. In six alternating runs it moved the dense screen's screen-a-frame case from
+1 554–1 678 µs to 1 681–1 806 µs, with nothing to band. That is 1–2 µs a row for a comparison,
+which points to the loop's code generation rather than the work, so the heads are now a pass of
+their own.
+
+```sh
+# in a scratch copy of the tree, before and after the change
+CARGO_TARGET_DIR=/tmp/slopty-band-target cargo test -p slopty-ui --release --lib --no-run
+target/bench-band/before failed_blocks_cost --ignored --nocapture --test-threads 1
+target/bench-band/after failed_blocks_cost --ignored --nocapture --test-threads 1
+target/bench-band/before dense_screen_cost --ignored --nocapture --test-threads 1
+target/bench-band/after dense_screen_cost --ignored --nocapture --test-threads 1
+```
+
+Logs: `target/logs/band-blocks-ab.log`, `target/logs/band-dense-ab.log`.
+
+## 2026-09-27 — an echo behind paced video
+
+mac-studio, release, load average 11–18. noq's pacer holds a packet until the pacing rate has
+earned its bytes and sets a timer for the shortfall. That timer is tokio's (a millisecond wheel,
+coalesced by macOS on top: "timers fire late by the thread's latency tier"), so a packet the rate
+earns in 0.5 ms waited 1–2 ms. An echo written while a frame's datagrams are paced out goes in
+the next packet (streams before datagrams), and waited for that timer. The measurement is one
+connection over loopback with a controller that paces at a fixed rate and never binds its
+window, so only the pacer decides when a packet leaves. Video goes as the encoder hands it
+over: one burst a frame at 60 fps, 25 kB P-frames and a 130 kB keyframe a second. A 240-byte
+echo goes on a stream at `ECHO_PRIORITY` at a random phase of each frame, 400 a run. The
+number is each echo's one-way time, from write to read. "Paced" is noq's pacer as it was.
+"Unpaced" is `stream_priority_unpaced(Some(ECHO_PRIORITY))` (`vendor/noq-proto/SLOPTY.md`,
+patch 8): a datagram starts without the pacing check while a stream at that priority has data
+pending.
+
+```sh
+cargo nextest run -p slopty-net --release --test pacer_wait --run-ignored only --no-capture
+```
+
+| rate | arm | round 1 p50 / p90 / p99 | round 2 | round 3 |
+| --- | --- | --- | --- | --- |
+| 20 Mbit/s | paced | 0.26 / 1.98 / 6.83 ms | 0.22 / 1.45 / 2.39 | 0.22 / 1.47 / 2.80 |
+| 20 Mbit/s | unpaced | 0.16 / **0.24** / 0.32 ms | 0.17 / **0.26** / 0.51 | 0.18 / **0.30** / 0.91 |
+| 100 Mbit/s | paced | 0.18 / 0.30 / 2.33 ms | 0.18 / 0.28 / 0.52 | 0.19 / 0.31 / 0.58 |
+| 100 Mbit/s | unpaced | 0.18 / 0.29 / 0.41 ms | 0.18 / 0.29 / 0.58 | 0.19 / 0.31 / 0.57 |
+
+At 20 Mbit/s the paced echo's p90 was 1.4–2.0 ms, three times the 0.5 ms one packet takes at the
+rate: the timer, not the rate. Unpaced, it is the loopback floor. At 100 Mbit/s a frame's burst
+drains in a few pacing intervals and the arms are within noise. An earlier run with the pacer
+lending a millisecond of the rate ahead (Chromium's `kAlarmGranularity`) changed nothing, p90
+1.42–1.59 ms against 1.44–1.66 ms across three alternated pairs. Video, always queued, spent
+the lent credit before any echo arrived, so the echo still waited for the timer. The lending was
+removed.
+
+The unpaced packet fills the room the echo leaves with datagrams, and the pacer is charged for it
+as for any other; a bucket already empty stays empty, so each echo costs the rate one packet.
+The gate test holds the order of magnitude. At 50 kB/s behind a backlog, a packet leaves every
+25 ms. Twenty echoes there measured 10.2 ms at the median paced and well under the test's
+5 ms unpaced (`an_echo_does_not_wait_for_the_pacer`).
+
+## 2026-09-27 — the shaped flood after the echo left the pacer
+
+One run of `echo_beside_a_video_flood` after noq-proto patch 8 (an echo stream skips the pacing
+check) and the client's typed input lifted the same way. Same harness as "echo priority ahead of
+datagrams": 20 Mbit/s, 2 ms each way, 100 ms of bottleneck queue, BBR3 with the bound. Release
+build, mac-studio, load average 40 to 60 from other work, so one run, not a ranking.
+
+```
+cargo nextest run -p slopty-net --release --test echo_beside_flood --run-ignored only --no-capture
+```
+
+| arm | echo p50 ms | echo p99 ms | echo max ms | frames whole | Mbit/s | before (median p50 / p99) |
+| --- | --- | --- | --- | --- | --- | --- |
+| bursts | 8.57 | 11.74 | 18.40 | 735 of 737 | 12.6 | 9.4 / 19.0 |
+| laned | 8.94 | 33.32 | 97.38 | 764 of 766 | 12.5 | 9.8 / 17.9 |
+| metered | 7.38 | 17.34 | 59.30 | 730 of 732 | 12.5 | 9.2 / 21.6 |
+| halved | 13.93 | 20.86 | 21.82 | 649 of 653 | 9.7 | 21.0 / 34.4 |
+
+No loss, no congestion events, and the same frames whole as before: video gave nothing up. The
+halved arm, where an echo queues behind the capture guard's 50 kB, gained most (p50 21 → 14 ms).
+Laned's p99 sits above its earlier range in this one loaded run; a quiet ten-run pass owes the
+ranking.
+
+## 2026-09-27 — the prompt rail off the face's frame
+
+The app's frame probe (`the_face_draws_a_streaming_answer_within_a_frame`) could not run
+tonight. Every app e2e test, `shell_typed_from_the_app_echoes_back_into_its_rows` included,
+timed out on its first `Ping`. The reply waits for the window's next frame, and the display
+drew none: its link is idle while the display sleeps. So the face was measured headless, in a
+twin of the probe (`measure_a_face_frame_while_an_answer_streams`, `slopty-ui`, release, GPUI's
+test platform, so no CoreText and no GPU). It builds the same made-up 80 turns in a 1000 × 720
+window through the worker's own decoder (`fixtures::long`) and starts a live answer. (h)
+appends a word per frame. (i) appends a word and pans ±40 points twice per word. Each frame is
+the event's apply plus the draw. The runs alternated binaries, four each, at load average 10
+to 15.
+
+A profile of (i) put about a third of the frame in the prompt rail. It rebuilt eighty ticks
+every frame, each with its prompt's text cloned, cut and formatted, and then laid them out and
+painted them. Dropping only its layout and paint saved 0.28 ms at p50; dropping it altogether
+saved 0.41 ms. The rail is now a cached view that draws only when its prompts change
+(`docs/decisions/claude-code.md`, "The prompt rail is a cached view of its own").
+
+| build | (h) following, p50 / p95 / p99 | (i) panning, p50 / p95 / p99 |
+| --- | --- | --- |
+| before | 1.66–1.72 / 2.03–2.72 / 2.15–8.03 ms | 1.16–1.22 / 2.75–2.82 / 3.01–3.47 ms |
+| **after** | **1.34–1.39 / 1.69–1.91 / 1.82–2.50 ms** | **0.82–0.86 / 2.35–2.48 / 2.68–2.76 ms** |
+
+The 8.03 ms before is one run hit by the load. Everything else in the table is steady.
+
+- A pan frame now costs about 0.35 ms less and a word frame about 0.3 ms less.
+- The app's panning p99 of 5.5–6.5 ms, from the entry before last, should fall by about that
+  much, but that is owed a run of the app probe with the display awake.
+- What is left of a word frame is GPUI laying out the rows in view and gpui-kit's `TextView`
+  parsing the live block's whole Markdown again (about a quarter of the frame).
+- Neither is in `slopty-ui`, and the rest of the face's own code is about 6 % of the frame.
+
+```sh
+cargo test -p slopty-ui --release --lib --no-run   # then copy the binary it names
+target/bench-face/before measure_a_face_frame_while_an_answer_streams --ignored --nocapture
+target/bench-face/after measure_a_face_frame_while_an_answer_streams --ignored --nocapture
+```
+
+## 2026-09-28 — a streaming answer's Markdown parsed from its last item
+
+The same headless twin as the entry above (`measure_a_face_frame_while_an_answer_streams`,
+`slopty-ui`, release, GPUI's test platform, 80 turns in a 1000 × 720 window). Both binaries
+were built from one tree and differ only in the gpui-kit pin: `a3dc7ffb` before, `577b935d`
+after (the fork's commits `dbd18ca4` and `577b935d`). The runs alternated binaries, four each,
+at load average 8 to 10.
+
+The face hands `TextView` the live block's whole text every frame. `set_text` used to parse
+all of it again on the UI thread, and the background parser parsed it once more to keep its
+copy in step. Now a Markdown text that extends the last one is appended: the append parses on
+the UI thread when what it parses is small, and it parses only the last block. A list, the
+last block of this answer, is parsed from its last item.
+
+| build | (h) following, p50 / p95 / p99 | (i) panning, p50 / p95 / p99 |
+| --- | --- | --- |
+| before | 1.33–1.38 / 1.74–1.76 / 1.85–1.98 ms | 0.83–0.87 / 2.42–2.50 / 2.80–2.84 ms |
+| **after** | **1.10–1.16 / 1.48–1.50 / 1.60–1.68 ms** | **0.83–0.84 / 2.28–2.38 / 2.52–2.74 ms** |
+
+One (i) run after hit a 15.7 ms max from the load; its percentiles are in the table.
+
+- A word frame costs about 0.23 ms less at p50 and 0.25 ms less at p95 and p99. A pan frame
+  parses nothing, so its p50 stays; the word frames in its tail are cheaper.
+- The fork's first commit alone (the last block parsed again, not the last item) changed
+  nothing here. The answer's words put a paragraph line right after a list item, which
+  continues the item, so after its first paragraph the whole answer is one list that never
+  closes. Its last block was nearly all of it.
+- Parsing alone, on the same words (a gpui-base test, release, dropped after): the whole text
+  took 137 µs a word on average over 320 words, and the tail 20 µs.
+
+```sh
+cargo test -p slopty-ui --release --lib --no-run   # once per pin; copy the binary it names
+target/bench-face/md-before measure_a_face_frame_while_an_answer_streams --ignored --nocapture
+target/bench-face/md-after measure_a_face_frame_while_an_answer_streams --ignored --nocapture
+```
+
+## 2026-09-28 — the head band on its own step, rules only between heads
+
+The terminal paint now lays each block's head on `surfaces.band` rather than `panel`, and it
+draws the 1 px rule only where two heads touch (a command that printed nothing). A head that
+follows output has no rule, because the band's top edge is the boundary
+(`docs/decisions/terminal.md`, "The head band is seen and the rule parts only heads"). The
+colour costs nothing. The rules used to be a field of every prepared row, set in the row loop.
+They are now a list built from the head runs, the same pass that yields the bands, and are
+painted after them. Headless GPUI in release on mac-studio. "Before" and "after" are test
+binaries built from one scratch copy of the tree (`/tmp/slopty-band3`, own target dir), which
+differ only in `terminal/element.rs`. They ran alternately, six runs each, while other
+sessions built on the machine (load average 12 to 14). Runs 5 and 6 caught a heavier build,
+which slowed both binaries by about 40 %. The ranges below are runs 1 to 4, and the logs hold
+all six.
+
+`failed_blocks_cost` (100 × 40, ten four-row blocks, ten heads that each follow output: ten
+rules before, none after), p50 in µs:
+
+| build | pointer away | pointer over a failed block |
+| --- | --- | --- |
+| before | 106.9–109.6 | 121.0–126.3 |
+| after | 104.9–117.0 | 119.1–134.0 |
+
+`dense_screen_cost` (200 × 60, no prompt marks), p50:
+
+| build | unchanged | a line a frame | a screen a frame |
+| --- | --- | --- | --- |
+| before | 465–510 µs | 501–650 µs | 1 772–2 241 µs |
+| after | 452–494 µs | 497–554 µs | 1 759–2 094 µs |
+
+Both are the same within the load. With ten rules gone, three of the four block runs came out a
+few µs faster. A first version kept the rule on the row and decided it in the row loop with a
+lookup in the head runs, reached only on a prompt row. In four alternating runs it moved the
+dense screen's screen-a-frame case from 1 793–1 857 µs to 1 902–1 993 µs, with no prompt on
+screen (`target/logs/band3-dense-ab.log`). That is the loop's code generation again, as on
+2026-09-27. The rules now come from their own pass.
+
+```sh
+# in a scratch copy of the tree, once with each element.rs
+CARGO_TARGET_DIR=/tmp/slopty-band3/target cargo test -p slopty-ui --release --lib --no-run
+/tmp/slopty-band3/bench/before failed_blocks_cost --ignored --nocapture --test-threads 1
+/tmp/slopty-band3/bench/after2 failed_blocks_cost --ignored --nocapture --test-threads 1
+/tmp/slopty-band3/bench/before dense_screen_cost --ignored --nocapture --test-threads 1
+/tmp/slopty-band3/bench/after2 dense_screen_cost --ignored --nocapture --test-threads 1
+```
+
+Logs: `target/logs/band3-blocks-ab2.log`, `target/logs/band3-dense-ab2.log` (the first version:
+`band3-blocks-ab.log`, `band3-dense-ab.log`).
+
+## 2026-09-28 — a zoomed stream's frame
+
+A remote picture now zooms inside its tile (`docs/decisions/input.md`, "A remote picture zooms
+inside its tile, and fingers can be a trackpad"). This times the frame of the view alone in a
+headless GPUI window (release, the phone's 1170 × 2532 body, a 5120 × 2880 frame as the
+surface) in three cases: at fit, zoomed 4× and still, and zoomed with a pinch step every frame,
+which re-clamps the zoom and draws the readout. Each run alternates six blocks of each case (50
+frames of warm-up, then 100 timed), so the machine's load weighs on all three alike. One test
+binary, six runs back to back, load average about 34 on mac-studio (other sessions' builds).
+
+p50 / p95 per run, µs:
+
+| run | fit | zoomed | pinching |
+| --- | --- | --- | --- |
+| 1 | 16.9 / 17.8 | 18.0 / 19.8 | 20.5 / 23.3 |
+| 2 | 17.6 / 18.0 | 18.1 / 19.3 | 20.9 / 21.9 |
+| 3 | 17.8 / 19.6 | 17.6 / 18.9 | 20.6 / 21.5 |
+| 4 | 17.2 / 18.3 | 17.5 / 19.0 | 20.5 / 22.2 |
+| 5 | 17.6 / 18.5 | 17.7 / 18.6 | 20.6 / 22.5 |
+| 6 | 17.3 / 19.1 | 17.6 / 18.9 | 20.2 / 22.5 |
+
+Spread of the p50s: fit 16.9–17.8, zoomed 17.5–18.1, pinching 20.2–20.9. A still zoomed picture
+costs the same as fit within the spread (it is one surface with relative insets in place of
+`size_full`). A pinching frame costs about 3 µs more, the readout's pill and its text. Maxima
+(22–162 µs) are the load, and fall on all three cases. What this does not see is the GPU: the
+surface is the same one quad either way, and the Metal surface shader clips it to the body's
+content mask with clip distances, so the fragments shaded are the body's pixels at any zoom.
+A zoomed picture does ask the worker for a larger scale, which costs encode, bandwidth and
+decode; that is the stream's cost, not the frame's, and the region design in
+`docs/decisions/video.md` ("A zoomed picture's region at native resolution") is its follow-up.
+
+```sh
+cargo test -p slopty-ui --release --lib --no-run
+# the binary it names, copied so other sessions' builds cannot replace it mid-run
+cp target/release/deps/slopty_ui-<hash> /tmp/slopty-zoom-bench
+for r in 1 2 3 4 5 6; do
+  /tmp/slopty-zoom-bench measure_a_zoomed_stream_frame --ignored --nocapture --test-threads 1
+done
+```
+
+Log: `target/logs/zoom-measure.log`.
+
+## 2026-09-28 — keystroke echo on a Linux worker, container on Docker Desktop's VM, debug build
+
+The first numbers from a worker running on Linux (`docs/decisions/platform.md`, "Linux proven
+in a container"). The worker, its ptyd and the relay are the `aarch64-unknown-linux-gnu` dev
+builds, cross-linked here. They run in a Debian 13 container on Docker Desktop, capped at two
+CPUs. The client is `tests/linux.rs` on this Mac: the client core's link and a `TermState`,
+with no GPUI. It sends 300 key presses (`TermRequest::Key`, as the app's keyboard sends them)
+into `/bin/cat`, with a return every 60 columns, untimed. Each sample runs from the send to the
+applied frame whose cursor has moved past the echo. The path is loopback only: the published
+UDP port goes through Docker Desktop's port forwarder into the VM and the container's bridge.
+It says nothing about a network. mac-studio, load average about 11 (other sessions' builds).
+
+| run | min | p50 | p90 | p99 | max | QUIC rtt |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0.44 ms | 0.69 ms | 0.89 ms | 1.41 ms | 1.56 ms | 0.47 ms |
+| 2 | 0.41 ms | 0.72 ms | 0.94 ms | 2.08 ms | 5.57 ms | 0.51 ms |
+| 3 | 0.47 ms | 0.72 ms | 0.94 ms | 1.63 ms | 1.84 ms | 0.44 ms |
+
+The echo costs about a quarter of a millisecond over the QUIC round trip. That covers the key
+encoder, the PTY's line discipline, the engine's frame and the client's apply, all on Linux.
+All 300 keys came back in every run. The test fails only when a key does not.
+
+```sh
+nice -n 10 cargo xtask linux e2e > target/logs/linux-e2e.log 2>&1
+grep 'linux echo' target/logs/linux-e2e.log
+```
+
+Logs: `target/logs/linux-e2e.log`, `linux-e2e-2.log`, `linux-e2e-3.log`; the daemons' under
+`target/logs/linux/<container>/`.
+
+## 2026-09-28 — a file tile of any size: frame time at 2 000, 20 000 and 200 000 lines
+
+The file tile now edits whole files up to 16 MiB (`docs/decisions/workspace.md`, "A file tile
+edits any file up to 16 MiB"). The smooth probe's file scenario opens a tile of source-like
+lines (`fn line_N() -> u32 { … } // padding…`, 67–77 bytes a line) beside five flooding
+shells, 1280 × 800. The caret starts ten lines from the end. It then measures four things, 5 s
+or 60 keys each: **(k)** typing 60 letters at 15/s into the file, **(j)** paging it (⇞ twenty
+times, then ⇟ twenty times, every 60 ms; the caret's line must move), **(e)** stepping the
+strip column to column, and **(f)** opening and closing the overview. The draw is the frame
+probe's `begin` → `end`, in ms (p50 / p95 / p99), with the frames dropped. The e2e app build
+(dev profile), mac-studio, load average 16–25 from other sessions. The arms alternate, three
+rounds of five.
+
+- **main** is this change at its tree.
+- **fork** is the same tree with two gpui-kit fixes (below), built in a copy of the workspace
+  with `[patch]` pointing at a patched copy of the fork (`target/files-fork/`). The fixes are
+  not landed.
+- The 2 000- and 20 000-line files are coloured. The 200 000-line one (14.5 MiB) is past the
+  2 MiB colour limit, so it is plain text.
+
+| arm | lines | (k) typing | (j) paging | (e) strip | (f) overview | (f) dropped |
+| --- | --- | --- | --- | --- | --- | --- |
+| main | 2 000 | 1.6 / 2.0 / 2.3–2.5 | 1.9 / 6.1–6.2 / 6.3 | 1.6–1.7 / 2.5–2.6 / 3.1–3.6 | 4.6–4.7 / 5.0–5.3 / 10.5–10.8 | 0, 0, 0 |
+| main | 20 000 | 1.7–1.9 / 2.1–2.4 / 2.9–3.5 | 1.9 / 5.4–5.6 / 5.9–6.4 | 1.6–1.7 / 2.7–2.8 / 3.8–7.0 | 4.1–4.9 / 5.4–5.6 / 21.7–22.0 | 14, 14, 14 |
+| fork | 20 000 | 1.5–1.6 / 2.0–2.1 / 2.5–3.8 | 1.6 / 5.1–5.2 / 5.3–5.6 | 1.5–1.6 / 2.4–2.5 / 3.8–7.2 | 4.6–4.7 / 5.1–5.2 / 9.4–9.6 | 0, 0, 0 |
+| main | 200 000 | 5.7–6.0 / 6.2–6.5 / 6.6–7.0 | 5.8–6.0 / 9.4–9.7 / 9.7–10.2 | 1.6–1.7 / 6.5–6.8 / 7.0–7.7 | 8.5–8.7 / 133.3–133.6 / 136.8–137.1 | 112, 112, 112 |
+| fork | 200 000 | 1.5–1.7 / 1.9–2.2 / 2.3–2.5 | 1.5–1.6 / 5.1–5.2 / 5.3–5.5 | 1.6 / 2.3–2.4 / 3.0–3.2 | 4.5 / 4.8–5.1 / 8.7–8.8 | 0, 0, 0 |
+
+Typing and paging stay within a frame at every size in both arms: no draw in (k) or (j) went
+over 16.7 ms. Two costs grow with the file in gpui-kit as it stands.
+
+- **The overview.** Zooming changes the editor's font size every frame, and
+  `TextWrapper::set_font` then rewraps every line, although with soft wrap off no line can
+  wrap. That is about 130 ms per frame at 200 000 lines (112 of 270 frames dropped) and 20 ms at
+  20 000 (14 dropped). The fix returns early when there is no wrap width.
+- **Every frame of the tile.** While an accessibility client is attached, and in every e2e
+  build, `Input` copies the whole rope into its accessibility value on each render. That is
+  the 4 ms added to the p50 of (k) and (j) at 200 000 lines. A `sample` of the app during (k)
+  put `Rope::to_string` under `Input::render` and `TextWrapper::update` under `set_font` as the
+  tile's main-thread time. The fix exposes a text over 64 KiB as the 100 lines around the caret,
+  as a screen reader's page of a long document.
+
+With both fixes, 200 000 lines draw as 2 000 do, within the spread. The patch
+(`target/files-fork/gpui-kit-large-files.patch`, three files) passes the fork's `gpui-base`
+and `gpui-component` input tests, plus a new unit test for the page.
+
+The background parse behind the colours costs 80–160 µs per line (the headless timing below:
+328 ms for 2 000 lines, 3.1 s for 20 000, 31 s for 200 000, release, at load 15–20). A parse
+that has started runs to its end. Before the colour limit, a `sample` of typing into a
+coloured 200 000-line file found five background threads in `highlight::spans` for the whole
+10 s. Hence `file::COLOURED_BYTES` (2 MiB). In the coloured 20 000-line arms, (k)'s frame
+interval p95 is 29–71 ms against 14 ms at 2 000. No draw was long, and the main thread was
+mostly idle in a `sample`. This fits the shells drawing less while the parses take the cores,
+but that is not proven.
+
+Headless, the tile's own UI-thread cost (no glyphs shaped, so a floor rather than a frame):
+putting the text in, a keystroke, a scroll step and a find.
+
+| lines | load | keystroke | scroll | find | background parse |
+| --- | --- | --- | --- | --- | --- |
+| 2 000 | 5.1 ms | 0.99 ms | 0.33 ms | 1.6 ms | 328 ms |
+| 20 000 | 1.3 ms | 0.97 ms | 0.33 ms | 1.2 ms | 3 137 ms |
+| 200 000 | 3.0 ms | 0.91 ms | 0.33 ms | 1.1 ms | 31 493 ms |
+
+```sh
+# the bins, once per arm (the fork arm: in the patched copy, CARGO_TARGET_DIR=<copy>/target)
+cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e
+D=$PWD/target/e2e-files-perf; mkdir -p $D/run $D/artifacts
+SLOPTY_SMOOTH_FILE_LINES=200000 SLOPTY_DATA_DIR=$D SLOPTY_PTYD_SOCKET=$D/run/ptyd.sock \
+  SLOPTY_WORKER_SOCKET=$D/run/worker.sock SLOPTY_E2E_BIN_DIR=$PWD/target/debug \
+  SLOPTY_E2E_ARTIFACTS=$D/artifacts SLOPTY_SMOOTH_E2E=1 RUST_LOG=warn \
+  nice -n 10 cargo nextest run -p slopty-e2e --test smooth --no-capture -E 'test(a_large_file_tile)'
+# SLOPTY_SMOOTH_FILE_NAME=big.txt: the same text uncoloured
+cargo test -p slopty-ui --release --lib timing_of_a_large_file -- --ignored --nocapture
+```
+
+Logs: `target/logs/files-ab.log` (the table), `files-smooth.log` (the first series, before the
+colour limit), `files-sample-typing.txt` and `files-sample-typing2.txt` (the samples).
+
+## 2026-09-28 — the overview's miniatures against its word covers
+
+Below zoom 0.5 the overview laid a word cover over each shell, file and note tile. It now
+shows the tile's own body at the zoom, with a one-line label under it
+(`docs/decisions/workspace.md`, "The overview draws miniatures"). Scenario (m) is new in the
+smooth probe (`twenty_mixed_tiles_open_hold_and_close_the_overview_on_the_mac`). It opens 20
+tiles: twelve shells (five flooding, six still after a screen of `seq`, one idle), four
+400-line file tiles and four notes. The overview then springs open and closed six times each
+way, with the frames of each spring read 500 ms after its ⌘⌥O. Then the overview is held
+open for 5 s with the floods running. Each spring gives about 40 frames, so a row gives the
+median of the six springs' p50s, the worst of their p95, p99 and max, and every frame
+counted. Draw is the frame probe's `begin` → `end` in ms (p50 / p95 / p99 / max).
+
+The e2e app build (dev profile) ran on mac-studio with a 1280 × 800 window and a load average
+of 13–17 from other sessions. The display ran at 75 Hz (frames every 13.3 ms), and no frame
+went over its period in any run. At 120 Hz a draw has 8.3 ms. Both arms are one binary. The
+cover arm was a temporary `SLOPTY_MEASURE_COVERS` switch in `render_body` that drew the old
+cover, and it was deleted after these runs. The arms alternated A B A B A B A B.
+
+| arm | run | opening | closing | held open |
+| --- | --- | --- | --- | --- |
+| covers | 1 | 4.3 / 6.1 / 9.2 / 9.2 | 1.1 / 4.4 / 5.8 / 5.8 | 4.3 / 4.6 / 5.8 / 7.4 |
+| miniatures | 1 | 1.7 / 3.1 / 5.7 / 5.7 | 1.1 / 3.0 / 4.2 / 4.2 | 1.7 / 1.9 / 2.2 / 2.9 |
+| covers | 2 | 4.3 / 5.8 / 9.3 / 9.3 | 1.1 / 4.4 / 5.9 / 5.9 | 4.3 / 4.6 / 4.8 / 6.9 |
+| miniatures | 2 | 1.8 / 3.2 / 5.8 / 5.8 | 1.2 / 2.6 / 3.2 / 3.2 | 1.7 / 1.9 / 2.0 / 2.9 |
+| covers | 3 | 4.3 / 5.5 / 9.5 / 9.5 | 1.1 / 4.2 / 6.0 / 6.0 | 4.3 / 4.6 / 5.5 / 5.9 |
+| miniatures | 3 | 1.7 / 3.0 / 6.2 / 6.2 | 1.1 / 1.8 / 3.1 / 3.1 | 1.7 / 2.1 / 2.9 / 3.3 |
+| covers | 4 | 4.3 / 5.5 / 8.9 / 8.9 | 1.1 / 5.3 / 5.8 / 5.8 | 4.3 / 4.7 / 5.3 / 7.6 |
+| miniatures | 4 | 1.7 / 3.0 / 5.9 / 5.9 | 1.1 / 2.4 / 3.5 / 3.5 | 1.7 / 2.0 / 2.4 / 3.1 |
+
+- **The covers cost 2.6 ms on every frame of an open overview.** The bodies were drawn under
+  the covers anyway, because the focused one keeps the keyboard and the others are cached
+  views. The covers came on top: each frame laid out every cover's title, meta and last lines
+  again (`tail`, `head`, a note's lines), since none of them was cached. With the floods
+  dirtying the window every frame, that was the held-open p50 of 4.3 ms, against 1.7 ms now.
+- **The opening spring fits 120 Hz now.** With covers its worst frame was 8.9–9.5 ms in every
+  run, over the 8.3 ms a 120 Hz frame has. With miniatures the worst is 5.7–6.2 ms. Closing
+  was already inside the budget and is a little lower (worst 3.1–4.2 ms against 5.8–6.0).
+- **Not measured: a screen tile.** A display needs Screen Recording for the worker
+  (`SLOPTY_SCREEN_E2E`), and its miniature is its last decoded frame. That frame was already
+  drawn at the zoom with no cover, so this change adds nothing to it.
+
+```
+cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e
+D=$PWD/target/e2e-mini; mkdir -p $D/bin $D/run $D/artifacts
+# one binary for every arm, safe from other sessions' builds
+for f in target/debug/*; do [ -f "$f" ] && [ -x "$f" ] && cp "$f" $D/bin/; done
+SLOPTY_DATA_DIR=$D SLOPTY_PTYD_SOCKET=$D/run/ptyd.sock SLOPTY_WORKER_SOCKET=$D/run/worker.sock \
+  SLOPTY_E2E_BIN_DIR=$D/bin SLOPTY_E2E_ARTIFACTS=$D/artifacts SLOPTY_SMOOTH_E2E=1 RUST_LOG=warn \
+  cargo nextest run -p slopty-e2e --test smooth --no-capture -E 'test(twenty_mixed)'
+```
+
+## 2026-09-28 — the focused tile cached, titles worked out when they change, notes counted once
+
+Three changes to what a workspace frame redraws when something other than the workspace
+changed (`docs/decisions/workspace.md`, "The focused tile is replayed too"):
+
+- **F1.** The focused tile's body is drawn from the view cache like any other while the
+  keyboard is on the body's own view (a shell's grid, a window, a folder, a file's editor). It
+  was always drawn afresh, so a stream, a flood or an animation step beside it drew it again.
+- **F3.** The twins' numbers ("Terminal 2") are worked out when a title may have changed (the
+  workspace's own notify, a command starting or ending, a window named), not every frame. That
+  pass read every shell's view, and GPUI tracks what a frame read, so any shell's output woke
+  the window even with that shell off screen. A program's new title notifies the chrome only
+  when its tile's title follows it (F6).
+- **F4.** A note's title and task count are kept per text (`NoteFacts`, refreshed by
+  `item_changed`), counted without building segments (`markdown::task_counts`), and a note tile
+  is no longer cloned (64 KiB at most) to draw it.
+
+Headless workspace, test profile (`dev`, deps at `opt-level = 3`), mac-studio, load average
+8.5–15 from other sessions. Three test binaries built from one tree: **B0** before, **B1** with
+F1 alone, **B2** with all three. The builds ran in turn, B0 → B1 → B2, three rounds. p50 in ms,
+one cell per round; each arm is 400 frames after 20 of warm-up. Round 2 of B0 and B1 and
+round 1 of B2 fell on load spikes (every arm of those runs moved together): read the other two.
+
+| arm | B0 | B1 | B2 |
+| --- | --- | --- | --- |
+| an off-screen shell's echo, 60 shells + 60 notes | 0.495, 0.925, 0.513 | 0.560, 0.980, 0.520 | 0.001, 0.001, 0.001 (no frame) |
+| the workspace's own frame, same crowd | 2.469, 3.713, 2.394 | 2.358, 3.922, 2.435 | 2.408, 2.314, 2.405 |
+| a neighbour's echo beside a focused 80 × 40 grid of words | 0.543, 1.031, 0.559 | 0.494, 0.986, 0.515 | 0.507, 0.445, 0.463 |
+| the focused grid rendered in those 420 frames | 420 | 1 | 1 |
+| the workspace's own frame, 120 notes × 4 KiB, 60 files, 12 shells | 8.712, 11.831, 8.633 | 8.671, 13.615, 8.817 | 7.727, 7.270, 7.505 |
+| the focused shell's echo in that registry | 0.592, 1.044, 0.603 | 0.601, 1.069, 0.603 | 0.563, 0.512, 0.530 |
+| a shell's echo beside two drawn 64 KiB notes of task lines | 32.26, 46.60, 31.73 | 31.89, 32.61, 31.65 | 46.15, 30.59, 30.69 |
+
+- **An off-screen shell no longer costs a frame.** Its output was a 0.5 ms frame of the
+  workspace, since the twins' pass had read its view. Now nothing is drawn. Sixty idle shells
+  and one busy one off screen is the ordinary case this fixes.
+- **The focused grid is replayed.** It rendered once in 420 neighbour frames against every
+  frame before. Here that is 0.04–0.05 ms a frame, since an 80 × 40 screen of one style
+  redraws from the word cache. A dense coloured 200 × 60 screen costs about 0.47 ms a frame
+  (the 2026-09-26 entry above), which is the saving a focused dense shell beside a stream now
+  gets.
+- **The registry's frame is 1.1–1.4 ms cheaper.** That is the notes: the navigator's rows and
+  the headers counted every note's tasks by building its segments, and the twins derived all
+  192 titles. An echo in that registry is 0.07 ms cheaper.
+- **The long notes' frame is about 1 ms cheaper and still 31 ms.** The header's clone and two
+  parses of 64 KiB per note are gone. The rest is the cached note view's replay: a `sample`
+  put 56 % of the frame in GPUI's `TabStopMap::replay`, which re-inserts every one of the note's
+  tab stops (a checkbox per task line, about 2 100 a note here) into a sum tree on every frame. That is
+  the fork's and `note.rs`'s to fix, not this change's.
+
+```sh
+# one test binary per arm (B0: the files before; B1: B0 with `cacheable` alone), then in turn:
+cargo test -p slopty-ui --lib --no-run   # copy target/debug/deps/slopty_ui-<hash> per arm
+for r in 1 2 3; do for b in b0 b1 b2; do for t in measure_an_echo_frame_beside_the_chrome \
+  measure_a_frame_over_a_large_registry measure_an_echo_frame_beside_long_notes; do
+  (cd crates/slopty-ui && ../../target/ab/bin-$b $t --ignored --nocapture); done; done; done
+# attribution: run measure_an_echo_frame_beside_long_notes and `sample <pid> 5 1`
+```
+
+Log: `target/logs/hotpath-ab.log`; the sample: `/tmp/ln-sample.txt`.
+
+## 2026-09-28 — a note drawn as a list, a focused face and note replayed
+
+Two changes on the frame another tile causes (`docs/decisions/workspace.md`, "The focused tile
+is replayed too", amended):
+
+- **N1.** A read note draws its segments in a gpui `list` (`NoteView::render_segment`), so a
+  frame lays out and paints only the rows in view. The entry above put 56 % of the long notes'
+  frame in `TabStopMap::replay` and blamed a checkbox per task line. The boxes are not focusable.
+  The nodes are the segments' gpui-kit `TextView`s: each wraps itself in a `track_focus` div
+  (gpui-kit `base/src/text/text_view.rs`, `request_layout`), GPUI's div paint inserts every
+  tracked handle into `next_frame.tab_stops`, tab stop or not (`elements/div.rs`), and a
+  replayed view replays that whole insertion history (`window.rs`, `TabStopMap::replay`). The
+  test's note is 2 114 tasks and 1 057 prose runs, about 3 200 `TextView`s a note.
+- **F2.** A focused face and a focused note are replayed while their fields have the keys
+  (`cacheable(placed, true)` for both), and both views observe their fields.
+
+Headless workspace, test profile (`dev`, deps at `opt-level = 3`), mac-studio, load average
+13.7–15.8 from other sessions. **B0** is the tree before (with the face's render counter and
+the new face arm), **B1** the tree after. The builds ran in turn, B0 → B1, three rounds. p50 in
+ms, one cell per round; each arm is 400 frames after 20 of warm-up. Round 1 of B0 fell on a
+load spike (every B0 arm moved together). Other sessions edited the tree between the two builds,
+so B1 differs from B0 by more than this change; the notes' and the face's arms move 40× and 3×,
+which that cannot account for.
+
+| arm | B0 | B1 |
+| --- | --- | --- |
+| a shell's echo beside two drawn 64 KiB notes of task lines | 43.18, 33.31, 30.72 | 0.817, 0.514, 0.491 |
+| a shell's echo beside a focused face (composer has the keys), `tools` transcript | 1.284, 0.769, 0.715 | 0.500, 0.282, 0.268 |
+| the face rendered in those 420 frames | 420 | 0 |
+| the workspace's own frame, 120 notes × 4 KiB, 60 files, 12 shells | 11.17, 8.07, 7.62 | 4.96, 3.44, 3.38 |
+| the focused shell's echo in that registry | 0.845, 0.558, 0.531 | 1.025, 0.543, 0.536 |
+
+- **The long notes' frame is 60× cheaper.** 30.7 ms was two notes replaying the paint of
+  about 6 400 segments, nearly all clipped out of sight. Now each note paints the rows its tile
+  shows, and the frame is the shell's echo plus the chrome.
+- **The registry's own frame is 4 ms cheaper.** Its notes are 4 KiB of task lines, about 80
+  segments each, and the notes on screen were replayed whole in each of those frames.
+- **A focused face costs nothing in a neighbour's frame.** It was drawn afresh with every
+  frame, 0.45–0.78 ms of each. Its composer's keys, caret blink and selection still draw it
+  (`the_focused_face_is_replayed_while_a_neighbour_draws` checks the send button lights for a
+  typed draft).
+- The echo in the registry did not move: that shell is focused and the notes were already
+  replayed there, at 4 KiB each.
+
+```sh
+# one test binary per arm, copied after `cargo nextest run -p slopty-ui --lib --no-run`
+# (`cargo nextest list -p slopty-ui --lib --message-format json` names it), then in turn:
+for r in 1 2 3; do for b in b0 b1; do for t in measure_an_echo_frame_beside_long_notes \
+  measure_an_echo_frame_beside_a_focused_face measure_a_frame_over_a_large_registry; do
+  (cd crates/slopty-ui && nice -n 10 ../../target/ab-notes/$b $t --ignored --nocapture); done; done; done
+```
+
+Log: `target/logs/notes-ab.log`.
+
+## 2026-09-28 — rows kept across frames, pixels in the texture's format
+
+mac-studio, release, load average 9–22 (other sessions building). Each comparison alternates
+the two arms in one sitting, so the load falls on both; ranges are over the rounds.
+
+**The terminal element's row cache** (`terminal::view::tests::dense_screen_cost`, 200 × 60 of
+dense coloured text, 600 frames after 60 of warm-up; p50 in µs; two sittings, seven rounds of
+each build, the before binary built from the tree just before the element change). A row is
+kept by its `Arc<Line>` while nothing that restyles it changes (docs/decisions/terminal.md, "a
+row the element built is kept while its line is"). The first after round of the first sitting
+ran without the map's capacity and fell on a load spike (unchanged 375 µs, a screen a frame
+3.2 ms); it is left out.
+
+| scenario | before | after |
+| --- | --- | --- |
+| unchanged | 450–471 (one round at 734) | 247–258 |
+| a line a frame | 486–516 (one round at 830) | 279–294 |
+| a screen a frame | 1 677–1 877 (one round at 3 054) | 1 763–1 972 |
+| every cell on a background, unchanged | 641–753 | 359–383 |
+
+An unchanged dense frame and a flood cost about 45 % less: the per-cell walk was about half of
+them, as the 2026-09-26 entry measured. A screen replaced whole every frame builds every row
+and is unchanged within the spread (the rounds overlap; the first sitting without the map's
+capacity read 3–5 % slower, which pre-sizing the map removed). p99 moved the same way:
+unchanged 612–757 → 365–455 µs.
+
+**A 12 MiB kitty image, encoded and decoded** (`codec::tests::image_event_cost`, 20 alternating
+rounds, four runs). The pixels as a sequence of `u8`s against one byte string
+(`serde_bytes`), the same wire bytes: median 15.3–16.5 ms → 0.75–0.91 ms (min 14.7–15.2 →
+0.56–0.63 ms).
+
+**Its texture on the UI thread** (`terminal::view::tests::image_texture_cost`, 12 rounds, three
+runs): the RGBA → premultiplied BGRA conversion the view made (a `flat_map` collect) against
+`placed_images` making the texture of the bytes as sent: median 1.60–1.79 ms → 0.39–0.48 ms
+(a copy into the texture's buffer). The conversion moved to the worker's session actor, where
+it runs once per image sent, in place: median 1.89–2.45 ms
+(`session::tests::image_premultiply_cost`).
+
+**A stream frame encoded and handed to the stream** (`codec::tests::frame_encode_cost`,
+alternating, four runs): the body allocated, copied behind the prefix and copied again by
+noq's slice write, against one serialisation into the prefixed buffer handed over shared.
+
+| frame | before, median µs | after, median µs |
+| --- | --- | --- |
+| an echo, 1 row, 1 631 B | 3.33 | 3.25–3.29 |
+| a screen, 60 rows, 96 503 B | 175.8–178.4 | 160.4–163.1 |
+
+The echo's saving is within the noise of its 20 000 samples; a screenful saves two 96 KB copies,
+about 15 µs.
+
+```sh
+# the row cache: one test binary per build, then in turn
+cargo test -p slopty-ui --release --lib --no-run   # copy target/release/deps/slopty_ui-<hash>
+for r in 1 2 3 4; do for b in before after; do
+  target/bench-f5/$b dense_screen_cost --ignored --nocapture --test-threads 1; done; done
+cargo test -p slopty-proto --release --lib image_event_cost -- --ignored --nocapture
+cargo test -p slopty-proto --release --lib frame_encode_cost -- --ignored --nocapture
+cargo test -p slopty-ui --release --lib image_texture_cost -- --ignored --nocapture
+cargo test -p slopty-worker --release --lib image_premultiply_cost -- --ignored --nocapture
+```
+
+Logs: `target/logs/dense-f5.log`, `target/logs/dense-f5b.log`, `target/logs/image-cost.log`.
+
+## 2026-09-28 — one transcript read for every follower, one pool trip for every agent
+
+**The conversation face.** Each follower of a session used to own the session's transcripts and
+decode them itself every 250 ms and at each hook, so N followers made N decodes of one file.
+Now one `slopty_worker::conversation::Reader` per session reads for all of them and broadcasts
+each read's changes. The probe follows one session with 4 clients, on the captured `tools`
+session (half of its 82 records at the start, with its subagent file). It times a tick that
+finds nothing new, 2 000 of them, and the second half appended one record per tick, 20
+replays. The follower's copy of each shared read is counted in. Release, mac-studio, load
+average 12–19 from other sessions, three rounds in one run:
+
+```
+cargo test -p slopty-worker --release --lib follower_read_cost -- --ignored --nocapture
+```
+
+| 4 followers | own decode each (before) | one shared read (after) |
+| --- | --- | --- |
+| a tick with nothing new | 211.7 / 208.7 / 246.3 µs | **55.7 / 52.5 / 51.9 µs** |
+| a record appended | 335.7 / 329.5 / 357.8 µs | **123.9 / 133.2 / 141.3 µs** |
+
+The idle tick scales with the followers, as expected: it was a `read_dir` of the subagents
+directory and a look at every file per follower, and now it is one per session. An appended
+record costs one decode plus a copy of its changes per follower, where it used to cost a
+decode per follower.
+
+**Agents nobody hooked.** Each 750 ms tick used to take every unhooked agent's transcript tail
+to the blocking pool on its own, one after the other. Now one trip reads them all. The probe
+uses 16 idle agents (nothing new in any file) and 2 000 ticks. Release, mac-studio, load average
+7–12, three runs of three rounds:
+
+```
+cargo test -p slopty-workerd --release --bin slopty-worker transcript_tick_cost -- --ignored --nocapture
+```
+
+| 16 idle agents | a trip each (before) | one trip (after) |
+| --- | --- | --- |
+| run 1 | 391.9 / 432.4 / 369.7 µs | 248.1 / 290.1 / 504.3 µs |
+| run 2 | 478.1 / 484.1 / 501.3 µs | 278.0 / 275.2 / 239.4 µs |
+| run 3 | 363.3 / 367.4 / 366.1 µs | 232.0 / 233.4 / 232.0 µs |
+
+The median tick went from 392 to 248 µs. The one inverted round (504 µs) stands alone among
+nine, on a machine shared with other builds. What is left is the reads themselves, a stat and an open
+per file. The same tick no longer copies each probe's program name, command line, title and
+directory into the agent table's observation: it moves them.
+
+The pump twin of `datagram_send_cost` (2026-09-25, "datagrams from the encoder's thread") is
+deleted. Its comparison is recorded there, and the path it measured is gone.
+
+## 2026-09-28 — a remote pointer drawn where the client put it, and cursor samples on frames
+
+Three changes to `ScreenView` (`docs/decisions/input.md`, "A window stream's pointer is where
+its input put it", amended; `docs/decisions/video.md`, "A cursor sample draws only what it
+moves, and rides the frames").
+
+**The pointer on a window stream.** Before, a move drew nothing: the pointer went up when the
+worker's sample of it came back, one round trip, up to a cursor tick (8.3 ms) and a frame later.
+On a 10 to 40 ms mesh, with the 19 ms a lone frame takes from notify to glass ("submit to glass",
+above), that is about 30 to 67 ms. Now the move redraws the view and the pointer is in that
+frame, about 19 ms. The headless test holds it: one render per move, the pointer's element at
+the new point in the worker's picture, and no cursor sample in between
+(`a_window_streams_pointer_is_drawn_where_this_client_put_it_in_the_same_frame`). The same
+holds on a display while this client moves the pointer.
+
+**Draws per second of video with the worker moving the pointer.** Headless GPUI draws a window
+at the end of every update that dirtied it, which is what an idle macOS window on the fork
+does (it draws on the next main-queue turn). So the count is how many draws the view asks for.
+Sixty frames at 60 Hz and 120 cursor samples at 120 Hz over one second, samples 4 ms off the
+frames' phase, then 30 ms of quiet:
+
+| rule | draws |
+| --- | --- |
+| before: every sample notifies, and so does every frame | 180 |
+| after: a sample draws only what it moves, and rides the next frame | 61 |
+
+The 61st draw is the last two samples, which came after the last frame and were drawn on their
+own once the next frame was more than half a refresh late. With frames at 60 Hz on a 60 Hz
+display, the old rule put a cursor-only draw inside most refreshes a frame also landed in. That
+frame then went up a refresh late: 31.9 against 18.9 ms to glass ("echo, key → glass", above).
+The "before" row is the same test with the pump's cursor arm notifying on every sample, the old
+rule.
+
+**The view's own frame** (`measure_a_zoomed_stream_frame`, the fallback arrow drawn at the
+worker's sample). The arrow used to be tessellated twice on every paint and the accessible label
+formatted on every render. Now the arrow is tessellated once per thread and moved into place,
+and the label is kept. The HUD's text is kept as a shared string (not in this case: the HUD is
+off). One test binary per arm (the `dev` profile), alternated, three runs, load average 13–19,
+p50 in µs:
+
+| case | before | after |
+| --- | --- | --- |
+| fit | 22.3 / 22.6 / 23.5 | 20.1 / 19.3 / 19.8 |
+| zoomed | 23.5 / 23.2 / 23.8 | 20.2 / 19.2 / 19.9 |
+| pinching | 25.7 / 26.6 / 27.4 | 24.4 / 22.7 / 22.7 |
+
+About 3 µs a frame. The p95s (23–85 µs) followed the load, not the arm. The "before" binary
+rebuilt the old overlay (a full-size canvas tessellating the arrow in its paint) and the old
+label, with everything else the same.
+
+**A stream frame beside the chrome** (`measure_a_stream_frame_beside_the_chrome`, new): 60
+shells and 60 notes, the navigator docked, a remote window focused with a 2560 × 1600 picture up
+and the last shell drawn beside it. Each timed frame is a `notify` of the `ScreenView`, which is
+what the pump sends per frame. 400 frames after 20, three runs, load average 15–19, ms:
+
+| run | stream frame p50 / p95 | shell echo p50 / p95 | workspace p50 / p95 |
+| --- | --- | --- | --- |
+| 1 | 0.463 / 0.628 | 0.477 / 0.697 | 2.172 / 2.515 |
+| 2 | 0.450 / 0.562 | 0.458 / 0.576 | 2.234 / 3.305 |
+| 3 | 0.453 / 0.554 | 0.462 / 0.524 | 2.264 / 2.723 |
+
+The workspace root rendered 420 times for the 420 stream frames, as did the view. At the pinned
+GPUI (`Window::mark_view_dirty`), a view's notify marks every ancestor view dirty, and the draw
+starts at the root. So a frame of video costs what an echo does, about 0.45 ms, and the view's
+own share is the 20 µs above. Nothing in `ScreenView` can stop this: `notify` is the only way to
+put a new picture up. This is the baseline for the next step, an element in the fork that
+presents a new surface without dirtying any view.
+
+```sh
+# the draw count, and the pointer tests
+cargo nextest run -p slopty-ui --no-capture -E 'test(cursor_samples_ride_the_frames_while_they_flow)'
+cargo nextest run -p slopty-ui -E 'test(a_window_streams_pointer) | test(a_displays_pointer)'
+# the view's frame: one test binary per arm, copied, then in turn
+cargo test -p slopty-ui --lib --no-run   # copy target/debug/deps/slopty_ui-<hash> per arm
+for r in 1 2 3; do for b in before after; do
+  (cd crates/slopty-ui && nice -n 10 ../../target/ab-pointer/$b measure_a_zoomed_stream_frame \
+    --ignored --nocapture --test-threads 1); done; done
+# the stream frame beside the chrome
+cargo test -p slopty-ui --lib measure_a_stream_frame_beside_the_chrome -- --ignored --nocapture
+```
+
+Logs: `target/logs/pointer-ab.log`, `target/logs/stream-frame-chrome.log`.
+
+## 2026-09-28 — audio behind the picture: the output device, the queue, and a render callback
+
+Release, mac-studio, default output "Mac Studio Speakers". Nothing played: the device's terms are
+read from the HAL, the `AudioQueue` rendered offline into memory, and the playout runs on its
+synthetic traces. `docs/decisions/audio.md` (2026-09-28, "Playback renders straight from the
+ring") holds the ruling.
+
+```sh
+cargo nextest run -p slopty-codec --release --run-ignored only -E 'binary(audio_latency)' --no-capture
+cargo nextest run -p slopty-codec --release latency_tests --no-capture
+```
+
+**The output devices** (`output_device_latency`, frames at 48 kHz). What a sample written by an
+output callback waits before the DAC is the I/O buffer it went into, the safety offset the HAL
+keeps ahead of the hardware's read position, and the device's and its stream's latency:
+
+| device | I/O buffer (range) | safety offset | device latency | stream latency | total |
+| --- | --- | --- | --- | --- | --- |
+| Mac Studio Speakers (default) | 512 (15–4 096) | 76 | 72 | 169 | 829 frames, 17.3 ms |
+| display audio (24B2W1G5) | 512 (15–4 096) | 320 | 88 | 0 | 920 frames, 19.2 ms |
+
+**What an `AudioQueue` holds** (`audio_queue_holds_what_is_enqueued`). Three 10 ms buffers whose
+samples count frames from 1, rendered offline 512 frames at a time: all 1 440 frames come out in
+order, the first at render frame 0, and three buffers come back. The queue adds no delay of its
+own; it holds what is enqueued. The player kept three 10 ms buffers enqueued and refilled one as
+soon as the device had taken it, so 20 to 30 ms always sat between the ring and the I/O buffer.
+
+**The whole path, at the DAC.** Before: the ring, then 20–30 ms in the queue, then 17.3 ms of
+device. After: the ring, then 17.3 ms. The ring's own depth, from the synthetic traces, with the
+device now rendering 512 frames at a time (the 2026-09-25 runs pulled 480):
+
+| trace | ring (heard) | at the DAC, before | at the DAC, after | underruns |
+| --- | --- | --- | --- | --- |
+| 250 ms stall, then its backlog in one burst | 31 ms at most after the burst, 21 ms mean over 1.5–3 s | 58–68 ms (mean) | 38 ms (mean) | 1 |
+| worker clock +100 ppm, 4 min | 30 ms at 5–15 s, 28 ms at 230–240 s | 65–77 ms | 45–47 ms | 0 |
+| worker clock −100 ppm, 4 min | 28 ms, then 21 ms | 58–75 ms | 38–45 ms | 0 |
+| a 40 ms keyframe burst every 2 s | 49 ms mean after 3 s, 78 ms at most | 86–96 ms | 66 ms | 3 |
+| muted 2–3 s, a 400 ms gate inside | 30 ms mean from 4 s | 67–77 ms | 47 ms | 0 |
+| renders of 1 024 frames (iOS's default), 1 ms scatter, 20 s | 18 ms mean after 3 s | — | — | 0 |
+
+The before column is the same ring with the queue's 20–30 ms added; the queue did not change
+what the ring held. Video is presented on arrival, so this is how far sound trailed the picture
+on top of the network, less the decode and present time of a frame: 20 to 30 ms less now. The
+drift traces run four minutes instead of two. Two minutes of a clock 100 ppm slow moved the ring
+12 ms, which stayed inside the ±7.5 ms deadband from where it started, so no slice was needed to
+show. Four minutes move it 24 ms.
+
+**The render callback at the device's size**
+(`the_render_callback_plays_the_ring_in_order_at_the_devices_size`): twelve on-time packets
+rendered 512 frames at a time through the `AURenderCallback` itself, with a buffer one frame
+larger than asked. 11 264 of 11 520 frames played, sample for sample after the start's 2.5 ms
+fade-in, with no underrun or slice and nothing written past the frames asked for. The rest is
+the last partial render, left in the ring when the run ends.
+
+Not measured: the output unit running on a device. That plays through this machine's output,
+which the run above avoids. `player_starts_and_drains` starts it on silence in the gate's run.
+
+## 2026-09-28 — the render callback's cost, behind a lock and wait-free
+
+Release, mac-studio. `render_cost` calls the `AURenderCallback` itself on 512-frame buffers,
+200 000 times per scenario, and times each call with `Instant` (about 20 ns of that is the
+clock). Nothing plays: the output unit is never opened. "Same thread" pushes the decoder's
+packets between renders. "Decoder beside" pushes them from a second thread that keeps the ring
+three renders ahead, so the two sides contend the way the stream task and the device's I/O
+thread do. The bench threads are not real-time, so the maxima include preemption on both
+sides. `docs/decisions/audio.md` (2026-09-28, "The device's thread never waits on the
+decoder's") holds the ruling.
+
+```sh
+cargo nextest run -p slopty-codec --release --run-ignored only -E 'test(render_cost)' --no-capture
+```
+
+Three runs each, ns:
+
+| ring | scenario | p50 | p99 | p99.9 | max |
+| --- | --- | --- | --- | --- | --- |
+| mutex (before) | same thread | 417 | 542 | 1 792–2 000 | 56 917–57 500 |
+| mutex (before) | decoder beside | 666–667 | 3 250–4 125 | 21 917–31 333 | 132 084–812 792 |
+| SPSC atomics (after) | same thread | 500 | 625 | 917–1 875 | 70 500–100 459 |
+| SPSC atomics (after) | decoder beside | 625 | 1 000–1 041 | 1 625–2 417 | 55 750–70 000 |
+
+The median rises 83 ns alone because the atomic copy is not vectorised. That is under 0.001%
+of the 10.7 ms buffer. With the decoder beside it, the lock's tail is gone: p99 is 3–4× lower,
+p99.9 9–19× lower, and the worst render dropped from 813 µs, 8% of the buffer, to the same
+preemption floor the uncontended runs show. On a real-time thread the before case is worse than
+this, since a preempted lock holder at normal priority keeps the device parked.
+
+The synthetic traces (`cargo nextest run -p slopty-codec --release latency_tests --no-capture`)
+read the same after the change as in the entry above: 31 ms at most after a stall's burst with
+one underrun, 30 → 28 ms at +100 ppm and 28 → 21 ms at −100 ppm with none, 49 ms mean and 3
+underruns under keyframe bursts, 30 ms after a gate while muted, 18 ms at 1 024-frame renders.
+
+## 2026-09-28 — moves queued behind a stall, the client's datagram path, the cursor's picture
+
+mac-studio, debug test profile (optimized), shared with other sessions' builds (load average
+6–24 across the runs). Logs: `target/logs/input-coalesce-*.log`,
+`target/logs/client-datagram-*.log`.
+
+```sh
+cargo nextest run -p slopty-input --test cost --run-ignored only --no-capture
+# the client: one test binary per build, alternated
+cargo test -p slopty-client --lib --no-run   # copy target/debug/deps/slopty_client-<hash>
+for r in 1 2 3 4 5; do for b in before after; do
+  target/bench-client/$b frame_path_cost --ignored --nocapture
+  target/bench-client/$b datagram_reader_cost --ignored --nocapture; done; done
+cargo nextest run -p slopty-client --lib --run-ignored only --no-capture \
+  -E 'test(wake_timer_cost) | test(datagram_reader_cost)'
+cargo nextest run -p slopty-capture --lib --run-ignored only --no-capture \
+  -E 'test(cursor_shape_cost) | test(pointer_read_cost)'
+```
+
+**Moves queued behind a stall** (`moves_queued_behind_a_stall`, new). A window stream gets moves
+at 500 Hz and 40 clicks. The owner lookup in front of each press holds the input thread for
+17 ms, the worst lookup measured in "input injection off the runtime", and the release comes
+10 ms after the press. The backend builds the `CGEvent` it would post and posts nothing. Before,
+the input thread posted every queued move in turn. Now a move with another move queued behind it
+(new bounds or a new scale between them do not count) is passed over. Three runs before, two of
+the stall case, three after:
+
+| | before | after |
+| --- | --- | --- |
+| moves posted, of 6 000 | all | 257–264 passed over |
+| handed → posted, every post, p99 | 18.8–18.9 ms | 10.1–10.7 ms |
+| handed → posted, the release, p50 | 7.6–7.9 ms | 7.3–8.1 ms |
+| handed → posted, the release, max | 10.0–10.5 ms | 9.4–10.7 ms |
+
+The p99 drop is the stale moves themselves: they no longer wait out the stall and then post.
+The release still waits for the rest of the stall. With posts this cheap, six stale moves
+cost it microseconds. A real `CGEventPostToPid` costs more than building the event, but
+posting can't be measured here without Accessibility and without input reaching a window,
+so the release's saving on the worker is six posts' worth, unmeasured. On a display stream
+each stale move also moved the real pointer along a path the client had already left.
+`injection_cost_on_the_callers_thread` is unchanged within its spread (thread move p50
+2.4–3.2 → 2.8–4.5 µs, handed → posted p50 8.5–10.5 → 8.8–17.5 µs). It passed over 0 and 3
+moves in the three runs after.
+
+**The client's datagram path.** The connection's reader takes everything the connection
+holds with one `read_many_datagrams` (noq 1.3, one lock of the connection per read, up to 64)
+and routes the screen datagrams among them under one lock of the router
+(`ScreenRouter::route_many`). Before, it made one `read_datagram` and one routing lock per
+datagram. The stream's worker keeps one pinned `Sleep` and moves its deadline, where it
+used to make a new one each wake. It reads the path's round trip once a report, not on
+every wake. It takes the decoder's leftovers only when the callback flagged some.
+
+What each wake paid, measured alone:
+
+| per wake | before | after |
+| --- | --- | --- |
+| the timer (`wake_timer_cost`, 200 000 wakes, three runs of three rounds) | 335–403 ns (a sleep made, registered, dropped unfired) | 52–56 ns (the deadline pushed later) |
+| the round trip (`endpoint::rtt` on the client's end while a frame arrives) | p50 667–834 ns, p99 4.0–4.8 µs, max 15–84 µs | not read |
+
+The whole path under the same load did not move measurably. `frame_path_cost` routes
+62 KB keyframes (51 datagrams) at 60 a second through the existing screen `Harness`; the
+decoder rejects each, which keeps a refresh pending and the loop on its 2 ms tick, so about
+13 wakes a frame. A cursor datagram routed behind each frame marks when the worker has handed
+the frame to the decoder. `datagram_reader_cost` sends the same frames over loopback QUIC to
+a client runtime of its own. Five alternated pairs (busy time is the runtime's workers'
+`worker_total_busy_duration`; "quietest" is the least disturbed of 20 one-second rounds):
+
+| | before | after |
+| --- | --- | --- |
+| stream worker busy per frame, quietest round | 48.8–74.5 µs | 55.7–82.9 µs |
+| stream worker busy per frame, median round | 58.4–163.4 µs | 58.1–167.8 µs |
+| last datagram routed → at the decoder, p50 | 42–70 µs | 41–75 µs |
+| client runtime busy per datagram, quietest round | 10.4–18.0 µs | 10.4–20.9 µs |
+| sent → last datagram routed, p50 | 884–1 619 µs | 894–1 211 µs |
+
+The spread between runs of one binary is several times the few microseconds a frame saves
+(13 wakes × about 0.3 µs of timer, plus a round-trip read that costs 0.7 µs at the median
+and up to tens of microseconds when the connection's driver holds the lock). Sent → last
+routed is mostly noq's pacer spreading the 51 datagrams. The change is kept for the per-wake
+figures, which are direct, and for the round-trip read's tail, which lands on the stream's
+task when the driver holds the lock.
+
+**The cursor's picture** (`cursor_shape_cost`, new, three runs). It reads the cursor, never
+the screen, so it runs without a Screen Recording grant. `NSCursor.currentSystemCursor` alone
+took p50 151–157 µs, p99 375–431 µs. The whole `cursor_shape(2)` read took p50 188–196 µs,
+p99 399–432 µs, so picking the representation, `CGImageForProposedRect`, the copy and the
+conversion come to about 35 µs of it. In 199 consecutive reads of an unchanged cursor the
+system never returned the same `NSCursor` or `NSImage` object twice. A throwaway probe also
+showed fresh representations and a fresh `CGImage` on every read. There is no identity to
+dedupe on. A digest of the pixels would still pay `currentSystemCursor` and
+`CGImageForProposedRect` first, so it could save at most the copy and conversion, a few
+microseconds of 190. The shape loop is left as it is (`docs/decisions/video.md`, 2026-09-28).
+`pointer_read_cost` in the same runs: `pointer_location` 0.73–1.68 ms, `pointer_moves` 14 ns.
+
+## 2026-09-28 — input behind a quality change
+
+mac-studio, release test binary copied to `/tmp` (the repo volume is mounted `noowners`, which
+makes each VideoToolbox session revalidate its code signature and build about 200× slower),
+machine shared with other sessions' builds. A window stream's task handled `SetQuality` inline:
+it waited for any resize build under way, then built the new session and put it in, and the
+input queued behind the change waited for all of it. Zoom and tile resizes send a quality change
+as often as every 400 ms. Now the change maps input and the pointer at the new scale at once and
+its session is built beside the commands, in the arm a resize's build already had.
+
+`input_behind_a_quality_change` (new, `apps/slopty-worker/src/screens.rs`) serves a stream on a
+test platform: a capture that never delivers, VideoToolbox building 1600 × 1000 ↔ 800 × 500 HEVC
+sessions, and an input sink that notes when the stream hands it an event, which is where the
+real one queues it for its input thread. Each of 40 rounds sends a quality change that flips the
+scale, then a move, and times the move from its send to the hand-over.
+
+```sh
+cargo build -p slopty-workerd --tests --release   # copy target/release/deps/slopty_worker-<hash>
+/tmp/slopty-a/after --ignored --exact screens::serving::input_behind_a_quality_change --nocapture
+```
+
+| move sent → handed to the input thread | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| before, p50 / p90 / max | 3.1 / 5.8 / 7.4 ms | 2.9 / 5.5 / 8.7 ms | 3.8 / 6.0 / 7.7 ms |
+| after, p50 / p90 / max | **12 / 33 / 246 µs** | **11 / 18 / 84 µs** | **11 / 31 / 85 µs** |
+
+The before column is the session build itself, the 3.5–4.3 ms of "encoder sessions off the
+runtime". The worst build measured there, 42 ms, would have held input as long.
+
+The first after-run found a bug the change had introduced. A geometry read started before the
+quality change and landing while its session was built replaced the build with its own answer
+(no resize), so the new session was dropped and never went in. A read that lands while a build
+is pending is now let go; the next tick after the build reads again. Test:
+`a_read_landing_during_a_quality_build_does_not_drop_it`, which fails without the fix.
+
+## 2026-09-28 — window input through a lossy link
+
+mac-studio, test profile, machine shared with other sessions (load average 14–36 across the
+runs). A window stream's input rode only the ordered control stream, at the paced priority,
+while a terminal's has had datagram copies and the unpaced echo priority since 2026-09-25. Now
+each window input also goes once as a `ClientDatagram::ScreenInput` copy 2 ms after its stream
+copy, and the client's writer raises the control stream to the echo priority for it as it does
+for typed input.
+
+`window_input_through_a_lossy_link` (new, `apps/slopty-worker/src/conn.rs`) runs the real client
+link, a `slopty-shape` relay with 4 ms each way and 13 % of packets lost each way (the
+keystroke copies' shaped loopback), real QUIC, and the worker's datagram reader and ordering,
+into a stream's task on the test platform of "input behind a quality change". Each input is
+timed from the client handing it to its link to the stream handing it to the input thread. Two
+patterns. A drag: 1 500 inputs 6 ms apart, a press or a release every tenth, moves otherwise.
+Clicks: 200 lone presses and releases 50 ms apart, as keys typed into a window come.
+
+```sh
+SLOPTY_ECHO_COPY=off cargo nextest run -p slopty-workerd --bin slopty-worker --run-ignored only \
+  -E 'test(=conn::lossy::window_input_through_a_lossy_link)' --no-capture
+cargo nextest run -p slopty-workerd --bin slopty-worker --run-ignored only \
+  -E 'test(=conn::lossy::window_input_through_a_lossy_link)' --no-capture
+# the same with SLOPTY_E2E_PATTERN=clicks, and SLOPTY_E2E_LOSS=0 for the clean link
+```
+
+Before is the code as it was: no copies, window input paced. After is copies on and window
+input unpaced. The middle row is the lift alone, copies off. Ranges over the runs:
+
+| drag, 13 % loss | runs | clicks p50 / p90 / p99 / max | moves p50 / p90 / p99 / max | moves over 50 ms |
+| --- | --- | --- | --- | --- |
+| before | 7 | 4.4–10.0 / 22–36 / 52–214 / 64–280 ms | 5.0–9.1 / 22–40 / 49–226 / 69–309 ms | 0.9–7.8 % |
+| lift, no copies | 3 | 4.3 / 22–23 / 40–51 / 45–59 ms | 4.3 / 22 / 39–43 / 56–78 ms | 0.3–0.5 % |
+| after | 3 | **4.2–4.3 / 8.0–11 / 15–32 / 21–58 ms** | **4.2–4.3 / 7.8–10 / 12–19 / 17–52 ms** | **0–0.1 %** |
+
+| lone clicks, 13 % loss | runs | p50 / p90 / p99 / max | over 50 ms |
+| --- | --- | --- | --- |
+| before | 2 | 4.3–4.4 / 27–28 / 30–54 / 52–80 ms | 1.0–2.5 % |
+| lift, no copies | 3 | 4.4–6.4 / 27–43 / 52–126 / 65–176 ms | 1.5–8.0 % |
+| after | 5 | **4.3–4.4 / 6.8–8.3 / 30–54 / 55–72 ms** | 1.0–1.5 % |
+
+A lost click waited for QUIC to learn of the loss and retransmit, about 27 ms on this 9 ms
+path, and every move behind it waited with it. Its copy arrives 2 ms after the lost packet
+would have. The tail that is left is a click whose packet and copy were both lost: then the
+moves behind it wait for the retransmission, since they may not overtake it. In a drag the
+copies took 294–382 inputs of 1 500 ahead of their stream copy, and 24–81 moves were passed over
+because a newer one had already been applied.
+
+The copies first went out without the lift, and made the drag worse: p99 up to 634 ms and max
+up to 723 ms in some runs, against 309 ms before. The client's congestion window sat at its
+floor, and the pacer, which charges a whole packet's credit however small the packet, held
+twice the packets it held before. Unpaced, as a keystroke is, the drag lost those stalls, and so
+did the stream copies alone (the middle row).
+
+Clean link (loss 0, 4 ms each way), drag, two pairs at load average 35: before p90 4.3–7.3 /
+max 8.2–42 ms, after p90 5.5–8.9 / max 30–78 ms. The copies go nowhere there (every one late),
+yet each costs a spawned task and a 2 ms timer on the client and a decode on the worker. The
+tails of both rows come and go with the load, and this run cannot separate that cost from it.

@@ -18,7 +18,7 @@ use serde_json::Value;
 use slopty_agent::statusline;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-use crate::hook;
+use crate::{hook, workerctl};
 
 /// How long the forward may take before the line goes out without it.
 const FORWARD_TIMEOUT: Duration = Duration::from_millis(500);
@@ -37,13 +37,13 @@ pub async fn run(data_dir: &Path, command: Option<String>) -> Result<()> {
         command.or_else(|| {
             let project =
                 status.as_ref().and_then(project_dir).or_else(|| std::env::current_dir().ok())?;
-            let user = statusline::user_settings(&slopty_agent::hooks::home_dir());
+            let user = statusline::user_settings(&slopty_platform::dirs::home());
             let setting = statusline::configured(&project, &user)?;
             statusline::command_of(&setting).map(str::to_owned)
         })
     };
     let session = hook::session().ok().flatten();
-    let socket = hook::socket(data_dir);
+    let socket = workerctl::socket(data_dir);
     let forward = async {
         if let (Some(status), Some(session)) = (status.as_ref(), session) {
             forward(&socket, session, status).await;
@@ -110,7 +110,7 @@ async fn line(command: Option<&str>, input: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use slopty_worker::ctl::{CtlReply, CtlRequest};
+    use slopty_proto::ctl::{CtlReply, CtlRequest};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::net::UnixListener;
 
@@ -159,7 +159,7 @@ mod tests {
         };
         assert_eq!(posted, session);
         let hook = slopty_agent::Hook::parse(&payload).expect("hook");
-        assert_eq!(hook.event, statusline::STATUSLINE_EVENT);
+        assert_eq!(hook.event, slopty_agent::HookEvent::Statusline);
         let meters = hook.meters.expect("meters");
         assert_eq!(
             (meters.model.as_deref(), meters.context_used_pct, meters.cost_usd),

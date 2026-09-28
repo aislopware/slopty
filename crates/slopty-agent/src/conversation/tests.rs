@@ -614,3 +614,125 @@ fn an_api_error_says_when_it_retries() {
     assert_eq!(note.text.text, "Overloaded");
     assert_eq!(note.retry, Some(Retry { attempt: 2, max: 10, in_ms: 1_085 }));
 }
+
+/// A background command's result says where it writes, and the queued notice Claude Code
+/// writes the moment it ends finishes it, stamped, before the model has taken the notice in;
+/// the attachment that follows changes nothing more.
+#[test]
+fn a_background_command_is_finished_by_its_queued_notice() {
+    let mut c = Conversation::default();
+    let input = json!({"command": "npm run build", "run_in_background": true});
+    c.ingest(&MAIN, &call("a1", None, "t1", "Bash", &input));
+    let text = "Command running in background with ID: b1. Output is being written to: \
+                /private/tmp/claude-501/-w/s1/tasks/b1.output. You will be notified when it \
+                completes.";
+    let structured = json!({"stdout": "", "stderr": "", "backgroundTaskId": "b1"});
+    c.ingest(&MAIN, &result("u1", Some("a1"), "t1", text, &structured));
+    let ToolDetail::Bash(bash) = &tool(&c, &MAIN, "t1").detail else { panic!("bash") };
+    assert_eq!(bash.output_file.as_deref(), Some("/private/tmp/claude-501/-w/s1/tasks/b1.output"));
+    assert_eq!(c.background().map(|(_, e)| e.id.as_str()).collect::<Vec<_>>(), ["t1"]);
+
+    let notice = "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>t1</tool-use-id>\n\
+                  <status>completed</status>\n<summary>Background command \"build\" completed \
+                  (exit code 0)</summary>\n</task-notification>";
+    let queued = json!({
+        "type": "queue-operation", "operation": "enqueue", "content": notice,
+        "timestamp": "2026-09-27T03:16:25.000Z",
+    });
+    let changes = c.ingest(&MAIN, &queued);
+    assert!(matches!(changes.as_slice(), [Change::Upsert { entry, .. }] if entry.id == "t1"));
+    let ToolDetail::Bash(bash) = &tool(&c, &MAIN, "t1").detail else { panic!("bash") };
+    assert_eq!(bash.status, ShellStatus::Done);
+    assert_eq!(bash.finished_ms, parse_ms("2026-09-27T03:16:25.000Z"));
+    let attached = json!({
+        "type": "attachment", "uuid": "n1", "parentUuid": "u1",
+        "timestamp": "2026-09-27T03:16:30.000Z",
+        "attachment": { "commandMode": "task-notification", "prompt": notice },
+    });
+    assert!(c.ingest(&MAIN, &attached).is_empty(), "the same notice again changes nothing");
+}
+
+/// A background subagent's notice brings its report and its figures from `<usage>`.
+#[test]
+fn a_background_subagent_reports_its_figures() {
+    let mut c = Conversation::default();
+    let input = json!({"description": "Survey", "prompt": "look", "run_in_background": true});
+    c.ingest(&MAIN, &call("a1", None, "t1", "Agent", &input));
+    let launched = json!({"isAsync": true, "status": "async_launched", "agentId": "x1"});
+    c.ingest(&MAIN, &result("u1", Some("a1"), "t1", "launched", &launched));
+    let notice = "<task-notification>\n<task-id>x1</task-id>\n<tool-use-id>t1</tool-use-id>\n\
+                  <status>completed</status>\n<result>Found 3 places.</result>\n\
+                  <usage>total_tokens: 1200\ntool_uses: 4\nduration_ms: 3000</usage>\n\
+                  </task-notification>";
+    c.ingest(&MAIN, &user("n1", Some("u1"), &json!(notice)));
+    let ToolDetail::Agent(agent) = &tool(&c, &MAIN, "t1").detail else { panic!("agent") };
+    assert_eq!(agent.status, AgentRun::Completed);
+    assert_eq!(agent.report.as_ref().map(|r| r.text.as_str()), Some("Found 3 places."));
+    assert_eq!(
+        (agent.tokens, agent.tool_uses, agent.duration_ms),
+        (Some(1200), Some(4), Some(3000))
+    );
+}
+
+fn picture() -> (Vec<u8>, Value) {
+    let mut bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+    bytes.extend(64_u32.to_be_bytes());
+    bytes.extend(48_u32.to_be_bytes());
+    let data = data_encoding::BASE64.encode(&bytes);
+    let block = json!({
+        "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": data },
+    });
+    (bytes, block)
+}
+
+/// A picture pasted with words is on its prompt, described and never carried; one pasted
+/// alone is a prompt of its own.
+#[test]
+fn a_pasted_picture_is_on_its_prompt() {
+    let (bytes, block) = picture();
+    let mut c = Conversation::default();
+    c.ingest(&MAIN, &user("p1", None, &json!([block, { "type": "text", "text": "what is this" }])));
+    c.ingest(&MAIN, &user("p2", Some("p1"), &json!([block])));
+    let prompts: Vec<&Prompt> = c
+        .entries(&MAIN)
+        .iter()
+        .filter_map(|e| match &e.body {
+            Body::Prompt(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    let [with_words, alone] = prompts.as_slice() else { panic!("{prompts:?}") };
+    assert_eq!(with_words.text.text, "what is this");
+    let [image] = with_words.images.as_slice() else { panic!() };
+    assert_eq!((image.width, image.height, image.media_type.as_str()), (64, 48, "image/png"));
+    assert_eq!(image.digest, blake3::hash(&bytes).to_hex().to_string());
+    assert_eq!(
+        image.at,
+        TextRef { record: "p1".to_owned(), part: Part::Image { tool_use_id: None, index: 0 } }
+    );
+    assert!(alone.text.text.is_empty());
+    assert_eq!(alone.images.len(), 1);
+    assert_eq!(c.turns(&MAIN).len(), 2, "each opens a turn");
+    let jsonl =
+        line(&user("p1", None, &json!([block, { "type": "text", "text": "what is this" }])));
+    assert_eq!(image_bytes(&jsonl, &image.at), Some(bytes));
+}
+
+/// A screenshot a tool returned is on its result, with no empty text beside it.
+#[test]
+fn a_tools_picture_is_on_its_result() {
+    let (_, block) = picture();
+    let mut c = Conversation::default();
+    c.ingest(&MAIN, &call("a1", None, "t1", "mcp__browser__screenshot", &json!({})));
+    let record = user(
+        "u1",
+        Some("a1"),
+        &json!([{ "type": "tool_result", "tool_use_id": "t1", "content": [block] }]),
+    );
+    c.ingest(&MAIN, &record);
+    let result = tool(&c, &MAIN, "t1").result.as_ref().expect("result");
+    assert_eq!(result.text, None);
+    let [image] = result.images.as_slice() else { panic!("{result:?}") };
+    assert_eq!(image.at.part, Part::Image { tool_use_id: Some("t1".to_owned()), index: 0 });
+    assert!(image_bytes(&line(&record), &image.at).is_some());
+}

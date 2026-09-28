@@ -486,11 +486,14 @@ pub mod alpha {
     /// Barely there: a selected row, the faint fill of a quiet pill, the hover wash over a
     /// bare button, a wash across the terminal grid (a block separator, the visual bell).
     pub const FAINT: f32 = 0.12;
+    /// The window under a light modal or sheet: dimmed about as far as an iOS sheet dims it,
+    /// so the sheet leads without the whole screen turning grey.
+    pub const DIM: f32 = 0.16;
     /// A tint that has to be seen: answer buttons, a selection.
     pub const TINT: f32 = 0.25;
     /// A tint under the pointer, a scrollbar thumb.
     pub const PRESSED: f32 = 0.4;
-    /// A modal backdrop.
+    /// The window under a dark modal or sheet.
     pub const SCRIM: f32 = 0.6;
     /// Present but set back: a read row in the inbox.
     pub const STRONG: f32 = 0.7;
@@ -531,6 +534,11 @@ pub struct Surfaces {
     pub raised: Rgb,
     /// Selected and pressed rows, pill fills, the HUD.
     pub overlay: Rgb,
+    /// A terminal block's head band, the rows its command was typed on: the content with a few
+    /// hundredths of the ink, as Zed's active line is, in both variants. It is its own step so
+    /// a band under an unfocused header (on `panel`) does not read as a second header, and so it
+    /// shows on white, where `panel` sat 1.5 L* off the content and only its rule was seen.
+    pub band: Rgb,
     /// The hairlines that divide regions: between panes, under a bar, round a popover.
     pub border: Rgb,
     /// The quieter hairline inside one region: between rows or groups of a list, under a
@@ -598,6 +606,7 @@ struct Tones {
     elevated: Step,
     raised: Step,
     overlay: Step,
+    band: Step,
     border: Step,
     border_subtle: Step,
     /// Where text moves when it has to read better: the pole away from the surfaces.
@@ -630,6 +639,7 @@ const DARK_TONES: Tones = Tones {
     raised: ink(0.065),
     border_subtle: ink(0.06),
     overlay: ink(0.085),
+    band: ink(0.035),
     border: ink(0.105),
     pole: Rgb::hex(0xffffff),
     text: Rgb::hex(0xe6e6e6),
@@ -658,6 +668,7 @@ const LIGHT_TONES: Tones = Tones {
     raised: ink(0.055),
     border_subtle: ink(0.065),
     overlay: ink(0.085),
+    band: ink(0.045),
     border: ink(0.115),
     pole: Rgb::hex(0x000000),
     text: Rgb::hex(0x1d1d1f),
@@ -740,6 +751,7 @@ impl Surfaces {
             elevated,
             raised,
             overlay,
+            band: at(t.band),
             border: at(t.border),
             border_subtle: at(t.border_subtle),
             text,
@@ -797,10 +809,11 @@ impl Elevation {
         ],
         highlight: Some(alpha::EDGE),
     };
-    /// Light: a faint shadow and a light scrim, since white panels read on their own.
+    /// Light: a faint shadow and a light scrim, since white panels read on their own. At a
+    /// quarter the scrim flattened the screen to a mid grey behind a drawer.
     pub const LIGHT: Self = Self {
         shade: Rgb::hex(0),
-        scrim: alpha::TINT,
+        scrim: alpha::DIM,
         shadow: [
             Shadow { y: 1.0, blur: 2.0, alpha: 0.06 },
             Shadow { y: 12.0, blur: 32.0, alpha: 0.10 },
@@ -1055,7 +1068,8 @@ impl CursorBlink {
     }
 }
 
-/// The quality a remote stream is opened at (the scale follows the canvas zoom, not this).
+/// The quality a remote stream is opened at (the scale follows the width the tile is drawn at,
+/// not this).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StreamPrefs {
     /// Frames per second.
@@ -1241,16 +1255,14 @@ mod tests {
     /// At three notches (dark bars 66 % toward black, `07080A` round `16181D`) the window wore a
     /// black frame; in light a grey slab (`EDEDED`) under a `D0D0D0` rule. A contrast ratio
     /// cannot see this: on near-black every step is under 1.05.
+    /// A colour's CIE L*: how light the eye reads it, in steps a viewer can compare.
+    fn lightness(c: Rgb) -> f32 {
+        let y = c.luminance();
+        if y > 216.0 / 24_389.0 { 116.0_f32.mul_add(y.cbrt(), -16.0) } else { y * 24_389.0 / 27.0 }
+    }
+
     #[test]
     fn the_chrome_sits_one_notch_from_the_content() {
-        let lightness = |c: Rgb| {
-            let y = c.luminance();
-            if y > 216.0 / 24_389.0 {
-                116.0_f32.mul_add(y.cbrt(), -16.0)
-            } else {
-                y * 24_389.0 / 27.0
-            }
-        };
         let steps = |variant| {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
@@ -1270,6 +1282,26 @@ mod tests {
         for (variant, notch) in [("dark", dark[2]), ("light", light[2])] {
             assert!((2.5..=4.0).contains(&notch), "{variant}: bars {notch:.2} L* under content");
         }
+    }
+
+    /// A terminal block's head band is seen on its own: as far off the content as the bars
+    /// are (2.5 to 4 L*) in both variants, and at least a unit off `panel`, so under an
+    /// unfocused header it is not a second header. On white it sat on `panel`, 1.5 L* off, and
+    /// the eye saw only its rule.
+    #[test]
+    fn the_head_band_shows_and_is_not_a_header() {
+        let notch = |variant| {
+            let theme = Theme::new(variant);
+            let band = lightness(theme.surfaces.band);
+            let apart = (band - lightness(theme.surfaces.panel)).abs();
+            assert!(apart >= 1.0, "{variant:?}: the band is {apart:.2} L* off the panel");
+            (lightness(theme.content()) - band).abs()
+        };
+        let (dark, light) = (notch(Variant::Dark), notch(Variant::Light));
+        for (variant, notch) in [("dark", dark), ("light", light)] {
+            assert!((2.5..=4.0).contains(&notch), "{variant}: band {notch:.2} L* off content");
+        }
+        assert!((dark - light).abs() <= 0.5, "dark {dark:.2}, light {light:.2}");
     }
 
     /// Each byte of a `0xRRGGBB` literal lands in its own channel, and the cube's first
@@ -1419,7 +1451,7 @@ mod tests {
     /// chrome has nothing of the kind, because these colours are ours and the fix is to pick
     /// better ones. WCAG AA for body text is 4.5:1, and the pairs are checked against all six
     /// surfaces rather than against the one they usually sit on: a status label follows its
-    /// card, and the card can be on any of them.
+    /// tile, and the tile can be on any of them.
     ///
     /// Derived at the steps without the lift, dark `text_muted` read 4.48 on `overlay` and
     /// light `accent`, `error`, `success` and `text_muted` about 4.40.
@@ -1606,6 +1638,10 @@ mod tests {
         assert_eq!(light.elevation.highlight, None, "white sheets read on their own");
         const { assert!(alpha::EDGE < alpha::FAINT, "the edge is the ladder's quietest step") };
         const { assert!(Elevation::DARK.scrim > Elevation::LIGHT.scrim, "dark dims deeper") };
+        const {
+            assert!(alpha::FAINT < alpha::DIM && alpha::DIM < alpha::TINT, "one ladder, in order");
+            assert!(Elevation::LIGHT.scrim < alpha::TINT, "light dims a sheet's worth, not grey");
+        };
         let (compact, touch) = (Density::COMPACT, Density::TOUCH);
         assert!(touch.hit >= 44.0 && touch.row >= 44.0 && touch.header >= 44.0);
         assert!(compact.row < touch.row && compact.row_two_line < touch.row_two_line);

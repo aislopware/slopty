@@ -17,6 +17,7 @@ noq-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slopty-core.workspace = true
+slopty-platform.workspace = true
 slopty-proto.workspace = true
 # Who is calling, from the tailnet (`admission`).
 slopty-tailnet.workspace = true

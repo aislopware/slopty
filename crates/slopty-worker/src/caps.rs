@@ -5,6 +5,7 @@
 //! without anyone telling us, so [`watch()`] looks at them every 5 s and publishes a new value
 //! only when something a caller would act on changed.
 
+#[cfg(target_os = "macos")]
 use std::ffi::CStr;
 use std::time::Duration;
 
@@ -61,34 +62,99 @@ async fn version_of(program: &str) -> Option<String> {
 
 /// Everything about this worker as it is now; `agents` from [`installed_agents`].
 pub fn probe(agents: &[InstalledAgent]) -> WorkerCaps {
-    let can_capture = slopty_capture::can_capture();
+    let desktop = desktop();
     WorkerCaps {
-        os: Os::MacOs,
-        os_version: sysctl_string(c"kern.osproductversion").unwrap_or_default(),
+        os: if cfg!(target_os = "linux") { Os::Linux } else { Os::MacOs },
+        os_version: os_version(),
         arch: std::env::consts::ARCH.to_owned(),
         cpus: std::thread::available_parallelism()
             .map_or(1, |n| u16::try_from(n.get()).unwrap_or(u16::MAX)),
-        memory: sysctl_u64(c"hw.memsize").unwrap_or(0),
-        // Every Apple-silicon Mac encodes both in hardware (VideoToolbox).
-        encoders: vec![VideoCodec::Hevc, VideoCodec::H264],
-        // Without Screen Recording no display can be streamed, so none is offered.
-        displays: if can_capture { displays() } else { Vec::new() },
+        memory: memory(),
+        encoders: desktop.encoders,
+        displays: desktop.displays,
         agents: agents.to_vec(),
-        can_capture,
-        can_inject: slopty_input::can_post(),
+        can_capture: desktop.can_capture,
+        can_inject: desktop.can_inject,
         load: load(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
 
+/// What this worker offers of its desktop.
+struct Desktop {
+    encoders: Vec<VideoCodec>,
+    displays: Vec<DisplayCap>,
+    can_capture: bool,
+    can_inject: bool,
+}
+
+/// macOS: both codecs, and the displays and input its grants allow.
+#[cfg(target_os = "macos")]
+fn desktop() -> Desktop {
+    let can_capture = slopty_capture::can_capture();
+    Desktop {
+        // Every Apple-silicon Mac encodes both in hardware (VideoToolbox).
+        encoders: vec![VideoCodec::Hevc, VideoCodec::H264],
+        // Without Screen Recording no display can be streamed, so none is offered.
+        displays: if can_capture { displays() } else { Vec::new() },
+        can_capture,
+        can_inject: slopty_input::can_post(),
+    }
+}
+
+/// Linux streams no desktop yet (`docs/decisions/platform.md`, "Linux seams"): no encoder, no
+/// display, no capture and no input, so no client offers any.
+#[cfg(not(target_os = "macos"))]
+const fn desktop() -> Desktop {
+    Desktop { encoders: Vec::new(), displays: Vec::new(), can_capture: false, can_inject: false }
+}
+
 /// The displays, from CoreGraphics. The watch reads them every few seconds, and a
 /// ScreenCaptureKit enumeration that often raises the private-window consent prompt again and
 /// again until someone at this Mac allows it.
+#[cfg(target_os = "macos")]
 fn displays() -> Vec<DisplayCap> {
     slopty_capture::active_displays()
         .into_iter()
         .map(|d| DisplayCap { id: d.id, w: d.w, h: d.h, scale: d.scale, hz: d.hz })
         .collect()
+}
+
+/// macOS's product version (`26.5`).
+#[cfg(target_os = "macos")]
+fn os_version() -> String {
+    sysctl_string(c"kern.osproductversion").unwrap_or_default()
+}
+
+/// The distribution and its version from `/etc/os-release` (`ubuntu 24.04`).
+#[cfg(target_os = "linux")]
+fn os_version() -> String {
+    std::fs::read_to_string("/etc/os-release").map(|text| os_release(&text)).unwrap_or_default()
+}
+
+/// `ID` and `VERSION_ID` of an `os-release` file, unquoted, as one string.
+#[cfg(any(target_os = "linux", test))]
+fn os_release(text: &str) -> String {
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+            .map(|value| value.trim().trim_matches(['"', '\'']).to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    [field("ID"), field("VERSION_ID")].into_iter().flatten().collect::<Vec<_>>().join(" ")
+}
+
+/// Physical memory, bytes.
+#[cfg(target_os = "macos")]
+fn memory() -> u64 {
+    sysctl_u64(c"hw.memsize").unwrap_or(0)
+}
+
+/// Physical memory, bytes: `sysinfo`'s total in its memory unit.
+#[cfg(target_os = "linux")]
+fn memory() -> u64 {
+    let info = rustix::system::sysinfo();
+    info.totalram.saturating_mul(u64::from(info.mem_unit))
 }
 
 /// Keep `caps` current until every receiver is gone: permissions and displays every 5 s, the
@@ -133,6 +199,7 @@ pub fn load() -> f32 {
 }
 
 /// A string sysctl, such as `kern.osproductversion`.
+#[cfg(target_os = "macos")]
 fn sysctl_string(name: &CStr) -> Option<String> {
     let mut buf = [0_u8; 256];
     let mut len = buf.len();
@@ -156,6 +223,7 @@ fn sysctl_string(name: &CStr) -> Option<String> {
 }
 
 /// A 64-bit integer sysctl, such as `hw.memsize`.
+#[cfg(target_os = "macos")]
 fn sysctl_u64(name: &CStr) -> Option<u64> {
     let mut value: u64 = 0;
     let mut len = size_of::<u64>();
@@ -177,6 +245,16 @@ fn sysctl_u64(name: &CStr) -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// A Linux worker names its distribution and version, quoted or not.
+    #[test]
+    fn os_release_names_the_distribution_and_version() {
+        let ubuntu = "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nID=ubuntu\nID_LIKE=debian\n";
+        assert_eq!(os_release(ubuntu), "ubuntu 24.04");
+        assert_eq!(os_release("ID='arch'\nBUILD_ID=rolling\n"), "arch", "rolling: no version");
+        assert_eq!(os_release(""), "");
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_probe_reads_this_mac() {
         let caps = probe(&[]);
@@ -191,6 +269,7 @@ mod tests {
         assert_eq!(caps.encoders, [VideoCodec::Hevc, VideoCodec::H264]);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn an_unknown_sysctl_is_none() {
         assert_eq!(sysctl_string(c"slopty.no.such.name"), None);

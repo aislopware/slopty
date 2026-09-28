@@ -10,14 +10,17 @@
 //!
 //! A change on disk while the tile is clean reloads it without a word, tints the lines that
 //! changed and scrolls to the first (an agent's edit shows where it landed). While the tile is
-//! dirty the same change marks the conflict instead, and the edit is kept. A file the worker
-//! clipped (past `FILE_LINES` or `FILE_BYTES`) opens read-only, with the reason in one line.
+//! dirty the same change marks the conflict instead, and the edit is kept.
+//!
+//! Any text file up to `FILE_BYTES` (16 MiB) is edited whole: a large one comes from the worker
+//! on a bulk stream and goes back on one, which the link does out of sight. A file past the cap
+//! says so and offers to open it in a terminal instead, in `$EDITOR` or `$PAGER`.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Render, SharedString,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{
@@ -25,7 +28,7 @@ use gpui_kit::component::input::{
     RangeDecorationStyle, RopeExt as _,
 };
 use slopty_core::ItemId;
-use slopty_proto::file::{FILE_BYTES, FILE_LINES, FileRead, WriteResult};
+use slopty_proto::file::{FILE_BYTES, FileRead, WriteResult};
 use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
@@ -55,8 +58,25 @@ pub(crate) const CHANGED_ON_DISK: &str = "Changed on disk";
 pub(crate) const RELOAD: &str = "Reload";
 /// The bar's way out that keeps the edit.
 pub(crate) const OVERWRITE: &str = "Overwrite";
+/// Text a file tile colours at most; a larger file is plain text.
+///
+/// The colours come from a parse of the whole text off the UI thread once typing pauses, about
+/// 80–160 µs a line (MEASUREMENTS, 2026-09-28): 3 s for 20 000 lines and 30 s for 200 000.
+/// A parse that has started runs to its end, so past this the pauses of ordinary typing would
+/// keep several cores parsing.
+pub const COLOURED_BYTES: usize = 2 << 20;
 /// What a file tile says while its first read is out, once the wait is worth a word.
 pub(crate) const READING: &str = "Reading…";
+/// What a file tile says of a file past the cap a tile holds.
+pub(crate) const TOO_LARGE: &str = "Too large to open here";
+/// What a file tile says of a file that is not text.
+pub(crate) const NOT_TEXT: &str = "Not a text file";
+/// What a file tile says of a file the worker could not read, over the reason.
+pub(crate) const CANNOT_READ: &str = "Cannot read this file";
+/// The way out of a file too large to edit here that opens it in `$EDITOR`.
+pub(crate) const OPEN_IN_EDITOR: &str = "Open in editor";
+/// The way out of a file too large to edit here that pages it.
+pub(crate) const OPEN_IN_PAGER: &str = "Open in pager";
 /// Why a save has no answer, after "Not saved: ".
 pub(crate) const LINK_LOST: &str = "the link dropped before the worker answered";
 
@@ -74,6 +94,9 @@ pub enum FileViewEvent {
     },
     /// "Reload": the edit is dropped; the file is to be read again.
     Reload,
+    /// A file too large to edit here: run this shell line in a terminal on the file's worker
+    /// ([`terminal_command`] makes the program to run it).
+    Run(String),
 }
 
 impl EventEmitter<FileViewEvent> for FileView {}
@@ -122,37 +145,59 @@ struct FileSearch {
     _subscription: Subscription,
 }
 
-/// The lines holding `needle`, in order; none for an empty needle. Smart case, the
-/// terminal's rule: a needle with no capital matches in any case, one with a capital as
-/// typed.
+/// The lines holding `needle`, in order; none for an empty needle.
+///
+/// Found in the whole text at once: one pass for the matches and one count of the newlines
+/// between them, with no copy per line. Smart case, the terminal's rule: a needle with no
+/// capital matches in any case, one with a capital as typed.
 #[must_use]
-pub fn find_hits<S: AsRef<str>>(lines: &[S], needle: &str) -> Vec<usize> {
+pub fn hit_lines(text: &str, needle: &str) -> Vec<usize> {
     if needle.is_empty() {
         return Vec::new();
     }
-    let sensitive = needle.chars().any(char::is_uppercase);
-    let needle = if sensitive { needle.to_owned() } else { needle.to_lowercase() };
-    lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| {
-            let line = line.as_ref();
-            if sensitive { line.contains(&*needle) } else { line.to_lowercase().contains(&needle) }
-        })
-        .map(|(ix, _)| ix)
-        .collect()
+    let folded;
+    let (haystack, needle) = if needle.chars().any(char::is_uppercase) {
+        (text, needle.to_owned())
+    } else {
+        // Folding keeps every newline where it was, so the lines are counted in the fold.
+        folded = text.to_lowercase();
+        (folded.as_str(), needle.to_lowercase())
+    };
+    let (mut hits, mut line, mut counted) = (Vec::new(), 0_usize, 0_usize);
+    for (at, _) in haystack.match_indices(needle.as_str()) {
+        let between = haystack.get(counted..at).unwrap_or_default();
+        line = line.saturating_add(between.matches('\n').count());
+        counted = at;
+        if hits.last() != Some(&line) {
+            hits.push(line);
+        }
+    }
+    hits
 }
 
-/// Why a read cannot be edited, when the worker clipped it: a save would cut the file there.
+/// Why a file cannot be edited here: it is past the cap a tile holds. The notice's two lines,
+/// said as one.
 #[must_use]
-pub fn clipped_reason(more_lines: u32, size: u64) -> Option<String> {
-    if size > FILE_BYTES {
-        Some(format!("Read-only: larger than {}", size_label(FILE_BYTES)))
-    } else if more_lines > 0 {
-        Some(format!("Read-only: longer than {FILE_LINES} lines"))
-    } else {
-        None
-    }
+pub fn too_large_reason(size: u64) -> String {
+    format!("{TOO_LARGE}: {}", too_large_detail(size))
+}
+
+/// How far past the cap a file is, under [`TOO_LARGE`].
+fn too_large_detail(size: u64) -> String {
+    format!("{}, over the {} a tile opens", size_label(size), size_label(FILE_BYTES))
+}
+
+/// The program that runs `line` in the worker user's login shell, as their terminal would: the
+/// rc files set `$EDITOR`, `$PAGER` and `PATH`.
+#[must_use]
+pub fn terminal_command(line: &str) -> Vec<String> {
+    ["/bin/sh", "-c", r#"exec "${SHELL:-/bin/sh}" -lic "$1""#, "sh", line].map(str::to_owned).into()
+}
+
+/// The shell line that pages `path` (`$PAGER`, else `less`).
+#[must_use]
+pub fn pager_command(path: &str) -> String {
+    format!("${{PAGER:-less}} {}", crate::terminal::url::shell_word(path))
 }
 
 /// The view of one file item.
@@ -169,9 +214,13 @@ pub struct FileView {
     trouble: Option<Trouble>,
     /// The next read replaces the text whatever the edit ("Reload" was pressed).
     discard: bool,
-    /// Why the text cannot be edited (the worker clipped it); none when it can.
+    /// Why the file cannot be edited here (past the cap); none when it can.
     read_only: Option<String>,
     editor: Entity<EditorState>,
+    /// The keyboard's place while the body shows no editor (a file not text, too large, not
+    /// readable, or not read yet), so the workspace's keys and the palette still reach the
+    /// tile; the editor takes it over once it is drawn.
+    focus_handle: FocusHandle,
     /// Text the editor takes at the next frame: replacing it needs the window, which a
     /// worker's message does not come with.
     pending_text: Option<String>,
@@ -244,6 +293,7 @@ impl FileView {
             discard: false,
             read_only: None,
             editor,
+            focus_handle: cx.focus_handle(),
             pending_text: None,
             pending_line: None,
             dirty: false,
@@ -284,23 +334,6 @@ impl FileView {
         self.pending_text.clone().unwrap_or_else(|| self.editor.read(cx).value().to_string())
     }
 
-    /// The text's lines, as the editor holds them.
-    #[must_use]
-    pub fn lines(&self, cx: &gpui::App) -> Vec<String> {
-        self.text(cx).split('\n').map(str::to_owned).collect()
-    }
-
-    /// The first `n` lines, read off the editor's rope rather than a copy of the whole text:
-    /// what the overview's cover shows of the file.
-    #[must_use]
-    pub fn head(&self, n: usize, cx: &gpui::App) -> Vec<String> {
-        if let Some(text) = &self.pending_text {
-            return text.split('\n').take(n).map(str::to_owned).collect();
-        }
-        let text = self.editor.read(cx).text();
-        (0..text.lines_len().min(n)).map(|row| text.slice_line(row).to_string()).collect()
-    }
-
     /// Lines in the editor.
     #[must_use]
     pub fn line_count(&self, cx: &gpui::App) -> usize {
@@ -328,7 +361,7 @@ impl FileView {
         self.trouble.as_ref()
     }
 
-    /// Why the text cannot be edited, when it cannot.
+    /// Why the file cannot be edited here, when it cannot: it is past the cap.
     #[must_use]
     pub fn read_only(&self) -> Option<&str> {
         self.read_only.as_deref()
@@ -352,6 +385,13 @@ impl FileView {
         &self.editor
     }
 
+    /// Whether the body holds the text in its editor, rather than a notice saying why not (a
+    /// file too large, not text, not readable) or nothing yet.
+    #[must_use]
+    pub const fn shows_text(&self) -> bool {
+        self.base.is_some() || matches!(self.read, Some(FileRead::Text { .. }))
+    }
+
     /// The caret's line and column, 1-based: what the status bar says of a focused file.
     #[must_use]
     pub fn caret(&self, cx: &gpui::App) -> (u32, u32) {
@@ -368,15 +408,30 @@ impl FileView {
         u32::try_from(line.saturating_add(1)).ok()
     }
 
-    /// Give the editor the keyboard.
+    /// Give the tile the keyboard: the editor when it is drawn, else the tile itself.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.editor.update(cx, |e, cx| e.focus(window, cx));
+        if self.shows_text() {
+            self.editor.update(cx, |e, cx| e.focus(window, cx));
+        } else {
+            window.focus(&self.focus_handle, cx);
+        }
     }
 
-    /// Whether the editor has the keyboard.
+    /// Whether the tile has the keyboard, in its editor, its find bar or itself.
     #[must_use]
     pub fn focused(&self, window: &Window, cx: &gpui::App) -> bool {
-        gpui::Focusable::focus_handle(self.editor.read(cx), cx).contains_focused(window, cx)
+        self.focus_handle.contains_focused(window, cx)
+    }
+
+    /// Keep the keyboard on what is drawn: into the editor once text arrives for a tile that
+    /// held it, and back to the tile when the text goes (the file turned binary or went away).
+    fn settle_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = gpui::Focusable::focus_handle(self.editor.read(cx), cx);
+        if self.shows_text() && self.focus_handle.is_focused(window) {
+            self.editor.update(cx, |e, cx| e.focus(window, cx));
+        } else if !self.shows_text() && editor.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
     }
 
     /// Land the caret on `line` (1-based, as a tool names it) and scroll there, now if the
@@ -391,8 +446,11 @@ impl FileView {
 
     /// The editor's text changed by a keystroke (a replace from here emits nothing).
     fn edited(&mut self, cx: &mut Context<Self>) {
-        let dirty =
-            self.base.as_ref().is_some_and(|base| *self.editor.read(cx).text() != *base.text);
+        let dirty = self.base.as_ref().is_some_and(|base| {
+            // Most keystrokes change the length, which settles it without reading the text.
+            let text = self.editor.read(cx).text();
+            text.len() != base.text.len() || *text != *base.text
+        });
         if !self.changed.is_empty() {
             // The tint said what the last reload did; once the human edits, it says nothing.
             self.changed.clear();
@@ -413,12 +471,18 @@ impl FileView {
     /// The worker read the file (the first time, after a change on disk, or on "Reload").
     pub fn set_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
         match &read {
-            FileRead::Text { text, more_lines, size, modified_ms, final_newline } => {
+            FileRead::Text { text, modified_ms, final_newline, .. } => {
                 let incoming = Version::of(text, *final_newline, *modified_ms);
-                self.read_only = clipped_reason(*more_lines, *size);
+                self.read_only = None;
                 self.take_version(incoming, cx);
             }
-            FileRead::Binary { .. } | FileRead::Missing { .. } => {
+            // The link hands on the text it announces, never the announcement.
+            FileRead::Streamed { .. } => return,
+            FileRead::Binary { .. } | FileRead::Missing { .. } | FileRead::TooLarge { .. } => {
+                self.read_only = match &read {
+                    FileRead::TooLarge { size } => Some(too_large_reason(*size)),
+                    _ => None,
+                };
                 if self.dirty && !self.discard {
                     // Gone or turned binary under an edit: the edit stays, "Overwrite" puts
                     // it back.
@@ -473,10 +537,12 @@ impl FileView {
         // text lands.
         self.pending_line =
             self.changed.first().copied().or(if reload { None } else { self.focus });
-        if self.syntax.is_none() || !reload {
-            let first = incoming.text.split('\n').next().unwrap_or_default();
-            self.syntax = Syntax::for_path(&self.path, first);
-        }
+        let first = incoming.text.split('\n').next().unwrap_or_default();
+        self.syntax = if incoming.text.len() <= COLOURED_BYTES {
+            Syntax::for_path(&self.path, first)
+        } else {
+            None
+        };
         self.pending_text = Some(incoming.text.clone());
         self.base = Some(incoming);
         self.dirty = false;
@@ -499,14 +565,10 @@ impl FileView {
     }
 
     /// ⌘S: send the edit, based on the version it started from. Nothing when there is
-    /// nothing to save, the text is clipped, a save is already out, or a conflict is waiting
-    /// for "Reload" or "Overwrite".
+    /// nothing to save, a save is already out, or a conflict is waiting for "Reload" or
+    /// "Overwrite".
     pub fn save(&mut self, cx: &mut Context<Self>) {
-        if !self.dirty
-            || self.read_only.is_some()
-            || self.saving.is_some()
-            || self.trouble == Some(Trouble::Conflict)
-        {
+        if !self.dirty || self.saving.is_some() || self.trouble == Some(Trouble::Conflict) {
             return;
         }
         let Some(base) = self.base.clone() else { return };
@@ -515,7 +577,7 @@ impl FileView {
 
     /// "Overwrite": write the edit over whatever the disk has now.
     pub fn overwrite(&mut self, cx: &mut Context<Self>) {
-        if self.read_only.is_some() || self.saving.is_some() {
+        if self.saving.is_some() {
             return;
         }
         self.trouble = None;
@@ -640,10 +702,11 @@ impl FileView {
     /// Recount the hits for the needle (it, or the text, changed) and land on the first at
     /// or after the caret.
     fn refresh_hits(&mut self, cx: &mut Context<Self>) {
-        let lines = self.lines(cx);
+        let Some(needle) = self.search.as_ref().map(|s| s.needle.clone()) else { return };
+        let hits = hit_lines(&self.text(cx), &needle);
         let from = usize::try_from(self.editor.read(cx).cursor_position().line).unwrap_or(0);
         let Some(search) = &mut self.search else { return };
-        search.hits = find_hits(&lines, &search.needle);
+        search.hits = hits;
         search.current = if search.hits.is_empty() {
             None
         } else {
@@ -785,15 +848,13 @@ impl FileView {
     #[must_use]
     pub fn summary(&self, cx: &gpui::App) -> String {
         match &self.read {
-            None => READING.to_owned(),
+            None | Some(FileRead::Streamed { .. }) => READING.to_owned(),
             Some(FileRead::Text { .. }) => {
                 let n = self.line_count(cx);
                 let mut parts =
                     vec![if n == 1 { "1 line".to_owned() } else { format!("{n} lines") }];
                 parts.extend(self.coloured_as().map(str::to_owned));
-                let state = if self.read_only.is_some() {
-                    Some("read-only")
-                } else if self.saving.is_some() {
+                let state = if self.saving.is_some() {
                     Some("saving")
                 } else {
                     self.dirty.then_some("edited")
@@ -813,22 +874,81 @@ impl FileView {
             }
             Some(FileRead::Binary { size }) => format!("binary, {}", size_label(*size)),
             Some(FileRead::Missing { error }) => format!("missing: {error}"),
+            Some(FileRead::TooLarge { size }) => format!("too large, {}", size_label(*size)),
         }
     }
 
-    fn notice(&self, text: String) -> AnyElement {
+    /// A file past the cap: what is so and how far past, and under it the ways to open it in
+    /// a terminal on its worker instead ($EDITOR at the tile's line, or $PAGER).
+    fn too_large(&self, size: u64, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let k = self.zoom;
+        let editor = crate::terminal::url::editor_command(&self.path, self.focus_line_number());
+        let pager = pager_command(&self.path);
+        let ways = div()
+            .mt(px(theme.spacing.sm * k))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm * k))
+            .child(self.bar_button(
+                "file-open-editor",
+                OPEN_IN_EDITOR,
+                ButtonKind::Secondary,
+                cx.listener(move |_this, _ev, _w, cx| {
+                    cx.emit(FileViewEvent::Run(editor.clone()));
+                }),
+            ))
+            .child(self.bar_button(
+                "file-open-pager",
+                OPEN_IN_PAGER,
+                ButtonKind::Ghost,
+                cx.listener(move |_this, _ev, _w, cx| {
+                    cx.emit(FileViewEvent::Run(pager.clone()));
+                }),
+            ));
+        self.notice(IconName::FileText, TOO_LARGE, Some(too_large_detail(size)), Some(ways))
+    }
+
+    /// The line the tile was opened at, 1-based, for a command that opens the file there.
+    fn focus_line_number(&self) -> Option<u32> {
+        self.focus.and_then(|l| u32::try_from(l.saturating_add(1)).ok())
+    }
+
+    /// What the body says instead of the text, one composed block in its middle: the kind's
+    /// mark, what is so, why, and any ways on.
+    fn notice(
+        &self,
+        icon: IconName,
+        title: &'static str,
+        detail: Option<String>,
+        ways: Option<gpui::Div>,
+    ) -> AnyElement {
         let id = self.id.as_uuid();
+        let (theme, k) = (&self.theme, self.zoom);
+        let said = match &detail {
+            Some(detail) => format!("{title}: {detail}"),
+            None => title.to_owned(),
+        };
         div()
+            .id("file-notice")
             .debug_selector(move || format!("file-notice-{id}"))
+            .role(Role::Status)
+            .aria_label(SharedString::from(said))
             .size_full()
             .flex()
             .items_center()
             .justify_center()
-            .p(px(self.pad * self.zoom))
-            .text_size(px(self.theme.typography.small() * self.zoom))
-            .font_family(self.theme.typography.ui_family.clone())
-            .text_color(hsla(self.theme.surfaces.text_muted))
-            .child(SharedString::from(text))
+            .p(px(self.pad * k))
+            .child(
+                crate::kit::notice(
+                    theme,
+                    k,
+                    crate::kit::notice_mark(theme, icon, k),
+                    title,
+                    detail.map(SharedString::from),
+                )
+                .children(ways),
+            )
             .into_any_element()
     }
 
@@ -868,7 +988,7 @@ impl FileView {
                 Some((IconName::CircleX, s.error, s.error_fill)),
                 Vec::new(),
             ),
-            None => (self.read_only.clone()?.into(), None, Vec::new()),
+            None => return None,
         };
         let id = self.id.as_uuid();
         let wash = mark.map_or_else(
@@ -909,8 +1029,9 @@ impl FileView {
         )
     }
 
-    /// One of the bar's ways out, at the bar's small size: the kit's secondary (the panel
-    /// with a hairline) or ghost (text until the pointer is on it), scaled with the zoom.
+    /// One of the bar's ways out on the kit's pill frame, as tall as a header's words that act:
+    /// secondary (the panel with a hairline) or ghost (text until the pointer is on it), scaled
+    /// with the zoom.
     fn bar_button(
         &self,
         part: &'static str,
@@ -922,23 +1043,22 @@ impl FileView {
         let s = theme.surfaces;
         let k = self.zoom;
         let id = self.id.as_uuid();
-        let button = div()
+        let button = crate::kit::pill_frame(theme, k)
             .id(part)
             .debug_selector(move || format!("{part}-{id}"))
             .role(Role::Button)
             .aria_label(label)
             .flex_none()
-            .px(px(theme.spacing.sm * k))
-            .py(px(theme.spacing.xxs * k))
-            .rounded(px(theme.radii.sm * k))
             .border_1()
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .child(label);
         let button = match kind {
+            // The floating surface a step above whatever it sits on, as `kit::button`'s: on the
+            // panel it sat below a notice's own surface and read as a hole.
             ButtonKind::Secondary => button
                 .border_color(hsla(s.border))
-                .bg(hsla(s.panel))
+                .bg(hsla(s.elevated))
                 .text_color(hsla(s.text))
                 .hover(move |st| st.bg(hsla(s.raised)))
                 .active(move |st| st.bg(hsla(s.overlay))),
@@ -1033,6 +1153,11 @@ impl FileView {
     }
 }
 
+/// How long a reload's diff may run on the UI thread before it settles for an approximation
+/// (more lines tinted than changed). A small change to a large file ends well before it: the
+/// common head and tail are trimmed first.
+const DIFF_WITHIN: std::time::Duration = std::time::Duration::from_millis(8);
+
 /// Lines (0-based) of `new` that differ from `old`.
 ///
 /// Every inserted or replaced line, and for a pure deletion the line now standing where the
@@ -1041,7 +1166,7 @@ impl FileView {
 pub fn changed_lines(old: &str, new: &str) -> Vec<usize> {
     let old: Vec<&str> = old.split('\n').collect();
     let new: Vec<&str> = new.split('\n').collect();
-    let diff = similar::TextDiff::from_slices(&old, &new);
+    let diff = similar::TextDiff::configure().timeout(DIFF_WITHIN).diff_slices(&old, &new);
     let mut changed = Vec::new();
     for op in diff.ops() {
         match *op {
@@ -1079,6 +1204,7 @@ pub fn size_label(bytes: u64) -> String {
 impl Render for FileView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_pending(window, cx);
+        self.settle_focus(window, cx);
         let id = *self.id.as_uuid();
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         let bar = self.render_bar(cx);
@@ -1090,9 +1216,13 @@ impl Render for FileView {
             None if !crate::screen::past_grace("file-reading", window, cx) => {
                 div().size_full().into_any_element()
             }
-            None => self.notice(READING.to_owned()),
-            Some(FileRead::Binary { .. } | FileRead::Missing { .. }) if self.base.is_none() => {
-                self.notice(self.summary(cx))
+            None => self.notice(IconName::File, READING, None, None),
+            Some(FileRead::TooLarge { size }) if self.base.is_none() => self.too_large(*size, cx),
+            Some(FileRead::Binary { size }) if self.base.is_none() => {
+                self.notice(IconName::File, NOT_TEXT, Some(size_label(*size)), None)
+            }
+            Some(FileRead::Missing { error }) if self.base.is_none() => {
+                self.notice(IconName::FileText, CANNOT_READ, Some(error.clone()), None)
             }
             Some(_) => div()
                 .flex_1()
@@ -1102,7 +1232,6 @@ impl Render for FileView {
                     Editor::new(&self.editor)
                         .appearance(false)
                         .bordered(false)
-                        .readonly(self.read_only.is_some())
                         .aria_label(SharedString::from(format!("Text of {}", self.path)))
                         .font_family(mono.clone())
                         .text_size(px(text_size))
@@ -1114,6 +1243,7 @@ impl Render for FileView {
             .id(SharedString::from(format!("file-{id}")))
             .debug_selector(move || format!("file-{id}"))
             .key_context(CTX)
+            .track_focus(&self.focus_handle)
             .role(Role::Document)
             .aria_label(SharedString::from(format!("File {}", self.path)))
             .aria_value(SharedString::from(self.summary(cx)))

@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use noq::{RecvStream, SendStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -35,13 +35,13 @@ impl<T: Serialize> FramedSend<T> {
 
     /// Encode and write one message.
     pub async fn send(&mut self, msg: &T) -> Result<(), NetError> {
-        let frame = codec::encode(msg)?;
-        self.stream.write_all(&frame).await.map_err(|e| NetError::stream(&e))
+        self.send_raw(codec::encode(msg)?).await
     }
 
-    /// Write pre-encoded frames (fan-out: encode once, send to many).
-    pub async fn send_raw(&mut self, frame: &[u8]) -> Result<(), NetError> {
-        self.stream.write_all(frame).await.map_err(|e| NetError::stream(&e))
+    /// Write a pre-encoded frame (fan-out: encode once, send to many). The stream keeps the
+    /// buffer itself until the peer acknowledges it, rather than a copy.
+    pub async fn send_raw(&mut self, frame: Bytes) -> Result<(), NetError> {
+        self.stream.write_chunk(frame).await.map_err(|e| NetError::stream(&e))
     }
 
     /// Reuse the stream for a different message type (after a header).
@@ -94,9 +94,18 @@ impl<T: DeserializeOwned> FramedRecv<T> {
 
     /// Read the next message; `Err(Closed)` at a clean end of stream.
     pub async fn recv(&mut self) -> Result<T, NetError> {
+        self.recv_unless(|_| false).await
+    }
+
+    /// Read the next message `skip` does not pass over; `skip` sees each body before it is
+    /// decoded, so a message the reader already has costs no decode. Cancel-safe, as
+    /// [`Self::recv`] is: a message skipped was never wanted.
+    pub async fn recv_unless(&mut self, skip: impl Fn(&[u8]) -> bool) -> Result<T, NetError> {
         loop {
-            if let Some(msg) = codec::try_decode::<T>(&mut self.buf)? {
-                return Ok(msg);
+            while let Some(body) = codec::try_take(&mut self.buf)? {
+                if !skip(&body) {
+                    return Ok(codec::decode_body(&body)?);
+                }
             }
             let n = self.stream.read_buf(&mut self.buf).await.map_err(|e| NetError::stream(&e))?;
             if n == 0 {

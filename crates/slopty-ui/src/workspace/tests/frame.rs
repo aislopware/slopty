@@ -165,8 +165,8 @@ fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) 
     let names = labels(&view, cx);
     assert!(names.iter().any(|l| l == "studio"), "a worker that is fine is its name: {names:#?}");
     assert!(
-        names.iter().any(|l| l == "Claude Code, Needs you"),
-        "the waiting tile's row: {names:#?}"
+        names.iter().any(|l| l == "Claude Code, Has a question"),
+        "the waiting tile's row, in the state's own word: {names:#?}"
     );
     assert!(names.iter().any(|l| l == "Workspace 1, 2 tiles, 1 needs you"), "{names:#?}");
 
@@ -349,8 +349,8 @@ fn the_column_dots_show_only_what_is_out_of_view(cx: &mut TestAppContext) {
 }
 
 /// A worker whose link is up says nothing about it: no word and no mark in the navigator, the
-/// palette or the empty workspace, only its round trip. Once the link drops, each says what is
-/// wrong with the warn mark and a word, and so does the status bar.
+/// palette or the empty workspace, and a round trip under `RTT_SHOWN_FROM` is not named. Once the
+/// link drops, each says what is wrong with the warn mark and a word, and so does the status bar.
 #[gpui::test]
 fn a_healthy_worker_says_nothing_and_a_lost_one_says_what_is_wrong(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -373,10 +373,7 @@ fn a_healthy_worker_says_nothing_and_a_lost_one_says_what_is_wrong(cx: &mut Test
     });
     assert_eq!(
         workers,
-        [
-            ("studio".to_owned(), "4.2 ms".to_owned(), None),
-            ("laptop".to_owned(), String::new(), None),
-        ]
+        [("studio".to_owned(), String::new(), None), ("laptop".to_owned(), String::new(), None),]
     );
 
     view.update_in(cx, |v, _w, cx| {
@@ -609,7 +606,12 @@ fn a_slow_round_trip_shows_on_the_right_edge_and_holds_still(cx: &mut TestAppCon
     cx.simulate_mouse_move(far, None, Modifiers::default());
     cx.run_until_parked();
     assert!(cx.debug_bounds(leak(format!("nav-rollup-{slow}"))).is_some(), "folded, the rollup");
-    assert_eq!(at(cx, "nav-rtt", slow), rtt, "back where it was, the rollup before it");
+    // Folded, its working agent is listed under *Working* above, which moves the whole row
+    // down; within the row the round trip stays put.
+    let (moved, row) = (at(cx, "nav-rtt", slow), at(cx, "nav-worker", slow));
+    assert_eq!(moved.size, rtt.size, "the rollup before it");
+    assert_eq!(moved.origin.x, rtt.origin.x, "back where it was");
+    assert_eq!(moved.top() - row.top(), rtt.top() - header.top(), "on the row's line");
 }
 
 fn theme() -> Theme {

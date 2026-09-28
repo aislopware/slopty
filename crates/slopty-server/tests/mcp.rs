@@ -151,6 +151,11 @@ mod tests {
                 "remove_item",
                 "point_at",
                 "list_windows",
+                "read_conversation",
+                "answer_permission",
+                "capture_still",
+                "upload_file",
+                "download_file",
                 "forget_worker",
             ]
         );
@@ -249,7 +254,7 @@ mod tests {
         let params = json!({ "name": "read_screen", "arguments": { "term": term } });
         let worker_side = async {
             let msg = tokio::time::timeout(Duration::from_secs(10), link.rx.recv()).await;
-            let Ok(Ok(FromServer::Request { id, verb: Verb::ReadScreen { .. } })) = msg else {
+            let Ok(Ok(FromServer::Request { id, verb: Verb::ReadScreen { .. }, .. })) = msg else {
                 panic!("the next request down the link is the read: {msg:?}")
             };
             let screen = Screen {
@@ -290,7 +295,7 @@ mod tests {
 
         let inside = SocketAddr::from(([127, 0, 0, 1], port));
         let listed = rpc(inside, 1, "tools/list", None, json!({})).await;
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 25);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 30);
         serving.abort();
     }
 }

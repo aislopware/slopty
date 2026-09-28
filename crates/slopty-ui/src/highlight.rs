@@ -1,4 +1,4 @@
-//! Syntax colouring for code the canvas shows: a file card's lines and a fenced block in an
+//! Syntax colouring for code the workspace shows: a file tile's lines and a fenced block in an
 //! answer.
 //!
 //! [`syntect`] parses with Sublime Text grammars (its bundled set, pure Rust through
@@ -6,7 +6,7 @@
 //! colours come from the app's own theme at draw time rather than from a `TextMate` theme:
 //! a theme swap or a settings reload recolours without parsing again, and every surface
 //! that shows code agrees with the terminal's palette. Parsing is the slow part (tens of
-//! milliseconds for a full card, see `docs/MEASUREMENTS.md`), so the file card does it off
+//! milliseconds for a full file tile, see `docs/MEASUREMENTS.md`), so the file tile does it off
 //! the UI thread and draws plain text until the spans arrive.
 
 use std::ops::Range;
@@ -150,7 +150,7 @@ impl Syntax {
     }
 
     /// `syntax` unless it is the bundle's plain text (`.txt`), which colours nothing and would
-    /// only add a name to the card's summary.
+    /// only add a name to the file tile's summary.
     fn coloured(syntax: &'static SyntaxReference) -> Option<Self> {
         (!std::ptr::eq(syntax, syntaxes().find_syntax_plain_text())).then_some(Self(syntax))
     }
@@ -177,8 +177,8 @@ impl Syntax {
 }
 
 /// The grammars bat ships, loaded once on first use (a few tens of milliseconds, paid on a
-/// background thread by the first card): syntect's own set has no TOML, TypeScript, Dockerfile,
-/// Zig or Nix, all of which a remote project is made of.
+/// background thread by the first file tile): syntect's own set has no TOML, TypeScript,
+/// Dockerfile, Zig or Nix, all of which a remote project is made of.
 fn syntaxes() -> &'static SyntaxSet {
     static SET: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
     &SET
@@ -387,7 +387,7 @@ pub fn code_ranges(code: &str, lang: &str, theme: &Theme) -> Vec<(Range<usize>, 
 }
 
 /// The code-block highlighter for gpui-kit's Markdown view, on `theme`'s colours: installed
-/// by [`crate::kit::sync`], so an answer's fenced code reads like a file card.
+/// by [`crate::kit::sync`], so an answer's fenced code reads like a file tile.
 pub fn code_block(
     theme: Theme,
 ) -> impl Fn(&CodeBlock) -> Vec<(Range<usize>, HighlightStyle)> + Send + Sync + 'static {
@@ -539,7 +539,7 @@ mod tests {
     }
 
     /// The numbers behind the background parse (`docs/MEASUREMENTS.md`): the grammar load
-    /// on first use, then a full card of Rust, then the same text again.
+    /// on first use, then a full file tile of Rust, then the same text again.
     #[test]
     #[ignore = "timing, run by hand with --ignored --nocapture"]
     fn timing_of_a_full_card() -> Result<(), String> {

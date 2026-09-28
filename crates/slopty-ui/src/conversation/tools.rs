@@ -56,12 +56,6 @@ fn first_line(text: &str) -> &str {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default()
 }
 
-/// A diff's size, `+a −r`.
-#[must_use]
-pub fn changes(added: u32, removed: u32) -> String {
-    format!("+{added} \u{2212}{removed}")
-}
-
 fn state_of(call: &ToolCall) -> State {
     match &call.detail {
         ToolDetail::Bash(bash) => match bash.status {
@@ -161,8 +155,7 @@ pub fn title(call: &ToolCall, tasks: &[Task]) -> Title {
             t(IconName::SquareTerminal, past("Running", "Ran"), Some(subject), false, meta)
         }
         ToolDetail::Edit(edit) => {
-            let meta = (edit.patch.added > 0 || edit.patch.removed > 0)
-                .then(|| changes(edit.patch.added, edit.patch.removed));
+            let meta = crate::kit::changes_text(edit.patch.added, edit.patch.removed);
             t(
                 IconName::FilePen,
                 past("Editing", "Edited"),
@@ -173,14 +166,14 @@ pub fn title(call: &ToolCall, tasks: &[Task]) -> Title {
         }
         ToolDetail::Write(write) => {
             let (verb, meta) = match write.kind {
-                WriteKind::Create => (past("Creating", "Created"), Some(changes(write.lines, 0))),
+                WriteKind::Create => {
+                    (past("Creating", "Created"), crate::kit::changes_text(write.lines, 0))
+                }
                 WriteKind::Overwrite | WriteKind::Unknown => (
                     past("Writing", "Wrote"),
-                    (write.patch.added > 0 || write.patch.removed > 0)
-                        .then(|| changes(write.patch.added, write.patch.removed))
-                        .or_else(|| {
-                            (write.lines > 0).then(|| count(write.lines.into(), "line", "lines"))
-                        }),
+                    crate::kit::changes_text(write.patch.added, write.patch.removed).or_else(
+                        || (write.lines > 0).then(|| count(write.lines.into(), "line", "lines")),
+                    ),
                 ),
             };
             let icon = if write.kind == WriteKind::Create {
@@ -409,7 +402,7 @@ mod tests {
                 "Ran | Print two lines |  | Done",
                 "Ran | Try to list a non-existent file | Exit 2 | Failed",
                 "Ran | Background sleep and echo |  | Done",
-                "Created | notes.md | +2 \u{2212}0 | Done",
+                "Created | notes.md | +2 | Done",
                 "general-purpose | Count lines |  | Done",
                 "Updated a task | Survey files | Done | Done",
                 "Updated a task | Write notes | Done | Done",
@@ -420,7 +413,7 @@ mod tests {
             [
                 "Read | notes.txt | 4 lines | Done",
                 "Edited | notes.txt | +1 \u{2212}1 | Done",
-                "Wrote | notes.txt | +1 \u{2212}0 | Done",
+                "Wrote | notes.txt | +1 | Done",
                 "Read | notes.txt | lines 1\u{2013}2 | Done",
                 "Read | notes.txt | lines 2\u{2013}3 | Done",
             ]

@@ -22,6 +22,8 @@ const TOOLS: &[(&str, &str)] = &[
     ("samply", "0.13.1"),
     ("git-cliff", "2.14.2"),
     ("committed", "1.1.11"),
+    // `cargo xtask linux`: cross-links the Linux worker with zig.
+    ("cargo-zigbuild", "0.23.4"),
 ];
 
 pub fn run(sh: &Shell, no_tools: bool) -> Result<()> {

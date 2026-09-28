@@ -7,7 +7,7 @@ mod units {
     use bytes::{BufMut as _, BytesMut};
     use slopty_core::{ClientId, ItemId};
     use slopty_proto::codec::{self, CodecError, MAX_FRAME_BYTES};
-    use slopty_proto::file::FILE_BYTES;
+    use slopty_proto::file::{FILE_BYTES, INLINE_FILE_BYTES};
     use slopty_proto::input::CellMetrics;
     use slopty_proto::items::ItemSync;
     use slopty_proto::media::{Kind, MediaHeader, flags};
@@ -17,7 +17,8 @@ mod units {
 
     #[test]
     fn the_limits_are_the_numbers_the_docs_name() {
-        assert_eq!(FILE_BYTES, 524_288);
+        assert_eq!(FILE_BYTES, 16_777_216);
+        assert_eq!(INLINE_FILE_BYTES, 65_536);
         assert_eq!(MAX_OSC52_BYTES, 262_144);
         assert_eq!(MAX_FETCH_LINES, 4096);
         assert_eq!(slopty_proto::transfer::INLINE_CLIP_BYTES, 65_536);

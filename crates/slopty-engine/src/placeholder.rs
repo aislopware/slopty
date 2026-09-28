@@ -233,16 +233,16 @@ pub fn render(run: &Run, image: (u32, u32), grid: Grid, cell: (u32, u32)) -> Opt
         let scale = rows_px / img_h.max(1.0);
         (scale, scale, img_w.mul_add(-scale, cols_px) / 2.0, 0.0)
     };
-    // The letterboxed canvas in image pixels.
+    // The letterboxed image in image pixels.
     let (sx_off, sy_off) = (x_off / x_scale, y_off / y_scale);
-    let (canvas_w, canvas_h) = (sx_off.mul_add(2.0, img_w), sy_off.mul_add(2.0, img_h));
+    let (boxed_w, boxed_h) = (sx_off.mul_add(2.0, img_w), sy_off.mul_add(2.0, img_h));
 
-    // The run's strip of the canvas.
+    // The run's strip of the letterboxed image.
     let (width, col, row) = (f64::from(run.width), f64::from(run.col), f64::from(run.row));
-    let mut src_w = canvas_w * (width / grid_cols);
-    let mut src_h = canvas_h / grid_rows;
-    let mut src_x = canvas_w * (col / grid_cols);
-    let mut src_y = canvas_h * (row / grid_rows);
+    let mut src_w = boxed_w * (width / grid_cols);
+    let mut src_h = boxed_h / grid_rows;
+    let mut src_x = boxed_w * (col / grid_cols);
+    let mut src_y = boxed_h * (row / grid_rows);
 
     let (mut dx_off, mut dy_off) = (0.0, 0.0);
     let mut dest_w = width * cell_w;
@@ -258,9 +258,9 @@ pub fn render(run: &Run, image: (u32, u32), grid: Grid, cell: (u32, u32)) -> Opt
             src_h = img_h;
             dest_h = img_h * y_scale;
         }
-    } else if src_y + src_h > canvas_h - sy_off {
+    } else if src_y + src_h > boxed_h - sy_off {
         src_y -= sy_off;
-        src_h = canvas_h - sy_off - src_y;
+        src_h = boxed_h - sy_off - src_y;
         src_h -= sy_off;
         dest_h = src_h * y_scale;
     } else {
@@ -277,9 +277,9 @@ pub fn render(run: &Run, image: (u32, u32), grid: Grid, cell: (u32, u32)) -> Opt
             src_w = img_w;
             dest_w = img_w * x_scale;
         }
-    } else if src_x + src_w > canvas_w - sx_off {
+    } else if src_x + src_w > boxed_w - sx_off {
         src_x -= sx_off;
-        src_w = canvas_w - sx_off - src_x;
+        src_w = boxed_w - sx_off - src_x;
         src_w -= sx_off;
         dest_w = src_w * x_scale;
     } else {

@@ -1,5 +1,8 @@
-//! The face: one virtualized column of the conversation, the prompt rail beside it, the task
-//! card, and the composer under it (the permission prompt takes the composer's shell).
+//! The face: one virtualized column of the conversation and the composer under it.
+//!
+//! Beside the column runs the prompt rail; over the composer sit the task card and the
+//! background work, and the permission prompt takes the composer's shell. A picture opens
+//! large over the face.
 //!
 //! The same list shows the session's changes on the header chip's click: every file the
 //! session changed, over the diffs that changed it.
@@ -13,7 +16,10 @@
 
 mod blocks;
 mod entries;
+mod media;
 mod parts;
+mod rail;
+mod work;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -30,7 +36,8 @@ use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use slopty_core::{ClientId, SessionId};
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::conversation::{
-    AgentRun, Body, ConversationEvent, PermissionEvent, TextRef, ThreadId, ToolDetail, Verdict,
+    AgentRun, Body, ConversationEvent, LiveKind, PermissionEvent, TextRef, ThreadId, ToolDetail,
+    Verdict,
 };
 use slopty_theme::Theme;
 
@@ -39,7 +46,7 @@ use super::diff::Block;
 use super::figures::{self, FileChange};
 use super::model::Model;
 use super::rows::{self, Density, Input, Row};
-use super::{CTX, CycleDensity, Interrupt, MESSAGE_PLACEHOLDER};
+use super::{CTX, CycleDensity, Interrupt, MESSAGE_PLACEHOLDER, composer};
 use crate::colors::hsla;
 
 /// Diffs coloured once, by thread, entry id and revision.
@@ -76,7 +83,7 @@ struct Finder {
     field: gpui::Entity<InputState>,
     hits: Vec<String>,
     at: usize,
-    _typing: Subscription,
+    _typing: [Subscription; 2],
 }
 
 /// What the face asks the workspace to do: everything that reaches the worker goes through
@@ -103,6 +110,47 @@ pub enum FaceEvent {
     },
     /// Show the TUI in the tile instead.
     ShowTerminal,
+    /// Upload this to the worker for the prompt; its chip is attachment `id`, which the
+    /// workspace reports on ([`ConversationView::attachment_progress`],
+    /// [`ConversationView::attachment_landed`], [`ConversationView::attachment_ended`]).
+    Attach {
+        /// The chip.
+        id: u64,
+        /// What goes up.
+        what: Attach,
+    },
+    /// The human took attachment `id` off the draft: its upload stops. Its chip is already
+    /// gone.
+    Detach {
+        /// The chip.
+        id: u64,
+    },
+}
+
+/// What an attachment is before it goes up.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Attach {
+    /// A picture pasted into the composer: its bytes and the name it lands under.
+    Picture {
+        /// The name, [`composer::picture_name`].
+        name: String,
+        /// The encoded picture.
+        bytes: Vec<u8>,
+    },
+    /// Files copied here, pasted into the composer.
+    Files(Vec<std::path::PathBuf>),
+}
+
+/// The extension of a picture Claude Code reads, for a pasted picture in `format`; `None` for
+/// one it does not.
+const fn picture_extension(format: gpui::ImageFormat) -> Option<&'static str> {
+    match format {
+        gpui::ImageFormat::Png => Some("png"),
+        gpui::ImageFormat::Jpeg => Some("jpg"),
+        gpui::ImageFormat::Gif => Some("gif"),
+        gpui::ImageFormat::Webp => Some("webp"),
+        _ => None,
+    }
 }
 
 /// A session's conversation face.
@@ -128,8 +176,15 @@ pub struct ConversationView {
     rows: Rc<[Row]>,
     /// Each row's key and revision, as the list holds them.
     keys: Vec<(String, u64)>,
+    /// The prompt rail, and the prompts it was last given, by row and revision.
+    rail: gpui::Entity<rail::Rail>,
+    rail_drawn: Vec<(usize, u64)>,
     list: ListState,
     composer: gpui::Entity<TextareaState>,
+    /// What was attached to the draft and is still uploading, a chip each.
+    attachments: composer::Attachments,
+    /// The window the face is in, to type a landed attachment's path into the composer.
+    window: gpui::AnyWindowHandle,
     /// Why a denial is given, typed on the permission card.
     deny: gpui::Entity<InputState>,
     /// The deny field is open on the card.
@@ -146,17 +201,38 @@ pub struct ConversationView {
     /// The copy button that just copied, by key, and the timer that clears it.
     copied: Option<String>,
     copied_clear: Option<Task<()>>,
-    /// The permission prompt's grants show.
-    grants_open: bool,
     /// The permission prompt's command shows whole.
     ask_all: bool,
     /// The task card shows every task.
     tasks_open: bool,
     /// The face is in the tile: the list and its clock run only then.
     shown: bool,
+    /// The picture open large over the face.
+    viewing: Option<slopty_proto::conversation::Image>,
+    /// Pictures made ready to draw, by digest: made once, decoded by GPUI off the frame.
+    pictures: std::cell::RefCell<HashMap<String, std::sync::Arc<gpui::Image>>>,
+    /// Background work opened in the tray to its last lines, by call.
+    tray_open: HashSet<String>,
+    /// The tray lists all of its work, not only the first few.
+    tray_all: bool,
+    /// When the face last swapped the composer for a permission prompt or back, and which way:
+    /// the shell cross-fades its contents.
+    morph: Option<(u64, bool)>,
+    /// Rows a fold just opened, by key, with the generation that names their reveal: they
+    /// settle in, and leave this once they have.
+    settling: HashMap<String, u64>,
+    settled_clear: Option<Task<()>>,
+    /// Counts reveals and morphs, so each one animates from its start.
+    generation: u64,
+    /// The permission prompt on show and when, by this client's clock, it came: its fallback
+    /// counts down from here, whatever the worker's clock says.
+    held: Option<(u64, u64)>,
     /// Ticks once a second while the agent works and the face shows (the elapsed time).
     clock: Option<Task<()>>,
     focus: FocusHandle,
+    /// Times this view was rendered rather than replayed from the view cache (tests).
+    #[cfg(test)]
+    renders: u32,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -174,6 +250,20 @@ impl EventEmitter<FaceEvent> for ConversationView {}
 impl Focusable for ConversationView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.composer.focus_handle(cx)
+    }
+}
+
+/// What an attachment's chip calls it: the picture's name, the one file's, or how many.
+fn attachment_name(what: &Attach) -> String {
+    match what {
+        Attach::Picture { name, .. } => name.clone(),
+        Attach::Files(paths) => match paths.as_slice() {
+            [one] => one.file_name().map_or_else(
+                || one.to_string_lossy().into_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            many => format!("{} files", many.len()),
+        },
     }
 }
 
@@ -210,12 +300,21 @@ impl ConversationView {
                 this.deny(cx);
             }
         });
+        // The face is drawn from a cached view: whatever changes one of its fields (a key, a
+        // caret blink, a selection) draws the face afresh.
+        let watching = [
+            cx.observe(&composer, |_, _, cx| cx.notify()),
+            cx.observe(&deny, |_, _, cx| cx.notify()),
+        ];
         let list = ListState::new(0, ListAlignment::Top, px(OVERDRAW));
         list.set_follow_mode(FollowMode::Tail);
+        let hint_theme = Rc::new(theme.clone());
+        let face = cx.weak_entity();
+        let rail = cx.new(|_| rail::Rail::new(face, Rc::clone(&hint_theme)));
         Self {
             session,
             shared: std::sync::Arc::new(theme.clone()),
-            hint_theme: Rc::new(theme.clone()),
+            hint_theme,
             theme,
             zoom: 1.0,
             width: 0.0,
@@ -226,8 +325,12 @@ impl ConversationView {
             thread: ThreadId::Main,
             rows: Rc::from([]),
             keys: Vec::new(),
+            rail,
+            rail_drawn: Vec::new(),
             list,
             composer,
+            attachments: composer::Attachments::default(),
+            window: window.window_handle(),
             deny,
             deny_open: false,
             approvals: Approvals::default(),
@@ -237,13 +340,23 @@ impl ConversationView {
             find: None,
             copied: None,
             copied_clear: None,
-            grants_open: false,
             ask_all: false,
             tasks_open: false,
             shown: false,
+            viewing: None,
+            pictures: std::cell::RefCell::default(),
+            tray_open: HashSet::new(),
+            tray_all: false,
+            morph: None,
+            settling: HashMap::new(),
+            settled_clear: None,
+            generation: 0,
+            held: None,
             clock: None,
             focus: cx.focus_handle(),
-            _subscriptions: vec![composing, denying],
+            #[cfg(test)]
+            renders: 0,
+            _subscriptions: [composing, denying].into_iter().chain(watching).collect(),
         }
     }
 
@@ -321,6 +434,12 @@ impl ConversationView {
         self.list.logical_scroll_top()
     }
 
+    /// Times this view was rendered rather than replayed from the view cache.
+    #[cfg(test)]
+    pub const fn renders(&self) -> u32 {
+        self.renders
+    }
+
     /// What the composer holds.
     #[must_use]
     pub fn draft(&self, cx: &App) -> String {
@@ -343,13 +462,51 @@ impl ConversationView {
         })
     }
 
+    /// The transcript shows the agent mid-turn, whatever the hooks say: a block still streaming,
+    /// or a tool call of the last turn with no result yet (and no interruption after it).
+    #[must_use]
+    pub fn mid_turn(&self) -> bool {
+        if self.model.live(&ThreadId::Main).next().is_some() {
+            return true;
+        }
+        let Some(main) = self.model.thread(&ThreadId::Main) else { return false };
+        for entry in main.entries().iter().rev() {
+            match &entry.body {
+                Body::Prompt(_) | Body::Interrupted { .. } => return false,
+                Body::Tool(call) if call.result.is_none() => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// What the session is about, for a tile the agent has not titled: its first prompt's
+    /// first line, cut short.
+    #[must_use]
+    pub fn first_prompt(&self) -> Option<String> {
+        figures::first_prompt(self.model.thread(&ThreadId::Main)?.entries())
+    }
+
     /// One line of what the agent is doing or last did, for the navigator and the overview:
-    /// the call it is on while it works, else the first line of its last answer.
+    /// the call it is on while it works (by the hooks or by the transcript, whichever knows),
+    /// else the first line of its last answer. Mid-turn with no call yet, nothing: the last
+    /// answer is not what it is doing.
     #[must_use]
     pub fn summary(&self) -> Option<String> {
-        let main = self.model.thread(&ThreadId::Main)?;
-        let tasks = main.tasks();
-        if self.working() {
+        if self.working() || self.mid_turn() {
+            // A call still streaming its input is the newest thing it does and has no entry
+            // yet: name it as its live row does.
+            let live = self.model.live(&ThreadId::Main).find_map(|(_, block)| match &block.kind {
+                LiveKind::Tool { name, .. } => {
+                    let input = super::tools::preparing(&block.text);
+                    Some(if input.is_empty() { name.clone() } else { format!("{name} {input}") })
+                }
+                LiveKind::Text | LiveKind::Thinking => None,
+            });
+            if live.is_some() {
+                return live;
+            }
+            let main = self.model.thread(&ThreadId::Main)?;
             let call = main
                 .entries()
                 .iter()
@@ -358,16 +515,14 @@ impl ConversationView {
                 .find_map(|e| match &e.body {
                     Body::Tool(call) => Some(call),
                     _ => None,
-                });
-            if let Some(call) = call {
-                let title = super::tools::title(call, tasks);
-                return Some(match title.subject {
-                    Some(subject) => format!("{} {subject}", title.verb),
-                    None => title.verb,
-                });
-            }
-            return None;
+                })?;
+            let title = super::tools::title(call, main.tasks());
+            return Some(match title.subject {
+                Some(subject) => format!("{} {subject}", title.verb),
+                None => title.verb,
+            });
         }
+        let main = self.model.thread(&ThreadId::Main)?;
         main.entries().iter().rev().find_map(|e| match &e.body {
             Body::Text(text) => text.text.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| {
                 l.trim_start_matches(['#', '*', '>', '-', ' ']).trim_end_matches('*').to_owned()
@@ -394,6 +549,10 @@ impl ConversationView {
             }
             self.rebuild(cx);
         }
+        if applied.media {
+            // A tail grew or a picture came: the rows that show them are measured again.
+            self.rebuild(cx);
+        }
         if applied.meters || applied.current {
             cx.notify();
         }
@@ -406,11 +565,12 @@ impl ConversationView {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        let asked = self.approvals.prompt().is_some();
         match event {
             PermissionEvent::Asked(prompt) => {
+                self.held = Some((prompt.ask, now_ms()));
                 self.approvals.asked(*prompt);
                 self.deny_open = false;
-                self.grants_open = false;
                 self.ask_all = false;
             }
             PermissionEvent::Settled { ask, outcome, .. } => {
@@ -420,6 +580,11 @@ impl ConversationView {
                     self.composer.update(cx, |c, cx| c.focus(window, cx));
                 }
             }
+        }
+        let asks = self.approvals.prompt().is_some();
+        if asks != asked {
+            self.generation = self.generation.wrapping_add(1);
+            self.morph = Some((self.generation, asks));
         }
         cx.notify();
     }
@@ -468,6 +633,7 @@ impl ConversationView {
             self.diffs.borrow_mut().clear();
             self.list.remeasure();
             self.list.remeasure();
+            self.sync_rail(cx);
             cx.notify();
         }
     }
@@ -479,6 +645,7 @@ impl ConversationView {
             self.zoom = zoom;
             self.width = width;
             self.list.remeasure();
+            self.sync_rail(cx);
             cx.notify();
         } else {
             self.width = width;
@@ -506,8 +673,18 @@ impl ConversationView {
 
     /// The elapsed time of a turn ticks once a second, only while it is on screen and the
     /// agent works; pending messages that never showed up go with the same tick.
+    /// Whether something on show counts time: the turn's elapsed time, a pending message,
+    /// background work's, a prompt's fallback.
+    fn ticking(&self) -> bool {
+        self.shown
+            && (self.working()
+                || !self.model.pending().is_empty()
+                || self.background_running()
+                || self.approvals.prompt().is_some())
+    }
+
     fn run_clock(&mut self, cx: &Context<Self>) {
-        if !(self.shown && (self.working() || !self.model.pending().is_empty())) {
+        if !self.ticking() {
             self.clock = None;
             return;
         }
@@ -526,7 +703,7 @@ impl ConversationView {
                             this.rebuild(cx);
                         }
                         cx.notify();
-                        this.shown && (this.working() || !this.model.pending().is_empty())
+                        this.ticking()
                     })
                     .unwrap_or(false);
                 if !going {
@@ -567,6 +744,7 @@ impl ConversationView {
             self.splice(&keys);
             self.keys = keys;
             self.rows = Rc::from(rows);
+            self.sync_rail(cx);
             cx.notify();
             return;
         }
@@ -591,7 +769,36 @@ impl ConversationView {
         self.splice(&keys);
         self.keys = keys;
         self.rows = Rc::from(rows);
+        self.sync_rail(cx);
         cx.notify();
+    }
+
+    /// Give the rail the prompts in the rows, their words worked out again only when a prompt
+    /// came, went, moved or changed; and the rows' count, the theme and the zoom it places them
+    /// by. The rail draws again only when one of those changed.
+    fn sync_rail(&mut self, cx: &mut Context<Self>) {
+        let drawn: Vec<(usize, u64)> = rows::prompts(&self.rows)
+            .map(|(ix, _)| (ix, self.keys.get(ix).map_or(0, |(_, rev)| *rev)))
+            .collect();
+        let ticks = (drawn != self.rail_drawn).then(|| {
+            let thread = self.model.thread(&self.thread);
+            rows::prompts(&self.rows)
+                .map(|(ix, id)| {
+                    let words = thread
+                        .and_then(|t| t.entry(id))
+                        .and_then(|e| match &e.body {
+                            Body::Prompt(p) => Some(entries::first_line(&p.text.text)),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    let hint = SharedString::from(words.chars().take(80).collect::<String>());
+                    rail::Tick { ix, hint }
+                })
+                .collect::<Rc<[_]>>()
+        });
+        self.rail_drawn = drawn;
+        let (total, theme, zoom) = (self.rows.len(), Rc::clone(&self.hint_theme), self.zoom);
+        self.rail.update(cx, |rail, cx| rail.set(ticks, total, &theme, zoom, cx));
     }
 
     /// A row's revision: it changes whenever what the row draws changes.
@@ -601,7 +808,15 @@ impl ConversationView {
         match row {
             Row::Prompt { id } => entry_rev(id),
             Row::Answer { id, end } => entry_rev(id).wrapping_mul(2).wrapping_add(u64::from(*end)),
-            Row::Entry { id, level } => entry_rev(id).wrapping_mul(4).wrapping_add(*level as u64),
+            Row::Entry { id, level } => {
+                // A background command's row grows with what it prints.
+                let printed = self.model.output(&self.thread, id).map_or(0, |o| o.bytes);
+                entry_rev(id)
+                    .wrapping_mul(4)
+                    .wrapping_add(*level as u64)
+                    .wrapping_mul(31)
+                    .wrapping_add(printed)
+            }
             Row::Fold { id, fold, open } => {
                 let figures = thread.and_then(|t| t.turn(id)).map_or(0, |t| {
                     t.usage.output.wrapping_mul(31).wrapping_add(u64::from(t.requests))
@@ -618,7 +833,11 @@ impl ConversationView {
             Row::Group { ids, open, .. } => ids
                 .iter()
                 .fold(u64::from(*open), |acc, id| acc.wrapping_mul(31).wrapping_add(entry_rev(id))),
-            Row::Live { id } => self.model.live_block_at(id).map_or(0, |b| b.text.len() as u64),
+            Row::Live { id } => {
+                let toggle = rows::entry_key(&format!("live-{}-{}-{}", id.turn, id.step, id.block));
+                let written = self.model.live_block_at(id).map_or(0, |b| b.text.len() as u64);
+                written.wrapping_mul(2).wrapping_add(u64::from(self.toggled.contains(&toggle)))
+            }
             // What a settled turn changed stays as it was once the turn settled.
             Row::Working | Row::Pending { .. } | Row::Changes { .. } | Row::File { .. } => 0,
         }
@@ -658,12 +877,72 @@ impl ConversationView {
 
     // ----- what the reader does -------------------------------------------------------
 
-    /// Open or close the fold, group or call `key`.
+    /// Open or close the fold, group or call `key`. What a fold opens settles in.
     fn toggle(&mut self, key: String, cx: &mut Context<Self>) {
+        let opens_fold = key.starts_with("f:") && !self.toggled.contains(&key);
         if !self.toggled.remove(&key) {
             self.toggled.insert(key);
         }
+        let before: HashSet<String> = self.keys.iter().map(|(k, _)| k.clone()).collect();
         self.rebuild(cx);
+        if !opens_fold || !crate::kit::motion(cx) {
+            return;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        self.settling.extend(
+            self.keys
+                .iter()
+                .filter(|(k, _)| !before.contains(k))
+                .map(|(k, _)| (k.clone(), generation)),
+        );
+        let settle = crate::kit::Pace::Settle.duration();
+        self.settled_clear = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(settle).await;
+            let _gone = this.update(cx, |this, _cx| this.settling.clear());
+        }));
+    }
+
+    /// Open `image` large over the face, or close it.
+    pub fn view_picture(
+        &mut self,
+        image: Option<slopty_proto::conversation::Image>,
+        cx: &mut Context<Self>,
+    ) {
+        self.viewing = image;
+        cx.notify();
+    }
+
+    /// The picture open large, if one is.
+    #[must_use]
+    pub const fn viewing(&self) -> Option<&slopty_proto::conversation::Image> {
+        self.viewing.as_ref()
+    }
+
+    /// Ask the worker for the pictures row `ix` shows that this client has not got: a row's
+    /// pictures are fetched when it is laid out (in view, or about to be), not with the
+    /// conversation.
+    fn want_pictures(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.get(ix) else { return };
+        let (Row::Prompt { id } | Row::Entry { id, .. }) = row else { return };
+        let images =
+            match self.model.thread(&self.thread).and_then(|t| t.entry(id)).map(|e| &e.body) {
+                Some(Body::Prompt(prompt)) => prompt.images.as_slice(),
+                Some(Body::Tool(call)) => {
+                    call.result.as_ref().map_or(&[][..], |r| r.images.as_slice())
+                }
+                _ => return,
+            };
+        // Drawn every frame the row is in view: a row with nothing to fetch costs a lookup.
+        if images.iter().all(|image| self.model.picture(&image.digest).is_some()) {
+            return;
+        }
+        let (thread, images) = (self.thread.clone(), images.to_vec());
+        for image in images {
+            if self.model.want(&thread, &image) {
+                cx.emit(FaceEvent::Expand { thread: thread.clone(), reference: image.at });
+            }
+        }
     }
 
     /// Show another thread: a subagent's, or back to the session's own.
@@ -699,6 +978,100 @@ impl ConversationView {
     pub fn interrupt(&self, cx: &mut Context<Self>) {
         if self.working() {
             cx.emit(FaceEvent::Interrupt);
+        }
+    }
+
+    /// A paste into the composer: a picture with no text on the clipboard, or files copied here,
+    /// are attached rather than pasted as text. Whether the paste was taken.
+    pub fn paste_attachment(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) -> bool {
+        let mut files = Vec::new();
+        let mut picture = None;
+        for entry in item.entries() {
+            match entry {
+                gpui::ClipboardEntry::ExternalPaths(paths) => {
+                    files.extend_from_slice(paths.paths());
+                }
+                gpui::ClipboardEntry::Image(image) => {
+                    picture = picture.or_else(|| {
+                        picture_extension(image.format).map(|ext| (ext, image.bytes.clone()))
+                    });
+                }
+                gpui::ClipboardEntry::String(_) => {}
+            }
+        }
+        if !files.is_empty() {
+            self.attach(Attach::Files(files), cx);
+            return true;
+        }
+        let texted = item.text().is_some_and(|t| !t.is_empty());
+        match picture {
+            Some((ext, bytes)) if !texted => {
+                self.attach(Attach::Picture { name: composer::picture_name(ext), bytes }, cx);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Show `what`'s chip and ask the workspace to send it up.
+    pub fn attach(&mut self, what: Attach, cx: &mut Context<Self>) {
+        let id = self.attachments.add(attachment_name(&what));
+        cx.emit(FaceEvent::Attach { id, what });
+        cx.notify();
+    }
+
+    /// Show the chip of `what`, which the workspace sends up itself (a drop on the face), and
+    /// say which it is.
+    pub fn start_attachment(&mut self, what: &Attach) -> u64 {
+        self.attachments.add(attachment_name(what))
+    }
+
+    /// The chips of what is still uploading.
+    #[must_use]
+    pub fn attachments(&self) -> &[composer::Attachment] {
+        self.attachments.chips()
+    }
+
+    /// Attachment `id` is `fraction` of the way up.
+    pub fn attachment_progress(&mut self, id: u64, fraction: f32, cx: &mut Context<Self>) {
+        if self.attachments.progress(id, fraction) {
+            cx.notify();
+        }
+    }
+
+    /// Attachment `id` landed at `paths` on the worker: its chip goes, and the paths are typed
+    /// at the composer's cursor, where Claude Code reads them as attached files.
+    pub fn attachment_landed(&mut self, id: u64, paths: &[String], cx: &mut Context<Self>) {
+        if !self.attachments.end(id) || paths.is_empty() {
+            return;
+        }
+        cx.notify();
+        let (composer, window, paths) = (self.composer.clone(), self.window, paths.to_vec());
+        // After whatever update delivered this: typing into the field takes its window.
+        cx.defer(move |cx| {
+            let _gone = window.update(cx, |_root, window, cx| {
+                composer.update(cx, |c, cx| {
+                    let value = c.value();
+                    let before = value.get(..c.cursor()).and_then(|b| b.chars().next_back());
+                    c.insert(composer::typed_paths(before, &paths), window, cx);
+                });
+            });
+        });
+    }
+
+    /// The human takes attachment `id` off the draft: its chip goes at once, and the workspace
+    /// stops its upload, so nothing is typed into the composer when it would have landed.
+    pub fn detach(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.attachments.end(id) {
+            cx.emit(FaceEvent::Detach { id });
+            cx.notify();
+        }
+    }
+
+    /// Attachment `id` will not land (a failure, a cancel, the link gone): its chip goes.
+    pub fn attachment_ended(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.attachments.end(id) {
+            cx.notify();
         }
     }
 
@@ -804,8 +1177,9 @@ impl ConversationView {
                 }
                 _ => {}
             });
+        let watching = cx.observe(&field, |_, _, cx| cx.notify());
         field.update(cx, |f, cx| f.focus(window, cx));
-        self.find = Some(Finder { field, hits: Vec::new(), at: 0, _typing: typing });
+        self.find = Some(Finder { field, hits: Vec::new(), at: 0, _typing: [typing, watching] });
         cx.notify();
     }
 
@@ -938,6 +1312,10 @@ impl ConversationView {
 
 impl Render for ConversationView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.renders = self.renders.saturating_add(1);
+        }
         let theme = self.theme.clone();
         let s = theme.surfaces;
         let rows = self.list_region(window, cx);
@@ -960,7 +1338,10 @@ impl Render for ConversationView {
             // Esc in the composer stops the agent's turn while it has one; otherwise it is the
             // field's own.
             .capture_action(cx.listener(|this, _: &gpui_kit::component::input::Escape, window, cx| {
-                if this.find.as_ref().is_some_and(|f| f.field.focus_handle(cx).is_focused(window)) {
+                if this.viewing.is_some() {
+                    this.view_picture(None, cx);
+                    cx.stop_propagation();
+                } else if this.find.as_ref().is_some_and(|f| f.field.focus_handle(cx).is_focused(window)) {
                     this.close_find(window, cx);
                     cx.stop_propagation();
                 } else if this.working() && this.approvals.prompt().is_none() {
@@ -976,9 +1357,11 @@ impl Render for ConversationView {
             .font_family(theme.typography.ui_family.clone())
             .text_size(self.z(theme.typography.ui_size))
             .text_color(hsla(s.text))
+            .relative()
             .children(bar)
             .child(rows)
             .children(foot)
+            .children(self.picture_viewer(window, cx))
     }
 }
 
@@ -1019,16 +1402,30 @@ impl ConversationView {
         }
         let items = list(
             self.list.clone(),
-            cx.processor(|this, ix: usize, window, cx| this.render_row(ix, window, cx)),
+            cx.processor(|this, ix: usize, window, cx| {
+                this.want_pictures(ix, cx);
+                this.render_row(ix, window, cx)
+            }),
         )
         .size_full();
         let conversation = self.pane == Pane::Conversation;
-        let rail = self.rail(cx).filter(|_| conversation);
+        let rail = (conversation && self.rail.read(cx).shown()).then(|| {
+            let z = |v: f32| px(v * self.zoom);
+            let spacing = theme.spacing;
+            self.rail.clone().cached(
+                gpui::StyleRefinement::default()
+                    .absolute()
+                    .top(z(spacing.md))
+                    .bottom(z(spacing.md))
+                    .right(z(spacing.xxs))
+                    .w(z(spacing.md)),
+            )
+        });
         let latest = (conversation && !self.list.is_following_tail()).then(|| self.latest_pill(cx));
         let find = self.find_bar(cx);
         region
             .child(items)
-            .child(self.list_fade())
+            .children(self.list_fade())
             .children(rail)
             .children(latest)
             .children(find)

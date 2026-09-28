@@ -14,7 +14,7 @@ expression: "decode(\"interrupt\").snapshot()"
             lines: 1
             chars: 83
             full: ~
-          images: 0
+          images: []
           command: ~
     - id: "00000000-0000-4000-8000-000000000015:0"
       at_ms: 1790482609619
@@ -44,6 +44,7 @@ expression: "decode(\"interrupt\").snapshot()"
               stdout: ~
               stderr: ~
               output_file: ~
+              finished_ms: ~
           result:
             status: Rejected
             text:
@@ -52,6 +53,7 @@ expression: "decode(\"interrupt\").snapshot()"
               chars: 436
               full: ~
             at_ms: 1790482610080
+            images: []
     - id: 00000000-0000-4000-8000-000000000019
       at_ms: 1790482610081
       body:

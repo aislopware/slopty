@@ -13,6 +13,8 @@ use slopty_proto::orchestration::Port;
 use slopty_proto::transfer::{ClipItem, ClipMsg, Dest, Offer, Peer, XferMsg};
 
 use super::*;
+use crate::conversation::ConversationView;
+use crate::conversation::composer::Attachment;
 
 /// What the workspace asked of a worker's [`Remote`].
 #[derive(Debug)]
@@ -483,6 +485,89 @@ fn a_promise_is_fetched_over_the_link_the_worker_has_now(cx: &mut TestAppContext
     let asked = relink(b"a restarted worker's", cx);
     assert_eq!(board.data("public.png"), None, "not the offered bytes");
     assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+/// A picture pasted into an agent's composer goes up to a directory of its own on the worker,
+/// with a chip in the composer while it uploads; once it has landed, its path is typed at the
+/// cursor, and nothing goes to the PTY until the message is sent. A file dropped on the face is
+/// attached the same way.
+#[gpui::test]
+fn a_picture_pasted_into_the_composer_uploads_and_its_path_is_typed(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (mut studio, mut calls, _board) = connect_remote(&view, cx);
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &studio, session, studio.me, 1);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.focus_tile(tile, cx);
+        v.show_face(session, true, cx);
+    });
+    cx.run_until_parked();
+    let face = view.read_with(cx, |v, _| v.conversation(session).cloned()).expect("a face");
+    cx.simulate_input("look at");
+    studio.drain();
+
+    let png: Vec<u8> = b"\x89PNG".iter().copied().chain(std::iter::repeat_n(7, 196)).collect();
+    let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, png.clone());
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image)));
+    cx.simulate_keystrokes("cmd-v");
+    cx.run_until_parked();
+    let Call::Upload(xfer, files, dest) = calls.try_recv().expect("an upload") else {
+        panic!("an upload");
+    };
+    assert_eq!(dest, Dest::Attachment, "never the session's working tree");
+    let [file] = files.as_slice() else { panic!("one file: {files:?}") };
+    assert_eq!(file.file_name().unwrap(), "pasted-image.png");
+    assert_eq!(std::fs::read(file).unwrap(), png, "the pasted bytes");
+    let chips = |cx: &mut VisualTestContext| {
+        face.read_with(cx, |f, _| {
+            f.attachments().iter().map(Attachment::progress).collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(chips(cx), ["\u{2191} 0%"], "a chip while it uploads");
+    assert!(cx.debug_bounds("composer-attachment").is_some(), "drawn in the composer");
+    assert_eq!(face.read_with(cx, ConversationView::draft), "look at", "nothing typed yet");
+
+    view.update_in(cx, |v, _window, cx| {
+        v.xfer_message(XferMsg::Progress { xfer, done: png.len() as u64 / 2 }, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(chips(cx), ["\u{2191} 50%"]);
+    let landed = "/Users/me/.slopty/drop/x/pasted-image.png".to_owned();
+    view.update_in(cx, |v, _window, cx| {
+        v.xfer_message(XferMsg::Finished { xfer, paths: vec![landed.clone()] }, cx);
+    });
+    cx.run_until_parked();
+    assert!(chips(cx).is_empty(), "the chip goes once it landed");
+    assert_eq!(face.read_with(cx, ConversationView::draft), format!("look at {landed} "));
+    assert!(!file.exists(), "the scratch copy here goes with the upload");
+    let typed: Vec<ClientMsg> = studio
+        .drain()
+        .into_iter()
+        .filter(|m| matches!(m, ClientMsg::Term { req, .. } if req.is_input()))
+        .collect();
+    assert!(typed.is_empty(), "the path waits in the draft: {typed:?}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let dropped = dir.path().join("design.png");
+    std::fs::write(&dropped, b"png").unwrap();
+    view.update_in(cx, |v, _window, cx| v.drop_files(tile, std::slice::from_ref(&dropped), cx));
+    cx.run_until_parked();
+    let Call::Upload(xfer, files, dest) = calls.try_recv().expect("an upload") else {
+        panic!("an upload");
+    };
+    assert_eq!((files, dest), (vec![dropped], Dest::Attachment), "a drop on the face attaches");
+    assert_eq!(face.read_with(cx, |f, _| f.attachments()[0].name.clone()), "design.png");
+
+    // The chip is the one place the upload is said, and the way to take it off the draft.
+    assert!(cx.debug_bounds(selector("upload", tile.item)).is_none(), "no header pill as well");
+    let remove = cx.debug_bounds("composer-attachment-remove").expect("the chip's way off");
+    cx.simulate_click(remove.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(chips(cx).is_empty(), "the chip goes at once");
+    assert!(matches!(calls.try_recv(), Ok(Call::Cancel(c)) if c == xfer), "and the upload stops");
+    let nodes = tree(cx);
+    assert!(!nodes.iter().any(|n| n.is("Button", Some("Cancel upload"))), "{nodes:#?}");
 }
 
 /// Files dropped on a shell go up to its directory; the tile shows how far the upload got,

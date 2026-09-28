@@ -41,9 +41,9 @@ fn a_place_is_its_last_two_directories_with_home_as_a_tilde() {
     assert_eq!(cwd_tail("/Users/w/src", Some("/Users/w/")), "~/src");
 }
 
-/// A header is its title, then its context, muted with no separator: a shell's directory
-/// (the one above it when the title already names it: "slopty" then "src"), a file's, a
-/// note's progress. A note with no tasks has none. (That the context is in the UI
+/// A header is its title, then its context, muted with no separator: a file's directory, a
+/// shell's (none when the title already names it: the status bar has the path), a note's
+/// progress as a count at the end. A note with no tasks has none. (That the context is in the UI
 /// face is `kit`'s `the_mono_face_is_for_ports_and_the_settings_file`: the test platform
 /// shapes every family alike.)
 #[gpui::test]
@@ -57,13 +57,19 @@ fn a_header_is_its_title_then_its_context_in_the_ui_face(cx: &mut TestAppContext
     let release = arrives(&view, cx, &fake, ItemKind::Note { text: tasks }, 3);
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Heading", Some("terminal slopty"))), "{nodes:#?}");
-    for label in ["src", "1 of 2 done"] {
-        assert!(nodes.iter().any(|n| n.is("Label", Some(label))), "{label}: {nodes:#?}");
-    }
+    assert!(nodes.iter().any(|n| n.is("Label", Some("src"))), "the file's: {nodes:#?}");
     assert!(!nodes.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains(" · "))));
-    for tile in [shell, release, file] {
-        assert!(cx.debug_bounds(selector("place", tile.item)).is_some(), "{tile:?}");
-    }
+    assert!(cx.debug_bounds(selector("place", file.item)).is_some(), "{file:?}");
+    assert!(cx.debug_bounds(selector("place", shell.item)).is_none(), "named by its title");
+    // A note keeps its name, and counts its tasks at the end as a command's time is said.
+    assert!(nodes.iter().any(|n| n.is("Heading", Some("note Release"))), "{nodes:#?}");
+    assert!(cx.debug_bounds(selector("place", release.item)).is_none(), "said once");
+    assert!(nodes.iter().any(|n| n.is("Status", Some("1 of 2 done"))), "{nodes:#?}");
+    let (name, count) = (
+        cx.debug_bounds(selector("name", release.item)).expect("the name"),
+        cx.debug_bounds(selector("tasks", release.item)).expect("the count"),
+    );
+    assert!(count.left() > name.right(), "after the name: {name:?} {count:?}");
     let note = arrives(&view, cx, &fake, ItemKind::Note { text: "plan".into() }, 4);
     view.update(cx, |v, cx| v.focus_tile(note, cx));
     cx.run_until_parked();
@@ -630,8 +636,9 @@ fn the_closed_notice_takes_the_tile_back(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("closed").is_none(), "the offer is taken");
 }
 
-/// The header's right end is one strip: the agent's pill at rest, fullscreen and close while
-/// the pointer is on the header, and the swap moves nothing (the strip, the title).
+/// The header's right end is one strip: the agent's pill at rest; the face toggle, fullscreen
+/// and close while the pointer is on the header, the toggle a control among them and never
+/// among the readouts; and the swap moves nothing (the strip, the title).
 #[gpui::test]
 fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -662,7 +669,7 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
     let (strip, name, pill) = (bounds(cx, "strip"), bounds(cx, "name"), bounds(cx, "agent"));
     assert!(strip.contains(&pill.center()), "the pill is in the strip");
     let side = crate::kit::icon_button_side(&Theme::default());
-    assert!(f32::from(strip.size.width) >= 2.0_f32.mul_add(side, -0.5), "room for both buttons");
+    assert!(f32::from(strip.size.width) >= 3.0_f32.mul_add(side, -0.5), "room for the buttons");
     assert!(!quads_at(cx, pill).is_empty(), "the pill shows at rest");
 
     let header = bounds(cx, "title").center();
@@ -673,6 +680,9 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
     assert_eq!(bounds(cx, "name"), name, "and so does the title");
     let close = cx.debug_bounds(selector("close", waiting.item)).expect("close drawn");
     assert!(strip.contains(&close.center()), "close sits in the same strip");
+    let face = cx.debug_bounds(selector("face", waiting.item)).expect("the face toggle");
+    assert!(strip.contains(&face.center()), "the toggle is one of the controls");
+    assert!(face.right() <= close.left(), "before close: {face:?} {close:?}");
 }
 
 /// A tabbed column's header is a tab row: a tab per tile with its title, the shown one
@@ -755,23 +765,328 @@ fn tiles_that_read_alike_are_numbered(cx: &mut TestAppContext) {
     let other = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
     cx.run_until_parked();
     let titles = view.read_with(cx, |v, cx| {
-        [first, second, other].map(|t| v.card_title(t, v.item(t).unwrap(), cx))
+        [first, second, other].map(|t| v.tile_title(t, v.item(t).unwrap(), cx))
     });
     assert_eq!(titles, ["Terminal", "Terminal 2", "Terminal"]);
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Heading", Some("terminal Terminal 2"))), "{nodes:#?}");
 }
 
-/// A shell titled by the directory it stands in shows the one above it as its place, and no
-/// place when that is all its place said.
+/// A shell titled by the directory it stands in shows no place: the directory above it read as
+/// the cwd, and the status bar has the whole path.
 #[test]
 fn a_place_does_not_repeat_the_title() {
     use crate::workspace::tile::place_beside;
     let beside = |place: &str, title: &str| place_beside(place.to_owned(), title);
-    assert_eq!(beside("~/src/slopty", "slopty").as_deref(), Some("~/src"));
-    assert_eq!(beside("oss/slopty", "slopty").as_deref(), Some("oss"));
-    assert_eq!(beside("/etc", "etc").as_deref(), Some("/"));
+    assert_eq!(beside("~/src/slopty", "slopty"), None);
+    assert_eq!(beside("~/drop-here", "drop-here"), None);
+    assert_eq!(beside("/etc", "etc"), None);
     assert_eq!(beside("slopty", "slopty"), None);
     assert_eq!(beside("~", "Terminal").as_deref(), Some("~"));
     assert_eq!(beside("~/src/myslopty", "slopty").as_deref(), Some("~/src/myslopty"));
+}
+
+/// A tile's leading slot at rest shows its kind: an idle agent keeps its glyph rather than a
+/// hollow ring that read as an unticked radio button.
+#[gpui::test]
+fn an_idle_agent_keeps_its_kind_in_the_slot(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let agent = SessionId::new();
+    let tile = opens(&view, cx, &fake, agent, fake.me, 1);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(agent) }, cx);
+    });
+    cx.run_until_parked();
+    let slot = cx.debug_bounds(selector("status", tile.item)).expect("the slot");
+    let idle = crate::icons::Status::Idle.label();
+    let marked = tree(cx).into_iter().any(|n| {
+        let [x, y, ..] = n.bounds;
+        slot.contains(&point(px(x + 1.0), px(y + 1.0))) && n.is("Image", Some(idle))
+    });
+    assert!(!marked, "the slot keeps the agent's glyph");
+}
+
+/// A long command that ended well while the human looked elsewhere reads in its header as
+/// the time it took alone, in the meta size: the slot's check says it is done, and that it went
+/// unseen is the navigator's to say. A screen reader still hears all of it.
+#[gpui::test]
+fn a_finished_command_reads_as_its_time_alone(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &fake, session, fake.me, 1);
+    let _other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    let done = Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(6) };
+    let full = done.label();
+    view.update_in(cx, |v, _w, cx| {
+        v.finished.insert(session, done);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let readout = cx.debug_bounds(selector("finished", tile.item)).expect("the readout");
+    assert!(tree(cx).iter().any(|n| n.is("Button", Some(full.as_str()))), "all of it, said");
+    let theme = Theme::default();
+    let words = |cx: &mut VisualTestContext, text: &str| {
+        cx.update(|window, _| {
+            let run = window.text_style().to_run(text.len());
+            let size = px(theme.typography.meta());
+            window.text_system().shape_line(text.to_owned().into(), size, &[run], None).width
+        })
+    };
+    let took = words(cx, &crate::kit::duration(Duration::from_secs(6)));
+    let pad = px(2.0 * theme.spacing.xs);
+    assert!(readout.size.width <= took + pad + px(0.5), "the time alone: {readout:?}");
+    assert!(cx.debug_bounds(selector("unseen", tile.item)).is_none(), "no dot on screen");
+}
+
+/// A note has one name, in its header as in every list: its title, with how far its tasks
+/// got as a count after it ("1/3"), never the count in the name's place.
+#[gpui::test]
+fn a_note_keeps_its_name_and_counts_its_tasks(cx: &mut TestAppContext) {
+    use crate::workspace::tile::note_count;
+    assert_eq!(note_count(1, 3), "1/3");
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let text = "# Release\n- [x] build\n- [ ] tag\n- [ ] ship".to_owned();
+    let note = arrives(&view, cx, &fake, ItemKind::Note { text }, 1);
+    let title = view.update(cx, |v, cx| {
+        let item = v.item(note).expect("the note").clone();
+        v.tile_title(note, &item, cx)
+    });
+    assert_eq!(title, "Release");
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Status", Some("1 of 3 done"))), "{nodes:#?}");
+    assert!(!nodes.iter().any(|n| n.label.as_deref() == Some("note 1 of 3 done")), "no count");
+}
+
+/// In the overview the words line up with the panes: a workspace's name and the "New
+/// workspace" glyph start on the edge of the glyphs the pane covers lead with, and the active
+/// block's ring is the full accent.
+#[gpui::test]
+fn the_overview_words_start_on_the_panes_glyphs(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let shells = three_shells(&view, cx, &fake);
+    cx.simulate_keystrokes("cmd-alt-o");
+    cx.run_until_parked();
+    let edge = shells
+        .iter()
+        .filter_map(|(_, t)| cx.debug_bounds(selector("shapes-label", t.item)))
+        .map(|b| f32::from(b.left()))
+        .fold(f32::INFINITY, f32::min);
+    let name = cx.debug_bounds("overview-name-0").expect("the name");
+    assert!((f32::from(name.left()) - edge).abs() < 0.5, "{name:?} on {edge}");
+    let new = cx.debug_bounds("overview-new-workspace").expect("the place for the next");
+    let pad = Theme::default().spacing.sm;
+    assert!((f32::from(new.left()) + pad - edge).abs() < 0.5, "its glyph on {edge}: {new:?}");
+    let accent = crate::colors::hsla(Theme::default().surfaces.accent);
+    let quads = cx.update(|window, _| window.painted_quads());
+    assert!(quads.iter().any(|q| q.border_color == accent), "the ring in the full accent");
+}
+
+/// On a phone the bar names the workspace as a navigation bar does, at 17 pt in the strong
+/// weight, with no "+": what it opened leads the "…" menu.
+#[gpui::test]
+fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("new-menu").is_none(), "no +");
+    let name = cx.debug_bounds("ws-tab-0").expect("the name");
+    let theme = Theme::default();
+    assert!(f32::from(name.size.height) >= theme.typography.title() + 2.0, "{name:?}");
+    click(cx, "more");
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let rows: Vec<String> =
+        tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label).collect();
+    assert_eq!(rows.first().map(String::as_str), Some("New terminal"), "{rows:?}");
+    assert!(rows.iter().any(|r| r == "New workspace"), "{rows:?}");
+}
+
+/// The column marks are short segments, not dots (dots after "+" read as the "…" button's
+/// glyph), and the columns in view are one thumb in the muted tone, not a bar per column: three
+/// of those in the title's tone read as "2 of 3 loaded".
+#[gpui::test]
+fn the_columns_in_view_are_one_thumb(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let _shells = three_shells(&view, cx, &fake);
+    let marks: Vec<Bounds<Pixels>> =
+        ["column-0", "column-1", "column-2"].iter().filter_map(|m| cx.debug_bounds(m)).collect();
+    assert_eq!(marks.len(), 3, "a mark per column");
+    for pair in marks.windows(2) {
+        assert!((pair[1].left() - pair[0].right()).abs() < px(0.5), "one run of targets");
+    }
+    let indicator = cx.debug_bounds("indicator").expect("the marks");
+    let theme = Theme::default();
+    let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+    let bars: Vec<&gpui::Quad> = quads
+        .iter()
+        .filter(|q| {
+            let (y, h) = (q.bounds.origin.y.0 / scale, q.bounds.size.height.0 / scale);
+            (h - 3.0).abs() < 0.1
+                && f32::from(indicator.top()) <= y
+                && y <= f32::from(indicator.bottom())
+        })
+        .collect();
+    let paint = |c| gpui::Background::from(crate::colors::hsla(c));
+    let thumbs = bars.iter().filter(|q| q.background == paint(theme.surfaces.text_muted)).count();
+    let rest = bars.iter().filter(|q| q.background == paint(theme.surfaces.border)).count();
+    let shown = view.read_with(cx, |v, _| {
+        let (x, w) = v.drawn_strip.view;
+        let columns = &v.drawn_strip.columns;
+        columns.iter().filter(|(at, wide)| at + wide > x + 1.0 && *at < x + w - 1.0).count()
+    });
+    assert!((1..3).contains(&shown), "some column is out of view: {shown}");
+    assert_eq!(
+        (thumbs, rest),
+        (shown, 3_usize.saturating_sub(shown)),
+        "a quad per column: {bars:#?}"
+    );
+    let joined = bars.iter().filter(|q| q.background == paint(theme.surfaces.text_muted));
+    let widths: Vec<f32> = joined.map(|q| q.bounds.size.width.0 / scale).collect();
+    let run = widths.iter().sum::<f32>();
+    let expected: f32 = (0..shown).map(|i| if i == 0 { 8.0 } else { 8.0 + 3.0 }).sum();
+    assert!((run - expected).abs() < 0.5, "the columns in view reach over their gaps: {widths:?}");
+}
+
+/// Chrome moves where it may: a tab grows in, the active fill slides between tabs, a menu
+/// drops in, a notice rises in and fades when its time is up, and a closing tile fades where
+/// it stood. Under Reduce Motion each lands at once.
+#[gpui::test]
+fn chrome_moves_and_holds_still_under_reduce_motion(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let _shells = three_shells(&view, cx, &fake);
+    // The focused column goes down into a workspace of its own: two tabs.
+    cx.simulate_keystrokes("cmd-alt-shift-down");
+    cx.run_until_parked();
+    view.update(cx, |v, _| v.set_animation(true));
+    let ws_id = |cx: &mut VisualTestContext, ix: usize| {
+        view.read_with(cx, |v, _| {
+            v.layout().workspaces().get(ix).map(slopty_client::layout::Workspace::id)
+        })
+        .expect("a workspace")
+    };
+    let menu_top = |cx: &mut VisualTestContext| {
+        click(cx, "more");
+        let top = cx.debug_bounds("menu").expect("the menu").top();
+        click(cx, "more");
+        top
+    };
+    let notice_top = |cx: &mut VisualTestContext, text: &str| {
+        view.update_in(cx, |v, _w, cx| v.show_notice(text.to_owned(), cx));
+        cx.run_until_parked();
+        cx.debug_bounds("said").expect("the notice").top()
+    };
+
+    click(cx, "ws-tab-0");
+    assert!(cx.debug_bounds("ws-tab-fill").is_some(), "the fill slides to the tab");
+    new_workspace_from_the_bar(cx);
+    let opened = ws_id(cx, 2);
+    let opening = Box::leak(format!("ws-tab-opening-{opened}").into_boxed_str());
+    assert!(cx.debug_bounds(opening).is_some(), "the new tab grows in");
+    click(cx, "ws-tab-0");
+    let (dropping, rising) = (menu_top(cx), notice_top(cx, "one"));
+    cx.executor().advance_clock(SAY_FOR);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("said").is_some(), "time's up: it fades where it stands");
+    assert!(view.read_with(cx, WorkspaceView::toast_text).is_none(), "and is no longer up");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("said").is_none(), "then it goes");
+    let last = focused(&view, cx).expect("a focused shell");
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
+    let fading = Box::leak(format!("closing-{}", last.item.as_uuid()).into_boxed_str());
+    assert!(cx.debug_bounds(fading).is_some(), "the closed tile fades where it stood");
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    click(cx, "ws-tab-1");
+    assert!(cx.debug_bounds("ws-tab-fill").is_none(), "the fill jumps");
+    new_workspace_from_the_bar(cx);
+    let third = ws_id(cx, 2);
+    let opening = Box::leak(format!("ws-tab-opening-{third}").into_boxed_str());
+    assert!(cx.debug_bounds(opening).is_none(), "the tab at its width at once");
+    click(cx, "ws-tab-0");
+    let (still_menu, still_notice) = (menu_top(cx), notice_top(cx, "two"));
+    assert!(dropping < still_menu - px(1.0), "the menu dropped in: {dropping:?} {still_menu:?}");
+    assert!(rising > still_notice + px(1.0), "the notice rose in: {rising:?} {still_notice:?}");
+    cx.executor().advance_clock(SAY_FOR);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("said").is_none(), "gone at once");
+    let next = focused(&view, cx).expect("a shell left to close");
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
+    let gone = Box::leak(format!("closing-{}", next.item.as_uuid()).into_boxed_str());
+    assert!(cx.debug_bounds(gone).is_none(), "the tile goes at once");
+}
+
+/// The overview's words show only while it opens (fading in once the zoom has all but landed)
+/// and leave at once as it closes; where chrome does not move they are simply there.
+#[test]
+fn the_overview_words_wait_for_the_zoom() {
+    use crate::workspace::strip::overview_words;
+    assert!(overview_words(gpui::div(), "w", true, true).is_some(), "opening: fading in");
+    assert!(overview_words(gpui::div(), "w", true, false).is_some(), "still: at once");
+    assert!(overview_words(gpui::div(), "w", false, true).is_none(), "closing: gone");
+}
+
+/// The server's word leads the status bar's one path, parted from the worker by the faint dot
+/// the path's steps are, and says what it costs.
+#[gpui::test]
+fn the_servers_word_says_what_it_costs(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    view.update_in(cx, |v, _w, cx| v.set_server_status(Some("server unreachable".into()), cx));
+    cx.run_until_parked();
+    let server = tree(cx).into_iter().find(|n| n.is("Status", Some("Server unreachable")));
+    let server = server.expect("the server's word");
+    assert_eq!(server.description.as_deref(), Some("direct links only"));
+    let place = cx.debug_bounds("status-place").expect("the path");
+    let word = cx.debug_bounds("server-status").expect("drawn");
+    assert!(place.contains(&word.center()), "one path with the worker: {place:?} {word:?}");
+}
+
+/// The empty workspace's ways to begin say where they open.
+#[gpui::test]
+fn the_ways_to_begin_say_where_they_open(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let _studio = connect(&view, cx, 1, "studio");
+    cx.run_until_parked();
+    for row in ["empty-terminal", "empty-agent", "empty-window"] {
+        let at = cx.debug_bounds(row).unwrap_or_else(|| panic!("{row}"));
+        let target = cx
+            .debug_bounds(Box::leak(format!("{row}-target").into_boxed_str()))
+            .unwrap_or_else(|| panic!("{row} names its worker"));
+        assert!(at.contains(&target.center()), "{row}: {at:?} {target:?}");
+    }
+}
+
+/// A remote window on its way turns its mark in its body, over what opens and where, and not
+/// in its header's slot as well.
+#[gpui::test]
+fn an_opening_window_turns_its_mark_in_the_body(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let tile = arrives(&view, cx, &fake, ItemKind::Window { window: slopty_core::WindowId(7) }, 1);
+    cx.executor().advance_clock(crate::screen::LOADING_GRACE);
+    cx.run_until_parked();
+    let working = crate::icons::Status::Working.label();
+    let slot = cx.debug_bounds(selector("status", tile.item)).expect("the slot");
+    let body = cx.debug_bounds(selector("waiting", tile.item)).expect("the body's block");
+    let nodes = tree(cx);
+    let in_slot = |n: &crate::a11y::Node| {
+        let [x, y, ..] = n.bounds;
+        slot.contains(&point(px(x + 1.0), px(y + 1.0)))
+    };
+    assert!(!nodes.iter().any(|n| in_slot(n) && n.is("Image", Some(working))), "no header mark");
+    assert!(body.size.height > px(40.0), "a mark and two lines: {body:?}");
+    assert!(nodes.iter().any(|n| n.is("Status", Some("Opening Window 7 on studio…"))));
 }

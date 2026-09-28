@@ -56,9 +56,6 @@ impl Listed {
     }
 }
 
-/// Environment variable naming the session a process runs in (its [`SessionId`]).
-pub const SESSION_ENV: &str = "SLOPTY_SESSION";
-
 /// The worker's session table. Cheap to clone; shared by every connection handler.
 #[derive(Clone)]
 pub struct Worker {
@@ -187,7 +184,7 @@ impl Worker {
         // run in from the environment.
         let mut env = self.inner.session_env.lock().clone();
         env.extend(req.env.iter().cloned());
-        env.push((SESSION_ENV.to_owned(), id.to_string()));
+        env.push((slopty_proto::ctl::SESSION_ENV.to_owned(), id.to_string()));
         let spec = SpawnSpec {
             command: req.command.clone(),
             // `~` is this worker's home: a client types it without knowing the path.

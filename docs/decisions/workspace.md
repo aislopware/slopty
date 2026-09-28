@@ -86,13 +86,23 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   | ⌘⌥↑ / ⌘⌥↓ | focus the tile above / below, else the workspace above / below |
   | ⌘⌥⇧← / ⌘⌥⇧→ | move the column left / right |
   | ⌘⌥⇧↑ / ⌘⌥⇧↓ | move the tile up / down, else to the workspace above / below |
+  | ⌘⌥Home / ⌘⌥End | focus the first / last column |
+  | ⌘⌥⇧Home / ⌘⌥⇧End | move the column to the start / end of the strip |
   | ⌘1 … ⌘9 | focus column N |
+  | ⌘⌥⇞ / ⌘⌥⇟ | focus the workspace above / below |
+  | ⌘⌥⇧⇞ / ⌘⌥⇧⇟ | move the workspace up / down |
+  | ⌃⌘⌥⇞ / ⌃⌘⌥⇟ | carry the column to the workspace above / below |
+  | ⌘⌥1 … ⌘⌥9 | focus workspace N (past the last, the trailing empty one) |
+  | ⌃⌘⌥1 … ⌃⌘⌥9 | carry the column to workspace N |
+  | ⌘⌥` | back to the workspace focused before |
   | ⌘[ / ⌘] | consume into, or expel from, the column left / right |
   | ⌘R / ⌘⇧R | next / previous preset width |
   | ⌘⌥- / ⌘⌥= | column 10 % narrower / wider |
   | ⌘⇧↩ | maximize the column (full width, again to restore) |
   | ⌃⌘F | fullscreen tile |
   | ⌘⌥C | centre the column |
+  | ⌘⌥⇧C | centre the fully visible columns as a group |
+  | ⌘⌥⇧F | widen the column over the room the visible columns leave |
   | ⌘⌥T | tabbed column |
   | ⌘⌥O (or a pinch in) | overview |
   | ⌘T, ⌘N | new shell |
@@ -103,6 +113,8 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   | ⌘⇧P | command palette |
   | ⌘F / ⌘⇧F | find in the tile / in every tile |
   | ⌘E | name the tile |
+  | ⌘L | the page's address (with no page focused, "Open URL…") |
+  | ⌘← / ⌘→ | page back / forward, while the page itself does not hold the keyboard |
   | ⌘S | save the file tile |
   | ⌘⇧A | next agent that needs you |
   | ⌘⇧O | point the others at the tile |
@@ -187,7 +199,8 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   and any http or https address typed into the palette. An existing tile for the same address
   is focused rather than opened twice. Chrome: the header shows the page's title, then the
   address as quiet text, "←" while there is history, and "↻". No address field and no tabs:
-  the palette is the address bar.
+  the palette is the address bar. (Amended 2026-09-27: the header has an address field now,
+  ⌘L or a click on the address; see ui.md, "A page's address is its header's field".)
   A page with the keyboard gets ⌘C, ⌘X, ⌘V, ⌘A, ⌘Z and ⇧⌘Z: the Mac's key monitor hands them
   to the page before the workspace's key equivalents can take them (ui.md, "The browser
   tile's native view").
@@ -349,3 +362,224 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   washes the share the tile would take, the lower half of a column of one; into a tabbed
   column, all of it. Both are `accent_fill`, the accent as a mark.
   Test: ui `the_drop_line_sits_on_the_divider_and_a_join_washes_its_share`.
+
+- ✅ **Every ported niri op has a key and a palette line** (2026-09-28). The 2026-09-28 gap
+  audit found layout ops that only tests could reach: focusing a workspace by step, by number
+  or back to the previous one, carrying a column to another workspace, moving a workspace,
+  moving a column to either end, centring the visible columns and filling the free width. All
+  of them are useful here, so none was deleted; each is bound (the key table above) and
+  listed in the palette. The keys translate niri's defaults under one rule: ⌘⌥ is niri's Mod
+  for the layout, and ⇧ moves the focused thing at the level the key names. So Home and End
+  are the strip's ends, as niri's Mod+Home/End, and ⌘⌥⇧Home carries the column there
+  (niri's Mod+Ctrl+Home). Page Up and Down are the workspace level, as niri's Mod+Page_Up.
+  With ⇧ they move the workspace itself (niri's Mod+Shift), and with ⌃ they carry the column
+  (niri's Mod+Ctrl). Digits follow the same split: ⌘N was already column N, so ⌘⌥N is
+  workspace N (niri's Mod+N). The column's carry to workspace N takes ⌃ too, because ⇧ on a
+  digit reaches the app as its symbol on most layouts. ⌘⌥` goes back to the previous
+  workspace, since niri's Mod+Tab would be macOS's app switcher. ⌘⌥⇧C and ⌘⌥⇧F are niri's
+  Mod+Ctrl+C and Mod+Ctrl+F, with ⇧ standing for Ctrl as on the arrows. A column carried to a
+  workspace past the last lands in the trailing empty one, which then gets a new empty one
+  after it. Moving a single tile to another workspace needs no key of its own, since
+  ⌘⌥⇧↑/↓ already does it from the top or bottom tile.
+  Tests: client `moving_a_column_to_a_numbered_workspace_clamps_to_the_trailing_one`, ui
+  `workspace::tests::niri_keys` (a key per family, and a palette line with its key per op).
+
+- ✅ **A file tile edits any file up to 16 MiB** (2026-09-28). The tile turned into a viewer
+  past 2 000 lines or 512 KiB, and most source files in a mature repository are past the line
+  count, so the one editor Slopty has refused the files a fix is usually in. Now the worker
+  reads the whole file up to `FILE_BYTES`, 16 MiB, and the tile edits all of it.
+  - **Two ways down, two ways up.** A text of 64 KiB or less (`INLINE_FILE_BYTES`, the
+    clipboard's inline limit) still rides the control stream in `FileRead::Text`. A larger one
+    is announced there as `FileRead::Streamed { xfer, … }`, and its text follows on a bulk
+    stream (`Purpose::FileText`) under the same transfer, at the bulk priority uploads and
+    clipboard fetches use. The control stream also carries keystrokes, and a frame of a few
+    megabytes on it would hold every key behind it. A save goes up the same way: over 64 KiB,
+    the client's link turns `ClientMsg::WriteFile` into a bulk stream (`Purpose::Save { path,
+    base_modified_ms }`), and the worker answers it with `WorkerMsg::Written`, as it answers an
+    inline save. A save stream that breaks is answered as a failed save, from whichever side
+    saw it break.
+  - **The join is the link's.** The announcement and its text arrive on different streams,
+    in either order. `slopty_client::link::files::Join` holds whichever comes first and hands
+    the tile a plain `FileRead::Text` once both are there, so nothing above the link knows a
+    read was streamed. The order is the control stream's: a later read of the same path, inline
+    or streamed, supersedes one still arriving, and its text is dropped when it lands, so a
+    slow stream never puts back an older file. A broken stream reaches the tile as a missing
+    file with the reason, so a first read never waits for good.
+  - **The watch and the conflict path are unchanged, at any size.** The worker sends a
+    watched file again when its stamp moves. A streamed send finishes before the next file is
+    looked at, so a file rewritten faster than the link carries it is sent as it stands when
+    the last send ends, not once per change. The conflict check is the modification time, as
+    before. A file on disk past the cap no longer refuses a save, since a tile only ever holds
+    whole files now. One that grows past the cap under an edit reads as `TooLarge`, which the
+    tile treats like any change on disk: the edit stays and the bar offers "Reload" and
+    "Overwrite".
+  - **Why 16 MiB.** It is the codec's frame limit, so the number already bounds every message
+    in the protocol, but that is not what sets it: a bulk stream has no frame. What sets it is
+    what a tile holds and does with the text. The editor's rope, the base the edit is weighed
+    against, the find's case fold and a save's copy make four to five copies, about 80 MB for
+    a 16 MiB file, which an iPhone can hold for one tile. On a 20 Mbit/s tailnet path, the text
+    takes about 7 s to arrive. VS Code's own large-file mode starts at 20 MB or 300 000 lines
+    (`LARGE_FILE_SIZE_THRESHOLD` in `textModel.ts`, read 2026-09-28) and turns off its
+    tokenizing there, which is the same trade the colour limit below makes.
+  - **Past the cap** the tile says so plainly ("Too large to edit here: 40.0 MB, past
+    16.0 MB") and offers "Open in editor" and "Open in pager". Each opens a terminal tile on
+    the file's worker, in the file's directory, running the terminal's
+    `url::editor_command` (`${EDITOR:-vi} +line 'path'`) or `${PAGER:-less} 'path'` through
+    the user's login shell (`file::terminal_command`), so the shell's rc files set `$EDITOR`,
+    `$PAGER` and `PATH`. A new tile rather than typing into the last shell, because that shell
+    may be on another worker or running something.
+  - **Colours stop at 2 MiB** (`file::COLOURED_BYTES`). The highlighter parses the whole text
+    off the UI thread once typing pauses, at 80–160 µs a line. That is 3 s for 20 000 lines
+    and 30 s for 200 000, and a parse that has started runs to its end, so on a 200 000-line
+    file the pauses of ordinary typing kept several cores parsing at once (a profile showed
+    five threads in `highlight::spans` for the whole run). A larger file is plain text. An
+    incremental parse, from the edited line until the parser's state matches the last parse's,
+    would lift the limit.
+  - **Find** counts its hits in the whole text at once (`file::hit_lines`: one case fold,
+    one pass for the matches, the newlines between them counted), not a copy of every line. A
+    reload's diff gets 8 ms before it settles for an approximate answer (`DIFF_WITHIN`), and a
+    small change to a large file ends well before that, since the common head and tail are
+    trimmed first.
+  - **gpui-kit.** The editor has no line limit. Its doc's "about 50K lines" is not enforced,
+    and 200 000 lines type and page within a frame. Two costs grew with the file and are fixed
+    in the fork (not yet landed). `TextWrapper::set_font` rewrapped every line on any font
+    change even with soft wrap off, which cost about 130 ms per frame while the overview zooms
+    a 200 000-line tile. `Input` copied the whole rope into its accessibility value on every
+    frame while an accessibility client was attached, which cost about 4 ms per frame at
+    14 MB. Frame time for 2 000, 20 000 and 200 000 lines, with and without the fork fix, is
+    in MEASUREMENTS.md (2026-09-28, "a file tile of any size").
+  - Tests: proto goldens `worker_file`, `worker_file_streamed`, `worker_file_too_large`,
+    `uni_bulk_file_text`, `uni_bulk_save`. Worker `file` unit tests: 200 000 lines read whole,
+    the inclusive cap and `TooLarge` past it, what `announce` streams, and a save past the cap
+    refused. Client `link::files` unit tests: the join in either order, a newer read dropping
+    a stale text, and a broken stream. Worker e2e
+    `a_large_file_streams_down_whole_and_its_save_streams_up`: a 200 000-line file through the
+    real link, its watched change, a streamed save landing, a stale one conflicting, and
+    `TooLarge`. UI: `a_twenty_thousand_line_file_stays_editable`,
+    `a_file_past_the_cap_offers_a_terminal_instead`,
+    `a_file_grown_past_the_cap_under_an_edit_keeps_it`, `a_file_past_the_colour_limit_is_plain`
+    and `hit_lines_agree_with_find_hits`. App e2e
+    `a_twenty_thousand_line_file_is_edited_near_its_end_and_saved`.
+
+- ✅ **A file tile saves a copy onto this device** (2026-09-28). The user wanted to keep a
+  worker's file here, not just edit it there. "Save a copy…" is in the palette (`SaveCopy`).
+  File tiles have no context menu, and the header gets no button.
+  - **It is a download, not the editor's text.** The file comes down through
+    `Remote::download`, the path a file dragged out of the app already takes: bulk streams,
+    resumed after a cut and checked against the worker's digest. So the copy is the bytes on
+    the worker's disk, whatever the tile shows. That covers a text past the inline limit, a
+    binary file, and one past `FILE_BYTES`, which the tile will not open. An unsaved edit is
+    not in the copy; ⌘S puts it on the worker first.
+  - **Mac:** the save panel (GPUI's `prompt_for_new_path`) opens in `~/Downloads` on the
+    file's name. The file lands in a hidden directory beside the chosen path and is renamed
+    into place, as a kept drag promise is, so a half-arrived file never carries the chosen
+    name. **iPhone and iPad:** GPUI has no save panel there, so the file comes into the
+    outbox, and `UIDocumentPickerViewController` in export mode (`file_drop::picker::export`,
+    the folder tile's "Save to Files…") copies it where the person chooses. The copy here is
+    deleted once the sheet is done. A failure is a notice: "name was not saved: why".
+  - **A tile with no editor still takes the keyboard.** A file tile gave its editor the
+    focus even while the body showed a notice (not text, too large, not readable) and drew no
+    editor. The focus then sat on nothing drawn, and a palette action fell to the window's root.
+    Those are the files a copy is most wanted for. The tile now tracks a focus handle of its own
+    that holds the keyboard while no editor is drawn. The editor takes it over once text
+    arrives, and gives it back if the text goes.
+  - Test: `workspace::tests::save_copy::a_file_tiles_copy_is_saved_whole_where_the_panel_says`
+    (headless workspace; the test platform's save panel is answered with a path, and nothing
+    is shown).
+
+- ✅ **The overview draws miniatures** (2026-09-28, design critique round 3 #16). Below zoom
+  0.5 the overview laid each shell's, file's and note's own surface over its body and wrote a
+  cover on it: glyph, title, one meta line and a few of its last lines at chrome size. The
+  overview read as a list of words, and no pane looked like the tile it stood for. niri and
+  Mission Control show the windows themselves, scaled. Now nothing covers the body.
+  - **What a miniature is.** Each tile is its own body at the overview's zoom. A shell's
+    grid, a file's editor, a note's Markdown and a conversation face are laid out at their
+    resting size and painted scaled. While the zoom moves, the terminal and the chrome paint
+    from the raster ladder. A remote window or display is its last decoded frame, which is
+    already a texture. A page is the snapshot `takeSnapshot` leaves when the overview covers
+    it. Colours, the cursor, a note's checkboxes and a face's last turn are all there, because
+    this is the tile's own drawing.
+  - **Nothing is built for it.** An unfocused body is an `Entity::cached` view. The frame
+    replays it until its own content changes, so a still miniature costs a replay and new
+    output redraws only its tile. The bodies were already drawn under the covers, so dropping
+    the covers took the only per-frame cost off. Held open over five floods, a frame's p50
+    fell from 4.3 ms to 1.7 ms. The opening spring's worst frame fell from 8.9–9.5 ms (over a
+    120 Hz frame) to 5.7–6.2 ms (MEASUREMENTS.md, 2026-09-28, "the overview's miniatures").
+    With the overview closed there is no miniature.
+  - **The label.** Round 4's facts stay, as one thin line at chrome size across each
+    miniature's foot: the state (else the kind) in the glyph slot, the title, then the place
+    and the worker where there are several, in the meta size. It sits on the content surface
+    under a subtle hairline, its glyph on the edge where the workspace's name starts. It
+    fades in with the overview's other words once the zoom has all but landed, is not drawn
+    while the overview closes, and under Reduce Motion is drawn at once. It takes no clicks,
+    so a click on it goes to the tile.
+  - **Rejected: a separate miniature cache.** The brief asked for a raster of each tile or its
+    rows drawn small, rebuilt at about 2 Hz while the overview is open. GPUI's glyph
+    rasteriser is crate-private, so a CPU raster could only be coloured blocks, not text.
+    Lines drawn small would repeat the terminal element's work with less in them: no colour,
+    no cursor, no images. Either one would draw on top of the body, which stays drawn to keep
+    the keyboard.
+  - **Not done: holding a flooding shell to 2 Hz while the overview is open.** It would belong
+    in `TerminalView`'s own notify. The held-open numbers above do not need it.
+  - Supersedes, in `ui.md`'s "The overview is shapes on lifted cards", the body's surface laid
+    over its view and the centred icon and title.
+  - Tests: ui `an_open_overview_draws_a_miniature_per_tile_and_none_while_closed`,
+    `a_small_overview_draws_tiles_as_miniatures` and
+    `overview_labels_say_state_place_and_worker`. Smooth
+    `twenty_mixed_tiles_open_hold_and_close_the_overview_on_the_mac`.
+
+- ✅ **The focused tile is replayed too** (2026-09-28, hot-path audit). A tile's body is an
+  `Entity::cached` view, but the focused one was always drawn afresh. Any view's notify marks
+  the workspace dirty, so a stream, a flooding neighbour or an animation step drew the focused
+  shell, face or file again with every frame. GPUI already redraws every view when focus
+  moves (`Window::focus` and `blur` refresh the window, and a cached view is never replayed
+  while refreshing), so staleness was never the reason.
+  - **The rule** (`WorkspaceView::cacheable`). A body is drawn afresh in the frame the focus
+    comes to it or leaves it, and a focused body in the frame the keyboard moves at all, even
+    within the tile: a replayed body replays its input handler and key listeners, so a shell
+    replayed after ⌘E put the keyboard in its header's rename field took the typed name
+    (`a_tile_is_named_from_its_header`). Otherwise it is replayed, whatever inside it has the
+    keys. That is the view itself (a shell's grid, a remote window, a folder, a file's editor
+    the file view observes) or a gpui-kit field, and both notify for every key, caret blink,
+    selection and input-method change.
+  - **A face and a note too, while their fields have the keys** (amended 2026-09-28). The
+    first cut drew a body afresh with every frame while a text field inside it had the keys,
+    on the belief that gpui-kit's input state is a model a cached view never sees change. It
+    is a view: `Textarea` and `Input` render the state entity itself, so its notify dirties
+    every view above it in the last frame's dispatch tree, cached ones included
+    (`Window::mark_view_dirty`). `ConversationView` (composer, deny field, find field) and
+    `NoteView` (its editor) also observe their fields, which says the dependency in their own
+    code. A neighbour's echo beside a
+    focused face fell from 0.72–1.28 ms to 0.27–0.50 ms p50, and the face rendered in none of
+    420 frames against all of them. The new tests fail under the old rule and still pass with
+    the observers removed, which is how the premise was found wrong. The same holds for a shell's find bar, so
+    the keyboard's place inside a tile no longer matters to the rule
+    (`a_focused_shell_whose_find_bar_has_the_keys_is_replayed_until_it_is_typed_in`).
+  - **A note reads as a list.** A read note was a column of every segment (prose, task, fence),
+    clipped by the tile. Each segment carries a gpui-kit `TextView`, which wraps itself in a
+    `track_focus` div, and GPUI puts every tracked focus handle in the frame's tab-stop map,
+    tab stop or not. A replayed view replays that map's whole insertion history, so a 64 KiB
+    note of task lines (about 3 200 segments) re-inserted about 3 200 nodes into a sum tree on
+    every frame another tile caused. `NoteView` now draws its segments in a gpui `list`: a frame
+    lays out and paints the rows in view, and a long note scrolls, as the strip already lets a
+    vertical swipe scroll what is under it. A changed text re-measures only the rows between
+    the first and last that differ, so ticking a box keeps the place. A shell's echo beside two
+    such notes fell from 30.7–43.2 ms to 0.49–0.82 ms p50. The note's whole text stays its
+    `Document` node's value, so a screen reader reaches every task; the boxes in the tree are
+    those drawn, and a task out of view is ticked by scrolling to it or in the editor.
+  - **Titles are worked out when they can change.** The twins' numbers and every item's derived
+    title are worked out after the workspace's own notify (`observe_self`), a command starting
+    or ending, or a window being named. A frame another tile causes changes no title. The pass
+    used to read every shell's view each frame, and GPUI wakes a window for any entity its
+    last frame read, so an off-screen shell's output cost a frame. A program's new title
+    notifies the chrome only when its tile's title follows it. A note's title and task count
+    are kept per text, refreshed by `item_changed`.
+  - Numbers in MEASUREMENTS.md, 2026-09-28, "the focused tile cached" and "a note drawn as a
+    list, a focused face and note replayed". Tests: ui
+    `the_focused_shell_is_replayed_while_a_neighbour_draws`,
+    `the_focused_face_is_replayed_while_a_neighbour_draws`,
+    `the_focused_note_is_replayed_while_a_neighbour_draws`,
+    `note::tests::a_long_note_draws_the_rows_in_view_and_scrolls`,
+    `a_focused_shell_whose_find_bar_has_the_keys_is_replayed_until_it_is_typed_in`,
+    `a_programs_title_draws_the_chrome_only_when_the_tiles_title_follows`,
+    `markdown::tests::task_counts_agree_with_the_segments`.

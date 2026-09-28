@@ -14,7 +14,7 @@ expression: "decode(\"compact\").snapshot()"
             lines: 1
             chars: 35
             full: ~
-          images: 0
+          images: []
           command: ~
     - id: "00000000-0000-4000-8000-000000000015:0"
       at_ms: 1790482612393
@@ -53,7 +53,7 @@ expression: "decode(\"compact\").snapshot()"
             lines: 1
             chars: 52
             full: ~
-          images: 0
+          images: []
           command: /compact
     - id: 00000000-0000-4000-8000-000000000025
       at_ms: 1790482629010

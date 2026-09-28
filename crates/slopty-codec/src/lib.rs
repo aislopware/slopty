@@ -7,8 +7,8 @@
 //!   control, no reordering, infinite GOP with long-term references, Annex B out.
 //! * `Decoder` (macOS, iOS) — a `VTDecompressionSession` fed Annex B; it rebuilds its format
 //!   description from the parameter sets in front of each keyframe.
-//! * [`audio`] — Opus through `AudioConverter` (encode on the worker, decode anywhere) and an
-//!   `AudioQueue` player.
+//! * [`audio`] — Opus through `AudioConverter` (encode on the worker, decode anywhere) and a player
+//!   that renders from its jitter ring on the output unit's I/O thread.
 //!
 //! Output is delivered on VideoToolbox's own threads through the sink closure given at
 //! construction; sinks must be cheap (hand the packet to a channel).
@@ -62,4 +62,7 @@ pub enum CodecError {
     /// The codec is not supported on this platform.
     #[error("unsupported codec {0:?}")]
     Unsupported(slopty_proto::screen::VideoCodec),
+    /// This platform has no audio encoder (`docs/decisions/platform.md`, "Linux seams").
+    #[error("no audio encoder on this platform")]
+    NoAudio,
 }

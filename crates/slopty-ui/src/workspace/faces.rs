@@ -22,6 +22,7 @@ use super::WorkspaceView;
 use super::actions::ToggleConversation;
 use crate::conversation::composer::{self, Step};
 use crate::conversation::{ConversationView, FaceEvent};
+use crate::icons::Status;
 
 /// What the workspace keeps about faces.
 #[derive(Default)]
@@ -47,6 +48,18 @@ impl WorkspaceView {
     pub fn face_shown(&self, session: SessionId) -> bool {
         let agent = self.agent_state(session).is_some_and(|a| a.status != AgentStatus::None);
         agent && self.faces.chosen.get(&session).copied().unwrap_or_else(|| self.layout.is_phone())
+    }
+
+    /// Whether `session`'s tile shows its face with an approval open in it: the card then says
+    /// what the agent waits on, and nothing else on the tile says it again.
+    #[must_use]
+    pub fn face_asks(&self, session: SessionId, cx: &gpui::App) -> bool {
+        self.face_shown(session)
+            && self
+                .faces
+                .views
+                .get(&session)
+                .is_some_and(|v| v.read(cx).approvals().prompt().is_some())
     }
 
     /// The face of `session`, once made.
@@ -207,6 +220,8 @@ impl WorkspaceView {
                 self.send_session(session, ClientMsg::Conversation(expand));
             }
             FaceEvent::ShowTerminal => self.show_face(session, false, cx),
+            FaceEvent::Attach { id, what } => self.attach_to_face(session, id, what, cx),
+            FaceEvent::Detach { id } => self.detach_from_face(session, id, cx),
         }
     }
 
@@ -254,10 +269,32 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         if let Some(view) = self.faces.views.get(&session) {
+            let was = (self.face_live(session, cx), view.read(cx).first_prompt());
             view.update(cx, |v, cx| v.apply(event, cx));
             // The navigator's line for the tile may say something new.
             gpui::App::notify(cx, self.chrome.navigator.entity_id());
+            // The header's mark and a tile named by its first prompt follow the face only when
+            // the face's news changes them: a streaming answer must not draw the frame once a
+            // delta.
+            if (self.face_live(session, cx), view.read(cx).first_prompt()) != was {
+                cx.notify();
+            }
         }
+    }
+
+    /// Whether `session`'s face shows the agent mid-turn ([`ConversationView::mid_turn`]).
+    fn face_live(&self, session: SessionId, cx: &gpui::App) -> bool {
+        self.faces.views.get(&session).is_some_and(|view| view.read(cx).mid_turn())
+    }
+
+    /// `session`'s agent in the status vocabulary, as a tile marks it: the worker's word, but
+    /// never calmer than working while the face shows a call in flight. A hook can lag or be
+    /// missing; the transcript the face projects then knows more, and saying "Idle" over a
+    /// spinning row reads as a broken status. Only the mark follows: nothing is driven.
+    pub(super) fn agent_mark(&self, session: SessionId, cx: &gpui::App) -> Option<Status> {
+        let status = self.agent_state(session).and_then(Status::of_agent)?;
+        let calm = matches!(status, Status::Idle | Status::Done);
+        Some(if calm && self.face_live(session, cx) { Status::Working } else { status })
     }
 
     /// A followed session's permission prompt was asked or settled.

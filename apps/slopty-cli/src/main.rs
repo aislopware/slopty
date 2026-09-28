@@ -3,7 +3,7 @@
 //! * `slopty workers|terminals|open|send|wait|…` drive workers through the server, one verb each
 //!   (`slopty_proto::orchestration`), as text or `--json`.
 //! * `slopty mcp` is the same verbs as an MCP server on stdio, for an AI agent.
-//! * `slopty server …` runs `slopty-server` as a `LaunchAgent`.
+//! * `slopty server …` runs `slopty-server` as a `LaunchAgent` or a systemd user unit.
 //! * `slopty worker …` talks to the local `slopty-worker` over its control socket.
 //! * `slopty hook` is the Claude Code hook relay (`slopty hook install` registers it).
 //! * `slopty add <host[:port]>` remembers a worker (today's `slopty-worker`) by its address.
@@ -35,7 +35,8 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "slopty", version, about)]
 struct Cli {
-    /// Data directory (default: `$SLOPTY_DATA_DIR` or `~/Library/Application Support/Slopty`).
+    /// Data directory (default: `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty` or
+    /// `$XDG_DATA_HOME/slopty`).
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     /// The server, `host[:port]` (default: `$SLOPTY_SERVER`, else `server` under `[client]` in
@@ -46,6 +47,11 @@ struct Cli {
     /// Print the answer as JSON.
     #[arg(long, global = true)]
     json: bool,
+    /// For a verb that changes something: a name for its effect, such as a UUID. Run again
+    /// with the same key, the command prints what the first run did instead of doing it twice.
+    /// A fresh key covers this run's own retries when omitted.
+    #[arg(long, global = true, value_name = "KEY")]
+    idempotency_key: Option<slopty_proto::orchestration::IdempotencyKey>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -149,6 +155,8 @@ enum BenchCmd {
         count: u32,
     },
     /// Stream a window or display and report what arrived.
+    // Apple only: this side decodes with VideoToolbox (`docs/decisions/platform.md`).
+    #[cfg(target_vendor = "apple")]
     Screen {
         /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
@@ -202,7 +210,7 @@ async fn run() -> Result<ExitCode> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
-    let data_dir = cli.data_dir.unwrap_or_else(client::data_dir);
+    let data_dir = cli.data_dir.unwrap_or_else(slopty_platform::dirs::data_dir);
     let done = match cli.cmd {
         Cmd::Worker { cmd } => workerctl::run(cmd, cli.server.as_deref(), &data_dir).await,
         Cmd::Hook { cmd: None } => {
@@ -224,7 +232,10 @@ async fn run() -> Result<ExitCode> {
             }
             Ok(())
         }
-        Cmd::Verb(cmd) => verbs::run(cmd, cli.server.as_deref(), &data_dir, cli.json).await,
+        Cmd::Verb(cmd) => {
+            let key = cli.idempotency_key;
+            verbs::run(cmd, cli.server.as_deref(), &data_dir, cli.json, key).await
+        }
         Cmd::Mcp => mcp::run(cli.server.as_deref(), &data_dir).await,
         Cmd::Server { cmd } => service::server(cmd, &data_dir).await,
         Cmd::Add { address } => client::add(&data_dir, &address).await,
@@ -240,18 +251,27 @@ async fn run() -> Result<ExitCode> {
         Cmd::Bench { cmd: BenchCmd::Echo { worker, count } } => {
             bench::echo(&data_dir, worker.as_deref(), count).await
         }
+        #[cfg(target_vendor = "apple")]
         Cmd::Bench { cmd: BenchCmd::Screen { worker, list, .. } } if list => {
-            bench::list(&data_dir, worker.as_deref()).await
+            bench::screen::list(&data_dir, worker.as_deref()).await
         }
+        #[cfg(target_vendor = "apple")]
         Cmd::Bench {
             cmd:
                 BenchCmd::Screen {
                     worker, window, display, seconds, scale, fps, mbit, max_stalls, ..
                 },
         } => {
-            let spec =
-                bench::ScreenBench { window, display, seconds, scale, fps, mbit, max_stalls };
-            bench::screen(&data_dir, worker.as_deref(), spec).await
+            let spec = bench::screen::ScreenBench {
+                window,
+                display,
+                seconds,
+                scale,
+                fps,
+                mbit,
+                max_stalls,
+            };
+            bench::screen::screen(&data_dir, worker.as_deref(), spec).await
         }
     };
     done.map(|()| ExitCode::SUCCESS)

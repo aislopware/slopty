@@ -1,5 +1,7 @@
 //! ptyd + worker + a client, all on this machine: connect, open a shell, see its output, close it.
 
+#![cfg(target_vendor = "apple")]
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
@@ -212,11 +214,11 @@ mod tests {
     }
 
     /// The worker's `doctor` report, from its control socket.
-    async fn doctor(ctl_sock: &std::path::Path) -> slopty_worker::ctl::Health {
+    async fn doctor(ctl_sock: &std::path::Path) -> slopty_proto::ctl::Health {
         use tokio::io::AsyncWriteExt as _;
         let stream = tokio::net::UnixStream::connect(ctl_sock).await.unwrap();
         let (rd, mut wr) = stream.into_split();
-        let mut line = serde_json::to_vec(&slopty_worker::ctl::CtlRequest::Doctor).unwrap();
+        let mut line = serde_json::to_vec(&slopty_proto::ctl::CtlRequest::Doctor).unwrap();
         line.push(b'\n');
         wr.write_all(&line).await.unwrap();
         // The worker answers a control request and closes without waiting to be half-closed, so
@@ -229,7 +231,7 @@ mod tests {
         let mut reply = String::new();
         BufReader::new(rd).read_line(&mut reply).await.unwrap();
         match serde_json::from_str(reply.trim()).unwrap() {
-            slopty_worker::ctl::CtlReply::Doctor(health) => health,
+            slopty_proto::ctl::CtlReply::Doctor(health) => health,
             other => panic!("unexpected ctl reply: {other:?}"),
         }
     }
@@ -920,7 +922,7 @@ mod tests {
         serving.abort();
     }
 
-    /// A file behind a file card is watched: a write on the worker reaches the client as a
+    /// A file behind a file tile is watched: a write on the worker reaches the client as a
     /// fresh `WorkerMsg::File` unasked, its removal too, and an emptied watch list stops it.
     #[tokio::test]
     async fn a_watched_file_is_read_again_when_it_changes() {
@@ -2087,8 +2089,8 @@ mod tests {
         };
         let screen = link.screen(stream, codec);
 
-        // The worker notices there is nothing to capture and says so, exactly as the app's canvas
-        // would hear it.
+        // The worker notices there is nothing to capture and says so, exactly as the app's
+        // workspace would hear it.
         let mut states = Vec::new();
         let deadline = tokio::time::Instant::now()
             .checked_add(Duration::from_secs(5))
@@ -3224,8 +3226,8 @@ mod tests {
     async fn wait_for_stats(
         ctl: &std::path::Path,
         within: Duration,
-        want: impl Fn(&slopty_worker::screen::ScreenStats) -> bool,
-    ) -> Option<slopty_worker::screen::ScreenStats> {
+        want: impl Fn(&slopty_proto::ctl::ScreenStats) -> bool,
+    ) -> Option<slopty_proto::ctl::ScreenStats> {
         let deadline =
             tokio::time::Instant::now().checked_add(within).expect("a deadline inside the clock");
         while tokio::time::Instant::now() < deadline {
@@ -3241,7 +3243,7 @@ mod tests {
     }
 
     /// The live streams as `slopty worker screens` reads them.
-    async fn screens(ctl: &std::path::Path) -> Vec<slopty_worker::screen::ScreenSummary> {
+    async fn screens(ctl: &std::path::Path) -> Vec<slopty_proto::ctl::ScreenSummary> {
         use tokio::io::AsyncWriteExt as _;
 
         let Ok(mut stream) = tokio::net::UnixStream::connect(ctl).await else {
@@ -3528,6 +3530,66 @@ mod tests {
         settled(&mut worker).await;
         board.0.write(&[vec![(text.clone(), b"nobody watches".to_vec())]]).unwrap();
         assert!(!arrives(&mut worker, Duration::from_millis(800), offered).await, "unwatched");
+    }
+
+    /// A shell's paste of a picture: the client's offer, sent ahead, is fetched and put on the
+    /// worker's pasteboard, and the shell's input behind the paste (the chord, then a line
+    /// typed after it) waits until the picture is there. On a named pasteboard, never the
+    /// user's.
+    #[tokio::test]
+    async fn a_shells_picture_paste_sets_the_pasteboard_before_the_chord_goes_on() {
+        use slopty_input::pasteboard::{Board as _, ORIGIN_TYPE, Rep};
+        use slopty_proto::terminal::PasteChord;
+        use slopty_proto::transfer::{ClipItem, ClipMsg, Offer, Peer};
+
+        let dir = tempfile::tempdir().unwrap();
+        let board = TestBoard(slopty_input::MacBoard::named(&pasteboard_name(dir.path())));
+        let png = Rep::Png.uti();
+        // A fresh pasteboard's first read can take seconds, longer than the worker holds a
+        // paste: pay for it here, not inside the hold the test times.
+        assert_eq!(board.0.data(&png), None);
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let (session, mut events) = open_shell_and_see(&mut worker, "picture-shell-ready").await;
+
+        let picture: Vec<u8> = (0..40_000_u32).map(|i| (i % 251) as u8).collect();
+        let offer = Offer {
+            origin: Peer::Client(ClientId::new()),
+            generation: 4,
+            items: vec![ClipItem {
+                uti: png.clone(),
+                size: picture.len() as u64,
+                hash: digest(&picture),
+                inline: None,
+            }],
+        };
+        worker.tx.send(&ClientMsg::Clip(ClipMsg::Offer(offer))).await.unwrap();
+        let chord = TermRequest::PastePicture(PasteChord::Command);
+        worker.tx.send(&ClientMsg::Term { session, req: chord }).await.unwrap();
+        let typed = TermRequest::Raw(b"echo after-'the-picture'\n".to_vec());
+        worker.tx.send(&ClientMsg::Term { session, req: typed }).await.unwrap();
+
+        let (generation, uti) = next_msg(&mut worker, |m| match m {
+            WorkerMsg::Clip(ClipMsg::Fetch { generation, uti }) => Some((generation, uti)),
+            _ => None,
+        })
+        .await;
+        assert_eq!((generation, uti.as_str()), (4, png.as_str()));
+        let early = tokio::time::timeout(
+            Duration::from_millis(400),
+            wait_for_text(&mut events, "after-the-picture"),
+        )
+        .await;
+        assert!(early.is_err(), "the line typed after the paste waits for the picture");
+        assert_ne!(board.0.data(&png).as_deref(), Some(picture.as_slice()));
+
+        let data = ClipMsg::Data { generation, uti, bytes: picture.clone() };
+        worker.tx.send(&ClientMsg::Clip(data)).await.unwrap();
+        wait_for_text(&mut events, "after-the-picture").await;
+        assert!(
+            board.0.data(&png).as_deref() == Some(picture.as_slice()),
+            "the picture was on the pasteboard when the held input went on"
+        );
+        assert!(board.0.types().iter().any(|t| t == ORIGIN_TYPE), "stamped with its origin");
     }
 
     /// Two files dropped on a terminal land in its shell's directory; one is cut halfway,
@@ -3863,7 +3925,7 @@ mod tests {
         .await
     }
 
-    /// A file card's save: from the version on disk it replaces the file and every watcher,
+    /// A file tile's save: from the version on disk it replaces the file and every watcher,
     /// the writer included, hears the new text; from a version older than the disk's it is a
     /// conflict and nothing is written; a pipe is refused.
     #[tokio::test]
@@ -3927,11 +3989,122 @@ mod tests {
         );
     }
 
+    /// The next read of `path` or save answer the link hands on, skipping everything else.
+    async fn next_file_event(
+        events: &mut tokio::sync::mpsc::Receiver<LinkEvent>,
+        path: &str,
+    ) -> WorkerMsg {
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        loop {
+            let event = tokio::time::timeout_at(deadline, events.recv()).await.unwrap().unwrap();
+            match event {
+                LinkEvent::Control(msg @ (WorkerMsg::File { .. } | WorkerMsg::Written { .. })) => {
+                    let (WorkerMsg::File { path: p, .. } | WorkerMsg::Written { path: p, .. }) =
+                        &msg
+                    else {
+                        continue;
+                    };
+                    if p == path {
+                        return msg;
+                    }
+                }
+                LinkEvent::Disconnected(why) => panic!("link dropped: {why}"),
+                _other => {}
+            }
+        }
+    }
+
+    /// A file tile's file of any size, through the real client link: a 200 000-line file (past
+    /// the inline limit) comes as a stream and reaches the link's owner as one whole text; the
+    /// watch sends it again when it changes; a save of the whole edited text goes up as a
+    /// stream and lands, and one based on an older version is a conflict. A file past the cap
+    /// is `TooLarge`, and nothing of it is sent.
+    #[tokio::test]
+    async fn a_large_file_streams_down_whole_and_its_save_streams_up() {
+        use slopty_proto::file::{FILE_BYTES, FileRead, INLINE_FILE_BYTES, WriteResult};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let mut link = slopty_client::WorkerLink::start(worker);
+        let mut events = link.events().unwrap();
+        let path = dir.path().join("big.rs");
+        let body = (0..200_000)
+            .map(|i| format!("fn line_{i}() -> u32 {{ {i} }}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        assert!(body.len() > INLINE_FILE_BYTES && (body.len() as u64) < FILE_BYTES);
+        std::fs::write(&path, &body).unwrap();
+        let name = path.to_string_lossy().into_owned();
+
+        link.send(ClientMsg::ReadFile { path: name.clone() }).await.unwrap();
+        let WorkerMsg::File {
+            read: FileRead::Text { text, size, modified_ms: base, final_newline },
+            ..
+        } = next_file_event(&mut events, &name).await
+        else {
+            panic!("a whole text")
+        };
+        assert_eq!(text.len() + 1, body.len(), "every byte but the final newline");
+        assert_eq!((size, final_newline), (body.len() as u64, true));
+        assert_eq!(text.lines().count(), 200_000);
+
+        link.send(ClientMsg::WatchFiles { paths: vec![name.clone()] }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let changed = body.replace("fn line_199999()", "fn line_last()");
+        std::fs::write(&path, &changed).unwrap();
+        let WorkerMsg::File { read: FileRead::Text { text, modified_ms: watched, .. }, .. } =
+            next_file_event(&mut events, &name).await
+        else {
+            panic!("the change, whole")
+        };
+        assert!(text.ends_with("fn line_last() -> u32 { 199999 }"), "the watch sends the change");
+        assert!(watched >= base);
+
+        let edited = format!("{text}\n// edited near the end\n");
+        let save = |base: Option<u64>| ClientMsg::WriteFile {
+            path: name.clone(),
+            text: edited.clone(),
+            base_modified_ms: base,
+        };
+        link.send(save(Some(watched))).await.unwrap();
+        let saved = loop {
+            match next_file_event(&mut events, &name).await {
+                WorkerMsg::Written { result: WriteResult::Saved { size, modified_ms }, .. } => {
+                    assert_eq!(size, edited.len() as u64);
+                    break modified_ms;
+                }
+                WorkerMsg::Written { result, .. } => panic!("not saved: {result:?}"),
+                WorkerMsg::File { .. } => {}
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited, "the whole edit landed");
+
+        link.send(save(Some(base.min(saved).saturating_sub(1)))).await.unwrap();
+        let conflict = loop {
+            if let WorkerMsg::Written { result, .. } = next_file_event(&mut events, &name).await {
+                break result;
+            }
+        };
+        assert!(matches!(conflict, WriteResult::Conflict { .. }), "{conflict:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited, "nothing written");
+
+        let huge = dir.path().join("huge.log");
+        let file = std::fs::File::create(&huge).unwrap();
+        file.set_len(FILE_BYTES + 1).unwrap();
+        let huge = huge.to_string_lossy().into_owned();
+        link.send(ClientMsg::ReadFile { path: huge.clone() }).await.unwrap();
+        assert_eq!(
+            next_file_event(&mut events, &huge).await,
+            WorkerMsg::File { path: huge, read: FileRead::TooLarge { size: FILE_BYTES + 1 } }
+        );
+    }
+
     /// One request on the worker's control socket, and its reply.
     async fn ctl(
         sock: &std::path::Path,
-        request: &slopty_worker::ctl::CtlRequest,
-    ) -> slopty_worker::ctl::CtlReply {
+        request: &slopty_proto::ctl::CtlRequest,
+    ) -> slopty_proto::ctl::CtlReply {
         use tokio::io::AsyncWriteExt as _;
         let mut stream = tokio::net::UnixStream::connect(sock).await.unwrap();
         let mut line = serde_json::to_vec(request).unwrap();
@@ -4021,7 +4194,7 @@ mod tests {
     #[tokio::test]
     async fn a_summary_carries_the_agent_a_hook_reported() {
         use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, SessionAgent};
-        use slopty_worker::ctl::{CtlReply, CtlRequest};
+        use slopty_proto::ctl::{CtlReply, CtlRequest};
 
         let dir = tempfile::tempdir().unwrap();
         let (_guard, mut worker) = connect(dir.path()).await;
@@ -4178,7 +4351,9 @@ mod tests {
                 }
                 ConversationEvent::Current => self.current = true,
                 ConversationEvent::Meters(meters) => self.meters = Some(meters),
-                ConversationEvent::Expanded { .. } => {}
+                ConversationEvent::Expanded { .. }
+                | ConversationEvent::Output(_)
+                | ConversationEvent::Image { .. } => {}
                 ConversationEvent::Live(live) => {
                     use slopty_proto::conversation::Live;
                     for live in live {
@@ -4535,7 +4710,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         use slopty_proto::conversation::{Body, Change, ConversationEvent, ConversationRequest};
-        use slopty_worker::ctl::CtlRequest;
+        use slopty_proto::ctl::CtlRequest;
 
         let dir = tempfile::tempdir().unwrap();
         let (_guard, mut worker) = connect(dir.path()).await;

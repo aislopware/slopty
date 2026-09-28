@@ -5,38 +5,28 @@
 //! foreground or while it has listeners (a background job's), and once more when that program
 //! ends. An idle shell is never scanned.
 //!
-//! They are read from libproc: each session's program and its descendants (`proc_listchildpids`),
-//! their descriptors (`proc_pidinfo(PROC_PIDLISTFDS)`), and each socket's state
-//! (`proc_pidfdinfo(PROC_PIDFDSOCKETINFO)`).
+//! On macOS they are read from libproc: each session's program and its descendants
+//! (`proc_listchildpids`), their descriptors (`proc_pidinfo(PROC_PIDLISTFDS)`), and each socket's
+//! state (`proc_pidfdinfo(PROC_PIDFDSOCKETINFO)`).
 //!
 //! libc binds the calls and `struct proc_fdinfo` but not `struct socket_fdinfo`, a 792-byte
 //! struct of nested unions. Only three of its fields are needed, so it is read as bytes at the
 //! offsets `<sys/proc_info.h>` lays them out at; the kernel writes exactly
 //! `PROC_PIDFDSOCKETINFO_SIZE` bytes or fails, so a size that changed would show as no ports,
 //! never as garbage.
+//!
+//! On Linux they are read from `/proc`: the parent of every process (`stat`), the socket inodes
+//! each descriptor names (`fd/*`), and the listening sockets of its network namespace
+//! (`net/tcp`, `net/tcp6`).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use imp::{children, name, tcp_listeners};
 use slopty_core::SessionId;
 use slopty_proto::orchestration::Port;
 
-/// `PROC_PIDFDSOCKETINFO` (`<sys/proc_info.h>`).
-const PROC_PIDFDSOCKETINFO: libc::c_int = 3;
-/// `PROC_PIDFDSOCKETINFO_SIZE`: `sizeof(struct socket_fdinfo)`.
-const SOCKET_FDINFO_SIZE: usize = 792;
-/// `socket_fdinfo.psi` (after `struct proc_fileinfo`, 24 bytes) `.soi_kind`, at 232 in it.
-const SOI_KIND: usize = 24 + 232;
-/// `socket_fdinfo.psi.soi_proto.pri_tcp.tcpsi_ini.insi_lport`: `soi_proto` at 240, the port
-/// at 4 in `struct in_sockinfo`, which starts `struct tcp_sockinfo`.
-const INSI_LPORT: usize = 24 + 240 + 4;
-/// `…pri_tcp.tcpsi_state`, at 80 in `struct tcp_sockinfo`.
-const TCPSI_STATE: usize = 24 + 240 + 80;
-/// `SOCKINFO_TCP`: `soi_proto` holds a `tcp_sockinfo`.
-const SOCKINFO_TCP: i32 = 2;
-/// `TSI_S_LISTEN`: the TCP state of a listening socket.
-const TSI_S_LISTEN: i32 = 1;
 /// Processes walked per session at most: a fork bomb in a terminal must not take the worker
 /// with it.
 const MAX_PROCESSES: usize = 4096;
@@ -138,17 +128,6 @@ impl Trigger {
     }
 }
 
-/// `struct socket_fdinfo` as bytes, aligned as the struct is (it holds `uint64_t`s).
-#[repr(C, align(8))]
-struct SocketFdInfo([u8; SOCKET_FDINFO_SIZE]);
-
-impl SocketFdInfo {
-    fn i32_at(&self, at: usize) -> Option<i32> {
-        let bytes = self.0.get(at..at.checked_add(4)?)?;
-        Some(i32::from_ne_bytes(bytes.try_into().ok()?))
-    }
-}
-
 /// Every TCP listener in the process trees rooted at `roots` (a session and the pid of the
 /// program ptyd spawned for it), ordered by port.
 #[must_use]
@@ -188,94 +167,250 @@ fn tree(root: u32) -> Vec<u32> {
     out
 }
 
-/// The live children of `pid`.
-fn children(pid: u32) -> Vec<u32> {
-    let Ok(ppid) = libc::pid_t::try_from(pid) else { return Vec::new() };
-    // SAFETY: libproc's size query: with a null buffer and size 0 `proc_listchildpids` writes
-    // nothing and returns how many pids it would.
-    let estimate = unsafe { libc::proc_listchildpids(ppid, std::ptr::null_mut(), 0) };
-    let Ok(estimate) = usize::try_from(estimate) else { return Vec::new() };
-    // Room for children forked between the two calls.
-    let mut pids: Vec<libc::pid_t> = vec![0; estimate.saturating_add(16)];
-    let Ok(bytes) = libc::c_int::try_from(pids.len().saturating_mul(size_of::<libc::pid_t>()))
-    else {
-        return Vec::new();
-    };
-    // SAFETY: libproc writes at most `bytes` bytes of pids into the buffer, which is that
-    // long, and returns how many it wrote.
-    let n = unsafe { libc::proc_listchildpids(ppid, pids.as_mut_ptr().cast(), bytes) };
-    let n = usize::try_from(n).unwrap_or(0).min(pids.len());
-    pids.truncate(n);
-    pids.into_iter().filter_map(|p| u32::try_from(p).ok().filter(|&p| p > 0)).collect()
+/// libproc (`docs` above).
+#[cfg(target_os = "macos")]
+mod imp {
+    /// `PROC_PIDFDSOCKETINFO` (`<sys/proc_info.h>`).
+    const PROC_PIDFDSOCKETINFO: libc::c_int = 3;
+    /// `PROC_PIDFDSOCKETINFO_SIZE`: `sizeof(struct socket_fdinfo)`.
+    const SOCKET_FDINFO_SIZE: usize = 792;
+    /// `socket_fdinfo.psi` (after `struct proc_fileinfo`, 24 bytes) `.soi_kind`, at 232 in it.
+    const SOI_KIND: usize = 24 + 232;
+    /// `socket_fdinfo.psi.soi_proto.pri_tcp.tcpsi_ini.insi_lport`: `soi_proto` at 240, the port
+    /// at 4 in `struct in_sockinfo`, which starts `struct tcp_sockinfo`.
+    const INSI_LPORT: usize = 24 + 240 + 4;
+    /// `…pri_tcp.tcpsi_state`, at 80 in `struct tcp_sockinfo`.
+    const TCPSI_STATE: usize = 24 + 240 + 80;
+    /// `SOCKINFO_TCP`: `soi_proto` holds a `tcp_sockinfo`.
+    const SOCKINFO_TCP: i32 = 2;
+    /// `TSI_S_LISTEN`: the TCP state of a listening socket.
+    const TSI_S_LISTEN: i32 = 1;
+    /// `struct socket_fdinfo` as bytes, aligned as the struct is (it holds `uint64_t`s).
+    #[repr(C, align(8))]
+    struct SocketFdInfo([u8; SOCKET_FDINFO_SIZE]);
+
+    impl SocketFdInfo {
+        fn i32_at(&self, at: usize) -> Option<i32> {
+            let bytes = self.0.get(at..at.checked_add(4)?)?;
+            Some(i32::from_ne_bytes(bytes.try_into().ok()?))
+        }
+    }
+
+    /// The live children of `pid`.
+    pub(super) fn children(pid: u32) -> Vec<u32> {
+        let Ok(ppid) = libc::pid_t::try_from(pid) else { return Vec::new() };
+        // SAFETY: libproc's size query: with a null buffer and size 0 `proc_listchildpids` writes
+        // nothing and returns how many pids it would.
+        let estimate = unsafe { libc::proc_listchildpids(ppid, std::ptr::null_mut(), 0) };
+        let Ok(estimate) = usize::try_from(estimate) else { return Vec::new() };
+        // Room for children forked between the two calls.
+        let mut pids: Vec<libc::pid_t> = vec![0; estimate.saturating_add(16)];
+        let Ok(bytes) = libc::c_int::try_from(pids.len().saturating_mul(size_of::<libc::pid_t>()))
+        else {
+            return Vec::new();
+        };
+        // SAFETY: libproc writes at most `bytes` bytes of pids into the buffer, which is that
+        // long, and returns how many it wrote.
+        let n = unsafe { libc::proc_listchildpids(ppid, pids.as_mut_ptr().cast(), bytes) };
+        let n = usize::try_from(n).unwrap_or(0).min(pids.len());
+        pids.truncate(n);
+        pids.into_iter().filter_map(|p| u32::try_from(p).ok().filter(|&p| p > 0)).collect()
+    }
+
+    /// Ports of the TCP sockets `pid` holds in the listening state.
+    pub(super) fn tcp_listeners(pid: u32) -> Vec<u16> {
+        let Ok(pid) = libc::c_int::try_from(pid) else { return Vec::new() };
+        // SAFETY: libproc's size query: with a null buffer and size 0 `proc_pidinfo` writes
+        // nothing and returns the bytes the descriptor list would take.
+        let needed =
+            unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+        let Ok(needed) = usize::try_from(needed) else { return Vec::new() };
+        let entry = size_of::<libc::proc_fdinfo>();
+        // Room for descriptors opened between the two calls.
+        let records = needed.checked_div(entry).unwrap_or(0);
+        let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity(records.saturating_add(16));
+        let Ok(room) = libc::c_int::try_from(fds.capacity().saturating_mul(entry)) else {
+            return Vec::new();
+        };
+        // SAFETY: libproc writes at most `room` bytes of `proc_fdinfo` records into the buffer,
+        // whose capacity is that many bytes, and returns the bytes it wrote.
+        let wrote = unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), room)
+        };
+        let count = usize::try_from(wrote).unwrap_or(0).checked_div(entry).unwrap_or(0);
+        // SAFETY: the kernel initialised `count` whole records, and `count` is within capacity
+        // (it wrote at most `room` bytes).
+        unsafe {
+            fds.set_len(count.min(fds.capacity()));
+        }
+        fds.iter()
+            .filter(|fd| {
+                fd.proc_fdtype == u32::try_from(libc::PROX_FDTYPE_SOCKET).unwrap_or(u32::MAX)
+            })
+            .filter_map(|fd| listening_port(pid, fd.proc_fd))
+            .collect()
+    }
+
+    /// The port of socket `fd` in `pid` when it is a listening TCP socket.
+    fn listening_port(pid: libc::c_int, fd: i32) -> Option<u16> {
+        let mut info = SocketFdInfo([0; SOCKET_FDINFO_SIZE]);
+        let size = libc::c_int::try_from(SOCKET_FDINFO_SIZE).ok()?;
+        // SAFETY: libproc writes at most `size` bytes of `struct socket_fdinfo` into `info`,
+        // which is that long and aligned as the struct; it returns the bytes it wrote.
+        let wrote = unsafe {
+            libc::proc_pidfdinfo(
+                pid,
+                fd,
+                PROC_PIDFDSOCKETINFO,
+                std::ptr::from_mut(&mut info).cast(),
+                size,
+            )
+        };
+        if usize::try_from(wrote).ok()? != SOCKET_FDINFO_SIZE {
+            return None;
+        }
+        if info.i32_at(SOI_KIND)? != SOCKINFO_TCP || info.i32_at(TCPSI_STATE)? != TSI_S_LISTEN {
+            return None;
+        }
+        // `insi_lport` is an int holding the port in network byte order (`ntohs` of its low half).
+        let lport = u16::try_from(info.i32_at(INSI_LPORT)? & 0xffff).ok()?;
+        Some(u16::from_be(lport)).filter(|&p| p != 0)
+    }
+
+    /// The command name of `pid`, empty when it is gone.
+    pub(super) fn name(pid: u32) -> String {
+        let Ok(pid) = libc::c_int::try_from(pid) else { return String::new() };
+        let mut buf = [0_u8; 256];
+        let Ok(size) = u32::try_from(buf.len()) else { return String::new() };
+        // SAFETY: libproc writes at most `size` bytes of the name into `buf`, which is that long,
+        // and returns how many it wrote.
+        let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), size) };
+        let n = usize::try_from(n).unwrap_or(0).min(buf.len());
+        String::from_utf8_lossy(buf.get(..n).unwrap_or_default()).into_owned()
+    }
 }
 
-/// Ports of the TCP sockets `pid` holds in the listening state.
-fn tcp_listeners(pid: u32) -> Vec<u16> {
-    let Ok(pid) = libc::c_int::try_from(pid) else { return Vec::new() };
-    // SAFETY: libproc's size query: with a null buffer and size 0 `proc_pidinfo` writes
-    // nothing and returns the bytes the descriptor list would take.
-    let needed =
-        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
-    let Ok(needed) = usize::try_from(needed) else { return Vec::new() };
-    let entry = size_of::<libc::proc_fdinfo>();
-    // Room for descriptors opened between the two calls.
-    let records = needed.checked_div(entry).unwrap_or(0);
-    let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity(records.saturating_add(16));
-    let Ok(room) = libc::c_int::try_from(fds.capacity().saturating_mul(entry)) else {
-        return Vec::new();
-    };
-    // SAFETY: libproc writes at most `room` bytes of `proc_fdinfo` records into the buffer,
-    // whose capacity is that many bytes, and returns the bytes it wrote.
-    let wrote =
-        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), room) };
-    let count = usize::try_from(wrote).unwrap_or(0).checked_div(entry).unwrap_or(0);
-    // SAFETY: the kernel initialised `count` whole records, and `count` is within capacity
-    // (it wrote at most `room` bytes).
-    unsafe {
-        fds.set_len(count.min(fds.capacity()));
+/// `/proc` (`docs` above).
+#[cfg(target_os = "linux")]
+mod imp {
+    use std::path::PathBuf;
+
+    use super::procfs;
+
+    /// The live children of `pid`, from each of its threads' `children` list; where the kernel
+    /// keeps none (`CONFIG_PROC_CHILDREN` off), every process whose `stat` names it as parent.
+    pub(super) fn children(pid: u32) -> Vec<u32> {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else { return Vec::new() };
+        let listed: Option<Vec<u32>> = tasks
+            .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("children")).ok())
+            .map(|list| list.split_whitespace().filter_map(|c| c.parse().ok()).collect::<Vec<_>>())
+            .reduce(|mut all, more| {
+                all.extend(more);
+                all
+            });
+        listed.unwrap_or_else(|| by_parent(pid))
     }
-    fds.iter()
-        .filter(|fd| fd.proc_fdtype == u32::try_from(libc::PROX_FDTYPE_SOCKET).unwrap_or(u32::MAX))
-        .filter_map(|fd| listening_port(pid, fd.proc_fd))
-        .collect()
+
+    /// Every process whose `stat` names `pid` as its parent: one read of each in `/proc`.
+    fn by_parent(pid: u32) -> Vec<u32> {
+        let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
+        entries
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+            .filter(|&child| {
+                std::fs::read_to_string(format!("/proc/{child}/stat"))
+                    .ok()
+                    .and_then(|stat| procfs::parent(&stat))
+                    == Some(pid)
+            })
+            .collect()
+    }
+
+    /// Ports of the TCP sockets `pid` holds in the listening state.
+    pub(super) fn tcp_listeners(pid: u32) -> Vec<u16> {
+        let dir = PathBuf::from(format!("/proc/{pid}"));
+        let Ok(fds) = std::fs::read_dir(dir.join("fd")) else { return Vec::new() };
+        let inodes: Vec<u64> = fds
+            .filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
+            .filter_map(|target| procfs::socket_inode(&target.to_string_lossy()))
+            .collect();
+        if inodes.is_empty() {
+            return Vec::new();
+        }
+        let mut ports: Vec<u16> = ["tcp", "tcp6"]
+            .into_iter()
+            .filter_map(|table| std::fs::read_to_string(dir.join("net").join(table)).ok())
+            .flat_map(|table| procfs::listeners(&table))
+            .filter(|(_port, inode)| inodes.contains(inode))
+            .map(|(port, _inode)| port)
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
+    /// The command name of `pid`, empty when it is gone.
+    pub(super) fn name(pid: u32) -> String {
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .map(|comm| comm.trim_end().to_owned())
+            .unwrap_or_default()
+    }
 }
 
-/// The port of socket `fd` in `pid` when it is a listening TCP socket.
-fn listening_port(pid: libc::c_int, fd: i32) -> Option<u16> {
-    let mut info = SocketFdInfo([0; SOCKET_FDINFO_SIZE]);
-    let size = libc::c_int::try_from(SOCKET_FDINFO_SIZE).ok()?;
-    // SAFETY: libproc writes at most `size` bytes of `struct socket_fdinfo` into `info`,
-    // which is that long and aligned as the struct; it returns the bytes it wrote.
-    let wrote = unsafe {
-        libc::proc_pidfdinfo(
-            pid,
-            fd,
-            PROC_PIDFDSOCKETINFO,
-            std::ptr::from_mut(&mut info).cast(),
-            size,
-        )
-    };
-    if usize::try_from(wrote).ok()? != SOCKET_FDINFO_SIZE {
-        return None;
-    }
-    if info.i32_at(SOI_KIND)? != SOCKINFO_TCP || info.i32_at(TCPSI_STATE)? != TSI_S_LISTEN {
-        return None;
-    }
-    // `insi_lport` is an int holding the port in network byte order (`ntohs` of its low half).
-    let lport = u16::try_from(info.i32_at(INSI_LPORT)? & 0xffff).ok()?;
-    Some(u16::from_be(lport)).filter(|&p| p != 0)
-}
+/// The `/proc` text the Linux scan reads, parsed. Pure, so it is tested on any host.
+#[cfg(any(target_os = "linux", test))]
+mod procfs {
+    /// `TCP_LISTEN` as `/proc/net/tcp` writes a socket's state.
+    const LISTEN: &str = "0A";
 
-/// The command name of `pid`, empty when it is gone.
-fn name(pid: u32) -> String {
-    let Ok(pid) = libc::c_int::try_from(pid) else { return String::new() };
-    let mut buf = [0_u8; 256];
-    let Ok(size) = u32::try_from(buf.len()) else { return String::new() };
-    // SAFETY: libproc writes at most `size` bytes of the name into `buf`, which is that long,
-    // and returns how many it wrote.
-    let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), size) };
-    let n = usize::try_from(n).unwrap_or(0).min(buf.len());
-    String::from_utf8_lossy(buf.get(..n).unwrap_or_default()).into_owned()
+    /// The parent pid in a `/proc/<pid>/stat` line: the second field after the parenthesised
+    /// name, which may itself hold spaces and parentheses.
+    pub(super) fn parent(stat: &str) -> Option<u32> {
+        let after = stat.get(stat.rfind(')')?.checked_add(1)?..)?;
+        after.split_whitespace().nth(1)?.parse().ok()
+    }
+
+    /// The inode a descriptor's link names when it is a socket (`socket:[12345]`).
+    pub(super) fn socket_inode(link: &str) -> Option<u64> {
+        link.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()
+    }
+
+    /// Every listening socket in a `/proc/net/tcp` or `tcp6` table, as (port, inode).
+    pub(super) fn listeners(table: &str) -> Vec<(u16, u64)> {
+        table
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if *fields.get(3)? != LISTEN {
+                    return None;
+                }
+                let port = fields.get(1)?.rsplit_once(':')?.1;
+                let port = u16::from_str_radix(port, 16).ok().filter(|&p| p != 0)?;
+                Some((port, fields.get(9)?.parse().ok()?))
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Listeners, parents and socket links read off `/proc` text as Linux writes it: only
+        /// the sockets in state `0A` of either table, a name with spaces and parentheses.
+        #[test]
+        fn listeners_and_parents_are_read_off_procfs() {
+            let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   \
+                0: 0100007F:1435 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 41231 1 0000000000000000 100 0 0 10 0\n   \
+                1: 0100007F:1435 0100007F:C350 01 00000000:00000000 00:00000000 00000000  1000        0 41299 1 0000000000000000 20 4 30 10 -1\n";
+            let tcp6 = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   \
+                0: 00000000000000000000000001000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 52000 1 0000000000000000 100 0 0 10 0\n";
+            assert_eq!(listeners(tcp), [(5173, 41231)], "the established one is not listening");
+            assert_eq!(listeners(tcp6), [(8080, 52000)]);
+            assert_eq!(parent("4242 (tmux: (srv) x) S 17 4242 4242 0 -1"), Some(17));
+            assert_eq!(socket_inode("socket:[41231]"), Some(41231));
+            assert_eq!(socket_inode("/dev/pts/3"), None);
+        }
+    }
 }
 
 #[cfg(test)]

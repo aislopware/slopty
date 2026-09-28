@@ -25,12 +25,18 @@ use slopty_core::ClientId;
 use slopty_platform::pasteboard::{
     CONCEALED_UTI, FILE_URL_UTI, ORIGIN_TYPE, Pasteboard, Provide, TEXT_UTI, TRANSIENT_UTI, Write,
 };
-use slopty_proto::transfer::{ClipItem, Hash, INLINE_CLIP_BYTES, Offer, Peer};
+use slopty_proto::ClientMsg;
+use slopty_proto::transfer::{ClipItem, ClipMsg, Hash, INLINE_CLIP_BYTES, Offer, Peer};
 use tokio::sync::watch;
+
+use crate::terminal::ClipPaste;
 
 /// The representations synced, richest first. File URLs name files on one machine only; files
 /// move by a transfer instead.
 pub const SYNCED: [&str; 5] = ["public.png", "public.tiff", "public.rtf", "public.html", TEXT_UTI];
+
+/// The synced representations that are pictures.
+const PICTURES: [&str; 2] = ["public.png", "public.tiff"];
 
 /// Files on the clipboard, for a paste that moves them.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -178,6 +184,28 @@ impl ClipSync {
         }
         self.told.insert(worker, offer.generation);
         Some(offer.clone())
+    }
+
+    /// What a paste into a shell of `worker` finds on the clipboard. Files first: they go as a
+    /// drop. Then a picture copied here with no text: a program on the worker reads it off
+    /// the worker's pasteboard (Claude Code), so it goes there ahead of the chord, with this
+    /// client's offer when the worker has not heard it. A picture a worker offered is left
+    /// alone, since it came from a worker's pasteboard. Anything else is text, which the view
+    /// reads itself.
+    pub fn shell_paste(&mut self, worker: WorkerKey, me: ClientId) -> ClipPaste {
+        if let Some(files) = self.files() {
+            return ClipPaste::Files(files);
+        }
+        self.refresh(me);
+        let Some(held) = self.held.as_ref().filter(|h| h.offer.is_some()) else {
+            return ClipPaste::Text;
+        };
+        let has = |uti: &str| held.reps.iter().any(|(t, _)| t == uti);
+        if !PICTURES.iter().any(|uti| has(uti)) || has(TEXT_UTI) {
+            return ClipPaste::Text;
+        }
+        let offer = self.offer_for(worker, me).map(|o| ClientMsg::Clip(ClipMsg::Offer(o)));
+        ClipPaste::Picture { offer }
     }
 
     /// The files the clipboard holds, for a paste that moves them: files copied here, or the

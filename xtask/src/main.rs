@@ -16,6 +16,7 @@ mod gate;
 mod icon;
 mod ime;
 mod ios;
+mod linux;
 mod prune;
 mod release;
 mod run;
@@ -155,6 +156,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ios::IosCmd,
     },
+    /// A terminal-only Linux worker: cross-build it (`build`, the default), run it in a Docker
+    /// Desktop container (`run`), or run the Linux end-to-end test against it from this Mac
+    /// (`e2e`).
+    Linux {
+        #[command(subcommand)]
+        cmd: Option<linux::LinuxCmd>,
+    },
     /// Keep the GPUI and gpui-kit forks current with upstream (`check` the drift, `sync` them).
     Upstream {
         #[command(subcommand)]
@@ -212,6 +220,7 @@ fn main() -> Result<()> {
         Cmd::Sign(opts) => sign::run(&sh, &opts),
         Cmd::Icon { out } => icon::run(&sh, &out),
         Cmd::Ios { cmd } => ios::run(&sh, &cmd),
+        Cmd::Linux { cmd } => linux::run(&sh, cmd.unwrap_or(linux::LinuxCmd::Build)),
         Cmd::Upstream { cmd } => upstream::run(&sh, &cmd),
     }
 }

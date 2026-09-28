@@ -11,6 +11,8 @@
 //!   composer that types into the same PTY, the permission card.
 //! * [`note`] — a sticky note read as Markdown and edited in place, text shared through the
 //!   document.
+//! * [`folder`] — a directory on a worker, browsed in place: files open beside it, rows drag out,
+//!   drops go up into it.
 //! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
 //! * [`picker`] — the "add a window" chooser.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
@@ -28,6 +30,7 @@ pub mod clipboard;
 pub mod colors;
 pub mod conversation;
 pub mod file;
+pub mod folder;
 pub mod fonts;
 pub mod frames;
 pub mod highlight;
@@ -40,6 +43,7 @@ pub mod palette;
 pub mod picker;
 pub mod screen;
 pub mod settings_editor;
+pub mod settings_form;
 pub mod shown;
 pub mod terminal;
 pub mod workspace;

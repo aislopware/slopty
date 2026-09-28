@@ -272,7 +272,8 @@ fn closing_after_the_focus_moved_takes_the_next_column_in_place() {
     l.focus_column_left();
     l.focus_column_right();
     // The memory is gone: the right neighbour, or the last one, takes the focus. The view
-    // comes back so the last column ends on the right edge, not beside bare canvas.
+    // comes back so the last column ends on the right edge, not beside an empty stretch of the
+    // strip.
     l.remove(t(3));
     assert_eq!(l.focused(), Some(t(2)));
     near(view_pos(&l), 0.0);
@@ -444,6 +445,22 @@ fn moving_a_column_to_another_workspace_keeps_its_width_and_tiles() {
     near(stored_width_of(&l, t(1)), THIRD);
     l.move_column_to_workspace_up();
     assert_eq!(shape(&l), vec![vec![vec![t(1), t(2)]], vec![]], "nothing above");
+}
+
+#[test]
+fn moving_a_column_to_a_numbered_workspace_clamps_to_the_trailing_one() {
+    let mut l = columns(3);
+    l.move_column_to_workspace(9);
+    assert_eq!(shape(&l), vec![vec![vec![t(1)], vec![t(2)]], vec![vec![t(3)]], vec![]]);
+    assert_eq!((l.active_workspace(), l.focused()), (1, Some(t(3))));
+    l.focus(t(1));
+    l.move_column_to_workspace(1);
+    assert_eq!((l.active_workspace(), l.focused()), (1, Some(t(1))));
+    assert_eq!(shape(&l)[0], vec![vec![t(2)]]);
+    assert_eq!(shape(&l)[1].len(), 2, "joined workspace 1: {:?}", shape(&l));
+    let before = shape(&l);
+    l.move_column_to_workspace(1);
+    assert_eq!(shape(&l), before, "already there");
 }
 
 #[test]
@@ -886,7 +903,7 @@ fn a_tall_overview_scrolls_with_the_active_workspace_and_refits_smoothly() {
 
 /// A lone column fills the window edge to edge, whatever its own width, which it keeps: a
 /// width step or a preset while it is alone is stored and shows when a neighbour arrives, and
-/// losing the neighbour fills the window again. A pane never floats on the canvas.
+/// losing the neighbour fills the window again. A pane never floats in empty space.
 #[test]
 fn a_lone_column_fills_the_width_and_keeps_its_own_for_a_neighbour() {
     let mut l = columns(1);
@@ -978,6 +995,26 @@ fn a_resize_while_compact_changes_the_stored_proportion() {
     l.set_viewport(1280.0, 800.0);
     let share = (half - 100.0) / COMPACT_WORKING;
     near(rect(&l, t(2)).w, 1280.0 * share);
+}
+
+/// An overview opened with motion off and closed with it on springs from where it is drawn,
+/// open, not from closed: the way out plays instead of the view jumping to the strip.
+#[test]
+fn closing_an_overview_opened_still_springs_from_open() {
+    let mut l = columns(1);
+    l.set_overview(true);
+    near(l.frame().overview, 1.0);
+    l.set_animate(true);
+    l.set_clock(MS(1000));
+    l.set_overview(false);
+    let f = l.frame();
+    near(f.overview, 1.0);
+    assert!(f.animating, "the way out plays");
+    l.set_clock(MS(1080));
+    let mid = l.frame().overview;
+    assert!(mid > 0.0 && mid < 1.0, "on its way: {mid}");
+    l.set_clock(MS(4000));
+    near(l.frame().overview, 0.0);
 }
 
 /// In the overview a strip that fits the zoomed-out window is centred in it, whatever column
@@ -1569,7 +1606,11 @@ fn restore_cleans_up_whatever_it_is_given() {
             .into_iter()
             .map(|tile| SavedTile { tile, height: TileHeight::default() })
             .collect(),
-        ..SavedColumn::default()
+        active_tile: 0,
+        width: ColumnWidth::Proportion(0.5),
+        preset: None,
+        full_width: false,
+        mode: DisplayMode::Normal,
     };
     let saved = Saved {
         workspaces: vec![
@@ -1590,7 +1631,7 @@ fn restore_cleans_up_whatever_it_is_given() {
                             height: TileHeight::Auto { weight: -1.0 },
                         }],
                         width: ColumnWidth::Fixed(f32::INFINITY),
-                        ..SavedColumn::default()
+                        ..col(vec![])
                     },
                 ],
                 active_column: 40,
@@ -1618,10 +1659,10 @@ fn restore_cleans_up_whatever_it_is_given() {
     let e = Layout::restore(Saved::default(), LayoutConfig::default());
     assert_eq!(shape(&e), vec![Vec::<Vec<TileRef>>::new()]);
     assert_eq!(e.active_workspace(), 0);
-    // Missing fields default.
-    let partial: Saved =
-        serde_json::from_str(r#"{"workspaces":[{"columns":[{"tiles":[]}]}]}"#).unwrap();
-    assert_eq!(partial.workspaces[0].columns[0].width, ColumnWidth::Proportion(0.5));
+    // A file missing fields is not a layout: the caller starts fresh.
+    let missing = serde_json::from_str::<Saved>(r#"{"workspaces":[{"columns":[{"tiles":[]}]}]}"#)
+        .unwrap_err();
+    assert!(missing.to_string().contains("missing field"), "{missing}");
 }
 
 // ----- nothing breaks at the edges ----------------------------------------------------------
@@ -1650,6 +1691,8 @@ fn every_action_is_safe_on_an_empty_layout() {
     l.move_window_down_or_to_workspace_down();
     l.move_column_to_workspace_up();
     l.move_column_to_workspace_down();
+    l.move_column_to_workspace(3);
+    l.focus_workspace(3);
     l.move_workspace_up();
     l.move_workspace_down();
     l.consume_or_expel_window_left();

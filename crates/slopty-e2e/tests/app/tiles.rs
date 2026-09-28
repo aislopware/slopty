@@ -1,7 +1,8 @@
 //! The editor and the browser tile in the real app: a file on the worker edited, saved and
 //! caught changing on disk under an edit; a page the test serves itself, opened in a tile,
-//! read back from the web view and hidden while the palette is over it. Each state worth a
-//! look is a golden.
+//! read back from the web view and hidden while the palette is over it; a `_blank` link's tile
+//! beside it, its script's dialogs as sheets, and find's count on it. Each state worth a look
+//! is a golden.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::TcpListener;
@@ -138,6 +139,56 @@ async fn a_file_is_edited_saved_and_caught_changing_under_an_edit() {
     stack.shutdown().await;
 }
 
+/// A 20 000-line file, ten times the old viewer's limit and past the inline limit, so it comes
+/// down a bulk stream and its save goes up one: the tile opens it editable near its end, takes
+/// an edit there, and ⌘S puts the whole edited file on the worker's disk.
+#[tokio::test]
+async fn a_twenty_thousand_line_file_is_edited_near_its_end_and_saved() {
+    if !gated() {
+        return;
+    }
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let file = stack.dir.path().join("big.rs");
+    let lines: Vec<String> =
+        (0..20_000).map(|i| format!("fn line_{i}() -> u32 {{ {i} * 2 + 1 }}")).collect();
+    let body = format!("{}\n", lines.join("\n"));
+    assert!(body.len() > slopty_proto::file::INLINE_FILE_BYTES, "it must stream");
+    std::fs::write(&file, &body).unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+
+    drv.open_file(&file.display().to_string(), Some(19_990)).await.unwrap();
+    let dump = drv
+        .wait_for("the whole file in its editor, at line 19 990, with the keyboard", STEP, |d| {
+            file_of(d).is_some_and(|f| f.lines == 20_000 && f.line == Some(19_990))
+                && d.focused.starts_with("file:")
+        })
+        .await
+        .unwrap();
+    let info = file_of(&dump).unwrap();
+    assert!(!info.edited && info.trouble.is_none() && info.read_only.is_none(), "{info:?}");
+
+    drv.type_text("// edited near the end\n").await.unwrap();
+    drv.wait_for("the edit, unsaved", STEP, |d| file_of(d).is_some_and(|f| f.edited))
+        .await
+        .unwrap();
+    drv.keys("cmd-s").await.unwrap();
+    drv.wait_for("the save", STEP, |d| {
+        file_of(d).is_some_and(|f| !f.edited && f.trouble.is_none() && f.lines == 20_001)
+    })
+    .await
+    .unwrap();
+    let mut expected = lines;
+    expected.insert(19_989, "// edited near the end".to_owned());
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("{}\n", expected.join("\n")),
+        "the worker's file is the whole edited text, its final newline kept"
+    );
+    stack.shutdown().await;
+}
+
 /// The test page, served on localhost by the test itself, to every request.
 const PAGE: &str = "<!doctype html><html><head><meta charset=utf-8>\
 <title>Slopty test page</title></head>\
@@ -156,8 +207,22 @@ f.addEventListener('input',show);document.addEventListener('selectionchange',sho
 f.focus();f.setSelectionRange(3,3);document.execCommand('insertText',false,'xyz');show();\
 </script></body></html>";
 
-/// Serve [`PAGE`], and [`EDIT_PAGE`] at `/edit`, on an ephemeral localhost port until the
-/// process ends; the port.
+/// A page whose `_blank` link follows itself as it loads, as a click on it would: the page's
+/// words hold "apple" three times over, in three cases, for find to count.
+const POPUP_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>popup</title>\
+</head><body><p>An apple, an Apple and APPLE pie.</p>\
+<a id=l href=\"/second\" target=_blank>second</a>\
+<script>document.getElementById('l').click();</script></body></html>";
+
+/// The page the link opens: an `alert`, then, once that is answered, a `confirm` whose OK
+/// closes the page's window.
+const SECOND_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>second</title>\
+</head><body><script>setTimeout(() => {\
+alert('Hello from the second page');\
+if (confirm('Close this page?')) { window.close(); } }, 0);</script></body></html>";
+
+/// Serve [`PAGE`], [`EDIT_PAGE`] at `/edit`, [`POPUP_PAGE`] at `/popup` and [`SECOND_PAGE`] at
+/// `/second`, on an ephemeral localhost port until the process ends; the port.
 fn serve_page() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -166,7 +231,12 @@ fn serve_page() -> u16 {
             let mut reader = BufReader::new(&stream);
             let mut line = String::new();
             let _read = reader.read_line(&mut line);
-            let page = if line.starts_with("GET /edit ") { EDIT_PAGE } else { PAGE };
+            let page = match line.split(' ').nth(1) {
+                Some("/edit") => EDIT_PAGE,
+                Some("/popup") => POPUP_PAGE,
+                Some("/second") => SECOND_PAGE,
+                _ => PAGE,
+            };
             while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
                 line.clear();
             }
@@ -252,5 +322,189 @@ async fn a_page_on_localhost_opens_in_a_browser_tile() {
         drv.ok(&Command::PageKeys { url: edit.clone(), keys: keys.to_owned() }).await.unwrap();
         drv.wait_for(keys, STEP, |d| title_of(d).starts_with(want)).await.unwrap();
     }
+    stack.shutdown().await;
+}
+
+/// The browser tiles of the dump, in the order the workspace lists them.
+fn pages(d: &Dump) -> Vec<&slopty_e2e::ItemInfo> {
+    d.items.iter().filter(|i| i.kind == "browser").collect()
+}
+
+/// A page's `_blank` link opens a second page tile right of the first, on the worker's port.
+/// That page's `alert` is a sheet in its tile, read from the accessibility tree, and ↩ answers
+/// it; its `confirm` follows, and OK runs the page's `window.close()`, which closes the tile.
+/// Back on the first page, ⌘F finds in it and the bar says how many matches the page holds.
+#[tokio::test]
+async fn a_blank_link_opens_a_tile_and_a_script_s_dialogs_are_sheets_in_it() {
+    if !gated() {
+        return;
+    }
+    let port = serve_page();
+    let popup = format!("http://127.0.0.1:{port}/popup");
+    let second = format!("http://127.0.0.1:{port}/second");
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+
+    drv.ok(&Command::OpenUrl { url: popup.clone() }).await.unwrap();
+    let dump = drv
+        .wait_for("the link's page in a tile of its own", STEP, |d| {
+            pages(d).iter().any(|i| i.browser.as_ref().is_some_and(|b| b.url == second))
+        })
+        .await
+        .unwrap();
+    let opener = pages(&dump).into_iter().find(|i| i.browser.as_ref().unwrap().url == popup);
+    let opened = pages(&dump).into_iter().find(|i| i.browser.as_ref().unwrap().url == second);
+    let (opener, opened) = (opener.unwrap(), opened.unwrap());
+    assert_eq!(opened.pos[1], opener.pos[1] + 1, "right of its opener: {opener:?} {opened:?}");
+
+    let alert = "Hello from the second page";
+    drv.wait_for("the alert, a sheet in the tile", STEP, |d| {
+        d.a11y_node("AlertDialog", Some(alert)).is_some()
+    })
+    .await
+    .unwrap();
+    let dump = drv.dump().await.unwrap();
+    assert!(dump.a11y_node("Button", Some("OK")).is_some(), "{:#?}", dump.a11y);
+    assert!(dump.a11y_node("Button", Some("Cancel")).is_none(), "an alert has only OK");
+
+    drv.keys("enter").await.unwrap();
+    drv.wait_for("the alert answered, the page on to its confirm", STEP, |d| {
+        d.a11y_node("AlertDialog", Some(alert)).is_none()
+            && d.a11y_node("AlertDialog", Some("Close this page?")).is_some()
+    })
+    .await
+    .unwrap();
+    let dump = drv.dump().await.unwrap();
+    assert!(dump.a11y_node("Button", Some("Cancel")).is_some(), "{:#?}", dump.a11y);
+
+    drv.keys("enter").await.unwrap();
+    let dump = drv
+        .wait_for("the page closed its window, and its tile went", STEP, |d| {
+            d.a11y_node("AlertDialog", None).is_none() && pages(d).len() == 1
+        })
+        .await
+        .unwrap();
+    assert_eq!(pages(&dump)[0].browser.as_ref().unwrap().url, popup);
+
+    // The opener again, focused, and ⌘F in it: its text holds three matches.
+    drv.ok(&Command::OpenUrl { url: popup.clone() }).await.unwrap();
+    drv.wait_for("the opener focused", STEP, |d| pages(d).first().is_some_and(|i| i.active))
+        .await
+        .unwrap();
+    drv.keys("cmd-f").await.unwrap();
+    drv.wait_for("the find bar", STEP, |d| d.a11y_node("Group", Some("Find in page")).is_some())
+        .await
+        .unwrap();
+    drv.type_text("apple").await.unwrap();
+    drv.wait_for("three matches", STEP, |d| {
+        d.a11y_node("Label", Some("Matches")).and_then(|n| n.value.as_deref()) == Some("3 matches")
+    })
+    .await
+    .unwrap();
+    drv.keys("cmd-g").await.unwrap();
+    drv.keys("escape").await.unwrap();
+    drv.wait_for("the bar closed", STEP, |d| d.a11y_node("Group", Some("Find in page")).is_none())
+        .await
+        .unwrap();
+    stack.shutdown().await;
+}
+
+/// The labels of the folder rows the dump's accessibility tree holds, top to bottom.
+fn folder_rows(d: &Dump) -> Vec<String> {
+    d.a11y.iter().filter(|n| n.role == "ListBoxOption").filter_map(|n| n.label.clone()).collect()
+}
+
+/// The directory the folder tile says it is at.
+fn folder_at(d: &Dump) -> Option<String> {
+    d.a11y
+        .iter()
+        .filter(|n| n.role == "Group")
+        .find_map(|n| n.label.as_deref()?.strip_prefix("Folder ").map(str::to_owned))
+}
+
+/// "Open folder…" in the palette opens a folder tile at the shell's directory, with the
+/// keyboard: its folders first, a hidden entry listed too. ↩ on a folder browses into it in
+/// place, and ↩ on a file there opens a file tile right of the folder with the file's text.
+#[tokio::test]
+async fn a_folder_tile_browses_the_worker_and_opens_a_file_beside_it() {
+    if !gated() {
+        return;
+    }
+    let mut stack = Stack::launch("e2e-folder").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let project = stack.path("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("README.md"), "# Project\n").unwrap();
+    std::fs::write(project.join(".env"), "KEY=1\n").unwrap();
+    std::fs::write(project.join("src/main.rs"), "fn main() {\n    run();\n}\n").unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    drv.type_text(&format!("cd '{}' && pwd", project.display())).await.unwrap();
+    drv.keys("enter").await.unwrap();
+    drv.wait_for("the shell in the project", STEP, |d| {
+        d.rows_containing("project").iter().any(|r| r.trim().ends_with("/project"))
+    })
+    .await
+    .unwrap();
+
+    drv.keys("cmd-shift-p").await.unwrap();
+    drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+        .await
+        .unwrap();
+    drv.type_text("Open folder").await.unwrap();
+    drv.keys("enter").await.unwrap();
+    // The palette again, its field holding the shell's directory: ↩ opens it.
+    drv.wait_for("the palette at the shell's directory", STEP, |d| {
+        d.a11y.iter().any(|n| {
+            n.role == "ListBoxOption"
+                && n.label
+                    .as_deref()
+                    .is_some_and(|l| l.contains("Open folder") && l.contains("/project"))
+        })
+    })
+    .await
+    .unwrap();
+    drv.keys("enter").await.unwrap();
+    let dump = drv
+        .wait_for("the folder tile, listed, with the keyboard", STEP, |d| {
+            d.item("folder").is_some()
+                && d.focused.starts_with("folder:")
+                && folder_rows(d) == ["src", ".env", "README.md"]
+        })
+        .await
+        .unwrap();
+    let at = folder_at(&dump).unwrap();
+    assert!(at.ends_with("/project"), "{at}");
+    // Titled by its name, as the shell beside it is by the same directory: two kinds, so no
+    // number tells them apart.
+    assert!(dump.a11y_node("Heading", Some("folder project")).is_some(), "{:#?}", dump.a11y);
+    assert!(dump.a11y_node("Heading", Some("terminal project")).is_some(), "{:#?}", dump.a11y);
+    assert!(dump.a11y_node("Button", Some("Enclosing folder")).is_some(), "{:#?}", dump.a11y);
+    golden(drv, &dir, "folder").await;
+
+    drv.keys("enter").await.unwrap();
+    let dump = drv
+        .wait_for("the folder moved into src", STEP, |d| {
+            folder_at(d).is_some_and(|at| at.ends_with("/project/src"))
+                && folder_rows(d) == ["main.rs"]
+        })
+        .await
+        .unwrap();
+    assert!(dump.focused.starts_with("folder:"), "the keyboard stays: {}", dump.focused);
+
+    drv.keys("enter").await.unwrap();
+    let dump = drv
+        .wait_for("main.rs in a file tile", STEP, |d| {
+            file_of(d).is_some_and(|f| f.path.ends_with("/project/src/main.rs") && f.lines == 3)
+        })
+        .await
+        .unwrap();
+    let folder = dump.item("folder").unwrap();
+    let file = dump.item("file").unwrap();
+    assert_eq!(file.pos[1], folder.pos[1] + 1, "right of the folder: {folder:?} {file:?}");
+    assert!(file.active, "the file tile has the focus");
     stack.shutdown().await;
 }

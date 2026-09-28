@@ -1,28 +1,36 @@
 # Slopty architecture
 
-Slopty is a remote-coding workstation: macOS **workers** expose shells and windows; macOS
-and iOS **clients** show them as tiles in one scrollable tiling workspace, several workers mixed, with Claude Code agents surfaced as
-first-class objects. Everything is Rust. Floor: macOS 26.5 / iOS 26.5, Apple silicon.
+Slopty is a remote-coding workstation in three roles. **Workers** (macOS; Linux for terminals
+and agents) expose shells, agents, windows and displays. One **server** keeps the worker
+directory and the orchestration verbs, and is never on the data path. **Clients** (the macOS,
+iPhone and iPad app, the `slopty` CLI, and AI agents over MCP) show the workers' items as tiles
+in one niri-style scrolling workspace, several workers mixed, with Claude Code agents surfaced
+as first-class objects. Everything is Rust. Floor: macOS 26.5 / iOS 26.5, Apple silicon.
 
 This file is the map. Rulings and their evidence live under [docs/decisions/](DECISIONS.md), one file per topic.
 
 ## 1. Shape
 
 ```
-                     ┌─────────────────────────── worker (macOS) ───────────────────────────┐
-                     │  slopty-ptyd            slopty-worker                                 │
+                                  ┌──────────── server (slopty-server) ────────────┐
+                                  │ worker directory · leases · orchestration verbs │
+                                  │ QUIC front end · MCP (Streamable HTTP)          │
+                                  └───────▲───────────────────────────────▲─────────┘
+                        workers dial in: │ lease + verbs     clients: directory, verbs
+                     ┌───────────────────┼──── worker (macOS · Linux) ────┼─────────────────┐
+                     │  slopty-ptyd      │     slopty-worker              │                 │
                      │  ┌────────────┐  fd     ┌───────────────────────────────────────┐    │
    shells/agents ◀──▶│  │ PTY keeper │ ──────▶ │ sessions · VT engine (libghostty-vt)  │    │
                      │  │ (tiny,     │ SCM_    │ frame diff · replay · fan-out          │    │
-                     │  │  outlives  │ RIGHTS  │ agent status (hooks/JSONL)             │    │
+                     │  │  outlives  │ RIGHTS  │ agent status (hooks/JSONL/mod)         │    │
                      │  │  worker)   │         │ screen: SCK → VT HEVC → FEC → datagrams│    │
                      │  └────────────┘         │ input: CGEvent injection               │    │
                      │                         └──────────────┬────────────────────────┘    │
                      └────────────────────────────────────────┼─────────────────────────────┘
-                                                              │ QUIC, plaintext: streams = control/terminal
-                                                              │              datagrams = video/audio/cursor
+                                                              │ QUIC, plaintext, direct: streams = control/terminal/files
+                                                              │                          datagrams = video/audio/cursor
                      ┌────────────────────────────────────────┼─────────────────────────────┐
-                     │ client (macOS app · iOS app)           ▼                              │
+                     │ client (macOS app · iOS app · CLI)     ▼                              │
                      │ slopty-client: session state · line cache · prediction · items · layout│
                      │ slopty-ui (GPUI): workspace · terminal element · surface element · chrome│
                      │ slopty-codec (decode) → CVPixelBuffer → gpui surface (zero copy)      │
@@ -155,7 +163,7 @@ URI of every linked cell (`ghostty_grid_ref_hyperlink_uri`, only on rows whose p
 they may hold one) and folds them into `Line::links`, a list of `Hyperlink { col, len, uri }`
 runs, so a link-free row costs one byte and no cell carries an id. The client draws the run
 under the pointer underlined while ⌘ is held (the pointer a hand, an I-beam elsewhere, the
-arrow while a program reports the mouse), names the target in a chip at the card's corner
+arrow while a program reports the mouse), names the target in a chip at the tile's corner
 (`TerminalView::link_target`) and opens the URI on ⌘-click; the OSC 8 target
 wins over the plain-text URL scan (`slopty_ui::terminal::url`). OSC 52 (and iTerm2 OSC 1337
 Copy) writes to the *system* clipboard become `TermEvent::ClipboardWrite`, capped at
@@ -178,8 +186,8 @@ frame; `slopty_theme::Colors` paints it over the client's theme, ANSI 0–15 and
 alike, and the shaped-word cache keys on it. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty parses
 all three) become `TermEvent::Notification { title, body }`, each field capped at 512 chars;
 the workspace posts them as a notification-centre banner when no window is active, tagged by the
-session so a click reveals the card, and bounces the Dock like an agent's attention. BEL tints
-the card's grid for a flash (`TerminalView::bell_flashing`, `alpha::FAINT`) and, when no window
+session so a click reveals the tile, and bounces the Dock like an agent's attention. BEL tints
+the tile's grid for a flash (`TerminalView::bell_flashing`, `alpha::FAINT`) and, when no window
 is active and `[terminal] bell_alert` holds (the default), plays the alert sound and bounces
 the Dock.
 
@@ -187,14 +195,15 @@ the Dock.
 decoded through the `png` crate by `slopty_engine::graphics::PngDecoder`) and lays the
 placements out at the client's cell pixels. Every `Frame` lists the placements on the
 viewport (`Frame.images: Vec<Placement>` — cell, offsets, painted size, source rectangle,
-z), and a placement's pixels travel once as `TermEvent::Image` (RGBA, sampled down by a
-whole factor when over `IMAGE_WIRE_BYTES`) ahead of the first frame that places them, and
+z), and a placement's pixels travel once as `TermEvent::Image` (premultiplied BGRA,
+the texture's format, made on the session actor; sampled down by a whole factor when over
+`IMAGE_WIRE_BYTES`) ahead of the first frame that places them, and
 again after a full frame (attach, resync). Worker and client keep the same bounded cache
 (`IMAGE_CACHE_BYTES`, least recently placed first: `graphics::Ledger` and
 `TermState::keep_image`), so the worker knows what to re-send. A placement change with no cell
 change still makes a frame (the storage generation is part of the dirty check). The view
-makes one GPUI texture per image generation (`TerminalView::placed_images`, BGRA
-premultiplied) and the element paints the source rectangle into the placement's cells
+makes one GPUI texture per image generation (`TerminalView::placed_images`, a copy of
+the bytes as sent) and the element paints the source rectangle into the placement's cells
 (`placement_bounds`), under the glyphs for `z < 0` and over them otherwise, shifted by the
 rows a scrolled view shows. A virtual placement (`U=1`) is shown through Unicode
 placeholders: the worker reads every U+10EEEE cell (image id in the foreground colour,
@@ -320,7 +329,11 @@ terminals opened and closed, agent status changes) read from a cursor, which is 
 watches the whole fleet over stateless HTTP; and `ForgetWorker`. Files are read in ranges of at
 most 8 MiB with the whole size reported, directories listed with `ListDir`, paths checked with
 `Stat`; a terminal opened by a verb takes a size, and `ResizeTerminal` resizes one no client
-shows. Rulings in `docs/decisions/topology.md`.
+shows. A verb that changes something may carry an idempotency key on its request; the worker
+keeps each key's outcome for ten minutes (`orchestrate::idempotency::Ledger`), so a caller that
+lost its answer to a timeout or a dropped link asks again and gets the first outcome, not a second
+terminal. The CLI and MCP give every mutating verb a key and resend under it on `Interrupted`.
+Rulings in `docs/decisions/topology.md`.
 
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),
 `slopty-predict`, `slopty-pty` (openpty/spawn, async master, ptyd protocol + client),
@@ -352,7 +365,7 @@ at 30 Hz while the worker's pointer is over the target and sent only when it cha
 (`slopty_worker::screen::ShapeDedup`); the client draws that picture with its hotspot on the
 position (`ScreenView`'s `Pointer`), and its own arrow until the first one arrives. The position
 scales by the stream size input maps with, the one last asked for, not the frame in flight. While a
-frame is up the card hides the client's own pointer (`CursorStyle::None`, a fork addition: on
+frame is up the tile hides the client's own pointer (`CursorStyle::None`, a fork addition: on
 macOS a cursor rect with a one-pixel clear `NSCursor`, restored by AppKit when the pointer
 leaves), so only the worker's pointer shows on it.
 
@@ -474,9 +487,9 @@ frame on one side and a paint on the other.
 this process excluded) → `AudioConverter` Opus (Apple's, in the OS; 20 ms packets, 96 kb/s) →
 one `Audio` datagram per packet, no FEC and no NACK (a lost 20 ms is cheaper than a late one).
 The worker stops sending 300 ms after the last non-silent sample, so silent apps cost nothing.
-The client decodes with `AudioConverter` and plays through an `AudioQueue` of three 10 ms
-buffers fed from a jitter buffer (`slopty-codec::audio`: `Jitter` sets the target, `Ring`
-plays) that aims for the lateness it measures (p95 over 5 s plus a device buffer, 20–120 ms),
+The client decodes with `AudioConverter` and plays through an output audio unit whose render
+callback fills each device I/O buffer straight from a jitter buffer (`slopty-codec::audio`:
+`Jitter` sets the target, `Ring` plays) that aims for the lateness it measures (p95 over 5 s plus a device buffer, 20–120 ms),
 prefills after a start, a mute or a dry run, and converges by dropping or repeating one 5 ms
 slice with a crossfade, which also absorbs clock drift;
 iOS puts the app in the `Playback` session category so it plays past the ring switch.
@@ -501,6 +514,12 @@ sent at −1: above files, below video.
     providers). A paste fetches the representation, inline or over a bulk stream.
   - The worker writes a client's offer to its pasteboard when that client's ⌘V reaches a window.
     The window's input is held in order until any fetch lands, for up to 3 s.
+  - A shell's ⌘V or ⌃V with a picture copied here and no text sends the offer, when the worker
+    has not heard it, and then `TermRequest::PastePicture` on the same ordered stream. The worker
+    holds that session's input behind it the way it holds a window's, writes the offer, then
+    applies the chord: ⌃V as the key, ⌘V as an empty paste. Claude Code reads the picture off
+    the worker's pasteboard on either. The request has no datagram copy, which could overtake
+    the offer.
   - Every Slopty write carries `com.aislopware.slopty.origin` (`transfer::origin_bytes`).
     Together with the `changeCount` of our own write and a same-digest backstop, this stops
     echoes, also when client and worker share a Mac.
@@ -521,6 +540,10 @@ sent at −1: above files, below video.
   - `Resume` answers the durable length of a partial, so an interrupted upload continues.
   - A drop on a streamed window goes to staging, and the files go on the worker's pasteboard
     as file URLs.
+  - A picture pasted into a conversation face's composer, or a file dropped on the face, goes
+    up with `Dest::Attachment` to a fresh `~/.slopty/drop/<xfer>/`, with nothing put on the
+    pasteboard. A chip in the composer shows it until it lands, and then its path is typed at
+    the composer's cursor, where Claude Code reads it as an attached file.
   - Copied files paste the way a drop lands (`slopty_ui::clipboard::ClipFiles`). ⌘V in a
     terminal with files copied here uploads them to the shell's directory and types their
     paths. ⌘V in a streamed window stages them, and the window's input, the chord first, waits
@@ -545,7 +568,7 @@ sent at −1: above files, below video.
     on iPad every drop comes through a `UIDropInteraction`. Each drop lands in a temporary
     directory of its own and then reaches the tile under it as an ordinary file drop. A file
     that failed is named in a notice, and what it wrote is deleted.
-- **File cards.** `ReadFile` answers the first 512 KiB and 2 000 lines of a text file,
+- **File tiles.** `ReadFile` answers the first 512 KiB and 2 000 lines of a text file,
   `WatchFiles` looks at each watched file's size and modification time every second and sends
   a changed one again, and `WriteFile { path, text, base_modified_ms }` saves an edit
   (`slopty_worker::file::write`). The save writes a temporary file beside the target, fsyncs
@@ -674,7 +697,7 @@ focused tile (`WorkspaceView::return_keyboard`), as the settings and the add-wor
 back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the toast's "Undo" (toasts sit at the foot of the strip) put the
 item back as it was (`remember_closed`, `take_back`), else `forget_closed` lets go. An idle
 shell keeps its session and its attached view through the wait, so its rows come back
-untouched and `forget_closed` sends the worker `Close`; every other card is its item, so the
+untouched and `forget_closed` sends the worker `Close`; every other tile is its item, so the
 document restores it (a note's editor commits on a timer, and the close reads the field
 directly so the last keystrokes come back too). An ended shell is the one exception: it has
 no session to keep and no rows the worker could replay, so it goes at once. Notes (⌘⇧N) are edited
@@ -684,12 +707,12 @@ fenced blocks as a block element with "copy" and, given a shell, "run"
 (`markdown::code_block`, `NoteViewEvent::Run` → `run_in_shell`), its task lines
 (`- [ ] …`, `markdown::task_row`) as rows whose box ticks the line in the text on a click
 without opening the editor (`NoteView::toggle_task`, committed at once), and a
-click on it puts the caret back in the editor; its title bar reads the first non-empty
+click on it puts the caret back in the editor; its header reads the first non-empty
 line (`workspace::note_title`, heading, list and task marks stripped, 40 chars, a checklist's
 ticks counted after it as `1 of 3 done`, the same words the navigator and the palette use,
 through `tile_place`), "Untitled note" while empty. A ticked task is struck through and set
 back to `alpha::STRONG`.
-Any card takes a **name** (⌘E, or a double-click on its title bar; `Item.name`,
+Any tile takes a **name** (⌘E, or a double-click on its header; `Item.name`,
 protocol 37, worker-sanitised to 128 characters): document state every client shows in place
 of the derived title until it is cleared, and what the palette's "Go to" line says. A
 **file tile** (`ItemKind::File { path }`, `slopty-ui::file`) is an editor on a file on the
@@ -730,10 +753,16 @@ palette lists every tile as "Go to <title>" after the sessions (`PaletteRun::Ite
 five distinct commands of the shell a "run" would go to as "Rerun <command>"
 (`TermState::recent_commands`, `PaletteRun::Rerun`, typed through `run_text`). ⌘F with the
 tile active opens a find bar like the terminal's (`FileView::find`, key context `FileSearch`):
-a hit is a line holding the text, smart-case (`file::find_hits`), tinted in the warn tone,
+a hit is a line holding the text, smart-case (`file::hit_lines`), tinted in the warn tone,
 stepped with ⌘G/↩ and wrapped; Esc closes it and the editor takes the keyboard back. Inside
 the editor, ⌘F is the tile's find, not gpui-kit's, and ⌘⌥↑/↓ move the focus between tiles, not add
 carets (bindings in `FileEditor > Input`).
+
+A **folder tile** (`ItemKind::Folder { path }`, `slopty-ui::folder`) browses a directory on the
+worker in place: `ClientMsg::ListFolder` → `WorkerMsg::Folder` (`slopty_worker::listing::folder`,
+folders first, cut at 2 000 with the whole count), rows walked by ↑/↓/↩/⌫, a folder opened moves
+the item (`ItemOp::SetFolder`), a file opens as a file tile beside it, rows drag out and drops go
+up into it; a path of unknown kind is asked as a folder first (`WorkspaceView::open_path_on`).
 
 A **browser tile** (`ItemKind::Browser { url }`, `slopty-ui::browser`) shows a web page,
 usually a port on the worker, in the platform's `WKWebView` (`slopty_platform::web`: an `NSView`
@@ -823,8 +852,8 @@ to the followers as live blocks (`ConversationEvent::Live`), each cleared right 
 transcript change that settles it. Agents the worker starts load the mod, and so does a
 `claude` typed in a Slopty shell (the shell integration's `claude` function). Everywhere else,
 the hooks, the transcript and the status line are the whole face (decisions, "Slopty's Claude
-Code mod is the live channel"). Phases 1a–1c (the decoder, the relay, the wrapper, the wire,
-the worker and the mod) are built; the face comes in 2. The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
+Code mod is the live channel"). The decoder, the relay, the wrapper, the wire, the worker, the mod and the face are
+built. The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
 resolved on the worker through the login shell), which, like ⌘N's shell, starts in the active
 terminal's directory when there is one (`WorkspaceView::active_cwd`, the session's OSC 7 cwd as
 the worker last reported it), else the worker's default; the palette's "New agent in <dir>" line
@@ -873,7 +902,8 @@ be on a phone.
 
 The worker spawns every session with `SLOPTY_SESSION=<id>` and `SLOPTY_WORKER_SOCKET=<path>`;
 the relay forwards its stdin plus those two to the daemon as `CtlRequest::Hook` and always
-exits 0. `slopty-agent` keeps one `Tracker` per session that turns the hook stream into
+exits 0. A `PermissionRequest` goes instead as one `CtlRequest::Permission`, which the worker
+takes in as a hook and then holds for a decision. `slopty-agent` keeps one `Tracker` per session that turns the hook stream into
 `AgentStatus` (`Idle`, `Working`, `Tool`, `Blocked{Permission|Question|Elicitation|IdlePrompt}`,
 `Done`) and flags `attention` on the transitions worth a sound. A block is a ledger of the
 calls waiting on the human (`tool_use_id`s), so a concurrent call finishing beside a pending
@@ -882,11 +912,11 @@ inherits the terminal's session) is dropped while the tracker is busy. An Esc in
 no hook; the transcript's `[Request interrupted by user]` record takes the agent to `Idle`
 instead. `AgentEvent.detail` says what
 the agent wants: the tool call awaiting permission, the question it asked, the elicitation's
-message, or on `Done` the last line it said (`last_assistant_message` from the `Stop` payload;
-when a payload has none of these but names a transcript, the daemon reads the JSONL tail —
-`slopty_agent::transcript` — off the blocking pool and fills the detail in). The daemon
+message, or on `Done` the last line it said (`last_assistant_message` from the `Stop` payload).
+A question or elicitation that arrives without its text, as a notification does, makes the
+daemon read the JSONL tail (`slopty_agent::transcript`) off the blocking pool to fill it in. The daemon
 broadcasts each change as `WorkerMsg::Agent` and replays the table to joining clients. The workspace shows the status
-as a pill in the terminal's title bar and outlines the item when the agent needs the human.
+as a pill in the terminal tile's header and outlines the tile when the agent needs the human.
 A blocked badge (permission, question or elicitation) is itself the button: a click reveals
 and focuses the terminal so the human answers Claude Code's own prompt there; Slopty never
 answers for them. Finding them: ⌘⇧A (the "Next Agent Needing You" menu item) reveals and focuses the
@@ -970,7 +1000,7 @@ separator). Geometry comes from `radii` (xs 4 / sm 6 / md 8), the 4/8 pt `spacin
 washes, the scrim and the separators are the `alpha` constants. Hairlines carry the elevation,
 shadows are `shadow_sm` on floating layers only (picker, worker switcher, search bar, "↓ latest").
 Focus is one accent hairline: the active item's frame and the search bar while
-they hold the caret. Pills (title bar, badge) are `small()` text on a `TINT`
+they hold the caret. Pills (tile header, badge) are `small()` text on a `TINT`
 fill of their tone with the tone as text; buttons are `radii.sm` with `raised` → `overlay`
 hover/pressed, and the one primary action on a surface is `accent_fill` with `accent_ink` text.
 gpui-kit's widgets (inputs, Markdown `TextView`) read gpui-kit's own theme, which
@@ -989,13 +1019,15 @@ fading in or out leaves no page behind; under Reduce Motion there is no fade to 
 `slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
 `CVPixelBuffer` (zero copy), draws the worker's cursor from the cursor channel, forwards mouse,
 scroll and keys (including ⌘ chords the workspace does not bind) as `ScreenInput`, and asks the
-worker for a stream scale matching its painted width. The pointer mapping (card point → stream pixel over
+worker for a stream scale matching its painted width. The pointer mapping (tile point → stream pixel over
 the bounds the render recorded, press/release with clicks and modifiers, pixel vs line scroll
-with its phase, ⌘⌥-scroll left to the workspace, moves off the picture dropped) is covered headless
+with its phase, ⌘-scroll forwarded with its ⌘ and ⌘⌥-scroll left to the workspace, moves off
+the picture dropped) is covered headless
 by `pointer_and_scroll_reach_the_worker_in_stream_pixels`. When the remote window changes size, the worker notices
 within 250 ms, restarts the stream at the new size and sends `Geometry`; the workspace re-aspects
-the item. The other way round, letting go of a window card's grip sends `Resize` with the size
-the card now stands for (native pixels), the worker sets `AXSize` on the matched window off the
+the item. The other way round, a window tile whose column changes size sends `Resize` with the
+size the tile now stands for, at the scale it drew the window at before
+(`WorkspaceView::resize_remote_windows`; a display is letterboxed instead), the worker sets `AXSize` on the matched window off the
 runtime, and the same poll reports what the window took. It is also a text input (`EntityInputHandler`): on iOS a tap raises the soft
 keyboard and committed text goes to the worker one key per character through
 `ScreenView::press` (press + release, armed ⌃/⌘ from the phone key bar applied); the bar over
@@ -1036,10 +1068,10 @@ the block's items come first, protocol 28:
 the marks carry the input column, `TermState::command_block` reads the command and the
 output from any row): "Copy command", "Copy output", "Rerun" (a paste of the command, then
 ↩ as a key), "Save as note" (the
-block as a note card beside the shell: the command as a heading and a runnable `sh` fence,
+block as a note tile beside the shell: the command as a heading and a runnable `sh` fence,
 the output as a plain fence, `block_note`; `TerminalViewEvent::NoteBlock` →
-`WorkspaceView::note_beside`, a free slot when the space beside is taken; the palette's "Keep
-last block as a card" does the same for the block before the newest prompt,
+`WorkspaceView::note_beside`, a new column right of the shell's; the palette's "Keep
+last block as a note" does the same for the block before the newest prompt,
 `TermState::last_block`) and "Select block"; then, on every row, the terminal's own: "Copy"
 (only with a selection; off a block a selection also offers "Save as note", fenced), "Paste", "Find…" and "Clear screen", each what its shortcut does. ⇧-arrows move
 a selection's head (`adjusted_head`: a cell sideways wrapping at the row's ends, a row up or
@@ -1055,7 +1087,7 @@ alone): a command is running once the cursor has left the rows it was typed on
 (`Effect::CommandStarted`) and finished when a newer prompt starts, whose `exit` is its
 status (`Effect::CommandFinished`); the view times the two and emits
 `TerminalViewEvent::CommandFinished { command, exit, elapsed }`, and the workspace badges the
-item's title bar ("done 12.3 s", "failed (1) 1 m 04 s" — `took_label`'s clock — in the success or warn tone,
+tile's header ("done 12.3 s", "failed (1) 1 m 04 s" — `took_label`'s clock — in the success or warn tone,
 `finished-<uuid>`, role Button) when the command ran at least `SLOW_COMMAND` (5 s) and its
 item was not the active one — the shell's answer to the agent attention badge. The badge
 goes when the item is activated (a press on it does that).
@@ -1075,7 +1107,7 @@ the `ShapeCache` global — an `Rc<Word>` (the `ShapedLine` at the base size plu
 colours) per FxHash of (text, styles, family, palette, cell width, and the blink phase for a
 word with an SGR 5 cell), never per zoom or focus. Nothing is swept per frame: each prepaint
 stamps the words it uses, and past a budget of 2¹⁸ glyphs the quarter stamped longest ago
-goes, so a pan or a scroll back finds what it showed a moment ago still shaped; a word is shaped with no forced width and
+goes, so a scroll back finds what it showed a moment ago still shaped; a word is shaped with no forced width and
 each glyph placed at the column of the cell its byte came from, so a wide cluster spans two
 cells however many glyphs it shaped to — so
 a frame of streaming output shapes only the words it has never seen and a zoom step shapes
@@ -1109,7 +1141,8 @@ keeps `displaySyncEnabled` at its default) and the compositor adds about a refre
 paint's own clock, or the next display tick, reads a refresh or more early. The video pacer
 stops its arrival → present clock the same way. The iOS simulator reports no presentation;
 there the next display tick stands in. `cargo xtask e2e smooth`
-runs the load scenarios (MEASUREMENTS, "canvas frame time", measured before the workspace).
+runs the load scenarios (MEASUREMENTS 2026-09-05, frame time under streaming load, measured
+before the workspace replaced the canvas).
 
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
 item, ⌘, and the palette's "Open settings" open it in the in-app editor, `SettingsEditor`
@@ -1172,7 +1205,7 @@ it says "Nothing answered on your tailnet".
 | Crate | Role | Platform |
 |---|---|---|
 | `slopty-core` | ids, clocks, errors, small shared types | all |
-| `slopty-proto` | wire messages, codec (postcard), byte goldens | all |
+| `slopty-proto` | wire messages, codec (postcard), byte goldens; the worker's local control socket (`ctl`, JSON lines, golden too) | all |
 | `slopty-grid` | terminal frame model, row diff, line cache | all |
 | `slopty-engine` | libghostty-vt engine: frames, scrollback, input encoders | worker |
 | `slopty-pty` | openpty/spawn/resize, ptyd protocol | worker |
@@ -1184,6 +1217,9 @@ it says "Nothing answered on your tailnet".
 | `slopty-input` | the input and clipboard seams (`InputSink`, `Board`); CGEvent injection for remote-window input (keymap, pointer/scroll/keys, owner activation, a thread per stream, held input let go at the end) and `NSPasteboard` on macOS | worker |
 | `slopty-agent` | Claude Code hook payloads → per-session `AgentStatus` | worker |
 | `slopty-worker` | session manager, mux, fan-out, the orchestration verbs, worker capabilities, listening ports | worker |
+| `slopty-tailnet` | the local Tailscale daemon's `LocalAPI`: peers and paths, `whois` and grants, admission policy | all |
+| `slopty-tools` | the orchestration verbs as one contract: name resolution, each verb, bulk files, JSON/text views, the MCP tools | all |
+| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, QUIC and MCP front ends | server |
 | `slopty-client` | client session state, the item registry mirror, the layout model | client |
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |
@@ -1194,9 +1230,10 @@ it says "Nothing answered on your tailnet".
 | `slopty-shape` | a UDP relay the client and worker speak QUIC through, with a delay/jitter/loss/rate model below the congestion controller; the degraded link the congestion rulings are measured on | dev |
 | `apps/slopty-ptyd` | PTY custodian daemon (LaunchAgent) | worker |
 | `apps/slopty-worker` | worker daemon | worker |
+| `apps/slopty-server` | server daemon (LaunchAgent, systemd user unit on Linux) | server |
 | `apps/slopty` | macOS app: logging, runtime, window options, then `slopty_app::open_workspace` | client |
-| `apps/slopty-ios` | iOS static library (`slopty_ios_run` called from a UIKit shim); `cargo xtask ios sim [--sim iphone\|ipad]\|device` generates the Xcode project | client |
-| `apps/slopty-cli` | `slopty` CLI: worker ctl, `add`/`workers`/`forget`, raw-mode reference client (`open`/`attach`), hook relay | worker |
+| `apps/slopty-ios` | iOS static library, called from a UIKit shim: `slopty_ios_did_finish_launching` at launch (logging, the notification delegate), then `slopty_ios_run` once the scene connects; `cargo xtask ios sim [--sim iphone\|ipad]\|device` generates the Xcode project | client |
+| `apps/slopty-cli` | `slopty` CLI: worker ctl and install, `add`/`workers`/`forget`, the orchestration verbs (`--json`), `slopty mcp`, raw-mode reference client (`open`/`attach`), hook relay | all |
 | `xtask` | all scripts (build, gates, bundle, sign, icon from `assets/icon.svg`, `e2e app|ios|worker|screen|input|all` for the self-test and the gated live tests) | dev |
 
 Dependency direction is strictly downward in that table; `slopty-ui` never sees `slopty-worker`.

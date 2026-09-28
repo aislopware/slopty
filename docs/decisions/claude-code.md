@@ -41,12 +41,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   say to prefer because the transcript file "may lag the in-memory conversation". So the
   detail comes from the payload first — the `AskUserQuestion` input's first `question`, the
   `Elicitation` `message`, the `Stop` message's last non-empty line — and only a `Blocked
-  (Question|Elicitation)` or `Done` event that still has no detail makes the daemon read the
-  transcript's last 256 KiB for the newest non-sidechain `assistant` record with a `text`
-  block (`slopty_agent::transcript`, `spawn_blocking`, table lock released meanwhile). The
-  transcript is JSONL of `{"type":"assistant","message":{"content":[{"type":"text",…}]}}`
-  records; `isSidechain: true` rows are subagent chatter and skipped. No wire change: `detail`
-  already existed. Found on the way: the `permission_prompt` Notification that follows a
+  (Question|Elicitation)` or `Done` event (`Done` dropped 2026-09-28, below) that still has no
+  detail makes the daemon read the transcript's last 256 KiB for the newest non-sidechain
+  `assistant` record with a `text` block (`slopty_agent::transcript`, `spawn_blocking`, table
+  lock released meanwhile). The transcript is JSONL of
+  `{"type":"assistant","message":{"content":[{"type":"text",…}]}}` records;
+  `isSidechain: true` rows are subagent chatter and skipped. No wire change: `detail` already
+  existed. Found on the way: the `permission_prompt` Notification that follows a
   `PermissionRequest` ~6 s later says only "Claude needs your permission" (no "to use X"), and
   used to replace `Permission{Bash}` + "$ touch …" with `Permission{""}` + nothing; the tracker
   now keeps the request's tool and detail when the notification names none. After Esc on the
@@ -967,7 +968,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   removed nothing and `status` said not installed. Now the program is the whole `command` when
   `args` is `["hook"]`, and the command line before ` hook` (quotes allowed) in the shell form.
   `install` keeps the first relay entry of an event and drops the rest, with any group that
-  leaves empty, so settings the old install filled collapse to one entry. The relay also cut
+  leaves empty, so settings the old install filled collapse to one entry (both old-form paths
+  removed 2026-09-28, below). The relay also cut
   stdin at 1 MiB, which turned a large `PostToolUse` (the tool's output rides along) into
   invalid JSON. It now reads the payload whole and forwards `slopty_agent::Hook` serialized:
   the fields the tracker reads, a few hundred bytes. The relay and `slopty worker` reach the
@@ -1151,8 +1153,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     transcript (`/clear`, `/resume`) or a rewritten one starts over the same way. Unfollow,
     the session closing or the connection ending finishes the stream; only followed sessions
     are read. `Expand` answers a clipped text whole (up to `EXPAND_CHARS`) on the same stream.
-    Following is per connection: two clients following one session read it twice, which costs
-    a decode each and keeps every stream's snapshot its own.
+    Every follower of a session shares one read of it (amended 2026-09-28, workers.md "A
+    followed session's transcripts are read once, whoever follows it"): the changes go out
+    over a broadcast, and a follower that joins late is handed the conversation as it stands.
   - **Cost.** A session growing at twenty times a real turn's rate, followed on the typing
     connection, leaves the echo's median where it was and adds 1.2–1.6 ms at p90; an appended
     answer reaches the follower in p50 26 ms (MEASUREMENTS.md, "an echo beside a followed
@@ -1367,8 +1370,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Find.** ⌘F opens a floating bar over the list. It searches prompts, answers, call titles,
     notes, and thinking where the density shows it. Enter and Shift-Enter step through the
     matches, opening the fold that hides one, and Esc gives the composer the keyboard back.
-  - Not done: images need their bytes on the wire, and a background task's live output needs
-    the worker to tail its file. Model and mode pickers would have to type into the TUI's menus,
+  - Images and a background task's live output came next (the entry below). Model and mode
+    pickers would have to type into the TUI's menus,
     which the face never does, so the mode shows as text in the composer's foot instead.
   - Tests:
     - the decoder: `a_turn_adds_up_its_requests`, `an_api_error_says_when_it_retries`,
@@ -1387,3 +1390,172 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `-subagent` and the new `conversation-settled` (a settled turn: its prompt, its fold with
       its figures, its answer and the file it changed);
     - the frame probe: `the_face_draws_a_streaming_answer_within_a_frame` (docs/MEASUREMENTS.md).
+- ✅ **The face shows the work beyond words: background output, pictures, thinking, plans and
+  tasks** (2026-09-27, wire additive but for `Prompt::images`). The face left out what a turn
+  does besides write and call tools. T3 Code and Amp both show it, so the face now does too.
+  - **Background output.** A `run_in_background` command writes to
+    `<tmp>/claude-<uid>/<project>/<session>/tasks/<task>.output`, named in its result's text.
+    The decoder keeps that path (`BashDetail::output_file`).
+    - The follow task tails it in the same blocking read as the transcripts
+      (`conversation::output::Outputs`), so no terminal path is touched. It reads the newest 32
+      background calls, stats each and reads the last 64 KiB only when the length changed.
+      After the call ends it reads once more, then stops.
+    - A path is read only when it is absolute and names the call's own task file under a
+      `tasks` directory (`is_task_output`), so a transcript cannot point the worker elsewhere.
+    - The tail is clipped like any text (escapes out, a line's `\r` rewrites kept to the last)
+      and goes out as `ConversationEvent::Output { thread, call, tail, bytes }`. The whole file,
+      up to 1 MiB, comes through the usual `Expand` with `Part::Output`.
+    - The end comes from Claude Code's `task-notification`: the `queue-operation` enqueue that
+      is written the moment the work ends, a queued attachment, or user text. It sets the
+      status, `BashDetail::finished_ms`, and for a background subagent its tokens, tool uses and
+      duration from `<usage>`.
+    - **No stop control.** Neither the transcript nor the hooks give a task's pid or a way to
+      stop it, and the mod is a read-only pipe. The only way to stop one would be to type into
+      the TUI, which the face never does, so the tray shows the state only.
+  - **The tray.** Background work sits over the composer while it runs and until the next
+    prompt: a row each with its name, state word and elapsed time, and the last line in mono.
+    - A click opens the last twelve lines in the code frame; once the work has ended, it can
+      expand to the whole file.
+    - A subagent's row opens its thread.
+    - Three rows show, and the rest sit under "N more in the background".
+    - The clock ticks while anything runs.
+    - The tray is the session's, so a subagent's thread leaves it out.
+  - **Pictures.** A pasted image, a tool's screenshot and a `Read` of an image are base64 in the
+    transcript. The wire carries only a description: `Image { digest (BLAKE3), media_type,
+    bytes, width, height, at }`, on `Prompt::images` (which replaces the old count) and
+    `ToolResult::images`.
+    - The decoder reads the size from the header, for PNG, JPEG, GIF and WebP.
+    - A row fetches its pictures when the list first lays it out. It sends `Expand` with
+      `Part::Image`, and the worker answers `ConversationEvent::Image` with the bytes (capped at
+      `IMAGE_BYTES`, 8 MiB) or none.
+    - The client keeps the bytes by digest, so a picture shown twice is fetched once, and GPUI
+      decodes it off the frame.
+    - A thumbnail has its own shape inside a 200 × 120 box, so the row is laid out before the
+      bytes come. It sits at the medium radius with a subtle hairline.
+    - A click opens the picture fitted over the face on the scrim, with its size and type; a
+      click anywhere or Esc closes it.
+    - A picture over the cap, or one whose bytes are gone, says so in place.
+  - **Thinking** is one line, "Thought for 9 s", timed from what it answered, with its first
+    words muted. The chevron takes the icon's slot on hover. A click opens it. It shows from the
+    Thinking density and opens by itself in Verbose.
+  - **A plan** (`ExitPlanMode`) is a card on the panel, with "Plan", its heading as title,
+    whether it was approved, and a copy button. Its Markdown is set at the prose size. Past 16
+    lines it shows 12 and "Show the whole plan · N lines". It stays in view when its turn folds.
+  - **Tasks** sit over the composer while one is open or the agent works: the task in progress,
+    `done/total`, and a segment per task (up to ten). Opened, each task shows how long it took,
+    from the calls that moved it.
+  - **From the second design critique** (the conversation's part):
+    - The approval sets its words at the composer's field inset (`kit::FIELD_INSET`) and uses
+      the `warn_fill` dot.
+    - Its fallback reads "Falls back to the terminal in 4 min", from five minutes left. It
+      counts down on this client's clock from when the prompt came, and sits before the
+      answers.
+    - The composer's foot shows the permission mode and the model as read-only words. The
+      density is in the palette only.
+    - The header drops the model chip, and its readouts are 8 pt apart.
+    - One `+N −M` everywhere (`kit::changes`, `changes_text`), with a zero side left out.
+    - A tool row's facts follow its subject; only a duration or a ✕ sits at the right.
+    - A row's chevron takes its icon's slot on hover or when open, and nothing trails.
+    - The list fades 12 pt at its top once scrolled off its start (`kit::edge_fade`).
+    - A missing last newline is a struck return mark on the line before it, not a row.
+    - The subagent's bar is 28 pt on `content` with a hairline foot and the kind at meta
+      size.
+    - Motion: the composer and the approval cross-fade in one shell, on the sheet's pace
+      asking and the settle's answered. A fold's rows settle in over 160 ms. The latest pill
+      and the find bar slide in. Reduce Motion lands them at once.
+    - The face toggle's placement is the tile's, so it was left to the tile.
+  - Tests:
+    - the decoder: `a_background_command_is_finished_by_its_queued_notice`,
+      `a_background_subagent_reports_its_figures`, `a_pasted_picture_is_on_its_prompt`,
+      `a_tools_picture_is_on_its_result`, and in `media` and `output`
+      `a_pictures_header_gives_its_size`, `a_picture_is_described_and_found_again`,
+      `a_read_picture_is_found_in_its_result`,
+      `a_background_commands_file_is_tailed_while_it_runs`, `only_a_tasks_own_file_is_read`,
+      `a_long_log_keeps_its_last_lines`, `escapes_and_overwrites_are_taken_out`,
+      `outputs_and_pictures_are_found_for_a_follower`;
+    - the goldens: `golden__conversation__conversation_output`, `_image`, `_image_gone`,
+      `client_expand_image`;
+    - the client: `a_picture_is_asked_for_once_and_kept_by_its_digest`,
+      `a_background_commands_lines_follow_its_call`,
+      `a_plan_stays_out_of_the_fold_and_pictures_stay_in_sight`,
+      `the_work_session_reads_its_times`, `background_work_says_how_it_stands`,
+      `a_plan_has_a_title_and_a_word`, `progress_counts_done_and_names_the_task_on_show`,
+      `the_fallback_counts_down_from_five_minutes`, `a_thumbnail_keeps_its_pictures_shape`;
+    - the face in a window: `a_picture_is_fetched_when_shown_and_opens_large`,
+      `background_work_sits_over_the_composer`, `thinking_is_a_line_that_opens`;
+    - end to end: `the_face_shows_the_work_beyond_words`, which writes the build's output file
+      as it runs and appends its notice, with the goldens `conversation-work` and
+      `conversation-work-verbose`.
+
+- ✅ **The prompt rail is a cached view of its own** (2026-09-27, frame-path pass). The rail
+  (a tick per prompt down the list's right edge) was built on every frame of the face: each
+  prompt's text cloned and cut to its first line, a label formatted, and eighty positioned
+  ticks laid out and painted, though a frame that scrolls or grows an answer changes none of
+  it. The rail is now `conversation::view::rail::Rail`, placed with `Entity::cached`. The face
+  hands it the prompts when its rows are rebuilt, and works out their words again only when a
+  prompt's row or revision changed. The rail draws again only when that, the row count, the
+  theme or the zoom changed. A headless panning frame over 80 turns fell from 1.19 to 0.83 ms
+  at p50 and from 3.0–3.5 to 2.7 ms at p99 (`docs/MEASUREMENTS.md`, "the prompt rail off the
+  face's frame").
+  - Test: `the_prompt_rail_draws_only_when_its_prompts_change` (a pan and a streaming answer
+    reuse it; a new prompt draws it with one more tick; a tick's click still moves the list).
+  - What is left of a streaming frame is GPUI's layout of the rows in view and gpui-kit's
+    `TextView`, which parses the live block's whole Markdown again on every word (about a
+    quarter of a headless word frame). That parse belongs to the gpui-kit fork.
+- ✅ **A streaming answer's Markdown parses from its last block** (2026-09-28, gpui-kit fork
+  `dbd18ca4` and `577b935d`). The face keeps handing `TextView` the live block's whole text
+  each frame, and the fork now treats Markdown that extends the last text as an append.
+  Only the last block is parsed again; a list is parsed from its last item. The parse runs
+  on the UI thread when that part is small, so the word lands in the frame that brought it
+  at its exact height. Text that may hold a link or footnote definition (`]:`) or open
+  with frontmatter is still parsed whole, because the new text can change earlier blocks.
+  MDX is also parsed whole, since an append onto a failed parse would drop text. The face
+  needed no change. This beat a `push_str` call from the face: the model's text already
+  arrives whole, and every other `TextView` user that streams through `set_text` gains too.
+  A headless word frame fell from 1.33–1.38 to 1.10–1.16 ms at p50 (`docs/MEASUREMENTS.md`,
+  "a streaming answer's Markdown parsed from its last item").
+  - Tests, in the fork: `markdown_appended_a_byte_at_a_time_parses_as_the_whole_text`
+    checks each step of several samples against a whole parse, and
+    `set_text_extending_markdown_parses_only_the_last_block_at_once` and
+    `set_text_extending_markdown_with_a_definition_resolves_earlier_references` cover the
+    rest.
+  - A long block other than a list, such as a big table or code fence, is still parsed
+    whole on every word.
+- ✅ **Hook events are a type, and the old install and old Claude Code paths are gone**
+  (2026-09-28). The event a hook names was a string, matched against literals in the tracker,
+  listed apart in `HOOK_EVENTS`, and declared as `"PermissionRequest"` in two crates, with
+  `"Report"` and `"Statusline"` invented in the CLI. It is now `slopty_agent::HookEvent`: one
+  variant per event Claude Code sends, plus `Report` and `Statusline` for what `slopty hook`
+  posts, each spelled on the wire as its variant, and `Other` for any event a newer Claude Code
+  adds. `HOOK_EVENTS` is the list of variants the relay registers, and every match on an event
+  is on the enum, so a new variant has to be placed in the tracker's transition.
+  - Only the args form of the relay's entry (`command` the binary, `args: ["hook"]`) was ever
+    written since the path-with-spaces fix, so `is_relay` no longer reads a shell command line
+    `<path> hook`, and `install` no longer collapses duplicates. It repoints the first relay
+    entry of an event or adds one. Pre-release, a settings file an old build wrote is
+    reinstalled by hand.
+  - Every `Stop` in the captures (`tests/fixtures/conversation/*/hooks.jsonl`, Claude Code
+    2.1.283) and in the 2.1.261 probe above carries `last_assistant_message`. So a finished
+    turn no longer rereads 256 KiB of transcript: `wants_transcript` asks only for a question
+    or an elicitation raised by a notification that does not spell it out
+    (`agent_needs_input`, `elicitation_dialog`).
+  - Tests: `an_event_is_spelled_as_its_name_and_a_new_one_reads_as_other`,
+    `blocked_and_done_say_what_they_want`, `recognises_our_command`,
+    `install_is_idempotent_and_uninstall_restores`,
+    `every_captured_event_is_one_the_relay_registers`.
+- ✅ **A permission request goes to the worker once** (2026-09-28). The relay used to post a
+  `PermissionRequest` as `CtlRequest::Hook`, wait for its reply, then open a second connection
+  with `CtlRequest::Permission` carrying the same payload, and the worker read that JSON twice,
+  once per request. Now `CtlRequest::Permission` is the only request for that hook. The control
+  socket reads its payload once, takes it in as it takes any hook (the followers' board and the
+  agent table), and hands the parsed hook to `follow::ask` to hold. A payload that does not
+  read, or a session the worker does not run, is a `CtlReply::Error`, which the relay reads as
+  no decision. This amends the note under **Approvals** that the worker must not apply the
+  payload a second time: there is no first time any more.
+  - The payload stays a JSON string inside the JSON line. Carrying it as raw JSON
+    (`serde_json::value::RawValue`) would drop the escaping, and the layering allows it, but
+    `CtlRequest::Hook` is built in callers this change did not own (the status-line relay, the
+    worker's e2e, the e2e harness), so it is left for one change that moves them together.
+  - Tests: `a_permission_request_prints_the_workers_decision` sees one request, the ask;
+    `a_worker_that_does_not_decide_leaves_the_dialog_to_claude_code` and
+    `the_wait_for_a_decision_is_bounded` answer that one connection.

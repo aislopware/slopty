@@ -390,6 +390,13 @@ impl StreamsState {
         }
     }
 
+    /// Whether the stream of the highest priority with data queued is at `min_priority` or above
+    pub(crate) fn has_pending_at(&self, min_priority: i32) -> bool {
+        self.pending
+            .peek()
+            .is_some_and(|stream| stream.priority >= min_priority)
+    }
+
     /// Whether any stream data is queued, regardless of control frames
     pub(crate) fn can_send_stream_data(&self) -> bool {
         // Reset streams may linger in the pending stream list, but will never produce stream frames

@@ -14,7 +14,7 @@ expression: "decode(\"permission\").snapshot()"
             lines: 1
             chars: 197
             full: ~
-          images: 0
+          images: []
           command: ~
     - id: "00000000-0000-4000-8000-000000000015:0"
       at_ms: 1790482631345
@@ -44,6 +44,7 @@ expression: "decode(\"permission\").snapshot()"
               stdout: ~
               stderr: ~
               output_file: ~
+              finished_ms: ~
           result:
             status: Error
             text:
@@ -52,6 +53,7 @@ expression: "decode(\"permission\").snapshot()"
               chars: 23
               full: ~
             at_ms: 1790482631755
+            images: []
     - id: "00000000-0000-4000-8000-000000000021:0"
       at_ms: 1790482632727
       body:
@@ -80,10 +82,12 @@ expression: "decode(\"permission\").snapshot()"
               stdout: ~
               stderr: ~
               output_file: ~
+              finished_ms: ~
           result:
             status: Ok
             text: ~
             at_ms: 1790482633255
+            images: []
     - id: "00000000-0000-4000-8000-000000000026:0"
       at_ms: 1790482634063
       body:
@@ -112,10 +116,12 @@ expression: "decode(\"permission\").snapshot()"
               stdout: ~
               stderr: ~
               output_file: ~
+              finished_ms: ~
           result:
             status: Ok
             text: ~
             at_ms: 1790482634363
+            images: []
     - id: "00000000-0000-4000-8000-000000000032:0"
       at_ms: 1790482635730
       body:

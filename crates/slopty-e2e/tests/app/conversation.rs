@@ -9,8 +9,9 @@
 //! recorded events are posted to the worker's mod socket as the mod posts them.
 //!
 //! Goldens: the face with a held prompt over an edit's diff, light and dark; a subagent's own
-//! thread; the face on a phone-width window, where it is the default; and a step the model is
-//! still writing.
+//! thread; the face on a phone-width window, where it is the default; a step the model is
+//! still writing; and the work beyond words (a pasted picture, a plan, the task list, a build
+//! in the background), folded and in Verbose.
 
 use std::path::{Path, PathBuf};
 
@@ -45,6 +46,12 @@ async fn start_recorded(stack: &Stack, session: &str, name: &str) -> String {
             std::fs::copy(&agent, subagents.join(agent.file_name().unwrap())).unwrap();
         }
     }
+    start(stack, session, &main).await
+}
+
+/// Start the session whose main transcript is `main` in `session` through the relay, and give
+/// it a status line (the model and the context in use). Returns the transcript's path.
+async fn start(stack: &Stack, session: &str, main: &Path) -> String {
     let transcript = main.to_string_lossy().into_owned();
     let start = json!({
         "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
@@ -80,6 +87,11 @@ fn permission_request(transcript: &str) -> Value {
 /// The labels of the nodes with `role`.
 fn labels(d: &Dump, role: &str) -> Vec<String> {
     d.a11y.iter().filter(|n| n.role == role).filter_map(|n| n.label.clone()).collect()
+}
+
+/// Whether a node of any role has a label starting with `prefix`.
+fn any_label(d: &Dump, prefix: &str) -> bool {
+    d.a11y.iter().any(|n| n.label.as_deref().is_some_and(|l| l.starts_with(prefix)))
 }
 
 fn has(d: &Dump, role: &str, label: &str) -> bool {
@@ -153,28 +165,111 @@ async fn a_subagent_has_a_thread_of_its_own() {
     .await
     .unwrap();
     golden(drv, &dir, "conversation-settled").await;
-    // Every step shown: the settled turn opens, the subagent's card with it.
+    // Every step shown: the settled turn opens, the subagent's card with it, above the tail.
     drv.keys("ctrl-o ctrl-o").await.unwrap();
-    let dump = drv
-        .wait_for("the subagent's card", STEP, |d| {
-            d.a11y
-                .iter()
-                .any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Subagent Count lines")))
-        })
-        .await
-        .unwrap();
+    drv.wait_for("every step", STEP, |d| any_label(d, "Updated a task")).await.unwrap();
+    let card_shows = |d: &Dump| {
+        d.a11y
+            .iter()
+            .any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Subagent Count lines")))
+    };
+    let dump = scroll_up_until(drv, "the subagent's card", card_shows).await;
     let card = dump
         .a11y
         .iter()
         .find(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Subagent Count lines")))
         .unwrap();
+    // The scroll can leave the card partly under the tile's header: click its part in the list.
+    let list = dump
+        .a11y
+        .iter()
+        .find(|n| n.role == "Group" && n.label.as_deref() == Some("Conversation"))
+        .unwrap();
     let [x, y, w, h] = card.bounds;
-    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    let (top, bottom) = (y.max(list.bounds[1]), (y + h).min(list.bounds[1] + list.bounds[3]));
+    drv.click(x + w / 2.0, f32::midpoint(top, bottom)).await.unwrap();
     drv.wait_for("the subagent's thread", STEP, |d| has(d, "Navigation", "Subagent Count lines"))
         .await
         .unwrap();
     golden(drv, &dir, "conversation-subagent").await;
     stack.shutdown().await;
+}
+
+/// A file dropped on the face while it shows is attached to the draft: its chip waits over the
+/// composer's field, saying how far it got and offering to stop it, and only the chip says so.
+#[tokio::test]
+async fn a_file_dropped_on_the_face_waits_in_the_composer() {
+    if !gated() {
+        return;
+    }
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    // Sparse: big enough to still be on its way when the frame is drawn, free to make.
+    let source = stack.path("screen-recording.mov");
+    std::fs::File::create(&source).unwrap().set_len(2 << 30).unwrap();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let dump = first_shell(&mut stack.driver).await;
+    let session = dump.terminals[0].session.clone();
+    start_recorded(&stack, &session, "tools").await;
+    let drv = &mut stack.driver;
+    drv.keys("cmd-j").await.unwrap();
+    let dump = drv
+        .wait_for("the settled conversation", STEP, |d| {
+            has(d, "Group", "Conversation") && has(d, "List", "Changed files")
+        })
+        .await
+        .unwrap();
+    let tile = dump.item("terminal").unwrap().bounds;
+    drv.drop_files(&[source.as_path()], tile[0] + tile[2] / 2.0, tile[1] + tile[3] / 2.0)
+        .await
+        .unwrap();
+    let dump = drv
+        .wait_for("the attachment's chip", STEP, |d| any_label(d, "Attaching screen-recording.mov"))
+        .await
+        .unwrap();
+    assert!(
+        !has(&dump, "Button", "Cancel upload"),
+        "the header says nothing the chip says: {:#?}",
+        dump.a11y
+    );
+    // Drawn at once, as the transfers golden is: the upload is still near its start.
+    drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
+    let frame = drv.render(&dir.join("conversation-attachment.png")).await.unwrap();
+    slopty_e2e::snapshot::assert_matches(
+        "conversation-attachment",
+        &frame,
+        slopty_e2e::snapshot::MAC_TOLERANCE,
+        &slopty_e2e::harness::artifacts_dir(),
+    )
+    .unwrap();
+    let stop = drv.dump().await.unwrap();
+    let stop = stop.a11y_node("Button", Some("Remove screen-recording.mov")).map(|n| n.bounds);
+    let [x, y, w, h] = stop.expect("the chip's way to stop it");
+    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    drv.wait_for("the chip gone", STEP, |d| !any_label(d, "Attaching screen-recording.mov"))
+        .await
+        .unwrap();
+    stack.shutdown().await;
+}
+
+/// Scroll the conversation up a few lines at a time until `shows` holds, as a reader looking
+/// for something above the tail would.
+async fn scroll_up_until(
+    drv: &mut slopty_e2e::Driver,
+    what: &str,
+    shows: impl Fn(&Dump) -> bool,
+) -> Dump {
+    for _ in 0..60 {
+        let dump = drv.dump().await.unwrap();
+        if shows(&dump) {
+            return dump;
+        }
+        let list = dump.a11y_node("Group", Some("Conversation")).expect("the conversation");
+        let [x, y, w, h] = list.bounds;
+        // The wheel's delta is in lines: a few at a time pass nothing by.
+        drv.scroll(x + w / 2.0, y + h / 2.0, 0.0, 5.0).await.unwrap();
+    }
+    drv.wait_for(what, STEP, shows).await.unwrap()
 }
 
 /// On a phone-width window an agent's tile opens on its conversation, with no key pressed,
@@ -291,11 +386,9 @@ async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
     let dump = stack
         .driver
         .wait_for("the step settled", STEP, |d| {
-            // The fold carries the turn's figures from the transcript: the model and what it
-            // wrote.
-            labels(d, "Button")
-                .iter()
-                .any(|l| l == "Worked \u{b7} 1 step \u{b7} Haiku 4.5 \u{b7} 20 tokens")
+            // The fold carries the turn's figures from the transcript: what it wrote. Its model
+            // is the one the composer names, so the fold leaves it out.
+            labels(d, "Button").iter().any(|l| l == "Worked \u{b7} 1 step \u{b7} 20 tokens")
                 && !has(d, "Article", writing)
                 && !has(d, "Status", "Preparing Bash")
         })
@@ -306,6 +399,249 @@ async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
         "{:#?}",
         dump.a11y
     );
+    stack.shutdown().await;
+}
+
+/// A screenshot made up for the session: a window's bar over a header whose chips run into
+/// the title, as a person would paste to show it clipping.
+fn screenshot() -> Vec<u8> {
+    let (w, h) = (640_u32, 400_u32);
+    let picture = image::RgbImage::from_fn(w, h, |x, y| {
+        let chip = |x0: u32| (x0..x0.saturating_add(90)).contains(&x) && (58..82).contains(&y);
+        if y < 28 {
+            image::Rgb([232, 232, 236])
+        } else if chip(300) || chip(400) || chip(500) {
+            image::Rgb([96, 120, 220])
+        } else if (24..420).contains(&x) && (62..78).contains(&y) {
+            image::Rgb([60, 60, 70])
+        } else if (40..100).contains(&y) {
+            image::Rgb([248, 248, 250])
+        } else {
+            image::Rgb([255, 255, 255])
+        }
+    });
+    let mut png = std::io::Cursor::new(Vec::new());
+    picture.write_to(&mut png, image::ImageFormat::Png).unwrap();
+    png.into_inner()
+}
+
+/// A session made up to show a turn's work beyond its words, laid out under the run's
+/// directory as Claude Code keeps it: a prompt with a pasted screenshot, the model's
+/// thinking, a plan the person approved, a task list under way, a `Read` of the screenshot,
+/// and a build run in the background whose output file the test writes and whose notice says
+/// it finished. Returns the main transcript and the build's output file.
+fn work_session(stack: &Stack) -> (PathBuf, PathBuf) {
+    let main = stack.path("projects").join("s1.jsonl");
+    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+    let tasks = stack.path("claude-tmp").join("s1").join("tasks");
+    std::fs::create_dir_all(&tasks).unwrap();
+    let output = tasks.join("b1.output");
+    std::fs::write(&output, "   Compiling slopty-theme v0.1.0\n   Compiling slopty-ui v0.1.0\n")
+        .unwrap();
+    let data = data_encoding::BASE64.encode(&screenshot());
+    let picture = json!({
+        "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": data },
+    });
+    let mut parent = Value::Null;
+    let mut out = String::new();
+    let mut push = |uuid: &str, at: &str, mut record: Value| {
+        if !uuid.is_empty() {
+            record["uuid"] = json!(uuid);
+            record["parentUuid"] = parent.clone();
+            parent = json!(uuid);
+        }
+        record["timestamp"] = json!(format!("2026-09-27T04:{at}.000Z"));
+        record["sessionId"] = json!("s1");
+        out.push_str(&record.to_string());
+        out.push('\n');
+    };
+    let assistant = |content: Value| {
+        json!({ "type": "assistant", "message": {
+            "role": "assistant", "model": "claude-opus-5-5", "content": [content],
+            "usage": { "input_tokens": 12, "cache_read_input_tokens": 41_000, "output_tokens": 420 },
+        }})
+    };
+    let result = |id: &str, content: Value, structured: Value| {
+        json!({ "type": "user", "message": { "role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": id, "content": content,
+        }]}, "toolUseResult": structured })
+    };
+    push(
+        "u1",
+        "00:00",
+        json!({ "type": "user", "permissionMode": "acceptEdits", "message": {
+            "role": "user", "content": [
+                picture,
+                { "type": "text", "text": "The header clips its chips on a narrow window, as here." },
+            ],
+        }}),
+    );
+    push(
+        "a1",
+        "00:09",
+        assistant(json!({ "type": "thinking", "thinking":
+        "The chips never shrink, so the title takes the squeeze. The header should give way \
+         from the right: the model first, then the context, and the changes last." })),
+    );
+    let plan = "# Let the header's chips give way\n\n\
+                1. Measure the chips before the title, at the tile's width.\n\
+                2. Drop the model chip first, then the context.\n\
+                3. Keep the changes chip to the last, since it opens the diff.\n\n\
+                The title keeps at least a third of the header.";
+    push(
+        "a2",
+        "00:12",
+        assistant(json!({
+            "type": "tool_use", "id": "t1", "name": "ExitPlanMode", "input": { "plan": plan },
+        })),
+    );
+    push(
+        "r1",
+        "00:30",
+        result("t1", json!("User has approved your plan."), json!({ "plan": plan })),
+    );
+    let todos = json!([
+        { "content": "Measure the chips", "activeForm": "Measuring the chips", "status": "completed" },
+        { "content": "Drop chips from the right", "activeForm": "Dropping chips from the right",
+          "status": "in_progress" },
+        { "content": "Check a phone-width window", "activeForm": "Checking a phone-width window",
+          "status": "pending" },
+    ]);
+    push(
+        "a3",
+        "00:31",
+        assistant(json!({
+            "type": "tool_use", "id": "t2", "name": "TodoWrite", "input": { "todos": todos },
+        })),
+    );
+    push("r2", "00:31", result("t2", json!("Todos have been modified successfully."), json!({})));
+    push(
+        "a4",
+        "00:40",
+        assistant(json!({
+            "type": "tool_use", "id": "t3", "name": "Read",
+            "input": { "file_path": "/work/shots/header.png" },
+        })),
+    );
+    push(
+        "r3",
+        "00:41",
+        result(
+            "t3",
+            json!([picture]),
+            json!({
+                "type": "image", "file": { "base64": data, "type": "image/png" },
+            }),
+        ),
+    );
+    push(
+        "a5",
+        "00:50",
+        assistant(json!({
+            "type": "tool_use", "id": "t4", "name": "Bash", "input": {
+                "command": "cargo build --release", "description": "Build the release binary",
+                "run_in_background": true,
+            },
+        })),
+    );
+    let started = format!(
+        "Command running in background with ID: b1. Output is being written to: {}. You will be \
+         notified when it completes.",
+        output.display()
+    );
+    push(
+        "r4",
+        "00:51",
+        result(
+            "t4",
+            json!(started),
+            json!({
+                "stdout": "", "stderr": "", "interrupted": false, "backgroundTaskId": "b1",
+            }),
+        ),
+    );
+    push(
+        "a6",
+        "00:55",
+        assistant(json!({ "type": "text", "text":
+        "The chips now give way from the right, the model first. The release build runs in the \
+         background; I will check a phone-width window once it is done." })),
+    );
+    std::fs::write(&main, out).unwrap();
+    (main, output)
+}
+
+/// The notice Claude Code queues when the background build ends, as the transcript keeps it.
+fn build_finished() -> String {
+    let notice = "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>t4</tool-use-id>\n\
+                  <status>completed</status>\n<summary>Background command \"Build the release \
+                  binary\" completed (exit code 0)</summary>\n</task-notification>";
+    let record = json!({
+        "type": "queue-operation", "operation": "enqueue", "content": notice,
+        "timestamp": "2026-09-27T04:01:55.000Z", "sessionId": "s1",
+    });
+    format!("{record}\n")
+}
+
+/// A turn's work beyond its words: the pasted screenshot on the prompt, the plan in view when
+/// the turn folds, the task list over the composer, and the build run in the background with
+/// its last line, following the file it writes as it grows and ending when its notice comes.
+/// In Verbose, the thinking opens and the screenshot the `Read` returned shows on it.
+#[tokio::test]
+async fn the_face_shows_the_work_beyond_words() {
+    if !gated() {
+        return;
+    }
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let dump = first_shell(&mut stack.driver).await;
+    let session = dump.terminals[0].session.clone();
+    let (main, output) = work_session(&stack);
+    start(&stack, &session, &main).await;
+    let drv = &mut stack.driver;
+    drv.keys("cmd-j").await.unwrap();
+    let building = "Build the release binary: Running";
+    drv.wait_for("the build in the background", STEP, |d| {
+        has(d, "List", "In the background")
+            && labels(d, "Button").iter().any(|l| l.starts_with(building))
+            && has(d, "Article", "Plan: Let the header's chips give way, Approved")
+    })
+    .await
+    .unwrap();
+    // The build prints on: the tray follows its file.
+    let mut file = std::fs::OpenOptions::new().append(true).open(&output).unwrap();
+    std::io::Write::write_all(
+        &mut file,
+        b"   Compiling slopty v0.1.0\n    Finished `release` profile [optimized] target(s) in 1m 04s\n",
+    )
+    .unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&main)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, build_finished().as_bytes()))
+        .unwrap();
+    drv.wait_for("the build done", STEP, |d| {
+        labels(d, "Button").iter().any(|l| l == "Build the release binary: Done \u{b7} 1m 5s")
+    })
+    .await
+    .unwrap();
+    golden(drv, &dir, "conversation-work").await;
+    drv.keys("ctrl-o ctrl-o").await.unwrap();
+    // Every step shows, the build's call among them, so its finished row leaves the tray.
+    drv.wait_for("every step", STEP, |d| {
+        any_label(d, "Updated the tasks")
+            && any_label(d, "Picture, 640 \u{d7} 400")
+            && !labels(d, "Button").iter().any(|l| l.starts_with("Build the release binary: "))
+    })
+    .await
+    .unwrap();
+    golden(drv, &dir, "conversation-work-verbose").await;
+    // Above the tail: the thinking, open in Verbose, and how long it took.
+    scroll_up_until(drv, "the thinking", |d| {
+        labels(d, "Button").iter().any(|l| l == "Thought for 9 s")
+    })
+    .await;
     stack.shutdown().await;
 }
 
@@ -537,9 +873,9 @@ async fn the_face_draws_a_streaming_answer_within_a_frame() {
             assert_eq!(stack.post_mod(&piece(word)).await.unwrap(), 204);
             if pan {
                 let dy = if (n / 60).is_multiple_of(2) { 40.0 } else { -40.0 };
-                stack.driver.scroll(x, y, 0.0, dy, false).await.unwrap();
+                stack.driver.scroll(x, y, 0.0, dy).await.unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-                stack.driver.scroll(x, y, 0.0, dy, false).await.unwrap();
+                stack.driver.scroll(x, y, 0.0, dy).await.unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(8)).await;
             } else {
                 tokio::time::sleep(std::time::Duration::from_millis(16)).await;

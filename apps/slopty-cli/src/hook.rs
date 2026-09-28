@@ -9,10 +9,11 @@
 //! another agent reports `working|blocked|done|idle|gone` and gets Claude Code's treatment.
 //!
 //! A `PermissionRequest` is the one hook Claude Code waits on (it is registered without
-//! `async`). After posting it, the relay asks the worker for a decision and prints what Claude
-//! Code expects. The worker decides only while a client follows the session; no decision prints
-//! nothing and Claude Code shows its own dialog ([`slopty_agent::permission`]).
-//! `slopty hook statusline` is the status-line wrapper ([`crate::statusline`]).
+//! `async`). The relay sends it as the question itself, which the worker takes in as any hook,
+//! waits for the decision and prints what Claude Code expects. The worker decides only while a
+//! client follows the session; no decision prints nothing and Claude Code shows its own dialog
+//! ([`slopty_agent::permission`]). `slopty hook statusline` is the status-line wrapper
+//! ([`crate::statusline`]).
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -20,12 +21,11 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Subcommand, ValueEnum};
-use slopty_agent::HOOK_EVENTS;
 use slopty_agent::hooks::{self, Outcome};
-use slopty_agent::permission::{self, Decision, PermissionAsk};
+use slopty_agent::permission::{self, hook_output};
+use slopty_agent::{HOOK_EVENTS, HookEvent};
 use slopty_core::SessionId;
-use slopty_worker::ctl::{CtlReply, CtlRequest};
-use slopty_worker::manager::SESSION_ENV;
+use slopty_proto::ctl::{CtlReply, CtlRequest, Decision, PermissionAsk, SESSION_ENV};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 
@@ -33,9 +33,6 @@ use crate::{statusline, workerctl};
 
 /// How long the relay waits for the daemon before giving up silently.
 const RELAY_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// The event the relay waits on for a decision.
-const PERMISSION_EVENT: &str = "PermissionRequest";
 
 #[derive(Subcommand, Debug)]
 pub enum HookCmd {
@@ -103,7 +100,7 @@ impl ReportStatus {
 /// The hook payload a report relays: the shape `slopty_agent::Hook` reads as a `Report`.
 fn report_payload(status: ReportStatus, message: &[String]) -> String {
     serde_json::json!({
-        "hook_event_name": "Report",
+        "hook_event_name": HookEvent::Report,
         "status": status.word(),
         "message": message.join(" "),
     })
@@ -126,13 +123,16 @@ pub async fn relay(data_dir: &Path) {
             return;
         }
     };
-    if let Some(output) = relay_at(&socket(data_dir), session, &payload, permission::WAIT).await {
+    if let Some(output) =
+        relay_at(&workerctl::socket(data_dir), session, &payload, permission::WAIT).await
+    {
         println!("{output}");
     }
 }
 
-/// Post one hook payload and, for a permission request, wait up to `wait` for the worker's
-/// decision; what to print for Claude Code, if anything.
+/// Post one hook payload or, for a permission request, ask with it and wait up to `wait` for
+/// the worker's decision; what to print for Claude Code, if anything. The ask carries the hook
+/// the worker takes in, so it goes once, on one connection.
 async fn relay_at(
     socket: &Path,
     session: SessionId,
@@ -146,25 +146,24 @@ async fn relay_at(
             return None;
         }
     };
-    if let Err(e) = post(socket, session, forwarded.clone()).await {
-        tracing::debug!(error = %e, "hook relay");
-        return None;
-    }
-    if event != PERMISSION_EVENT {
+    if event != HookEvent::PermissionRequest {
+        if let Err(e) = post(socket, session, forwarded).await {
+            tracing::debug!(error = %e, "hook relay");
+        }
         return None;
     }
     let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
     let ask = PermissionAsk { session, payload: forwarded, wait_ms };
-    decide(socket, ask, wait).await.hook_output()
+    hook_output(&decide(socket, ask, wait).await)
 }
 
 /// The part of a hook payload the daemon reads, and the event it names. The payload is read
 /// whole, since a `PostToolUse` carries the tool's output and that can run to megabytes, and
 /// only the fields [`slopty_agent::Hook`] names go on, trimmed ([`slopty_agent::Hook::trimmed`]).
-fn forwardable(payload: &str) -> Result<(String, String)> {
+fn forwardable(payload: &str) -> Result<(HookEvent, String)> {
     let hook = slopty_agent::Hook::parse(payload).context("the hook payload is not JSON")?;
     let hook = hook.trimmed();
-    Ok((hook.event.clone(), serde_json::to_string(&hook)?))
+    Ok((hook.event, serde_json::to_string(&hook)?))
 }
 
 /// The worker's decision on a permission request, or [`Decision::Pass`] when it gives none
@@ -209,20 +208,6 @@ pub fn session() -> Result<Option<SessionId>> {
     Ok(Some(session.to_string_lossy().parse().context("SLOPTY_SESSION is not a session id")?))
 }
 
-/// The worker's control socket: `$SLOPTY_WORKER_SOCKET`, else the installed agents' socket under
-/// `data_dir` when it exists, else the dev default. The same resolution as `slopty worker`'s,
-/// which keeps it private to `workerctl`.
-pub fn socket(data_dir: &Path) -> PathBuf {
-    if let Some(path) = std::env::var_os("SLOPTY_WORKER_SOCKET") {
-        return PathBuf::from(path);
-    }
-    let installed = data_dir.join("run").join("worker.sock");
-    if installed.exists() {
-        return installed;
-    }
-    std::env::temp_dir().join("slopty").join("worker.sock")
-}
-
 /// Post one forwarded hook for `session`.
 pub async fn post(socket: &Path, session: SessionId, payload: String) -> Result<()> {
     let request = workerctl::call_at(socket, CtlRequest::Hook { session, payload });
@@ -240,7 +225,7 @@ pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
             let Some(session) = session()? else {
                 bail!("not inside a Slopty session ({SESSION_ENV} is unset)");
             };
-            post(&socket(data_dir), session, report_payload(status, &message)).await
+            post(&workerctl::socket(data_dir), session, report_payload(status, &message)).await
         }
         HookCmd::Statusline { command } => statusline::run(data_dir, command).await,
         HookCmd::Install { settings } => {
@@ -286,7 +271,7 @@ pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
 }
 
 fn default_settings() -> PathBuf {
-    hooks::settings_path(&hooks::home_dir())
+    hooks::settings_path(&slopty_platform::dirs::home())
 }
 
 /// The exec-form command for this binary.
@@ -301,7 +286,7 @@ mod tests {
     use std::time::Instant;
 
     use serde_json::json;
-    use slopty_agent::permission::PermissionAnswer;
+    use slopty_proto::ctl::PermissionAnswer;
     use tokio::io::AsyncReadExt as _;
     use tokio::net::UnixListener;
 
@@ -323,7 +308,7 @@ mod tests {
         })
         .to_string();
         let (event, forwarded) = forwardable(&payload).expect("json");
-        assert_eq!(event, "PostToolUse");
+        assert_eq!(event, HookEvent::PostToolUse);
         assert!(forwarded.len() < slopty_agent::HOOK_JSON_BUDGET, "{} bytes", forwarded.len());
         let hook = slopty_agent::Hook::parse(&forwarded).expect("json");
         let original = slopty_agent::Hook::parse(&payload).expect("json");
@@ -342,7 +327,7 @@ mod tests {
         let payload =
             report_payload(ReportStatus::Blocked, &["approve".to_owned(), "it?".to_owned()]);
         let hook = slopty_agent::Hook::parse(&payload).expect("json");
-        assert_eq!(hook.event, "Report");
+        assert_eq!(hook.event, HookEvent::Report);
         assert_eq!(hook.status.as_deref(), Some("blocked"));
         assert_eq!(hook.message.as_deref(), Some("approve it?"));
     }
@@ -414,8 +399,8 @@ mod tests {
         .to_string()
     }
 
-    /// A permission request is posted as a hook, then waits, its end of the socket open, for
-    /// the worker's decision, which comes out as the hook output Claude Code reads.
+    /// A permission request goes once, as the question, and waits, its end of the socket open,
+    /// for the worker's decision, which comes out as the hook output Claude Code reads.
     #[tokio::test]
     async fn a_permission_request_prints_the_workers_decision() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -425,23 +410,18 @@ mod tests {
             updated_permissions: suggested.as_array().cloned().unwrap_or_default(),
         };
         let answer = CtlReply::Permission(PermissionAnswer { decision: always.clone() });
-        let (socket, heard) = worker(
-            dir.path(),
-            vec![ok(), Reply::Open(serde_json::to_string(&answer).expect("json"))],
-        );
+        let (socket, heard) =
+            worker(dir.path(), vec![Reply::Open(serde_json::to_string(&answer).expect("json"))]);
         let session = SessionId::new();
         let output = relay_at(&socket, session, &permission_request(), permission::WAIT).await;
-        assert_eq!(output, always.hook_output());
+        assert_eq!(output, hook_output(&always));
         assert_eq!(
             output.map(|o| o["hookSpecificOutput"]["decision"]["updatedPermissions"].clone()),
             Some(suggested),
             "the suggested rule goes back"
         );
         let heard = heard.await.expect("worker");
-        let [hook, ask] = heard.as_slice() else { panic!("{heard:?}") };
-        assert!(
-            matches!(serde_json::from_str(hook), Ok(CtlRequest::Hook { session: s, .. }) if s == session)
-        );
+        let [ask] = heard.as_slice() else { panic!("one request, not {heard:?}") };
         let Ok(CtlRequest::Permission(ask)) = serde_json::from_str(ask) else {
             panic!("an ask: {ask}");
         };
@@ -459,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn a_worker_that_does_not_decide_leaves_the_dialog_to_claude_code() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (socket, _heard) = worker(dir.path(), vec![ok(), Reply::Close]);
+        let (socket, _heard) = worker(dir.path(), vec![Reply::Close]);
         let started = Instant::now();
         assert_eq!(
             relay_at(&socket, SessionId::new(), &permission_request(), permission::WAIT).await,
@@ -470,13 +450,13 @@ mod tests {
         let error = serde_json::to_string(&CtlReply::Error { message: "unknown".to_owned() })
             .expect("json");
         let dir = tempfile::tempdir().expect("tempdir");
-        let (socket, _heard) = worker(dir.path(), vec![ok(), Reply::Line(error)]);
+        let (socket, _heard) = worker(dir.path(), vec![Reply::Line(error)]);
         assert_eq!(
             relay_at(&socket, SessionId::new(), &permission_request(), permission::WAIT).await,
             None
         );
 
-        // No worker at all: nothing is posted, nothing asked.
+        // No worker at all: nothing asked.
         let dir = tempfile::tempdir().expect("tempdir");
         let started = Instant::now();
         let absent = dir.path().join("none.sock");
@@ -491,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn the_wait_for_a_decision_is_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (socket, _heard) = worker(dir.path(), vec![ok(), Reply::Hold]);
+        let (socket, _heard) = worker(dir.path(), vec![Reply::Hold]);
         let started = Instant::now();
         let wait = Duration::from_millis(300);
         assert_eq!(relay_at(&socket, SessionId::new(), &permission_request(), wait).await, None);

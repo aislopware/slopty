@@ -6,24 +6,41 @@
 //!
 //! * [`resolve`]: worker names and id prefixes, `worker/session` handles, to ids.
 //! * [`ops`]: each verb once, resolved, sent, and its one expected answer taken apart.
+//! * [`bulk`]: files of any size up and down, in parts.
 //! * [`view`]: the answers as JSON for scripts and models, and as text for a person.
 //! * [`tools`]: the MCP tools, their schemas, and a call run end to end.
+//! * [`mcp`]: those tools as an MCP server over any [`Dispatch`].
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
 
+pub mod bulk;
+pub mod mcp;
 pub mod ops;
 pub mod resolve;
 pub mod tools;
 pub mod view;
 
-use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
+use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, Verb};
 
 /// Where verbs go: something that answers each with its [`Outcome`], a failure included.
 ///
 /// Calls may be in flight together; each answer finds its own caller.
 pub trait Dispatch: Send + Sync {
-    /// Answer `verb`.
-    fn call(&self, verb: Verb) -> impl Future<Output = Outcome> + Send;
+    /// Answer `verb`, done once per `key` when it changes something.
+    fn send(&self, key: Option<IdempotencyKey>, verb: Verb)
+    -> impl Future<Output = Outcome> + Send;
+
+    /// Answer `verb`, which needs no key.
+    fn call(&self, verb: Verb) -> impl Future<Output = Outcome> + Send {
+        self.send(None, verb)
+    }
+
+    /// Whether a file the caller names on its own machine is one this side can read and write:
+    /// the CLI and `slopty mcp` run on the caller's machine, the server's endpoint does not.
+    fn local_files(&self) -> bool {
+        true
+    }
 }
 
 /// A verb that failed, or a name that did not resolve.

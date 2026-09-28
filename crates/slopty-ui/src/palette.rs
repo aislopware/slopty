@@ -5,12 +5,17 @@
 //! palette is gone and the focus is back where it was, so a terminal's own actions (find,
 //! the prompts) reach the terminal that was focused.
 
+use std::cell::RefCell;
+use std::hash::{Hash, Hasher as _};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Action, AnimationExt as _, App, AppContext as _, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
-    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, px,
+    Action, AnimationExt as _, App, AppContext as _, Bounds, Context, ElementId, Entity,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    MouseButton, ParentElement, Pixels, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_core::SessionId;
@@ -18,16 +23,17 @@ use slopty_theme::Theme;
 
 use crate::colors::hsla;
 use crate::icons::{self, IconName, IconSize, Status};
+use crate::kit::{Edge, Pace};
 
 /// What the list says when the query leaves nothing.
 pub(crate) const NO_COMMAND_MATCHES: &str = "No command matches";
 
 /// The keys the palette's foot names beside ↩, each with what it does. What ↩ does is the
 /// selected line's own verb ([`PaletteRun::verb`]).
-pub(crate) const LEGEND: [(&str, &str); 2] = [("↑↓", "move"), ("esc", "close")];
+pub(crate) const LEGEND: [(&str, &str); 2] = [("↑↓", "Move"), ("Esc", "Close")];
 
 /// What the palette's foot says ↩ does with nothing selected.
-const RETURN_VERB: &str = "open";
+const RETURN_VERB: &str = "Open";
 
 /// The heading over the commands an empty field lists because they were run last.
 const RECENT: &str = "Recent";
@@ -131,7 +137,7 @@ pub(crate) fn list_pad(theme: &Theme) -> f32 {
 
 /// The ink of the dot between the facts of a meta line: the muted tone at the pressed step,
 /// so the dot divides the facts without reading as one of them (monocode's footer sets its
-/// dot at a quarter of the text). The hairline's own colour vanished on the light canvas.
+/// dot at a quarter of the text). The hairline's own colour vanished on the light theme's `canvas`.
 pub(crate) fn separator_ink(theme: &Theme) -> gpui::Hsla {
     crate::colors::hsla_alpha(theme.surfaces.text_muted, slopty_theme::alpha::PRESSED)
 }
@@ -175,49 +181,159 @@ pub(crate) fn field_row(
         )
 }
 
-/// `el`, the sheet of a list typed at, rising the base unit's half into place as it fades in
-/// ([`crate::kit::fade_in`] on the layer under it). Under Reduce Motion it is there at once.
-pub(crate) fn rise_in(
-    el: gpui::Stateful<gpui::Div>,
-    id: &'static str,
-    theme: &Theme,
-    cx: &App,
-) -> gpui::AnyElement {
-    let motion = slopty_theme::Motion::DEFAULT;
-    slide_in(el, id, cx, (motion.fade, crate::kit::ease_out()), theme.spacing.xs, false)
-}
+/// How long the selection plate takes to land while a key is held: a move that comes before
+/// the last one settled glides the rest of the way this fast, and one that comes sooner than
+/// this snaps, so a held arrow never trails the list.
+const HELD: Duration = Duration::from_millis(60);
 
-/// `el`, a phone's sheet from the top edge, coming down the base unit into place as it fades
-/// in, on a sheet's time and curve. Under Reduce Motion it is there at once.
-fn drop_in(
-    el: gpui::Stateful<gpui::Div>,
-    id: &'static str,
-    theme: &Theme,
-    cx: &App,
-) -> gpui::AnyElement {
-    let motion = slopty_theme::Motion::DEFAULT;
-    slide_in(el, id, cx, (motion.sheet, crate::kit::drawer()), -theme.spacing.sm, true)
-}
+/// The selection plate: the one `overlay` fill under a list's selected row, which settles from
+/// row to row as one plate (its place and its size eased) rather than blinking from one row to
+/// the next. The navigator's, the palette's, a picker's and the inbox's views share it.
+///
+/// The selected row reports where it was laid out ([`Plate::mark`]), and the plate, laid under
+/// the rows ([`Plate::under`]), paints there in the same frame: every element is laid out
+/// before any is painted, so a list that scrolls carries the plate with it. A move starts from
+/// where the plate is drawn at that moment and is never queued behind the last one; a key that
+/// repeats faster than the plate can land snaps it. Under Reduce Motion it is on the row at once.
+#[derive(Clone, Default)]
+pub(crate) struct Plate(Rc<RefCell<Glide>>);
 
-/// `el` entering from `from` points below its place (above, when negative) over `time`, and
-/// with `fade` from clear; drawn in place at once when chrome may not move.
-fn slide_in(
-    el: gpui::Stateful<gpui::Div>,
-    id: &'static str,
-    cx: &App,
-    time: (std::time::Duration, impl Fn(f32) -> f32 + 'static),
-    from: f32,
-    fade: bool,
-) -> gpui::AnyElement {
-    if !crate::kit::motion(cx) {
-        return el.into_any_element();
+impl std::fmt::Debug for Plate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Plate").finish_non_exhaustive()
     }
-    let (duration, curve) = time;
-    el.relative()
-        .with_animation(id, gpui::Animation::new(duration).with_easing(curve), move |el, t| {
-            el.top(px(from * (1.0 - t))).when(fade, |el| el.opacity(t))
-        })
-        .into_any_element()
+}
+
+impl Plate {
+    /// `row`, the selected one, `key` naming it among the list's rows: it tells the plate where
+    /// it was laid out this frame.
+    pub(crate) fn mark<E: ParentElement + Styled>(&self, row: E, key: impl Hash) -> E {
+        let glide = Rc::clone(&self.0);
+        let key = key_of(key);
+        row.child(
+            gpui::canvas(
+                move |bounds, _window, _cx| glide.borrow_mut().row = Some((key, bounds)),
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+    }
+
+    /// The plate, to lay first in the region the rows scroll in, so it paints under them. It
+    /// fills that region and draws only inside it.
+    pub(crate) fn under(&self, theme: &Theme) -> impl IntoElement + use<> {
+        let glide = Rc::clone(&self.0);
+        let fill = hsla(theme.surfaces.overlay);
+        let radius = px(theme.radii.sm);
+        gpui::canvas(
+            |_, _, _| {},
+            move |region, (), window, cx| {
+                let moving = crate::kit::motion(cx);
+                let mut glide = glide.borrow_mut();
+                let Some(plate) = glide.frame(Instant::now(), moving) else { return };
+                window.with_content_mask(Some(gpui::ContentMask { bounds: region }), |window| {
+                    window.paint_quad(gpui::fill(plate, fill).corner_radii(radius));
+                });
+                if glide.flight.is_some() {
+                    window.request_animation_frame();
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
+}
+
+/// A row's name among its list's, as the plate compares them.
+fn key_of(key: impl Hash) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The plate's motion: where the selected row is, where the plate was drawn, and the move in
+/// flight, as offsets from the row it is going to so a scroll carries it along.
+#[derive(Default, Debug)]
+struct Glide {
+    /// The selected row this frame, as it reported itself; taken by the frame that paints.
+    row: Option<(u64, Bounds<Pixels>)>,
+    /// The row the plate is on or going to.
+    on: Option<u64>,
+    /// Where the plate was drawn in the last frame, if it was.
+    drawn: Option<Bounds<Pixels>>,
+    /// When the selection last moved.
+    moved: Option<Instant>,
+    flight: Option<Flight>,
+}
+
+/// A move in flight: how far off the row the plate started, when, and how long it takes.
+#[derive(Clone, Copy, Debug)]
+struct Flight {
+    from: [f32; 4],
+    start: Instant,
+    length: Duration,
+}
+
+impl Glide {
+    /// Where to draw the plate at `now`, `None` when no selected row was laid out. A new row
+    /// starts a move from where the plate was drawn, unless `moving` is off, the plate was not
+    /// drawn, or the key repeats faster than [`HELD`].
+    fn frame(&mut self, now: Instant, moving: bool) -> Option<Bounds<Pixels>> {
+        let Some((key, row)) = self.row.take() else {
+            self.drawn = None;
+            self.flight = None;
+            return None;
+        };
+        if self.on != Some(key) {
+            // The plate's first row is where it appears, not a move.
+            let moved = self.on.replace(key).is_some();
+            let gap = self.moved.map(|at| now.saturating_duration_since(at));
+            self.moved = moved.then_some(now);
+            let length = match gap {
+                Some(gap) if gap < HELD => None,
+                Some(gap) if gap < Pace::Settle.duration() => Some(HELD),
+                _ => Some(Pace::Settle.duration()),
+            };
+            self.flight = match (self.drawn, length) {
+                (Some(drawn), Some(length)) if moving => {
+                    Some(Flight { from: sides(drawn, row), start: now, length })
+                }
+                _ => None,
+            };
+        }
+        let plate = match self.flight {
+            Some(flight) if moving => {
+                let progress = now.saturating_duration_since(flight.start).as_secs_f32()
+                    / flight.length.as_secs_f32();
+                if progress >= 1.0 {
+                    self.flight = None;
+                }
+                let rest = 1.0 - Pace::Settle.curve().at(progress.min(1.0));
+                let [left, top, width, height] = flight.from.map(|d| d * rest);
+                Bounds::new(
+                    gpui::point(row.origin.x + px(left), row.origin.y + px(top)),
+                    gpui::size(row.size.width + px(width), row.size.height + px(height)),
+                )
+            }
+            _ => {
+                self.flight = None;
+                row
+            }
+        };
+        self.drawn = Some(plate);
+        Some(plate)
+    }
+}
+
+/// How far `from` is off `to`: its left, top, width and height less `to`'s.
+fn sides(from: Bounds<Pixels>, to: Bounds<Pixels>) -> [f32; 4] {
+    [
+        f32::from(from.origin.x - to.origin.x),
+        f32::from(from.origin.y - to.origin.y),
+        f32::from(from.size.width - to.size.width),
+        f32::from(from.size.height - to.size.height),
+    ]
 }
 
 /// One key of a foot: its cap, then what it does.
@@ -267,17 +383,25 @@ pub enum PaletteRun {
     Action(Box<dyn Action>),
     /// Reveal and focus this session's terminal in the workspace.
     Session(SessionId),
-    /// Reveal this item (a file card, a note) in the workspace.
+    /// Reveal this item (a file tile, a note) in the workspace.
     Item(slopty_core::ItemId),
     /// Go to this worker's tiles, or give it a shell when it has none.
     Worker(slopty_client::layout::WorkerKey),
-    /// Open a file card for the path the field holds (relative to the active shell, `~` the
+    /// Open a file tile for the path the field holds (relative to the active shell, `~` the
     /// worker's home), landing on `line`.
     OpenFile {
         /// As typed, with any `:line` suffix removed.
         path: String,
         /// The `:line` suffix, 1-based.
         line: Option<u32>,
+        /// The worker's file search found it, so it is a file and opens without asking the
+        /// worker what it is.
+        found: bool,
+    },
+    /// Open a folder tile at the directory the field holds.
+    OpenFolder {
+        /// As typed, without its trailing slash.
+        path: String,
     },
     /// Open a shell in the directory the field holds (spelled from the worker's root or home).
     OpenShell {
@@ -293,9 +417,9 @@ pub enum PaletteRun {
     OpenUrl(String),
     /// Open this address in a browser tile.
     OpenInTile(String),
-    /// Reveal this session and open its find bar on `needle` (find in every card).
+    /// Reveal this session and open its find bar on `needle` (find in every tile).
     FindIn {
-        /// The card's session.
+        /// The tile's session.
         session: SessionId,
         /// What was typed.
         needle: String,
@@ -307,9 +431,9 @@ pub enum PaletteRun {
         /// What was typed at its prompt.
         command: String,
     },
-    /// Reveal this file card and open its find bar on `needle` (find in every card).
+    /// Reveal this file tile and open its find bar on `needle` (find in every tile).
     FindInFile {
-        /// The card.
+        /// The tile.
         item: slopty_core::ItemId,
         /// What was typed.
         needle: String,
@@ -321,17 +445,18 @@ impl PaletteRun {
     #[must_use]
     pub const fn verb(&self) -> &'static str {
         match self {
-            Self::Action(_) | Self::Rerun { .. } => "run",
+            Self::Action(_) | Self::Rerun { .. } => "Run",
             Self::Session(_)
             | Self::Item(_)
             | Self::Worker(_)
             | Self::FindIn { .. }
-            | Self::FindInFile { .. } => "go to",
+            | Self::FindInFile { .. } => "Go to",
             Self::OpenFile { .. }
+            | Self::OpenFolder { .. }
             | Self::OpenShell { .. }
             | Self::OpenAgent { .. }
             | Self::OpenUrl(_)
-            | Self::OpenInTile(_) => "open",
+            | Self::OpenInTile(_) => "Open",
         }
     }
 }
@@ -343,7 +468,10 @@ impl Clone for PaletteRun {
             Self::Session(session) => Self::Session(*session),
             Self::Item(item) => Self::Item(*item),
             Self::Worker(worker) => Self::Worker(*worker),
-            Self::OpenFile { path, line } => Self::OpenFile { path: path.clone(), line: *line },
+            Self::OpenFile { path, line, found } => {
+                Self::OpenFile { path: path.clone(), line: *line, found: *found }
+            }
+            Self::OpenFolder { path } => Self::OpenFolder { path: path.clone() },
             Self::OpenShell { cwd } => Self::OpenShell { cwd: cwd.clone() },
             Self::OpenAgent { cwd } => Self::OpenAgent { cwd: cwd.clone() },
             Self::OpenUrl(url) => Self::OpenUrl(url.clone()),
@@ -368,9 +496,13 @@ impl std::fmt::Debug for PaletteRun {
             Self::Session(session) => f.debug_tuple("Session").field(session).finish(),
             Self::Item(item) => f.debug_tuple("Item").field(item).finish(),
             Self::Worker(worker) => f.debug_tuple("Worker").field(worker).finish(),
-            Self::OpenFile { path, line } => {
-                f.debug_struct("OpenFile").field("path", path).field("line", line).finish()
-            }
+            Self::OpenFile { path, line, found } => f
+                .debug_struct("OpenFile")
+                .field("path", path)
+                .field("line", line)
+                .field("found", found)
+                .finish(),
+            Self::OpenFolder { path } => f.debug_struct("OpenFolder").field("path", path).finish(),
             Self::OpenShell { cwd } => f.debug_struct("OpenShell").field("cwd", cwd).finish(),
             Self::OpenAgent { cwd } => f.debug_struct("OpenAgent").field("cwd", cwd).finish(),
             Self::OpenUrl(url) => f.debug_tuple("OpenUrl").field(url).finish(),
@@ -395,7 +527,7 @@ impl std::fmt::Debug for PaletteRun {
 /// they are what was asked for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
-    /// Going to a tile: a session, a file card, a named tile, a find's hit.
+    /// Going to a tile: a session, a file tile, a named tile, a find's hit.
     Tiles,
     /// Going to a worker.
     Workers,
@@ -456,7 +588,7 @@ pub struct PaletteItem {
     /// page's address), after the directory.
     pub place: Option<String>,
     /// How long the tile's session has run.
-    pub age: Option<std::time::Duration>,
+    pub age: Option<Duration>,
     /// The group it is listed under.
     pub section: Section,
 }
@@ -578,7 +710,7 @@ impl PaletteItem {
     #[must_use]
     pub fn found_file(root: &str, relative: &str) -> Self {
         let path = format!("{}/{relative}", root.trim_end_matches('/'));
-        let run = PaletteRun::OpenFile { path, line: None };
+        let run = PaletteRun::OpenFile { path, line: None, found: true };
         Self::line(
             format!("Open {relative}"),
             String::new(),
@@ -600,8 +732,8 @@ impl PaletteItem {
         [shell, agent]
     }
 
-    /// `<title>` with `N hits` on the right for a card the needle was found in; ↩ does
-    /// `run` (the card's own find bar, or the card itself).
+    /// `<title>` with `N hits` on the right for a tile the needle was found in; ↩ does
+    /// `run` (the tile's own find bar, or the tile itself).
     #[must_use]
     pub fn hits(title: &str, total: u32, run: PaletteRun) -> Self {
         let keys = if total == 1 { "1 hit".to_owned() } else { format!("{total} hits") };
@@ -611,6 +743,7 @@ impl PaletteItem {
             }
             PaletteRun::FindInFile { .. } | PaletteRun::OpenFile { .. } => IconName::FileText,
             PaletteRun::Item(_) => IconName::StickyNote,
+            PaletteRun::OpenFolder { .. } => IconName::Folder,
             PaletteRun::Action(_)
             | PaletteRun::Worker(_)
             | PaletteRun::OpenShell { .. }
@@ -625,8 +758,16 @@ impl PaletteItem {
     #[must_use]
     pub fn open_file(path: &str, line: Option<u32>) -> Self {
         let keys = line.map(|n| format!("line {n}")).unwrap_or_default();
-        let run = PaletteRun::OpenFile { path: path.to_owned(), line };
+        let run = PaletteRun::OpenFile { path: path.to_owned(), line, found: false };
         Self::line(format!("Open {path}"), keys, run, IconName::FileText, Section::Files)
+    }
+
+    /// `Open folder <dir>` for a directory typed into the field: a folder tile there.
+    #[must_use]
+    pub fn open_folder(path: &str) -> Self {
+        let run = PaletteRun::OpenFolder { path: path.to_owned() };
+        let label = format!("Open folder {path}");
+        Self::line(label, String::new(), run, IconName::FolderOpen, Section::Files)
     }
 
     /// `New terminal in <dir>` for a directory typed into the field.
@@ -674,7 +815,7 @@ impl PaletteItem {
 
     /// The same line, `age` old.
     #[must_use]
-    pub const fn aged(mut self, age: Option<std::time::Duration>) -> Self {
+    pub const fn aged(mut self, age: Option<Duration>) -> Self {
         self.age = age;
         self
     }
@@ -842,7 +983,7 @@ pub(crate) fn status_slot(
 /// An age as the inbox, the palette and the navigator print it: `now` under a minute, then
 /// whole minutes, hours and days, the one unit that matters.
 #[must_use]
-pub fn age_label(age: std::time::Duration) -> String {
+pub fn age_label(age: Duration) -> String {
     let secs = age.as_secs();
     match secs {
         0..60 => "now".to_owned(),
@@ -899,6 +1040,11 @@ pub fn keys_label(keystroke: &gpui::Keystroke) -> String {
         "enter" => out.push('↩'),
         "escape" => out.push('⎋'),
         "backspace" => out.push('⌫'),
+        "delete" => out.push('⌦'),
+        "pageup" => out.push('⇞'),
+        "pagedown" => out.push('⇟'),
+        "home" => out.push('↖'),
+        "end" => out.push('↘'),
         "space" => out.push('␣'),
         key => out.extend(key.chars().flat_map(char::to_uppercase)),
     }
@@ -952,10 +1098,10 @@ pub fn path_query(query: &str) -> Option<(String, Option<u32>)> {
 
 /// What a path typed into the field offers.
 ///
-/// A directory — a slash at the end, spelled from the worker's root or home — offers a shell
-/// and a conversation there; anything else with the shape of a path opens as a file card. A
-/// relative directory is a file line: the worker resolves a file against the active shell, but
-/// a shell has to know its directory from the start.
+/// A directory — a slash at the end, spelled from the worker's root or home — offers a folder
+/// tile, a shell and a conversation there; anything else with the shape of a path opens as a file
+/// tile. A relative directory is a file line: the worker resolves a file against the active shell,
+/// but a shell has to know its directory from the start.
 #[must_use]
 pub fn path_items(query: &str) -> Vec<PaletteItem> {
     if let Some(url) =
@@ -970,7 +1116,11 @@ pub fn path_items(query: &str) -> Vec<PaletteItem> {
     let rooted = path.starts_with('/') || path.starts_with("~/");
     if line.is_none() && path.ends_with('/') && rooted {
         let cwd = if path == "/" { "/" } else { path.trim_end_matches('/') };
-        return vec![PaletteItem::open_shell(cwd), PaletteItem::open_agent(cwd)];
+        return vec![
+            PaletteItem::open_folder(cwd),
+            PaletteItem::open_shell(cwd),
+            PaletteItem::open_agent(cwd),
+        ];
     }
     vec![PaletteItem::open_file(&path, line)]
 }
@@ -1004,7 +1154,7 @@ pub fn filter<'a>(query: &str, items: &'a [PaletteItem]) -> Vec<&'a PaletteItem>
 /// What the palette decided.
 #[derive(Debug)]
 pub enum PaletteEvent {
-    /// The field changed; the canvas asks the worker for the files it names.
+    /// The field changed; the workspace asks the worker for the files it names.
     Changed(String),
     /// Run this, once the palette is gone and the focus is back.
     Run(PaletteRun),
@@ -1026,7 +1176,7 @@ pub struct CommandPalette {
     scroll: ScrollHandle,
     /// The selection moved (a step, a new query): the next frame scrolls to it.
     reveal: bool,
-    /// A find in every card: the field's text is a needle, never a path.
+    /// A find in every tile: the field's text is a needle, never a path.
     finding: bool,
     /// Whether key chords are worth printing: not on a touch device with no keyboard, where
     /// no chord can be pressed.
@@ -1039,6 +1189,12 @@ pub struct CommandPalette {
     /// The sheet's list runs on past its foot: a fade there says so, since a touch list shows
     /// no scrollbar.
     more_below: bool,
+    /// The last frame drew it as a phone's sheet.
+    sheet: bool,
+    /// It was dismissed or chose, and draws its way out until its owner drops it.
+    leaving: bool,
+    /// The fill under the selected line.
+    plate: Plate,
     theme: Theme,
     _events: Subscription,
 }
@@ -1071,12 +1227,12 @@ impl CommandPalette {
         Self::with_field(items, "Type a command", false, theme, window, cx)
     }
 
-    /// The palette as a search across every card: no commands, no path lines, the field
-    /// says what it is for, and the lines are what the canvas sets from the hits. `seed` is
-    /// what the field starts with (the active card's own needle), selected so typing replaces
-    /// it; the canvas runs the first search itself, since a set value is no change.
+    /// The palette as a search across every tile: no commands, no path lines, the field
+    /// says what it is for, and the lines are what the workspace sets from the hits. `seed` is
+    /// what the field starts with (the active tile's own needle), selected so typing replaces
+    /// it; the workspace runs the first search itself, since a set value is no change.
     pub fn find(seed: &str, theme: Theme, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let palette = Self::with_field(Vec::new(), "Find in every card", true, theme, window, cx);
+        let palette = Self::with_field(Vec::new(), "Find in every tile", true, theme, window, cx);
         if !seed.is_empty() {
             palette.input.update(cx, |input, cx| {
                 input.set_value(seed.to_owned(), window, cx);
@@ -1121,6 +1277,9 @@ impl CommandPalette {
             brief: false,
             sheet_below: 0.0,
             more_below: false,
+            sheet: false,
+            leaving: false,
+            plate: Plate::default(),
             theme,
             _events: events,
         }
@@ -1148,7 +1307,7 @@ impl CommandPalette {
         self.path_items = path_items(text);
     }
 
-    /// Replace the lines under the commands (the hits of a find in every card).
+    /// Replace the lines under the commands (the hits of a find in every tile).
     pub fn set_lines(&mut self, lines: Vec<PaletteItem>, cx: &mut Context<Self>) {
         self.found = lines;
         cx.notify();
@@ -1201,6 +1360,9 @@ impl CommandPalette {
     }
 
     fn run(&self, cx: &mut Context<Self>) {
+        if self.leaving {
+            return;
+        }
         let matches = self.matches(cx);
         let at = self.selected(matches.len());
         if let Some(item) = matches.get(at).map(|item| (*item).clone()) {
@@ -1279,12 +1441,12 @@ impl CommandPalette {
                 // for ports and figures.
                 div()
                     .when(path, |el| el.min_w_0().overflow_hidden().text_ellipsis())
-                    .when(!path, gpui::Styled::flex_none)
+                    .when(!path, Styled::flex_none)
                     .child(SharedString::from(text)),
             );
         }
         let chosen_item = item.clone();
-        crate::kit::row(theme, crate::kit::Row::One)
+        let row = crate::kit::row(theme, crate::kit::Row::One)
             .id(ElementId::NamedInteger("palette-item".into(), u64::try_from(ix).unwrap_or(0)))
             .debug_selector(move || format!("palette-item-{ix}"))
             .role(gpui::accesskit::Role::ListBoxOption)
@@ -1296,11 +1458,14 @@ impl CommandPalette {
             .px(px(spacing.inset() - pad))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .when(chosen, |el| el.bg(hsla(overlay)))
             .active(move |st| st.bg(hsla(overlay)))
             .on_mouse_move(cx.listener(move |this, _ev, _window, cx| this.point_at(ix, cx)))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |_this, _ev, _window, cx| Self::choose(&chosen_item, cx)))
+            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                if !this.leaving {
+                    Self::choose(&chosen_item, cx);
+                }
+            }))
             .child(status_slot(theme, item.icon, item.status, hsla(icon_ink), 1.0))
             .child(
                 div()
@@ -1334,8 +1499,33 @@ impl CommandPalette {
                         .when_some(tone, |el, tone| el.text_color(hsla(tone.tone(theme))))
                         .child(SharedString::from(text))
                 }
-            }))
+            }));
+        if chosen { self.plate.mark(row, ix) } else { row }
     }
+
+    /// Stop taking the keys and the pointer and draw the way out: a fade on a desktop, the sheet
+    /// back up on a phone, each in three quarters of its way in. How long that takes, for the
+    /// owner to keep drawing it before dropping it; nothing under Reduce Motion.
+    pub fn leave(&mut self, cx: &mut Context<Self>) -> Duration {
+        self.leaving = true;
+        cx.notify();
+        if !crate::kit::motion(cx) {
+            return Duration::ZERO;
+        }
+        leaving_time(if self.sheet { Pace::Sheet } else { Pace::Fade })
+    }
+}
+
+/// How long a sheet or the palette takes to leave: three quarters of its way in, since what is
+/// dismissed is no longer looked at.
+fn leaving_time(pace: Pace) -> Duration {
+    pace.duration().mul_f32(0.75)
+}
+
+/// The one-shot animation of leaving on `pace`: [`leaving_time`] on its curve.
+fn leaving(pace: Pace) -> gpui::Animation {
+    let curve = pace.curve();
+    gpui::Animation::new(leaving_time(pace)).with_easing(move |t| curve.at(t))
 }
 
 impl Render for CommandPalette {
@@ -1381,14 +1571,17 @@ impl Render for CommandPalette {
         let viewport = window.viewport_size();
         let height = f32::from(viewport.height);
         let sheet = f32::from(viewport.width) < self.sheet_below;
+        self.sheet = sheet;
         let safe_top = window.insets().effective().top;
-        // No scrim: a list typed at floats over the work (`kit::anchor`).
+        // A list typed at floats over the work (`kit::anchor`); only a touch screen's palette,
+        // the phone's sheet or the iPad's with no keyboard, dims what it came over.
         let backdrop = crate::kit::anchor(&theme, window);
         let backdrop = if sheet { backdrop.px_0().pt_0() } else { backdrop };
         let dialog = crate::kit::dialog(&theme, crate::kit::Overlay::List);
         let dialog = if sheet {
             // A sheet from the top: the window's width, down to the keyboard. Its surface runs
-            // up under the status bar and the island, and its field starts below them.
+            // up under the status bar and the island, and its field starts below them. The
+            // scrim sets it off, so it casts no shadow into the keyboard's grey.
             dialog
                 .max_w_full()
                 .max_h_full()
@@ -1398,6 +1591,7 @@ impl Render for CommandPalette {
                 .border_t_0()
                 .border_x_0()
                 .rounded_t(px(0.0))
+                .shadow_none()
         } else {
             let ceiling = crate::kit::Overlay::List.bounds().1;
             dialog.max_h(px(ceiling.min(height * SHARE)))
@@ -1414,19 +1608,13 @@ impl Render for CommandPalette {
             }
         });
         let fade = self.more_below.then(|| {
-            let solid = hsla(s.elevated);
-            div()
+            crate::kit::edge_fade(Edge::Bottom, s.elevated, px(theme.spacing.lg))
                 .debug_selector(|| "palette-more".to_owned())
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom_0()
-                .h(px(theme.density.row))
-                .bg(gpui::linear_gradient(
-                    180.0,
-                    gpui::linear_color_stop(gpui::Hsla { a: 0.0, ..solid }, 0.0),
-                    gpui::linear_color_stop(solid, 1.0),
-                ))
+        });
+        // Glass has no Esc: the field ends in Cancel, as iOS search does.
+        let cancel = (!self.chords).then(|| {
+            crate::kit::button(&theme, "palette-cancel", "Cancel", crate::kit::ButtonKind::Link)
+                .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(PaletteEvent::Dismiss)))
         });
         let panel = dialog
             .id("palette")
@@ -1434,7 +1622,11 @@ impl Render for CommandPalette {
             .role(gpui::accesskit::Role::Dialog)
             .aria_label("Commands")
             // The typed text starts on the rows' text: the edge grid.
-            .child(field_row(&theme, &self.input, "Command"))
+            .child(
+                field_row(&theme, &self.input, "Command")
+                    .gap(px(theme.spacing.md))
+                    .children(cancel),
+            )
             .child(
                 div()
                     .relative()
@@ -1442,6 +1634,7 @@ impl Render for CommandPalette {
                     .min_h_0()
                     .flex()
                     .flex_col()
+                    .child(self.plate.under(&theme))
                     .child(
                         div()
                             .id("palette-list")
@@ -1464,43 +1657,248 @@ impl Render for CommandPalette {
                     .children(fade),
             )
             .when(self.chords, |el| el.child(legend(&theme, verb)));
-        // The phone's sheet hangs from the window's top edge and comes down from it; on a
-        // desktop the sheet rises into place.
-        let panel = if sheet {
-            drop_in(panel, "palette-drop", &theme, cx)
+        // The phone's sheet dims what it came down over; on glass anywhere the dim is also what a
+        // finger taps to close it, where a desktop's Esc would.
+        let scrim = (sheet || !self.chords).then(|| {
+            div()
+                .debug_selector(|| "palette-scrim".to_owned())
+                .absolute()
+                .inset_0()
+                .bg(crate::kit::scrim(&theme))
+        });
+        let (panel, scrim) = if self.leaving {
+            (leave_panel(panel, sheet, cx), scrim.map(|scrim| leave_scrim(scrim, cx)))
         } else {
-            rise_in(panel, "palette-rise", &theme, cx)
+            (enter_panel(panel, sheet, &theme, cx), scrim.map(|scrim| enter_scrim(scrim, cx)))
         };
-        let root = backdrop
-            .id("palette-backdrop")
-            .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
-            .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))
-            .capture_action(cx.listener(|_this, _: &Escape, _window, cx| {
-                cx.emit(PaletteEvent::Dismiss);
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_this, _ev, _window, cx| {
+        let root = backdrop.id("palette-backdrop").children(scrim).child(panel);
+        let root = if self.leaving {
+            root
+        } else {
+            root.capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
+                .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))
+                .capture_action(cx.listener(|_this, _: &Escape, _window, cx| {
                     cx.emit(PaletteEvent::Dismiss);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(panel);
-        gpui::deferred(crate::kit::fade_in(root, "palette-fade", cx))
-            .with_priority(Layer::Dialog.priority())
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_this, _ev, _window, cx| {
+                        cx.emit(PaletteEvent::Dismiss);
+                        cx.stop_propagation();
+                    }),
+                )
+        };
+        gpui::deferred(root).with_priority(Layer::Dialog.priority())
+    }
+}
+
+/// The palette arriving. On a desktop it rises the base unit into place as it fades in; the
+/// phone's sheet comes down its whole height from the window's top edge, on a sheet's time and
+/// curve. The field has the keys from the first frame either way: only paint moves.
+fn enter_panel(
+    panel: gpui::Stateful<gpui::Div>,
+    sheet: bool,
+    theme: &Theme,
+    cx: &App,
+) -> gpui::AnyElement {
+    if !sheet {
+        return crate::kit::slide_fade(panel, "palette-open", theme.spacing.xs, Pace::Fade, cx);
+    }
+    if !crate::kit::motion(cx) {
+        return panel.into_any_element();
+    }
+    panel
+        .relative()
+        .with_animation("palette-sheet-in", Pace::Sheet.animation(), |el, t| {
+            el.top(gpui::relative(t - 1.0))
+        })
+        .into_any_element()
+}
+
+/// The palette leaving: on a desktop it fades where it is, with no travel; the sheet goes back
+/// up. Under Reduce Motion it is gone at once, as its owner drops it at once.
+fn leave_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui::AnyElement {
+    if !crate::kit::motion(cx) {
+        return panel.opacity(0.0).into_any_element();
+    }
+    if sheet {
+        panel
+            .relative()
+            .with_animation("palette-sheet-out", leaving(Pace::Sheet), |el, t| {
+                el.top(gpui::relative(-t))
+            })
+            .into_any_element()
+    } else {
+        panel
+            .with_animation("palette-close", leaving(Pace::Fade), |el, t| el.opacity(1.0 - t))
+            .into_any_element()
+    }
+}
+
+/// The sheet's scrim coming up with it.
+fn enter_scrim(scrim: gpui::Div, cx: &App) -> gpui::AnyElement {
+    if !crate::kit::motion(cx) {
+        return scrim.into_any_element();
+    }
+    scrim
+        .with_animation("palette-scrim-in", Pace::Sheet.animation(), Styled::opacity)
+        .into_any_element()
+}
+
+/// The sheet's scrim going with it.
+fn leave_scrim(scrim: gpui::Div, cx: &App) -> gpui::AnyElement {
+    if !crate::kit::motion(cx) {
+        return scrim.opacity(0.0).into_any_element();
+    }
+    scrim
+        .with_animation("palette-scrim-out", leaving(Pace::Sheet), |el, t| el.opacity(1.0 - t))
+        .into_any_element()
+}
+
+#[cfg(test)]
+impl Plate {
+    /// Where the plate was drawn in the last frame.
+    pub(crate) fn drawn(&self) -> Option<Bounds<Pixels>> {
+        self.0.borrow().drawn
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui::Keystroke;
+    use gpui::{Keystroke, TestAppContext, VisualTestContext, point, size};
     use slopty_core::ItemId;
 
     use super::*;
 
+    /// A row's box `y` down a list.
+    fn line(y: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(0.0), px(y)), size(px(320.0), px(32.0)))
+    }
+
+    /// `ms` past `t0`.
+    fn after(t0: Instant, ms: u64) -> Instant {
+        t0.checked_add(Duration::from_millis(ms)).expect("a test's instant")
+    }
+
+    /// The plate's top, drawn over `row` at `ms` past `t0`.
+    fn top_at(glide: &mut Glide, row: (u64, f32), t0: Instant, ms: u64) -> f32 {
+        glide.row = Some((row.0, line(row.1)));
+        let drawn = glide.frame(after(t0, ms), true).expect("a row, a plate");
+        f32::from(drawn.origin.y)
+    }
+
+    /// The plate appears on its first row, starts a move from where it is drawn, and lands on
+    /// the settle. A move while it settles starts from where it is at that moment, never from
+    /// the row it was going to, and lands in [`HELD`]; one sooner than that snaps; a scroll
+    /// carries it along; and under Reduce Motion it is on the row at once.
+    #[test]
+    fn the_plate_retargets_from_where_it_is_and_never_queues() {
+        let t0 = Instant::now();
+        let mut glide = Glide::default();
+        assert!(top_at(&mut glide, (1, 0.0), t0, 0).abs() < 0.01, "appears in place");
+        assert!(top_at(&mut glide, (2, 32.0), t0, 1_000).abs() < 0.01, "a move starts there");
+        let mid = top_at(&mut glide, (2, 32.0), t0, 1_060);
+        assert!(mid > 0.0 && mid < 32.0, "on its way: {mid}");
+        // A scroll of 10 during the move carries the plate the same 10.
+        let scrolled = {
+            glide.row = Some((2, line(42.0)));
+            let at = after(t0, 1_060);
+            f32::from(glide.frame(at, true).expect("drawn").origin.y)
+        };
+        assert!((scrolled - mid - 10.0).abs() < 0.01, "carried by the scroll: {scrolled}");
+        glide.row = Some((2, line(32.0)));
+        let _back = glide.frame(after(t0, 1_060), true);
+        // ↓ again before it landed: from `mid`, straight to the third row.
+        assert!((top_at(&mut glide, (3, 64.0), t0, 1_080) - mid).abs() < 0.01, "from where it is");
+        let on = top_at(&mut glide, (3, 64.0), t0, 1_100);
+        assert!(on > mid && on < 64.0, "towards the new row only: {on}");
+        // A key repeating faster than the plate can land puts it on its row.
+        assert!((top_at(&mut glide, (4, 96.0), t0, 1_110) - 96.0).abs() < 0.01, "snaps");
+        // A held key's pace: a move before the settle is over lands in `HELD`.
+        let held = u64::try_from(HELD.as_millis()).unwrap_or(0);
+        assert!((top_at(&mut glide, (5, 128.0), t0, 1_210) - 96.0).abs() < 0.01, "held, moving");
+        let landed = top_at(&mut glide, (5, 128.0), t0, 1_210 + held);
+        assert!((landed - 128.0).abs() < 0.01, "held, landed");
+        let settle = u64::try_from(Pace::Settle.duration().as_millis()).unwrap_or(0);
+        assert!((top_at(&mut glide, (6, 160.0), t0, 3_000) - 128.0).abs() < 0.01, "a new move");
+        let before = top_at(&mut glide, (6, 160.0), t0, 3_000 + held);
+        assert!(before < 160.0, "not landed at the held pace: {before}");
+        let settled = top_at(&mut glide, (6, 160.0), t0, 3_000 + settle);
+        assert!((settled - 160.0).abs() < 0.01, "on the settle");
+        glide.row = Some((7, line(192.0)));
+        let still = glide.frame(after(t0, 9_000), false).expect("drawn");
+        assert_eq!(still, line(192.0), "under Reduce Motion, on the row at once");
+        glide.row = None;
+        assert_eq!(glide.frame(after(t0, 10_000), true), None, "no row, no plate");
+    }
+
+    /// A palette over `n` tiles, drawn.
+    fn palette_of(
+        n: usize,
+        cx: &mut TestAppContext,
+    ) -> (Entity<CommandPalette>, &mut VisualTestContext) {
+        cx.update(gpui_kit::init);
+        let items: Vec<PaletteItem> =
+            (0..n).map(|i| PaletteItem::session(&format!("tile {i}"), SessionId::new())).collect();
+        let (palette, cx) = cx
+            .add_window_view(|window, cx| CommandPalette::new(items, Theme::default(), window, cx));
+        cx.run_until_parked();
+        (palette, cx)
+    }
+
+    fn plate(palette: &Entity<CommandPalette>, cx: &VisualTestContext) -> Bounds<Pixels> {
+        palette.read_with(cx, |p, _| p.plate.drawn()).expect("the plate is drawn")
+    }
+
+    fn step(palette: &Entity<CommandPalette>, cx: &mut VisualTestContext) {
+        palette.update(cx, |p, cx| p.step(1, cx));
+        cx.run_until_parked();
+    }
+
+    /// The palette's plate sits under the selected line, and a step draws it first where it
+    /// was; under Reduce Motion a step puts it on the new line in the same frame.
+    #[gpui::test]
+    fn the_palette_plate_settles_from_line_to_line(cx: &mut TestAppContext) {
+        let (palette, cx) = palette_of(4, cx);
+        let first = cx.debug_bounds("palette-item-0").expect("a line");
+        assert_eq!(plate(&palette, cx), first, "under the selected line");
+        step(&palette, cx);
+        assert_eq!(plate(&palette, cx), first, "the move starts where the plate was");
+        cx.update(|_w, cx| cx.set_reduce_motion(true));
+        // As if the last step were long past, so only Reduce Motion can land it at once.
+        palette.update(cx, |p, _| p.plate.0.borrow_mut().moved = None);
+        step(&palette, cx);
+        let third = cx.debug_bounds("palette-item-2").expect("a line");
+        assert_eq!(plate(&palette, cx), third, "still: on the line at once");
+    }
+
+    /// The palette leaves in three quarters of its way in, a fade on a desktop and the sheet on
+    /// a phone, and at once under Reduce Motion; once leaving, it runs nothing more.
+    #[gpui::test]
+    fn the_palette_leaves_quicker_than_it_came(cx: &mut TestAppContext) {
+        let (palette, cx) = palette_of(2, cx);
+        let fade = palette.update(cx, CommandPalette::leave);
+        assert_eq!(fade, Pace::Fade.duration().mul_f32(0.75), "90 ms");
+        assert!(fade < Pace::Fade.duration());
+        let sheet = palette.update(cx, |p, cx| {
+            p.sheet = true;
+            p.leave(cx)
+        });
+        assert_eq!(sheet, Pace::Sheet.duration().mul_f32(0.75), "180 ms");
+        cx.update(|_w, cx| cx.set_reduce_motion(true));
+        assert_eq!(palette.update(cx, CommandPalette::leave), Duration::ZERO, "at once");
+        let ran: Rc<std::cell::Cell<bool>> = Rc::default();
+        let sink = Rc::clone(&ran);
+        cx.update(|_w, cx| {
+            cx.subscribe(&palette, move |_, _ev: &PaletteEvent, _| sink.set(true)).detach();
+        });
+        palette.update(cx, |p, cx| p.run(cx));
+        assert!(!ran.get(), "a leaving palette runs nothing");
+    }
+
     #[test]
     fn an_age_says_the_one_unit_that_matters() {
-        let s = std::time::Duration::from_secs;
+        let s = Duration::from_secs;
         assert_eq!(age_label(s(0)), "now");
         assert_eq!(age_label(s(59)), "now");
         assert_eq!(age_label(s(60)), "1m");
@@ -1532,8 +1930,8 @@ mod tests {
         assert_eq!(q("go to shell"), None, "words: a command");
         assert_eq!(q(""), None);
 
-        // A directory, spelled from the root or home with a slash at the end, offers a
-        // shell and a conversation there; anything else is a file. The label says what the
+        // A directory, spelled from the root or home with a slash at the end, offers a folder
+        // tile, a shell and a conversation there; anything else is a file. The label says what the
         // line opens, so only a line number is left for the right edge.
         let labels = |s: &str| {
             path_items(s)
@@ -1541,13 +1939,19 @@ mod tests {
                 .map(|i| format!("{} {}", i.label, i.keys).trim_end().to_owned())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(labels("~/proj/"), ["New terminal in ~/proj", "New agent in ~/proj"]);
-        assert_eq!(labels("/"), ["New terminal in /", "New agent in /"]);
+        assert_eq!(
+            labels("~/proj/"),
+            ["Open folder ~/proj", "New terminal in ~/proj", "New agent in ~/proj"]
+        );
+        assert_eq!(labels("/"), ["Open folder /", "New terminal in /", "New agent in /"]);
         assert!(
-            matches!(&path_items("/srv/a/")[0].run, PaletteRun::OpenShell { cwd } if cwd == "/srv/a")
+            matches!(&path_items("/srv/a/")[0].run, PaletteRun::OpenFolder { path } if path == "/srv/a")
         );
         assert!(
-            matches!(&path_items("/srv/a/")[1].run, PaletteRun::OpenAgent { cwd } if cwd == "/srv/a")
+            matches!(&path_items("/srv/a/")[1].run, PaletteRun::OpenShell { cwd } if cwd == "/srv/a")
+        );
+        assert!(
+            matches!(&path_items("/srv/a/")[2].run, PaletteRun::OpenAgent { cwd } if cwd == "/srv/a")
         );
         assert_eq!(labels("~/proj"), ["Open ~/proj"], "no slash at the end: a file");
         assert_eq!(labels("src/"), ["Open src/"], "relative: no shell to spell it from");
@@ -1574,7 +1978,7 @@ mod tests {
         let found = PaletteItem::found_file("/tmp/work/", "src/main.rs");
         assert_eq!(found.label, "Open src/main.rs");
         assert!(
-            matches!(&found.run, PaletteRun::OpenFile { path, line: None } if path == "/tmp/work/src/main.rs"),
+            matches!(&found.run, PaletteRun::OpenFile { path, line: None, found: true } if path == "/tmp/work/src/main.rs"),
             "{found:?}"
         );
     }
@@ -1587,13 +1991,15 @@ mod tests {
         assert_eq!(label("ctrl-tab"), "⌃⇥");
         assert_eq!(label("cmd-alt-r"), "⌥⌘R");
         assert_eq!(label("cmd-="), "⌘=");
+        assert_eq!(label("shift-pageup"), "⇧⇞", "a named key reads as its menu glyph");
+        assert_eq!(label("cmd-end"), "⌘↘");
         let item = |label: &str| PaletteItem::new(label, IconName::Command, Box::new(MoveUp), &[]);
-        let items = vec![item("New note"), item("Zoom in"), item("Zoom to item")];
+        let items = vec![item("New note"), item("Move column left"), item("Move column right")];
         let labels =
             |q: &str| filter(q, &items).iter().map(|i| i.label.as_str()).collect::<Vec<_>>();
-        assert_eq!(labels(""), ["New note", "Zoom in", "Zoom to item"]);
-        assert_eq!(labels("zoom"), ["Zoom in", "Zoom to item"]);
-        assert_eq!(labels("item zo"), ["Zoom to item"], "every word, any order, any case");
+        assert_eq!(labels(""), ["New note", "Move column left", "Move column right"]);
+        assert_eq!(labels("column"), ["Move column left", "Move column right"]);
+        assert_eq!(labels("RIGHT col"), ["Move column right"], "every word, any order, any case");
         assert!(labels("nothing").is_empty());
     }
 
@@ -1608,7 +2014,7 @@ mod tests {
             PaletteItem::found_file("~", "notes.md"),
             PaletteItem::worker("studio", "connected", worker),
             PaletteItem::session("zsh", SessionId::new()),
-            PaletteItem::new("Zoom in", IconName::Command, Box::new(MoveDown), &[]),
+            PaletteItem::new("Larger text", IconName::Command, Box::new(MoveDown), &[]),
             PaletteItem::session("claude", SessionId::new()),
         ];
         let order = |path_first: bool| {
@@ -1619,7 +2025,7 @@ mod tests {
         };
         assert_eq!(
             order(false),
-            ["zsh", "claude", "studio", "New note", "Zoom in", "Open notes.md"]
+            ["zsh", "claude", "studio", "New note", "Larger text", "Open notes.md"]
         );
         assert_eq!(order(true)[0], "Open notes.md");
         let typed = path_items("~/proj/");
@@ -1664,13 +2070,13 @@ mod tests {
         let command =
             |label: &str| PaletteItem::new(label, IconName::Command, Box::new(MoveUp), &[]);
         assert_eq!(group(&command("New note"), &recent), ("Recent", "recent"));
-        assert_eq!(group(&command("Zoom in"), &recent), ("Commands", "commands"));
+        assert_eq!(group(&command("Larger text"), &recent), ("Commands", "commands"));
         assert_eq!(group(&command("New note"), &[]), ("Commands", "commands"), "a typed query");
         let tile = PaletteItem::session("New note", SessionId::new());
         assert_eq!(group(&tile, &recent), ("Tiles", "tiles"));
-        assert_eq!(command("New note").run.verb(), "run");
-        assert_eq!(tile.run.verb(), "go to");
-        assert_eq!(PaletteItem::open_file("/w/a.rs", None).run.verb(), "open");
+        assert_eq!(command("New note").run.verb(), "Run");
+        assert_eq!(tile.run.verb(), "Go to");
+        assert_eq!(PaletteItem::open_file("/w/a.rs", None).run.verb(), "Open");
     }
 
     /// A line that goes somewhere carries its kind in the leading slot; a command carries
@@ -1678,7 +2084,7 @@ mod tests {
     /// minute, and a command's keys; the kind is read after where the tile is.
     #[test]
     fn the_right_edge_says_status_age_or_keys_and_the_kind_is_context() {
-        let minutes = |n: u64| Some(std::time::Duration::from_secs(n * 60));
+        let minutes = |n: u64| Some(Duration::from_secs(n * 60));
         let tile = PaletteItem::session("claude", SessionId::new()).aged(minutes(12));
         assert_eq!(tile.trailing(), Some(("12m".to_owned(), None)));
         let working = tile.clone().with_status(Some(Status::Working));

@@ -12,15 +12,18 @@ use slopty_proto::server::Os;
 use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
 
 use super::actions::{
-    AddWindow, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight, CycleWidth,
-    CycleWidthBack, FocusColumn, FocusColumnFirst, FocusColumnLast, FocusColumnLeft,
-    FocusColumnRight, FocusDown, FocusUp, FontLarger, FontReset, FontSmaller, FullscreenTile,
-    MaximizeColumn, MoveColumnLeft, MoveColumnRight, MoveDown, MoveUp, NarrowColumn, NewAgent,
-    NewNote, NewTerminal, RenameItem, ToggleMute, ToggleOverview, ToggleStats, ToggleTabbed,
-    UndoClose, WidenColumn,
+    AddWindow, CenterColumn, CenterVisibleColumns, CloseItem, ConsumeOrExpelLeft,
+    ConsumeOrExpelRight, CycleWidth, CycleWidthBack, ExpandColumn, FocusColumn, FocusColumnFirst,
+    FocusColumnLast, FocusColumnLeft, FocusColumnRight, FocusDown, FocusUp, FocusWorkspace,
+    FocusWorkspaceDown, FocusWorkspacePrevious, FocusWorkspaceUp, FontLarger, FontReset,
+    FontSmaller, FullscreenTile, MaximizeColumn, MoveColumnLeft, MoveColumnRight,
+    MoveColumnToFirst, MoveColumnToLast, MoveColumnToWorkspace, MoveColumnToWorkspaceDown,
+    MoveColumnToWorkspaceUp, MoveDown, MoveUp, MoveWorkspaceDown, MoveWorkspaceUp, NarrowColumn,
+    NewAgent, NewNote, NewTerminal, RenameItem, ToggleMute, ToggleOverview, ToggleStats,
+    ToggleTabbed, UndoClose, WidenColumn,
 };
 use super::toast::ToastKind;
-use super::{AGENT_COMMAND, ClosedTile, KeyTarget, Rename, UNDO_CLOSE, WorkspaceView};
+use super::{AGENT_COMMAND, ClosedTile, Field, KeyTarget, Rename, UNDO_CLOSE, WorkspaceView};
 use crate::screen::ScreenView;
 use crate::terminal::TerminalView;
 
@@ -56,6 +59,11 @@ impl WorkspaceView {
             }
             // A file tile is an editor: the keyboard goes into its text, as into a shell.
             Some(ItemKind::File { .. }) => self.pending_focus_file = Some(tile.item),
+            // A folder tile walks its rows by key, and looks again at what it holds.
+            Some(ItemKind::Folder { .. }) => {
+                self.pending_focus_folder = Some(tile.item);
+                self.refresh_folder(tile.item, cx);
+            }
             // A remote window takes the keyboard only when clicked: its chords are the
             // worker's, and a key walk through the strip must not land in one by accident.
             Some(_) | None => self.pending_focus_self = true,
@@ -77,6 +85,11 @@ impl WorkspaceView {
             }
             Some((tile, ItemKind::File { .. }))
                 if let Some(view) = self.files.get(&tile.item).cloned() =>
+            {
+                view.update(cx, |v, cx| v.focus(window, cx));
+            }
+            Some((tile, ItemKind::Folder { .. }))
+                if let Some(view) = self.folders.get(&tile.item).cloned() =>
             {
                 view.update(cx, |v, cx| v.focus(window, cx));
             }
@@ -104,11 +117,6 @@ impl WorkspaceView {
         if let Some(tile) = self.tile_of(item) {
             self.focus_tile(tile, cx);
         }
-    }
-
-    /// The user activated a notification: it reveals the session.
-    pub fn notification_response(&mut self, session: SessionId, cx: &mut Context<Self>) {
-        self.reveal_session(session, cx);
     }
 
     /// Run a layout action at the clock, then follow the focus and save.
@@ -198,18 +206,71 @@ impl WorkspaceView {
         .on_action(cx.listener(|this, _: &CenterColumn, _w, cx| {
             this.layout_action(cx, slopty_client::layout::Layout::center_column);
         }))
+        .on_action(cx.listener(|this, _: &CenterVisibleColumns, _w, cx| {
+            this.layout_action(cx, slopty_client::layout::Layout::center_visible_columns);
+        }))
+        .on_action(cx.listener(|this, _: &ExpandColumn, _w, cx| {
+            this.width_action(cx, slopty_client::layout::Layout::expand_to_available_width);
+        }))
+        .on_action(cx.listener(|this, _: &MoveColumnToFirst, _w, cx| {
+            this.layout_action(cx, slopty_client::layout::Layout::move_column_to_first);
+        }))
+        .on_action(cx.listener(|this, _: &MoveColumnToLast, _w, cx| {
+            this.layout_action(cx, slopty_client::layout::Layout::move_column_to_last);
+        }))
+        .on_action(cx.listener(|this, _: &MoveColumnToWorkspaceUp, _w, cx| {
+            this.layout_action(cx, slopty_client::layout::Layout::move_column_to_workspace_up);
+        }))
+        .on_action(cx.listener(|this, _: &MoveColumnToWorkspaceDown, _w, cx| {
+            this.layout_action(cx, slopty_client::layout::Layout::move_column_to_workspace_down);
+        }))
+        .on_action(cx.listener(|this, a: &MoveColumnToWorkspace, _w, cx| {
+            let index = a.index;
+            this.layout_action(cx, |l| l.move_column_to_workspace(index));
+        }))
+        .on_action(cx.listener(|this, _: &MoveWorkspaceUp, _w, cx| {
+            this.layout_action(cx, slopty_client::layout::Layout::move_workspace_up);
+        }))
+        .on_action(cx.listener(|this, _: &MoveWorkspaceDown, _w, cx| {
+            this.layout_action(cx, slopty_client::layout::Layout::move_workspace_down);
+        }))
+        .on_action(cx.listener(|this, _: &FocusWorkspaceUp, _w, cx| {
+            this.layout_action(cx, slopty_client::layout::Layout::focus_workspace_up);
+        }))
+        .on_action(cx.listener(|this, _: &FocusWorkspaceDown, _w, cx| {
+            this.layout_action(cx, slopty_client::layout::Layout::focus_workspace_down);
+        }))
+        .on_action(cx.listener(|this, _: &FocusWorkspacePrevious, _w, cx| {
+            this.layout_action(cx, slopty_client::layout::Layout::focus_workspace_previous);
+        }))
+        .on_action(cx.listener(|this, a: &FocusWorkspace, _w, cx| {
+            let index = a.index;
+            this.layout_action(cx, |l| l.focus_workspace(index));
+        }))
         .on_action(cx.listener(|this, _: &ToggleTabbed, _w, cx| {
             this.layout_action(cx, slopty_client::layout::Layout::toggle_tabbed);
         }))
         .on_action(cx.listener(|this, _: &ToggleOverview, _w, cx| {
             this.layout_action(cx, slopty_client::layout::Layout::toggle_overview);
         }))
-        .on_action(cx.listener(|this, _: &FontLarger, _w, cx| this.font_by(1.0, cx)))
-        .on_action(cx.listener(|this, _: &FontSmaller, _w, cx| this.font_by(-1.0, cx)))
-        .on_action(cx.listener(|this, _: &FontReset, _w, cx| {
-            this.font_delta = 0.0;
-            this.apply_font(cx);
+        // A focused page zooms; everywhere else the text size moves.
+        .on_action(cx.listener(|this, _: &FontLarger, _w, cx| {
+            if !this.zoom_page(crate::browser::Zoom::In, cx) {
+                this.font_by(1.0, cx);
+            }
         }))
+        .on_action(cx.listener(|this, _: &FontSmaller, _w, cx| {
+            if !this.zoom_page(crate::browser::Zoom::Out, cx) {
+                this.font_by(-1.0, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &FontReset, _w, cx| {
+            if !this.zoom_page(crate::browser::Zoom::Reset, cx) {
+                this.font_delta = 0.0;
+                this.apply_font(cx);
+            }
+        }))
+        .on_action(cx.listener(Self::inspect_page))
     }
 
     /// A width change: the layout's, then the remote windows of the column asked to take the
@@ -329,6 +390,19 @@ impl WorkspaceView {
             view.update(cx, |v, cx| v.set_hud(self.show_stats, cx));
         }
         cx.notify();
+    }
+
+    /// Trackpad mode for the active picture, when the palette runs it with the focus elsewhere:
+    /// the focused picture takes the action itself.
+    pub fn toggle_trackpad(
+        &mut self,
+        _: &crate::screen::ToggleTrackpad,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.active_screen() {
+            view.update(cx, ScreenView::toggle_trackpad);
+        }
     }
 
     /// ⌘⇧M: silence or resume the focused remote window's audio (this client only).
@@ -464,14 +538,16 @@ impl WorkspaceView {
         self.focused().and_then(|t| self.item(t)).and_then(|item| self.cwd_of(item))
     }
 
-    /// The working directory of an item: a terminal's session's, a file card's directory.
+    /// The working directory of an item: a terminal's session's, a file tile's directory, the
+    /// folder a folder tile is at.
     pub(super) fn cwd_of(&self, item: &Item) -> Option<String> {
         match &item.kind {
             ItemKind::Terminal { session } => self.summary(*session).and_then(|s| s.cwd.clone()),
-            // A file card's directory, when the path is spelled from the root.
+            // A file tile's directory, when the path is spelled from the root.
             ItemKind::File { path } if path.starts_with('/') => path
                 .rsplit_once('/')
                 .map(|(dir, _)| if dir.is_empty() { "/" } else { dir }.to_owned()),
+            ItemKind::Folder { path } if path.starts_with('/') => Some(path.clone()),
             _ => None,
         }
     }
@@ -513,10 +589,15 @@ impl WorkspaceView {
     pub fn add_window(&mut self, _: &AddWindow, _window: &mut Window, cx: &mut Context<Self>) {
         let Some((key, _)) = self.new_tile_target() else { return };
         let Some(w) = self.workers.get_mut(&key) else { return };
-        // A Mac that has not granted Screen Recording lists no window worth picking: say why
-        // rather than show an empty picker.
-        if w.caps.as_ref().is_some_and(|c| c.os == Os::MacOs && !c.can_capture) {
-            let text = format!("{} can\u{2019}t share its screen: Screen Recording is off", w.name);
+        // A worker that cannot capture lists no window worth picking: say why rather than show
+        // an empty picker (a Mac without Screen Recording, a Linux worker with no capture).
+        if let Some(caps) = w.caps.as_ref().filter(|c| !c.can_capture) {
+            let why = if caps.os == Os::MacOs {
+                "Screen Recording is off"
+            } else {
+                "it has no screen capture"
+            };
+            let text = format!("{} can\u{2019}t share its screen: {why}", w.name);
             self.show_notice(text, cx);
             return;
         }
@@ -568,9 +649,9 @@ impl WorkspaceView {
         self.propose(key, ItemOp::Add(item), cx);
     }
 
-    /// A file card for `path` on `key` (the context worker when `None`): an existing card for
+    /// A file tile for `path` on `key` (the context worker when `None`): an existing tile for
     /// it is focused, else a new one opens right of the focus and asks the worker for the text.
-    /// `line` (1-based) is where the card lands.
+    /// `line` (1-based) is where the tile lands.
     pub fn open_file_on(
         &mut self,
         key: Option<WorkerKey>,
@@ -597,7 +678,7 @@ impl WorkspaceView {
                 name: None,
             };
             let id = item.id;
-            tracing::info!(%id, %path, ?line, "open file card");
+            tracing::info!(%id, %path, ?line, "open file tile");
             self.propose(key, ItemOp::Add(item), cx);
             id
         };
@@ -613,15 +694,16 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// A file card on the context worker (the self-test socket's and the palette's way).
+    /// A file tile on the context worker (the self-test socket's and the palette's way).
     pub fn open_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
         self.open_file_on(None, path, line, cx);
     }
 
     /// `path` made absolute against the session's directory as the worker last reported it;
-    /// a path with no directory known stays as it is.
+    /// a path with no directory known stays as it is, and so does one under `~`, which the
+    /// worker expands to its own home.
     pub(super) fn absolute_in_session(&self, session: SessionId, path: &str) -> String {
-        if path.starts_with('/') {
+        if path.starts_with('/') || path == "~" || path.starts_with("~/") {
             return path.to_owned();
         }
         match self.summary(session).and_then(|s| s.cwd.as_deref()) {
@@ -630,20 +712,19 @@ impl WorkspaceView {
         }
     }
 
-    /// `path` made absolute against the focused shell's directory, when it is a shell; `~` is
-    /// left for the worker, whose home it names.
+    /// `path` made absolute against the focused shell's directory, when it is a shell.
     pub(super) fn absolute_in_active_shell(&self, path: &str) -> String {
         let session = self.focused().and_then(|t| self.item(t)).and_then(|i| match i.kind {
             ItemKind::Terminal { session } => Some(session),
             _ => None,
         });
         match session {
-            Some(session) if !path.starts_with('~') => self.absolute_in_session(session, path),
-            _ => path.to_owned(),
+            Some(session) => self.absolute_in_session(session, path),
+            None => path.to_owned(),
         }
     }
 
-    /// Ask the worker for a file card's text (again).
+    /// Ask the worker for a file tile's text (again).
     pub(super) fn request_file(&self, id: ItemId) {
         let Some(tile) = self.tile_of(id) else { return };
         if let Some(ItemKind::File { path }) = self.item(tile).map(|i| &i.kind) {
@@ -652,7 +733,7 @@ impl WorkspaceView {
     }
 
     /// ⌘F with the workspace (not a terminal) focused: find in the focused terminal, or in
-    /// the focused file card.
+    /// the focused file tile.
     pub fn find_in_active(
         &mut self,
         action: &crate::terminal::Find,
@@ -663,6 +744,8 @@ impl WorkspaceView {
             view.update(cx, |view, cx| view.find(action, window, cx));
         } else if let Some(view) = self.active_item().and_then(|id| self.files.get(&id)).cloned() {
             view.update(cx, |view, cx| view.find(window, cx));
+        } else {
+            self.find_in_page(window, cx);
         }
     }
 
@@ -695,7 +778,10 @@ impl WorkspaceView {
                 }
                 self.remember_closed(tile, item, None, cx);
             }
-            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Browser { .. } => {
+            ItemKind::Window { .. }
+            | ItemKind::Display { .. }
+            | ItemKind::Browser { .. }
+            | ItemKind::Folder { .. } => {
                 self.remember_closed(tile, item, None, cx);
             }
             // A file's edit lives in its editor, not in the registry: the editor waits with the
@@ -728,7 +814,7 @@ impl WorkspaceView {
     }
 
     /// Take a tile off and offer it back for [`UNDO_CLOSE`].
-    fn remember_closed(
+    pub(super) fn remember_closed(
         &mut self,
         tile: TileRef,
         item: Item,
@@ -737,7 +823,7 @@ impl WorkspaceView {
     ) {
         self.closed_seq = self.closed_seq.wrapping_add(1);
         let seq = self.closed_seq;
-        let title = self.card_title(tile, &item, cx);
+        let title = self.tile_title(tile, &item, cx);
         let at = self.layout.position(tile);
         self.closed.push(ClosedTile { tile, item, at, session, file: None, seq });
         self.propose(tile.worker, ItemOp::Remove(tile.item), cx);
@@ -826,6 +912,19 @@ impl WorkspaceView {
                 .placeholder(placeholder)
                 .default_value(item.name.clone().unwrap_or_default())
         });
+        self.open_field(tile, Field::Name, input, window, cx);
+    }
+
+    /// `input` in `tile`'s header in place of its title, holding the keyboard with its text
+    /// selected, until ↩, Esc or a click elsewhere.
+    pub(super) fn open_field(
+        &mut self,
+        tile: TileRef,
+        field: Field,
+        input: Entity<InputState>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
             InputEvent::PressEnter { .. } => this.finish_rename(true, true, cx),
             // A click elsewhere: the field goes, the name stays, whoever was clicked keeps
@@ -836,19 +935,34 @@ impl WorkspaceView {
         let return_to = window.focused(cx);
         self.tick();
         self.layout.focus(tile);
-        self.rename = Some(Rename { tile, input, return_to, _subscription: subscription });
+        self.rename = Some(Rename { tile, field, input, return_to, _subscription: subscription });
         self.pending_focus_rename = true;
         cx.notify();
     }
 
-    /// The name field closes. `keep` writes its text as the item's name (blank clears it);
-    /// `back` gives the keyboard back to whoever had it before the field.
+    /// The header's field closes. `keep` writes its text: a name as the item's (blank clears
+    /// it), an address as the page's, where an address that is none keeps the field open to
+    /// be put right. `back` gives the keyboard back to whoever had it before the field.
     pub(super) fn finish_rename(&mut self, keep: bool, back: bool, cx: &mut Context<Self>) {
+        if keep
+            && let Some(field) = self.rename.as_ref().filter(|r| r.field == Field::Address)
+            && crate::browser::web_url(&field.input.read(cx).value()).is_none()
+        {
+            let text = field.input.read(cx).value().trim().to_owned();
+            self.show_notice(format!("Not a web address: {text}"), cx);
+            return;
+        }
         let Some(rename) = self.rename.take() else { return };
         if keep && self.item(rename.tile).is_some() {
             let text = rename.input.read(cx).value().trim().to_owned();
-            let name = (!text.is_empty()).then_some(text);
-            self.propose(rename.tile.worker, ItemOp::Rename { id: rename.tile.item, name }, cx);
+            match rename.field {
+                Field::Name => {
+                    let name = (!text.is_empty()).then_some(text);
+                    let op = ItemOp::Rename { id: rename.tile.item, name };
+                    self.propose(rename.tile.worker, op, cx);
+                }
+                Field::Address => self.load_address(rename.tile, &text, cx),
+            }
         }
         if back {
             self.rename_return = rename.return_to.or_else(|| Some(self.focus.clone()));

@@ -1,0 +1,999 @@
+//! A folder tile: a directory on the worker, browsed in place.
+//!
+//! The item (`ItemKind::Folder`) names the directory; what is in it is not in the registry. The
+//! workspace asks the worker for it (`ClientMsg::ListFolder`) when the tile appears, when it moves
+//! and when it takes the keyboard, and the worker answers with the first entries, folders first
+//! ([`Listing`]). ↑ and ↓ move the selection, ↩ or a click opens it: a folder in place (the
+//! item moves with it, `ItemOp::SetFolder`), a file as a file tile beside this one. ⌫ or ⌘↑
+//! goes up, and so does the header's arrow. A row dragged out of the tile is a file promise, as
+//! a path dragged out of a shell is; files dropped on the tile go up into the folder.
+//!
+//! On iOS the Files picker stands in for Finder: the path bar's upload button ("Upload from
+//! Files…") sends picked files up into the folder, and the selected row's save button ("Save to
+//! Files…") brings it down and saves it there. Both are palette commands too. An iPad's touch
+//! held on a row lifts it out to another app, found by [`FolderView::path_at`].
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::SystemTime;
+
+use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    AnyElement, Bounds, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Pixels, Point, Render, ScrollStrategy,
+    SharedString, StatefulInteractiveElement as _, Styled as _, UniformListScrollHandle, Window,
+    div, px, uniform_list,
+};
+use slopty_core::ItemId;
+use slopty_proto::folder::{FolderEntry, Listing};
+use slopty_proto::orchestration::FileKind;
+use slopty_theme::Theme;
+
+use crate::colors::hsla;
+use crate::icons::{IconName, IconSize};
+use crate::palette::Plate;
+
+#[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
+mod actions {
+    gpui::actions!(
+        folder,
+        [
+            /// Select the entry below.
+            SelectNext,
+            /// Select the entry above.
+            SelectPrevious,
+            /// Select the first entry.
+            SelectFirst,
+            /// Select the last entry.
+            SelectLast,
+            /// Open the selected entry: a folder in place, a file in a tile beside.
+            OpenSelected,
+            /// Go up to the folder this one is in.
+            OpenParent,
+            /// Pick files in the Files app and send them up into this folder (iOS).
+            UploadFromFiles,
+            /// Bring the selected entry down and save it with the Files app (iOS).
+            SaveToFiles,
+        ]
+    );
+}
+pub use actions::{
+    OpenParent, OpenSelected, SaveToFiles, SelectFirst, SelectLast, SelectNext, SelectPrevious,
+    UploadFromFiles,
+};
+
+/// The key context of a folder tile; its keys are bound in it.
+pub const CTX: &str = "FolderView";
+
+/// What a folder with nothing in it says.
+pub(crate) const EMPTY_FOLDER: &str = "Empty folder";
+/// What a folder tile says when a file is at its path.
+pub(crate) const NOT_A_FOLDER: &str = "Not a folder";
+/// What a folder tile says when the worker could not list its path, over the reason.
+pub(crate) const CANNOT_LIST: &str = "Cannot list this folder";
+/// The header's way up, and the palette's.
+pub(crate) const ENCLOSING_FOLDER: &str = "Enclosing folder";
+/// The path bar's upload through the Files picker, and the palette's.
+pub const UPLOAD_FROM_FILES: &str = "Upload from Files\u{2026}";
+/// The selected row's save through the Files picker, and the palette's.
+pub const SAVE_TO_FILES: &str = "Save to Files\u{2026}";
+
+/// Whether the Files picker stands in for Finder here: iOS, where nothing else reaches the
+/// Files app, and no file can be dragged in or out of an iPhone.
+pub const FILES_PICKER: bool = cfg!(target_os = "ios");
+
+/// How far a pressed row travels before it is dragged out rather than clicked: the terminal's
+/// slop for a path.
+const DRAG_SLOP: f32 = 4.0;
+/// The crumbs the path bar keeps after its first: deeper folders fold into one `…`.
+const CRUMBS: usize = 3;
+/// The width of a row's size column at zoom 1, room for "1023.9 KB".
+const SIZE_W: f32 = 64.0;
+/// The width of a row's age column at zoom 1, room for "59m".
+const AGE_W: f32 = 32.0;
+
+/// What a folder tile tells the workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderViewEvent {
+    /// The tile moved to this directory: the item follows, and the worker is asked for it.
+    Browse(String),
+    /// A file was opened: a file tile for it beside this one.
+    OpenFile(String),
+    /// A row was dragged out of the app.
+    DragOut(String),
+    /// Files picked in the Files app are to go up into this folder.
+    UploadHere,
+    /// This entry is to be brought down and saved with the Files app.
+    SaveToFiles {
+        /// Its path on the worker.
+        path: String,
+        /// Whether it is a folder.
+        folder: bool,
+    },
+}
+
+impl EventEmitter<FolderViewEvent> for FolderView {}
+
+/// The view of one folder item.
+pub struct FolderView {
+    id: ItemId,
+    /// The directory the tile is at, as the item names it.
+    path: String,
+    /// What the worker last said, for `listed`; kept while the next listing is on its way so a
+    /// move does not flash an empty tile.
+    listing: Option<Listing>,
+    /// The path `listing` answers.
+    listed: Option<String>,
+    /// The worker is to be asked for `path` ([`Self::take_request`]).
+    wants: bool,
+    selected: Option<usize>,
+    /// The entry to select when the next listing comes: the folder just gone up from.
+    came_from: Option<String>,
+    /// The worker's home, which the path bar calls `~`.
+    home: Option<String>,
+    /// A row pressed and where, until it is let go or dragged out.
+    press: Option<(usize, Point<Pixels>)>,
+    /// The press became a drag: the click that ends it opens nothing.
+    dragged: bool,
+    /// Where the list and its rows were drawn last, for [`Self::path_at`].
+    drawn: Rc<RefCell<Drawn>>,
+    zoom: f32,
+    theme: Theme,
+    focus: FocusHandle,
+    scroll: UniformListScrollHandle,
+    plate: Plate,
+}
+
+impl std::fmt::Debug for FolderView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FolderView")
+            .field("id", &self.id)
+            .field("path", &self.path)
+            .field("listed", &self.listed)
+            .field("selected", &self.selected)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FolderView {
+    /// A tile at `path`, waiting on the worker.
+    pub fn new(id: ItemId, path: &str, theme: Theme, cx: &Context<Self>) -> Self {
+        Self {
+            id,
+            path: path.to_owned(),
+            listing: None,
+            listed: None,
+            wants: true,
+            selected: None,
+            came_from: None,
+            home: None,
+            press: None,
+            dragged: false,
+            drawn: Rc::default(),
+            zoom: 1.0,
+            theme,
+            focus: cx.focus_handle(),
+            scroll: UniformListScrollHandle::new(),
+            plate: Plate::default(),
+        }
+    }
+
+    /// Item this tile belongs to.
+    #[must_use]
+    pub const fn id(&self) -> ItemId {
+        self.id
+    }
+
+    /// The directory the tile is at, as its item names it.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// What the worker last said, once it has.
+    #[must_use]
+    pub const fn listing(&self) -> Option<&Listing> {
+        self.listing.as_ref()
+    }
+
+    /// The directory listed, absolute, once the worker has listed one.
+    #[must_use]
+    pub fn dir(&self) -> Option<&str> {
+        match &self.listing {
+            Some(Listing::Listed { dir, .. }) => Some(dir),
+            _ => None,
+        }
+    }
+
+    /// The entries listed, folders first.
+    #[must_use]
+    pub fn entries(&self) -> &[FolderEntry] {
+        match &self.listing {
+            Some(Listing::Listed { entries, .. }) => entries,
+            _ => &[],
+        }
+    }
+
+    /// The selected entry.
+    #[must_use]
+    pub fn selected(&self) -> Option<&FolderEntry> {
+        self.entries().get(self.selected?)
+    }
+
+    /// Whether the tile moved and its new listing has not come yet.
+    #[must_use]
+    pub fn browsing(&self) -> bool {
+        self.listed.as_deref() != Some(self.path.as_str())
+    }
+
+    /// The directory above this one, once listed; none at the root.
+    #[must_use]
+    pub fn parent(&self) -> Option<String> {
+        parent_of(self.dir()?)
+    }
+
+    /// Where the entries are, for the self-test's dump: a summary as a screen reader hears it.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        match &self.listing {
+            None => crate::file::READING.to_owned(),
+            Some(Listing::NotFolder) => NOT_A_FOLDER.to_owned(),
+            Some(Listing::Missing { error }) => error.clone(),
+            Some(Listing::Listed { entries, total, .. }) => {
+                let shown = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+                match (shown, *total) {
+                    (_, 0) => EMPTY_FOLDER.to_owned(),
+                    (shown, total) if shown < total => format!("First {shown} of {total} items"),
+                    (_, total) => count_label(total),
+                }
+            }
+        }
+    }
+
+    /// The worker's home, for the path bar's `~`.
+    pub fn set_home(&mut self, home: Option<String>) {
+        self.home = home.filter(|h| !h.is_empty());
+    }
+
+    /// The zoom the tile is drawn at.
+    pub const fn set_zoom(&mut self, zoom: f32) {
+        self.zoom = zoom;
+    }
+
+    /// Draw by another theme (the workspace swapped it).
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        if self.theme != theme {
+            self.theme = theme;
+            cx.notify();
+        }
+    }
+
+    /// The item was moved (by this tile, another client or the registry's snapshot): the
+    /// listing of the new path is to be asked for. The old one stays until it comes.
+    pub fn set_path(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.path != path {
+            path.clone_into(&mut self.path);
+            self.wants = true;
+            cx.notify();
+        }
+    }
+
+    /// Ask the worker again: the link it was asked on dropped, or the folder may have changed.
+    pub const fn refresh(&mut self) {
+        self.wants = true;
+    }
+
+    /// The path to ask the worker for, once: `None` when nothing new is wanted.
+    pub fn take_request(&mut self) -> Option<String> {
+        std::mem::take(&mut self.wants).then(|| self.path.clone())
+    }
+
+    /// The worker listed `asked`. An answer for a path the tile has moved from is dropped.
+    pub fn set_listing(&mut self, asked: &str, listing: Listing, cx: &mut Context<Self>) {
+        if asked != self.path {
+            return;
+        }
+        let kept = self.selected().map(|e| e.name.clone());
+        let same_dir = self.listed.as_deref() == Some(asked);
+        let wanted = self.came_from.take().or(if same_dir { kept } else { None });
+        self.selected = match &listing {
+            Listing::Listed { entries, .. } if !entries.is_empty() => Some(
+                wanted.and_then(|name| entries.iter().position(|e| e.name == name)).unwrap_or(0),
+            ),
+            _ => None,
+        };
+        self.listing = Some(listing);
+        self.listed = Some(asked.to_owned());
+        if let Some(ix) = self.selected {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
+    /// Give the tile the keyboard.
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+    }
+
+    /// Whether the tile has the keyboard.
+    #[must_use]
+    pub fn focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
+    /// Move the selection by `delta` rows, stopping at the ends.
+    pub fn select_by(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.entries().len();
+        if count == 0 {
+            return;
+        }
+        let last = count.saturating_sub(1);
+        let at = self
+            .selected
+            .map_or(if delta > 1 { last } else { 0 }, |ix| ix.saturating_add_signed(delta));
+        self.select(at.min(last), cx);
+    }
+
+    /// Select row `ix` and bring it into view.
+    fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.selected != Some(ix) {
+            self.selected = Some(ix);
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+            cx.notify();
+        }
+    }
+
+    /// Open the selected entry: a folder here, a file beside. Nothing while a move waits for
+    /// its listing, since the rows shown are the old folder's.
+    pub fn open_selected(&mut self, cx: &mut Context<Self>) {
+        if self.browsing() {
+            return;
+        }
+        let (Some(dir), Some(entry)) = (self.dir(), self.selected()) else { return };
+        let path = join(dir, &entry.name);
+        if entry.kind == FileKind::Dir {
+            self.browse(path, cx);
+        } else {
+            tracing::info!(%path, "folder opens a file");
+            cx.emit(FolderViewEvent::OpenFile(path));
+        }
+    }
+
+    /// Go up to the folder this one is in, the one just left selected there.
+    pub fn open_parent(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.dir().filter(|_| !self.browsing()) else { return };
+        let Some(parent) = parent_of(dir) else { return };
+        self.came_from = dir.rsplit('/').next().map(str::to_owned);
+        self.browse(parent, cx);
+    }
+
+    /// Move the tile to `path`.
+    pub fn browse(&mut self, path: String, cx: &mut Context<Self>) {
+        tracing::info!(%path, "folder moves");
+        self.set_path(&path, cx);
+        cx.emit(FolderViewEvent::Browse(path));
+    }
+
+    /// A row pressed: selected at once, and remembered in case it becomes a drag.
+    fn press(&mut self, ix: usize, at: Point<Pixels>, cx: &mut Context<Self>) {
+        self.press = Some((ix, at));
+        self.dragged = false;
+        self.select(ix, cx);
+    }
+
+    /// The pointer moved with the button down: past the slop, the pressed row is dragged out.
+    fn drag(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((ix, from)) = self.press else { return };
+        if (at - from).magnitude() < f64::from(DRAG_SLOP) {
+            return;
+        }
+        self.press = None;
+        let (Some(dir), Some(entry)) = (self.dir(), self.entries().get(ix)) else { return };
+        let path = join(dir, &entry.name);
+        self.dragged = true;
+        tracing::info!(%path, "folder drags out");
+        cx.emit(FolderViewEvent::DragOut(path));
+    }
+
+    /// A click on row `ix`: it opens, once. The second click of a double-click is the same
+    /// gesture, and the end of a drag is not a click.
+    fn clicked(&mut self, ix: usize, clicks: usize, cx: &mut Context<Self>) {
+        self.press = None;
+        if std::mem::take(&mut self.dragged) || clicks > 1 {
+            return;
+        }
+        self.select(ix, cx);
+        self.open_selected(cx);
+    }
+
+    /// The entry of row `ix` as a worker path, and whether it is a folder. None while a move
+    /// waits for its listing, since the rows shown are the old folder's.
+    fn entry_path(&self, ix: usize) -> Option<(String, bool)> {
+        let (Some(dir), Some(entry)) =
+            (self.dir().filter(|_| !self.browsing()), self.entries().get(ix))
+        else {
+            return None;
+        };
+        Some((join(dir, &entry.name), entry.kind == FileKind::Dir))
+    }
+
+    /// The entry of the row drawn under `at` (window points) as a worker path, and whether it
+    /// is a folder: what a touch held there lifts out of an iPad.
+    #[must_use]
+    pub fn path_at(&self, at: Point<Pixels>) -> Option<(String, bool)> {
+        let drawn = self.drawn.borrow();
+        if !drawn.list.is_some_and(|list| list.contains(&at)) {
+            return None;
+        }
+        let (ix, _) = drawn.rows.iter().find(|(_, bounds)| bounds.contains(&at))?;
+        self.entry_path(*ix)
+    }
+
+    /// Files picked in the Files app are to go up into this folder.
+    pub fn upload_here(&self, cx: &mut Context<Self>) {
+        if self.dir().is_some() {
+            tracing::info!(path = %self.path, "folder asks the Files picker for files");
+            cx.emit(FolderViewEvent::UploadHere);
+        }
+    }
+
+    /// The selected entry is to be brought down and saved with the Files app.
+    pub fn save_selected(&self, cx: &mut Context<Self>) {
+        let Some((path, folder)) = self.selected.and_then(|ix| self.entry_path(ix)) else {
+            return;
+        };
+        tracing::info!(%path, "folder saves to Files");
+        cx.emit(FolderViewEvent::SaveToFiles { path, folder });
+    }
+
+    /// What the body says instead of rows, one composed block in its middle: the kind's mark,
+    /// what is so and, where there is one, why.
+    fn notice(
+        &self,
+        icon: IconName,
+        title: impl Into<SharedString>,
+        detail: Option<SharedString>,
+    ) -> AnyElement {
+        let id = self.id.as_uuid();
+        let k = self.zoom;
+        let theme = &self.theme;
+        div()
+            .debug_selector(move || format!("folder-notice-{id}"))
+            .flex_1()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(crate::kit::notice(
+                theme,
+                k,
+                crate::kit::notice_mark(theme, icon, k),
+                title,
+                detail,
+            ))
+            .into_any_element()
+    }
+
+    /// The folders from the top down to this one, each a way there; the root's own name, or
+    /// `~` for the worker's home. Past [`CRUMBS`] deep, the middle folds into one `…`.
+    fn crumbs(&self, dir: &str) -> Vec<(String, String)> {
+        let home = self.home.as_deref().map(|h| h.trim_end_matches('/')).filter(|h| !h.is_empty());
+        let under_home = home.and_then(|home| {
+            let rest = dir.strip_prefix(home)?;
+            (rest.is_empty() || rest.starts_with('/')).then_some((home, rest))
+        });
+        let (mut crumbs, rest) = match under_home {
+            Some((home, rest)) => (vec![("~".to_owned(), home.to_owned())], rest),
+            None => (vec![("/".to_owned(), "/".to_owned())], dir),
+        };
+        let mut at = crumbs.first().map(|(_, path)| path.clone()).unwrap_or_default();
+        for part in rest.split('/').filter(|p| !p.is_empty()) {
+            at = join(&at, part);
+            crumbs.push((part.to_owned(), at.clone()));
+        }
+        if crumbs.len() > CRUMBS.saturating_add(2) {
+            let tail = crumbs.split_off(crumbs.len().saturating_sub(CRUMBS));
+            let folded = crumbs.pop().map(|(_, path)| path).unwrap_or_default();
+            crumbs.truncate(1);
+            crumbs.push(("\u{2026}".to_owned(), folded));
+            crumbs.extend(tail);
+        }
+        crumbs
+    }
+
+    /// The bar over the rows: where the tile is, every folder above it a click away, and how
+    /// much this one holds.
+    fn path_bar(&self, dir: &str, total: u32, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let k = self.zoom;
+        let crumbs = self.crumbs(dir);
+        let last = crumbs.len().saturating_sub(1);
+        let mut trail = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xxs * k))
+            .overflow_hidden()
+            .whitespace_nowrap();
+        for (n, (label, path)) in crumbs.into_iter().enumerate() {
+            if n > 0 {
+                trail = trail.child(
+                    crate::icons::icon(
+                        theme,
+                        IconName::ChevronRight,
+                        IconSize::Inline,
+                        crate::palette::separator_ink(theme),
+                    )
+                    .size(px(theme.typography.small() * k)),
+                );
+            }
+            let here = n == last;
+            let crumb = div()
+                .id(numbered("folder-crumb", n))
+                .debug_selector(move || format!("folder-crumb-{n}"))
+                .role(if here { Role::Label } else { Role::Link })
+                .aria_label(SharedString::from(label.clone()))
+                .px(px(theme.spacing.xxs * k))
+                .rounded(px(theme.radii.xs * k))
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .map(|el| if here { el.flex_shrink(1.0) } else { el.flex_none() })
+                .text_color(hsla(if here { s.text } else { s.text_muted }))
+                .child(label);
+            let crumb = if here {
+                crumb
+            } else {
+                crumb
+                    .cursor_pointer()
+                    .hover(move |st| st.text_color(hsla(s.text_secondary)))
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.browse(path.clone(), cx);
+                    }))
+            };
+            trail = trail.child(crumb);
+        }
+        let id = self.id.as_uuid();
+        div()
+            .id("folder-path")
+            .debug_selector(move || format!("folder-path-{id}"))
+            .role(Role::Navigation)
+            .aria_label(SharedString::from(dir.to_owned()))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm * k))
+            .h(px(theme.density.row * k))
+            // A crumb's pad hangs out past the edge grid, so the first one's text stands on
+            // the rows' icons and the header's glyph, not a pad's width right of them.
+            .pl(px((theme.spacing.inset() - theme.spacing.xxs) * k))
+            .pr(px(theme.spacing.inset() * k))
+            .border_b_1()
+            .border_color(hsla(s.border_subtle))
+            .text_size(px(theme.typography.small() * k))
+            .child(trail)
+            .child(
+                crate::kit::meta(crate::kit::tabular(div()), theme)
+                    .flex_none()
+                    .text_size(px(theme.typography.meta() * k))
+                    .child(count_label(total)),
+            )
+            .when(FILES_PICKER, |bar| {
+                bar.child(
+                    crate::kit::icon_button_at(
+                        theme,
+                        format!("folder-upload-{id}"),
+                        IconName::Upload,
+                        UPLOAD_FROM_FILES,
+                        k,
+                    )
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.upload_here(cx);
+                    })),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Row `ix`: the entry's kind, its name (a hidden one muted), then how big it is and how
+    /// long ago it changed, in columns.
+    fn row(
+        &self,
+        ix: usize,
+        entry: &FolderEntry,
+        now: SystemTime,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let k = self.zoom;
+        let chosen = self.selected == Some(ix);
+        let folder = entry.kind == FileKind::Dir;
+        let icon = match entry.kind {
+            FileKind::Dir => IconName::Folder,
+            FileKind::Symlink => IconName::Link,
+            FileKind::File | FileKind::Other => IconName::File,
+        };
+        let ink = RowInk::of(theme, entry, chosen);
+        let detail = if folder {
+            entry.items.map(count_label).unwrap_or_default()
+        } else if entry.kind == FileKind::File {
+            crate::file::size_label(entry.size)
+        } else {
+            String::new()
+        };
+        let age = age(entry.modified_ms, now).map(crate::palette::age_label).unwrap_or_default();
+        let column = |text: String, width: f32| {
+            crate::kit::meta(crate::kit::tabular(div()), theme)
+                .flex_none()
+                .w(px(width * k))
+                .text_size(px(theme.typography.meta() * k))
+                .text_right()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .child(text)
+        };
+        let pad = crate::palette::list_pad(theme);
+        let drawn = Rc::clone(&self.drawn);
+        let save = (FILES_PICKER && chosen).then(|| {
+            crate::kit::icon_button_at(
+                theme,
+                format!("folder-save-{}", self.id.as_uuid()),
+                IconName::Download,
+                SAVE_TO_FILES,
+                k,
+            )
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _ev, _window, cx| {
+                cx.stop_propagation();
+                this.save_selected(cx);
+            }))
+        });
+        let row = div()
+            .id(numbered("folder-row", ix))
+            .debug_selector(move || format!("folder-row-{ix}"))
+            .role(Role::ListBoxOption)
+            .aria_label(SharedString::from(entry.name.clone()))
+            .aria_selected(chosen)
+            .relative()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm * k))
+            .h(px(theme.density.row * k))
+            .px(px((theme.spacing.inset() - pad) * k))
+            .rounded(px(theme.radii.sm * k))
+            .cursor_pointer()
+            .when(!chosen, |el| el.hover(move |st| st.bg(hsla(s.raised))))
+            .opacity(ink.opacity)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _window, cx| {
+                    this.press(ix, ev.position, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, _window, cx| {
+                if ev.pressed_button == Some(MouseButton::Left) {
+                    this.drag(ev.position, cx);
+                }
+            }))
+            .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _window, cx| {
+                this.clicked(ix, ev.click_count(), cx);
+            }))
+            .child(
+                crate::icons::icon(theme, icon, IconSize::Inline, hsla(ink.icon))
+                    .size(px(theme.typography.icon() * k)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(hsla(ink.name))
+                    .when(chosen, |el| {
+                        el.font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
+                    })
+                    .child(SharedString::from(entry.name.clone())),
+            )
+            .when(entry.link && entry.kind != FileKind::Symlink, |el| {
+                el.child(
+                    crate::icons::icon(theme, IconName::Link, IconSize::Inline, hsla(s.text_muted))
+                        .size(px(theme.typography.small() * k)),
+                )
+            })
+            .child(column(detail, SIZE_W))
+            .child(column(age, AGE_W))
+            .children(save)
+            .child(
+                gpui::canvas(
+                    move |bounds, _window, _cx| drawn.borrow_mut().rows.push((ix, bounds)),
+                    |_bounds, (), _window, _cx| {},
+                )
+                .absolute()
+                .size_full(),
+            );
+        if chosen { self.plate.mark(row, ix).into_any_element() } else { row.into_any_element() }
+    }
+
+    /// The rows, drawn as far as they are seen: a folder can hold thousands.
+    fn list(&self, count: usize, cx: &Context<Self>) -> AnyElement {
+        let id = self.id.as_uuid();
+        let drawn = Rc::clone(&self.drawn);
+        let pad = crate::palette::list_pad(&self.theme) * self.zoom;
+        let rows = uniform_list(
+            "folder-rows",
+            count,
+            cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+                let now = SystemTime::now();
+                let entries = this.entries();
+                range
+                    .filter_map(|ix| Some(this.row(ix, entries.get(ix)?, now, cx)))
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(&self.scroll)
+        .size_full()
+        // The fill sits the list's pad in from the tile's edges; the text on the edge grid.
+        .p(px(pad));
+        div()
+            .id("folder-list")
+            .debug_selector(move || format!("folder-list-{id}"))
+            .role(Role::ListBox)
+            .aria_label("Entries")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(self.plate.under(&self.theme))
+            .child(
+                gpui::canvas(
+                    move |bounds, _window, _cx| {
+                        let mut drawn = drawn.borrow_mut();
+                        drawn.list = Some(bounds);
+                        drawn.rows.clear();
+                    },
+                    |_bounds, (), _window, _cx| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
+    /// The line under a listing the worker cut: how much of the folder the rows are.
+    fn foot(&self, shown: usize, total: u32) -> Option<AnyElement> {
+        let shown = u32::try_from(shown).unwrap_or(u32::MAX);
+        if shown >= total {
+            return None;
+        }
+        let theme = &self.theme;
+        let k = self.zoom;
+        let id = self.id.as_uuid();
+        Some(
+            crate::kit::meta(crate::kit::tabular(div()), theme)
+                .id("folder-cut")
+                .debug_selector(move || format!("folder-cut-{id}"))
+                .role(Role::Status)
+                .flex_none()
+                .flex()
+                .items_center()
+                .h(px(theme.density.row * k))
+                .px(px(theme.spacing.inset() * k))
+                .border_t_1()
+                .border_color(hsla(theme.surfaces.border_subtle))
+                .text_size(px(theme.typography.meta() * k))
+                .child(format!("Showing the first {shown} of {total}"))
+                .into_any_element(),
+        )
+    }
+}
+
+impl Focusable for FolderView {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for FolderView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = *self.id.as_uuid();
+        let k = self.zoom;
+        // A body without rows has none to be found under a touch.
+        *self.drawn.borrow_mut() = Drawn::default();
+        let body: Vec<AnyElement> = match &self.listing {
+            // Blank while an answer in time would fill it; past the grace, a word.
+            None if !crate::screen::past_grace("folder-reading", window, cx) => Vec::new(),
+            None => vec![self.notice(IconName::Folder, crate::file::READING, None)],
+            Some(Listing::NotFolder) => vec![self.notice(IconName::File, NOT_A_FOLDER, None)],
+            Some(Listing::Missing { error }) => vec![self.notice(
+                IconName::FolderSearch,
+                CANNOT_LIST,
+                Some(SharedString::from(error.clone())),
+            )],
+            Some(Listing::Listed { dir, entries, total }) => {
+                let mut body = vec![self.path_bar(dir, *total, cx)];
+                if entries.is_empty() {
+                    body.push(self.notice(IconName::FolderOpen, EMPTY_FOLDER, None));
+                } else {
+                    body.push(self.list(entries.len(), cx));
+                    body.extend(self.foot(entries.len(), *total));
+                }
+                body
+            }
+        };
+        div()
+            .id(SharedString::from(format!("folder-{id}")))
+            .debug_selector(move || format!("folder-{id}"))
+            .key_context(CTX)
+            .track_focus(&self.focus)
+            .role(Role::Group)
+            .aria_label(SharedString::from(format!("Folder {}", self.dir().unwrap_or(&self.path))))
+            .aria_value(SharedString::from(self.summary()))
+            .on_action(cx.listener(|this, _: &SelectNext, _window, cx| this.select_by(1, cx)))
+            .on_action(cx.listener(|this, _: &SelectPrevious, _window, cx| this.select_by(-1, cx)))
+            .on_action(
+                cx.listener(|this, _: &SelectFirst, _window, cx| this.select_by(isize::MIN, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectLast, _window, cx| this.select_by(isize::MAX, cx)),
+            )
+            .on_action(cx.listener(|this, _: &OpenSelected, _window, cx| this.open_selected(cx)))
+            .on_action(cx.listener(|this, _: &OpenParent, _window, cx| this.open_parent(cx)))
+            .on_action(cx.listener(|this, _: &UploadFromFiles, _window, cx| this.upload_here(cx)))
+            .on_action(cx.listener(|this, _: &SaveToFiles, _window, cx| this.save_selected(cx)))
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .font_family(self.theme.typography.ui_family.clone())
+            .text_size(px(self.theme.typography.ui_size * k))
+            .children(body)
+    }
+}
+
+/// Where the list and its rows were drawn, in window points.
+#[derive(Debug, Default)]
+struct Drawn {
+    /// The list, which clips the rows scrolled part out of it.
+    list: Option<Bounds<Pixels>>,
+    /// Each row drawn, by index.
+    rows: Vec<(usize, Bounds<Pixels>)>,
+}
+
+/// The palette's lines for the Files picker: on iOS, where it stands in for Finder (`ios`),
+/// and nowhere else.
+#[must_use]
+pub fn files_palette_items(
+    ios: bool,
+    bindings: &[gpui::KeyBinding],
+) -> Vec<crate::palette::PaletteItem> {
+    if !ios {
+        return Vec::new();
+    }
+    vec![
+        crate::palette::PaletteItem::new(
+            UPLOAD_FROM_FILES,
+            IconName::Upload,
+            Box::new(UploadFromFiles),
+            bindings,
+        ),
+        crate::palette::PaletteItem::new(
+            SAVE_TO_FILES,
+            IconName::Download,
+            Box::new(SaveToFiles),
+            bindings,
+        ),
+    ]
+}
+
+/// How a row is inked: its icon, its name, and the whole row's opacity.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct RowInk {
+    pub icon: slopty_theme::Rgb,
+    pub name: slopty_theme::Rgb,
+    pub opacity: f32,
+}
+
+impl RowInk {
+    /// A folder's icon a step up from a file's, and the selected row's too. A hidden entry
+    /// (a dot name, `UF_HIDDEN`) is the whole row set back, as Finder shows one: muted text
+    /// alone was the same AA grey as every size and age beside it, so it did not read as
+    /// hidden at all.
+    pub(crate) fn of(theme: &Theme, entry: &FolderEntry, chosen: bool) -> Self {
+        let s = &theme.surfaces;
+        let folder = entry.kind == FileKind::Dir;
+        if entry.hidden {
+            return Self { icon: s.text_muted, name: s.text_muted, opacity: HIDDEN };
+        }
+        let icon = if folder || chosen { s.text_secondary } else { s.text_muted };
+        Self { icon, name: s.text, opacity: 1.0 }
+    }
+}
+
+/// How far a hidden row is set back: present, but behind the rest, as a read inbox row is.
+const HIDDEN: f32 = slopty_theme::alpha::STRONG;
+
+/// An element id for the `n`th of a kind.
+fn numbered(kind: &'static str, n: usize) -> gpui::ElementId {
+    gpui::ElementId::NamedInteger(kind.into(), u64::try_from(n).unwrap_or(u64::MAX))
+}
+
+/// How long ago `modified_ms` (Unix milliseconds) was at `now`; none when the worker gave no
+/// time.
+fn age(modified_ms: u64, now: SystemTime) -> Option<std::time::Duration> {
+    let now = now.duration_since(std::time::UNIX_EPOCH).ok()?;
+    (modified_ms > 0).then(|| now.saturating_sub(std::time::Duration::from_millis(modified_ms)))
+}
+
+/// `name` in `dir`.
+#[must_use]
+pub fn join(dir: &str, name: &str) -> String {
+    format!("{}/{name}", dir.trim_end_matches('/'))
+}
+
+/// The directory `dir` is in; none for the root.
+#[must_use]
+pub fn parent_of(dir: &str) -> Option<String> {
+    let trimmed = dir.trim_end_matches('/');
+    let (parent, _) = trimmed.rsplit_once('/')?;
+    Some(if parent.is_empty() { "/".to_owned() } else { parent.to_owned() })
+}
+
+/// How many entries, as a folder's size is said: `1 item`, `12 items`.
+#[must_use]
+pub fn count_label(n: u32) -> String {
+    if n == 1 { "1 item".to_owned() } else { format!("{n} items") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_joins_and_goes_up_to_the_root() {
+        assert_eq!(join("/w", "src"), "/w/src");
+        assert_eq!(join("/", "etc"), "/etc");
+        assert_eq!(parent_of("/w/src").as_deref(), Some("/w"));
+        assert_eq!(parent_of("/w").as_deref(), Some("/"));
+        assert_eq!(parent_of("/"), None);
+        assert_eq!(count_label(1), "1 item");
+        assert_eq!(count_label(0), "0 items");
+    }
+
+    /// A hidden entry reads as set back: its name falls well under the contrast of the sizes
+    /// and ages in the same list, where muted text alone had matched them.
+    #[test]
+    fn a_hidden_entry_is_set_back() {
+        for variant in [slopty_theme::Variant::Light, slopty_theme::Variant::Dark] {
+            let theme = Theme::new(variant);
+            let file = |name: &str, hidden| FolderEntry {
+                name: name.to_owned(),
+                kind: FileKind::File,
+                link: false,
+                hidden,
+                size: 6,
+                items: None,
+                modified_ms: 0,
+            };
+            let plain = RowInk::of(&theme, &file("README.md", false), false);
+            let hidden = RowInk::of(&theme, &file(".env", true), false);
+            let under = theme.content();
+            let seen =
+                |ink: slopty_theme::Rgb, opacity: f32| under.mix(ink, opacity).contrast(under);
+            let meta = seen(theme.surfaces.text_muted, 1.0);
+            let name = seen(hidden.name, hidden.opacity);
+            assert!(name * 1.25 < meta, "hidden {name:.2} against the meta's {meta:.2}");
+            assert!(name >= 1.8, "still legible: {name:.2}");
+            assert!(
+                (plain.opacity - 1.0).abs() < f32::EPSILON && plain.name == theme.surfaces.text
+            );
+        }
+    }
+}

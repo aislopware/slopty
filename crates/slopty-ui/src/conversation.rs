@@ -12,7 +12,7 @@
 //! * [`diff`] — an edit's patch numbered and coloured, in a column or side by side.
 //! * [`figures`] — a turn's figures, times of day and the files a run of entries changed.
 //! * [`find`] — which entries hold a query, and the row that shows each.
-//! * [`composer`] — what the composer types into the terminal.
+//! * [`composer`] — what the composer types into the terminal, and the files attached to it.
 //! * [`approval`] — a held permission prompt and how it ended.
 //! * [`view`] — the face itself: the list, the prompt rail, the task card, the composer.
 
@@ -30,7 +30,7 @@ pub mod tools;
 pub mod view;
 
 pub use actions::{CycleDensity, Interrupt};
-pub use view::{ConversationView, FaceEvent};
+pub use view::{Attach, ConversationView, FaceEvent};
 
 /// The key context the face binds in.
 pub const CTX: &str = "Conversation";

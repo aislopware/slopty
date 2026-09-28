@@ -12,6 +12,7 @@ mod e2e;
 pub mod net;
 mod server;
 pub mod settings;
+pub mod this_mac;
 pub mod workers;
 
 use std::rc::Rc;
@@ -19,9 +20,10 @@ use std::rc::Rc;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowOptions, div, px,
+    AnimationExt as _, App, AppContext as _, Context, Entity, Focusable as _,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowOptions,
+    div, px,
 };
 use gpui_kit::component::Root;
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
@@ -29,6 +31,7 @@ pub use settings::actions::OpenSettings;
 use slopty_client::LinkEvent;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WorkerId};
+use slopty_platform::notify::{Notifier, Tap};
 use slopty_proto::WorkerMsg;
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::{Density, Spacing, Theme, Typography};
@@ -37,11 +40,13 @@ use slopty_ui::colors::hsla;
 use slopty_ui::kit::{self, ButtonKind};
 use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
-use slopty_ui::terminal::TerminalView;
+use slopty_ui::terminal::{TerminalView, TerminalViewEvent};
+use slopty_ui::workspace::attention::Attention;
 use slopty_ui::workspace::{
-    HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, WorkerLink, WorkerStatus,
+    Finished, HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, WorkerLink, WorkerStatus,
     WorkspaceEvent, WorkspaceView,
 };
+pub use this_mac::actions::UseThisMac;
 pub use workers::actions::{AddWorker, ConnectServer, DisconnectServer};
 use workers::{Hearing, Tick, WorkerSlot};
 
@@ -62,6 +67,15 @@ const AT_END: f32 = 0.5;
 /// The add-worker panel's width: a line of help, the tailnet's rows and an address field
 /// beside its button, not a document.
 const ADD_PANEL_W: f32 = 440.0;
+/// From this width the address field and its action share a row: a tablet's, a Mac's. Under
+/// it (a phone, an iPad's Split View column) the action is a thumb's full width under the field.
+/// Chosen by the room, not by the input: a 440 pt Connect button under its field on a 1032 pt
+/// iPad was the phone's stack.
+const FIELD_ROW_FROM: f32 = 600.0;
+/// This device can ask Tailscale what is on the tailnet: not on iOS, where no app can read it.
+const LISTS_TAILNET: bool = !cfg!(target_os = "ios");
+/// What the panel says where it cannot look on the tailnet, so its absence has a reason.
+const UNLISTED: &str = "This device cannot list your tailnet, so type an address.";
 /// The address field's height, and its button's beside it: T3 Code's field (`h-9`) under a
 /// pointer, a finger's target on glass.
 const FIELD_H: f32 = if TOUCH { Density::TOUCH.hit } else { 36.0 };
@@ -87,7 +101,7 @@ const LINK_BATCH: usize = 256;
 const BAR_KEYS: [(&str, &str, Option<&str>); 12] = [
     ("Esc", "escape", None),
     ("Tab", "tab", None),
-    ("⌃", "", None),
+    ("Ctrl", "", None),
     ("←", "left", None),
     ("↑", "up", None),
     ("↓", "down", None),
@@ -114,25 +128,28 @@ fn cap_width(label: &str, spacing: Spacing) -> f32 {
     if label.chars().count() > 1 { 2.0_f32.mul_add(spacing.sm, side) } else { side }
 }
 
-/// Where a key sits on a row wide enough to spread the bar out (an iPad's): the keys the soft
-/// keyboard lacks at the left, the arrows in the middle, the symbols and the word keys (Copy,
-/// Paste, Find) at the right, as a hardware keyboard's own groups sit apart.
+/// Where a key sits on a row wide enough for all of it (an iPad's): one leading run of groups,
+/// as iOS's own input-assistant bar has, with the word keys (Copy, Paste, Find) trailing. Spread
+/// in three islands the arrows floated alone in the middle, far from both hands' keys.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum KeyGroup {
     /// Esc, Tab and the sticky modifiers.
     Lead,
     /// The four arrows.
     Arrows,
-    /// Shell symbols, then the word keys.
-    Trail,
+    /// Shell symbols.
+    Symbols,
+    /// The word keys, at the row's trailing end.
+    Words,
 }
 
 /// The group `label`'s key belongs to.
 fn key_group(label: &str) -> KeyGroup {
     match label {
-        "Esc" | "Tab" | "⌃" | "⌘" => KeyGroup::Lead,
+        "Esc" | "Tab" | "Ctrl" | "⌘" => KeyGroup::Lead,
         "←" | "↑" | "↓" | "→" => KeyGroup::Arrows,
-        _ => KeyGroup::Trail,
+        word if word.chars().count() > 1 => KeyGroup::Words,
+        _ => KeyGroup::Symbols,
     }
 }
 
@@ -142,6 +159,13 @@ fn key_row_width<'a>(labels: impl IntoIterator<Item = &'a str>, spacing: Spacing
         .into_iter()
         .fold((0.0_f32, 0.0_f32), |(n, w), label| (n + 1.0, w + cap_width(label, spacing)));
     2.0_f32.mul_add(spacing.xs, (count - 1.0).max(0.0).mul_add(spacing.xs, caps))
+}
+
+/// How wide the row of `labels`' caps is laid out as one run of groups: [`key_row_width`] with
+/// a step between the groups where a gap between caps was. At most three breaks: the lead, the
+/// arrows, the symbols, then the word keys trailing.
+fn spread_width<'a>(labels: impl IntoIterator<Item = &'a str>, spacing: Spacing) -> f32 {
+    3.0_f32.mul_add(spacing.md - spacing.xs, key_row_width(labels, spacing))
 }
 
 /// Which ends of the key row fade, as `(leading, trailing)`: the leading one once the row is
@@ -155,7 +179,7 @@ fn key_bar_fades(scrolled: f32, max: f32) -> (bool, bool) {
 const SCREEN_BAR_KEYS: [(&str, &str, Option<&str>); 9] = [
     ("Esc", "escape", None),
     ("Tab", "tab", None),
-    ("⌃", "", None),
+    ("Ctrl", "", None),
     ("⌘", "cmd", None),
     ("←", "left", None),
     ("↑", "up", None),
@@ -181,6 +205,24 @@ impl Panel {
             Self::Worker => "mac-studio or 100.64.0.3",
         }
     }
+
+    /// What the address field takes, as its label names it.
+    const fn field(self) -> &'static str {
+        match self {
+            Self::Server => "Server address",
+            Self::Worker => "Worker address",
+        }
+    }
+
+    /// The address field's label: "Or type an address" only under rows to press, where "or"
+    /// has a first way to follow; else what the field takes.
+    fn address_label(self, search: Option<&Search>) -> &'static str {
+        if search.is_some_and(|s| !s.offers(self).is_empty()) {
+            "Or type an address"
+        } else {
+            self.field()
+        }
+    }
 }
 
 /// The panel that connects to a server or adds a worker by address: shown until this
@@ -198,6 +240,8 @@ struct Adding {
     /// Where the look on the tailnet stands; `None` where none is made (iOS, where no app can
     /// read Tailscale, and a server's panel while a server is set).
     search: Option<Search>,
+    /// "Use this Mac as a worker" under way: its checklist stands in for the address.
+    this_mac: Option<this_mac::Flow>,
 }
 
 /// What the tailnet offers the panel: a server to connect to, or a worker to add.
@@ -260,18 +304,18 @@ impl Search {
         }
     }
 
-    /// The line under [`Self::words`]: what to do about it. Nothing while it looks.
+    /// What follows [`Self::words`] on its line: what to do about it. Nothing while it looks.
     const fn next_step(&self, mode: Panel) -> Option<&'static str> {
         match (self, mode) {
             (Self::Looking, _) => None,
             (Self::Answered { running: false, .. }, _) => {
-                Some("Start it here, or type an address on your VPN.")
+                Some("Start it, or type an address on your VPN.")
             }
             (Self::Answered { .. }, Panel::Server) => {
-                Some("Start the Slopty server on a machine there, or type its address.")
+                Some("Start the Slopty server on a machine there.")
             }
             (Self::Answered { .. }, Panel::Worker) => {
-                Some("Start the Slopty worker on a Mac there, or type its address.")
+                Some("Start the Slopty worker on a Mac there.")
             }
         }
     }
@@ -331,6 +375,18 @@ pub struct Workspace {
     key_bar_scroll: ScrollHandle,
     /// The key row's fades as last drawn, `(leading, trailing)` ([`key_bar_fades`]).
     key_bar_fades: (bool, bool),
+    /// What "Use this Mac as a worker" does to this machine; `None` where it is not offered.
+    this_mac: Option<Rc<dyn this_mac::Host>>,
+    /// Runs of it so far, so an answer for one left behind is dropped.
+    this_mac_runs: u64,
+    /// What reaches the system's notifications while the app is not in front.
+    attention: Attention,
+    /// The terminals whose finished commands [`Self::attention`] hears, by session.
+    heard_terminals: std::collections::HashMap<SessionId, gpui::Subscription>,
+    /// The time iOS grants after the app leaves the screen, held until it returns, so the links
+    /// stay up for what arrives just after the phone is pocketed.
+    #[cfg(target_os = "ios")]
+    grace: Option<slopty_platform::notify::BackgroundGrace>,
 }
 
 impl Workspace {
@@ -346,7 +402,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let events = cx.subscribe(&view, |ws: &mut Self, _view, event, cx| match event {
-            WorkspaceEvent::NeedsYou(n) => slopty_platform::set_badge(*n),
+            // The badge is the inbox's count, which `Self::look` follows.
+            WorkspaceEvent::NeedsYou(_) => {}
             WorkspaceEvent::Attention(_session) => {
                 slopty_platform::attention();
                 slopty_platform::bounce();
@@ -362,7 +419,11 @@ impl Workspace {
         });
         // The key bar follows the focused tile: a workspace change re-renders the shell,
         // which is a key bar and the overlays.
-        let changes = cx.observe(&view, |_ws, _view, cx| cx.notify());
+        let changes = cx.observe(&view, |ws, _view, cx| {
+            ws.look(cx);
+            cx.notify();
+        });
+        let this_mac = this_mac::native(&runtime);
         Self {
             workers: Vec::new(),
             directory: slopty_client::directory::Directory::default(),
@@ -385,6 +446,75 @@ impl Workspace {
             split_view: None,
             key_bar_scroll: ScrollHandle::new(),
             key_bar_fades: (false, false),
+            this_mac,
+            this_mac_runs: 0,
+            attention: Attention::new(Rc::new(slopty_platform::notify::Memory::default())),
+            heard_terminals: std::collections::HashMap::new(),
+            #[cfg(target_os = "ios")]
+            grace: None,
+        }
+    }
+
+    /// Post notes through `notifier` from now on (the system's in the app).
+    fn set_notifier(&mut self, notifier: Rc<dyn Notifier>) {
+        self.attention = Attention::new(notifier);
+    }
+
+    /// The workspace changed: hand the attention what it follows, and hear every terminal's
+    /// finished commands.
+    fn look(&mut self, cx: &mut Context<Self>) {
+        let view = self.view.read(cx);
+        let look = view.attention_look(cx);
+        let terminals = view.terminal_views();
+        self.attention.look(&look);
+        self.heard_terminals.retain(|session, _| terminals.iter().any(|(s, _)| s == session));
+        for (session, terminal) in terminals {
+            if self.heard_terminals.contains_key(&session) {
+                continue;
+            }
+            let heard =
+                cx.subscribe(&terminal, move |ws: &mut Self, _terminal, event, cx| match event {
+                    TerminalViewEvent::CommandFinished { command, exit, elapsed } => {
+                        let done =
+                            Finished { command: command.clone(), exit: *exit, elapsed: *elapsed };
+                        ws.command_finished(session, &done, cx);
+                    }
+                    TerminalViewEvent::Notification { title, body } => {
+                        ws.program_note(session, title, body, cx);
+                    }
+                    _ => {}
+                });
+            self.heard_terminals.insert(session, heard);
+        }
+    }
+
+    /// A program in `session` asked for a desktop notification (OSC 9 / 777 / 99): it notifies
+    /// while the app is away, under the tile's name.
+    fn program_note(&mut self, session: SessionId, title: &str, body: &str, cx: &Context<Self>) {
+        let view = self.view.read(cx);
+        let Some((route, tile)) = view.attention_route(session, cx) else { return };
+        let (title, body) = slopty_ui::workspace::program_banner(Some(&tile), title, body);
+        self.attention.program(route, title, body);
+    }
+
+    /// A shell command ended in `session`: a long one notifies while the app is away.
+    fn command_finished(&mut self, session: SessionId, done: &Finished, cx: &Context<Self>) {
+        let view = self.view.read(cx);
+        let Some((route, title)) = view.attention_route(session, cx) else { return };
+        let slow = view.slow_command();
+        self.attention.command_finished(route, title, done, slow);
+    }
+
+    /// The app came to the front or left it. On iOS, leaving holds the background grace.
+    fn set_active(&mut self, active: bool) {
+        self.attention.set_active(active);
+        #[cfg(target_os = "ios")]
+        {
+            self.grace = if active {
+                None
+            } else {
+                slopty_platform::notify::BackgroundGrace::begin("Slopty keeps its links")
+            };
         }
     }
 
@@ -406,7 +536,14 @@ impl Workspace {
             &editor,
             window,
             |this, editor, event, window, cx| match event {
-                SettingsEditorEvent::Save(text) => this.save_settings(text, editor, window, cx),
+                SettingsEditorEvent::Apply(text) => {
+                    this.write_settings(text, editor, cx);
+                }
+                SettingsEditorEvent::Save(text) => {
+                    if this.write_settings(text, editor, cx) {
+                        this.close_settings(window, cx);
+                    }
+                }
                 SettingsEditorEvent::OpenExternally => {
                     open_settings_file(cx);
                     this.close_settings(window, cx);
@@ -418,22 +555,25 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The editor's Save: a text that parses is written and applied at once, and the watcher
-    /// takes it as seen; one that does not stays in the editor with the reason under it.
-    fn save_settings(
+    /// A change from the settings form, or the file's face saved: a text that parses is written
+    /// and applied at once, and the watcher takes it as seen; one that does not stays in the
+    /// editor with the reason under it. Returns whether it was written.
+    fn write_settings(
         &mut self,
         text: &str,
         editor: &Entity<SettingsEditor>,
-        window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         match settings::save(&self.settings_path, text, &mut self.settings_seen) {
             Ok(loaded) => {
                 tracing::info!(path = %self.settings_path.display(), "settings saved");
                 self.apply_loaded(loaded, cx);
-                self.close_settings(window, cx);
+                true
             }
-            Err(error) => editor.update(cx, |e, cx| e.set_error(error, cx)),
+            Err(error) => {
+                editor.update(cx, |e, cx| e.set_error(error, cx));
+                false
+            }
         }
     }
 
@@ -523,14 +663,9 @@ impl Workspace {
         self.workers.iter_mut().find(|w| w.id == id)
     }
 
-    /// A banner for `session` was activated: whichever worker runs it, its tile is revealed.
-    fn notification_response(
-        &self,
-        session: SessionId,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.view.update(cx, |v, cx| v.notification_response(session, cx));
+    /// A note was tapped: its tile comes forward, on whichever worker it lives.
+    fn open_notification(&self, tap: &Tap, cx: &mut Context<Self>) {
+        self.view.update(cx, |v, cx| v.open_notification(tap, cx));
     }
 
     /// Start (or refresh) a worker: its tiles wait in the workspace and a connect loop of its
@@ -839,15 +974,18 @@ impl Workspace {
     }
 
     /// Show the panel, connecting to a server or adding a worker; an open panel switches to
-    /// `mode` and keeps what was typed.
+    /// `mode` and keeps what was typed, leaving this Mac's checklist if it was up.
     fn show_add_worker(&mut self, mode: Panel, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(adding) = &mut self.adding {
+            let left = adding.this_mac.take().is_some();
             if adding.mode != mode {
                 adding.mode = mode;
                 adding.error = None;
                 adding.address.update(cx, |input, cx| {
                     input.set_placeholder(mode.example(), window, cx);
                 });
+            }
+            if left || adding.mode != mode {
                 cx.notify();
             }
             return;
@@ -861,10 +999,11 @@ impl Workspace {
         address.update(cx, |input, cx| input.focus(window, cx));
         // A server's panel looks while no server is set; a worker's always, for the workers
         // not yet added.
-        let search = (!cfg!(target_os = "ios") && (mode == Panel::Worker || self.server.is_none()))
+        let search = (LISTS_TAILNET && (mode == Panel::Worker || self.server.is_none()))
             .then_some(Search::Looking);
         let looking = search.is_some();
-        self.adding = Some(Adding { mode, address, busy: false, error: None, search });
+        self.adding =
+            Some(Adding { mode, address, busy: false, error: None, search, this_mac: None });
         if looking {
             self.look_on_tailnet(window, cx);
         }
@@ -1045,6 +1184,188 @@ impl Workspace {
         .detach();
     }
 
+    /// "Use this Mac as a worker", from the panel, the palette or a failed line's "Try again":
+    /// install the worker's services, then read its `doctor` as the panel's checklist. A run
+    /// already installing or adding is left to finish.
+    fn use_this_mac(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(host) = self.this_mac.clone() else { return };
+        if self.adding.is_none() {
+            self.show_add_worker(Panel::Worker, window, cx);
+        }
+        let Some(adding) = &mut self.adding else { return };
+        if adding
+            .this_mac
+            .as_ref()
+            .is_some_and(|f| f.adding || f.worker == this_mac::Worker::Installing)
+        {
+            return;
+        }
+        self.this_mac_runs = self.this_mac_runs.wrapping_add(1);
+        let run = self.this_mac_runs;
+        adding.this_mac = Some(this_mac::Flow::installing(run));
+        let install = host.install();
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = install.await;
+            let _gone = this
+                .update_in(cx, |ws, window, cx| ws.this_mac_installed(run, outcome, window, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Back from this Mac's checklist to the panel it was opened from.
+    fn leave_this_mac(&mut self, cx: &mut Context<Self>) {
+        if let Some(adding) = &mut self.adding {
+            adding.this_mac = None;
+        }
+        cx.notify();
+    }
+
+    /// Run `run` of this Mac's flow, if it is still the one on screen.
+    fn this_mac_flow(&mut self, run: u64) -> Option<&mut this_mac::Flow> {
+        self.adding.as_mut()?.this_mac.as_mut().filter(|flow| flow.run == run)
+    }
+
+    /// The install ended: ask the worker how it stands, or say why it failed.
+    fn this_mac_installed(
+        &mut self,
+        run: u64,
+        outcome: Result<(), String>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(flow) = self.this_mac_flow(run) else { return };
+        match outcome {
+            Ok(()) => {
+                flow.worker = this_mac::Worker::Starting;
+                self.read_this_mac(run, false, window, cx);
+            }
+            Err(why) => flow.worker = this_mac::Worker::Failed(why),
+        }
+        cx.notify();
+    }
+
+    /// Ask the worker's `doctor` until it answers or [`this_mac::ATTEMPTS`] run out, starting
+    /// it again first when `restart`.
+    fn read_this_mac(&mut self, run: u64, restart: bool, window: &Window, cx: &Context<Self>) {
+        let Some(host) = self.this_mac.clone() else { return };
+        let Some(flow) = self.this_mac_flow(run) else { return };
+        flow.reading = true;
+        cx.spawn_in(window, async move |this, cx| {
+            if restart {
+                host.restart().await;
+            }
+            let mut doctor = None;
+            for attempt in 0..this_mac::ATTEMPTS {
+                if attempt > 0 {
+                    cx.background_executor().timer(this_mac::RETRY).await;
+                }
+                doctor = host.doctor().await;
+                if doctor.is_some() {
+                    break;
+                }
+            }
+            let _gone =
+                this.update_in(cx, |ws, window, cx| ws.this_mac_read(run, doctor, window, cx));
+        })
+        .detach();
+    }
+
+    /// The worker answered with `doctor` (or never did): the checklist shows it, and a worker
+    /// that may stream and take input is added.
+    fn this_mac_read(
+        &mut self,
+        run: u64,
+        doctor: Option<this_mac::Doctor>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(flow) = self.this_mac_flow(run) else { return };
+        flow.reading = false;
+        flow.worker = doctor.map_or(this_mac::Worker::Silent, this_mac::Worker::Up);
+        if flow.worker.ready() && !flow.adding {
+            self.add_this_mac(run, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Add this Mac over loopback.
+    fn add_this_mac(&mut self, run: u64, window: &Window, cx: &Context<Self>) {
+        let Some(host) = self.this_mac.clone() else { return };
+        let Some(flow) = self.this_mac_flow(run) else { return };
+        flow.adding = true;
+        flow.error = None;
+        let add = host.add(this_mac::LOOPBACK);
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = add.await;
+            let _gone =
+                this.update_in(cx, |ws, window, cx| ws.this_mac_added(run, outcome, window, cx));
+        })
+        .detach();
+    }
+
+    /// This Mac was added: the panel closes onto its workspace, with a word when the tailnet
+    /// does not reach it yet. A failure stays on the checklist.
+    fn this_mac_added(
+        &mut self,
+        run: u64,
+        outcome: Result<net::Added, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(flow) = self.this_mac_flow(run) else { return };
+        match outcome {
+            Ok(net::Added { id, name }) => {
+                let reached = match &flow.worker {
+                    this_mac::Worker::Up(d) => {
+                        matches!(d.tailnet, this_mac::Tailnet::Reachable(_))
+                    }
+                    _ => true,
+                };
+                self.adding = None;
+                self.show_notice(
+                    if reached {
+                        format!("Added {name}")
+                    } else {
+                        format!("Added {name}. Only this Mac reaches it until Tailscale is up.")
+                    },
+                    cx,
+                );
+                self.add_worker(id, name, true, cx);
+                self.view.update(cx, |view, cx| view.return_keyboard(window, cx));
+            }
+            Err(why) => {
+                flow.adding = false;
+                flow.error = Some(why);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A missing line's button: its pane of System Settings, or the install again.
+    fn this_mac_fix(&mut self, fix: this_mac::Fix, window: &mut Window, cx: &mut Context<Self>) {
+        match fix {
+            this_mac::Fix::Open(pane) => {
+                if let Some(host) = &self.this_mac {
+                    host.open(pane);
+                }
+            }
+            this_mac::Fix::Retry => self.use_this_mac(window, cx),
+        }
+    }
+
+    /// The app is in front again, perhaps from System Settings: a worker short of ready is
+    /// asked again, and started again first when Screen Recording was what it lacked.
+    fn this_mac_activated(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(flow) = self.adding.as_ref().and_then(|a| a.this_mac.as_ref()) else { return };
+        if !flow.rereads() {
+            return;
+        }
+        let (run, restart) = (flow.run, flow.restarts());
+        self.read_this_mac(run, restart, window, cx);
+        cx.notify();
+    }
+
     /// Write `[client] server` into `settings.toml`, the rest of the file untouched, and take
     /// it as loaded so the watcher sees nothing new.
     fn save_server(&mut self, server: Option<&slopty_net::HostAddr>) -> Result<(), String> {
@@ -1080,14 +1401,16 @@ impl Workspace {
     }
 
     /// The way in: the app's name, a heading and a line on what it is, what the tailnet
-    /// answered as a list to press, the address with its one primary action, and the other way
-    /// in as a quiet link.
+    /// answered as a list to press, the address with its one primary action, and the other ways
+    /// in as quiet links: the other panel, and on a Mac "Use this Mac as a worker", whose
+    /// checklist then stands in for the list and the address.
     ///
     /// On the first run it is the page, a third of the way down the content surface over a foot
     /// that says why there is nothing to pair. Later ("Add a worker…", "Connect to a server…")
-    /// it is a dialog over the workspace, closed by Cancel, Esc or a click outside it. On the
-    /// Mac the field and its action share a row; on touch the field ends in a Paste, since the
-    /// phone has no ⌘V, and the action is a thumb's full width under it.
+    /// it is a dialog over the workspace, closed by Cancel, Esc or a click outside it. From
+    /// [`FIELD_ROW_FROM`] wide the field and its action share a row; narrower, the action is a
+    /// thumb's full width under it. On touch the field ends in a Paste, since glass has no ⌘V,
+    /// and where the tailnet cannot be listed a line says so.
     fn add_worker_panel(
         &self,
         adding: &Adding,
@@ -1099,11 +1422,11 @@ impl Workspace {
         let (spacing, radii, ty) = (theme.spacing, theme.radii, &theme.typography);
         let button = |id, text, kind| kit::button(theme, id, text, kind);
         // Each blurb fits one line of a 402 pt phone.
-        let (title, blurb, field, go, other, other_mode) = match adding.mode {
+        let field = adding.mode.field();
+        let (title, blurb, go, other, other_mode) = match adding.mode {
             Panel::Server => (
                 "Connect to a server",
                 "A server on your tailnet or VPN lists your workers.",
-                "Server address",
                 "Connect",
                 "Add a worker by address instead",
                 Panel::Worker,
@@ -1111,16 +1434,27 @@ impl Workspace {
             Panel::Worker => (
                 "Add a worker",
                 "A Mac running the Slopty worker, on your tailnet or VPN.",
-                "Worker address",
                 "Add",
                 "Connect to a server instead",
                 Panel::Server,
             ),
         };
+        let flow = adding.this_mac.as_ref();
+        // The checklist has a heading of its own, and its link goes back to the panel it came
+        // from, named as that panel's own link names it.
+        let (title, blurb, other) = match (flow, adding.mode) {
+            (None, _) => (title, blurb, other),
+            (Some(_), Panel::Server) => {
+                (this_mac::TITLE, this_mac::BLURB, "Connect to a server instead")
+            }
+            (Some(_), Panel::Worker) => {
+                (this_mac::TITLE, this_mac::BLURB, "Add a worker by address instead")
+            }
+        };
         let welcome = self.welcome();
-        // The page names the app over its heading, as a sign on the door does; a dialog over
-        // the workspace needs no sign.
-        let wordmark = welcome.then(|| wordmark(theme));
+        // The page leads with the app's mark over its heading, as Raycast's and Linear's first
+        // screens do; a dialog over the workspace needs no sign.
+        let brand = welcome.then(|| kit::brand(theme, None));
         let heading = div()
             .id("add-worker-title")
             .role(Role::Heading)
@@ -1139,14 +1473,23 @@ impl Workspace {
         );
         let tailnet =
             adding.search.as_ref().map(|search| self.tailnet_list(search, adding.mode, cx));
+        let field_label = adding.mode.address_label(adding.search.as_ref());
+        let unlisted = (!LISTS_TAILNET).then(|| {
+            kit::meta(div(), theme)
+                .debug_selector(|| "add-worker-unlisted".to_owned())
+                .child(UNLISTED)
+        });
         let status = match (&adding.error, adding.busy) {
             (Some(e), _) => Some((e.clone(), s.error)),
             (None, true) => Some(("Connecting…".to_owned(), s.text_muted)),
             (None, false) => None,
         };
+        let safe = window.insets().effective();
+        let room = f32::from(self.frame_size(window).width - safe.left - safe.right);
+        let stacked = room < FIELD_ROW_FROM;
         let go = button("add", go, ButtonKind::Primary)
             .h(px(FIELD_H))
-            .when(TOUCH, gpui::Styled::w_full)
+            .when(stacked, gpui::Styled::w_full)
             .on_click(cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)));
         let paste = TOUCH.then(|| {
             button("paste-address", "Paste", ButtonKind::Link)
@@ -1173,7 +1516,7 @@ impl Workspace {
                     .aria_label(field)
                     .when_some(paste, Input::suffix),
             );
-        let entry = if TOUCH {
+        let entry = if stacked {
             div().flex().flex_col().gap(px(spacing.sm)).child(address.w_full()).child(go)
         } else {
             div().flex().items_center().gap(px(spacing.sm)).child(address).child(go)
@@ -1182,31 +1525,58 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(spacing.sm))
-            // Under the tailnet's list the field is the other way; alone it needs no label.
-            .when(tailnet.is_some(), |el| el.child(kit::label(theme, "Or type an address")))
+            .child(panel_label(theme, "add-worker-label", field_label))
             .child(entry)
             .when_some(status, |el, (text, tone)| {
                 el.child(
-                    div()
+                    kit::meta(div(), theme)
                         .id("add-worker-status")
                         .role(Role::Status)
                         .aria_label(SharedString::from(text.clone()))
-                        .text_size(px(ty.small()))
                         .text_color(hsla(tone))
                         .child(SharedString::from(text)),
                 )
             });
-        let switch = button("panel-switch", other, ButtonKind::Link)
-            .text_size(px(ty.small()))
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                this.show_add_worker(other_mode, window, cx);
-            }));
+        // At the body's size, as Cancel beside it is: one size for what can be pressed.
+        let in_flow = flow.is_some();
+        let switch = button("panel-switch", other, ButtonKind::Link).on_click(cx.listener(
+            move |this, _ev, window, cx| {
+                if in_flow {
+                    this.leave_this_mac(cx);
+                } else {
+                    this.show_add_worker(other_mode, window, cx);
+                }
+            },
+        ));
+        // This Mac is one more place to add, so it is a row to press as the tailnet's are, not
+        // a second link under the switch, where the likeliest first step for a single Mac sat
+        // at the page's foot dressed as a way aside.
+        let use_this_mac = (self.this_mac.is_some() && !in_flow).then(|| {
+            let row = this_mac_row(theme)
+                .on_click(cx.listener(|this, _ev, window, cx| this.use_this_mac(window, cx)));
+            let frame = div()
+                .flex()
+                .flex_col()
+                .p(px(spacing.xxs))
+                .rounded(px(radii.md))
+                .border_1()
+                .border_color(hsla(s.border))
+                .child(row);
+            div()
+                .id("add-worker-this-mac")
+                .flex()
+                .flex_col()
+                .gap(px(spacing.sm))
+                .child(panel_label(theme, "add-worker-this-mac-label", THIS_MAC_LABEL))
+                .child(frame)
+        });
         let cancel = (!welcome).then(|| {
             button("cancel-add", "Cancel", ButtonKind::Ghost)
                 .on_click(cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)))
         });
-        let aside =
-            div().flex().items_center().child(switch).child(div().flex_1()).children(cancel);
+        let ways = div().flex().flex_col().items_start().gap(px(spacing.xs)).child(switch);
+        let aside = div().flex().items_start().child(ways).child(div().flex_1()).children(cancel);
+        let checklist = flow.map(|flow| self.this_mac_checklist(flow, cx));
         let panel = div()
             .id("add-worker")
             .debug_selector(|| "add-worker".to_owned())
@@ -1235,14 +1605,21 @@ impl Workspace {
                     .flex_col()
                     .gap(px(spacing.lg))
                     .mb(px(spacing.sm))
-                    .children(wordmark)
+                    .children(brand)
                     .child(intro),
             )
-            .children(tailnet)
-            .child(entry)
+            // Where the tailnet cannot be listed, the line saying so stands in the list's place;
+            // this Mac's checklist stands in for both and the address.
+            .when_some(checklist, gpui::ParentElement::child)
+            .when(!in_flow, |el| {
+                el.children(tailnet).children(unlisted).children(use_this_mac).child(entry)
+            })
             .child(aside);
         if !welcome {
-            return kit::backdrop(theme, window)
+            // The scrim dims in as the dialog rises the base unit's half into place, both on
+            // the overlay's pace, and under Reduce Motion both are there at once.
+            let panel = kit::slide_fade(panel, "add-worker-rise", spacing.xs, kit::Pace::Fade, cx);
+            let backdrop = kit::backdrop(theme, window)
                 .id("add-worker-backdrop")
                 .occlude()
                 .on_mouse_down(
@@ -1252,15 +1629,25 @@ impl Workspace {
                         cx.stop_propagation();
                     }),
                 )
-                .child(panel)
+                .child(panel);
+            if !kit::motion(cx) {
+                return backdrop.into_any_element();
+            }
+            let dim = kit::scrim(theme);
+            return backdrop
+                .with_animation("add-worker-scrim", kit::Pace::Fade.animation(), move |el, t| {
+                    el.bg(gpui::Hsla { a: dim.a * t, ..dim })
+                })
                 .into_any_element();
         }
         // Not a dialog over an app that does nothing yet: the page itself, on the content
         // surface the tiles' bodies take. Its block sits a third of the way down the room over
         // the foot, where the eye starts; spacers rather than a percentage pad, which would
-        // resolve against the width. The safe area includes a phone's keyboard, so the block
-        // rises with it.
-        let safe = window.insets().effective();
+        // resolve against the width. The foot stays on the bottom safe edge, as on the Mac; only
+        // the block's room gives way to a keyboard, so the block rises with it and the note stays
+        // put under the keys rather than floating mid-screen.
+        let insets = window.insets();
+        let keyboard = (insets.ime.bottom - insets.safe_area.bottom).max(px(0.0));
         let foot = div()
             .id("add-worker-foot")
             .debug_selector(|| "add-worker-foot".to_owned())
@@ -1276,69 +1663,68 @@ impl Workspace {
             .flex_col()
             .items_center()
             .pt(safe.top)
-            .pb(safe.bottom)
+            .pb(insets.safe_area.bottom)
             // A phone on its side has the island at one end: the page keeps clear of it.
             .pl(safe.left + px(spacing.lg))
             .pr(safe.right + px(spacing.lg))
             .bg(hsla(theme.content()))
             .font_family(ty.ui_family.clone())
-            .child(div().flex_grow(1.0))
-            .child(panel)
-            .child(div().flex_grow(2.0))
+            .child(
+                div()
+                    .id("welcome-room")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .pb(keyboard)
+                    .child(div().flex_grow(1.0))
+                    .child(panel)
+                    .child(div().flex_grow(2.0)),
+            )
             .child(foot)
             .into_any_element()
     }
 
-    /// What the tailnet answered: each server and worker a row to press, under a label, in
-    /// one framed list; while it looks, or when nothing answered, the same frame holds one
-    /// row saying so and what to do, so the page does not jump as the look ends.
+    /// What the tailnet answered: each server and worker a row to press, in one framed list
+    /// under a label. While it looks, or when nothing answered, one quiet line says so and what
+    /// to do, with no frame and no label (the line names the tailnet itself): a frame is drawn
+    /// only round what can be chosen, and a framed status with a magnifier read as a search
+    /// field to type in.
     fn tailnet_list(&self, search: &Search, mode: Panel, cx: &Context<Self>) -> gpui::AnyElement {
         use slopty_ui::icons::{IconName, IconSize, Status, icon, status_icon};
         let theme = &self.theme;
-        let s = theme.surfaces;
-        // The rows' radius plus the pad round them, so the corners nest.
-        let frame = div()
-            .id("add-worker-tailnet")
-            .flex()
-            .flex_col()
-            .p(px(theme.spacing.xxs))
-            .rounded(px(theme.radii.md))
-            .border_1()
-            .border_color(hsla(s.border));
-        let glyph = px(theme.typography.icon());
+        let (s, spacing, ty) = (theme.surfaces, theme.spacing, &theme.typography);
+        let section = div().id("add-worker-tailnet").flex().flex_col().gap(px(spacing.sm));
         if let Some(words) = search.words(mode) {
+            let mark = px(ty.small());
             let mark = match search {
-                Search::Looking => status_icon(theme, Status::Running, glyph, hsla(s.text_muted)),
-                Search::Answered { running, .. } => {
-                    let name = if *running { IconName::Search } else { IconName::WifiOff };
-                    icon(theme, name, IconSize::Inline, hsla(s.text_muted))
-                        .size(glyph)
-                        .into_any_element()
+                Search::Looking => {
+                    Some(status_icon(theme, Status::Running, mark, hsla(s.text_muted)))
                 }
+                Search::Answered { running: false, .. } => Some(
+                    icon(theme, IconName::WifiOff, IconSize::Inline, hsla(s.text_muted))
+                        .size(mark)
+                        .into_any_element(),
+                ),
+                Search::Answered { .. } => None,
             };
-            let row = kit::row(theme, kit::Row::Two)
+            let step = search.next_step(mode);
+            let said = step.map_or_else(|| words.to_owned(), |step| format!("{words}. {step}"));
+            // Announced as the words, the step its description, shown as one run of text.
+            let line = kit::meta(div(), theme)
                 .id("add-worker-search")
                 .debug_selector(|| "add-worker-search".to_owned())
                 .role(Role::Status)
                 .aria_label(words)
-                .child(mark)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(px(theme.typography.ui_size))
-                                .text_color(hsla(s.text_secondary))
-                                .child(words),
-                        )
-                        .children(
-                            search.next_step(mode).map(|step| kit::meta(div(), theme).child(step)),
-                        ),
-                );
-            return frame.child(row).into_any_element();
+                .when_some(step, gpui::StatefulInteractiveElement::aria_description)
+                .flex()
+                .items_center()
+                .gap(px(spacing.xs))
+                .children(mark)
+                .child(div().flex_1().min_w_0().child(said));
+            return section.child(line).into_any_element();
         }
         let rows = search.offers(mode).into_iter().enumerate().map(|(ix, (host, offer))| {
             let target = offer.at.clone();
@@ -1346,21 +1732,127 @@ impl Workspace {
                 this.connect_found(host, &target, window, cx);
             }))
         });
+        // The rows' radius plus the pad round them, so the corners nest.
+        let frame = div()
+            .flex()
+            .flex_col()
+            .p(px(spacing.xxs))
+            .rounded(px(theme.radii.md))
+            .border_1()
+            .border_color(hsla(s.border))
+            .children(rows);
+        let label = panel_label(theme, "add-worker-tailnet-label", "On your tailnet");
+        section.child(label).child(frame).into_any_element()
+    }
+
+    /// This Mac's checklist: a line for each thing the worker needs, marked as its `doctor`
+    /// reads it, the missing ones with the button that fixes them, in one framed list as the
+    /// tailnet's rows are; under it, the add under way or why it failed.
+    fn this_mac_checklist(&self, flow: &this_mac::Flow, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let (s, spacing) = (theme.surfaces, theme.spacing);
+        let logs =
+            slopty_platform::service::Session::native().logs(slopty_platform::service::WORKER);
+        let lines = this_mac::checklist(&flow.worker, &logs)
+            .into_iter()
+            .map(|line| self.this_mac_line(line, cx));
+        let frame = div()
+            .id("this-mac-checklist")
+            .debug_selector(|| "this-mac-checklist".to_owned())
+            .role(Role::List)
+            .aria_label(this_mac::TITLE)
+            .flex()
+            .flex_col()
+            .p(px(spacing.xxs))
+            .rounded(px(theme.radii.md))
+            .border_1()
+            .border_color(hsla(s.border))
+            .children(lines);
+        let status = match (&flow.error, flow.adding) {
+            (Some(why), _) => Some((why.clone(), s.error)),
+            (None, true) => Some(("Adding this Mac\u{2026}".to_owned(), s.text_muted)),
+            (None, false) => None,
+        };
+        let again = flow.error.is_some().then(|| {
+            let run = flow.run;
+            kit::button(theme, "this-mac-add-again", "Try again", ButtonKind::Link).on_click(
+                cx.listener(move |this, _ev, window, cx| this.add_this_mac(run, window, cx)),
+            )
+        });
         div()
             .flex()
             .flex_col()
-            .gap(px(theme.spacing.sm))
-            .child(kit::label(theme, "On your tailnet"))
-            .child(frame.children(rows))
+            .gap(px(spacing.sm))
+            .child(frame)
+            .when_some(status, |el, (text, tone)| {
+                el.child(
+                    kit::meta(div(), theme)
+                        .id("this-mac-status")
+                        .debug_selector(|| "this-mac-status".to_owned())
+                        .role(Role::Status)
+                        .aria_label(SharedString::from(text.clone()))
+                        .flex()
+                        .items_center()
+                        .gap(px(spacing.sm))
+                        .child(div().text_color(hsla(tone)).child(SharedString::from(text)))
+                        .children(again),
+                )
+            })
             .into_any_element()
+    }
+
+    /// One line of this Mac's checklist: its mark, its name over what it is for or what to do,
+    /// and a missing line's button.
+    fn this_mac_line(&self, line: this_mac::Line, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        use slopty_ui::icons::status_mark;
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let status = line.status();
+        let check = line.check;
+        let fix = line.fix.map(|fix| {
+            kit::button(theme, check.fix_id(), fix.label(), ButtonKind::Secondary).on_click(
+                cx.listener(move |this, _ev, window, cx| this.this_mac_fix(fix, window, cx)),
+            )
+        });
+        let muted = line.mark == this_mac::Mark::Unknown;
+        // A line's detail wraps rather than cut off a path or a reason, so the line grows from
+        // a two-line row's height instead of holding it.
+        kit::inset_x(div(), theme)
+            .id(gpui::ElementId::Name(format!("this-mac-{}", check.slug()).into()))
+            .debug_selector(move || format!("this-mac-{}", check.slug()))
+            .role(Role::ListItem)
+            .aria_label(check.title())
+            .aria_description(SharedString::from(line.detail.clone()))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm))
+            .min_h(px(kit::Row::Two.height(theme)))
+            .py(px(theme.spacing.xs))
+            .child(status_mark(theme, Some(status), 1.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(theme.typography.ui_size))
+                            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+                            .text_color(hsla(if muted { s.text_secondary } else { s.text }))
+                            .child(check.title()),
+                    )
+                    .child(kit::meta(div(), theme).child(SharedString::from(line.detail))),
+            )
+            .children(fix)
     }
 
     /// Esc, Tab, sticky Control, arrows and the shell symbols a phone keyboard hides; shown
     /// above the keyboard inset while a terminal or a remote window is active.
     ///
     /// The bar is the body's own surface under a hairline, so it reads as the tile's input row
-    /// and its caps as plates on it; on the canvas a cap needed a hairline of its own to be
-    /// seen. Its row scrolls where it overflows, and an end with keys past it fades out.
+    /// and its caps as plates on it, with no hairline of their own. Its row scrolls where it
+    /// overflows, and an end with keys past it fades out.
     fn key_bar(
         &mut self,
         target: &KeyTarget,
@@ -1382,28 +1874,25 @@ impl Workspace {
                 cx.notify();
             }
         });
-        let solid = hsla(self.theme.content());
-        let fade = |toward: f32| {
-            div().absolute().top_0().bottom_0().w(px(self.theme.spacing.lg)).bg(
-                gpui::linear_gradient(
-                    toward,
-                    gpui::linear_color_stop(gpui::Hsla { a: 0.0, ..solid }, 0.0),
-                    gpui::linear_color_stop(solid, 1.0),
-                ),
-            )
-        };
+        let (surface, depth) = (self.theme.content(), px(self.theme.spacing.lg));
         div()
             .relative()
             .w_full()
-            .bg(solid)
+            .bg(hsla(surface))
             .border_t_1()
             .border_color(hsla(self.theme.surfaces.border))
             .child(row)
             .when(leading, |el| {
-                el.child(fade(270.0).left_0().debug_selector(|| "key-bar-fade-leading".to_owned()))
+                el.child(
+                    kit::edge_fade(kit::Edge::Leading, surface, depth)
+                        .debug_selector(|| "key-bar-fade-leading".to_owned()),
+                )
             })
             .when(trailing, |el| {
-                el.child(fade(90.0).right_0().debug_selector(|| "key-bar-fade-trailing".to_owned()))
+                el.child(
+                    kit::edge_fade(kit::Edge::Trailing, surface, depth)
+                        .debug_selector(|| "key-bar-fade-trailing".to_owned()),
+                )
             })
             .into_any_element()
     }
@@ -1420,9 +1909,9 @@ impl Workspace {
         key_bar_fades(scrolled, f32::from(self.key_bar_scroll.max_offset().x))
     }
 
-    /// The key bar's row with `keys` in it. Where they all fit in `width` (an iPad), their
-    /// groups spread along it ([`key_group`]); where they do not (a phone), one line in the
-    /// order given that scrolls sideways.
+    /// The key bar's row with `keys` in it. Where they all fit in `width` (an iPad), one leading
+    /// run of their groups a step apart, the word keys trailing ([`key_group`]); where they do
+    /// not (a phone), one line in the order given that scrolls sideways.
     fn key_row_of(
         &self,
         keys: Vec<(&'static str, gpui::AnyElement)>,
@@ -1430,31 +1919,35 @@ impl Workspace {
     ) -> gpui::Stateful<gpui::Div> {
         let spacing = self.theme.spacing;
         let row = self.key_row();
-        if key_row_width(keys.iter().map(|(label, _)| *label), spacing) > width {
+        if spread_width(keys.iter().map(|(label, _)| *label), spacing) > width {
             return row.children(keys.into_iter().map(|(_, key)| key));
         }
-        let group = || div().flex().items_center().gap(px(spacing.xs));
         let (mut lead, mut arrows, mut symbols, mut words) =
-            (group(), group(), Vec::new(), Vec::new());
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (label, key) in keys {
             match key_group(label) {
-                KeyGroup::Lead => lead = lead.child(key),
-                KeyGroup::Arrows => arrows = arrows.child(key),
-                KeyGroup::Trail if label.chars().count() > 1 => words.push(key),
-                KeyGroup::Trail => symbols.push(key),
+                KeyGroup::Lead => lead.push(key),
+                KeyGroup::Arrows => arrows.push(key),
+                KeyGroup::Symbols => symbols.push(key),
+                KeyGroup::Words => words.push(key),
             }
         }
+        let group = |keys: Vec<gpui::AnyElement>| {
+            div().flex().flex_none().items_center().gap(px(spacing.xs)).children(keys)
+        };
+        let run = [lead, arrows, symbols].into_iter().filter(|g| !g.is_empty()).map(group);
         row.debug_selector(|| "key-bar-spread".to_owned())
-            .child(lead.flex_1().debug_selector(|| "key-group-lead".to_owned()))
-            .child(arrows.flex_none().debug_selector(|| "key-group-arrows".to_owned()))
             .child(
-                group()
-                    .flex_1()
-                    .justify_end()
-                    .debug_selector(|| "key-group-trail".to_owned())
-                    .children(symbols)
-                    .children(words),
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(spacing.md))
+                    .debug_selector(|| "key-bar-lead".to_owned())
+                    .children(run),
             )
+            .child(div().flex_1())
+            .child(group(words).debug_selector(|| "key-bar-trail".to_owned()))
     }
 
     /// The key bar's row, before its keys: one line that scrolls sideways.
@@ -1668,7 +2161,7 @@ fn key_label(label: &str, lit: bool) -> String {
 fn key_spoken(label: &str) -> &str {
     match label {
         "Esc" => "Escape",
-        "⌃" => "Control",
+        "Ctrl" => "Control",
         "⌘" => "Command",
         "←" => "Left arrow",
         "↑" => "Up arrow",
@@ -1728,6 +2221,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &DisconnectServer, window, cx| {
                 this.disconnect_server(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &UseThisMac, window, cx| {
+                this.use_this_mac(window, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
@@ -1785,6 +2281,9 @@ fn apply_link_event(
         }
         LinkEvent::Control(WorkerMsg::FoundFiles { root, query, paths }) => {
             view.update(cx, |v, cx| v.files_found(&root, &query, &paths, cx));
+        }
+        LinkEvent::Control(WorkerMsg::Folder { path, listing }) => {
+            view.update(cx, |v, cx| v.folder_listed(key, &path, &listing, cx));
         }
         LinkEvent::Control(WorkerMsg::HooksInstalled { ok, message }) => {
             view.update(cx, |v, cx| {
@@ -1847,22 +2346,11 @@ fn frame_nominal() -> std::time::Duration {
         })
 }
 
-/// The app's name where it names itself: the word alone, at the strong weight in the secondary
-/// tone. A mark on an accent tile read as a web page's logo over a form.
-fn wordmark(theme: &Theme) -> impl IntoElement {
-    div()
-        .id("app-brand")
-        .debug_selector(|| "app-brand".to_owned())
-        .role(Role::Label)
-        .aria_label(APP_NAME)
-        .text_size(px(theme.typography.ui_size))
-        .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
-        .text_color(hsla(theme.surfaces.text_secondary))
-        .child(APP_NAME)
+/// A label over a part of the panel, at the meta size its status lines share, so the block
+/// under the heading keeps to two sizes: the body's and the meta's.
+fn panel_label(theme: &Theme, selector: &'static str, text: &'static str) -> gpui::Div {
+    kit::meta(div(), theme).flex_none().debug_selector(move || selector.to_owned()).child(text)
 }
-
-/// What the app is called where it names itself.
-const APP_NAME: &str = "Slopty";
 
 /// A server or a worker the tailnet found, as a row to press, the palette's: its kind's glyph,
 /// its name over what it is and its address, and a chevron that says the press goes on.
@@ -1912,6 +2400,49 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
     tab_stop(row, s.accent)
 }
 
+/// The label over this Mac's row on the add panels.
+const THIS_MAC_LABEL: &str = "On this Mac";
+
+/// This Mac as a row to press, drawn as a found worker's is: the Mac's glyph, what pressing
+/// does over what follows, and the chevron that says the press goes on to a checklist.
+fn this_mac_row(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    use slopty_ui::icons::{IconName, IconSize, icon};
+    let s = theme.surfaces;
+    let glyph_size = px(theme.typography.icon());
+    let row = kit::row(theme, kit::Row::Two)
+        .id("use-this-mac")
+        .debug_selector(|| "use-this-mac".to_owned())
+        .role(Role::Button)
+        .aria_label(this_mac::TITLE)
+        .rounded(px(theme.radii.sm))
+        .cursor_pointer()
+        .hover(move |el| el.bg(hsla(s.raised)))
+        .active(move |el| el.bg(hsla(s.overlay)))
+        .child(
+            icon(theme, IconName::Monitor, IconSize::Inline, hsla(s.text_muted)).size(glyph_size),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(theme.typography.ui_size))
+                        .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+                        .text_color(hsla(s.text))
+                        .child(this_mac::TITLE),
+                )
+                .child(kit::meta(div(), theme).child(this_mac::ROW_META)),
+        )
+        .child(
+            icon(theme, IconName::ChevronRight, IconSize::Inline, hsla(s.text_muted))
+                .size(glyph_size),
+        );
+    tab_stop(row, s.accent)
+}
+
 /// The app's own bindings, outside any view's context.
 fn app_key_bindings() -> Vec<gpui::KeyBinding> {
     vec![
@@ -1928,17 +2459,21 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
     let item = |label: &str, icon: IconName, action: Box<dyn gpui::Action>| {
         slopty_ui::palette::PaletteItem::new(label, icon, action, &bindings)
     };
-    vec![
+    let mut items = vec![
         item("Open settings", IconName::Settings, Box::new(OpenSettings)),
         item("Connect to a server", IconName::Link, Box::new(ConnectServer)),
         item("Disconnect from the server", IconName::Unplug, Box::new(DisconnectServer)),
         item("Add a worker", IconName::Plus, Box::new(AddWorker)),
-    ]
+    ];
+    if this_mac::OFFERED {
+        items.push(item(this_mac::TITLE, IconName::Monitor, Box::new(UseThisMac)));
+    }
+    items
 }
 
 /// Where this device keeps its layout: beside the settings, in the client's data directory.
 fn layout_path() -> std::path::PathBuf {
-    slopty_settings::data_dir().join("layout.json")
+    slopty_platform::dirs::data_dir().join("layout.json")
 }
 
 /// Whether this launch is `cargo xtask e2e`'s, driven over its socket.
@@ -1994,8 +2529,14 @@ pub fn open_workspace(
     });
     let (directory_cache, cache_writes) = tokio::sync::watch::channel(server::Cache::Remove);
     handle.spawn(server::write_cache(server::cache_path(), cache_writes));
-    let workspace = cx
-        .new(|cx| Workspace::new(view, handle, settings_path, settings_seen, directory_cache, cx));
+    let mut tapped = slopty_platform::notify::taps();
+    let notifier = notifier();
+    let workspace = cx.new(|cx| {
+        let mut ws =
+            Workspace::new(view, handle, settings_path, settings_seen, directory_cache, cx);
+        ws.set_notifier(notifier);
+        ws
+    });
     let root_view = workspace.clone();
     // Terminals and remote desktops stay at full rate while another app has the keyboard: a
     // second display is watched while typing elsewhere.
@@ -2016,10 +2557,15 @@ pub fn open_workspace(
         let dark = settings::is_dark(window.appearance());
         root_view.update(cx, |ws, cx| {
             ws.subscriptions.push(subscription);
-            // A worker's clipboard is watched only while this app is frontmost.
+            // A worker's clipboard is watched only while this app is frontmost, and this Mac's
+            // checklist is read again on the way back from System Settings.
             let activation = cx.observe_window_activation(window, |ws, window, cx| {
                 let active = window.is_window_active();
                 ws.view.update(cx, |v, cx| v.set_app_active(active, cx));
+                ws.set_active(active);
+                if active {
+                    ws.this_mac_activated(window, cx);
+                }
             });
             ws.subscriptions.push(activation);
             ws.window_dark = dark;
@@ -2028,18 +2574,21 @@ pub fn open_workspace(
         cx.new(|cx| Root::new(root_view, window, cx))
     })?;
     watch_settings(workspace.clone(), cx);
-    // A tap on an agent banner brings the app and that session forward, on whichever worker
-    // the session lives.
+    // A tapped note brings the app forward on its tile, on whichever worker it lives. The tap
+    // that launched the app waited for `taps` above and arrives first, once the window is up.
     let for_notifications = workspace.clone();
-    cx.on_system_notification_response(move |response, cx| {
-        let Ok(session) = response.tag.parse::<SessionId>() else { return };
-        cx.activate(true);
-        let _handled = window.update(cx, |_root, window, cx| {
-            for_notifications.update(cx, |ws, cx| {
-                ws.notification_response(session, window, cx);
+    cx.spawn(async move |cx| {
+        while let Some(tap) = tapped.recv().await {
+            cx.update(|cx| {
+                cx.activate(true);
+                let _handled = window.update(cx, |_root, window, cx| {
+                    window.activate_window();
+                    for_notifications.update(cx, |ws, cx| ws.open_notification(&tap, cx));
+                });
             });
-        });
-    });
+        }
+    })
+    .detach();
     // Every worker added by address gets a link now, and the server's (cached) directory has
     // been read by the settings above; with neither, the panel.
     let known = match net::known_workers() {
@@ -2075,6 +2624,16 @@ pub fn open_workspace(
         e2e::serve(socket.into(), workspace, window.into(), &runtime, cx);
     }
     Ok(())
+}
+
+/// Where notes go: the system's notification centre, or, under the self-test, nowhere a person
+/// would see them (its window is never in front, so everything would notify).
+fn notifier() -> Rc<dyn Notifier> {
+    if self_test() {
+        Rc::new(slopty_platform::notify::Memory::default())
+    } else {
+        Rc::new(slopty_platform::notify::System::new())
+    }
 }
 
 /// The pasteboard the clipboard is shared through: the general one, or the one named by
@@ -2166,7 +2725,7 @@ mod tests {
             assert!(spoken.chars().count() > 1, "{label} is named, not drawn");
             assert!(!label.starts_with(char::is_lowercase), "{label} is sentence case");
         }
-        assert_eq!(key_label("⌃", true), "Control, armed");
+        assert_eq!(key_label("Ctrl", true), "Control, armed");
         assert_eq!(key_label("Esc", false), "Escape");
     }
 
@@ -2192,22 +2751,72 @@ mod tests {
         assert!(cap_side(spacing) < KEY_BAR_H, "a cap sits inside its bar");
     }
 
-    /// Where the row fits (an iPad) its keys spread in three groups: what the soft keyboard
-    /// lacks at the left, the arrows in the middle, the symbols and the word keys at the right.
+    /// Every bar fits the narrowest iPad (744 pt) as one run of groups with its word keys
+    /// trailing, and a phone's (402 pt) never does, so it scrolls.
     #[test]
-    fn a_wide_key_bar_spreads_its_groups() {
+    fn every_bar_spreads_on_an_ipad_and_scrolls_on_a_phone() {
         let spacing = Theme::default().spacing;
-        let group = |labels: &[&str]| labels.iter().map(|l| key_group(l)).collect::<Vec<_>>();
-        assert!(group(&["Esc", "Tab", "⌃", "⌘"]).iter().all(|g| *g == KeyGroup::Lead));
-        assert!(group(&["←", "↑", "↓", "→"]).iter().all(|g| *g == KeyGroup::Arrows));
-        let trail = group(&["~", "|", "/", "-", "Copy", "Paste", "Find"]);
-        assert!(trail.iter().all(|g| *g == KeyGroup::Trail));
-        let terminal = BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Paste", "Find"]);
-        let screen = SCREEN_BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Copy", "Paste"]);
-        for row in [key_row_width(terminal, spacing), key_row_width(screen, spacing)] {
-            assert!(row <= 744.0, "every bar spreads on the narrowest iPad: {row}");
+        let terminal = || BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Paste", "Find"]);
+        let screen = || SCREEN_BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Copy", "Paste"]);
+        for row in [spread_width(terminal(), spacing), spread_width(screen(), spacing)] {
+            assert!(row <= 744.0 && row > 402.0, "{row}");
         }
-        assert!(key_row_width(["Esc"], spacing) > 0.0, "one key is a row");
+        assert_eq!(key_group("Ctrl"), KeyGroup::Lead, "a word, but the soft keyboard's lack");
+        assert_eq!(key_group("Find"), KeyGroup::Words);
+        assert_eq!(key_group("|"), KeyGroup::Symbols);
+    }
+
+    /// The terminal's key row, drawn from a shell's caps at the window's width.
+    struct KeyRow(Entity<Workspace>);
+
+    impl Render for KeyRow {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let width = f32::from(window.viewport_size().width);
+            let ws = self.0.read(cx);
+            let labels = BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Paste", "Find"]);
+            let keys = labels
+                .map(|label| {
+                    let id = format!("key-{label}");
+                    let selector = id.clone();
+                    let cap = ws.key_cap(id, label, false).debug_selector(move || selector);
+                    (label, cap.child(label).into_any_element())
+                })
+                .collect();
+            div().size_full().child(ws.key_row_of(keys, width))
+        }
+    }
+
+    /// On an iPad the key bar is one bar: Esc, Tab and the modifiers, then the arrows, then the
+    /// symbols, one leading run a step apart, the word keys at the trailing end; the arrows no
+    /// longer float alone in the middle. On a phone it is one line in the given order.
+    #[gpui::test]
+    fn an_ipad_key_bar_is_one_leading_run_with_the_word_keys_trailing(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ws = workspace(cx, &runtime, &dir);
+        let (_row, cx) = cx.add_window_view(|_, _| KeyRow(ws));
+        let spacing = Theme::default().spacing;
+        cx.simulate_resize(size(px(1032.0), px(200.0)));
+        cx.run_until_parked();
+        let at = |cx: &mut VisualTestContext, label: &str| {
+            // A debug selector is looked up by a `'static` name; a test's few are leaked.
+            let selector: &'static str = Box::leak(format!("key-{label}").into_boxed_str());
+            cx.debug_bounds(selector).unwrap_or_else(|| panic!("{label} drawn"))
+        };
+        let gap = |cx: &mut VisualTestContext, before: &str, after: &str| {
+            f32::from(at(cx, after).left() - at(cx, before).right())
+        };
+        assert!((f32::from(at(cx, "Esc").left()) - spacing.xs).abs() < 0.5, "leading");
+        assert!((gap(cx, "Tab", "Ctrl") - spacing.xs).abs() < 0.5, "caps in a group");
+        assert!((gap(cx, "⌘", "←") - spacing.md).abs() < 0.5, "the arrows follow the lead");
+        assert!((gap(cx, "→", "~") - spacing.md).abs() < 0.5, "the symbols follow the arrows");
+        assert!((f32::from(at(cx, "Find").right()) - (1032.0 - spacing.xs)).abs() < 0.5);
+        assert!(gap(cx, "-", "Paste") > 200.0, "the word keys trail: {}", gap(cx, "-", "Paste"));
+
+        cx.simulate_resize(size(px(402.0), px(200.0)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("key-bar-spread").is_none(), "a phone's row scrolls");
+        assert!((gap(cx, "→", "~") - spacing.xs).abs() < 0.5, "in the given order");
     }
 
     /// The shell in a headless window with the add-worker panel up, `worker` ones known so
@@ -2219,6 +2828,27 @@ mod tests {
         dir: &tempfile::TempDir,
         worker: bool,
     ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        let ws = workspace(cx, runtime, dir);
+        if worker {
+            ws.update(cx, |ws, _cx| {
+                ws.workers.push(WorkerSlot::new(WorkerId::new(), "studio".to_owned(), true));
+            });
+        }
+        let root = ws.clone();
+        let (_root, cx) = cx.add_window_view(move |window, cx| Root::new(root, window, cx));
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
+        });
+        cx.run_until_parked();
+        (ws, cx)
+    }
+
+    /// The shell with no window, no worker and no panel.
+    fn workspace(
+        cx: &mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        dir: &tempfile::TempDir,
+    ) -> Entity<Workspace> {
         cx.update(|cx| {
             gpui_kit::init(cx);
             cx.bind_keys(app_key_bindings());
@@ -2232,20 +2862,7 @@ mod tests {
             view
         });
         let seen = settings::Seen::of(&path);
-        let ws = cx.new(|cx| {
-            let mut ws = Workspace::new(view, handle, path, seen, cache, cx);
-            if worker {
-                ws.workers.push(WorkerSlot::new(WorkerId::new(), "studio".to_owned(), true));
-            }
-            ws
-        });
-        let root = ws.clone();
-        let (_root, cx) = cx.add_window_view(move |window, cx| Root::new(root, window, cx));
-        cx.update(|window, cx| {
-            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
-        });
-        cx.run_until_parked();
-        (ws, cx)
+        cx.new(|cx| Workspace::new(view, handle, path, seen, cache, cx))
     }
 
     /// The first run's block sits a third of the way down the room over its foot on every
@@ -2274,22 +2891,78 @@ mod tests {
     }
 
     /// Over the workspace the panel is a dialog, and it has no foot: the note is the first
-    /// run's. On the Mac the field and its action share a row, the field taking the room.
+    /// run's. From a tablet's width the field and its action share a row, the field taking the
+    /// room; under it (a phone, a Split View column) the action is the field's width under it,
+    /// on the first run and in the dialog alike, whatever the input.
     #[gpui::test]
-    fn the_field_and_its_action_share_a_row(cx: &mut TestAppContext) {
+    fn the_field_and_its_action_share_a_row_from_a_tablets_width(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let (_ws, cx) = shell(cx, &runtime, &dir, true);
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
         cx.simulate_resize(size(px(900.0), px(600.0)));
         cx.run_until_parked();
         assert!(cx.debug_bounds("add-worker-foot").is_none(), "a dialog has no foot");
         assert!(cx.debug_bounds("app-brand").is_none(), "nor the app's name");
-        let field = cx.debug_bounds("add-worker-field").expect("the field");
-        let go = cx.debug_bounds("add").expect("its action");
-        assert!((f32::from(field.top() - go.top())).abs() < 0.5, "{field:?} {go:?}");
-        assert!((f32::from(field.size.height - go.size.height)).abs() < 0.5, "one height");
-        assert!(field.right() < go.left(), "the action after the field");
-        assert!(field.size.width > go.size.width * 3.0, "the field takes the room");
+        let sizes = [
+            (900.0, 600.0, false),
+            (560.0, 800.0, false),
+            (1024.0, 1366.0, true),
+            (402.0, 874.0, true),
+        ];
+        for (w, h, welcome) in sizes {
+            if welcome {
+                ws.update(cx, |ws, _cx| ws.workers.clear());
+            }
+            cx.simulate_resize(size(px(w), px(h)));
+            cx.run_until_parked();
+            assert_eq!(ws.read_with(cx, |ws, _| ws.welcome()), welcome);
+            let field = cx.debug_bounds("add-worker-field").expect("the field");
+            let go = cx.debug_bounds("add").expect("its action");
+            if w >= FIELD_ROW_FROM {
+                assert!((f32::from(field.top() - go.top())).abs() < 0.5, "{w}: {field:?} {go:?}");
+                assert!((f32::from(field.size.height - go.size.height)).abs() < 0.5, "one height");
+                assert!(field.right() < go.left(), "the action after the field");
+                assert!(field.size.width > go.size.width * 3.0, "the field takes the room");
+            } else {
+                assert!(field.bottom() < go.top(), "{w}: the action under the field");
+                assert!((f32::from(field.size.width - go.size.width)).abs() < 0.5, "full width");
+            }
+        }
+    }
+
+    /// The dialog rises into place as its scrim dims in; under Reduce Motion it is in place on
+    /// its first frame.
+    #[gpui::test]
+    fn the_dialog_rises_into_place_unless_motion_is_reduced(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.simulate_resize(size(px(900.0), px(600.0)));
+        let first_top = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.cancel_add_worker(window, cx);
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
+            });
+            cx.run_until_parked();
+            f32::from(cx.debug_bounds("add-worker").expect("the dialog is drawn").top())
+        };
+        cx.update(|_window, cx| cx.set_reduce_motion(true));
+        let still = first_top(cx);
+        assert!(
+            600.0_f32.mul_add(-kit::MODAL_ANCHOR, still).abs() < 0.5,
+            "in place at once: {still}"
+        );
+        cx.update(|_window, cx| cx.set_reduce_motion(false));
+        // The test runs on this Mac, whose own Reduce Motion the kit reads as well.
+        if cx.update(|_window, cx| kit::motion(cx)) {
+            let rising = first_top(cx);
+            assert!(rising > still + 0.5, "below its place on its first frame: {rising}");
+        }
     }
 
     /// Each panel's field gives an example of its own kind of host, and switching panels
@@ -2356,6 +3029,15 @@ mod tests {
         assert!(field.bottom() <= first.top(), "under what the panel is for");
         let brand = cx.debug_bounds("app-brand").expect("the first run carries the name");
         assert!(brand.bottom() <= field.top(), "over the heading");
+        let mark = cx.debug_bounds("app-mark").expect("led by the app's mark");
+        assert!((f32::from(mark.size.width) - kit::BRAND_MARK).abs() < 0.5, "{mark:?}");
+        assert!(mark.left() <= brand.left() + px(0.5), "its name beside it: {mark:?} {brand:?}");
+        let label = cx.debug_bounds("add-worker-label").expect("the field's label");
+        assert!(second.bottom() <= label.top(), "under the rows");
+        let named = ws.read_with(cx, |ws, _| {
+            ws.adding.as_ref().map(|a| a.mode.address_label(a.search.as_ref()))
+        });
+        assert_eq!(named, Some("Or type an address"), "the other way, under the rows");
         let address = cx.debug_bounds("add-worker-field").expect("the field");
         assert!(second.bottom() <= address.top(), "the rows over the field");
         assert_eq!(words(cx), None, "done looking");
@@ -2372,6 +3054,10 @@ mod tests {
             ws.update(cx, |ws, cx| ws.offer_found(empty, window, cx));
         });
         assert_eq!(words(cx).as_deref(), Some(NOTHING_ANSWERED));
+        let label = ws.read_with(cx, |ws, _| {
+            ws.adding.as_ref().map(|a| a.mode.address_label(a.search.as_ref()))
+        });
+        assert_eq!(label, Some("Server address"), "no \"or\" with nothing before it");
         looking(&ws, cx);
         cx.update(|window, cx| {
             ws.update(cx, |ws, cx| ws.offer_found(net::Tailnet::default(), window, cx));
@@ -2503,5 +3189,202 @@ mod tests {
         let outside = point(panel.left(), panel.bottom() + px(20.0));
         cx.simulate_click(outside, gpui::Modifiers::none());
         assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "a click outside closes it");
+    }
+
+    /// A stand-in for this Mac: it records what the flow asked of it and answers with the
+    /// `doctor` it is given, so no test installs an agent, prompts or opens System Settings.
+    #[derive(Debug)]
+    struct StandIn {
+        asked: std::cell::RefCell<Vec<String>>,
+        doctor: std::cell::RefCell<Option<this_mac::Doctor>>,
+        added: WorkerId,
+    }
+
+    impl StandIn {
+        fn ask(&self, what: String) {
+            self.asked.borrow_mut().push(what);
+        }
+
+        fn asked(&self) -> Vec<String> {
+            std::mem::take(&mut *self.asked.borrow_mut())
+        }
+    }
+
+    impl this_mac::Host for StandIn {
+        fn install(&self) -> this_mac::Pending<Result<(), String>> {
+            self.ask("install".to_owned());
+            Box::pin(async { Ok(()) })
+        }
+
+        fn doctor(&self) -> this_mac::Pending<Option<this_mac::Doctor>> {
+            self.ask("doctor".to_owned());
+            let doctor = self.doctor.borrow().clone();
+            Box::pin(async move { doctor })
+        }
+
+        fn restart(&self) -> this_mac::Pending<()> {
+            self.ask("restart".to_owned());
+            Box::pin(async {})
+        }
+
+        fn add(&self, address: &str) -> this_mac::Pending<Result<net::Added, String>> {
+            self.ask(format!("add {address}"));
+            let added = net::Added { id: self.added, name: "mac-studio".to_owned() };
+            Box::pin(async move { Ok(added) })
+        }
+
+        fn open(&self, pane: this_mac::Pane) {
+            self.ask(format!("open {pane:?}"));
+        }
+    }
+
+    /// "Use this Mac as a worker" on the first run installs through the host, then shows the
+    /// worker's `doctor` as the checklist: the missing grant's button opens its own pane. Back
+    /// from System Settings the worker is started again and asked again, and once it may
+    /// stream and take input this Mac is added over loopback and the panel gives way to its
+    /// workspace.
+    #[gpui::test]
+    fn this_mac_installs_then_is_added_once_its_doctor_is_green(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        cx.simulate_resize(size(px(900.0), px(700.0)));
+        let studio = this_mac::Tailnet::Reachable("mac-studio.tail1234.ts.net".to_owned());
+        let lacking = this_mac::Doctor {
+            version: "0.3.0".to_owned(),
+            screen_recording: false,
+            accessibility: true,
+            tailnet: studio,
+        };
+        let host = Rc::new(StandIn {
+            asked: std::cell::RefCell::default(),
+            doctor: std::cell::RefCell::new(Some(lacking.clone())),
+            added: WorkerId::new(),
+        });
+        let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
+        ws.update(cx, |ws, cx| {
+            ws.this_mac = Some(shared);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(ws.read_with(cx, |ws, _| ws.welcome()), "the first run");
+
+        let entry = cx.debug_bounds("use-this-mac").expect("the entry, a row to press");
+        let field = cx.debug_bounds("add-worker-field").expect("the address");
+        let switch = cx.debug_bounds("panel-switch").expect("the other way in");
+        assert!(entry.bottom() <= field.top(), "a place to add, over the address to type");
+        assert!(entry.bottom() <= switch.top(), "not a second link under the way aside");
+        cx.simulate_click(entry.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(host.asked(), ["install", "doctor"], "installed, then asked");
+        assert!(cx.debug_bounds("this-mac-checklist").is_some(), "the checklist is up");
+        assert!(cx.debug_bounds("add-worker-field").is_none(), "in the address's place");
+        assert!(cx.debug_bounds("use-this-mac").is_none(), "the entry has done its part");
+        assert!(cx.debug_bounds("this-mac-fix-accessibility").is_none(), "granted: no button");
+        let open = cx.debug_bounds("this-mac-fix-screen").expect("Screen Recording's button");
+        cx.simulate_click(open.center(), gpui::Modifiers::none());
+        assert_eq!(host.asked(), ["open ScreenRecording"], "its own pane");
+
+        // Granted in System Settings; the app comes back to the front.
+        *host.doctor.borrow_mut() = Some(this_mac::Doctor { screen_recording: true, ..lacking });
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.this_mac_activated(window, cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            host.asked(),
+            ["restart", "doctor", "add 127.0.0.1"],
+            "started again to see the grant, then added over loopback"
+        );
+        let (adding, added) = ws.read_with(cx, |ws, _| {
+            (ws.adding.is_some(), ws.workers.iter().any(|w| w.id == host.added && w.added))
+        });
+        assert!(!adding && added, "the panel gave way to this Mac's workspace");
+    }
+
+    /// A failed install is the checklist's first line, red with a way to try again; back to
+    /// the panel leaves the checklist for the address.
+    #[gpui::test]
+    fn a_failed_install_offers_another_try(cx: &mut TestAppContext) {
+        #[derive(Debug)]
+        struct Refusing;
+        impl this_mac::Host for Refusing {
+            fn install(&self) -> this_mac::Pending<Result<(), String>> {
+                Box::pin(async { Err("launchctl bootstrap failed".to_owned()) })
+            }
+
+            fn doctor(&self) -> this_mac::Pending<Option<this_mac::Doctor>> {
+                Box::pin(async { None })
+            }
+
+            fn restart(&self) -> this_mac::Pending<()> {
+                Box::pin(async {})
+            }
+
+            fn add(&self, _address: &str) -> this_mac::Pending<Result<net::Added, String>> {
+                Box::pin(async { Err("no".to_owned()) })
+            }
+
+            fn open(&self, _pane: this_mac::Pane) {}
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.simulate_resize(size(px(900.0), px(700.0)));
+        ws.update(cx, |ws, _cx| ws.this_mac = Some(Rc::new(Refusing)));
+        cx.dispatch_action(UseThisMac);
+        cx.run_until_parked();
+        let worker = ws.read_with(cx, |ws, _| {
+            ws.adding.as_ref().and_then(|a| a.this_mac.as_ref()).map(|f| f.worker.clone())
+        });
+        assert_eq!(
+            worker,
+            Some(this_mac::Worker::Failed("launchctl bootstrap failed".to_owned())),
+            "the reason, kept"
+        );
+        assert!(cx.debug_bounds("this-mac-fix-running").is_some(), "a way to try again");
+        let back = cx.debug_bounds("panel-switch").expect("the way back");
+        cx.simulate_click(back.center(), gpui::Modifiers::none());
+        assert!(cx.debug_bounds("this-mac-checklist").is_none(), "left");
+        assert!(cx.debug_bounds("add-worker-field").is_some(), "the address is back");
+    }
+
+    /// The palette offers it on a Mac.
+    #[test]
+    fn the_palette_offers_this_mac_on_a_mac() {
+        let offered = app_palette_items().iter().any(|item| item.label == this_mac::TITLE);
+        assert_eq!(offered, this_mac::OFFERED);
+    }
+
+    /// A change from the settings form writes the file and applies it with the dialog still
+    /// open; a text that does not parse is not written and the dialog says why; the file's face
+    /// saved is written, applied and closed.
+    #[gpui::test]
+    fn a_settings_change_applies_with_the_dialog_still_open(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.open_settings(window, cx)));
+        cx.run_until_parked();
+        let editor = ws.read_with(cx, |ws, _| ws.settings_editor.clone()).expect("the dialog");
+        let send = |cx: &mut VisualTestContext, event: SettingsEditorEvent| {
+            editor.update(cx, |_, cx| cx.emit(event));
+            cx.run_until_parked();
+        };
+        let open =
+            |cx: &mut VisualTestContext| ws.read_with(cx, |ws, _| ws.settings_editor.is_some());
+
+        send(cx, SettingsEditorEvent::Apply("[font]\nligatures = false\n".to_owned()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[font]\nligatures = false\n");
+        assert!(!ws.read_with(cx, |ws, _| ws.settings.font.ligatures), "applied");
+        assert!(open(cx), "the dialog stays open");
+
+        send(cx, SettingsEditorEvent::Apply("[font]\nligatures = 3\n".to_owned()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[font]\nligatures = false\n");
+        assert!(editor.read_with(cx, |e, _| e.error().is_some()), "the dialog says why");
+        assert!(open(cx), "and stays open");
+
+        send(cx, SettingsEditorEvent::Save("[font]\nligatures = true\n".to_owned()));
+        assert!(ws.read_with(cx, |ws, _| ws.settings.font.ligatures), "saved and applied");
+        assert!(!open(cx), "and closed");
     }
 }

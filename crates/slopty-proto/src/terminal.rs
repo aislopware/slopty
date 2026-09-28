@@ -193,6 +193,36 @@ pub enum TermRequest {
         /// The marker's id.
         marker: u64,
     },
+    /// ⌘V or ⌃V while this client's clipboard holds a picture and no text. The worker puts
+    /// this client's clipboard offer on its pasteboard, then applies the chord, so a program
+    /// that reads the pasteboard on it (Claude Code) finds the picture. The offer rode ahead
+    /// of this on the control stream as `ClipMsg::Offer` when the worker had not heard it.
+    /// The session's input behind this waits, in order, until the pasteboard holds the
+    /// offer, as a window's input waits behind its ⌘V. It has no datagram copy, which could
+    /// overtake the offer.
+    PastePicture(PasteChord),
+}
+
+/// What a [`TermRequest::PastePicture`] applies once the worker's pasteboard holds the
+/// client's picture.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum PasteChord {
+    /// ⌘V: an empty paste, bracketed when the program asked for bracketed paste. Claude Code
+    /// reads the pasteboard's picture on an empty paste.
+    Command,
+    /// ⌃V as typed, Claude Code's own picture-paste key.
+    Control(KeyEvent),
+}
+
+impl PasteChord {
+    /// The input the chord is once the pasteboard is set.
+    #[must_use]
+    pub fn into_request(self) -> TermRequest {
+        match self {
+            Self::Command => TermRequest::Paste(String::new()),
+            Self::Control(key) => TermRequest::Key(key),
+        }
+    }
 }
 
 impl TermRequest {
@@ -207,7 +237,8 @@ impl TermRequest {
             | Self::Paste(_)
             | Self::Raw(_)
             | Self::Clear
-            | Self::Focus { .. } => true,
+            | Self::Focus { .. }
+            | Self::PastePicture(_) => true,
             Self::Attach { .. }
             | Self::Detach
             | Self::Close
@@ -354,6 +385,21 @@ pub struct Placement {
     pub z: i32,
 }
 
+/// A [`TermEvent::Frame`]'s number and whether it is `full`, read from its postcard body.
+///
+/// Only the front is read, not the rows; `None` for any other event. What lets a client drop
+/// the second copy of an echo (stream and datagram) before decoding it.
+#[must_use]
+pub fn frame_head(body: &[u8]) -> Option<(u64, bool)> {
+    // Postcard writes an enum's variant index as a varint, then the struct's fields in order;
+    // `Frame` is the first variant, and `seq` and `full` its first fields.
+    let (variant, fields) = postcard::take_from_bytes::<u32>(body).ok()?;
+    if variant != 0 {
+        return None;
+    }
+    postcard::take_from_bytes::<(u64, bool)>(fields).ok().map(|(head, _rows)| head)
+}
+
 /// Largest text a program can put on the clipboard through OSC 52; a pasteboard can hold a
 /// whole file, and pushing that to every viewer would starve the rows behind it.
 pub const MAX_OSC52_BYTES: usize = 256 * 1024;
@@ -441,8 +487,9 @@ pub enum TermEvent {
     },
     /// The pixels of an image a `Frame` places (kitty graphics).
     ///
-    /// Sent before the first frame that places it and again after a `full` frame. RGBA,
-    /// row-major, no padding.
+    /// Sent before the first frame that places it and again after a `full` frame. BGRA with
+    /// the alpha premultiplied, row-major, no padding: the texture format, so a client uploads
+    /// the bytes as they arrive.
     Image {
         /// The image id programs and placements use.
         id: u32,
@@ -452,8 +499,10 @@ pub enum TermEvent {
         width: u32,
         /// Height in pixels.
         height: u32,
-        /// `width * height * 4` bytes.
-        rgba: Vec<u8>,
+        /// `width * height * 4` bytes, written as one byte string (not a sequence of `u8`s):
+        /// the same wire bytes, a copy instead of a call per byte.
+        #[serde(with = "serde_bytes")]
+        bgra: Vec<u8>,
     },
     /// The program changed (or reset) the terminal's colours; the whole current set.
     Colors(ColorOverrides),

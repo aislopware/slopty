@@ -213,11 +213,11 @@ async fn read_requests(
     let mut requests = JoinSet::new();
     loop {
         match rx.recv().await {
-            Ok(ToServer::Request { id, verb }) => {
+            Ok(ToServer::Request { id, key, verb }) => {
                 while requests.try_join_next().is_some() {}
                 let (hub, out) = (hub.clone(), out.clone());
                 requests.spawn(async move {
-                    let outcome = hub.dispatch(verb).await;
+                    let outcome = hub.dispatch_keyed(key, verb).await;
                     let _gone = out.send(FromServer::Reply { id, outcome }).await;
                 });
             }
@@ -454,7 +454,7 @@ mod tests {
         let role = Role::Agent { name: "test".to_owned() };
         let mut link = connect(&endpoint, &at, role).await.unwrap();
         let verb = Verb::Events { since: None, timeout_ms: WAIT_CAP_MS, filter: EventFilter::All };
-        link.tx.send(&ToServer::Request { id: 1, verb }).await.unwrap();
+        link.tx.send(&ToServer::Request { id: 1, key: None, verb }).await.unwrap();
         until("the wait started", || hub.events_waiting() == 1).await;
 
         link.close();

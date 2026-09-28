@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{MainThreadMarker, MainThreadOnly as _, sel};
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
+use objc2::{MainThreadMarker, MainThreadOnly as _, msg_send, sel};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSEvent, NSEventMask, NSEventModifierFlags,
     NSEventType, NSImage, NSResponder, NSView,
@@ -50,7 +50,7 @@ thread_local! {
 /// One page in a browser tile. Main thread only; dropping it takes the view away.
 pub struct WebView {
     watched: Rc<Watched>,
-    _delegate: Retained<Delegate>,
+    delegate: Retained<Delegate>,
     mtm: MainThreadMarker,
 }
 
@@ -77,6 +77,9 @@ impl WebView {
         clip.setHidden(true);
         // SAFETY: WebKit rule: a configuration made by `new` is complete.
         let config = unsafe { WKWebViewConfiguration::new(mtm) };
+        if cfg!(debug_assertions) {
+            developer_extras(&config);
+        }
         // SAFETY: WebKit rule: the view copies the configuration at init.
         let web =
             unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), zero, &config) };
@@ -86,6 +89,7 @@ impl WebView {
         unsafe {
             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         }
+        super::adopt_view(&web, &delegate);
         clip.addSubview(&web);
         host.addSubview(&clip);
         let request = NSURLRequest::requestWithURL(&address);
@@ -94,7 +98,7 @@ impl WebView {
         let _navigation = unsafe { web.loadRequest(&request) };
         let watched = Rc::new(Watched { web, clip, host, sink, last_escape: Cell::new(None) });
         watch(Rc::clone(&watched));
-        Some(Self { watched, _delegate: delegate, mtm })
+        Some(Self { watched, delegate, mtm })
     }
 
     /// Show the page at `frame`, cut to `clip` (both in the GPUI view's coordinates), at
@@ -145,6 +149,12 @@ impl WebView {
         let _navigation = unsafe { self.watched.web.goBack() };
     }
 
+    /// Forward one page, when there is one.
+    pub fn forward(&self) {
+        // SAFETY: WebKit rule: `goForward` with no forward history does nothing and returns nil.
+        let _navigation = unsafe { self.watched.web.goForward() };
+    }
+
     /// Load the page again.
     pub fn reload(&self) {
         // SAFETY: WebKit rule: `reload` may be called at any time.
@@ -163,11 +173,14 @@ impl WebView {
         let loading = unsafe { web.isLoading() };
         // SAFETY: as above.
         let can_go_back = unsafe { web.canGoBack() };
+        // SAFETY: as above.
+        let can_go_forward = unsafe { web.canGoForward() };
         Page {
             title: title.map(|t| t.to_string()).unwrap_or_default(),
             url: url.and_then(|u| u.absoluteString()).map(|u| u.to_string()).unwrap_or_default(),
             loading,
             can_go_back,
+            can_go_forward,
         }
     }
 
@@ -236,6 +249,41 @@ impl WebView {
             self.watched.web.takeSnapshotWithConfiguration_completionHandler(Some(&config), &done);
         }
     }
+
+    /// Find `text` in the page, after the current match or (`backwards`) before it; the
+    /// answer comes back as [`WebEvent::Found`].
+    pub fn find(&self, text: &str, backwards: bool) {
+        super::find_in(&self.watched.web, text, backwards, Rc::clone(&self.watched.sink));
+    }
+
+    /// Count `text` in the page; the answer comes back as [`WebEvent::Counted`].
+    pub fn count(&self, text: &str) {
+        super::count_in(&self.watched.web, text, Rc::clone(&self.watched.sink));
+    }
+
+    /// Open Web Inspector on the page, in a window of its own. Whether it opened: only a
+    /// debug build's page is open to it.
+    #[must_use]
+    pub fn inspect(&self) -> bool {
+        cfg!(debug_assertions) && show_inspector(&self.watched.web)
+    }
+
+    /// Show the page at `zoom`, 1 being its own size.
+    pub fn set_zoom(&self, zoom: f64) {
+        super::zoom_in(&self.watched.web, zoom);
+    }
+
+    /// How much of download `id` has come, and of how much (0 while that is unknown); `None`
+    /// once it is over.
+    #[must_use]
+    pub fn received(&self, id: u64) -> Option<(u64, u64)> {
+        self.delegate.received(id)
+    }
+
+    /// Stop download `id`.
+    pub fn cancel_download(&self, id: u64) {
+        self.delegate.cancel(id);
+    }
 }
 
 impl Drop for WebView {
@@ -248,9 +296,46 @@ impl Drop for WebView {
         unsafe {
             w.web.setNavigationDelegate(None);
         }
+        super::forget_view(&w.web, &self.delegate);
         w.clip.removeFromSuperview();
         WATCHED.with(|all| all.borrow_mut().retain(|o| !Rc::ptr_eq(o, w)));
     }
+}
+
+/// Whether `object` answers `selector`, asked before a selector of `WebKit`'s private headers.
+fn responds(object: &AnyObject, selector: Sel) -> bool {
+    // SAFETY: `NSObject` rule: `respondsToSelector:` may be asked of any object.
+    unsafe { msg_send![object, respondsToSelector: selector] }
+}
+
+/// Turn on the developer extras of the pages `config` makes: the local Web Inspector, and
+/// "Inspect Element" in a page's menu. `isInspectable` alone opens a page to Safari's
+/// Develop menu, not to an inspector of its own.
+fn developer_extras(config: &WKWebViewConfiguration) {
+    // SAFETY: WebKit rule: `preferences` is a `WKPreferences` property of every configuration.
+    let preferences: Option<Retained<AnyObject>> = unsafe { msg_send![config, preferences] };
+    let Some(preferences) = preferences.filter(|p| responds(p, sel!(_setDeveloperExtrasEnabled:)))
+    else {
+        return;
+    };
+    // SAFETY: WebKit rule (`WKPreferencesPrivate.h`): `_developerExtrasEnabled` is a BOOL
+    // property of `WKPreferences`; its setter is present, asked above.
+    let () = unsafe { msg_send![&*preferences, _setDeveloperExtrasEnabled: true] };
+}
+
+/// Show Web Inspector for `web`'s page. Whether it could.
+fn show_inspector(web: &WKWebView) -> bool {
+    if !responds(web, sel!(_inspector)) {
+        return false;
+    }
+    // SAFETY: WebKit rule (`WKWebViewPrivate.h`): `_inspector` is a `_WKInspector` property of
+    // a macOS `WKWebView`, present as asked above.
+    let inspector: Option<Retained<AnyObject>> = unsafe { msg_send![web, _inspector] };
+    let Some(inspector) = inspector.filter(|i| responds(i, sel!(show))) else { return false };
+    // SAFETY: WebKit rule (`_WKInspector.h`): `show` opens the inspector's window and takes
+    // no arguments; present as asked above.
+    let () = unsafe { msg_send![&*inspector, show] };
+    true
 }
 
 /// The image as PNG bytes.

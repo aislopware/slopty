@@ -43,17 +43,20 @@ const EVENT_BUFFER: usize = 1024;
 
 /// How long a daemon going down waits for its streams' input threads to let go of what their
 /// clients hold down on this desktop.
+#[cfg(target_os = "macos")]
 const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Command line.
 #[derive(Parser, Debug)]
 #[command(name = "slopty-worker", version, about)]
 struct Args {
-    /// ptyd socket (default: `$TMPDIR/slopty/ptyd.sock`, or `$SLOPTY_PTYD_SOCKET`).
+    /// ptyd socket (default: `$SLOPTY_PTYD_SOCKET`, else `ptyd.sock` in the platform's socket
+    /// directory, `$TMPDIR/slopty` on macOS).
     #[arg(long)]
     ptyd_socket: Option<PathBuf>,
     /// Data directory holding `worker-id`, `items.json` and `settings.toml` (default:
-    /// `$SLOPTY_DATA_DIR` or `~/Library/Application Support/Slopty`).
+    /// `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty` on macOS and
+    /// `$XDG_DATA_HOME/slopty` on Linux).
     #[arg(long)]
     data_dir: Option<PathBuf>,
     /// Control socket (default: `$TMPDIR/slopty/worker.sock`, or `$SLOPTY_WORKER_SOCKET`).
@@ -104,6 +107,26 @@ fn admission(data_dir: &std::path::Path) -> Admission {
     Admission::new(parse_allow(&loaded.settings.worker.allow, "[worker]"))
 }
 
+/// The clipboard the worker syncs: `NSPasteboard` on macOS.
+#[cfg(target_os = "macos")]
+pub type Board = slopty_input::MacBoard;
+
+/// The general pasteboard, or the one called `name` (tests).
+#[cfg(target_os = "macos")]
+fn board(name: Option<&str>) -> Board {
+    name.map_or_else(Board::general, Board::named)
+}
+
+/// No clipboard is synced on Linux yet (`docs/decisions/platform.md`, "Linux seams").
+#[cfg(not(target_os = "macos"))]
+pub type Board = slopty_input::pasteboard::Unsupported;
+
+/// The board that refuses every paste, whatever it is named.
+#[cfg(not(target_os = "macos"))]
+const fn board(_name: Option<&str>) -> Board {
+    slopty_input::pasteboard::Unsupported
+}
+
 /// Shared daemon state.
 #[derive(Clone, Debug)]
 pub struct Daemon {
@@ -123,7 +146,7 @@ pub struct Daemon {
     /// by [`agents::watch`] for the sessions no hook speaks for.
     pub agents: Arc<parking_lot::Mutex<AgentTable>>,
     /// Clipboard sync over the worker's pasteboard.
-    pub clip: Arc<slopty_worker::clip::Clipboard<slopty_input::MacBoard>>,
+    pub clip: Arc<slopty_worker::clip::Clipboard<Board>>,
     /// Uploads in flight.
     pub transfers: Arc<slopty_worker::xfer::Transfers>,
     /// When each session's listening ports are scanned, and what they were.
@@ -135,8 +158,7 @@ pub struct Daemon {
     /// Screen streams across every connection, for the control socket.
     pub screens: slopty_worker::screen::Registry,
     /// Sleep policy: awake while a client is attached, display on while a stream is live.
-    pub wake:
-        Arc<parking_lot::Mutex<slopty_worker::wake::Wake<Box<dyn slopty_worker::wake::Holds>>>>,
+    pub wake: Arc<parking_lot::Mutex<slopty_worker::wake::Wake<Assertions>>>,
     /// How each client's packets travel, from this machine's Tailscale.
     pub paths: tailnet::Paths,
     /// What this worker can do and how it is doing, kept current for the whole daemon's life
@@ -172,7 +194,12 @@ impl Daemon {
         // Past the table the session is gone whatever ptyd answered; a failed ptyd close is
         // the caller's to report, but the clients must still hear of it.
         self.agents.lock().forget(session);
-        self.follows.lock().board.forget(session);
+        let released = {
+            let mut follows = self.follows.lock();
+            follows.board.forget(session);
+            follows.holds.forget(session)
+        };
+        follow::release(self, released);
         let _sent = self.events.send(slopty_proto::WorkerMsg::SessionClosed { session, reason });
         for delta in self.items.remove_session(session, by) {
             let _sent = self.events.send(slopty_proto::WorkerMsg::Items(delta));
@@ -205,8 +232,8 @@ async fn close_stale_exits(daemon: Daemon) -> ! {
 }
 
 /// The daemon's sleep assertions, as `NSProcessInfo` activities.
-#[derive(Default)]
-struct Assertions {
+#[derive(Debug, Default)]
+pub struct Assertions {
     system: Option<slopty_platform::Activity>,
     display: Option<slopty_platform::Activity>,
 }
@@ -257,6 +284,7 @@ fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) 
         daemon.items.clone(),
         daemon.events.clone(),
         launch,
+        Arc::new(follow::Orchestrated(daemon.clone())),
     );
     let caps = daemon.caps.clone();
     tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, caps));
@@ -307,7 +335,7 @@ async fn run() -> Result<()> {
     // timers macOS would otherwise coalesce for a background process.
     let _activity = slopty_platform::Activity::latency_critical("Slopty worker");
 
-    let data_dir = args.data_dir.unwrap_or_else(paths::data_dir);
+    let data_dir = args.data_dir.unwrap_or_else(slopty_platform::dirs::data_dir);
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
     let id = paths::worker_id(&data_dir)?;
@@ -325,8 +353,8 @@ async fn run() -> Result<()> {
             .context("connect to slopty-ptyd")?;
     let (events, _keep) = broadcast::channel(EVENT_BUFFER);
     let items = ItemStore::open(&data_dir.join("items.json"))?;
-    let holds: Box<dyn slopty_worker::wake::Holds> = Box::new(Assertions::default());
-    let wake = Arc::new(parking_lot::Mutex::new(slopty_worker::wake::Wake::new(holds)));
+    let wake =
+        Arc::new(parking_lot::Mutex::new(slopty_worker::wake::Wake::new(Assertions::default())));
     let screens = slopty_worker::screen::Registry::default();
     screens.observe({
         let wake = Arc::clone(&wake);
@@ -353,9 +381,7 @@ async fn run() -> Result<()> {
         items,
         agents,
         clip: Arc::new(slopty_worker::clip::Clipboard::new(
-            args.pasteboard
-                .as_deref()
-                .map_or_else(slopty_input::MacBoard::general, slopty_input::MacBoard::named),
+            board(args.pasteboard.as_deref()),
             slopty_proto::transfer::Peer::Worker(id),
         )),
         transfers: Arc::new(slopty_worker::xfer::Transfers::new(
@@ -368,7 +394,7 @@ async fn run() -> Result<()> {
         wake,
         paths,
         caps,
-        home: std::env::var("HOME").unwrap_or_default(),
+        home: slopty_platform::dirs::home().to_str().map(str::to_owned).unwrap_or_default(),
         follows: Arc::default(),
         claude_mod,
     };
@@ -436,35 +462,7 @@ async fn run() -> Result<()> {
     let allow: Vec<String> =
         daemon.listener.admission().ranges().iter().map(ToString::to_string).collect();
     tracing::info!(%id, name = %daemon.name, %listen, ?allow, "listening");
-    // ScreenCaptureKit's first start in a process is slow; pay it now, not on the first window.
-    if args.installed {
-        tokio::spawn(async {
-            match slopty_worker::screen::warm_up().await {
-                Ok(took) => tracing::debug!(ms = took.as_millis(), "capture warmed up"),
-                Err(e) => tracing::debug!(error = %e, "capture warm-up failed"),
-            }
-        });
-    }
-    // So is AppKit's first look at the cursor (seconds); the shape loop must find it warm.
-    tokio::task::spawn_blocking(|| {
-        let took = slopty_capture::warm_cursor();
-        tracing::debug!(ms = took.as_millis(), "cursor warmed up");
-    });
-    if !slopty_input::can_post() {
-        tracing::warn!("no post-event (Accessibility) access: remote-window input will be dropped");
-        if args.installed {
-            let _granted = slopty_input::request_post();
-        }
-    }
-    // Preflighting is not enough: until a process asks, macOS neither prompts nor lists the
-    // binary under Screen Recording, so every stream fails with -3801 and there is nothing to
-    // switch on. Asking costs one prompt, once, per signed identity.
-    if !slopty_capture::can_capture() {
-        tracing::warn!("no Screen Recording access: windows and displays cannot be streamed");
-        if args.installed {
-            let _granted = slopty_capture::request_capture();
-        }
-    }
+    desktop(args.installed);
     if args.print_addr {
         #[expect(clippy::print_stdout, reason = "the address is what a harness waits for")]
         {
@@ -503,13 +501,66 @@ async fn run() -> Result<()> {
     )
     .await;
     // Last, so nothing a client sent before the close is posted after it.
+    let_go().await;
+    ended
+}
+
+/// Get the desktop half ready: capture and input warmed up, and their permissions checked (and,
+/// installed, asked for).
+#[cfg(target_os = "macos")]
+fn desktop(installed: bool) {
+    // ScreenCaptureKit's first start in a process is slow; pay it now, not on the first window.
+    if installed {
+        tokio::spawn(async {
+            match slopty_worker::screen::warm_up().await {
+                Ok(took) => tracing::debug!(ms = took.as_millis(), "capture warmed up"),
+                Err(e) => tracing::debug!(error = %e, "capture warm-up failed"),
+            }
+        });
+    }
+    // So is AppKit's first look at the cursor (seconds); the shape loop must find it warm.
+    tokio::task::spawn_blocking(|| {
+        let took = slopty_capture::warm_cursor();
+        tracing::debug!(ms = took.as_millis(), "cursor warmed up");
+    });
+    if !slopty_input::can_post() {
+        tracing::warn!("no post-event (Accessibility) access: remote-window input will be dropped");
+        if installed {
+            let _granted = slopty_input::request_post();
+        }
+    }
+    // Preflighting is not enough: until a process asks, macOS neither prompts nor lists the
+    // binary under Screen Recording, so every stream fails with -3801 and there is nothing to
+    // switch on. Asking costs one prompt, once, per signed identity.
+    if !slopty_capture::can_capture() {
+        tracing::warn!("no Screen Recording access: windows and displays cannot be streamed");
+        if installed {
+            let _granted = slopty_capture::request_capture();
+        }
+    }
+}
+
+/// A Linux worker streams no window or display and injects no input: it advertises neither in
+/// its [`slopty_proto::server::WorkerCaps`] (`docs/decisions/platform.md`, "Linux seams").
+#[cfg(not(target_os = "macos"))]
+fn desktop(_installed: bool) {
+    tracing::info!("desktop streaming is unsupported here: terminals, files and agents only");
+}
+
+/// Release whatever keys and buttons the streams' input threads hold down on this desktop.
+#[cfg(target_os = "macos")]
+async fn let_go() {
     let released =
         tokio::task::spawn_blocking(|| slopty_input::let_go_everywhere(RELEASE_WAIT)).await;
     if !matches!(released, Ok(true)) {
         tracing::warn!("an input thread did not let go in time; a key or button may stay down");
     }
-    ended
 }
+
+/// No input is injected here, so nothing is held down.
+#[cfg(not(target_os = "macos"))]
+#[expect(clippy::unused_async, reason = "the macOS twin waits on the input threads")]
+async fn let_go() {}
 
 #[cfg(test)]
 mod tests {

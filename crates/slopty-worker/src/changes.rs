@@ -202,7 +202,7 @@ async fn run_git(git: &Path, root: &Path, args: &[&str]) -> Option<String> {
 /// `git diff --numstat` output counted: one line per file, `added\tremoved\tpath`, with `-`
 /// for both counts of a binary file.
 #[must_use]
-pub fn parse_numstat(out: &str) -> RepoChanges {
+fn parse_numstat(out: &str) -> RepoChanges {
     let mut changes = RepoChanges::default();
     for line in out.lines().filter(|line| !line.trim().is_empty()) {
         let mut fields = line.splitn(3, '\t');
@@ -215,33 +215,56 @@ pub fn parse_numstat(out: &str) -> RepoChanges {
     changes
 }
 
-/// The git to run, found once.
-///
-/// The first on `PATH`, then Homebrew's, then the Command Line Tools' or Xcode's own. Never
-/// `/usr/bin/git`: on a Mac without the developer tools that shim puts up the dialog offering to
-/// install them, and a daemon must not.
+/// The git to run, found once: `find_git` on this machine's `PATH`.
 #[must_use]
 pub fn git() -> Option<&'static Path> {
     static GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
-    GIT.get_or_init(|| {
-        let on_path = std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let known = [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/Library/Developer/CommandLineTools/usr/bin",
-            "/Applications/Xcode.app/Contents/Developer/usr/bin",
-        ]
-        .map(PathBuf::from);
-        on_path
-            .into_iter()
-            .chain(known)
-            .filter(|dir| dir != Path::new("/usr/bin"))
-            .map(|dir| dir.join("git"))
-            .find(|git| git.is_file())
-    })
-    .as_deref()
+    GIT.get_or_init(|| find_git(std::env::var_os("PATH").as_deref(), GitHost::THIS, Path::is_file))
+        .as_deref()
+}
+
+/// Where `find_git` looks beyond `PATH`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitHost {
+    /// Homebrew's, then the Command Line Tools' or Xcode's own. Never `/usr/bin/git`: on a Mac
+    /// without the developer tools that shim puts up the dialog offering to install them, and a
+    /// daemon must not.
+    Mac,
+    /// `/usr/local/bin`, then the distribution's `/usr/bin`, where git is git.
+    Linux,
+}
+
+impl GitHost {
+    /// The rule of the machine this runs on.
+    pub const THIS: Self = if cfg!(target_os = "macos") { Self::Mac } else { Self::Linux };
+
+    const fn known(self) -> &'static [&'static str] {
+        match self {
+            Self::Mac => &[
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/Library/Developer/CommandLineTools/usr/bin",
+                "/Applications/Xcode.app/Contents/Developer/usr/bin",
+            ],
+            Self::Linux => &["/usr/local/bin", "/usr/bin"],
+        }
+    }
+}
+
+/// The first `git` for which `is_file` holds: on `path` (a `PATH` value), then in the
+/// directories `host` knows, skipping `/usr/bin` on a Mac.
+fn find_git(
+    path: Option<&std::ffi::OsStr>,
+    host: GitHost,
+    is_file: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    path.map(|path| std::env::split_paths(path).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .chain(host.known().iter().map(PathBuf::from))
+        .filter(|dir| host != GitHost::Mac || dir != Path::new("/usr/bin"))
+        .map(|dir| dir.join("git"))
+        .find(|git| is_file(git))
 }
 
 #[cfg(test)]
@@ -249,6 +272,25 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
+
+    /// `PATH` first on both; a Mac passes over `/usr/bin`'s install shim wherever it appears,
+    /// and Linux takes `/usr/bin/git`, the distribution's own, when `PATH` has none.
+    #[test]
+    fn git_is_found_by_each_hosts_rule() {
+        let only = |have: &'static [&'static str]| {
+            move |git: &Path| have.iter().any(|h| git == Path::new(h))
+        };
+        let path = std::ffi::OsStr::new("/home/me/bin:/usr/bin");
+        let found = |host, have| find_git(Some(path), host, only(have));
+        let usr = &["/usr/bin/git"][..];
+        assert_eq!(found(GitHost::Linux, usr), Some(PathBuf::from("/usr/bin/git")));
+        assert_eq!(find_git(None, GitHost::Linux, only(usr)), Some(PathBuf::from("/usr/bin/git")));
+        assert_eq!(found(GitHost::Mac, usr), None, "the Mac's /usr/bin/git is the install shim");
+        let brew = &["/usr/bin/git", "/opt/homebrew/bin/git"][..];
+        assert_eq!(found(GitHost::Mac, brew), Some(PathBuf::from("/opt/homebrew/bin/git")));
+        let mine = &["/usr/bin/git", "/home/me/bin/git"][..];
+        assert_eq!(found(GitHost::Linux, mine), Some(PathBuf::from("/home/me/bin/git")));
+    }
 
     #[test]
     fn numstat_counts_files_and_lines_and_a_binary_as_a_file() {

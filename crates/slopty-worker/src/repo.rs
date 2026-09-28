@@ -48,7 +48,7 @@ pub fn root_of_str(cwd: &str) -> Option<String> {
 /// whose `gitdir:` line names the git directory, relative to `root` or absolute, and `HEAD` is
 /// in there: each worktree has its own.
 #[must_use]
-pub fn head_of(root: &Path) -> Option<PathBuf> {
+fn head_of(root: &Path) -> Option<PathBuf> {
     let dot_git = root.join(".git");
     if std::fs::metadata(&dot_git).ok()?.is_dir() {
         return Some(dot_git.join("HEAD"));
@@ -58,7 +58,7 @@ pub fn head_of(root: &Path) -> Option<PathBuf> {
     (!gitdir.is_empty()).then(|| root.join(gitdir).join("HEAD"))
 }
 
-/// [`branch_at`] of [`head_of`]: what the repository rooted at `root` has checked out.
+/// `branch_at` of `head_of`: what the repository rooted at `root` has checked out.
 #[must_use]
 pub fn branch_of(root: &Path) -> Option<String> {
     branch_at(&head_of(root)?)
@@ -73,7 +73,7 @@ const SHORT_HASH: usize = 7;
 /// commit abbreviated when `HEAD` is detached. `None` when the file cannot be read or holds
 /// neither.
 #[must_use]
-pub fn branch_at(head: &Path) -> Option<String> {
+fn branch_at(head: &Path) -> Option<String> {
     let text = std::fs::read_to_string(head).ok()?;
     let line = text.lines().next()?.trim();
     if let Some(target) = line.strip_prefix("ref:") {

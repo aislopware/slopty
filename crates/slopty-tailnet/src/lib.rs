@@ -16,6 +16,7 @@
 //! server and dials them over the tunnel like any other address.
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
 
 mod api;
 #[cfg(any(test, feature = "fake"))]
@@ -28,5 +29,14 @@ pub mod whois;
 pub use api::{LocalApi, LocalApiError, Pong};
 pub use locate::Location;
 pub use policy::{Grant, Role};
-pub use status::{Node, Path, Status};
+pub use status::{BackendState, Node, Path, Status};
 pub use whois::WhoIs;
+
+/// A field Go's JSON writes as `null` for an empty collection reads as the empty value.
+fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    Ok(<Option<T> as serde::Deserialize>::deserialize(de)?.unwrap_or_default())
+}

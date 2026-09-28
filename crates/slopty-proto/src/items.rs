@@ -1,5 +1,5 @@
 //! The worker's item registry: what exists on a worker for its clients to show (terminals, streamed
-//! windows and displays, notes, file cards). Worker-authoritative, snapshot + deltas.
+//! windows and displays, notes, files, folders and pages). Worker-authoritative, snapshot + deltas.
 //!
 //! Where an item is shown is not here: each client arranges the items of every worker it reaches
 //! in a layout of its own (`slopty_client::layout`), so a phone and a Mac share the set and not
@@ -43,6 +43,13 @@ pub enum ItemKind {
         /// the worker's own: each client opens it through its forward of that port, whatever
         /// local port the forward took.
         url: String,
+    },
+    /// A directory on the worker, browsed in place: what is in it comes over
+    /// `WorkerMsg::Folder`, not the registry, and browsing moves the item
+    /// ([`ItemOp::SetFolder`]).
+    Folder {
+        /// Absolute path on the worker, or `~/…` in its home.
+        path: String,
     },
 }
 
@@ -94,6 +101,22 @@ pub enum ItemOp {
         /// Markdown.
         text: String,
     },
+    /// Point a browser item at another address, as typed in its header. Refused for any
+    /// other kind of item and for anything but an `http` or `https` address.
+    SetUrl {
+        /// Item.
+        id: ItemId,
+        /// The address as the worker sees it (`http://localhost:5173/`).
+        url: String,
+    },
+    /// Point a folder item at another directory, as browsing into one does. Refused for any
+    /// other kind of item.
+    SetFolder {
+        /// Item.
+        id: ItemId,
+        /// Absolute path on the worker.
+        path: String,
+    },
 }
 
 impl ItemOp {
@@ -105,8 +128,54 @@ impl ItemOp {
             Self::Remove(id)
             | Self::Sleep { id, .. }
             | Self::Rename { id, .. }
-            | Self::SetNote { id, .. } => *id,
+            | Self::SetNote { id, .. }
+            | Self::SetUrl { id, .. }
+            | Self::SetFolder { id, .. } => *id,
         }
+    }
+}
+
+/// Why an [`ItemOp`] does not apply to an item.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+pub enum Refused {
+    /// The op edits a field this kind of item does not have (a note's text on a terminal).
+    #[error("not a {0}")]
+    WrongKind(&'static str),
+    /// [`ItemOp::Add`] and [`ItemOp::Remove`] act on the registry, not on an item.
+    #[error("adds and removes act on the registry, not on an item")]
+    NotAnEdit,
+}
+
+impl Item {
+    /// Apply an edit to this item; whether anything changed.
+    ///
+    /// Setting a field to the value it holds changes nothing and says so: the worker and every
+    /// client apply the same op, so a client redraws only for what moved, and one that applied
+    /// its own op ahead of the worker sees the worker's echo as the no-op it is. The worker
+    /// still broadcasts such an op, since the echo is how the proposer hears it was taken.
+    ///
+    /// # Errors
+    /// [`Refused::WrongKind`] for a note's text, an address or a folder on another kind of
+    /// item, and [`Refused::NotAnEdit`] for an add or a remove.
+    pub fn apply(&mut self, op: &ItemOp) -> Result<bool, Refused> {
+        fn set<T: PartialEq + Clone>(field: &mut T, value: &T) -> bool {
+            let changed = field != value;
+            if changed {
+                field.clone_from(value);
+            }
+            changed
+        }
+        Ok(match (op, &mut self.kind) {
+            (ItemOp::Add(_) | ItemOp::Remove(_), _) => return Err(Refused::NotAnEdit),
+            (ItemOp::Sleep { sleeping, .. }, _) => set(&mut self.sleeping, sleeping),
+            (ItemOp::Rename { name, .. }, _) => set(&mut self.name, name),
+            (ItemOp::SetNote { text, .. }, ItemKind::Note { text: at }) => set(at, text),
+            (ItemOp::SetUrl { url, .. }, ItemKind::Browser { url: at }) => set(at, url),
+            (ItemOp::SetFolder { path, .. }, ItemKind::Folder { path: at }) => set(at, path),
+            (ItemOp::SetNote { .. }, _) => return Err(Refused::WrongKind("note")),
+            (ItemOp::SetUrl { .. }, _) => return Err(Refused::WrongKind("browser")),
+            (ItemOp::SetFolder { .. }, _) => return Err(Refused::WrongKind("folder")),
+        })
     }
 }
 
@@ -139,4 +208,48 @@ pub enum ItemSync {
         /// The item.
         item: ItemId,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(kind: ItemKind) -> Item {
+        Item { id: ItemId::nil(), kind, sleeping: false, name: None }
+    }
+
+    /// An edit reports a change only when the value moved, whatever the field; an edit of a
+    /// field the kind lacks is refused and leaves the item alone, as are adds and removes.
+    #[test]
+    fn an_edit_changes_only_what_moves_and_only_where_it_fits() {
+        let id = ItemId::nil();
+        let mut page = item(ItemKind::Browser { url: "http://localhost:5173/".to_owned() });
+        let same = ItemOp::SetUrl { id, url: "http://localhost:5173/".to_owned() };
+        let moved = ItemOp::SetUrl { id, url: "http://localhost:8080/".to_owned() };
+        assert_eq!(page.apply(&same), Ok(false), "already there");
+        assert_eq!(page.apply(&moved), Ok(true));
+        assert_eq!(page.apply(&moved), Ok(false), "once");
+        assert_eq!(page.kind, ItemKind::Browser { url: "http://localhost:8080/".to_owned() });
+
+        let rename = ItemOp::Rename { id, name: Some("dev".to_owned()) };
+        assert_eq!((page.apply(&rename), page.apply(&rename)), (Ok(true), Ok(false)));
+        let sleep = ItemOp::Sleep { id, sleeping: true };
+        assert_eq!((page.apply(&sleep), page.apply(&sleep)), (Ok(true), Ok(false)));
+
+        let mut note = item(ItemKind::Note { text: String::new() });
+        let text = ItemOp::SetNote { id, text: "plan".to_owned() };
+        assert_eq!((note.apply(&text), note.apply(&text)), (Ok(true), Ok(false)));
+        let mut folder = item(ItemKind::Folder { path: "~/".to_owned() });
+        let into = ItemOp::SetFolder { id, path: "~/src".to_owned() };
+        assert_eq!((folder.apply(&into), folder.apply(&into)), (Ok(true), Ok(false)));
+
+        let before = page.clone();
+        assert_eq!(page.apply(&text), Err(Refused::WrongKind("note")));
+        assert_eq!(page.apply(&into), Err(Refused::WrongKind("folder")));
+        assert_eq!(note.apply(&moved), Err(Refused::WrongKind("browser")));
+        assert_eq!(page.apply(&ItemOp::Remove(id)), Err(Refused::NotAnEdit));
+        assert_eq!(page.apply(&ItemOp::Add(before.clone())), Err(Refused::NotAnEdit));
+        assert_eq!(page, before, "a refused op leaves the item as it was");
+        assert_eq!(Refused::WrongKind("note").to_string(), "not a note");
+    }
 }
