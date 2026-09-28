@@ -56,12 +56,12 @@ use std::path::Path;
 use serde_json::Value;
 use slopty_core::WallMs;
 pub use slopty_proto::conversation::{
-    AgentDetail, AgentRun, Answer, BashDetail, Body, Cap, Change, Clipped, Compact, EditDetail,
-    Entry, GlobDetail, GrepDetail, Hunk, IMAGE_BYTES, Image, Link, McpDetail, Note, NoteKind,
-    Origin, Output, Part, Patch, Prompt, Question, QuestionDetail, ReadDetail, ResultStatus, Retry,
-    ShellStatus, Task, TaskCreateDetail, TaskUpdateDetail, TextRef, ThreadId, ThreadState,
-    ToolCall, ToolDetail, ToolResult, Turn, Usage, WebFetchDetail, WebSearchDetail, WriteDetail,
-    WriteKind,
+    AgentDetail, AgentRun, Answer, BashDetail, Body, Cap, Change, Choice, Clipped, Compact,
+    EditDetail, Entry, GlobDetail, GrepDetail, Hunk, IMAGE_BYTES, Image, Link, McpDetail, Note,
+    NoteKind, Origin, Output, Part, Patch, Prompt, Question, QuestionDetail, ReadDetail,
+    ResultStatus, Retry, ShellStatus, Task, TaskCreateDetail, TaskUpdateDetail, TextRef, ThreadId,
+    ThreadState, ToolCall, ToolDetail, ToolResult, Turn, Usage, WebFetchDetail, WebSearchDetail,
+    WriteDetail, WriteKind,
 };
 
 use crate::transcript::Tail;
@@ -1185,7 +1185,11 @@ fn question(q: &Value) -> Question {
             .and_then(Value::as_array)
             .map(|os| {
                 os.iter()
-                    .filter_map(|o| string_at(o, "label").or_else(|| o.as_str().map(str::to_owned)))
+                    .filter_map(|o| {
+                        let label =
+                            string_at(o, "label").or_else(|| o.as_str().map(str::to_owned))?;
+                        Some(Choice { label, description: string_at(o, "description") })
+                    })
                     .collect()
             })
             .unwrap_or_default(),

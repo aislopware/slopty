@@ -6,6 +6,8 @@
 //! synchronously ([`crate::hooks`]): instead of posting the hook as it does every other event, it
 //! asks the worker for a decision over the control socket and waits, up to [`WAIT`], for one of
 //! - allow once;
+//! - answer an `AskUserQuestion`, or approve an `ExitPlanMode` plan: an allow that carries the
+//!   call's input, with the answers for a question;
 //! - allow always, handing back the permission updates Claude Code suggested;
 //! - deny, with a message for the model;
 //! - no decision: the TUI's dialog appears, as it would with no hook at all.
@@ -53,7 +55,10 @@ pub const WAIT: Duration = Duration::from_secs(HOOK_TIMEOUT_S as u64 - 5);
 pub fn hook_output(decision: &Decision) -> Option<Value> {
     let output = match decision {
         Decision::Pass => return None,
-        Decision::Allow => json!({ "behavior": "allow" }),
+        Decision::Allow { updated_input: None } => json!({ "behavior": "allow" }),
+        Decision::Allow { updated_input: Some(input) } => {
+            json!({ "behavior": "allow", "updatedInput": input })
+        }
         Decision::AllowAlways { updated_permissions } => {
             json!({ "behavior": "allow", "updatedPermissions": updated_permissions })
         }
@@ -69,17 +74,46 @@ pub fn hook_output(decision: &Decision) -> Option<Value> {
     }))
 }
 
-/// The decision a person's verdict makes.
+/// The tools whose permission prompt is the person's answer rather than a yes or no: Claude
+/// Code takes an allow for them from a hook only with an `updatedInput`, and shows its own
+/// dialog when the allow comes without one.
+const ASKS_THE_PERSON: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
+
+/// The decision a person's verdict on the `PermissionRequest` `hook` makes.
 ///
-/// `suggestions` are the hook payload's ([`Hook`]) `permission_suggestions`: "allow always"
-/// hands every one of them back, as Claude Code's own "Yes, and always …" does. A denial
-/// without words gets some.
+/// "Allow always" hands back every one of the hook's `permission_suggestions`, as Claude
+/// Code's own "Yes, and always …" does. An allow for a tool that asks the person carries the
+/// call's own input back, and an answer carries it with the answers, keyed by each question's
+/// text as `AskUserQuestion` reads them. A denial without words gets some.
 #[must_use]
-pub fn decision(verdict: &Verdict, suggestions: Option<&Value>) -> Decision {
+pub fn decision(verdict: &Verdict, hook: &Hook) -> Decision {
+    let input = || hook.tool_input.clone().unwrap_or_else(|| json!({}));
     match verdict {
-        Verdict::Allow => Decision::Allow,
+        Verdict::Allow => Decision::Allow {
+            updated_input: hook
+                .tool_name
+                .as_deref()
+                .is_some_and(|tool| ASKS_THE_PERSON.contains(&tool))
+                .then(input),
+        },
+        Verdict::Answer { answers } => {
+            let mut input = input();
+            let answers: serde_json::Map<String, Value> = answers
+                .iter()
+                .map(|a| (a.question.clone(), Value::String(a.answer.clone())))
+                .collect();
+            if let Some(fields) = input.as_object_mut() {
+                fields.insert("answers".to_owned(), Value::Object(answers));
+            }
+            Decision::Allow { updated_input: Some(input) }
+        }
         Verdict::AllowAlways => Decision::AllowAlways {
-            updated_permissions: suggestions.and_then(Value::as_array).cloned().unwrap_or_default(),
+            updated_permissions: hook
+                .permission_suggestions
+                .as_ref()
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
         },
         Verdict::Deny { message, interrupt } => Decision::Deny {
             message: if message.trim().is_empty() {
@@ -168,6 +202,8 @@ pub fn suggestions(value: &Value) -> Vec<Suggestion> {
 
 #[cfg(test)]
 mod tests {
+    use slopty_proto::conversation::Answer;
+
     use super::*;
 
     /// A decision prints what the hooks reference defines, and no decision prints nothing.
@@ -258,17 +294,80 @@ mod tests {
             ]
         );
         let given = hook.permission_suggestions.as_ref();
-        let always = decision(&Verdict::AllowAlways, given);
+        let always = decision(&Verdict::AllowAlways, &hook);
         assert_eq!(
             always,
             Decision::AllowAlways {
                 updated_permissions: given.and_then(Value::as_array).cloned().unwrap_or_default()
             }
         );
-        assert_eq!(decision(&Verdict::Allow, None), Decision::Allow);
-        let silent = decision(&Verdict::Deny { message: " ".to_owned(), interrupt: false }, None);
+        assert_eq!(
+            decision(&Verdict::Allow, &hook),
+            Decision::Allow { updated_input: None },
+            "an edit's allow leaves its input to the model"
+        );
+        let silent = decision(&Verdict::Deny { message: " ".to_owned(), interrupt: false }, &hook);
         assert!(
             matches!(silent, Decision::Deny { message, interrupt: false } if !message.trim().is_empty())
+        );
+    }
+
+    /// An answer to `AskUserQuestion` is an allow whose input is the call's own with the
+    /// answers keyed by each question's text; a plan's approval hands its input back, without
+    /// which Claude Code would show its own dialog.
+    #[test]
+    fn an_answer_and_a_plan_approval_carry_the_calls_input() {
+        let questions = json!([{
+            "question": "Which layout?", "header": "Layout", "multiSelect": false,
+            "options": [{ "label": "Split", "description": "Side by side" }, { "label": "Stacked" }]
+        }, {
+            "question": "Which panes?", "header": "Panes", "multiSelect": true,
+            "options": [{ "label": "Files" }, { "label": "Terminal" }]
+        }]);
+        let hook = Hook::parse(
+            &json!({
+                "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
+                "tool_input": { "questions": questions }
+            })
+            .to_string(),
+        )
+        .expect("hook");
+        let answers = vec![
+            Answer { question: "Which layout?".to_owned(), answer: "Split".to_owned() },
+            Answer { question: "Which panes?".to_owned(), answer: "Files, Terminal".to_owned() },
+        ];
+        let answered = decision(&Verdict::Answer { answers }, &hook);
+        assert_eq!(
+            hook_output(&answered).map(|o| o["hookSpecificOutput"]["decision"].clone()),
+            Some(json!({
+                "behavior": "allow",
+                "updatedInput": {
+                    "questions": questions,
+                    "answers": { "Which layout?": "Split", "Which panes?": "Files, Terminal" }
+                }
+            }))
+        );
+
+        let plan = json!({ "plan": "1. Split the view" });
+        let hook = Hook::parse(
+            &json!({
+                "hook_event_name": "PermissionRequest", "tool_name": "ExitPlanMode",
+                "tool_input": plan
+            })
+            .to_string(),
+        )
+        .expect("hook");
+        assert_eq!(
+            hook_output(&decision(&Verdict::Allow, &hook))
+                .map(|o| o["hookSpecificOutput"]["decision"].clone()),
+            Some(json!({ "behavior": "allow", "updatedInput": plan }))
+        );
+        let keep = Verdict::Deny { message: "Keep the old layout".to_owned(), interrupt: false };
+        assert_eq!(
+            hook_output(&decision(&keep, &hook))
+                .map(|o| o["hookSpecificOutput"]["decision"].clone()),
+            Some(json!({ "behavior": "deny", "message": "Keep the old layout" })),
+            "keep planning is a denial that lets the turn go on"
         );
     }
 }

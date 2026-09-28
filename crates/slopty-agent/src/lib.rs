@@ -34,6 +34,7 @@
 #![forbid(unsafe_code)]
 
 pub mod claude_mod;
+pub mod commands;
 pub mod conversation;
 pub mod detect;
 pub mod discover;

@@ -1488,13 +1488,14 @@ mod size_report {
 mod conversation {
     use slopty_core::{ClientId, SessionId, WallMs};
     use slopty_proto::conversation::{
-        AgentDetail, AgentRun, Answer, BashDetail, Blob, Body, Change, Clipped, Compact,
-        ConversationEvent, ConversationRequest, EditDetail, Entry, GlobDetail, Grant, GrepDetail,
-        Hunk, Image, Link, Live, LiveId, LiveKind, McpDetail, Meters, Note, NoteKind, Output, Part,
-        Patch, PermissionEvent, PermissionPrompt, Prompt, Question, QuestionDetail, RateWindow,
-        ReadDetail, ResultStatus, Retry, Settled, ShellStatus, Suggestion, Task, TaskCreateDetail,
-        TaskUpdateDetail, TextRef, ThreadId, ToolCall, ToolDetail, ToolResult, Turn, Usage,
-        Verdict, WebFetchDetail, WebSearchDetail, WriteDetail, WriteKind,
+        AgentDetail, AgentRun, Answer, BashDetail, Blob, Body, Change, Choice, Clipped,
+        CommandSource, Compact, ConversationEvent, ConversationRequest, EditDetail, Entry,
+        GlobDetail, Grant, GrepDetail, Hunk, Image, Link, Live, LiveId, LiveKind, McpDetail,
+        Meters, Note, NoteKind, Output, Part, Patch, PermissionEvent, PermissionPrompt, Prompt,
+        Question, QuestionDetail, RateWindow, ReadDetail, ResultStatus, Retry, Settled,
+        ShellStatus, SlashCommand, Suggestion, Task, TaskCreateDetail, TaskUpdateDetail, TextRef,
+        ThreadId, ToolCall, ToolDetail, ToolResult, Turn, Usage, Verdict, WebFetchDetail,
+        WebSearchDetail, WriteDetail, WriteKind,
     };
     use slopty_proto::transfer::UniHead;
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
@@ -1602,6 +1603,15 @@ mod conversation {
             ("client_answer_allow", Verdict::Allow),
             ("client_answer_always", Verdict::AllowAlways),
             ("client_answer_deny", Verdict::Deny { message: "no".to_owned(), interrupt: true }),
+            (
+                "client_answer_question",
+                Verdict::Answer {
+                    answers: vec![Answer {
+                        question: "Which layout?".to_owned(),
+                        answer: "Split, Stacked".to_owned(),
+                    }],
+                },
+            ),
         ] {
             snap(
                 name,
@@ -1625,6 +1635,14 @@ mod conversation {
                 session,
                 thread: ThreadId::Main,
                 reference: reference(Part::Image { tool_use_id: None, index: 2 }),
+            }),
+        );
+        snap(
+            "client_mention_search",
+            &ClientMsg::Conversation(ConversationRequest::Search {
+                session,
+                query: "src/ma".to_owned(),
+                limit: 50,
             }),
         );
     }
@@ -1748,6 +1766,28 @@ mod conversation {
                 thread: ThreadId::Main,
                 reference: reference(Part::Stdout),
                 text: Some(text("all of it")),
+            },
+        );
+        let command = |name: &str, hint: Option<&str>, source| SlashCommand {
+            name: name.to_owned(),
+            description: format!("{name} it"),
+            argument_hint: hint.map(str::to_owned),
+            source,
+        };
+        snap(
+            "conversation_commands",
+            &ConversationEvent::Commands(vec![
+                command("compact", Some("<instructions>"), CommandSource::BuiltIn),
+                command("review", None, CommandSource::Personal),
+                command("frontend:component", Some("[name]"), CommandSource::Project),
+                command("cloudflare:build-agent", None, CommandSource::Plugin),
+            ]),
+        );
+        snap(
+            "conversation_found",
+            &ConversationEvent::Found {
+                query: "ma".to_owned(),
+                paths: vec!["src/main.rs".to_owned(), "src/manual/".to_owned()],
             },
         );
     }
@@ -1980,7 +2020,13 @@ mod conversation {
                         questions: vec![Question {
                             text: "Which?".to_owned(),
                             header: Some("Pick".to_owned()),
-                            options: vec!["a".to_owned(), "b".to_owned()],
+                            options: vec![
+                                Choice { label: "a".to_owned(), description: None },
+                                Choice {
+                                    label: "b".to_owned(),
+                                    description: Some("the other".to_owned()),
+                                },
+                            ],
                             multi_select: false,
                         }],
                         answers: vec![Answer {
@@ -2199,7 +2245,19 @@ mod ctl {
     fn permissions() {
         let reply = |decision| CtlReply::Permission(PermissionAnswer { decision });
         snap("ctl_reply_permission_pass", &reply(Decision::Pass));
-        snap("ctl_reply_permission_allow", &reply(Decision::Allow));
+        snap("ctl_reply_permission_allow", &reply(Decision::Allow { updated_input: None }));
+        snap(
+            "ctl_reply_permission_answer",
+            &reply(Decision::Allow {
+                updated_input: Some(serde_json::json!({
+                    "answers": { "Which layout?": "Split" },
+                    "questions": [{
+                        "header": "Layout", "multiSelect": false, "question": "Which layout?",
+                        "options": [{ "label": "Split" }, { "label": "Stacked" }]
+                    }]
+                })),
+            }),
+        );
         snap(
             "ctl_reply_permission_always",
             &reply(Decision::AllowAlways {

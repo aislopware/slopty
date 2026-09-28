@@ -148,7 +148,7 @@ mod hooks {
                     hook.permission_suggestions.as_ref().and_then(Value::as_array).cloned();
                 Decision::AllowAlways { updated_permissions: suggested.expect("suggestions") }
             } else {
-                Decision::Allow
+                Decision::Allow { updated_input: None }
             };
             assert_eq!(hook_output(&decision).as_ref(), Some(&record["output"]), "{command}");
         }

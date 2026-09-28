@@ -355,6 +355,7 @@ impl ConversationView {
                     .gap(self.z(theme.spacing.xs))
                     .pt(self.z(theme.spacing.xs))
                     .children(self.clock_label(*at_ms, PROMPT_GROUP))
+                    .children(self.rewind_button(id, PROMPT_GROUP, cx))
                     .child(self.copy_button(
                         format!("p:{id}"),
                         PROMPT_GROUP,
@@ -367,7 +368,7 @@ impl ConversationView {
     }
 
     /// A prompt as it was typed: a command with its name.
-    fn prompt_words(&self, prompt: &Prompt) -> String {
+    pub(super) fn prompt_words(&self, prompt: &Prompt) -> String {
         let text = self.text_of(&prompt.text);
         match &prompt.command {
             Some(command) if command == "!" => format!("!{text}"),
@@ -394,6 +395,7 @@ impl ConversationView {
         let images = (!prompt.images.is_empty())
             .then(|| self.thumbnails(&format!("prompt-{key}"), &prompt.images, cx));
         let expand = self.expand_link(&format!("prompt-{key}"), &prompt.text, cx);
+        let mentions = self.mention_chips(key, &text, cx);
         div()
             .id(ElementId::Name(SharedString::from(format!("prompt-card-{key}"))))
             .role(Role::Article)
@@ -424,11 +426,12 @@ impl ConversationView {
                                     .flex_1()
                                     .min_w_0()
                                     .whitespace_normal()
-                                    .child(SharedString::from(text)),
+                                    .child(self.mentioned_text(text)),
                             )
                         }),
                 )
             })
+            .children(mentions)
             .children(expand)
     }
 

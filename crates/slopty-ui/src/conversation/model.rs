@@ -20,7 +20,7 @@ use std::sync::Arc;
 use slopty_core::WallMs;
 use slopty_proto::conversation::{
     Body, Change, Clipped, ConversationEvent, Entry, Image, Live, LiveId, LiveKind, Meters, Origin,
-    Output, Part, Task, TextRef, ThreadId, Turn,
+    Output, Part, SlashCommand, Task, TextRef, ThreadId, Turn,
 };
 
 /// One thread: its entries in order, its task list and, for a subagent, the call that
@@ -156,6 +156,8 @@ pub struct Applied {
     /// A background command's output, or a picture's bytes: the rows that show them are
     /// drawn again.
     pub media: bool,
+    /// The slash commands, or the paths an `@` query found: the composer's menu may show them.
+    pub menu: bool,
 }
 
 /// A picture's bytes, as far as this client has them.
@@ -223,6 +225,10 @@ pub struct Model {
     pictures: HashMap<String, Picture>,
     /// The digest each picture asked for was asked by, by its place.
     asked: HashMap<String, String>,
+    /// The slash commands the agent takes.
+    commands: Vec<SlashCommand>,
+    /// The last `@` query answered, and the paths it found.
+    found: Option<(String, Vec<String>)>,
 }
 
 impl Model {
@@ -285,8 +291,28 @@ impl Model {
                 self.pictures.insert(digest, picture);
                 applied.media = true;
             }
+            ConversationEvent::Commands(commands) => {
+                applied.menu = self.commands != commands;
+                self.commands = commands;
+            }
+            ConversationEvent::Found { query, paths } => {
+                self.found = Some((query, paths));
+                applied.menu = true;
+            }
         }
         applied
+    }
+
+    /// The slash commands the agent takes, as the worker last listed them.
+    #[must_use]
+    pub fn commands(&self) -> &[SlashCommand] {
+        &self.commands
+    }
+
+    /// The paths the worker found for `query`, once it answered that query.
+    #[must_use]
+    pub fn found(&self, query: &str) -> Option<&[String]> {
+        self.found.as_ref().filter(|(q, _)| q == query).map(|(_, paths)| paths.as_slice())
     }
 
     /// What the background command `call` of `thread` printed last.

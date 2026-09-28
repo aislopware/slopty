@@ -2,4 +2,4 @@
 source: crates/slopty-proto/tests/golden.rs
 expression: line
 ---
-{"reply":"permission","decision":{"kind":"allow"}}
+{"reply":"permission","decision":{"kind":"allow","updated_input":null}}

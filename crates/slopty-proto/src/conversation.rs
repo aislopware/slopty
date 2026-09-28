@@ -34,6 +34,10 @@
 //! bytes. A client asks for the bytes when the picture comes into view
 //! ([`ConversationRequest::Expand`] of its [`Image::at`]) and keeps them by digest, so a picture
 //! that shows twice travels once.
+//!
+//! **The composer's menus.** The same stream carries the slash commands the agent takes
+//! ([`ConversationEvent::Commands`]) and the answer to a follower's `@` search of the agent's
+//! working directory ([`ConversationRequest::Search`], [`ConversationEvent::Found`]).
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, SessionId, WallMs};
@@ -674,9 +678,18 @@ pub struct Question {
     /// Its short label.
     pub header: Option<String>,
     /// The choices offered.
-    pub options: Vec<String>,
+    pub options: Vec<Choice>,
     /// More than one may be picked.
     pub multi_select: bool,
+}
+
+/// One choice a question offers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    /// What it is called, and what the answer says when it is picked.
+    pub label: String,
+    /// What picking it means, when the model said.
+    pub description: Option<String>,
 }
 
 /// One answer.
@@ -906,6 +919,17 @@ pub enum ConversationRequest {
         /// Where the whole text is.
         reference: TextRef,
     },
+    /// Files and folders under the agent's working directory that `query` matches, for an
+    /// `@` mention; answered as [`ConversationEvent::Found`] on the session's conversation
+    /// stream. Only while following.
+    Search {
+        /// The session.
+        session: SessionId,
+        /// What follows the `@`; empty lists the top of the tree.
+        query: String,
+        /// Paths wanted at most.
+        limit: u32,
+    },
 }
 
 /// Worker → client on a conversation stream.
@@ -947,6 +971,44 @@ pub enum ConversationEvent {
         /// [`IMAGE_BYTES`].
         blob: Option<Blob>,
     },
+    /// The slash commands the agent takes, the whole list: sent after
+    /// [`ConversationEvent::Current`] and again whenever it changes.
+    Commands(Vec<SlashCommand>),
+    /// The answer to [`ConversationRequest::Search`].
+    Found {
+        /// The query answered, so a stale answer can be told from the current one.
+        query: String,
+        /// Paths relative to the agent's working directory, best first; a directory ends in
+        /// `/`.
+        paths: Vec<String>,
+    },
+}
+
+/// A slash command the agent takes, for the composer's menu.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SlashCommand {
+    /// Its name without the slash: `compact`, `frontend:component`, `cloudflare:build-agent`.
+    pub name: String,
+    /// What it does, one line.
+    pub description: String,
+    /// What its argument is, as Claude Code hints it (`<path>`, `[model]`).
+    pub argument_hint: Option<String>,
+    /// Where it comes from.
+    pub source: CommandSource,
+}
+
+/// Where a [`SlashCommand`] comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum CommandSource {
+    /// Claude Code's own.
+    BuiltIn,
+    /// The person's: `~/.claude/commands` or `~/.claude/skills`.
+    Personal,
+    /// The project's: `.claude/commands` or `.claude/skills` in the agent's directory or one
+    /// above it.
+    Project,
+    /// An enabled plugin's command or skill, named `<plugin>:<name>`.
+    Plugin,
 }
 
 /// The end of what a background command has printed.
@@ -1131,6 +1193,13 @@ pub enum Verdict {
         message: String,
         /// Also stop the turn.
         interrupt: bool,
+    },
+    /// Answer an `AskUserQuestion`: the call runs with these answers, as if the person had
+    /// picked them in the TUI's own dialog.
+    Answer {
+        /// One per question answered, by the question's text; the options of a multi-select
+        /// question joined with `", "`, or the words typed instead of an option.
+        answers: Vec<Answer>,
     },
 }
 

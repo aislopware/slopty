@@ -10,6 +10,12 @@ use slopty_proto::conversation::{
     Grant, PermissionPrompt, Settled, Suggestion, ToolDetail, Verdict,
 };
 
+/// The tool whose prompt is a plan to approve.
+pub const PLAN_TOOL: &str = "ExitPlanMode";
+
+/// The tool whose prompt is questions to answer.
+pub const QUESTION_TOOL: &str = "AskUserQuestion";
+
 /// How a prompt ended, as the line under the conversation says it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Outcome {
@@ -27,10 +33,14 @@ impl Outcome {
     /// What the line says.
     #[must_use]
     pub fn text(&self, tool: &str) -> String {
-        let verb = |verdict: &Verdict| match verdict {
-            Verdict::Allow => format!("Allowed {tool} once"),
-            Verdict::AllowAlways => format!("Always allowed {tool}"),
-            Verdict::Deny { .. } => format!("Denied {tool}"),
+        let verb = |verdict: &Verdict| match (verdict, tool) {
+            (Verdict::Answer { answers }, _) => super::question::answered_line(answers),
+            (Verdict::Allow | Verdict::AllowAlways, PLAN_TOOL) => "Approved the plan".to_owned(),
+            (Verdict::Deny { .. }, PLAN_TOOL) => "Kept planning".to_owned(),
+            (Verdict::Deny { .. }, QUESTION_TOOL) => "Skipped the question".to_owned(),
+            (Verdict::Allow, _) => format!("Allowed {tool} once"),
+            (Verdict::AllowAlways, _) => format!("Always allowed {tool}"),
+            (Verdict::Deny { .. }, _) => format!("Denied {tool}"),
         };
         match self {
             Self::Answered(verdict) => verb(verdict),
@@ -235,7 +245,8 @@ pub fn statement(prompt: &PermissionPrompt) -> String {
         }
         ToolDetail::WebSearch(_) => "search the web".to_owned(),
         ToolDetail::Agent(_) => "start a subagent".to_owned(),
-        ToolDetail::Plan { .. } => "leave plan mode".to_owned(),
+        ToolDetail::Plan { .. } => return "Claude has a plan for you to review".to_owned(),
+        ToolDetail::Question(_) => return "Claude has a question".to_owned(),
         ToolDetail::Mcp(mcp) => format!("use {} from {}", mcp.tool, mcp.server),
         _ => format!("use {}", prompt.tool),
     };
@@ -303,6 +314,21 @@ mod tests {
         assert_eq!(approvals.answer(Verdict::Allow), Some((7, Verdict::Allow)));
         assert_eq!(approvals.answer(Verdict::AllowAlways), None, "already answering");
         assert_eq!(approvals.answering(), Some(&Verdict::Allow));
+    }
+
+    /// A question settles into what was answered, a plan into approved or kept.
+    #[test]
+    fn a_question_and_a_plan_settle_in_their_own_words() {
+        let answers = vec![slopty_proto::conversation::Answer {
+            question: "Which layout?".to_owned(),
+            answer: "Split".to_owned(),
+        }];
+        let answered = Outcome::Answered(Verdict::Answer { answers });
+        assert_eq!(answered.text(QUESTION_TOOL), "Answered: Split");
+        let skipped = Verdict::Deny { message: String::new(), interrupt: false };
+        assert_eq!(Outcome::Answered(skipped.clone()).text(QUESTION_TOOL), "Skipped the question");
+        assert_eq!(Outcome::Answered(Verdict::Allow).text(PLAN_TOOL), "Approved the plan");
+        assert_eq!(Outcome::Elsewhere(skipped).text(PLAN_TOOL), "Kept planning on another device");
     }
 
     /// A prompt settles into the line that says how: this client's answer, another's, the

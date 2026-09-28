@@ -1373,6 +1373,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Images and a background task's live output came next (the entry below). Model and mode
     pickers would have to type into the TUI's menus,
     which the face never does, so the mode shows as text in the composer's foot instead.
+    (Amended for the model on 2026-09-28: `/model <alias>` takes its argument without a menu,
+    so the model became a picker that types it; see "The composer answers questions, lists
+    commands and mentions files". The mode stays text.)
   - Tests:
     - the decoder: `a_turn_adds_up_its_requests`, `an_api_error_says_when_it_retries`,
       `a_branch_abandons_what_followed_its_fork` (the rewind marker) and the five `conversation`
@@ -1559,3 +1562,104 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `a_permission_request_prints_the_workers_decision` sees one request, the ask;
     `a_worker_that_does_not_decide_leaves_the_dialog_to_claude_code` and
     `the_wait_for_a_decision_is_bounded` answer that one connection.
+- ✅ **The composer answers questions, lists commands and mentions files** (2026-09-28, read
+  out of the Claude Code 2.1.283 bundle; wire change, goldens below). The face could show an
+  `AskUserQuestion` but not answer it, and the person had to know every command's name and
+  every path by heart. The composer now finishes those loops itself, still without typing
+  into a TUI menu (`.research/ui-wave5-2026-09-28.md` §1.1, §1.4, §1.5, §1.9, §1.10, §1.11).
+  - **A question is answered through the permission hook.** The 2.1.283 bundle takes a
+    `PermissionRequest` allow that carries `updatedInput` for exactly two tools,
+    `AskUserQuestion` and `ExitPlanMode` (the set its permission check exempts from asking
+    again). It ignores an allow *without* an input for them and shows its own dialog. So:
+    - `Verdict::Answer { answers }` is a new answer. The worker (`permission::decision`)
+      turns it into `Decision::Allow { updated_input }`: the call's own input plus `answers`,
+      keyed by each question's text. That is the map `AskUserQuestion` reads, and it takes a
+      string or an array there. The face sends one string, a multi-select's labels joined with
+      `", "` as the TUI joins them, and typed words for a question answered in the field.
+    - `Decision::Allow` grew `updated_input`. An allow for either tool carries the call's input
+      back, because a bare allow would leave the TUI's dialog up. Every other tool's allow
+      carries none: an input there would send the call through the permission check again.
+    - `Question::options` became `Choice { label, description }`, so the card can show what
+      each option means.
+    - This was checked by reading the bundle, not by a capture. `cargo xtask fixtures` runs a
+      model and was not run for this change. A capture of an answered question is still owed.
+  - **The question card.** It takes the composer's shell as the permission prompt does, one
+    question at a time with "1 of 3". Options are two-line rows with a circle that fills when
+    picked, and there is a field for words of one's own. A single choice goes on at once and
+    is the answer on the last question. Digits 1–9 pick while the field is empty, ↑/↓ move and
+    Enter goes on. Skip is a denial with words, which lets the turn go on. The settled line
+    says "Answered: …". Digits are read from the field's own text, so the field needs no key
+    bindings of its own.
+  - **A plan is approved or kept.** `ExitPlanMode` keeps the permission card with "Approve
+    plan" (an allow carrying the plan's input) and "Keep planning" (a denial with the field's
+    words and no interrupt). There is no "Always allow": a plan is not a rule.
+  - **Slash commands come from a table and the disk, not from the mod.**
+    `ConversationEvent::Commands` carries the whole list after `Current`, and again when it
+    changes. Each follower looks every five seconds. The list is:
+    - Claude Code's own commands, from a table read out of the version the fixtures pin
+      (`slopty_agent::commands::BUILT_IN`, 2.1.283), with its bundled skills;
+    - the project's `.claude/commands` and `.claude/skills`, in the agent's directory and each
+      directory above it short of home, then the person's under `~/.claude`, then every
+      enabled plugin's, named `<plugin>:<name>`.
+
+    A command file's subdirectories namespace it (`git/commit.md` is `git:commit`), and a
+    skill marked `user-invocable: false` stays out. The mod's `command.list` would be exact,
+    but its shape is unverified and it exists only where the mod is trusted, so the table
+    stands until a capture pins it.
+  - **The command menu.** It is the shell's section nearest the field, opened by a leading `/`
+    while the caret is in the first word of a one-line draft, never by a `/` mid-line. Names
+    that start with the query rank first, then names that hold it, then descriptions; the
+    project's and the person's rank ahead of Claude Code's own. ↑/↓ move, Enter or Tab picks,
+    and Esc closes it until the caret leaves the word. A pick writes `/name ` into the draft
+    and nothing more. Sending still types the draft raw.
+  - **Mentions ride the conversation stream.** An `@` that starts a word sends
+    `ConversationRequest::Search { session, query, limit }`, answered as
+    `ConversationEvent::Found` on the session's conversation stream. The research named a
+    folder request, but the worker knows the agent's directory (its foreground process's) and
+    the client does not, and the answer lands on the stream the face already reads. The
+    palette's `FindFiles` stays the palette's. The walk (`slopty_worker::file::mention`)
+    honours `.gitignore` as quick open does, keeps at most 50 000 paths, and is kept per
+    follower. It is walked again when a hook has fired since (the agent may have made or
+    removed a file) or after 30 seconds. A folder pick writes `@dir/` and keeps asking one
+    level down; a file writes `@path `. Claude Code reads `@path` itself, so the draft stays
+    text.
+  - **A sent prompt's mentions are chips.** Its `@path` words are set in the accent, and the
+    paths are listed under the words as chips, glyph and name, with the path on hover. A chip
+    opens the path in a tile, relative to the session's directory. The chips sit under the
+    text rather than inside it because a wrapped line in GPUI cannot hold a box.
+  - **The model picker types `/model <alias>`** (amending the 2026-09-27 note above). The
+    model in the foot opens Opus, Sonnet, Haiku and Default over the field, and a pick types
+    `/model <alias>` and Enter the way the composer types any command. `/model` takes its
+    argument without opening its menu, so nothing is picked in the TUI. It only works while
+    the agent is idle; mid-turn its hint says "After this turn". The permission mode stays
+    text, because it only changes through ⇧Tab or a menu.
+  - **Rewind hands over to the TUI.** A prompt's hover row has "Rewind…", which shows the TUI
+    and types `/rewind` and Enter there. The person then picks the point in Claude Code's own
+    menu, and the face shows the `Rewound` rule afterwards.
+    - Ruling: a bare slash command typed because the person clicked is not driving the agent.
+      It is exactly what they would have typed, and every choice after it is made in Claude
+      Code's own UI. What stays forbidden is typing into a menu: its digits, its arrows, its
+      picks.
+    - It only works while the agent is idle, as Compact does.
+  - **Recall.** ↑ in an empty composer brings back the prompt sent before it, and ↓ goes
+    forward to the empty draft again. A recalled prompt that is edited becomes the person's
+    own draft, and ↑ then moves the caret.
+  - **An unreachable worker.** The face says "<worker> is unreachable · your draft is kept",
+    dims the field, and neither Enter nor Send sends anything. The tile still covers the face
+    with its state pill while the worker is away (`workspace/tile.rs`, `body_state`), so the
+    line shows only once the tile keeps the face under that pill. That change is the tile
+    owner's to make.
+  - Tests:
+    - wire: the goldens `conversation__client_answer_question`, `__client_mention_search`,
+      `__conversation_commands`, `__conversation_found`, `ctl__ctl_reply_permission_answer`,
+      and the changed `ctl__ctl_reply_permission_allow` and `conversation__conversation_tools`
+      (a question's `Choice`);
+    - the agent: `an_answer_and_a_plan_approval_carry_the_calls_input`,
+      `custom_commands_are_found_where_claude_code_loads_them`,
+      `the_built_in_table_names_each_command_once`;
+    - the worker: `a_mention_ranks_names_first_and_skips_the_ignored`;
+    - the face in a window (`view/tests/composing.rs`): the command menu, a mention's search
+      and pick, a question answered by digit, click and Enter, a plan kept then approved,
+      mention chips, recall, the model picker, rewind and the unreachable worker;
+    - the pure parts: `menu` (tokens, ranking, picks, mentions), `question` (one question at a
+      time) and `approval` (the settled lines).

@@ -14,6 +14,8 @@
 //! * [`find`] — which entries hold a query, and the row that shows each.
 //! * [`composer`] — what the composer types into the terminal, and the files attached to it.
 //! * [`approval`] — a held permission prompt and how it ended.
+//! * [`question`] — an `AskUserQuestion` answered in the composer, one question at a time.
+//! * [`menu`] — the composer's slash command and `@` mention menus, as text.
 //! * [`view`] — the face itself: the list, the prompt rail, the task card, the composer.
 
 mod actions;
@@ -24,7 +26,9 @@ pub mod figures;
 pub mod find;
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub mod menu;
 pub mod model;
+pub mod question;
 pub mod rows;
 pub mod tools;
 pub mod view;

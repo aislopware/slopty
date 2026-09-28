@@ -293,7 +293,9 @@ mod tests {
             .unwrap();
         assert!(read.is_err() || response.is_empty(), "closed unanswered: {response:?}");
 
-        let inside = SocketAddr::from(([127, 0, 0, 1], port));
+        // Over `::1`, not `127.0.0.1`: the listener is the IPv6 wildcard, and with address reuse
+        // another test's listener bound to `127.0.0.1` on the same port would answer instead.
+        let inside = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
         let listed = rpc(inside, 1, "tools/list", None, json!({})).await;
         assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 30);
         serving.abort();

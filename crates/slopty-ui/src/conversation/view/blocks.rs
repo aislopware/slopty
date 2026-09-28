@@ -660,14 +660,14 @@ impl ConversationView {
                         q.options.iter().map(|option| {
                             let picked = answer
                                 .as_deref()
-                                .is_some_and(|a| a.split(", ").any(|p| p == option));
+                                .is_some_and(|a| a.split(", ").any(|p| p == option.label));
                             div()
                                 .px(self.z(theme.spacing.sm))
                                 .rounded(self.z(theme.radii.xs))
                                 .border_1()
                                 .border_color(hsla(if picked { s.accent } else { s.border_subtle }))
                                 .text_color(hsla(if picked { s.text } else { s.text_secondary }))
-                                .child(SharedString::from(option.clone()))
+                                .child(SharedString::from(option.label.clone()))
                         }),
                     ))
             }))

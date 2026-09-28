@@ -433,7 +433,9 @@ fn questions_plans_and_the_web_are_typed() {
         &result("u1", Some("a1"), "t1", "answered", &json!({"answers": {"Which?": "B"}})),
     );
     let ToolDetail::Question(q) = &tool(&c, &MAIN, "t1").detail else { panic!("question") };
-    assert_eq!(q.questions[0].options, ["A", "B"]);
+    let labels: Vec<&str> = q.questions[0].options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(labels, ["A", "B"]);
+    assert_eq!(q.questions[0].options[1].description.as_deref(), Some("b"));
     assert_eq!(q.answers, [Answer { question: "Which?".into(), answer: "B".into() }]);
 
     c.ingest(&MAIN, &call("a2", Some("u1"), "t2", "ExitPlanMode", &json!({"plan": "1. Do it"})));

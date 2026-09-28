@@ -15,6 +15,7 @@
 //! and their measured height, and only rows whose content moved are measured again.
 
 mod blocks;
+mod composing;
 mod entries;
 mod media;
 mod meters;
@@ -136,6 +137,21 @@ pub enum FaceEvent {
     },
     /// Show the system's picker; the files picked are attached as a drop on the face is.
     PickFiles,
+    /// Ask the worker for the paths under the agent's directory that an `@` query matches;
+    /// the answer comes on the conversation stream.
+    Search {
+        /// What follows the `@`.
+        query: String,
+    },
+    /// Open a file or folder of the agent's in a tile of its own: a mention's chip was
+    /// clicked.
+    OpenPath {
+        /// As the prompt names it: relative to the agent's directory, or absolute.
+        path: String,
+    },
+    /// Show the TUI and type `/rewind` there, for the person to pick the point in Claude
+    /// Code's own menu.
+    Rewind,
 }
 
 /// What an attachment is before it goes up.
@@ -212,6 +228,20 @@ pub struct ConversationView {
     /// The deny field is open on the card.
     deny_open: bool,
     approvals: Approvals,
+    /// The question held, as far as it is answered here.
+    answering: Option<super::question::Answering>,
+    /// Words of one's own for the question on show.
+    answer_field: gpui::Entity<InputState>,
+    /// A new question came: the next frame empties the answer field and, when the composer
+    /// had the keyboard, gives it to the field.
+    answer_reset: bool,
+    /// The composer's menu as the person left it.
+    menu: composing::MenuState,
+    menu_scroll: gpui::ScrollHandle,
+    /// The prompt recalled into the composer, by how far back it is, and its words.
+    recall: Option<(usize, String)>,
+    /// The worker is out of reach: its name, for the composer to say so.
+    away: Option<String>,
     /// This client's id on the worker, for telling its own answers from another's.
     me: Option<ClientId>,
     /// Diffs coloured once, by thread, entry id and revision.
@@ -319,21 +349,31 @@ impl ConversationView {
         });
         let deny =
             cx.new(|cx| InputState::new(window, cx).placeholder("Tell Claude what to do instead"));
-        let composing = cx.subscribe_in(&composer, window, |this, _input, event, window, cx| {
-            if let InputEvent::PressEnter { shift: false, .. } = event {
-                this.submit(window, cx);
-            }
-        });
+        let answer_field =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Or type an answer"));
+        let composing =
+            cx.subscribe_in(&composer, window, |this, _input, event, window, cx| match event {
+                InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
+                InputEvent::Change => this.composer_changed(cx),
+                _ => {}
+            });
         let denying = cx.subscribe_in(&deny, window, |this, _input, event, _window, cx| {
             if let InputEvent::PressEnter { .. } = event {
                 this.deny(cx);
             }
         });
+        let answering =
+            cx.subscribe_in(&answer_field, window, |this, _input, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.answer_go_on(window, cx),
+                InputEvent::Change => this.answer_typed(window, cx),
+                _ => {}
+            });
         // The face is drawn from a cached view: whatever changes one of its fields (a key, a
         // caret blink, a selection) draws the face afresh.
         let watching = [
             cx.observe(&composer, |_, _, cx| cx.notify()),
             cx.observe(&deny, |_, _, cx| cx.notify()),
+            cx.observe(&answer_field, |_, _, cx| cx.notify()),
         ];
         let list = ListState::new(0, ListAlignment::Top, px(OVERDRAW));
         list.set_follow_mode(FollowMode::Tail);
@@ -363,6 +403,13 @@ impl ConversationView {
             deny,
             deny_open: false,
             approvals: Approvals::default(),
+            answering: None,
+            answer_field,
+            answer_reset: false,
+            menu: composing::MenuState::default(),
+            menu_scroll: gpui::ScrollHandle::new(),
+            recall: None,
+            away: None,
             me: None,
             diffs: std::cell::RefCell::default(),
             pane: Pane::Conversation,
@@ -393,7 +440,7 @@ impl ConversationView {
             focus: cx.focus_handle(),
             #[cfg(test)]
             renders: 0,
-            _subscriptions: [composing, denying].into_iter().chain(watching).collect(),
+            _subscriptions: [composing, denying, answering].into_iter().chain(watching).collect(),
         }
     }
 
@@ -600,7 +647,7 @@ impl ConversationView {
             // A tail grew or a picture came: the rows that show them are measured again.
             self.rebuild(cx);
         }
-        if applied.meters || applied.current {
+        if applied.meters || applied.current || applied.menu {
             cx.notify();
         }
     }
@@ -619,10 +666,14 @@ impl ConversationView {
                 self.approvals.asked(*prompt);
                 self.deny_open = false;
                 self.ask_all = false;
+                self.start_answering();
             }
             PermissionEvent::Settled { ask, outcome, .. } => {
                 self.approvals.settled(ask, outcome, self.me);
                 self.deny_open = false;
+                if self.approvals.prompt().is_none() {
+                    self.answering = None;
+                }
                 if let Some(window) = window {
                     self.composer.update(cx, |c, cx| c.focus(window, cx));
                 }
@@ -640,8 +691,30 @@ impl ConversationView {
     /// release, and nothing streams until the next follow.
     pub fn unfollowed(&mut self, cx: &mut Context<Self>) {
         self.approvals.reset();
+        self.answering = None;
         self.deny_open = false;
         cx.notify();
+    }
+
+    /// Whether the session's worker is out of reach, by its name: the composer says so and
+    /// keeps the draft, and nothing is sent until it is back.
+    pub fn set_away(&mut self, away: Option<String>, cx: &mut Context<Self>) {
+        if self.away != away {
+            self.away = away;
+            cx.notify();
+        }
+    }
+
+    /// The worker the face's session runs on is out of reach, by its name.
+    #[must_use]
+    pub fn away(&self) -> Option<&str> {
+        self.away.as_deref()
+    }
+
+    /// The question held, as far as it is answered here.
+    #[must_use]
+    pub const fn answering(&self) -> Option<&super::question::Answering> {
+        self.answering.as_ref()
     }
 
     /// This client's id on the session's worker.
@@ -1170,11 +1243,16 @@ impl ConversationView {
     /// Send the composer's text, led by the paths of what was attached. Not while an attachment
     /// is still on its way up: the message would go without it.
     pub fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.draft_empty(cx) || self.attachments.uploading() || self.approvals.prompt().is_some()
+        if self.draft_empty(cx)
+            || self.attachments.uploading()
+            || self.approvals.prompt().is_some()
+            || self.away.is_some()
         {
             return;
         }
         let (text, paths) = (self.draft(cx), self.attachments.paths());
+        self.recall = None;
+        self.menu = composing::MenuState::default();
         self.attachments.clear();
         self.thumbnails.clear();
         self.composer.update(cx, |c, cx| c.set_value("", window, cx));
@@ -1418,6 +1496,7 @@ impl Render for ConversationView {
         {
             self.renders = self.renders.saturating_add(1);
         }
+        self.settle_focus(window, cx);
         let theme = self.theme.clone();
         let s = theme.surfaces;
         let rows = self.list_region(window, cx);
@@ -1450,8 +1529,25 @@ impl Render for ConversationView {
                 } else if this.find.as_ref().is_some_and(|f| f.field.focus_handle(cx).is_focused(window)) {
                     this.close_find(window, cx);
                     cx.stop_propagation();
+                } else if this.composer_focused(window, cx) && this.menu_close(cx) {
+                    cx.stop_propagation();
                 } else if this.turn_running() && this.approvals.prompt().is_none() {
                     this.interrupt(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            // The composer's menu, prompt recall and a question's options take the arrows,
+            // Enter and Tab before the field does.
+            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveUp, window, cx| this.arrow(-1, window, cx)))
+            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveDown, window, cx| this.arrow(1, window, cx)))
+            .capture_action(cx.listener(|this, enter: &gpui_kit::component::input::Enter, window, cx| {
+                // With the worker away, Enter leaves the draft as it is: nothing goes.
+                if !enter.shift && !enter.secondary && this.composer_focused(window, cx) && (this.away.is_some() || this.menu_enter(window, cx)) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::IndentInline, window, cx| {
+                if this.composer_focused(window, cx) && this.menu_enter(window, cx) {
                     cx.stop_propagation();
                 }
             }))

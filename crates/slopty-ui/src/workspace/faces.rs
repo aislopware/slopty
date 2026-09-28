@@ -21,7 +21,7 @@ use slopty_proto::terminal::TermRequest;
 use super::WorkspaceView;
 use super::actions::ToggleConversation;
 use crate::conversation::composer::{self, Step};
-use crate::conversation::{ConversationView, FaceEvent};
+use crate::conversation::{ConversationView, FaceEvent, menu};
 use crate::icons::Status;
 
 /// What the workspace keeps about faces.
@@ -178,6 +178,12 @@ impl WorkspaceView {
                 self.pending_focus = Some(session);
             }
             view.update(cx, |v, cx| v.set_shown(shown, cx));
+            let away = self
+                .worker_of_session(session)
+                .and_then(|key| self.workers.get(&key))
+                .filter(|w| w.link.is_none())
+                .map(|w| w.name.clone());
+            view.update(cx, |v, cx| v.set_away(away, cx));
         }
         // Faces of sessions that are gone go with them.
         let live: HashSet<SessionId> = self.terminals.keys().copied().collect();
@@ -229,7 +235,31 @@ impl WorkspaceView {
                     self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
                 }
             }
+            FaceEvent::Search { query } => {
+                let search = ConversationRequest::Search { session, query, limit: menu::MENTIONS };
+                self.send_session(session, ClientMsg::Conversation(search));
+            }
+            FaceEvent::OpenPath { path } => self.open_mention(session, &path, cx),
+            FaceEvent::Rewind => {
+                // The person's click, typed as they would type it: Claude Code's own menu picks
+                // the point, never the face.
+                self.show_face(session, false, cx);
+                Self::type_into(session, composer::submission("/rewind", &[]), cx);
+            }
         }
+    }
+
+    /// Open what a prompt's `@` mention names on the session's worker: a path relative to the
+    /// agent's directory, as Claude Code reads it, or one spelled from the root.
+    fn open_mention(&mut self, session: SessionId, path: &str, cx: &mut Context<Self>) {
+        let Some(key) = self.worker_of_session(session) else { return };
+        let path = if path.starts_with('/') || path.starts_with('~') {
+            path.to_owned()
+        } else {
+            let Some(cwd) = self.summary(session).and_then(|s| s.cwd.clone()) else { return };
+            format!("{}/{path}", cwd.trim_end_matches('/'))
+        };
+        self.open_path_on(key, &path, None, cx);
     }
 
     /// Type `steps` into `session`'s terminal the way a person at its view would: a message as

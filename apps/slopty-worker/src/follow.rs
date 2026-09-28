@@ -20,6 +20,12 @@
 //! send, every file is read on the blocking pool, and the stream's writes wait on nobody but
 //! this client.
 //!
+//! **The composer's menus.** Once the conversation is current, a follower sends the slash
+//! commands the agent takes (`slopty_agent::commands`), read from the agent's directory every
+//! few seconds and sent again when they changed. It answers an `@` query from a walk of that
+//! directory (`slopty_worker::file::mention`), kept until a hook says the agent did something
+//! or it grows stale.
+//!
 //! **Held prompts.** The relay's `CtlRequest::Permission`, once the control socket has taken
 //! its hook in, comes to [`ask`]. The daemon's
 //! [`Follows::holds`] (`slopty_worker::conversation::Holds`) decides: undecided at once when
@@ -30,7 +36,7 @@
 //! **Orchestration** follows too, as `ORCHESTRATION` ([`Orchestrated`]): the sessions whose
 //! conversation a verb read or whose agent a verb started, until they end.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -42,13 +48,14 @@ use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::codec::CodecError;
 use slopty_proto::conversation::{
     Blob, Cap, Change, Clipped, ConversationEvent, EXPAND_CHARS, Meters, Part, PermissionEvent,
-    PermissionPrompt, Settled, TextRef, ThreadId, Verdict,
+    PermissionPrompt, Settled, SlashCommand, TextRef, ThreadId, Verdict,
 };
 use slopty_proto::ctl::Decision;
 use slopty_worker::clip::Link;
 use slopty_worker::conversation::{
     Board, Held, Holds, ORCHESTRATION, Read, Reader, Seen, SharedReader,
 };
+use slopty_worker::file::mention::Index;
 use slopty_worker::orchestrate::{Conversations, Sources};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -65,6 +72,17 @@ const FRAME_CHANGES: usize = 64;
 /// How much sooner than the relay gives up the worker answers, so the answer reaches it.
 const HOLD_MARGIN: Duration = Duration::from_secs(1);
 
+/// How often a follower looks at the agent's custom commands again: a command file the person
+/// writes shows in the menu within this.
+const COMMANDS_EVERY: Duration = Duration::from_secs(5);
+
+/// How long a walk of the agent's directory answers `@` mentions with no hook in between: a
+/// file made outside the agent shows within this.
+const MENTIONS_FRESH: Duration = Duration::from_secs(30);
+
+/// Most paths one `@` query is answered with.
+const MENTIONS_MAX: u32 = 200;
+
 /// Who follows what, the prompts held for them, and what the hooks tell the followers.
 #[derive(Debug, Default)]
 pub struct Follows {
@@ -80,8 +98,9 @@ pub struct Follows {
 pub struct Pending {
     /// As shown to the followers.
     pub prompt: PermissionPrompt,
-    /// Claude Code's `permission_suggestions`, handed back on "allow always".
-    pub suggestions: Option<serde_json::Value>,
+    /// The hook as it asked: its suggestions go back on "allow always", its tool's input with
+    /// an answer or a plan's approval.
+    pub hook: Hook,
     /// Where the decision goes: the relay's connection.
     pub reply: oneshot::Sender<Decision>,
 }
@@ -96,6 +115,31 @@ pub enum Command {
         /// Where it is.
         reference: TextRef,
     },
+    /// Answer an `@` mention's query from the agent's directory.
+    Search {
+        /// What was typed after the `@`.
+        query: String,
+        /// Paths wanted at most.
+        limit: u32,
+    },
+}
+
+/// A follower's walk of the agent's directory for `@` mentions, kept while nothing says the
+/// tree moved.
+struct Mentions {
+    root: PathBuf,
+    /// The session's hook count when it was walked: a hook is the agent doing something,
+    /// which may have added or removed a file.
+    hooks: u64,
+    at: Instant,
+    index: Arc<Index>,
+}
+
+impl Mentions {
+    /// Whether this walk still answers for `root` with `hooks` heard.
+    fn fresh(&self, root: &Path, hooks: u64) -> bool {
+        self.root == root && self.hooks == hooks && self.at.elapsed() < MENTIONS_FRESH
+    }
 }
 
 /// The decision the relay waiting on `session`'s permission prompt `hook`, for at most
@@ -151,7 +195,7 @@ fn hold(
     let mut follows = daemon.follows.lock();
     let id = follows.holds.ask(session, |id| Pending {
         prompt: permission::prompt(session, id, hook, asked_ms, until_ms),
-        suggestions: hook.permission_suggestions.clone(),
+        hook: hook.clone(),
         reply,
     })?;
     follows.holds.get(id).map(|held| held.reply.prompt.clone())
@@ -173,7 +217,7 @@ pub fn answer(
         return false;
     };
     tracing::info!(%session, ask, %by, ?verdict, "permission answered");
-    let decision = permission::decision(&verdict, held.reply.suggestions.as_ref());
+    let decision = permission::decision(&verdict, &held.reply.hook);
     let _gone = held.reply.reply.send(decision);
     let outcome = Settled::Answered { verdict, by };
     let _sent = daemon.events.send(WorkerMsg::Permission(PermissionEvent::Settled {
@@ -289,6 +333,9 @@ async fn follow(
     let mut current = false;
     let mut meters_sent: Option<Meters> = None;
     let mut overlay = Overlay::default();
+    let mut commands_sent: Option<Vec<SlashCommand>> = None;
+    let mut commands_read: Option<Instant> = None;
+    let mut mentions: Option<Mentions> = None;
     // Live blocks the mod stops reporting expire on this tick; the reader has its own.
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -325,6 +372,14 @@ async fn follow(
             }
             meters_sent = meters;
         }
+        if current && commands_read.is_none_or(|at| at.elapsed() >= COMMANDS_EVERY) {
+            commands_read = Some(Instant::now());
+            let listed = slash_commands(daemon, session).await;
+            if commands_sent.as_ref() != Some(&listed) {
+                out.send(&ConversationEvent::Commands(listed.clone())).await?;
+                commands_sent = Some(listed);
+            }
+        }
         tokio::select! {
             _ = tick.tick() => {}
             changed = seen.changed() => {
@@ -352,9 +407,65 @@ async fn follow(
                     };
                     out.send(&event).await?;
                 }
+                Some(Command::Search { query, limit }) => {
+                    let hooks = seen.borrow().hooks;
+                    let paths = search(daemon, session, &mut mentions, hooks, &query, limit).await;
+                    out.send(&ConversationEvent::Found { query, paths }).await?;
+                }
             },
         }
     }
+}
+
+/// Where the agent in `session` works: its own process's directory (the terminal's foreground
+/// process is the agent), else the shell's last OSC 7.
+async fn agent_dir(daemon: &Daemon, session: SessionId) -> Option<PathBuf> {
+    let handle = daemon.worker.get(session).ok()?;
+    let foreground = handle.probe().await.ok().and_then(|p| p.foreground).and_then(|f| f.cwd);
+    if foreground.is_some() {
+        return foreground;
+    }
+    handle.snapshot().await.ok()?.cwd.map(PathBuf::from)
+}
+
+/// The slash commands the agent in `session` takes, read off the runtime; Claude Code's own
+/// alone when its directory is unknown.
+async fn slash_commands(daemon: &Daemon, session: SessionId) -> Vec<SlashCommand> {
+    let Some(dir) = agent_dir(daemon, session).await else {
+        return slopty_agent::commands::built_in().collect();
+    };
+    let home = slopty_platform::dirs::home();
+    tokio::task::spawn_blocking(move || slopty_agent::commands::all(&home, &dir))
+        .await
+        .unwrap_or_else(|_| slopty_agent::commands::built_in().collect())
+}
+
+/// The paths an `@` query matches under the agent's directory, from the follower's walk
+/// while it is fresh, else from a new one; nothing when the directory is unknown.
+async fn search(
+    daemon: &Daemon,
+    session: SessionId,
+    mentions: &mut Option<Mentions>,
+    hooks: u64,
+    query: &str,
+    limit: u32,
+) -> Vec<String> {
+    let Some(root) = agent_dir(daemon, session).await else { return Vec::new() };
+    let fresh = mentions.as_ref().filter(|m| m.fresh(&root, hooks)).map(|m| Arc::clone(&m.index));
+    let index = if let Some(index) = fresh {
+        index
+    } else {
+        let dir = root.clone();
+        let Ok(index) = tokio::task::spawn_blocking(move || Index::build(&dir)).await else {
+            return Vec::new();
+        };
+        let index = Arc::new(index);
+        tracing::debug!(%session, paths = index.len(), "walked the agent's directory");
+        *mentions = Some(Mentions { root, hooks, at: Instant::now(), index: Arc::clone(&index) });
+        index
+    };
+    let (query, limit) = (query.to_owned(), limit.min(MENTIONS_MAX) as usize);
+    tokio::task::spawn_blocking(move || index.matching(&query, limit)).await.unwrap_or_default()
 }
 
 /// The reader of `session`'s transcripts that its followers share; the first follower's call

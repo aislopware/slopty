@@ -1045,6 +1045,11 @@ impl Peer<'_> {
                     }
                 }
             }
+            ConversationRequest::Search { session, query, limit } => {
+                if let Some(task) = self.follows.get(&session) {
+                    let _gone = task.send(crate::follow::Command::Search { query, limit });
+                }
+            }
         }
     }
 

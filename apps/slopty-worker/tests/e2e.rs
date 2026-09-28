@@ -4339,7 +4339,9 @@ mod tests {
                 ConversationEvent::Meters(meters) => self.meters = Some(meters),
                 ConversationEvent::Expanded { .. }
                 | ConversationEvent::Output(_)
-                | ConversationEvent::Image { .. } => {}
+                | ConversationEvent::Image { .. }
+                | ConversationEvent::Commands(_)
+                | ConversationEvent::Found { .. } => {}
                 ConversationEvent::Live(live) => {
                     use slopty_proto::conversation::Live;
                     for live in live {

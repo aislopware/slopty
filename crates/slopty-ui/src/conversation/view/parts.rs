@@ -111,6 +111,30 @@ impl ConversationView {
         )
     }
 
+    /// While the worker is out of reach: that it is, and that the draft waits for it.
+    fn away_line(&self) -> Option<AnyElement> {
+        let name = self.away.as_deref()?;
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let text = SharedString::from(format!("{name} is unreachable \u{b7} your draft is kept"));
+        Some(
+            div()
+                .id("composer-away")
+                .debug_selector(|| "composer-away".to_owned())
+                .role(Role::Status)
+                .aria_label(text.clone())
+                .flex()
+                .items_center()
+                .gap(self.z(theme.spacing.sm))
+                .px(self.z(theme.spacing.sm))
+                .text_size(self.z(theme.typography.small()))
+                .text_color(hsla(s.text_secondary))
+                .child(self.icon(IconName::WifiOff, s.warn))
+                .child(div().flex_1().min_w_0().child(text))
+                .into_any_element(),
+        )
+    }
+
     /// Everything under the list, on the reading column: how the last prompt ended, and the
     /// composer's floating shell, which holds the background work and the task list over the
     /// field (or over a permission prompt while one is asked).
@@ -123,8 +147,14 @@ impl ConversationView {
         let tasks = self.tasks_card(cx);
         let tray = self.tray(cx);
         let settled = self.settled_line(cx);
+        let away = self.away_line();
         let asking = self.approvals.prompt().is_some();
-        let inside = if asking { self.approval(cx) } else { self.composer_box(cx) };
+        let inside = match (asking, self.answering.is_some()) {
+            (true, true) => self.question_card(cx),
+            (true, false) => self.approval(cx),
+            (false, _) => self.composer_box(cx),
+        };
+        let menu = (!asking).then(|| self.menu_section(cx)).flatten();
         // The shell stays; what it holds cross-fades between the composer and a prompt, on the
         // sheet's curve asked in, on the settle's answered. Reduce Motion swaps at once.
         let inside = match self.morph {
@@ -144,7 +174,8 @@ impl ConversationView {
         // The work in the background and the task list are the shell's top sections, over the
         // field, a hairline apart, as T3's composer holds pending work: one surface, not three.
         let s = self.theme.surfaces;
-        let sections = tray.into_iter().chain(tasks).map(|section| {
+        // The menu is the section nearest the field it writes into.
+        let sections = tray.into_iter().chain(tasks).chain(menu).map(|section| {
             div()
                 .border_b_1()
                 .border_color(hsla(s.border_subtle))
@@ -178,6 +209,7 @@ impl ConversationView {
                         .flex_col()
                         .gap(z(spacing.sm))
                         .children(settled)
+                        .children(away)
                         .child(shell),
                 )
                 .into_any_element(),
@@ -223,19 +255,23 @@ impl ConversationView {
             .held
             .filter(|(ask, _)| *ask == prompt.ask)
             .and_then(|(_, since)| wait_left(&prompt, since, WallMs::now()));
-        let allow = kit::button(&theme, "allow-once", "Allow once", ButtonKind::Primary)
+        // A plan is approved or kept: never allowed for good, and kept with words for Claude.
+        let plan = self.plan_asked();
+        let (allow_label, deny_label) =
+            if plan { ("Approve plan", "Keep planning") } else { ("Allow once", "Deny") };
+        let allow = kit::button(&theme, "allow-once", allow_label, ButtonKind::Primary)
             .when(busy, |el| el.opacity(slopty_theme::alpha::PRESSED))
             .on_click(cx.listener(|this, _ev, _w, cx| this.answer(Verdict::Allow, cx)));
-        let always = (!prompt.suggestions.is_empty()).then(|| {
+        let always = (!prompt.suggestions.is_empty() && !plan).then(|| {
             kit::button(&theme, "allow-always", "Always allow", ButtonKind::Secondary)
                 .when(busy, |el| el.opacity(slopty_theme::alpha::PRESSED))
                 .on_click(cx.listener(|this, _ev, _w, cx| this.answer(Verdict::AllowAlways, cx)))
         });
         let deny = if self.deny_open {
-            kit::button(&theme, "deny-send", "Deny", ButtonKind::Secondary)
+            kit::button(&theme, "deny-send", deny_label, ButtonKind::Secondary)
                 .on_click(cx.listener(|this, _ev, _w, cx| this.deny(cx)))
         } else {
-            kit::button(&theme, "deny", "Deny", ButtonKind::Ghost).on_click(cx.listener(
+            kit::button(&theme, "deny", deny_label, ButtonKind::Ghost).on_click(cx.listener(
                 |this, _ev, window, cx| {
                     this.deny_open = true;
                     this.deny.update(cx, |d, cx| d.focus(window, cx));
@@ -596,8 +632,9 @@ impl ConversationView {
         let theme = self.theme.clone();
         let s = theme.surfaces;
         let empty = self.draft_empty(cx);
-        let stop = self.turn_running() && empty && self.attachments().is_empty();
-        let lit = stop || (!empty && !self.attachments.uploading());
+        let away = self.away.is_some();
+        let stop = self.turn_running() && empty && self.attachments().is_empty() && !away;
+        let lit = stop || (!empty && !self.attachments.uploading() && !away);
         let (icon, label) =
             if stop { (IconName::Square, "Stop") } else { (IconName::ArrowUp, "Send") };
         let send = div()
@@ -665,18 +702,12 @@ impl ConversationView {
             .children(model.map(|model| {
                 div()
                     .flex()
+                    .items_center()
                     .gap(self.z(theme.spacing.xs))
                     .min_w_0()
                     .text_color(hsla(s.text_muted))
                     .child(kit::separator(&self.theme))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(SharedString::from(model)),
-                    )
+                    .child(self.model_button(model, cx))
             }));
         let attach = kit::icon_button_at(
             &theme,
@@ -694,15 +725,19 @@ impl ConversationView {
             .gap(self.z(theme.spacing.sm))
             .children(self.attachment_chips(cx))
             .child(
-                div().text_size(self.z(theme.typography.prose())).child(
-                    Textarea::new(&self.composer)
-                        .appearance(false)
-                        .bordered(false)
-                        .aria_label("Message")
-                        .on_paste(move |item, _window, cx| {
-                            face.update(cx, |v, cx| v.paste_attachment(item, cx)).unwrap_or(false)
-                        }),
-                ),
+                div()
+                    .text_size(self.z(theme.typography.prose()))
+                    .when(away, |el| el.opacity(slopty_theme::alpha::PRESSED))
+                    .child(
+                        Textarea::new(&self.composer)
+                            .appearance(false)
+                            .bordered(false)
+                            .aria_label("Message")
+                            .on_paste(move |item, _window, cx| {
+                                face.update(cx, |v, cx| v.paste_attachment(item, cx))
+                                    .unwrap_or(false)
+                            }),
+                    ),
             )
             .child(
                 div()

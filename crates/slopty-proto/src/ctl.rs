@@ -165,7 +165,12 @@ pub enum Decision {
     /// No decision: Claude Code shows its own dialog.
     Pass,
     /// Allow this call.
-    Allow,
+    Allow {
+        /// The call's input to use instead of the model's: `AskUserQuestion`'s with the
+        /// person's answers, or `ExitPlanMode`'s own. Claude Code takes an allow for a tool that
+        /// asks the person only with an input, and shows its own dialog otherwise.
+        updated_input: Option<Value>,
+    },
     /// Allow this call and apply these permission updates, normally what the request's
     /// `permission_suggestions` offered (an allow rule, a mode, a directory).
     AllowAlways {

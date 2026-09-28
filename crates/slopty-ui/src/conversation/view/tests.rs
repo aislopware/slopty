@@ -13,6 +13,8 @@ use super::ConversationView;
 use crate::conversation::fixtures;
 use crate::conversation::rows::{self, Density, Row};
 
+mod composing;
+
 /// A face 800 × 400 points over the recorded session `name`, its composer focused.
 fn face<'a>(
     cx: &'a mut TestAppContext,
