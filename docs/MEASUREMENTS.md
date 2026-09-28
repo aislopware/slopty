@@ -7209,3 +7209,63 @@ for r in 1 2 3; do for a in ui0 ui1; do for t in measure_a_frame_of_motion_besid
 ```
 
 Log: `target/logs/ui-ab.log`.
+
+## 2026-09-28 — repaired loss holds the rate: capture and input to the glass, before and after
+
+The same measurement as "capture to the glass and input to the glass, from drawn pictures", run
+before and after the rate controller stopped reading loss that parity repairs as overuse
+(`docs/decisions/video.md`, "Repaired loss holds the rate"). Each case is one binary built from
+the tree and copied off the repository volume, run three times, 20 s after a 1 s warm-up, with
+the loopback case and the tailnet-shaped case (5 ms each way, 3 % i.i.d. datagram loss) in each
+run. The rate controller gets no path sample here, so no congestion window caps it.
+
+```sh
+cargo test -p slopty-worker --lib --no-run      # target/debug/deps/slopty_worker-<hash>
+mkdir -p /tmp/slopty-glass/after && cp target/debug/deps/slopty_worker-<hash> /tmp/slopty-glass/after/slopty_worker
+cd /tmp/slopty-glass/after && nice -n 10 ./slopty_worker --ignored --exact \
+  screen::synthetic::tests::capture_and_input_to_glass --nocapture
+```
+
+"Before" is the binary built just ahead of the change, rerun after it at the same load as the
+"after" runs: load average 10 to 14 before, 9 to 19 after. A first set of before-runs at load 42
+to 50 read the same on the shaped link, input sent → painted at 57–60 ms p50. Each cell is
+p50 / p95 / max in ms for runs 1, 2 and 3.
+
+| loopback | before | after |
+| --- | --- | --- |
+| capture → painted | 11.9 / 15.2 / 87.5, 12.3 / 23.6 / 36.9, 12.4 / 15.1 / 28.0 | 12.7 / 15.1 / 26.8, 11.5 / 15.0 / 24.4, 11.4 / 14.7 / 22.6 |
+| input sent → painted | 21.5 / 37.6 / 58.6, 22.5 / 39.2 / 55.3, 21.6 / 36.9 / 40.3 | 21.9 / 37.3 / 40.2, 21.3 / 37.3 / 43.3, 21.3 / 37.7 / 51.9 |
+| input at the worker → the capture showing it | 8.0 / 22.5 / 27.8, 8.0 / 24.9 / 26.8, 8.5 / 23.2 / 28.8 | 8.3 / 22.9 / 27.1, 7.5 / 23.9 / 26.3, 8.3 / 25.2 / 29.3 |
+| frames encoded / s | 59.6, 60.0, 60.0 | 60.0, 60.0, 60.0 |
+| rate at the end | 30.0 Mbit/s (the ceiling) in each | 30.0 Mbit/s in each |
+
+| tailnet-shaped: 5 ms each way, 3 % loss | before | after |
+| --- | --- | --- |
+| capture → painted | 25.1 / 28.6 / 120.5, 25.9 / 28.1 / 39.4, 25.8 / 27.9 / 39.8 | 25.3 / 28.3 / 40.7, 25.1 / 28.3 / 36.5, 25.1 / 27.8 / 39.8 |
+| **input sent → painted** | 54.4 / 96.2 / 147.1, 54.1 / 95.5 / 100.6, 56.1 / 97.1 / 104.5 | **40.1 / 55.9 / 65.2, 40.3 / 53.9 / 57.8, 39.8 / 55.6 / 60.0** |
+| **input at the worker → the capture showing it** | 22.0 / 63.0 / 68.2, 21.4 / 61.9 / 70.2, 24.1 / 63.9 / 68.7 | **8.4 / 23.2 / 28.6, 8.4 / 21.5 / 26.7, 8.2 / 24.0 / 27.6** |
+| frames encoded / s | 24.5, 26.4, 25.0 | 60.0, 60.0, 60.0 |
+| rate at the end | 1.0 Mbit/s (the floor) in each | 15.2, 15.2, 21.6 Mbit/s |
+| frames lost / repaired by parity or NACK / NACKs | 0 / 57, 54, 55 / 3, 2, 5 | 0 / 94, 99, 87 / 10, 7, 8 |
+
+Before, the first decision of every shaped run was a cut (`9.0(Cut)`), and the stream reached
+the 1 Mbit/s floor within about 8 s and stayed there, cutting again every cooldown. After, no
+shaped run cut once. The verdicts were `Steady` from the 12 Mbit/s start, with a `Grow` in the
+odd window that read under 0.5 % loss (two to five per run; why a window of 3 % i.i.d. loss
+reads that low was not looked into). No frame was lost in any run, before or after. Parity and
+NACK repaired every frame the loss hit, and at 60 fps there are more frames to hit.
+
+The hop that moved is input at the worker → the capture showing it: 21–24 ms p50 before,
+8.2–8.4 after, which is the loopback figure. The cadence stays at 60, so a click waits for the
+next beat the gate lets through and not for one of every three. Input sent → painted falls by
+the same 14–16 ms at the median and by 40 ms at p95. What is left over loopback, about 18 ms, is
+the 10 ms round trip plus the paint timer's phase, which a run holds at 10 ms on the shaped
+link against 3–4 on loopback. Capture → painted did not move, because the cut never touched
+the encode: it only thinned the cadence. Loopback is within run-to-run noise of before, and its
+controller path is the same one (clean windows grow).
+
+What this leaves out: the shaped link has no QUIC, and so no congestion controller of its own.
+Over a real connection with 3 % random loss, BBRv3 lowers its long-term inflight bound when a
+probing round loses more than 2 %, and the controller's cap at 90 % of `cwnd × 8 / rtt` then
+bounds the target however the policy reads the loss. How far that holds a stream down on such
+a path needs the same run over QUIC.

@@ -12,12 +12,22 @@
 //!   queue and hold figures of the next [`SETTLE_REPORTS`] reports are not counted, so the burst
 //!   the release produces is not judged either. Loss in those reports still counts: a stall
 //!   followed by real loss cuts once.
-//! * **Overuse** — datagram loss above 2 %, the client's present queue ≥ 3 frames, or its hold p95
-//!   above 60 ms (frames waiting for their missing tail): cut to 75 % and hold for [`COOLDOWN`]
+//! * **Overuse** — the client's present queue ≥ 3 frames or its hold p95 above 60 ms (frames
+//!   waiting for their missing tail), more than 2 % of the window's frames lost after parity and
+//!   NACK had their turn, or datagram loss above 10 %: cut to 75 % and hold for [`COOLDOWN`]
 //!   decisions.
-//! * **Clean** — loss ≤ 0.5 %, queue ≤ 1, hold p95 ≤ 25 ms: grow by an eighth (at least
-//!   [`STEP_MIN_BPS`]) towards the ceiling.
+//! * **Clean** — datagram loss ≤ 0.5 %, no frame lost, queue ≤ 1, hold p95 ≤ 25 ms: grow by an
+//!   eighth (at least [`STEP_MIN_BPS`]) towards the ceiling.
 //! * Otherwise stay.
+//!
+//! Datagram loss between the clean and the heavy line holds rather than cuts. Parity is sized
+//! from that same loss (`Redundancy`) and repairs it without a round trip, so on a path that
+//! drops at random (Wi-Fi, a tailnet hop) the loss says nothing about the rate: 3 % of i.i.d.
+//! loss cut a stream to the floor and halved its cadence for no frame saved (MEASUREMENTS.md,
+//! "capture to the glass"). What congestion does that random loss does not is queue, hold
+//! frames, outrun the parity, or drop heavily, and each of those still cuts. This is GCC's
+//! hold band between 2 and 10 % with the lower line moved to the loss the viewer sees
+//! (`docs/decisions/video.md`, "Repaired loss holds the rate").
 //!
 //! The policy's value (`wanted`) and the target the encoder gets are two numbers: the target is
 //! `wanted` capped at 90 % of the selected QUIC path's `cwnd × 8 / rtt`, in every state
@@ -55,7 +65,10 @@ pub const START_BPS: u32 = 12_000_000;
 /// Smallest growth step.
 pub const STEP_MIN_BPS: u32 = 500_000;
 
-const OVERUSE_LOSS_PERMILLE: u32 = 20;
+/// GCC's decrease line. Past it parity costs a quarter of the rate and more, and a smaller
+/// picture buys more than further parity does.
+const HEAVY_LOSS_PERMILLE: u32 = 100;
+const UNREPAIRED_LOSS_PERMILLE: u32 = 20;
 const CLEAN_LOSS_PERMILLE: u32 = 5;
 const OVERUSE_QUEUE: u8 = 3;
 const CLEAN_QUEUE: u8 = 1;
@@ -248,6 +261,10 @@ pub struct Window {
     pub lost: u32,
     /// Datagrams the worker sent.
     pub sent: u32,
+    /// Frames the client delivered, whole or repaired.
+    pub frames_ok: u32,
+    /// Frames the client gave up on: what parity and NACK could not repair.
+    pub frames_lost: u32,
     /// Deepest present queue reported.
     pub queue_max: u8,
     /// Longest hold p95 reported.
@@ -266,6 +283,8 @@ impl Window {
     pub fn add(&mut self, report: &ReceiverReport, datagrams_sent: u32, settling: bool) {
         self.lost = self.lost.saturating_add(report.datagrams_lost);
         self.sent = self.sent.saturating_add(datagrams_sent);
+        self.frames_ok = self.frames_ok.saturating_add(report.frames_ok);
+        self.frames_lost = self.frames_lost.saturating_add(report.frames_lost);
         self.stalled_ms = self.stalled_ms.saturating_add(u32::from(report.stalled_ms));
         self.stalls = self.stalls.saturating_add(u32::from(report.stalls));
         if !settling {
@@ -304,6 +323,16 @@ impl Window {
             None => 0,
         }
     }
+
+    /// Frames lost after repair per thousand the client resolved.
+    #[must_use]
+    pub const fn unrepaired_permille(&self) -> u32 {
+        let resolved = self.frames_ok.saturating_add(self.frames_lost);
+        match self.frames_lost.saturating_mul(1000).checked_div(resolved) {
+            Some(permille) => permille,
+            None => 0,
+        }
+    }
 }
 
 /// The policy: what one window asks of the target. `cooling` is whether a recent cut still
@@ -315,11 +344,14 @@ pub const fn judge(window: &Window, cooling: bool) -> RateVerdict {
     }
     let loss = window.loss_permille();
     let hold_ms = window.hold_max.as_millis();
-    let overuse = loss > OVERUSE_LOSS_PERMILLE
+    let overuse = loss > HEAVY_LOSS_PERMILLE
+        || window.unrepaired_permille() > UNREPAIRED_LOSS_PERMILLE
         || window.queue_max >= OVERUSE_QUEUE
         || hold_ms > OVERUSE_HOLD_MS;
-    let clean =
-        loss <= CLEAN_LOSS_PERMILLE && window.queue_max <= CLEAN_QUEUE && hold_ms <= CLEAN_HOLD_MS;
+    let clean = loss <= CLEAN_LOSS_PERMILLE
+        && window.frames_lost == 0
+        && window.queue_max <= CLEAN_QUEUE
+        && hold_ms <= CLEAN_HOLD_MS;
     if overuse {
         RateVerdict::Cut
     } else if clean && !cooling {
@@ -454,7 +486,8 @@ mod tests {
     use super::*;
 
     const CLEAN: ReceiverReport = ReceiverReport {
-        frames_ok: 0,
+        // A 60 fps stream at the 50 ms report cadence.
+        frames_ok: 3,
         frames_fec: 0,
         frames_lost: 0,
         datagrams_lost: 0,
@@ -469,7 +502,11 @@ mod tests {
         stalled_ms: 0,
         stalls: 0,
     };
-    const LOSSY: ReceiverReport = ReceiverReport { datagrams_lost: 30, ..CLEAN };
+    /// Loss that outran the parity: a quarter of the frames never arrived whole.
+    const LOSSY: ReceiverReport =
+        ReceiverReport { datagrams_lost: 30, frames_ok: 3, frames_lost: 1, ..CLEAN };
+    /// 3 % of the datagrams dropped at random, and every frame they hit repaired by parity.
+    const REPAIRED: ReceiverReport = ReceiverReport { datagrams_lost: 9, frames_fec: 1, ..CLEAN };
     /// A stall released in this report, and the frames given up during it count as lost.
     const STALL: ReceiverReport =
         ReceiverReport { datagrams_lost: 30, stalled_ms: 180, stalls: 1, ..CLEAN };
@@ -509,7 +546,7 @@ mod tests {
         let clean = Window { sent: 300, ..Window::default() };
         assert_eq!(judge(&clean, false), RateVerdict::Grow);
         assert_eq!(judge(&clean, true), RateVerdict::Steady, "cooling: no growth");
-        let lossy = Window { lost: 30, sent: 300, ..Window::default() };
+        let lossy = Window { lost: 40, sent: 300, ..Window::default() };
         assert_eq!(judge(&lossy, false), RateVerdict::Cut);
         assert_eq!(judge(&Window { stalled_ms: 120, ..lossy }, false), RateVerdict::Stall);
         assert_eq!(judge(&Window { stalls: 1, ..lossy }, true), RateVerdict::Stall);
@@ -595,8 +632,9 @@ mod tests {
             assert_eq!(c.on_report(&CLEAN, 300, None), None);
         }
         assert_eq!(c.on_report(&STALL, 300, None).map(|d| d.verdict), Some(RateVerdict::Stall));
-        // 100 of the window's 3000 datagrams: over the 2 % overuse line on its own.
-        let burst_loss = ReceiverReport { datagrams_lost: 100, ..CLEAN };
+        // Two of the window's 30 frames lost for good: over the 2 % line on its own.
+        let burst_loss =
+            ReceiverReport { datagrams_lost: 100, frames_ok: 1, frames_lost: 2, ..CLEAN };
         assert_eq!(c.on_report(&burst_loss, 300, None), None);
         for _ in 0..8 {
             assert_eq!(c.on_report(&CLEAN, 300, None), None);
@@ -629,16 +667,78 @@ mod tests {
     /// The overuse lines are exclusive: loss or a hold of exactly the figure is not yet a cut.
     #[test]
     fn the_overuse_lines_are_exclusive() {
-        let at = |lost: u32, hold_ms: u64| Window {
+        let at = |lost: u32, frames_lost: u32, hold_ms: u64| Window {
             lost,
             sent: 1000,
+            frames_ok: 1000_u32.saturating_sub(frames_lost),
+            frames_lost,
             hold_max: Duration::from_millis(hold_ms),
             ..Window::default()
         };
-        assert_ne!(judge(&at(OVERUSE_LOSS_PERMILLE, 0), false), RateVerdict::Cut);
-        assert_eq!(judge(&at(OVERUSE_LOSS_PERMILLE + 1, 0), false), RateVerdict::Cut);
-        assert_ne!(judge(&at(0, OVERUSE_HOLD_MS), false), RateVerdict::Cut);
-        assert_eq!(judge(&at(0, OVERUSE_HOLD_MS + 1), false), RateVerdict::Cut);
+        assert_ne!(judge(&at(HEAVY_LOSS_PERMILLE, 0, 0), false), RateVerdict::Cut);
+        assert_eq!(judge(&at(HEAVY_LOSS_PERMILLE + 1, 0, 0), false), RateVerdict::Cut);
+        assert_ne!(judge(&at(0, UNREPAIRED_LOSS_PERMILLE, 0), false), RateVerdict::Cut);
+        assert_eq!(judge(&at(0, UNREPAIRED_LOSS_PERMILLE + 1, 0), false), RateVerdict::Cut);
+        assert_ne!(judge(&at(0, 0, OVERUSE_HOLD_MS), false), RateVerdict::Cut);
+        assert_eq!(judge(&at(0, 0, OVERUSE_HOLD_MS + 1), false), RateVerdict::Cut);
+    }
+
+    /// A window of `lost` datagrams in a thousand and `frames_lost` frames in thirty, with the
+    /// present queue and hold p95 the client reported.
+    fn window(lost: u32, frames_lost: u32, queue_max: u8, hold_ms: u64) -> Window {
+        Window {
+            lost,
+            sent: 1000,
+            frames_ok: 30_u32.saturating_sub(frames_lost),
+            frames_lost,
+            queue_max,
+            hold_max: Duration::from_millis(hold_ms),
+            ..Window::default()
+        }
+    }
+
+    /// Random loss that parity repairs, at 3 % (the tailnet-shaped link) and 8 %, neither cuts
+    /// nor grows, whatever the hold short of the overuse line. A run of such windows keeps the
+    /// rate where it was instead of walking it to the floor.
+    #[test]
+    fn repaired_random_loss_holds_the_rate() {
+        for lost in [30, 80] {
+            for hold_ms in [5, 25, 45] {
+                let w = window(lost, 0, 1, hold_ms);
+                assert_eq!(judge(&w, false), RateVerdict::Steady, "{w:?}");
+            }
+        }
+        let run = trajectory(&[&REPAIRED; 12]);
+        assert!(
+            run.iter().all(|&(v, bps)| (v, bps) == (RateVerdict::Steady, START_BPS)),
+            "{run:?}"
+        );
+        // Under the clean line it still grows.
+        assert_eq!(judge(&window(5, 0, 1, 25), false), RateVerdict::Grow);
+    }
+
+    /// Loss is let off only while nothing else looks like a queue: the same 3 % cuts once the
+    /// hold climbs over its line or the present queue backs up.
+    #[test]
+    fn repaired_loss_with_a_growing_hold_or_queue_cuts() {
+        let climbing: Vec<_> =
+            [20, 40, 70].map(|hold_ms| judge(&window(30, 0, 1, hold_ms), false)).into();
+        assert_eq!(climbing, [RateVerdict::Steady, RateVerdict::Steady, RateVerdict::Cut]);
+        assert_eq!(judge(&window(30, 0, 3, 20), false), RateVerdict::Cut);
+    }
+
+    /// Loss cuts when the viewer would see it or when it is heavy: frames parity and NACK could
+    /// not save, even with little datagram loss, or datagram loss past GCC's 10 % line even
+    /// with every frame repaired. One lost frame under the line only stops the growth.
+    #[test]
+    fn unrepaired_or_heavy_loss_cuts() {
+        assert_eq!(judge(&window(10, 1, 0, 0), false), RateVerdict::Cut, "1 of 30 frames");
+        assert_eq!(judge(&window(120, 0, 0, 0), false), RateVerdict::Cut, "12 %, all repaired");
+        let one_in_sixty =
+            Window { frames_ok: 59, frames_lost: 1, sent: 1000, ..Window::default() };
+        assert_eq!(judge(&one_in_sixty, false), RateVerdict::Steady);
+        assert_eq!(one_in_sixty.unrepaired_permille(), 16);
+        assert_eq!(Window::default().unrepaired_permille(), 0);
     }
 
     /// Either stall figure alone starts the settling, and a report with neither never does:

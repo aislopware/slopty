@@ -23,7 +23,7 @@ upstream_branch = "main"
 fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
-base = "17b2c6a269c3de51a2f0dc97d49f87f0dd9d6571"
+base = "56dc9648c4049abab97045d925ef3983214d97e3"
 base_date = "2026-09-28"
 checked = "2026-09-28"
 # It lands several changes a day, so every gate asks.

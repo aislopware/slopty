@@ -1240,3 +1240,46 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   loopback and sits at its floor. On a tailnet-shaped link, the rate controller's loss rule
   halves the cadence under 3 % random loss that parity fully repairs, and that doubles input →
   glass. That is a policy question left open.
+
+- ✅ **Repaired loss holds the rate; congestion, unrepaired frames and heavy loss cut it**
+  (2026-09-28, MEASUREMENTS "repaired loss holds the rate"). `judge` used to cut on datagram
+  loss above 2 %. Parity is sized from that same loss and repairs it without a round trip, so on
+  a path that drops at random the cut bought nothing. Over 5 ms each way with 3 % i.i.d. loss it
+  took the stream to the 1 Mbit/s floor and the cadence to 25 fps, with no frame lost. Input at
+  the worker → the capture showing it was 21–24 ms p50 against 8 on loopback. The overuse lines
+  are now the present queue (≥ 3) and the hold p95 (> 60 ms) as before, more than 2 % of the
+  window's frames given up after parity and NACK (`frames_lost` over `frames_ok + frames_lost`,
+  fields the report already carried), and datagram loss above 10 %. Clean now also asks for no
+  lost frame. Loss between the clean line (0.5 %) and 10 % neither cuts nor grows. After the
+  change the shaped runs never cut, held 60 fps at 15–22 Mbit/s, and input at the worker → the
+  capture showing it came down to 8.2–8.4 ms p50, the loopback figure. Loopback did not move.
+
+  The sources agree on the shape. GCC's loss-based controller holds between 2 and 10 % and
+  decreases only above 10 %, because "if the packet loss ratio does not increase, the losses are
+  probably not related to self-inflicted congestion"
+  (<https://www.ietf.org/archive/id/draft-ietf-rmcat-gcc-02.txt>, §6). libwebrtc's
+  `LossBasedBweV2` fits observed loss to an inherent loss plus the loss explained by sending
+  above a limit. It lowers the estimate only for the second part and freezes increases while
+  the average loss is above the inherent one
+  (<https://webrtc.googlesource.com/src/+/656517acd38c2621edc4905caf0efe389843bb8c/modules/congestion_controller/goog_cc/loss_based_bwe_v2.cc>).
+  BBRv3 tolerates loss up to `BBR.LossThresh` (2 %) per round while it probes, and names random
+  loss as a case where it does better than loss-based controllers
+  (<https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.txt>). The RMCAT evaluation RFCs
+  require independent random loss in the test cases, as loss that is not congestion
+  (<https://www.rfc-editor.org/rfc/rfc8867.txt>, <https://www.rfc-editor.org/rfc/rfc8868.txt>).
+  SCReAM backs off on every loss event (<https://www.rfc-editor.org/rfc/rfc8298.txt>, §4.1.2.1),
+  but it has no parity to pay for the loss it ignores.
+
+  The 2 % line moved from datagrams to frames because a frame given up is what congestion does
+  that repaired random loss does not: a bottleneck that overflows drops in bursts, and a burst
+  outruns parity sized at twice the mean. It is also what the viewer sees, as a freeze and a
+  refresh. 10 % is GCC's decrease line. Past it parity is 250 ‰ of the rate and more
+  (`Redundancy::HEADROOM`), and a smaller picture buys more than more parity does. Delay still
+  cuts on its own at any loss. The QUIC path is a further guard: BBRv3 reacts to loss with its
+  own bounds, and the 90 % cwnd cap takes the target down with it. Growth stays at loss ≤ 0.5 %
+  and was not moved to GCC's 2 %: parity takes a share of every rate and growth under loss was
+  not measured. `Redundancy` is unchanged, because it repaired every frame in the shaped runs.
+  A delay trend (GCC's over-use detector) was not added. The report carries `owd_jitter` but no
+  delay gradient, and adding one is a wire change that no measurement asked for. Tests:
+  `repaired_random_loss_holds_the_rate`, `repaired_loss_with_a_growing_hold_or_queue_cuts`,
+  `unrepaired_or_heavy_loss_cuts`, `the_overuse_lines_are_exclusive`.
