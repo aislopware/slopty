@@ -16,7 +16,7 @@
 
 use slopty_proto::screen::ReceiverReport;
 
-use crate::DEFAULT_PARITY_PERMILLE;
+use crate::packetize::DEFAULT_PARITY_PERMILLE;
 
 /// Adaptive parity ratio.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

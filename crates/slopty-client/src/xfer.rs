@@ -10,7 +10,7 @@
 //! there ([`download`]).
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -18,7 +18,9 @@ use parking_lot::Mutex;
 use slopty_core::XferId;
 use slopty_net::streams::RawRecv;
 use slopty_net::{ClientMsg, Connection, NetError};
-use slopty_proto::transfer::{BulkHeader, Dest, Hash, Purpose, XferMsg};
+use slopty_proto::transfer::{
+    BulkHeader, Dest, Hash, MAX_FILES, MODE_BITS, Purpose, XferMsg, partial_of, relative_path,
+};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::sync::{Notify, mpsc, oneshot};
 
@@ -46,11 +48,12 @@ pub struct Entry {
     pub mode: u32,
 }
 
-/// The files a drop of `paths` sends: each file as itself, each directory walked.
+/// The files a drop of `paths` sends: each file as itself, each directory walked, up to
+/// [`MAX_FILES`] in all.
 ///
 /// Every name is relative to the dropped item's parent, so a directory arrives as a directory.
 /// Symbolic links are followed for a dropped item and skipped inside a directory, so a link
-/// loop cannot make a drop endless.
+/// loop cannot make a drop endless. A name that is not UTF-8 cannot travel and is skipped.
 pub fn entries(paths: &[PathBuf]) -> std::io::Result<Vec<Entry>> {
     let mut out = Vec::new();
     for path in paths {
@@ -60,10 +63,16 @@ pub fn entries(paths: &[PathBuf]) -> std::io::Result<Vec<Entry>> {
             .ok_or_else(|| std::io::Error::other(format!("no name: {}", path.display())))?;
         walk(path, name.to_owned(), true, &mut out)?;
     }
+    if out.len() >= MAX_FILES {
+        tracing::warn!("the drop stops at {MAX_FILES} files");
+    }
     Ok(out)
 }
 
 fn walk(path: &Path, name: String, top: bool, out: &mut Vec<Entry>) -> std::io::Result<()> {
+    if out.len() >= MAX_FILES {
+        return Ok(());
+    }
     let meta = if top { std::fs::metadata(path)? } else { std::fs::symlink_metadata(path)? };
     if meta.is_dir() {
         let mut children: Vec<_> = std::fs::read_dir(path)?.collect::<Result<_, _>>()?;
@@ -88,7 +97,7 @@ fn walk(path: &Path, name: String, top: bool, out: &mut Vec<Entry>) -> std::io::
             name,
             size: meta.len(),
             mtime_ms,
-            mode: meta.permissions().mode() & 0o7777,
+            mode: meta.permissions().mode() & MODE_BITS,
         });
     }
     Ok(())
@@ -124,15 +133,6 @@ pub fn paste_paths(paths: &[String]) -> String {
         out.push(' ');
         out
     })
-}
-
-/// A transfer name as a relative path: `None` for one that could escape its root (absolute,
-/// `..`, empty).
-#[must_use]
-pub fn safe_relative(name: &str) -> Option<PathBuf> {
-    let path = Path::new(name);
-    let normal = path.components().all(|c| matches!(c, Component::Normal(_)));
-    (normal && !name.is_empty()).then(|| path.to_owned())
 }
 
 /// Transfers in flight on one link, shared by the control reader, the bulk acceptor and the
@@ -585,7 +585,7 @@ async fn held(fetch: &Fetch, into: &Path) -> Vec<(String, u64)> {
     for (name, landed) in files {
         let bytes = match landed {
             Some(path) => tokio::fs::metadata(&path).await.map_or(0, |m| m.len()),
-            None => match safe_relative(&name) {
+            None => match relative_path(&name) {
                 Some(rel) => durable(&partial_of(&into.join(rel))).await,
                 None => 0,
             },
@@ -618,14 +618,6 @@ async fn landed_data(file: &tokio::fs::File) -> std::io::Result<()> {
     tokio::task::spawn_blocking(move || rustix::fs::fsync(&file).map_err(std::io::Error::from))
         .await
         .map_err(std::io::Error::other)?
-}
-
-/// Where `target`'s bytes are written until it is whole and checked.
-#[must_use]
-pub fn partial_of(target: &Path) -> PathBuf {
-    let mut name = target.as_os_str().to_owned();
-    name.push(".partial");
-    PathBuf::from(name)
 }
 
 /// How long a whole file waits for the worker's digest, which rides the control stream.
@@ -662,7 +654,7 @@ async fn write_file(
     rx: &mut RawRecv,
 ) -> Result<(), String> {
     let io = |e: std::io::Error| format!("{}: {e}", header.name);
-    let rel = safe_relative(&header.name).ok_or_else(|| format!("bad name {:?}", header.name))?;
+    let rel = relative_path(&header.name).ok_or_else(|| format!("bad name {:?}", header.name))?;
     let target = dir.join(rel);
     let had = fetch.state.lock().files.get(&header.name).cloned().flatten();
     if header.offset == header.size && had.as_ref() == Some(&target) {
@@ -714,7 +706,7 @@ async fn write_file(
     landed_data(&file).await.map_err(io)?;
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::Permissions::from_mode(header.mode & 0o777);
+        let mode = std::fs::Permissions::from_mode(header.mode & MODE_BITS);
         file.set_permissions(mode).await.map_err(io)?;
     }
     let mtime =
@@ -805,14 +797,6 @@ mod tests {
             "'/a b' /c ",
             "a space after each, as a drop on Terminal.app types"
         );
-    }
-
-    #[test]
-    fn a_name_that_could_leave_its_root_is_refused() {
-        assert_eq!(safe_relative("dir/f.txt"), Some(PathBuf::from("dir/f.txt")));
-        for bad in ["", "/etc/passwd", "../up", "a/../../b", "./x"] {
-            assert_eq!(safe_relative(bad), None, "{bad:?}");
-        }
     }
 
     #[test]

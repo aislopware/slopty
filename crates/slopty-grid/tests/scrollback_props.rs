@@ -39,7 +39,8 @@ mod props {
                 .filter(|i| *i >= oldest && *i < sb.total() && sb.get(LineIndex(*i)).is_none())
                 .collect();
             prop_assert_eq!(from_gaps, expected);
-            prop_assert!(sb.stats().cached <= capacity);
+            let cached = (0..200_u64).filter(|i| sb.get(LineIndex(*i)).is_some()).count();
+            prop_assert!(cached <= capacity);
         }
     }
 }

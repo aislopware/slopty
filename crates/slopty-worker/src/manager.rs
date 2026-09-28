@@ -67,15 +67,12 @@ struct Inner {
     /// Output copies and checkpoints for ptyd, drained onto `ptyd` by [`tap_loop`].
     tap: mpsc::Sender<Tap>,
     sessions: Mutex<HashMap<SessionId, Entry>>,
-    exits: Mutex<Option<mpsc::UnboundedReceiver<(SessionId, i32)>>>,
     /// Environment every session gets on top of the request's (`SLOPTY_WORKER_SOCKET`).
     session_env: Mutex<Vec<(String, String)>>,
     /// Sessions whose output named a local server ([`SessionStart::port_hints`]).
     port_hints: mpsc::UnboundedSender<SessionId>,
-    port_hints_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
     /// Sessions whose place changed ([`SessionStart::moves`]).
     moves: mpsc::UnboundedSender<SessionId>,
-    moves_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
     /// The coding agents seen in the sessions, which every summary carries.
     agents: Arc<dyn Agents>,
     /// Each repository's changes against `HEAD`, which every summary in it carries.
@@ -90,13 +87,27 @@ impl std::fmt::Debug for Worker {
     }
 }
 
+/// What the sessions report that the daemon acts on, each read by one task of its own.
+#[derive(Debug)]
+pub struct Reports {
+    /// Each child exit, as ptyd reports it; the caller pumps it into [`Worker::on_exit`]. It
+    /// ends when the connection to ptyd does: the worker can then neither spawn nor hand its
+    /// sessions on, and should exit so a fresh one connects again.
+    pub exits: mpsc::UnboundedReceiver<(SessionId, i32)>,
+    /// The sessions whose output named a local server.
+    pub port_hints: mpsc::UnboundedReceiver<SessionId>,
+    /// The sessions whose directory, repository or branch changed, whose summaries are then
+    /// out of date.
+    pub moves: mpsc::UnboundedReceiver<SessionId>,
+}
+
 impl Worker {
     /// Connect to ptyd (default socket or `$SLOPTY_PTYD_SOCKET`) and adopt every session it
     /// already holds. `agents` is the daemon's agent table, read into every summary.
     pub async fn connect(
         socket: Option<PathBuf>,
         agents: Arc<dyn Agents>,
-    ) -> Result<Self, WorkerError> {
+    ) -> Result<(Self, Reports), WorkerError> {
         let path = socket.unwrap_or_else(socket_path);
         let (mut client, exits) = PtydClient::connect(&path).await?;
         let existing = client.list().await?;
@@ -109,12 +120,9 @@ impl Worker {
                 ptyd: tokio::sync::Mutex::new(client),
                 tap,
                 sessions: Mutex::new(HashMap::new()),
-                exits: Mutex::new(Some(exits)),
                 session_env: Mutex::new(Vec::new()),
                 port_hints,
-                port_hints_rx: Mutex::new(Some(port_hints_rx)),
                 moves,
-                moves_rx: Mutex::new(Some(moves_rx)),
                 agents,
                 changes,
                 unwatched: Mutex::new(Unwatched::default()),
@@ -127,7 +135,7 @@ impl Worker {
                 tracing::warn!(session = %info.id, error = %e, "adopt failed");
             }
         }
-        Ok(worker)
+        Ok((worker, Reports { exits, port_hints: port_hints_rx, moves: moves_rx }))
     }
 
     /// The daemon's agent table.
@@ -140,27 +148,6 @@ impl Worker {
     #[must_use]
     pub fn shared_agents(&self) -> Arc<dyn Agents> {
         Arc::clone(&self.inner.agents)
-    }
-
-    /// Take the exit-notification receiver (once); the caller pumps it into `on_exit`. It ends
-    /// when the connection to ptyd does: the worker can then neither spawn nor hand its sessions
-    /// on, and should exit so a fresh one connects again.
-    #[must_use]
-    pub fn take_exits(&self) -> Option<mpsc::UnboundedReceiver<(SessionId, i32)>> {
-        self.inner.exits.lock().take()
-    }
-
-    /// Take the receiver of port hints (once): the sessions whose output named a local server.
-    #[must_use]
-    pub fn take_port_hints(&self) -> Option<mpsc::UnboundedReceiver<SessionId>> {
-        self.inner.port_hints_rx.lock().take()
-    }
-
-    /// Take the receiver of moves (once): the sessions whose directory, repository or branch
-    /// changed, whose summaries are then out of date.
-    #[must_use]
-    pub fn take_moves(&self) -> Option<mpsc::UnboundedReceiver<SessionId>> {
-        self.inner.moves_rx.lock().take()
     }
 
     /// Record a child exit reported by ptyd, and tell the session's viewers.
@@ -389,7 +376,7 @@ const TAP_QUEUE: usize = 1024;
 /// worker goes away. The taps ride the same connection as the requests, and only that connection
 /// may tap (ptyd checks it holds the master), so a dying worker's last taps and its EOF reach ptyd
 /// in order. A failed send is logged once and the loop goes on: a dead ptyd ends the worker
-/// through the exits channel ([`Worker::take_exits`]), and a rejected frame (too large) must not
+/// through the exits channel ([`Reports::exits`]), and a rejected frame (too large) must not
 /// stop the other sessions' taps.
 async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
     let mut failing = false;
@@ -410,7 +397,7 @@ async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
 async fn send_tap(ptyd: &mut PtydClient, tap: Tap) -> Result<(), slopty_pty::PtyError> {
     match tap {
         Tap::Output(frame) => ptyd.output(&frame).await,
-        Tap::Checkpoint { id, state } => ptyd.checkpoint(id, state).await,
+        Tap::Checkpoint { id, state } => ptyd.checkpoint(id, &state).await,
         Tap::Resize { id, size } => ptyd.resize(id, size).await,
     }
 }

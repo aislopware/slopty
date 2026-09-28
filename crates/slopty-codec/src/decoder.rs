@@ -136,7 +136,6 @@ pub struct Decoder {
     format: Option<CFRetained<CMFormatDescription>>,
     parameter_sets: Vec<Vec<u8>>,
     shared: Arc<Shared>,
-    frames_in: u64,
 }
 
 // SAFETY: VideoToolbox sessions are documented as usable from any thread; the decode path
@@ -151,7 +150,6 @@ impl std::fmt::Debug for Decoder {
         f.debug_struct("Decoder")
             .field("codec", &self.codec)
             .field("ready", &self.session.is_some())
-            .field("frames_in", &self.frames_in)
             .finish_non_exhaustive()
     }
 }
@@ -214,7 +212,6 @@ impl Decoder {
             format: None,
             parameter_sets: Vec::new(),
             shared: Arc::new(Shared { sink: Box::new(sink), lost: AtomicBool::new(false) }),
-            frames_in: 0,
         }
     }
 
@@ -222,12 +219,6 @@ impl Decoder {
     #[must_use]
     pub const fn ready(&self) -> bool {
         self.session.is_some()
-    }
-
-    /// Frames submitted.
-    #[must_use]
-    pub const fn frames_in(&self) -> u64 {
-        self.frames_in
     }
 
     /// Decode one Annex B access unit. Output arrives asynchronously through the sink.
@@ -273,9 +264,7 @@ impl Decoder {
                 }
             }
         }
-        check("VTDecompressionSessionDecodeFrame", status)?;
-        self.frames_in = self.frames_in.saturating_add(1);
-        Ok(())
+        check("VTDecompressionSessionDecodeFrame", status)
     }
 
     /// Configure for `sets` and remember them.

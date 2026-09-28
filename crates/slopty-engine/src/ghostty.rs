@@ -110,8 +110,8 @@ pub struct GhosttyEngine {
     generation: u64,
     /// The `generation` `primary_snapshot` was taken at.
     primary_at: u64,
-    /// Search's plain text of the history and the screen, and the `generation` it is of.
-    search_text: Option<(u64, String)>,
+    /// Search's text of the rows that scrolled into history, and the last needle's hits.
+    history: search::History,
     /// A write since the last colour check carried an OSC or a reset, and the next write
     /// checks again in case the sequence was split across the two.
     colours_touched: bool,
@@ -292,7 +292,7 @@ impl GhosttyEngine {
             primary_snapshot: None,
             generation: 0,
             primary_at: u64::MAX,
-            search_text: None,
+            history: search::History::default(),
             colours_touched: false,
             alt_prefix: Vec::new(),
             buttons_down: 0,
@@ -319,8 +319,8 @@ impl GhosttyEngine {
     }
 
     /// Every retained row (history then screen) as plain text, one line per row with trailing
-    /// blanks trimmed; blank rows at the very end are omitted. Measured at 0.4 ms for ~900
-    /// rows of 80 columns (see `docs/MEASUREMENTS.md`).
+    /// blanks trimmed; blank rows at the very end are omitted.
+    #[cfg(test)]
     fn plain_text(&self) -> Result<String, EngineError> {
         let total = u32::try_from(self.total_rows()?).unwrap_or(u32::MAX);
         self.plain_rows(0, total.saturating_sub(1))
@@ -1765,12 +1765,23 @@ impl GhosttyEngine {
             return Ok(search::Found::default());
         }
         let pattern = search::Pattern::new(needle, regex).map_err(EngineError::Pattern)?;
-        // A find bar searches on every keystroke; the history is formatted once per change.
-        if self.search_text.as_ref().is_none_or(|(at, _)| *at != self.generation) {
-            self.search_text = Some((self.generation, self.plain_text()?));
+        // A history row is formatted once, by the first search after it scrolled up; the
+        // screen, which a program may still write anywhere, every time.
+        let scrollback = self.term.scrollback_rows()? as u64;
+        let y = |rows: u64| u32::try_from(rows).unwrap_or(u32::MAX);
+        let history_end = self.base.saturating_add(scrollback);
+        if let Some((from, to)) = self.history.missing(self.epoch, self.base, history_end) {
+            let (first, last) = (from.saturating_sub(self.base), to.saturating_sub(self.base));
+            let text = self.plain_rows(y(first), y(last.saturating_sub(1)))?;
+            self.history.append(&text, to.saturating_sub(from));
         }
-        let text = self.search_text.as_ref().map_or("", |(_, text)| text.as_str());
-        Ok(search::find(text, &pattern, LineIndex(self.base), max))
+        let rows = self.total_rows()?;
+        let screen = if rows > scrollback {
+            self.plain_rows(y(scrollback), y(rows.saturating_sub(1)))?
+        } else {
+            String::new()
+        };
+        Ok(self.history.find(&pattern, needle, regex, max, &screen))
     }
 
     /// Encode a key event into `out`. Appends nothing for keys the terminal does not encode.
@@ -2255,17 +2266,55 @@ mod tests {
         assert!(diff.updates.iter().any(|u| u.line.text() == "one"), "{diff:?}");
     }
 
-    /// Search formats the history once per change, not once per keystroke in the find bar.
+    /// Search formats a history row once, when it first finds it scrolled up, and scans it
+    /// once per needle: a find bar refreshed while a program writes costs the rows written
+    /// since and the screen, not the whole history again.
     #[test]
-    fn search_reuses_the_text_until_something_is_written() {
+    fn a_search_after_output_formats_and_scans_only_the_new_rows() {
         let mut e = engine(20, 3);
-        e.write(b"alpha\r\nbeta\r\n");
-        assert_eq!(e.search("beta", false, 10).unwrap().total, 1);
-        let generation = e.generation;
-        assert_eq!(e.search("alp", false, 10).unwrap().total, 1);
-        assert_eq!(e.search_text.as_ref().map(|(at, _)| *at), Some(generation));
-        e.write(b"beta again\r\n");
-        assert_eq!(e.search("beta", false, 10).unwrap().total, 2, "a write is seen");
+        for i in 0..50 {
+            e.write(format!("row {i} beta\r\n").as_bytes());
+        }
+        assert_eq!(e.search("beta", false, 10).unwrap().total, 50);
+        let held = e.history.rows(e.epoch, e.base, e.base + 48).expect("the history is held");
+        assert_eq!(held.first().map(String::as_str), Some("row 0 beta"));
+        e.write(b"beta again\r\nand beta\r\n");
+        let hits = e.history.hits_scanned();
+        let found = e.search("beta", false, 10).unwrap();
+        assert_eq!(found.total, 52, "a write is seen");
+        assert_eq!(e.history.hits_scanned() - hits, 2, "only the rows that scrolled up since");
+        let fresh = search::find(
+            &e.plain_text().unwrap(),
+            &search::Pattern::new("beta", false).unwrap(),
+            LineIndex(e.base),
+            10,
+        );
+        assert_eq!(found, fresh, "the same answer as a search of the whole text");
+        // Another needle scans the rows held again, without formatting them.
+        assert_eq!(e.search("row 4", false, 100).unwrap().total, 11);
+    }
+
+    /// Rows the terminal evicts leave the search's hits and count, and a reflow starts over.
+    #[test]
+    fn evicted_rows_and_a_reflow_leave_the_search() {
+        let mut e = engine(20, 3);
+        let needle = search::Pattern::new("x", false).unwrap();
+        let fresh = |e: &GhosttyEngine| {
+            search::find(&e.plain_text().unwrap(), &needle, LineIndex(e.base), 5)
+        };
+        for i in 0..300 {
+            e.write(format!("x {i}\r\n").as_bytes());
+        }
+        assert_eq!(e.search("x", false, 5).unwrap(), fresh(&e));
+        for i in 300..3_000 {
+            e.write(format!("x {i}\r\n").as_bytes());
+        }
+        let found = e.search("x", false, 5).unwrap();
+        assert!(e.base > 300, "rows were evicted: base {}", e.base);
+        assert_eq!(found, fresh(&e));
+        e.resize(TermSize { cols: 12, ..e.size }).unwrap();
+        e.write(b"x after\r\n");
+        assert_eq!(e.search("x", false, 5).unwrap(), fresh(&e));
     }
 
     /// Colours are checked only after a write that could change them, and one after it.
@@ -3167,6 +3216,34 @@ mod scrollback_tests {
                 regex_us[regex_us.len() - 1],
             );
         }
+    }
+
+    /// What a find bar's refresh costs while a program writes: the same needle searched again
+    /// after each 30 lines of output, over a full 50 000-line history. `cargo nextest run -p
+    /// slopty-engine --release --run-ignored only search_after_output_cost --no-capture` prints
+    /// it (MEASUREMENTS.md, "a find bar's refresh under output").
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn search_after_output_cost() {
+        let mut e = engine(50_000);
+        write_lines(&mut e, 50_000);
+        let _first = e.search("lazy dog", false, 100).unwrap();
+        let mut plain_us = Vec::new();
+        for round in 0..20_u32 {
+            write_lines(&mut e, 30);
+            e.write(format!("round {round}\r\n").as_bytes());
+            let t = std::time::Instant::now();
+            let found = e.search("lazy dog", false, 100).unwrap();
+            plain_us.push(t.elapsed().as_micros());
+            assert!(found.total > 0);
+        }
+        plain_us.sort_unstable();
+        eprintln!(
+            "search_after_output_cost: {} lines, 30 written between: p50 {} us, max {} us",
+            e.total_lines().unwrap(),
+            plain_us[plain_us.len() / 2],
+            plain_us[plain_us.len() - 1],
+        );
     }
 
     #[test]

@@ -347,10 +347,11 @@ async fn run() -> Result<()> {
         .with_context(|| format!("bind {local} (is another worker running?)"))?;
     let listen = listener.local_addr()?;
     let agents: Arc<parking_lot::Mutex<AgentTable>> = Arc::default();
-    let worker =
+    let (worker, reports) =
         Worker::connect(args.ptyd_socket, Arc::new(server::DaemonAgents(Arc::clone(&agents))))
             .await
             .context("connect to slopty-ptyd")?;
+    let slopty_worker::manager::Reports { mut exits, port_hints, mut moves } = reports;
     let (events, _keep) = broadcast::channel(EVENT_BUFFER);
     let items = ItemStore::open(&data_dir.join("items.json"))?;
     let wake =
@@ -406,7 +407,7 @@ async fn run() -> Result<()> {
         }
     });
     tokio::spawn(clip::watch(daemon.clone()));
-    tokio::spawn(ports::watch(daemon.clone()));
+    tokio::spawn(ports::watch(daemon.clone(), port_hints));
     // Agents the hooks never report: the foreground process, the title, the transcript.
     tokio::spawn(agents::watch(daemon.clone()));
 
@@ -419,9 +420,9 @@ async fn run() -> Result<()> {
     // hands its sessions to nobody, so it goes down (`ptyd_gone`) and launchd starts one that
     // connects again.
     let (ptyd_gone_tx, mut ptyd_gone) = tokio::sync::oneshot::channel::<()>();
-    if let Some(mut exits) = daemon.worker.take_exits() {
+    tokio::spawn({
         let daemon = daemon.clone();
-        tokio::spawn(async move {
+        async move {
             while let Some((session, status)) = exits.recv().await {
                 tracing::info!(%session, status, "child exited");
                 daemon.worker.on_exit(session, status);
@@ -430,21 +431,21 @@ async fn run() -> Result<()> {
                 }
             }
             let _sent = ptyd_gone_tx.send(());
-        });
-    }
+        }
+    });
     tokio::spawn(close_stale_exits(daemon.clone()));
     // A session that moved (`cd`, a checkout) has a stale summary everywhere it was sent: the
     // server's listing and the clients that do not watch that session.
-    if let Some(mut moves) = daemon.worker.take_moves() {
+    tokio::spawn({
         let daemon = daemon.clone();
-        tokio::spawn(async move {
+        async move {
             while let Some(session) = moves.recv().await {
                 if let Some(summary) = daemon.worker.summary(session).await {
                     let _sent = daemon.events.send(slopty_proto::WorkerMsg::SessionOpened(summary));
                 }
             }
-        });
-    }
+        }
+    });
 
     // Sessions (and the `slopty hook` relay inside them) find this daemon through its socket,
     // and a `claude` typed in one finds the mod (the shell integration's `claude` function).

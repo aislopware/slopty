@@ -735,9 +735,10 @@ done
 "#;
 
     /// A command that prints nothing while it runs (the e2e's `sleep 6` after ⌘K) is seen
-    /// running right after ↩, not when its prompt comes back: the `133;C` that takes the
+    /// running while it runs, not when its prompt comes back: the `133;C` that takes the
     /// cursor's row out of the prompt reaches the client as a frame of its own, so the
-    /// block tracking sees the cursor below the command while it runs.
+    /// block tracking sees the cursor below the command while it runs. The command outlasts
+    /// the wait, so only its end (or a hang) could come first, however slow the machine.
     #[tokio::test]
     async fn a_silent_command_after_a_clear_is_seen_running_at_once() {
         fn pump(events: &[TermEvent], state: &mut TermState, effects: &mut Vec<Effect>) {
@@ -765,19 +766,23 @@ done
             wait_for(&mut rx, |_, s| text(s).trim_end() == "\n~\n>" && s.cursor().row == 2).await;
         pump(&events, &mut state, &mut effects);
         effects.clear();
-        session.request(me, TermRequest::Raw(b"sleep 2\r".to_vec())).unwrap();
+        session.request(me, TermRequest::Raw(b"sleep 60\r".to_vec())).unwrap();
         let typed = tokio::time::Instant::now();
-        let deadline = typed.checked_add(Duration::from_secs(1)).unwrap();
+        let deadline = typed.checked_add(Duration::from_secs(50)).unwrap();
         while !state.command_running() {
             let ev = tokio::time::timeout_at(deadline, rx.rx.recv())
                 .await
-                .unwrap_or_else(|_| panic!("not seen running within a second; {effects:?}"))
+                .unwrap_or_else(|_| panic!("not seen running while it ran; {effects:?}"))
                 .expect("sink closed");
             pump(&[event(&ev)], &mut state, &mut effects);
         }
         assert!(
-            effects.iter().any(|e| matches!(e, Effect::CommandStarted(c) if c == "sleep 2")),
+            effects.iter().any(|e| matches!(e, Effect::CommandStarted(c) if c == "sleep 60")),
             "{effects:?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::CommandFinished { .. })),
+            "seen running before it ended: {effects:?}"
         );
         assert_eq!(state.cursor().row, 3, "the cursor sits below the command while it runs");
         session.request(me, TermRequest::Raw(b"\x04".to_vec())).unwrap();
@@ -1015,6 +1020,127 @@ done"#
         assert_eq!(jumps(&frames(&events)), [], "the fast viewer is not held back");
         session.close();
         let _killed = child.kill().await;
+    }
+
+    /// Viewers that stopped reading while a program wrote to one that kept reading, holding
+    /// every frame they were sent: each misses the diffs the reader was sent and is owed every
+    /// row. `lines` of `width` characters are written, then the program waits; returns the
+    /// session, its child and the stale viewers' sinks, their held events drained into one
+    /// list, which frees their frames when dropped.
+    async fn stale_viewers(
+        viewers: usize,
+        lines: u32,
+        width: u16,
+        at: TermSize,
+    ) -> (session::SessionHandle, tokio::process::Child, Vec<mpsc::Receiver<Outbound>>, Vec<Outbound>)
+    {
+        let script = format!(
+            "read x; pad=$(printf '%0{width}d' 0); i=0; while [ $i -lt {lines} ]; do \
+             printf '\\033[3%dm%d %s\\033[0m\\n' $((i % 8)) $i \"$pad\"; i=$((i+1)); done; \
+             echo DONE; sleep 30"
+        );
+        let (session, child) = start(&["/bin/sh", "-c", &script]);
+        let (tx, mut reader) = mpsc::channel(1 << 16);
+        let driver = ClientId::new();
+        session.attach(driver, at, tx).unwrap();
+        tokio::spawn(async move { while reader.recv().await.is_some() {} });
+        let mut sinks = Vec::new();
+        for _ in 0..viewers {
+            let (tx, rx) = mpsc::channel(1 << 16);
+            session.attach(ClientId::new(), at, tx).unwrap();
+            sinks.push(rx);
+        }
+        session.request(driver, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(60)).unwrap();
+        loop {
+            if let session::Text::Screen { screen, .. } =
+                session.read(session::Read::Screen).await.unwrap()
+                && screen.rows.iter().any(|r| r.starts_with("DONE"))
+            {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the output never ended");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // The actor is idle once the last frame is paced out.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut held = Vec::new();
+        for rx in &mut sinks {
+            while let Ok(out) = rx.try_recv() {
+                held.push(out);
+            }
+        }
+        (session, child, sinks, held)
+    }
+
+    /// The first whole frame each sink is sent, with when it came.
+    fn first_whole(
+        sinks: Vec<mpsc::Receiver<Outbound>>,
+    ) -> Vec<tokio::task::JoinHandle<(tokio::time::Instant, Outbound)>> {
+        sinks
+            .into_iter()
+            .map(|mut rx| {
+                tokio::spawn(async move {
+                    loop {
+                        let out = tokio::time::timeout(Duration::from_secs(60), rx.recv())
+                            .await
+                            .expect("a whole frame")
+                            .expect("sink open");
+                        if matches!(event(&out), TermEvent::Frame(f) if f.full) {
+                            return (tokio::time::Instant::now(), out);
+                        }
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Viewers owed every row when room comes back are sent one whole frame between them,
+    /// built and encoded once: the same buffer, not one full read of the screen each.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_viewers_catching_up_together_share_one_whole_frame() {
+        let (session, mut child, sinks, held) = stale_viewers(4, 300, 20, size(40, 6)).await;
+        let caught_up = first_whole(sinks);
+        drop(held);
+        let mut buffers = Vec::new();
+        for viewer in caught_up {
+            let (_at, out) = viewer.await.unwrap();
+            buffers.push(out.wire().as_ptr());
+        }
+        buffers.sort_unstable();
+        buffers.dedup();
+        // One flush serves all four; the actor could, at worst, wake between two of the drops.
+        assert!(buffers.len() <= 2, "{} whole frames built for four viewers", buffers.len());
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// How long the last of eight stale viewers waits for its whole frame of a full 200 × 60
+    /// screen once they all have room. `cargo nextest run -p slopty-worker --release --test
+    /// session_actor --run-ignored only stale_viewers_catch_up_cost --no-capture` prints it
+    /// (MEASUREMENTS.md, "stale viewers caught up with one whole frame").
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "measurement, run by hand"]
+    async fn stale_viewers_catch_up_cost() {
+        let mut lasts = Vec::new();
+        for _ in 0..10 {
+            let (session, mut child, sinks, held) = stale_viewers(8, 400, 190, size(200, 60)).await;
+            let caught_up = first_whole(sinks);
+            let released = tokio::time::Instant::now();
+            drop(held);
+            let mut last = Duration::ZERO;
+            for viewer in caught_up {
+                let (at, _out) = viewer.await.unwrap();
+                last = last.max(at.duration_since(released));
+            }
+            lasts.push(last);
+            session.close();
+            let _killed = child.kill().await;
+        }
+        let (p50, p90, max) = spread(&mut lasts);
+        eprintln!(
+            "MEASURE eight stale viewers at 200x60: the last one's whole frame p50 {p50:.2} p90 {p90:.2} max {max:.2} ms"
+        );
     }
 
     /// A paste far larger than the tty's input queue into a program that echoes as it reads:

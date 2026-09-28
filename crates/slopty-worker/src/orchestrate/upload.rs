@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use slopty_core::XferId;
 use slopty_proto::orchestration::{ErrorCode, UploadPart};
-use slopty_proto::transfer::Hash;
+use slopty_proto::transfer::{Hash, MODE_BITS};
 
 use super::{Failure, MAX_FILE_BYTES, io_failure};
 
@@ -113,13 +113,13 @@ fn finish(
         ));
     }
     // As `scp` does: a file replaced keeps its mode, a new one takes the caller's.
-    let permissions = kept
-        .or_else(|| mode.map(|mode| std::os::unix::fs::PermissionsExt::from_mode(mode & 0o7777)));
+    let permissions = kept.or_else(|| {
+        mode.map(|mode| std::os::unix::fs::PermissionsExt::from_mode(mode & MODE_BITS))
+    });
     if let Some(permissions) = permissions {
         std::fs::set_permissions(partial, permissions).map_err(|e| io_failure(partial, &e))?;
     }
-    file.sync_all().map_err(|e| io_failure(partial, &e))?;
-    std::fs::rename(partial, &target).map_err(|e| io_failure(&target, &e))
+    crate::xfer::land(&file, partial, &target).map_err(|e| io_failure(&target, &e))
 }
 
 #[cfg(test)]

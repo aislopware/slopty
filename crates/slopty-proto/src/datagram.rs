@@ -108,8 +108,8 @@ pub fn term_datagram(session: SessionId, event: &[u8]) -> Result<Bytes, CodecErr
 }
 
 /// The [`TermDatagram`] in a worker's datagram, or `None` when it is media or does not decode.
-#[must_use]
-pub fn parse_term_datagram(datagram: &[u8]) -> Option<TermDatagram> {
+#[cfg(test)]
+fn parse_term_datagram(datagram: &[u8]) -> Option<TermDatagram> {
     let (header, payload) = MediaHeader::parse(datagram)?;
     (header.kind() == Some(Kind::Term)).then(|| codec::decode_body(payload).ok()).flatten()
 }

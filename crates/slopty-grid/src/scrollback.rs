@@ -42,17 +42,6 @@ impl LineIndex {
     }
 }
 
-/// Cache statistics for the debug overlay.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct ScrollbackStats {
-    /// Lines currently cached.
-    pub cached: usize,
-    /// Cache capacity.
-    pub capacity: usize,
-    /// Total lines the worker reports (history + screen).
-    pub total: u64,
-}
-
 /// No lines: what a trim that spares nothing spares.
 const NOTHING: Range<LineIndex> = LineIndex(0)..LineIndex(0);
 
@@ -220,12 +209,6 @@ impl Scrollback {
         gaps
     }
 
-    /// Statistics.
-    #[must_use]
-    pub fn stats(&self) -> ScrollbackStats {
-        ScrollbackStats { cached: self.lines.len(), capacity: self.capacity, total: self.total }
-    }
-
     /// Evict past capacity, farthest from the view first, sparing `keep` and the screen.
     /// Following the output that is the oldest line; scrolled up, it is whichever end of the
     /// cache is farther from the top of the view, so lines fetched there stay.
@@ -298,7 +281,7 @@ mod tests {
         for _ in 0..10 {
             sb.set_extent(LineIndex(5), 60);
         }
-        assert_eq!(sb.stats().cached, 2, "nothing was dropped by an unchanged oldest");
+        assert_eq!(sb.lines.len(), 2, "nothing was dropped by an unchanged oldest");
         assert_eq!(sb.total(), 60);
         sb.set_extent(LineIndex(7), 60);
         assert!(sb.get(LineIndex(6)).is_none(), "an advance does drop what the worker dropped");
@@ -386,7 +369,7 @@ mod tests {
         for i in 0..5_u64 {
             sb.insert(LineIndex(i), l(&i.to_string()));
         }
-        assert_eq!(sb.stats().cached, 3);
+        assert_eq!(sb.lines.len(), 3);
         assert!(sb.get(LineIndex(1)).is_none());
         assert!(sb.get(LineIndex(4)).is_some());
         sb.set_extent(LineIndex(4), 100);

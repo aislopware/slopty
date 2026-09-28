@@ -6,6 +6,8 @@
 //! never queue behind a file. A forwarded TCP connection is a bidirectional stream that opens
 //! with [`TunnelOpen`] and carries raw bytes both ways.
 
+use std::path::{Component, Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, SessionId, WorkerId, XferId};
 
@@ -186,10 +188,39 @@ pub struct BulkHeader {
     pub size: u64,
     /// Last modification, milliseconds since the Unix epoch.
     pub mtime_ms: u64,
-    /// Unix permission bits.
+    /// Unix permission bits, within [`MODE_BITS`].
     pub mode: u32,
     /// The bytes that follow start here: non-zero when resuming.
     pub offset: u64,
+}
+
+/// The permission bits a transferred file carries: read, write and execute for its owner, its
+/// group and others. Set-id and sticky bits never travel.
+pub const MODE_BITS: u32 = 0o777;
+
+/// Most files one transfer sends: a drop or a drag of a home directory must not walk the disk.
+pub const MAX_FILES: usize = 10_000;
+
+/// A transfer's file name ([`BulkHeader::name`]) as a path under the transfer's root; `None`
+/// for one that could leave it or names nothing: empty, absolute, a `.` or `..` or empty
+/// component, or a NUL.
+#[must_use]
+pub fn relative_path(name: &str) -> Option<PathBuf> {
+    let path = Path::new(name);
+    let refused = name.is_empty()
+        || name.contains('\0')
+        || name.split('/').any(|c| c.is_empty() || c == "." || c == "..")
+        || !path.components().all(|c| matches!(c, Component::Normal(_)));
+    (!refused).then(|| path.to_owned())
+}
+
+/// Where the bytes of a file landing at `target` are written until it is whole and checked:
+/// beside it, so landing is a rename, and under a name a resumed transfer finds again.
+#[must_use]
+pub fn partial_of(target: &Path) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(".partial");
+    PathBuf::from(name)
 }
 
 /// File transfer control.
@@ -273,4 +304,23 @@ pub enum XferMsg {
         /// the client's disk.
         held: Vec<(String, u64)>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_that_could_leave_its_root_is_refused() {
+        for bad in ["", "/etc/passwd", "../x", "a/../b", "a//b", "./a", "a/.", "a/", "a\0b"] {
+            assert_eq!(relative_path(bad), None, "{bad:?}");
+        }
+        assert_eq!(relative_path("dir/a b.txt"), Some(PathBuf::from("dir/a b.txt")));
+        assert_eq!(relative_path(".hidden/x"), Some(PathBuf::from(".hidden/x")));
+    }
+
+    #[test]
+    fn a_partial_sits_beside_its_target() {
+        assert_eq!(partial_of(Path::new("/tmp/a.txt")), Path::new("/tmp/a.txt.partial"));
+    }
 }

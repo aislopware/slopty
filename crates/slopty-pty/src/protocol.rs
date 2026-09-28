@@ -100,7 +100,8 @@ pub enum PtydRequest {
         #[serde(with = "byte_string")]
         state: Vec<u8>,
     },
-    /// Resize (ptyd owns the size of record so a reattaching worker sees the truth).
+    /// Resize (ptyd owns the size of record so a reattaching worker sees the truth). No reply:
+    /// the attached worker's taps ride the same connection behind it.
     Resize {
         /// The session it is about.
         id: SessionId,
@@ -244,6 +245,60 @@ impl OutputFrame {
     }
 }
 
+/// [`PtydRequest::Checkpoint`] as its codec frame, in two parts: the head, then the state where
+/// it already is. A state is megabytes, and encoding the request copied it into a buffer that
+/// grew as it went.
+#[derive(Debug)]
+pub struct CheckpointFrame<'a> {
+    head: Vec<u8>,
+    state: &'a [u8],
+}
+
+impl<'a> CheckpointFrame<'a> {
+    /// The frame for `id`'s `state`.
+    ///
+    /// # Errors
+    ///
+    /// A frame over the codec's limit.
+    pub fn new(id: SessionId, state: &'a [u8]) -> Result<Self, PtyError> {
+        use slopty_proto::codec::{CodecError, MAX_FRAME_BYTES, PREFIX_BYTES};
+
+        /// Serializes as `PtydRequest::Checkpoint` does up to its state: the variant's index,
+        /// then the id.
+        struct Head {
+            id: SessionId,
+        }
+        impl Serialize for Head {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut v =
+                    serializer.serialize_struct_variant("PtydRequest", 3, "Checkpoint", 2)?;
+                v.serialize_field("id", &self.id)?;
+                v.end()
+            }
+        }
+
+        let encode = |e| PtyError::Codec(CodecError::Encode(e));
+        let head = postcard::to_extend(&Head { id }, vec![0; PREFIX_BYTES]).map_err(encode)?;
+        // A byte string is its length, then its bytes.
+        let mut head = postcard::to_extend(&state.len(), head).map_err(encode)?;
+        let body = head.len().saturating_sub(PREFIX_BYTES).saturating_add(state.len());
+        if body > MAX_FRAME_BYTES {
+            return Err(PtyError::Codec(CodecError::TooLarge { len: body, max: MAX_FRAME_BYTES }));
+        }
+        let prefix = u32::try_from(body).unwrap_or(u32::MAX).to_le_bytes();
+        if let Some(at) = head.get_mut(..PREFIX_BYTES) {
+            at.copy_from_slice(&prefix);
+        }
+        Ok(Self { head, state })
+    }
+
+    /// The frame as the socket carries it, in order.
+    #[must_use]
+    pub fn parts(&self) -> [&[u8]; 2] {
+        [&self.head, self.state]
+    }
+}
+
 fn output_frame(id: SessionId, bytes: &[u8]) -> Result<Vec<u8>, PtyError> {
     use slopty_proto::codec::{CodecError, MAX_FRAME_BYTES, PREFIX_BYTES};
 
@@ -294,6 +349,19 @@ mod tests {
         let owned =
             slopty_proto::codec::encode(&PtydRequest::Output { id, bytes: bytes.clone() }).unwrap();
         assert_eq!(OutputFrame::new(id, &bytes).unwrap().as_bytes(), &*owned);
+    }
+
+    #[test]
+    fn the_checkpoint_frame_in_parts_is_the_requests_frame() {
+        let id = SessionId::new();
+        for len in [0_usize, 5, 200, 70_000] {
+            let state = b"\x1b[1mstate\x1b[0m".repeat(len / 14 + 1);
+            let owned =
+                slopty_proto::codec::encode(&PtydRequest::Checkpoint { id, state: state.clone() })
+                    .unwrap();
+            let frame = CheckpointFrame::new(id, &state).unwrap();
+            assert_eq!(frame.parts().concat(), &*owned, "{len} bytes");
+        }
     }
 
     /// What the tap costs per 64 KiB read. Before: the session actor copied the read into a

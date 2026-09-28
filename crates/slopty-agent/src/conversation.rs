@@ -276,7 +276,8 @@ impl Conversation {
     }
 
     /// Decode complete JSONL lines from a file feeding `thread`.
-    pub fn ingest_jsonl(&mut self, thread: &ThreadId, jsonl: &str) -> Vec<Change> {
+    #[cfg(test)]
+    pub(crate) fn ingest_jsonl(&mut self, thread: &ThreadId, jsonl: &str) -> Vec<Change> {
         let mut batch = Batch::default();
         self.decode(thread, jsonl, &mut batch);
         batch.changes

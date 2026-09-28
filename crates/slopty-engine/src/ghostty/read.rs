@@ -172,17 +172,15 @@ impl GhosttyEngine {
     }
 
     /// Rows `[first, end)` by absolute index, one string per row, blank rows included. Slices
-    /// search's text when it is of this generation, else formats just these rows.
+    /// search's copy of the history when it holds them, else formats just these rows.
     fn rows_text(&self, first: u64, end: u64) -> Result<Vec<String>, EngineError> {
         let first = first.max(self.base);
         if end <= first {
             return Ok(Vec::new());
         }
         let count = usize::try_from(end.saturating_sub(first)).unwrap_or(usize::MAX);
-        let current = self.search_text.as_ref().filter(|(at, _)| *at == self.generation);
-        let mut rows: Vec<String> = if let Some((_, text)) = current {
-            let skip = usize::try_from(first.saturating_sub(self.base)).unwrap_or(usize::MAX);
-            text.split('\n').skip(skip).take(count).map(str::to_owned).collect()
+        let mut rows: Vec<String> = if let Some(held) = self.history.rows(self.epoch, first, end) {
+            held
         } else {
             let y = |abs: u64| u32::try_from(abs.saturating_sub(self.base)).unwrap_or(u32::MAX);
             let text = self.plain_rows(y(first), y(end.saturating_sub(1)))?;
@@ -452,8 +450,8 @@ mod tests {
         assert_eq!(lines.lines, ["0123456789", "abcdef", "next"]);
     }
 
-    /// Search's whole-history text, when current, is what a read slices; the rows come out the
-    /// same either way.
+    /// Search's copy of the history is what a read of rows it holds slices; the rows come out
+    /// the same either way.
     #[test]
     fn reads_agree_with_and_without_the_search_text() {
         let mut e = engine(30, 5);
@@ -462,7 +460,7 @@ mod tests {
         }
         let formatted = e.text_lines(Some(10), 5).unwrap();
         let _found = e.search("row", false, 10).unwrap();
-        assert!(e.search_text.is_some());
+        assert!(e.history.rows(e.epoch, 10, 15).is_some());
         let sliced = e.text_lines(Some(10), 5).unwrap();
         assert_eq!(formatted, sliced);
         assert_eq!(sliced.lines[0], "row 10");

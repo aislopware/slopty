@@ -9,12 +9,12 @@ use std::time::Instant;
 use slopty_core::SessionId;
 use slopty_proto::WorkerMsg;
 use slopty_worker::ports::{RESCAN, listening};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::Daemon;
 
-/// Scan sessions as the trigger says until the daemon stops.
-pub async fn watch(daemon: Daemon) {
-    let Some(mut hints) = daemon.worker.take_port_hints() else { return };
+/// Scan sessions as the trigger says, and on the sessions' `hints`, until the daemon stops.
+pub async fn watch(daemon: Daemon, mut hints: UnboundedReceiver<SessionId>) {
     let mut look = tokio::time::interval(RESCAN);
     look.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The process ptyd spawned for each session: the root of the tree scanned.

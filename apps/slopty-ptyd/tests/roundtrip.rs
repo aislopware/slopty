@@ -226,10 +226,10 @@ mod roundtrip {
         master.write_all(b"ping\r").await.unwrap();
         let out = read_until(&master, b"echoed:ping", attached.backlog).await;
         assert!(!out.is_empty());
-        client
-            .resize(id, TermSize { cols: 90, rows: 40, metrics: CellMetrics::default() })
-            .await
-            .unwrap();
+        let resized = TermSize { cols: 90, rows: 40, metrics: CellMetrics::default() };
+        client.resize(id, resized).await.unwrap();
+        // A resize carries no reply; a request that does orders it before its reply.
+        assert_eq!(client.list().await.unwrap()[0].size, resized, "the size of record");
         assert_eq!(slopty_pty::pty::get_size(master.as_fd()).unwrap(), (90, 40));
         client.shutdown().await.unwrap();
     }
@@ -291,7 +291,7 @@ mod roundtrip {
         let master = PtyMaster::new(attached.master).unwrap();
 
         client.output(&tap(id, b"before-the-checkpoint")).await.unwrap();
-        client.checkpoint(id, b"STATE".to_vec()).await.unwrap();
+        client.checkpoint(id, b"STATE").await.unwrap();
         client.output(&tap(id, b"after-the-checkpoint")).await.unwrap();
         // Taps carry no reply; a request that does orders them before its reply.
         let info = client.list().await.unwrap();
@@ -301,7 +301,7 @@ mod roundtrip {
         // Another connection cannot tap a session it does not hold.
         let (mut stranger, _) = PtydClient::connect(&daemon.socket).await.unwrap();
         stranger.output(&tap(id, b"ignored")).await.unwrap();
-        stranger.checkpoint(id, b"IGNORED".to_vec()).await.unwrap();
+        stranger.checkpoint(id, b"IGNORED").await.unwrap();
         assert_eq!(stranger.list().await.unwrap()[0].checkpoint, b"STATE".len());
 
         // The worker dies: the connection drops and ptyd resumes reading the master itself.
@@ -339,8 +339,8 @@ mod roundtrip {
         let (mut first, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
         let _held = first.attach(id).await.unwrap();
         let state = vec![b'.'; MAX_CHECKPOINT_BYTES];
-        first.checkpoint(id, state).await.unwrap();
-        first.checkpoint(id, vec![b'!'; MAX_CHECKPOINT_BYTES + 1]).await.unwrap();
+        first.checkpoint(id, &state).await.unwrap();
+        first.checkpoint(id, &vec![b'!'; MAX_CHECKPOINT_BYTES + 1]).await.unwrap();
         let info = first.list().await.unwrap();
         assert_eq!(
             info[0].checkpoint, MAX_CHECKPOINT_BYTES,
@@ -403,6 +403,42 @@ mod roundtrip {
         assert_eq!(ended.expect("the channel ends"), None);
     }
 
+    /// How long a resize holds the worker's connection to ptyd, and so every session's output
+    /// taps queued behind it: a resize then an output tap, 500 times. Run with `cargo nextest
+    /// run -p slopty-ptyd --release --run-ignored only resize_cost --no-capture`.
+    #[tokio::test]
+    #[ignore = "measurement, run by hand"]
+    async fn resize_cost() {
+        let daemon = start().await;
+        let (mut client, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let id = SessionId::new();
+        let spec = SpawnSpec {
+            command: vec!["/bin/sh".into(), "-c".into(), "sleep 60".into()],
+            cwd: None,
+            env: Vec::new(),
+            size: size(),
+        };
+        client.spawn(id, spec).await.unwrap();
+        let _attached = client.attach(id).await.unwrap();
+        let tap = OutputFrame::new(id, &[b'x'; 512]).unwrap();
+        let mut took = Vec::new();
+        for i in 0..500_u16 {
+            let size = TermSize { cols: 80 + i % 2, rows: 24, metrics: CellMetrics::default() };
+            let t = std::time::Instant::now();
+            client.resize(id, size).await.unwrap();
+            client.output(&tap).await.unwrap();
+            took.push(t.elapsed().as_micros());
+        }
+        took.sort_unstable();
+        eprintln!(
+            "resize_cost: resize then a tap, p50 {} us, p99 {} us, max {} us",
+            took[took.len() / 2],
+            took[took.len() * 99 / 100],
+            took[took.len() - 1]
+        );
+        client.shutdown().await.unwrap();
+    }
+
     /// What handing ptyd a checkpoint costs: a 4 MiB state sent 20 times, each followed by a
     /// `List`, whose reply comes after ptyd took the whole state. Run with
     /// `cargo nextest run -p slopty-ptyd --release --run-ignored only checkpoint_transfer_cost
@@ -426,7 +462,7 @@ mod roundtrip {
         let mut took = Vec::new();
         for _ in 0..20 {
             let t = std::time::Instant::now();
-            client.checkpoint(id, state.clone()).await.unwrap();
+            client.checkpoint(id, &state).await.unwrap();
             assert_eq!(client.list().await.unwrap()[0].checkpoint, state.len());
             took.push(t.elapsed().as_micros());
         }

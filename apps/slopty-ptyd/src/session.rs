@@ -29,29 +29,52 @@ pub enum Broadcast {
 /// Shared session state.
 pub struct Session {
     /// The id the worker chose when it spawned the session.
-    pub id: SessionId,
+    id: SessionId,
     /// Child pid.
-    pub pid: u32,
+    pid: u32,
+    /// Milliseconds since the Unix epoch when the child was spawned.
+    started_ms: u64,
+    /// Slave device.
+    tty: PathBuf,
+    /// Master, shared with the reader task.
+    master: Arc<PtyMaster>,
+    /// What the connections and the reader change, under one lock.
+    state: Mutex<State>,
+    /// Exit status once known.
+    exited: watch::Sender<Option<i32>>,
+    /// `true` = reader must stay out of the fd.
+    pause: watch::Sender<bool>,
+    /// Reader acknowledges it is out of the fd (or finished) by setting this to `true`.
+    parked: watch::Sender<bool>,
+}
+
+/// A session's state that the connections share: one lock, so an attach sees a checkpoint and
+/// the ring after it as one pair.
+struct State {
+    /// Size of record.
+    size: TermSize,
+    /// Output since the last checkpoint: tapped by the attached worker, read by us while
+    /// detached.
+    ring: Ring,
+    /// The last worker's terminal state (empty until a worker sends one).
+    checkpoint: Vec<u8>,
+    /// Connection id holding the master, if any.
+    attached_by: Option<u64>,
+}
+
+/// What a worker taking the master is handed besides it.
+#[derive(Debug)]
+pub struct Handover {
+    /// The last worker's terminal state.
+    pub checkpoint: Vec<u8>,
+    /// Output since it.
+    pub backlog: Vec<u8>,
+    /// Bytes lost before `backlog`.
+    pub dropped: u64,
+    /// Size of record.
+    pub size: TermSize,
     /// Milliseconds since the Unix epoch when the child was spawned.
     pub started_ms: u64,
-    /// Slave device.
-    pub tty: PathBuf,
-    /// Master, shared with the reader task.
-    pub master: Arc<PtyMaster>,
-    /// Size of record.
-    pub size: Mutex<TermSize>,
-    /// Output since the last checkpoint: tapped by the attached worker, read by us while detached.
-    pub ring: Mutex<Ring>,
-    /// The last worker's terminal state (empty until a worker sends one).
-    pub checkpoint: Mutex<Vec<u8>>,
-    /// Connection id holding the master, if any.
-    pub attached_by: Mutex<Option<u64>>,
-    /// Exit status once known.
-    pub exited: Mutex<Option<i32>>,
-    /// `true` = reader must stay out of the fd.
-    pub pause: watch::Sender<bool>,
-    /// Reader acknowledges it is out of the fd (or finished) by setting this to `true`.
-    pub parked: watch::Sender<bool>,
 }
 
 impl std::fmt::Debug for Session {
@@ -82,17 +105,20 @@ impl Session {
         let master = Arc::new(PtyMaster::new(pty.into_master())?);
         let (pause, _) = watch::channel(false);
         let (parked, _) = watch::channel(false);
+        let state = State {
+            size: spec.size,
+            ring: Ring::new(backlog_bytes),
+            checkpoint: Vec::new(),
+            attached_by: None,
+        };
         let session = Arc::new(Self {
             id,
             pid,
             started_ms,
             tty,
             master,
-            size: Mutex::new(spec.size),
-            ring: Mutex::new(Ring::new(backlog_bytes)),
-            checkpoint: Mutex::new(Vec::new()),
-            attached_by: Mutex::new(None),
-            exited: Mutex::new(None),
+            state: Mutex::new(state),
+            exited: watch::Sender::new(None),
             pause,
             parked,
         });
@@ -109,7 +135,7 @@ impl Session {
                     -1
                 }
             };
-            *waiter.exited.lock() = Some(status);
+            waiter.exited.send_replace(Some(status));
             tracing::info!(session = %waiter.id, pid = waiter.pid, status, "child exited");
             let _ignored = events.send(Broadcast::Exited { id: waiter.id, status });
         });
@@ -141,7 +167,7 @@ impl Session {
                         self.parked.send_replace(true);
                         return;
                     }
-                    Ok(n) => self.ring.lock().push(buf.get(..n).unwrap_or_default()),
+                    Ok(n) => self.state.lock().ring.push(buf.get(..n).unwrap_or_default()),
                     Err(e) => {
                         tracing::warn!(session = %self.id, error = %e, "master read failed");
                         self.parked.send_replace(true);
@@ -152,8 +178,29 @@ impl Session {
         }
     }
 
-    /// Stop the reader and wait until it is out of the fd, then take the backlog.
-    pub async fn pause_reader(&self) -> (Vec<u8>, u64) {
+    /// Hand the master to connection `conn` unless another holds it; `false` when one does.
+    pub fn claim(&self, conn: u64) -> bool {
+        let mut state = self.state.lock();
+        match state.attached_by {
+            Some(other) if other != conn => false,
+            _ => {
+                state.attached_by = Some(conn);
+                true
+            }
+        }
+    }
+
+    /// Connection `conn` let go of the master (it hung up).
+    pub fn release(&self, conn: u64) {
+        let mut state = self.state.lock();
+        if state.attached_by == Some(conn) {
+            state.attached_by = None;
+        }
+    }
+
+    /// Stop the reader and wait until it is out of the fd, then take the backlog with the
+    /// checkpoint it follows and the size.
+    pub async fn hand_over(&self) -> Handover {
         self.pause.send_replace(true);
         let mut parked = self.parked.subscribe();
         while !*parked.borrow_and_update() {
@@ -161,23 +208,47 @@ impl Session {
                 break;
             }
         }
-        let mut ring = self.ring.lock();
-        let dropped = ring.dropped();
-        (ring.drain(), dropped)
+        let mut state = self.state.lock();
+        let dropped = state.ring.dropped();
+        Handover {
+            checkpoint: state.checkpoint.clone(),
+            backlog: state.ring.drain(),
+            dropped,
+            size: state.size,
+            started_ms: self.started_ms,
+        }
     }
 
-    /// Output the attached worker read, in order: goes after whatever the ring already holds.
-    pub fn tap(&self, bytes: &[u8]) {
-        self.ring.lock().push(bytes);
+    /// Output connection `conn` read from the master, in order: goes after whatever the ring
+    /// already holds. Only the connection holding the master may tap: its frames and its EOF
+    /// arrive in one order, so everything a dying worker tapped is in the ring before our
+    /// reader resumes, and nothing it sends can land after the next worker attaches.
+    pub fn tap(&self, conn: u64, bytes: &[u8]) {
+        let mut state = self.state.lock();
+        if state.attached_by == Some(conn) {
+            state.ring.push(bytes);
+        }
     }
 
-    /// Replace the checkpoint; the ring's bytes are inside it now, so they go.
-    pub fn set_checkpoint(&self, state: Vec<u8>) {
-        // Both locks, ring first, so an `Attach` racing this sees either the old pair or the new
-        // pair: it takes `checkpoint` under its own lock only after `pause_reader` released ours.
-        let mut ring = self.ring.lock();
-        *self.checkpoint.lock() = state;
-        ring.clear();
+    /// Replace the checkpoint with one from connection `conn`, if it holds the master; the
+    /// ring's bytes are inside it now, so they go.
+    pub fn set_checkpoint(&self, conn: u64, checkpoint: Vec<u8>) {
+        let mut state = self.state.lock();
+        if state.attached_by == Some(conn) {
+            state.checkpoint = checkpoint;
+            state.ring.clear();
+        }
+    }
+
+    /// The size of record, which the next worker to attach starts at.
+    pub fn set_size(&self, size: TermSize) {
+        self.state.lock().size = size;
+    }
+
+    /// Wait up to `grace` for the child to exit; `true` when it has.
+    pub async fn exits_within(&self, grace: std::time::Duration) -> bool {
+        let mut exited = self.exited.subscribe();
+        tokio::time::timeout(grace, exited.wait_for(Option::is_some)).await.is_ok_and(|w| w.is_ok())
     }
 
     /// Let the reader drain again.
@@ -194,15 +265,16 @@ impl Session {
     /// Snapshot for `List`.
     #[must_use]
     pub fn info(&self) -> SessionInfo {
+        let state = self.state.lock();
         SessionInfo {
             id: self.id,
             pid: self.pid,
             tty: self.tty.clone(),
-            size: *self.size.lock(),
-            attached: self.attached_by.lock().is_some(),
-            exited: *self.exited.lock(),
-            backlog: self.ring.lock().len(),
-            checkpoint: self.checkpoint.lock().len(),
+            size: state.size,
+            attached: state.attached_by.is_some(),
+            exited: *self.exited.borrow(),
+            backlog: state.ring.len(),
+            checkpoint: state.checkpoint.len(),
         }
     }
 

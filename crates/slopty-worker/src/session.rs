@@ -743,6 +743,9 @@ struct Actor {
     dirty_since_checkpoint: bool,
     /// Bytes tapped since the last checkpoint (a checkpoint empties ptyd's ring).
     tapped_since_checkpoint: usize,
+    /// How large the last state formatted was: the next one's buffer starts that large rather
+    /// than doubling its way up through megabytes.
+    checkpoint_bytes: usize,
     /// A tap did not fit the channel: ptyd's ring has a hole until the next checkpoint.
     tap_lost: bool,
     /// The last state formatted was too large for ptyd to keep. Until one fits, ptyd's ring is
@@ -881,6 +884,7 @@ impl Actor {
             // of this worker folds it and anything the replay answered into one state.
             dirty_since_checkpoint: true,
             tapped_since_checkpoint: 0,
+            checkpoint_bytes: 0,
             tap_lost: false,
             oversize: false,
             size_untold: None,
@@ -1181,7 +1185,7 @@ impl Actor {
         if let Some(size) = self.size_untold.take() {
             self.tell_size(size);
         }
-        let mut state = Vec::new();
+        let mut state = Vec::with_capacity(self.checkpoint_bytes.saturating_add(4096));
         if let Some(t) = &self.title {
             // Not part of what the formatter emits; the next worker learns it the way this one did.
             state.extend_from_slice(b"\x1b]0;");
@@ -1199,6 +1203,7 @@ impl Actor {
             format_us = formatting.elapsed().as_micros(),
             "checkpoint formatted"
         );
+        self.checkpoint_bytes = state.len();
         if state.len() > CHECKPOINT_MAX_BYTES {
             // ptyd would refuse the frame; keep the ring instead (it holds the output since
             // the last checkpoint that did fit, and what fits of the output after it) and try
@@ -1453,37 +1458,51 @@ impl Actor {
     }
 
     /// Every viewer that missed a diff and has room is sent every row, at the others'
-    /// sequence number.
+    /// sequence number: one whole frame, built and encoded once, however many are owed it.
     fn send_whole_frames(&mut self) {
-        let mut gone = Vec::new();
-        for i in 0..self.viewers.len() {
-            if self.viewers.get(i).is_some_and(|v| v.stale && v.takes_frame())
-                && !self.send_whole(i)
-            {
-                gone.push(i);
-            }
+        let owed: Vec<usize> = (0..self.viewers.len())
+            .filter(|&i| self.viewers.get(i).is_some_and(|v| v.stale && v.takes_frame()))
+            .collect();
+        if owed.is_empty() {
+            return;
         }
+        let gone = match self.whole_frame() {
+            Ok((frame, images)) => {
+                owed.into_iter().filter(|&i| !self.deliver_whole(i, &frame, &images)).collect()
+            }
+            Err(error) => owed
+                .into_iter()
+                .filter(|&i| !error.as_ref().is_none_or(|out| self.deliver(i, out.clone())))
+                .collect(),
+        };
         self.remove(gone);
     }
 
     /// Every row for viewer `i`, with the images it needs. `false` when the viewer is gone.
     fn send_whole(&mut self, i: usize) -> bool {
-        let (frame, images) = match self.engine.join_frame(self.ack_seq) {
-            Ok(joined) => joined,
-            Err(e) => {
-                tracing::error!(session = %self.id, error = %e, "whole frame failed");
-                return self
-                    .encode(&TermEvent::Error(e.to_string()))
-                    .is_none_or(|out| self.deliver(i, out));
-            }
-        };
-        let Some(frame) = self.encode(&TermEvent::Frame(frame)) else { return true };
+        match self.whole_frame() {
+            Ok((frame, images)) => self.deliver_whole(i, &frame, &images),
+            Err(error) => error.is_none_or(|out| self.deliver(i, out)),
+        }
+    }
+
+    /// Every row and the images on them, encoded for whoever joins at the others' sequence
+    /// number; the error to tell them when the rows could not be read.
+    fn whole_frame(&mut self) -> Result<(Outbound, Vec<Outbound>), Option<Outbound>> {
+        let (frame, images) = self.engine.join_frame(self.ack_seq).map_err(|e| {
+            tracing::error!(session = %self.id, error = %e, "whole frame failed");
+            self.encode(&TermEvent::Error(e.to_string()))
+        })?;
+        let frame = self.encode(&TermEvent::Frame(frame)).ok_or(None)?;
+        let images = images.into_iter().filter_map(|u| self.encode(&image_event(u))).collect();
+        Ok((frame, images))
+    }
+
+    /// Hand viewer `i` a whole frame and the images before it. `false` when it is gone.
+    fn deliver_whole(&mut self, i: usize, frame: &Outbound, images: &[Outbound]) -> bool {
         let Some(v) = self.viewers.get_mut(i) else { return true };
         v.stale = false;
-        images
-            .into_iter()
-            .all(|u| self.encode(&image_event(u)).is_none_or(|image| self.deliver(i, image)))
-            && self.deliver_frame(i, &frame)
+        images.iter().all(|image| self.deliver(i, image.clone())) && self.deliver_frame(i, frame)
     }
 
     /// Drop the viewers at `gone` (ascending indices), whose sinks closed. A closed sink does

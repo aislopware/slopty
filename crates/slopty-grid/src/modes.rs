@@ -46,12 +46,6 @@ bitflags! {
 }
 
 impl TermModes {
-    /// Whether a wheel event should scroll the client's viewport rather than be forwarded.
-    #[must_use]
-    pub const fn wheel_scrolls_viewport(self) -> bool {
-        !self.contains(Self::ALT_SCREEN) && !self.contains(Self::MOUSE_TRACKING)
-    }
-
     /// Whether typing plausibly echoes at the cursor, so local echo may be predicted: not
     /// on the alternate screen (a full-screen program draws what it likes), not at a password
     /// prompt (echo off with the tty buffering the line), not with the cursor hidden, not while
@@ -70,13 +64,6 @@ impl TermModes {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wheel_routing() {
-        assert!(TermModes::empty().wheel_scrolls_viewport());
-        assert!(!TermModes::ALT_SCREEN.wheel_scrolls_viewport());
-        assert!(!TermModes::MOUSE_TRACKING.wheel_scrolls_viewport());
-    }
 
     #[test]
     fn prediction_gates() {

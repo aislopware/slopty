@@ -7110,3 +7110,45 @@ default 60 ceiling on a 75 Hz beat, 59.3–60.0 frames/s were encoded, four beat
 `slopty bench screen` now runs the same pacer on a 60 Hz timer and prints capture → painted and
 arrival → painted, loopback only, for a worker that can capture. It was not run: the only such
 worker here is the installed one, and it would capture this Mac's screen.
+
+## 2026-09-28 — the session loop's catch-up, find and ptyd costs
+
+Release builds on mac-studio, other sessions building (load average 15 to 30). "Before" is
+the tree as it was, "after" is the change, each run from the same test. One before run each,
+three after runs for ptyd.
+
+```
+cargo nextest run -p slopty-worker --release --test session_actor --run-ignored only \
+  -E 'test(stale_viewers_catch_up_cost)' --no-capture
+cargo nextest run -p slopty-engine --release --run-ignored only \
+  -E 'test(search_after_output_cost) | test(search_cost)' --no-capture
+cargo nextest run -p slopty-ptyd --release --run-ignored only \
+  -E 'test(resize_cost) | test(checkpoint_transfer_cost)' --no-capture
+```
+
+| measurement | before | after |
+| --- | --- | --- |
+| eight viewers owed every row of a full 200 × 60 screen, the last one's whole frame after they get room, p50 / p90 / max of 10 | 7.81 / 8.40 / 8.64 ms | **2.85 / 3.13 / 3.30 ms** |
+| a find bar's refresh: the same needle over 50 621 lines after 30 more were written, p50 / max of 20 | 19 983 / 22 554 µs | **144 / 265 µs** |
+| search again, nothing written, 50 001 lines, plain p50 (the needle alternates, so each is scanned) | 7.6 ms | 6.1 ms |
+| a resize then an output tap on the worker's ptyd connection, p50 / p99 / max of 500 | 41 / 132 / 306 µs | **1 / 13–16 / 17–44 µs** |
+| a 4 MiB checkpoint to ptyd, then `List`, p50 / max of 20 | 1 130 / 2 661 µs | 513–597 / 1 338–1 377 µs |
+
+Each stale viewer used to cost the session loop its own `join_frame`: every row read through
+libghostty and encoded, once per viewer, in one flush. Now one whole frame is built and encoded
+per flush and the same buffer goes to each of them (`stale_viewers_catching_up_together_share_one_whole_frame`).
+What is left of the 2.85 ms is the one build at 200 × 60 and the eight deliveries.
+
+Search used to format the whole history as plain text whenever anything had been written, and
+during output something always had: 10 ms of formatting and 6 to 10 ms of scanning at 50 k
+lines, on the loop that frames the echo. A row that scrolled into history never changes within
+its numbering, so each is now formatted once and scanned once per needle; a refresh formats and
+scans the rows written since and the screen. Rows the terminal evicts leave the count, and a
+new numbering (a reflow, the alternate screen) starts over
+(`a_search_after_output_formats_and_scans_only_the_new_rows`, `evicted_rows_and_a_reflow_leave_the_search`).
+
+A resize waited for ptyd's reply while the worker's one connection to ptyd, and so every
+session's output taps and checkpoints, queued behind it. ptyd no longer answers a resize, and
+the worker sends it like a tap (`a_resize_and_a_checkpoint_wait_for_no_reply`). A checkpoint
+used to be encoded into a buffer that grew by doubling through the megabytes; its frame is now
+a small head written beside the state, and both go to the socket in one `sendmsg`.

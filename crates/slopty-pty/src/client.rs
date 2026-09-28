@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::protocol::{OutputFrame, PtydEvent, PtydRequest, SessionInfo};
+use crate::protocol::{CheckpointFrame, OutputFrame, PtydEvent, PtydRequest, SessionInfo};
 use crate::pty::SpawnSpec;
 use crate::{PtyError, fdpass};
 
@@ -104,15 +104,19 @@ impl PtydClient {
     }
 
     /// Hand ptyd the session's current terminal state; it replaces the previous checkpoint and
-    /// empties the ring. Fire-and-forget, like [`Self::output`].
+    /// empties the ring. Fire-and-forget, like [`Self::output`]; the state goes to the socket
+    /// from where it is, behind the frame's head.
     #[expect(clippy::needless_pass_by_ref_mut, reason = "one sender at a time; see the type")]
-    pub async fn checkpoint(&mut self, id: SessionId, state: Vec<u8>) -> Result<(), PtyError> {
-        self.send(&codec::encode(&PtydRequest::Checkpoint { id, state })?).await
+    pub async fn checkpoint(&mut self, id: SessionId, state: &[u8]) -> Result<(), PtyError> {
+        let frame = CheckpointFrame::new(id, state)?;
+        fdpass::send_parts(&self.stream, &frame.parts(), None).await
     }
 
-    /// Record a resize, so the next worker to attach starts at this size.
+    /// Record a resize, so the next worker to attach starts at this size. Fire-and-forget, like
+    /// [`Self::output`]: the taps of every session queue behind it on this connection.
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "one sender at a time; see the type")]
     pub async fn resize(&mut self, id: SessionId, size: TermSize) -> Result<(), PtyError> {
-        self.expect_ok(&PtydRequest::Resize { id, size }).await
+        self.send(&codec::encode(&PtydRequest::Resize { id, size })?).await
     }
 
     /// Kill and forget.
@@ -202,5 +206,47 @@ async fn read_loop(
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use slopty_proto::input::CellMetrics;
+
+    use super::*;
+
+    /// A resize and a checkpoint go out without waiting for ptyd, which answers neither: a
+    /// daemon that reads and never replies holds up no tap behind them.
+    #[tokio::test]
+    async fn a_resize_and_a_checkpoint_wait_for_no_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ptyd.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let (got_tx, mut got) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut inbox = fdpass::Inbox::default();
+            loop {
+                while let Some(req) = inbox.decode::<PtydRequest>().unwrap() {
+                    got_tx.send(req).unwrap();
+                }
+                if inbox.recv(&stream).await.unwrap() == 0 {
+                    return;
+                }
+            }
+        });
+        let (mut client, _exits) = PtydClient::connect(&path).await.unwrap();
+        let id = SessionId::new();
+        let size = TermSize { cols: 90, rows: 40, metrics: CellMetrics::default() };
+        let state = b"\x1b[31mstate\x1b[0m".repeat(20_000);
+        let sent = async {
+            client.resize(id, size).await.unwrap();
+            client.checkpoint(id, &state).await.unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(5), sent).await.expect("nothing waits for ptyd");
+        assert_eq!(got.recv().await, Some(PtydRequest::Resize { id, size }));
+        assert_eq!(got.recv().await, Some(PtydRequest::Checkpoint { id, state }));
     }
 }

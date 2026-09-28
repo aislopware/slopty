@@ -197,32 +197,6 @@ impl Screen {
         self.lines = lines.into_iter().map(Arc::new).collect();
         Ok(())
     }
-
-    /// Scroll the visible content up by `n` rows (content moves up, blank rows enter at the
-    /// bottom) and return the lines that left the top. Used by clients that maintain a local
-    /// scrollback from row updates, and by the prediction engine when it speculates a newline.
-    pub fn scroll_up(&mut self, n: u16) -> Vec<Arc<Line>> {
-        let n = usize::from(n.min(self.rows));
-        let evicted: Vec<Arc<Line>> = self.lines.drain(..n).collect();
-        self.lines.extend(std::iter::repeat_with(|| Arc::new(Line::blank(self.cols))).take(n));
-        evicted
-    }
-
-    /// Rows whose content differs between `self` and `other` (same size assumed; a size mismatch
-    /// reports every row).
-    #[must_use]
-    pub fn changed_rows(&self, other: &Self) -> Vec<u16> {
-        if self.cols != other.cols || self.rows != other.rows {
-            return (0..self.rows).collect();
-        }
-        self.lines
-            .iter()
-            .zip(&other.lines)
-            .enumerate()
-            .filter(|(_, (a, b))| a != b)
-            .filter_map(|(i, _)| u16::try_from(i).ok())
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -237,34 +211,6 @@ mod tests {
         assert_eq!(row_err, ScreenError::RowOutOfRange { row: 3, rows: 3 });
         let width_err = s.apply(RowUpdate { row: 0, line: Line::blank(9) }).unwrap_err();
         assert_eq!(width_err, ScreenError::WidthMismatch { got: 9, cols: 10 });
-    }
-
-    #[test]
-    fn scroll_up_evicts_top_rows_in_order() {
-        let mut s = Screen::new(5, 3);
-        for (i, t) in ["one", "two", "three"].iter().enumerate() {
-            s.apply(RowUpdate {
-                row: u16::try_from(i).unwrap(),
-                line: Line::from_text(t, 5, Style::DEFAULT),
-            })
-            .unwrap();
-        }
-        let gone = s.scroll_up(2);
-        assert_eq!(gone.iter().map(|l| l.text()).collect::<Vec<_>>(), ["one", "two"]);
-        assert_eq!(s.line(0).unwrap().text(), "three");
-        assert!(s.line(1).unwrap().is_blank());
-        assert!(s.line(2).unwrap().is_blank());
-        assert_eq!(s.scroll_up(99).len(), 3, "clamped to the screen height");
-    }
-
-    #[test]
-    fn changed_rows_reports_only_differences() {
-        let a = Screen::new(5, 2);
-        let mut b = a.clone();
-        b.apply(RowUpdate { row: 1, line: Line::from_text("x", 5, Style::DEFAULT) }).unwrap();
-        assert_eq!(a.changed_rows(&b), vec![1]);
-        let c = Screen::new(6, 2);
-        assert_eq!(a.changed_rows(&c), vec![0, 1]);
     }
 
     #[test]
@@ -302,13 +248,6 @@ mod tests {
         .unwrap();
         assert_eq!(s.line(0).unwrap().text(), "top");
         assert_eq!(s.line(1).unwrap().text(), "bottom");
-    }
-
-    #[test]
-    fn a_height_mismatch_alone_reports_every_row() {
-        let a = Screen::new(5, 3);
-        let b = Screen::new(5, 2);
-        assert_eq!(a.changed_rows(&b), vec![0, 1, 2]);
     }
 
     #[test]

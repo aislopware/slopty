@@ -22,5 +22,5 @@ pub use cell::{Cell, CellText, CellWidth};
 pub use line::{Hyperlink, Line, LineFlags, SemanticMark};
 pub use modes::TermModes;
 pub use screen::{Cursor, CursorShape, RowUpdate, Screen, ScreenError};
-pub use scrollback::{LineIndex, Scrollback, ScrollbackStats};
+pub use scrollback::{LineIndex, Scrollback};
 pub use style::{Color, Style, StyleFlags, Underline};

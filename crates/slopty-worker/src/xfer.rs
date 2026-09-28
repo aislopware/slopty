@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
 use slopty_core::XferId;
-use slopty_proto::transfer::{Dest, Hash};
+use slopty_proto::transfer::{Dest, Hash, MAX_FILES, MODE_BITS, partial_of, relative_path};
 use tokio::sync::{Notify, watch};
 
 /// Progress is reported at most this often per transfer.
@@ -191,19 +191,9 @@ pub struct Transfers {
     ledger: Mutex<()>,
 }
 
-/// `name` as a relative path: `/`-separated, no empty, `.` or `..` component, not absolute.
+/// `name` as a path under its transfer's root ([`relative_path`]).
 fn relative(name: &str) -> Result<PathBuf, XferError> {
-    let refused = || XferError::Name(name.to_owned());
-    if name.is_empty() || name.starts_with('/') || name.contains('\0') {
-        return Err(refused());
-    }
-    let path = PathBuf::from(name);
-    if name.split('/').any(|c| c.is_empty() || c == "." || c == "..")
-        || !path.components().all(|c| matches!(c, Component::Normal(_)))
-    {
-        return Err(refused());
-    }
-    Ok(path)
+    relative_path(name).ok_or_else(|| XferError::Name(name.to_owned()))
 }
 
 /// One ledger line: `["<xfer>","<entry>"]` and a newline; `None` for a path that is not UTF-8.
@@ -246,14 +236,6 @@ fn remove_empty_dirs(dir: &Path) {
     }
     // Fails, as it should, while anything is left in it.
     let _not_empty = std::fs::remove_dir(dir);
-}
-
-/// Where `target`'s bytes are written until it is whole.
-#[must_use]
-pub fn partial_of(target: &Path) -> PathBuf {
-    let mut name = target.as_os_str().to_owned();
-    name.push(".partial");
-    PathBuf::from(name)
 }
 
 /// Bytes of `target` held durably in its partial file, synced now so the answer holds after a
@@ -578,14 +560,10 @@ impl Receiving {
         if let Some(mtime) = mtime.filter(|_| mtime_ms > 0) {
             self.file.set_modified(mtime)?;
         }
-        if mode & 0o777 != 0 {
-            self.file.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+        if mode & MODE_BITS != 0 {
+            self.file.set_permissions(std::fs::Permissions::from_mode(mode & MODE_BITS))?;
         }
-        // A plain fsync, not the drive-cache flush `sync_all` is on Apple platforms, and no
-        // directory sync: 0.2 ms a file against 7.6 (MEASUREMENTS.md, "syncing a landed
-        // file"). A cut stream's bytes are still fully synced for its resume (`keep`).
-        rustix::fs::fsync(&self.file).map_err(std::io::Error::from)?;
-        std::fs::rename(partial_of(&self.target), &self.target)?;
+        land(&self.file, &partial_of(&self.target), &self.target)?;
         Ok(Landed { path: self.target, size: self.size, hash: self.hasher.finalize().into() })
     }
 
@@ -595,6 +573,20 @@ impl Receiving {
         let _synced = self.file.sync_all();
         self.at
     }
+}
+
+/// Hand a whole, checked file's bytes to the drive, then rename its partial file into place.
+///
+/// A plain `fsync`, not the drive-cache flush `sync_all` is on Apple platforms, and no
+/// directory sync: 0.2 ms a file against 7.6 (MEASUREMENTS.md, "syncing a landed file").
+/// What a resume claims to hold is still fully synced ([`durable`]).
+///
+/// # Errors
+///
+/// The sync or the rename failing.
+pub fn land(file: &File, partial: &Path, target: &Path) -> std::io::Result<()> {
+    rustix::fs::fsync(file).map_err(std::io::Error::from)?;
+    std::fs::rename(partial, target)
 }
 
 /// One file of a download: its name relative to the fetched path's parent, where it is, and
@@ -613,10 +605,8 @@ pub struct Outgoing {
     pub mode: u32,
 }
 
-/// Most files one fetch sends: a drag of a home directory must not walk the disk.
-pub const MAX_OUTGOING: usize = 10_000;
-
-/// The files under `path` (itself when it is a file), symbolic links left out.
+/// The files under `path` (itself when it is a file), symbolic links left out, up to
+/// [`MAX_FILES`]. A name that is not UTF-8 cannot travel and is skipped.
 pub fn outgoing(path: &Path) -> std::io::Result<Vec<Outgoing>> {
     let base = path.parent().unwrap_or_else(|| Path::new("/"));
     let mut out = Vec::new();
@@ -631,7 +621,10 @@ pub fn outgoing(path: &Path) -> std::io::Result<Vec<Outgoing>> {
         } else if meta.is_file() {
             use std::os::unix::fs::PermissionsExt as _;
             let rel = at.strip_prefix(base).unwrap_or(&at);
-            let name = rel.to_string_lossy().into_owned();
+            let Some(name) = rel.to_str().map(str::to_owned) else {
+                tracing::warn!(path = %at.display(), "skipped: name is not UTF-8");
+                continue;
+            };
             let mtime_ms = meta
                 .modified()
                 .ok()
@@ -642,9 +635,10 @@ pub fn outgoing(path: &Path) -> std::io::Result<Vec<Outgoing>> {
                 path: at,
                 size: meta.len(),
                 mtime_ms,
-                mode: meta.permissions().mode() & 0o777,
+                mode: meta.permissions().mode() & MODE_BITS,
             });
-            if out.len() >= MAX_OUTGOING {
+            if out.len() >= MAX_FILES {
+                tracing::warn!(path = %path.display(), "the fetch stops at {MAX_FILES} files");
                 break;
             }
         }
@@ -666,9 +660,7 @@ mod tests {
 
     #[test]
     fn names_that_climb_out_are_refused() {
-        for bad in ["", "/etc/passwd", "../x", "a/../../x", "a//b", "./a", "a/.", "a\0b"] {
-            assert!(matches!(relative(bad), Err(XferError::Name(_))), "{bad:?}");
-        }
+        assert!(matches!(relative("a/../../x"), Err(XferError::Name(_))));
         assert_eq!(relative("dir/a b.txt").unwrap(), PathBuf::from("dir/a b.txt"));
     }
 

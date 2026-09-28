@@ -91,13 +91,6 @@ impl Style {
     pub fn is_default(&self) -> bool {
         *self == Self::DEFAULT
     }
-
-    /// True when the style has an attribute affecting glyph selection (bold/italic), so the
-    /// renderer must pick a different font face.
-    #[must_use]
-    pub const fn needs_face_variant(&self) -> bool {
-        self.flags.intersects(StyleFlags::BOLD.union(StyleFlags::ITALIC))
-    }
 }
 
 #[cfg(test)]
@@ -108,18 +101,6 @@ mod tests {
     fn default_style_is_the_zero_value() {
         assert!(Style::default().is_default());
         assert_eq!(Style::default(), Style::DEFAULT);
-    }
-
-    #[test]
-    fn only_bold_and_italic_need_a_face_variant() {
-        assert!(!Style::DEFAULT.needs_face_variant());
-        let mut s = Style::DEFAULT;
-        s.flags = StyleFlags::FAINT;
-        assert!(!s.needs_face_variant(), "faint is a colour, not a face");
-        s.flags = StyleFlags::BOLD;
-        assert!(s.needs_face_variant());
-        s.flags = StyleFlags::ITALIC;
-        assert!(s.needs_face_variant());
     }
 
     #[test]

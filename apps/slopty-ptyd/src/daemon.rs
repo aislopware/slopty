@@ -18,6 +18,9 @@ use tokio::sync::broadcast;
 
 use crate::session::{Broadcast, Session};
 
+/// How long a closed session's child has to exit after its hangup before it is killed.
+const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Everything shared between connections.
 struct State {
     sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
@@ -133,7 +136,7 @@ impl Drop for Connection {
         for id in std::mem::take(&mut self.attached) {
             let session = self.state.sessions.lock().get(&id).cloned();
             if let Some(s) = session {
-                *s.attached_by.lock() = None;
+                s.release(self.id);
                 s.resume_reader();
             }
         }
@@ -202,10 +205,10 @@ impl Connection {
                     self.state.events.clone(),
                 ) {
                     Ok(session) => {
-                        let pid = session.pid;
-                        tracing::info!(session = %id, pid, tty = %session.tty.display(), "spawned");
+                        let info = session.info();
+                        tracing::info!(session = %id, pid = info.pid, tty = %info.tty.display(), "spawned");
                         self.state.sessions.lock().insert(id, session);
-                        self.reply(&PtydEvent::Spawned { id, pid }, None).await
+                        self.reply(&PtydEvent::Spawned { id, pid: info.pid }, None).await
                     }
                     Err(e) => self.error(Some(id), e.to_string()).await,
                 }
@@ -214,44 +217,27 @@ impl Connection {
                 let Some(session) = self.session(id) else {
                     return self.error(Some(id), "no such session").await;
                 };
-                let claimed = {
-                    let mut holder = session.attached_by.lock();
-                    match *holder {
-                        Some(other) if other != self.id => false,
-                        _ => {
-                            *holder = Some(self.id);
-                            true
-                        }
-                    }
-                };
-                if !claimed {
+                if !session.claim(self.id) {
                     return self.error(Some(id), "attached by another connection").await;
                 }
                 // Held from the claim on, so the connection's drop lets go of it whatever
                 // happens from here.
                 self.attached.insert(id);
-                let (backlog, dropped) = session.pause_reader().await;
-                let size = *session.size.lock();
-                let checkpoint = session.checkpoint.lock().clone();
+                let handed = session.hand_over().await;
                 let ev = PtydEvent::Attached {
                     id,
-                    checkpoint,
-                    backlog,
-                    dropped,
-                    size,
-                    started_ms: session.started_ms,
+                    checkpoint: handed.checkpoint,
+                    backlog: handed.backlog,
+                    dropped: handed.dropped,
+                    size: handed.size,
+                    started_ms: handed.started_ms,
                 };
                 self.reply(&ev, Some(session.master_fd())).await
             }
             PtydRequest::Output { id, bytes } => {
-                // No reply by contract. Only the connection holding the master may tap: its
-                // frames and its EOF arrive in one order, so everything a dying worker tapped is
-                // in the ring before our reader resumes, and nothing it sends can land after
-                // the next worker attaches.
-                if let Some(session) = self.session(id)
-                    && *session.attached_by.lock() == Some(self.id)
-                {
-                    session.tap(&bytes);
+                // No reply by contract.
+                if let Some(session) = self.session(id) {
+                    session.tap(self.id, &bytes);
                 }
                 Ok(())
             }
@@ -262,35 +248,33 @@ impl Connection {
                     tracing::warn!(session = %id, bytes = state.len(), "checkpoint too large; ignored");
                     return Ok(());
                 }
-                if let Some(session) = self.session(id)
-                    && *session.attached_by.lock() == Some(self.id)
-                {
-                    session.set_checkpoint(state);
+                if let Some(session) = self.session(id) {
+                    session.set_checkpoint(self.id, state);
                 }
                 Ok(())
             }
             PtydRequest::Resize { id, size } => {
+                // No reply by contract: the worker's taps queue behind it.
                 let Some(session) = self.session(id) else {
-                    return self.error(Some(id), "no such session").await;
+                    tracing::debug!(session = %id, "resize of no session");
+                    return Ok(());
                 };
-                *session.size.lock() = size;
-                match slopty_pty::pty::set_size(session.master_fd(), size) {
-                    Ok(()) => self.reply(&PtydEvent::Ok, None).await,
-                    Err(e) => self.error(Some(id), e.to_string()).await,
+                session.set_size(size);
+                if let Err(e) = slopty_pty::pty::set_size(session.master_fd(), size) {
+                    tracing::warn!(session = %id, error = %e, "TIOCSWINSZ failed");
                 }
+                Ok(())
             }
             PtydRequest::Close { id } => {
                 let Some(session) = self.state.sessions.lock().remove(&id) else {
                     return self.error(Some(id), "no such session").await;
                 };
                 self.attached.remove(&id);
-                if session.exited.lock().is_none() {
+                if session.info().exited.is_none() {
                     let _hup = session.signal(Signal::HUP);
-                    let s = Arc::clone(&session);
                     tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                        if s.exited.lock().is_none() {
-                            let _kill = s.signal(Signal::KILL);
+                        if !session.exits_within(HANGUP_GRACE).await {
+                            let _kill = session.signal(Signal::KILL);
                         }
                     });
                 }

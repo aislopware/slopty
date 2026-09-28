@@ -28,9 +28,20 @@ pub async fn send(
     frame: &[u8],
     fd: Option<BorrowedFd<'_>>,
 ) -> Result<(), PtyError> {
+    send_parts(stream, &[frame], fd).await
+}
+
+/// Send one frame written as `parts`, one after the other, without joining them first,
+/// optionally with one fd on its first byte.
+pub async fn send_parts(
+    stream: &UnixStream,
+    parts: &[&[u8]],
+    fd: Option<BorrowedFd<'_>>,
+) -> Result<(), PtyError> {
+    let total = parts.iter().fold(0_usize, |sum, part| sum.saturating_add(part.len()));
     let mut sent = 0_usize;
-    while sent < frame.len() {
-        let rest = frame.get(sent..).unwrap_or_default();
+    while sent < total {
+        let rest = unsent(parts, sent);
         let fds = fd.filter(|_| sent == 0).map(|f| [f]);
         let n = stream
             .async_io(Interest::WRITABLE, || {
@@ -39,14 +50,28 @@ pub async fn send(
                 if let Some(fds) = &fds {
                     cmsg.push(SendAncillaryMessage::ScmRights(fds));
                 }
-                sendmsg(stream, &[IoSlice::new(rest)], &mut cmsg, SendFlags::empty())
-                    .map_err(std::io::Error::from)
+                sendmsg(stream, &rest, &mut cmsg, SendFlags::empty()).map_err(std::io::Error::from)
             })
             .await
             .map_err(|e| PtyError::os("sendmsg", e))?;
         sent = sent.saturating_add(n);
     }
     Ok(())
+}
+
+/// What is left of `parts` once `sent` bytes of them went.
+fn unsent<'a>(parts: &[&'a [u8]], sent: usize) -> Vec<IoSlice<'a>> {
+    let mut skip = sent;
+    let mut rest = Vec::with_capacity(parts.len());
+    for part in parts {
+        if skip >= part.len() {
+            skip = skip.saturating_sub(part.len());
+            continue;
+        }
+        rest.push(IoSlice::new(part.get(skip..).unwrap_or_default()));
+        skip = 0;
+    }
+    rest
 }
 
 /// Socket buffer each way. macOS gives a Unix stream 8 KiB, which cut a 3.5 MB checkpoint into
