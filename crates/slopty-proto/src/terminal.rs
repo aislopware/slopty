@@ -544,4 +544,51 @@ pub enum TermEvent {
         /// Unique within the session.
         id: u64,
     },
+    /// The program's progress changed (`OSC 9;4`), or its report was dropped. Sent on attach
+    /// while one stands, like the title.
+    Progress(Progress),
+    /// The session was reopened after its shell was lost. Sent on attach for the session's
+    /// whole life.
+    Restored(Restored),
+}
+
+/// What a program reports of its progress with `OSC 9;4`, a sequence from the `ConEmu`
+/// terminal: build tools, package managers and Claude Code's turn bar
+/// (`terminalProgressBarEnabled`) emit it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Progress {
+    /// What to show.
+    pub state: ProgressState,
+    /// How far along, 0 to 100, when the program said. An error or a pause that names no
+    /// value keeps the last one, as `ConEmu` and Windows Terminal do.
+    pub percent: Option<u8>,
+}
+
+/// The state an `OSC 9;4` report names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum ProgressState {
+    /// Nothing to show: never reported, removed (`9;4;0`), or its program gave the prompt back.
+    #[default]
+    None,
+    /// Determinate, at [`Progress::percent`] (`9;4;1`).
+    Set,
+    /// Failed (`9;4;2`).
+    Error,
+    /// Working, with no measure of how far along (`9;4;3`).
+    Indeterminate,
+    /// Paused (`9;4;4`).
+    Paused,
+}
+
+/// A session reopened after its shell was lost to a reboot or to ptyd ending.
+///
+/// It runs a new login shell in the directory the old one was in, with the old screen and
+/// scrollback above a divider. Nothing the old shell was running is started again.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Restored {
+    /// When the scrollback above the divider was saved: output after it was lost.
+    pub saved_ms: WallMs,
+    /// What the session was opened to run; empty for the login shell. A client may offer it
+    /// again, never run it unasked.
+    pub command: Vec<String>,
 }

@@ -31,7 +31,7 @@ pub mod search;
 
 pub use ghostty::GhosttyEngine;
 pub use graphics::ImageUpload;
-use slopty_proto::terminal::{ColorOverrides, TermSize};
+use slopty_proto::terminal::{ColorOverrides, Progress, TermSize};
 
 /// Engine failure. libghostty-vt reports out-of-memory and invalid arguments; both are bugs or
 /// resource exhaustion, never a consequence of PTY output, so the session is torn down.
@@ -74,6 +74,9 @@ pub enum EngineEvent {
     /// The program changed or reset the terminal's colours (OSC 4/10/11/12, 104/110/111/112,
     /// a full reset); the whole set now over the driver's.
     Colors(ColorOverrides),
+    /// The program's progress report changed (`OSC 9;4`), or was dropped because the shell
+    /// printed its next prompt.
+    Progress(Progress),
 }
 
 /// Configuration for a new engine.

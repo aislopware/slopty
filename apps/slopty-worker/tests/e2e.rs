@@ -97,6 +97,14 @@ mod tests {
 
     /// Start ptyd and the worker in `dir`; the address a loopback client dials.
     async fn daemons(dir: &std::path::Path) -> (Guard, SocketAddr) {
+        let ptyd = spawn_ptyd(dir).await;
+        let (worker, addr) = spawn_worker(dir).await;
+        let guard = Guard(vec![ptyd, worker], None);
+        (guard, addr)
+    }
+
+    /// Start ptyd on `dir`'s socket, once it listens.
+    async fn spawn_ptyd(dir: &std::path::Path) -> Child {
         let ptyd_sock = dir.join("ptyd.sock");
         let mut ptyd = Command::new(bin("slopty-ptyd"))
             .arg("--socket")
@@ -107,9 +115,7 @@ mod tests {
             .spawn()
             .expect("slopty-ptyd built alongside the tests");
         wait_for_ptyd(&mut ptyd, &ptyd_sock).await;
-        let (worker, addr) = spawn_worker(dir).await;
-        let guard = Guard(vec![ptyd, worker], None);
-        (guard, addr)
+        ptyd
     }
 
     /// Start the worker on `dir`'s ptyd socket and data dir and read the address it prints.
@@ -1043,6 +1049,112 @@ mod tests {
             .await
             .unwrap();
         wait_for_text(&mut events, "restart-marker-two").await;
+        worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+    }
+
+    /// ptyd ends, as it does in a reboot or a crash, and the shell goes with it. The next ptyd
+    /// and worker bring the session back under its id: a new shell in the directory the old
+    /// one was last in, the old scrollback above a divider, and the program the old shell was
+    /// running not started again.
+    #[tokio::test]
+    async fn a_session_whose_shell_was_lost_comes_back_in_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = dir.path().join("place").join("deeper");
+        std::fs::create_dir_all(&place).unwrap();
+        let ran = dir.path().join("ran");
+        let (mut guard, addr) = daemons(dir.path()).await;
+        let (endpoint, mut worker) = dial(addr).await;
+        guard.1 = Some(endpoint);
+        // Wide enough for the temporary directory's path on one row.
+        let size = TermSize { cols: 200, rows: 20, ..TermSize::default() };
+        let open = OpenSession {
+            size,
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            env: vec![("PS1".to_owned(), "$ ".to_owned())],
+            title: None,
+            attach: true,
+        };
+        worker.tx.send(&ClientMsg::OpenSession { request: 1, spec: open }).await.unwrap();
+        let session = next_msg(&mut worker, |m| match m {
+            WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
+            _ => None,
+        })
+        .await;
+        let (_opened, mut events) = session_stream(&worker).await;
+        let type_in =
+            |text: String| ClientMsg::Term { session, req: TermRequest::Raw(text.into_bytes()) };
+        // `cd`, then report the directory the way the shell integration does (OSC 7).
+        let cd = format!(
+            "cd '{}'; printf '\\033]7;file://localhost%s\\007' \"$PWD\"; echo kept-mark'er'\n",
+            place.display()
+        );
+        worker.tx.send(&type_in(cd)).await.unwrap();
+        wait_for_text(&mut events, "kept-marker").await;
+        let program = format!("sh -c 'echo once >> {}; exec sleep 120'\n", ran.display());
+        worker.tx.send(&type_in(program)).await.unwrap();
+        // The screen is on disk once a checkpoint after the marker reached the worker's keeper,
+        // at most `restore::KEEP_EVERY` after the one before it.
+        let kept = dir.path().join("data").join("sessions").join(format!("{session}.vt"));
+        let marker = b"kept-marker";
+        tokio::time::timeout(Duration::from_secs(40), async {
+            while !(ran.exists()
+                && std::fs::read(&kept).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker)))
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the screen is kept");
+
+        // ptyd ends, and the worker with it; the shell and its program go with them.
+        guard.0[0].start_kill().unwrap();
+        guard.0[0].wait().await.unwrap();
+        tokio::time::timeout(STEP, guard.0[1].wait()).await.expect("the worker exits").unwrap();
+        drop(events);
+        drop(worker);
+
+        let ptyd = spawn_ptyd(dir.path()).await;
+        let (next, addr) = spawn_worker(dir.path()).await;
+        guard.0 = vec![ptyd, next];
+        let (endpoint, mut worker) = dial(addr).await;
+        guard.1 = Some(endpoint);
+        assert_eq!(worker.ack.sessions.iter().map(|s| s.id).collect::<Vec<_>>(), [session]);
+        worker
+            .tx
+            .send(&ClientMsg::Term { session, req: TermRequest::Attach { size } })
+            .await
+            .unwrap();
+        let (opened, mut events) = session_stream(&worker).await;
+        assert_eq!(opened, session);
+        let mut restored = None;
+        let full = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                TermEvent::Restored(r) => restored = Some(r),
+                TermEvent::Frame(f) if f.full => break f,
+                _other => {}
+            }
+        };
+        let restored = restored.expect("the viewer is told the session was restored");
+        assert!(restored.command.is_empty(), "the shell runs again, so nothing to offer");
+        assert!(!restored.saved_ms.is_zero());
+        let rows: Vec<String> =
+            full.updates.iter().map(|u| u.line.text().trim_end().to_owned()).collect();
+        let marker_row = rows.iter().position(|r| r == "kept-marker");
+        let divider_row = rows.iter().position(|r| r.starts_with("── Restored after restart ─"));
+        assert!(
+            matches!((marker_row, divider_row), (Some(m), Some(d)) if m < d),
+            "the old scrollback above the divider: {rows:?}"
+        );
+        // The new shell stands in the old one's last directory.
+        let canonical = place.canonicalize().unwrap();
+        worker.tx.send(&type_in("echo a't:'$(pwd -P)\n".to_owned())).await.unwrap();
+        wait_for_text(&mut events, &format!("at:{}", canonical.display())).await;
+        assert_eq!(
+            std::fs::read_to_string(&ran).unwrap(),
+            "once\n",
+            "the program the lost shell ran is not started again"
+        );
         worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
     }
 

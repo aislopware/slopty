@@ -7,8 +7,8 @@ use slopty_grid::{
     CellWidth, Cursor, Line, LineFlags, LineIndex, Screen, Scrollback, SemanticMark, TermModes,
 };
 use slopty_proto::terminal::{
-    ColorOverrides, Frame, IMAGE_CACHE_BYTES, MAX_FETCH_LINES, Placement, SearchMatch, TermEvent,
-    TermRequest, TermSize,
+    ColorOverrides, Frame, IMAGE_CACHE_BYTES, MAX_FETCH_LINES, Placement, Progress, Restored,
+    SearchMatch, TermEvent, TermRequest, TermSize,
 };
 
 /// Lines kept client-side; the worker retains 50k. Past it the lines farthest from the view
@@ -119,6 +119,10 @@ pub struct TermState {
     placements: Vec<Placement>,
     /// The program's colour changes over the theme.
     colors: ColorOverrides,
+    /// The program's progress report (`OSC 9;4`).
+    progress: Progress,
+    /// The session was reopened after its shell was lost.
+    restored: Option<Restored>,
     /// The primary screen's lines while the alternate screen is up, to take back if the
     /// worker returns to the same numbering.
     parked: Option<Parked>,
@@ -221,6 +225,8 @@ impl TermState {
             image_bytes: 0,
             placements: Vec::new(),
             colors: ColorOverrides::default(),
+            progress: Progress::default(),
+            restored: None,
             parked: None,
             superseded: 0,
             in_flight: VecDeque::new(),
@@ -302,6 +308,22 @@ impl TermState {
     #[must_use]
     pub const fn modes(&self) -> TermModes {
         self.screen.modes()
+    }
+
+    /// The program's progress (`OSC 9;4`): `ProgressState::None` when there is none to show.
+    /// A tile header draws it as a bar, and the app's Dock tile as a badge. Changes arrive
+    /// with no [`Effect`] of their own: read it after [`Self::apply`].
+    #[must_use]
+    pub const fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    /// Whether the session was reopened after its shell was lost (a reboot, ptyd ending),
+    /// and what it ran before. The divider in the scrollback says so too; this is for chrome
+    /// that offers the old command again.
+    #[must_use]
+    pub const fn restored(&self) -> Option<&Restored> {
+        self.restored.as_ref()
     }
 
     /// Title from OSC 0/2.
@@ -418,6 +440,7 @@ impl TermState {
             TermEvent::Exited { status } => {
                 self.exited = Some(status);
                 self.running = None;
+                self.progress = Progress::default();
                 vec![Effect::Exited(status)]
             }
             TermEvent::Resized { cols, rows } => {
@@ -439,6 +462,14 @@ impl TermState {
             }
             TermEvent::Marker { id } => {
                 vec![Effect::Request(TermRequest::Reached { marker: id })]
+            }
+            TermEvent::Progress(progress) => {
+                self.progress = progress;
+                Vec::new()
+            }
+            TermEvent::Restored(restored) => {
+                self.restored = Some(restored);
+                Vec::new()
             }
         }
     }
@@ -1179,6 +1210,31 @@ mod tests {
     /// effect: title, cwd with its repository and branch, the bell, a clipboard write, the exit
     /// (which also ends a running command), an error, matches and a refused pattern; a resize
     /// and the driver flag change the state and emit nothing.
+    /// A progress report is kept until the next one, and the program's exit drops it; a
+    /// restored session says so for as long as it lives.
+    #[test]
+    fn progress_and_restored_are_kept() {
+        use slopty_proto::terminal::ProgressState;
+
+        let mut state = TermState::new(size());
+        assert_eq!(state.progress(), Progress::default());
+        assert_eq!(state.restored(), None);
+        let half = Progress { state: ProgressState::Set, percent: Some(50) };
+        assert_eq!(state.apply(TermEvent::Progress(half)), vec![]);
+        assert_eq!(state.progress(), half);
+        let turn = Progress { state: ProgressState::Indeterminate, percent: None };
+        state.apply(TermEvent::Progress(turn));
+        assert_eq!(state.progress(), turn);
+        let restored = Restored {
+            saved_ms: slopty_core::WallMs::from_millis(1_790_000_000_000),
+            command: vec!["claude".into()],
+        };
+        assert_eq!(state.apply(TermEvent::Restored(restored.clone())), vec![]);
+        state.apply(TermEvent::Exited { status: 0 });
+        assert_eq!(state.progress(), Progress::default(), "the exit ends the report");
+        assert_eq!(state.restored(), Some(&restored));
+    }
+
     #[test]
     fn events_are_kept_and_re_emitted_as_effects() {
         let mut state = TermState::new(size());

@@ -1152,6 +1152,28 @@ mod golden {
         snap("server_terminals", &FromServer::Terminals(vec![(worker, summary)]));
         snap("server_worker_load", &FromServer::Load { worker, load: 0.75 });
     }
+
+    /// `OSC 9;4` as the tile header and the Dock read it, and a session reopened after its
+    /// shell was lost.
+    #[test]
+    fn progress_and_restored() {
+        use slopty_proto::terminal::{Progress, ProgressState, Restored};
+        snap(
+            "worker_term_progress",
+            &TermEvent::Progress(Progress { state: ProgressState::Set, percent: Some(42) }),
+        );
+        snap(
+            "worker_term_progress_indeterminate",
+            &TermEvent::Progress(Progress { state: ProgressState::Indeterminate, percent: None }),
+        );
+        snap(
+            "worker_term_restored",
+            &TermEvent::Restored(Restored {
+                saved_ms: WallMs::from_millis(1_790_000_000_000),
+                command: vec!["claude".to_owned()],
+            }),
+        );
+    }
 }
 
 #[cfg(test)]

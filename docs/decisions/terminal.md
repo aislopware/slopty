@@ -2006,3 +2006,79 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     through untouched. They also cut the command line as OpenSSH does and read `ssh -G`.
     `a_typed_ssh_goes_through_the_cli` types `ssh` into real zsh, bash and fish and checks
     that a user's alias wins. `the_cli_travels_to_integrated_shells_only` covers the variable.
+- ✅ **A program's progress (`OSC 9;4`) is session state on the wire** (2026-09-29, product gap
+  4). cargo-style tools, dnf5, systemd and Claude Code's turn bar (`terminalProgressBarEnabled`)
+  report progress with ConEmu's `OSC 9;4`. libghostty-vt parses it, and the binding fork
+  already has `Terminal::on_progress_report`, so no fork change was needed.
+  - **Shape.** `slopty_proto::terminal::Progress { state, percent }`, with `ProgressState`
+    `None`, `Set`, `Error`, `Indeterminate` or `Paused`. It travels as
+    `TermEvent::Progress` when it changes and is sent on attach while one stands, as the title
+    is. It is not in `SessionSummary`: the tile and the Dock read an attached session, and
+    adding a field there would touch every summary built in the tree.
+  - **ConEmu's rules for a missing value.** A set with no value is zero. An error or a pause
+    with none keeps the last value, as ConEmu and Windows Terminal do. Values over 100 are
+    clamped by the parser. A report that changes nothing sends nothing.
+  - **The prompt ends it.** Ghostty drops a bar nobody updated for 15 s, which cuts off a
+    long step of a build that reports rarely. Here the next prompt (`133;A`) clears it: the
+    shell has the terminal back, so the program that reported has ended, cleared or not. The
+    program's exit clears it too. A shell without the integration keeps a stale bar until the
+    next report, which is the cost of the rule.
+  - **Not kept across a worker restart.** The checkpoint carries no progress, so a restarted
+    worker shows none until the program reports again. Claude Code reports at the next turn.
+  - Client: `TermState::progress()`, updated by `apply` with no `Effect` of its own, so the
+    UI reads it after each apply. Tests: `progress_reports_are_events` and
+    `claude_codes_turn_bar_and_a_prompt_end_progress` (engine),
+    `progress_reaches_the_viewers_and_a_late_attach` (actor), `progress_and_restored_are_kept`
+    (client). Goldens: `worker_term_progress`, `worker_term_progress_indeterminate`.
+- ✅ **Sessions come back after a reboot** (2026-09-29, product gap 14). ptyd keeps shells alive
+  across a worker restart, but a reboot or ptyd ending lost every shell. The items stayed,
+  pointing at sessions that no longer existed.
+  - **Prior art.** macOS Terminal.app reopens each window with a new shell in the old
+    directory and prints the old contents above a "Restored session" line. Zellij serializes
+    each session to its cache and holds the old commands behind "Press ENTER to run".
+    tmux-resurrect restores panes and directories on request and reruns only an allowlist of
+    programs. Warp and iTerm2 restore windows and their contents on launch, with new shells.
+    Slopty takes Terminal.app's shape (a new shell, the old text above a divider) and
+    Zellij's rule that nothing reruns unasked.
+  - **The worker keeps them, not ptyd.** The gap note had ptyd write the recipe. The worker
+    does it instead (`slopty_worker::restore::Keeper`): it makes the checkpoints, knows the
+    OSC 7 directory and the title, and has `slopty_platform::fs::replace`. ptyd stays without
+    VT parsing and without `slopty-platform`, and its protocol does not change. Per session,
+    `<data dir>/sessions/<id>.json` holds the recipe: command, the request's own environment,
+    directory, title, size, when the screen was saved, and whether the session was itself
+    restored. `<id>.vt` holds the newest checkpoint. The directory is 0700 because a
+    scrollback holds whatever was printed. The recipe is written at open. Each checkpoint
+    updates the directory, title and size, and is written at most every 10 s. The worker
+    writes what it holds on its way down, which covers a reboot (launchd stops it with
+    SIGTERM) and ptyd ending (it exits after its ptyd). Closing a session deletes both files.
+    Cost: MEASUREMENTS 2026-09-29, "Keeping a session's screen on disk".
+  - **Reopened under the same id.** On start, `Worker::connect` adopts what ptyd holds, and
+    `Worker::restore` reopens every kept session ptyd does not hold under its old
+    `SessionId`, so every item keeps its tile with no item change. It spawns a new shell in
+    the last directory (home when that directory is gone). The environment is the worker's
+    current session environment plus the request's own. The engine replays the kept screen,
+    then `GhosttyEngine::mark_restored` closes it off. That call switches off what the old
+    programs left on (alternate screen, mouse and focus reports, bracketed paste, application
+    keys, kitty keyboard flags, a hidden cursor, the program's colours). It then draws a faint
+    "── Restored after restart ───" rule on the row below the last one with text, not at the
+    cursor, because an inline TUI like Claude Code leaves its cursor above its status rows.
+    The new shell's prompt follows. The next checkpoint folds the pair together, so a later
+    worker restart does not draw a second divider.
+  - **Nothing reruns.** The new session runs the login shell. The one exception is a session
+    opened on a shell alone that `/etc/shells` lists (`/bin/zsh`), which gets that shell. A
+    program is never started again. `TermEvent::Restored { saved_ms, command }` tells each
+    viewer on attach that the session was restored and what it ran before (empty when that
+    was the shell), so the UI can offer the command again. The chain survives a second loss.
+  - **Exited sessions come back as shells too.** An exited session stays until closed, and
+    its record with it, so after a reboot it reopens as a live shell in its directory. The
+    gap note's alternative, a read-only ended item with "Start a shell here", needs a session
+    with no PTY, which the worker cannot hold. That alternative stays open.
+  - Tests: `a_session_whose_shell_was_lost_comes_back_in_its_directory` (apps/slopty-worker
+    e2e) starts the test's own ptyd and worker and opens `/bin/sh` in a temporary directory.
+    It `cd`s deeper, reports OSC 7, prints a marker and starts a program that logs each start.
+    Then it kills ptyd, starts both again and attaches. It checks that the session is listed
+    under its id, that `Restored` arrives, that the marker is above the divider, that
+    `pwd -P` in the new shell is the deeper directory, and that the program started once.
+    `restore::tests` cover the files, the forgetting, the write pacing and the shell rule.
+    `ghostty::restored::tests` cover the divider and the mode reset. Golden:
+    `worker_term_restored`.

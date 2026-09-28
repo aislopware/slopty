@@ -7666,3 +7666,28 @@ Sizing the message first, with postcard's `Size` flavour, and then serialising i
 `Vec` also makes one block, but it walks the message twice. On a one-off harness with the same
 frames it cost 6 768 instructions for the echo and 1 729 833 for the full screen (+58 %), so it
 was not taken.
+
+## 2026-09-29 — Keeping a session's screen on disk
+
+Mac Studio M1 Max, macOS 27.0, other sessions building in the same checkout. The worker now
+writes each session's newest checkpoint to `<data dir>/sessions/<id>.vt` so a session can come
+back after its shell is lost (`docs/decisions/terminal.md`, "Sessions come back after a
+reboot"). The write runs on a blocking thread of the keeper's own task. The session thread,
+the frame path and the tap to ptyd do not change: the tap loop hands the state it already
+sent to ptyd to the keeper, a move with no copy.
+
+```sh
+cargo nextest run -p slopty-worker --release --run-ignored only -E 'test(keep_cost)' --no-capture
+```
+
+A 200-column session holding the full 50 000-line scrollback, checkpointed, then written with
+`slopty_platform::fs::replace` into a temporary directory on the internal SSD, 20 rounds, three
+runs:
+
+| state | mean | worst |
+| --- | --- | --- |
+| 5 957 KiB | 2.7–3.0 ms | 4.2–5.8 ms |
+
+A session is written at most once every 10 s (`restore::KEEP_EVERY`), and the newest state
+replaces one still waiting. Twenty busy sessions at full scrollback cost the writer about 60 ms
+of I/O every 10 s, on no thread a key or a frame waits on.

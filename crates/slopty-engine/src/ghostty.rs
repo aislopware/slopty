@@ -13,6 +13,7 @@ use libghostty_vt::screen::{
 use libghostty_vt::style::{PaletteIndex, RgbColor};
 use libghostty_vt::terminal::{
     ClipboardLocation, ColorScheme, Mode, Point, PointCoordinate, PointSpace,
+    ProgressState as VtProgress,
 };
 use libghostty_vt::{Terminal, focus, key, mouse, paste};
 use slopty_core::{Duration, MonoTime};
@@ -24,7 +25,8 @@ use slopty_proto::input::{
     KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseButton, MouseEvent,
 };
 use slopty_proto::terminal::{
-    ColorOverrides, Frame, LineDiscipline, PixelRect, Placement, TermColors, TermSize,
+    ColorOverrides, Frame, LineDiscipline, PixelRect, Placement, Progress, ProgressState,
+    TermColors, TermSize,
 };
 
 use crate::graphics::{self, ImageUpload, Ledger, Shipped};
@@ -33,6 +35,7 @@ use crate::{EngineConfig, EngineError, EngineEvent, convert, osc133, search};
 
 mod read;
 mod redraw;
+mod restored;
 
 pub use read::{CommandBlock, Position, ScreenText, TextLines, TextSince};
 
@@ -176,6 +179,8 @@ pub struct GhosttyEngine {
     graphics_gen: u64,
     /// The program's colour changes as last reported.
     overrides: ColorOverrides,
+    /// The program's progress report as last reported, shared with libghostty's callback.
+    progress: Rc<std::cell::Cell<Progress>>,
 }
 
 /// The primary screen's numbering, parked while a program has the alternate screen.
@@ -279,6 +284,8 @@ impl GhosttyEngine {
 
         let events: Events = Rc::new(RefCell::new(Vec::new()));
         install_callbacks(&mut term, &events, &light)?;
+        let progress = Rc::new(std::cell::Cell::new(Progress::default()));
+        install_progress(&mut term, &events, &progress)?;
         let render = Rc::new(RefCell::new(RenderState::new()?));
         let hold = Rc::new(std::cell::Cell::new(None));
         install_render_hold(&mut term, &render, &hold)?;
@@ -333,6 +340,7 @@ impl GhosttyEngine {
             uploads: Vec::new(),
             graphics_gen: 0,
             overrides: ColorOverrides::default(),
+            progress,
         };
         engine.reanchor()?;
         Ok(engine)
@@ -574,6 +582,11 @@ impl GhosttyEngine {
             osc133::Mark::PromptStart { redraw } => {
                 if let Some(redraw) = redraw {
                     self.prompt_redraw = redraw;
+                }
+                // The shell has the terminal back, so whatever reported progress has ended,
+                // cleared or not.
+                if self.progress.replace(Progress::default()).state != ProgressState::None {
+                    self.events.borrow_mut().push(EngineEvent::Progress(Progress::default()));
                 }
                 let (marks, starts) = (&mut self.exit_marks, &mut self.prompt_starts);
                 remark(marks, starts, &mut self.remarked_rows, line, |_, starts| {
@@ -1533,6 +1546,41 @@ fn install_callbacks(
         }
     })?;
     Ok(())
+}
+
+/// Follow the program's `OSC 9;4` progress reports, and report each change.
+fn install_progress(
+    term: &mut Terminal<'static, 'static>,
+    events: &Events,
+    progress: &Rc<std::cell::Cell<Progress>>,
+) -> Result<(), EngineError> {
+    let (events, shown) = (Rc::clone(events), Rc::clone(progress));
+    term.on_progress_report(move |_, report| {
+        let Ok(state) = report.state() else { return };
+        let was = shown.get();
+        let now = progress_after(was, state, report.progress());
+        if now != was {
+            shown.set(now);
+            events.borrow_mut().push(EngineEvent::Progress(now));
+        }
+    })?;
+    Ok(())
+}
+
+/// The progress after a report of `state` with `percent`, given the progress before it. An
+/// error or a pause without a value keeps the last value, and a set without one is zero, as in
+/// `ConEmu`, which defined the sequence.
+fn progress_after(was: Progress, state: VtProgress, percent: Option<u8>) -> Progress {
+    let percent = percent.map(|p| p.min(100));
+    let (state, percent) = match state {
+        VtProgress::Set => (ProgressState::Set, Some(percent.unwrap_or(0))),
+        VtProgress::Error => (ProgressState::Error, percent.or(was.percent)),
+        VtProgress::Indeterminate => (ProgressState::Indeterminate, None),
+        VtProgress::Pause => (ProgressState::Paused, percent.or(was.percent)),
+        // `Remove`, and any state a later libghostty adds.
+        _ => (ProgressState::None, None),
+    };
+    Progress { state, percent }
 }
 
 /// Capture the frame a program leaves on screen when it begins a render hold (synchronized
@@ -2880,6 +2928,64 @@ mod tests {
             matches!(&ev[0], EngineEvent::Notification { body, .. } if body.len() == NOTIFICATION_CHARS),
             "{ev:?}"
         );
+    }
+
+    fn progress_events(e: &GhosttyEngine) -> Vec<Progress> {
+        e.drain_events()
+            .into_iter()
+            .filter_map(|ev| match ev {
+                EngineEvent::Progress(p) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn progress(state: ProgressState, percent: Option<u8>) -> Progress {
+        Progress { state, percent }
+    }
+
+    /// `OSC 9;4` in each state, with the `ConEmu` rules for a missing value, reported only when
+    /// it changes.
+    #[test]
+    fn progress_reports_are_events() {
+        let mut e = engine(10, 3);
+        e.write(b"\x1b]9;4;1;42\x07");
+        assert_eq!(progress_events(&e), [progress(ProgressState::Set, Some(42))]);
+        e.write(b"\x1b]9;4;1;42\x07");
+        assert_eq!(progress_events(&e), [], "no change, no event");
+        e.write(b"\x1b]9;4;2\x1b\\");
+        assert_eq!(progress_events(&e), [progress(ProgressState::Error, Some(42))], "kept");
+        e.write(b"\x1b]9;4;4;7\x07");
+        assert_eq!(progress_events(&e), [progress(ProgressState::Paused, Some(7))]);
+        e.write(b"\x1b]9;4;1\x07");
+        assert_eq!(progress_events(&e), [progress(ProgressState::Set, Some(0))]);
+        e.write(b"\x1b]9;4;1;250\x07");
+        assert_eq!(progress_events(&e), [progress(ProgressState::Set, Some(100))], "clamped");
+        e.write(b"\x1b]9;4;3\x07");
+        assert_eq!(progress_events(&e), [progress(ProgressState::Indeterminate, None)]);
+        e.write(b"\x1b]9;4;0\x07");
+        assert_eq!(progress_events(&e), [Progress::default()]);
+        e.write(b"\x1b]9;4;9\x07\x1b]9;4\x07");
+        assert_eq!(progress_events(&e), [], "not a state");
+    }
+
+    /// Claude Code brackets a turn with `9;4;3;` and `9;4;0;` (a trailing separator and no
+    /// value), and the bar goes with the prompt when a program never clears it.
+    #[test]
+    fn claude_codes_turn_bar_and_a_prompt_end_progress() {
+        let mut e = engine(20, 3);
+        e.write(b"\x1b]9;4;3;\x07thinking");
+        assert_eq!(progress_events(&e), [progress(ProgressState::Indeterminate, None)]);
+        e.write(b"\x1b]9;4;0;\x07");
+        assert_eq!(progress_events(&e), [Progress::default()]);
+        e.write(b"\x1b]9;4;1;60\x07\r\n\x1b]133;D;130\x07\x1b]133;A\x07$ ");
+        assert_eq!(
+            progress_events(&e),
+            [progress(ProgressState::Set, Some(60)), Progress::default()],
+            "a killed program's bar is cleared by the next prompt"
+        );
+        e.write(b"\x1b]133;A\x07$ ");
+        assert_eq!(progress_events(&e), [], "a prompt with no bar up says nothing");
     }
 
     #[test]

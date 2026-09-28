@@ -54,9 +54,9 @@ struct Args {
     /// directory, `$TMPDIR/slopty` on macOS).
     #[arg(long)]
     ptyd_socket: Option<PathBuf>,
-    /// Data directory holding `worker-id`, `items.json` and `settings.toml` (default:
-    /// `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty` on macOS and
-    /// `$XDG_DATA_HOME/slopty` on Linux).
+    /// Data directory holding `worker-id`, `items.json`, `settings.toml` and the kept sessions
+    /// (`sessions/`) (default: `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty`
+    /// on macOS and `$XDG_DATA_HOME/slopty` on Linux).
     #[arg(long)]
     data_dir: Option<PathBuf>,
     /// Control socket (default: `$TMPDIR/slopty/worker.sock`, or `$SLOPTY_WORKER_SOCKET`).
@@ -398,10 +398,13 @@ async fn run(displays: Displays) -> Result<()> {
         .with_context(|| format!("bind {local} (is another worker running?)"))?;
     let listen = listener.local_addr()?;
     let agents: Arc<parking_lot::Mutex<AgentTable>> = Arc::default();
-    let (worker, reports) =
-        Worker::connect(args.ptyd_socket, Arc::new(server::DaemonAgents(Arc::clone(&agents))))
-            .await
-            .context("connect to slopty-ptyd")?;
+    let (worker, reports) = Worker::connect(
+        args.ptyd_socket,
+        Arc::new(server::DaemonAgents(Arc::clone(&agents))),
+        &data_dir.join("sessions"),
+    )
+    .await
+    .context("connect to slopty-ptyd")?;
     let slopty_worker::manager::Reports { mut exits, port_hints, mut moves } = reports;
     let (events, _keep) = broadcast::channel(EVENT_BUFFER);
     let items = ItemStore::open(&data_dir.join("items.json"))?;
@@ -512,6 +515,13 @@ async fn run(displays: Displays) -> Result<()> {
         tokio::spawn(modsock::serve(daemon.clone(), mod_path));
     }
     daemon.worker.set_session_env(session_env);
+    // Sessions whose shells were lost to a reboot or to ptyd ending come back under their old
+    // ids, before any client asks for them, so every item keeps its tile.
+    for session in daemon.worker.restore().await {
+        if let Some(delta) = daemon.items.ensure_terminal(session, ClientId::nil()) {
+            let _sent = daemon.events.send(slopty_proto::WorkerMsg::Items(delta));
+        }
+    }
     tokio::spawn(ctl::serve(daemon.clone(), ctl_path));
 
     join_server(&daemon, args.server.as_deref(), &data_dir);
@@ -551,6 +561,9 @@ async fn run(displays: Displays) -> Result<()> {
             }
         }
     };
+    // A reboot stops the worker before it stops ptyd: this is the last chance to keep the
+    // screens as they are now.
+    daemon.worker.keep_now().await;
     daemon.listener.endpoint().close(0_u32.into(), b"worker shutting down");
     let _drained = tokio::time::timeout(
         std::time::Duration::from_secs(1),

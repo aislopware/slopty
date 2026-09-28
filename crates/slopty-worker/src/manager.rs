@@ -9,13 +9,14 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::ptyd::PtydError;
-use slopty_proto::terminal::{OpenSession, SessionState, SessionSummary, TermSize};
+use slopty_proto::terminal::{OpenSession, Restored, SessionState, SessionSummary, TermSize};
 use slopty_pty::protocol::{SessionInfo, socket_path};
 use slopty_pty::{PtyError, PtydClient, SpawnSpec};
 use tokio::sync::mpsc;
 
 use crate::WorkerError;
 use crate::orchestrate::Agents;
+use crate::restore::{Keeper, Recipe};
 use crate::session::{self, Probe, SessionHandle, SessionStart, Tap};
 
 /// Scrollback lines the engine retains per session.
@@ -41,6 +42,20 @@ struct Entry {
     exited: Option<i32>,
     /// When ptyd spawned the child.
     started_ms: WallMs,
+}
+
+/// What a session is adopted with besides what ptyd hands over.
+#[derive(Clone, Debug, Default)]
+struct Adoption {
+    /// What it was opened to run.
+    command: Vec<String>,
+    /// Its child's exit status, when ptyd reaped it before this worker adopted it.
+    exited: Option<i32>,
+    /// It was reopened after its shell was lost.
+    restored: Option<Restored>,
+    /// The lost shell's screen, to replay with the divider under it: ptyd holds nothing of
+    /// the new shell but its first output.
+    screen: Option<Vec<u8>>,
 }
 
 /// An [`Entry`] taken out of the table's lock, to be summarised.
@@ -87,6 +102,11 @@ struct Inner {
     changes: crate::changes::Changes,
     /// Since when each exited session has had no viewer.
     unwatched: Mutex<Unwatched>,
+    /// The sessions kept on disk, to reopen after their shell is lost.
+    keeper: Keeper,
+    /// Kept sessions ptyd did not hold when this worker connected: their shells were lost, and
+    /// [`Worker::restore`] reopens them.
+    lost: Mutex<HashMap<SessionId, Recipe>>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -111,14 +131,26 @@ pub struct Reports {
 
 impl Worker {
     /// Connect to ptyd (default socket or `$SLOPTY_PTYD_SOCKET`) and adopt every session it
-    /// already holds. `agents` is the daemon's agent table, read into every summary.
+    /// already holds. `agents` is the daemon's agent table, read into every summary. `kept` is
+    /// where sessions are kept on disk ([`crate::restore`]); the ones ptyd no longer holds wait
+    /// for [`Self::restore`].
     pub async fn connect(
         socket: Option<PathBuf>,
         agents: Arc<dyn Agents>,
+        kept: &Path,
     ) -> Result<(Self, Reports), WorkerError> {
         let path = socket.unwrap_or_else(socket_path);
         let (mut client, exits) = PtydClient::connect(&path).await?;
         let existing = client.list().await?;
+        let (keeper, mut recipes) = Keeper::open(kept)
+            .map_err(|source| PtyError::Os { context: "open the kept sessions", source })?;
+        let held: Vec<(SessionInfo, Option<Recipe>)> = existing
+            .into_iter()
+            .map(|info| {
+                let recipe = recipes.remove(&info.id);
+                (info, recipe)
+            })
+            .collect();
         let (tap, tap_rx) = mpsc::channel(TAP_QUEUE);
         let (port_hints, port_hints_rx) = mpsc::unbounded_channel();
         let (moves, moves_rx) = mpsc::unbounded_channel();
@@ -134,12 +166,14 @@ impl Worker {
                 agents,
                 changes,
                 unwatched: Mutex::new(Unwatched::default()),
+                keeper,
+                lost: Mutex::new(recipes),
             }),
         };
         tokio::spawn(tap_loop(Arc::downgrade(&worker.inner), tap_rx));
-        for info in existing {
+        for (info, recipe) in held {
             tracing::info!(session = %info.id, pid = info.pid, "adopting session from ptyd");
-            worker.adopt_listed(info).await;
+            worker.adopt_listed(info, recipe).await;
         }
         Ok((worker, Reports { exits, port_hints: port_hints_rx, moves: moves_rx }))
     }
@@ -147,9 +181,15 @@ impl Worker {
     /// Take over a session ptyd listed. One closed since the listing is let go. One an older
     /// worker still holds (it is exiting as this one starts) is taken in the background once
     /// that worker lets go, and announced through [`Reports::moves`] like any changed summary.
-    async fn adopt_listed(&self, info: SessionInfo) {
-        let (id, size, exited) = (info.id, info.size, info.exited);
-        match self.adopt(id, size, Vec::new(), exited).await {
+    async fn adopt_listed(&self, info: SessionInfo, recipe: Option<Recipe>) {
+        let (id, size) = (info.id, info.size);
+        let adoption = Adoption {
+            exited: info.exited,
+            command: recipe.as_ref().map(|r| r.command.clone()).unwrap_or_default(),
+            restored: recipe.and_then(|r| r.restored),
+            screen: None,
+        };
+        match self.adopt(id, size, adoption.clone()).await {
             Ok(_handle) => {}
             Err(WorkerError::Pty(PtyError::Daemon(PtydError::NoSuchSession))) => {
                 tracing::debug!(session = %id, "closed before it was adopted");
@@ -157,17 +197,17 @@ impl Worker {
             Err(WorkerError::Pty(PtyError::Daemon(PtydError::AttachedElsewhere))) => {
                 tracing::info!(session = %id, "held by an older worker; adopting once it lets go");
                 let worker = self.clone();
-                tokio::spawn(async move { worker.adopt_when_free(id, size, exited).await });
+                tokio::spawn(async move { worker.adopt_when_free(id, size, adoption).await });
             }
             Err(e) => tracing::warn!(session = %id, error = %e, "adopt failed"),
         }
     }
 
-    async fn adopt_when_free(&self, id: SessionId, size: TermSize, exited: Option<i32>) {
+    async fn adopt_when_free(&self, id: SessionId, size: TermSize, adoption: Adoption) {
         let asked = tokio::time::Instant::now();
         loop {
             tokio::time::sleep(HANDOVER_POLL).await;
-            match self.adopt(id, size, Vec::new(), exited).await {
+            match self.adopt(id, size, adoption.clone()).await {
                 Ok(_handle) => {
                     tracing::info!(session = %id, "adopted from the older worker");
                     let _sent = self.inner.moves.send(id);
@@ -228,25 +268,103 @@ impl Worker {
             env,
             size: req.size,
         };
+        let recipe = Recipe {
+            command: req.command.clone(),
+            env: req.env.clone(),
+            cwd: spec.cwd.as_deref().map(|cwd| cwd.to_string_lossy().into_owned()),
+            title: req.title.clone(),
+            size: req.size,
+            saved_ms: WallMs::ZERO,
+            restored: None,
+        };
         self.inner.ptyd.lock().await.spawn(id, spec).await?;
-        self.adopt(id, req.size, req.command.clone(), None).await
+        self.inner.keeper.opened(id, recipe);
+        let adoption = Adoption { command: req.command.clone(), ..Adoption::default() };
+        self.adopt(id, req.size, adoption).await
+    }
+
+    /// Reopen every kept session whose shell was lost (ptyd did not hold it when this worker
+    /// connected), under its old id so its items keep their tiles: a new shell in the
+    /// directory the old one was last in, below the old screen and a divider. The old
+    /// command runs again only when it was a shell itself ([`Recipe::reopen_command`]).
+    /// Returns the sessions reopened; one that fails stays kept for the next start.
+    ///
+    /// Call it once [`Self::set_session_env`] has said what every session gets.
+    pub async fn restore(&self) -> Vec<SessionId> {
+        let lost: Vec<(SessionId, Recipe)> =
+            std::mem::take(&mut *self.inner.lost.lock()).into_iter().collect();
+        if lost.is_empty() {
+            return Vec::new();
+        }
+        let shells = crate::restore::system_shells();
+        let mut reopened = Vec::with_capacity(lost.len());
+        for (id, recipe) in lost {
+            match self.reopen(id, &recipe, &shells).await {
+                Ok(_handle) => {
+                    tracing::info!(session = %id, cwd = ?recipe.cwd, "restored a session whose shell was lost");
+                    reopened.push(id);
+                }
+                Err(e) => tracing::warn!(session = %id, error = %e, "session not restored"),
+            }
+        }
+        reopened
+    }
+
+    async fn reopen(
+        &self,
+        id: SessionId,
+        recipe: &Recipe,
+        shells: &str,
+    ) -> Result<SessionHandle, WorkerError> {
+        let command = recipe.reopen_command(shells);
+        let restored = recipe.restored(&command);
+        let screen = self.inner.keeper.screen(id).await;
+        // A directory that is gone (deleted, an unmounted volume) leaves the shell at home.
+        let cwd = recipe
+            .cwd
+            .as_deref()
+            .map(|cwd| crate::file::expand_home(Path::new(cwd)))
+            .filter(|cwd| cwd.is_dir());
+        let mut env = self.inner.session_env.lock().clone();
+        env.extend(recipe.env.iter().cloned());
+        env.push((slopty_proto::ctl::SESSION_ENV.to_owned(), id.to_string()));
+        let spec = SpawnSpec { command: command.clone(), cwd: cwd.clone(), env, size: recipe.size };
+        self.inner.ptyd.lock().await.spawn(id, spec).await?;
+        self.inner.keeper.opened(
+            id,
+            Recipe {
+                command: command.clone(),
+                cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
+                restored: Some(restored.clone()),
+                ..recipe.clone()
+            },
+        );
+        let adoption =
+            Adoption { command, exited: None, restored: Some(restored), screen: Some(screen) };
+        self.adopt(id, recipe.size, adoption).await
+    }
+
+    /// Write every session's newest screen to disk now, as the worker goes down.
+    pub async fn keep_now(&self) {
+        self.inner.keeper.flush().await;
     }
 
     async fn adopt(
         &self,
         id: SessionId,
         size: TermSize,
-        command: Vec<String>,
-        exited: Option<i32>,
+        adoption: Adoption,
     ) -> Result<SessionHandle, WorkerError> {
+        let Adoption { command, exited, restored, screen } = adoption;
         let attached = self.inner.ptyd.lock().await.attach(id).await?;
         if attached.dropped > 0 {
             tracing::warn!(session = %id, dropped = attached.dropped, "output lost before the backlog; the replay starts mid-stream");
         }
+        let divide = screen.is_some();
         let handle = session::spawn(SessionStart {
             id,
             master: attached.master,
-            checkpoint: attached.checkpoint,
+            checkpoint: screen.unwrap_or(attached.checkpoint),
             backlog: attached.backlog,
             tap: self.inner.tap.clone(),
             size: if attached.size == TermSize::default() { size } else { attached.size },
@@ -255,6 +373,8 @@ impl Worker {
             port_hints: Some(self.inner.port_hints.clone()),
             moves: Some(self.inner.moves.clone()),
             touched: Some(self.inner.changes.toucher()),
+            restored,
+            divide,
         })?;
         let started_ms = attached.started_ms;
         self.inner
@@ -378,6 +498,7 @@ impl Worker {
     pub async fn close(&self, id: SessionId) -> Result<(), WorkerError> {
         let entry = self.inner.sessions.lock().remove(&id).ok_or(WorkerError::NoSuchSession)?;
         self.inner.changes.forget(id);
+        self.inner.keeper.forget(id);
         entry.handle.close();
         match self.inner.ptyd.lock().await.close(id).await {
             // ptyd has already forgotten it: closed is what was asked for.
@@ -434,7 +555,10 @@ async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
     let mut failing = false;
     while let Some(tap) = rx.recv().await {
         let Some(inner) = inner.upgrade() else { return };
-        let sent = send_tap(&mut *inner.ptyd.lock().await, tap).await;
+        let sent = send_tap(&mut *inner.ptyd.lock().await, &tap).await;
+        if let Tap::Checkpoint { id, state, place } = tap {
+            inner.keeper.checkpoint(id, state, place);
+        }
         match sent {
             Err(e) if !failing => {
                 tracing::warn!(error = %e, "ptyd tap not sent");
@@ -446,11 +570,11 @@ async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
     }
 }
 
-async fn send_tap(ptyd: &mut PtydClient, tap: Tap) -> Result<(), PtyError> {
+async fn send_tap(ptyd: &mut PtydClient, tap: &Tap) -> Result<(), PtyError> {
     match tap {
-        Tap::Output(frame) => ptyd.output(&frame).await,
-        Tap::Checkpoint { id, state } => ptyd.checkpoint(id, &state).await,
-        Tap::Resize { id, size } => ptyd.resize(id, size).await,
+        Tap::Output(frame) => ptyd.output(frame).await,
+        Tap::Checkpoint { id, state, .. } => ptyd.checkpoint(*id, state).await,
+        Tap::Resize { id, size } => ptyd.resize(*id, *size).await,
     }
 }
 

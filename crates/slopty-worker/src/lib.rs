@@ -23,6 +23,7 @@ pub mod orchestrate;
 pub mod platform;
 pub mod ports;
 pub mod repo;
+pub mod restore;
 pub mod screen;
 pub mod session;
 pub mod wake;

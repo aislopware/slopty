@@ -65,6 +65,8 @@ mod actor {
             port_hints: None,
             moves,
             touched: None,
+            restored: None,
+            divide: false,
         })
         .unwrap();
         (handle, child, tap_rx)
@@ -556,6 +558,48 @@ mod actor {
             "{events:?}"
         );
         assert!(text(&screen).contains("hello"), "{}", text(&screen));
+        session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        child.wait().await.unwrap();
+        session.close();
+    }
+
+    /// A progress report reaches the viewers as it changes, a client attaching while it stands
+    /// is told it ahead of its first frame, and the program's exit drops it.
+    #[tokio::test]
+    async fn progress_reaches_the_viewers_and_a_late_attach() {
+        use slopty_proto::terminal::{Progress, ProgressState};
+
+        let (session, mut child) = start(&[
+            "/bin/sh",
+            "-c",
+            "printf '\\033]9;4;1;30\\007'; read x; printf '\\033]9;4;0\\007'; read x; exit 0",
+        ]);
+        let (a, b, c) = (ClientId::new(), ClientId::new(), ClientId::new());
+        let (tx_a, mut rx_a) = viewer(64);
+        session.attach(a, size(40, 6), tx_a).unwrap();
+        let at_30 = Progress { state: ProgressState::Set, percent: Some(30) };
+        wait_for(&mut rx_a, |ev, _| ev.contains(&TermEvent::Progress(at_30))).await;
+        let (tx_b, mut rx_b) = viewer(64);
+        session.attach(b, size(40, 6), tx_b).unwrap();
+        let (events, _) = wait_for(&mut rx_b, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full))
+        })
+        .await;
+        let progress = events.iter().position(|e| *e == TermEvent::Progress(at_30));
+        let frame = events.iter().position(|e| matches!(e, TermEvent::Frame(_)));
+        assert!(progress.is_some() && progress < frame, "{events:?}");
+        session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        wait_for(&mut rx_b, |ev, _| ev.contains(&TermEvent::Progress(Progress::default()))).await;
+        let (tx_c, mut rx_c) = viewer(64);
+        session.attach(c, size(40, 6), tx_c).unwrap();
+        let (events, _) = wait_for(&mut rx_c, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full))
+        })
+        .await;
+        assert!(
+            !events.iter().any(|e| matches!(e, TermEvent::Progress(_))),
+            "nothing to tell once it is gone: {events:?}"
+        );
         session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
         child.wait().await.unwrap();
         session.close();

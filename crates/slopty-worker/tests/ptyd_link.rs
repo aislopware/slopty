@@ -86,7 +86,9 @@ mod ptyd_link {
         let held = older.attach(id).await.unwrap();
 
         let (worker, mut reports) =
-            Worker::connect(Some(socket), Arc::new(NoAgents)).await.unwrap();
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"))
+                .await
+                .unwrap();
         assert!(worker.get(id).is_err(), "not the worker's while the older one holds it");
 
         drop(held);
@@ -103,7 +105,9 @@ mod ptyd_link {
         let dir = tempfile::tempdir().unwrap();
         let (_ptyd, socket) = ptyd(dir.path()).await;
         let (worker, _reports) =
-            Worker::connect(Some(socket.clone()), Arc::new(NoAgents)).await.unwrap();
+            Worker::connect(Some(socket.clone()), Arc::new(NoAgents), &dir.path().join("kept"))
+                .await
+                .unwrap();
         let open = OpenSession {
             size: TermSize::default(),
             cwd: None,

@@ -15,14 +15,15 @@ use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, Text
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
 use slopty_proto::codec;
 use slopty_proto::terminal::{
-    ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, TermColors,
-    TermError, TermEvent, TermRequest, TermSize,
+    ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, Progress,
+    ProgressState, Restored, TermColors, TermError, TermEvent, TermRequest, TermSize,
 };
 use slopty_pty::PtyMaster;
 use slopty_pty::protocol::OutputFrame;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::WorkerError;
+use crate::restore::Place;
 
 /// While output keeps flowing, frames go out no closer together than this: 125 frames per
 /// second per session is more than any display shows (120 Hz `ProMotion`), and without the
@@ -449,6 +450,8 @@ pub enum Tap {
         id: SessionId,
         /// VT bytes from [`GhosttyEngine::checkpoint`].
         state: Vec<u8>,
+        /// Where the session stands, which reopening it after its shell is lost starts from.
+        place: Place,
     },
     /// The terminal was resized: the size the next worker starts at.
     Resize {
@@ -486,7 +489,15 @@ pub struct SessionStart {
     /// Where the session says which repository it is in, each time it reads the branch, so
     /// that repository's changes are counted ([`crate::changes`]).
     pub touched: Option<mpsc::UnboundedSender<(SessionId, String)>>,
+    /// The session was reopened after its shell was lost: every viewer is told so.
+    pub restored: Option<Restored>,
+    /// `checkpoint` is the lost shell's screen and `backlog` the new shell's first output: the
+    /// divider goes between them. Not so once a worker has checkpointed the pair.
+    pub divide: bool,
 }
+
+/// The divider between a lost shell's screen and the new shell's.
+pub const RESTORED_DIVIDER: &str = "Restored after restart";
 
 /// Spawn the actor thread.
 pub fn spawn(start: SessionStart) -> Result<SessionHandle, WorkerError> {
@@ -710,6 +721,10 @@ struct Actor {
     cwd: Option<String>,
     /// The program's colour changes (OSC 4/10/11/12): broadcast, and sent to a late attach.
     program_colors: ColorOverrides,
+    /// The program's progress report (OSC 9;4): broadcast, and sent to a late attach.
+    progress: Progress,
+    /// See [`SessionStart::restored`].
+    restored: Option<Restored>,
     /// [`crate::repo::root_of`] of `cwd`, resolved when the shell reports a directory and when
     /// a command ends rather than per summary.
     repo: Option<String>,
@@ -822,6 +837,9 @@ impl Actor {
         if !start.checkpoint.is_empty() {
             engine.write(&start.checkpoint);
         }
+        if start.divide {
+            engine.mark_restored(RESTORED_DIVIDER)?;
+        }
         if !start.backlog.is_empty() {
             engine.write(&start.backlog);
         }
@@ -830,11 +848,13 @@ impl Actor {
         // now would land in a shell that is not asking). The title, the directory and the
         // program's colours are what the first attach is told.
         let (mut title, mut cwd, mut program_colors) = (None, None, ColorOverrides::default());
+        let mut progress = Progress::default();
         for ev in engine.drain_events() {
             match ev {
                 EngineEvent::Title(t) => title = Some(t),
                 EngineEvent::Cwd(c) => cwd = Some(c),
                 EngineEvent::Colors(c) => program_colors = c,
+                EngineEvent::Progress(p) => progress = p,
                 EngineEvent::PtyWrite(_)
                 | EngineEvent::Bell
                 | EngineEvent::Notification { .. }
@@ -863,6 +883,8 @@ impl Actor {
             told_cwd: cwd.clone(),
             cwd,
             program_colors,
+            progress,
+            restored: start.restored,
             repo,
             branch,
             place_due: false,
@@ -1207,7 +1229,9 @@ impl Actor {
             self.tap_lost = false;
             return;
         }
-        match self.tap.try_send(Tap::Checkpoint { id: self.id, state }) {
+        let place =
+            Place { cwd: self.cwd.clone(), title: self.title.clone(), size: self.engine.size() };
+        match self.tap.try_send(Tap::Checkpoint { id: self.id, state, place }) {
             Ok(()) => {
                 self.dirty_since_checkpoint = false;
                 self.tapped_since_checkpoint = 0;
@@ -1244,6 +1268,10 @@ impl Actor {
                 }
                 EngineEvent::Notification { title, body } => {
                     self.broadcast(&TermEvent::Notification { title, body });
+                }
+                EngineEvent::Progress(progress) => {
+                    self.progress = progress;
+                    self.broadcast(&TermEvent::Progress(progress));
                 }
                 // A prompt that sets the title on every draw repeats it; the viewers already
                 // hold it.
@@ -1627,9 +1655,9 @@ impl Actor {
         self.frame_room();
     }
 
-    /// What a viewer joining is told: the title, the directory, the program's colours, every
-    /// row with the images on them (now if it has room, else when it has), and the exit if the
-    /// child is gone.
+    /// What a viewer joining is told: the title, the directory, the program's colours, its
+    /// progress, whether the session was restored, every row with the images on them (now if
+    /// it has room, else when it has), and the exit if the child is gone.
     fn introduce(&mut self, client: ClientId) {
         if let Some(t) = self.title.clone() {
             self.send_to(client, &TermEvent::Title(t));
@@ -1640,6 +1668,12 @@ impl Actor {
         }
         if self.program_colors != ColorOverrides::default() {
             self.send_to(client, &TermEvent::Colors(self.program_colors.clone()));
+        }
+        if self.progress.state != ProgressState::None {
+            self.send_to(client, &TermEvent::Progress(self.progress));
+        }
+        if let Some(restored) = self.restored.clone() {
+            self.send_to(client, &TermEvent::Restored(restored));
         }
         if let Some(i) = self.viewers.iter().position(|v| v.client == client) {
             if let Some(v) = self.viewers.get_mut(i) {
@@ -1790,6 +1824,8 @@ impl Actor {
                 self.exited = Some(status);
                 self.activity.send_if_modified(|a| !std::mem::replace(&mut a.exited, true));
                 self.flush_frame();
+                // Its report ends with the program; the viewers drop it on the exit.
+                self.progress = Progress::default();
                 self.broadcast(&TermEvent::Exited { status });
             }
             Cmd::Read { read, reply } => {
