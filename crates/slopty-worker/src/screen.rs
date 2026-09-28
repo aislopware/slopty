@@ -17,6 +17,9 @@
 //! frames rather than letting latency build up; the client notices the gap and asks for a
 //! refresh. The newest capture is kept, so a picture that went still still gets the frame the
 //! cadence or the guard held back, and a refresh asked for on it is answered (`repair_loop`).
+//!
+//! [`synthetic::Drawn`] is a platform whose pictures are drawn instead of captured, for timing
+//! this path end to end where ScreenCaptureKit cannot run.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -51,6 +54,9 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::platform::{Native, Platform};
+
+#[cfg(target_os = "macos")]
+pub mod synthetic;
 
 /// A platform's capture.
 type Source<P> = <P as Platform>::Capture;

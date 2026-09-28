@@ -16,6 +16,12 @@
 //! ([`PacingStats::skipped`]). Those two counters are the double-present / skipped-present
 //! pattern; on a steady source matched to the display both stay near zero.
 //!
+//! Where the worker's clock is this process's too (loopback: the host time clock the worker stamps
+//! captures with and [`Instant`] both read mach absolute time), a [`ClockAnchor`] given to
+//! [`Pacer::share_clock`] lets the ring time each frame from its capture as well, and inputs the
+//! caller marks with [`Pacer::input_sent`] and [`Pacer::input_visible`] are timed from their send
+//! to the first frame shown that has them ([`Pacer::glass`]).
+//!
 //! Everything here is pure: the caller supplies the clock ([`Clock`]), so the policy is testable
 //! without a window.
 
@@ -102,6 +108,83 @@ impl CaptureClock {
     }
 }
 
+/// One moment read on both the worker's capture clock and this process's.
+///
+/// Only meaningful where they are the same clock: the host time clock `slopty_capture::host_now_us`
+/// reads and [`Instant`] are both mach absolute time on one machine, so on loopback a capture
+/// timestamp converts exactly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ClockAnchor {
+    /// The moment on this process's clock.
+    pub at: Instant,
+    /// The same moment on the worker's capture clock, microseconds.
+    pub host_us: u64,
+}
+
+impl ClockAnchor {
+    /// When a frame stamped `pts_us` was captured, on this process's clock. Only the low 32 bits
+    /// of the stamp are the wire's, so the stamp is read as the nearest moment to the anchor with
+    /// those bits: within 35 minutes of it either way.
+    #[must_use]
+    pub fn captured(&self, pts_us: u64) -> Option<Instant> {
+        #[expect(clippy::cast_possible_truncation, reason = "the wire's low 32 bits by design")]
+        let (pts, anchor) = (pts_us as u32, self.host_us as u32);
+        let ahead = pts.wrapping_sub(anchor).cast_signed();
+        let by = Duration::from_micros(u64::from(ahead.unsigned_abs()));
+        if ahead >= 0 { self.at.checked_add(by) } else { self.at.checked_sub(by) }
+    }
+}
+
+/// p50, p95 and the worst of one ring of durations.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Spread {
+    /// Median.
+    pub p50: Duration,
+    /// 95th percentile.
+    pub p95: Duration,
+    /// Worst.
+    pub max: Duration,
+    /// Samples in the ring.
+    pub count: usize,
+}
+
+impl Spread {
+    fn of(ring: &VecDeque<Duration>) -> Self {
+        let mut sorted: Vec<Duration> = ring.iter().copied().collect();
+        sorted.sort_unstable();
+        Self {
+            p50: percentile(&sorted, 50),
+            p95: percentile(&sorted, 95),
+            max: sorted.last().copied().unwrap_or_default(),
+            count: sorted.len(),
+        }
+    }
+}
+
+/// The two end-to-end timings, over the last [`RING`] samples of each.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct GlassStats {
+    /// Capture on the worker → the display showing the frame; empty unless the clocks are
+    /// shared ([`Pacer::share_clock`]).
+    pub capture: Spread,
+    /// Input sent → the display showing the first frame that has it.
+    pub input: Spread,
+    /// Inputs sent that no shown frame has had yet.
+    pub inputs_pending: usize,
+}
+
+/// An input the caller sent, waiting for the frame that shows it to reach the display.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SentInput {
+    seq: u64,
+    sent: Instant,
+    /// The first decoded frame that has it; `None` until one is found.
+    visible_from: Option<u64>,
+}
+
+/// Inputs in flight kept at most; an older one is dropped unmeasured.
+const INPUTS_IN_FLIGHT: usize = 64;
+
 /// What to do with a frame the decoder just produced.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pace {
@@ -169,6 +252,14 @@ pub struct Pacer<C: Clock = SystemClock> {
     last_seq: Option<u64>,
     ring: VecDeque<Sample>,
     stats: PacingStats,
+    /// The worker's clock against this one, when they are the same clock.
+    anchor: Option<ClockAnchor>,
+    /// Capture → shown, over the last [`RING`] frames shown.
+    captures: VecDeque<Duration>,
+    /// Inputs sent and not yet shown, oldest first.
+    inputs: VecDeque<SentInput>,
+    /// Input sent → shown, over the last [`RING`] inputs.
+    input_ring: VecDeque<Duration>,
 }
 
 impl Default for Pacer<SystemClock> {
@@ -189,6 +280,42 @@ impl<C: Clock> Pacer<C> {
             last_seq: None,
             ring: VecDeque::with_capacity(RING),
             stats: PacingStats::default(),
+            anchor: None,
+            captures: VecDeque::new(),
+            inputs: VecDeque::new(),
+            input_ring: VecDeque::new(),
+        }
+    }
+
+    /// The worker's capture clock is this process's clock too (loopback), read together at
+    /// `anchor`: from here on every frame shown is timed from its capture as well.
+    pub const fn share_clock(&mut self, anchor: ClockAnchor) {
+        self.anchor = Some(anchor);
+    }
+
+    /// Input `seq` left this client `at`. Sequence numbers count up.
+    pub fn input_sent(&mut self, seq: u64, at: Instant) {
+        if self.inputs.len() >= INPUTS_IN_FLIGHT {
+            self.inputs.pop_front();
+        }
+        self.inputs.push_back(SentInput { seq, sent: at, visible_from: None });
+    }
+
+    /// The decoded frame stamped `pts_us` is the first found to show every input up to `seq`:
+    /// they are timed to the first frame at least that new that reaches the display.
+    pub fn input_visible(&mut self, seq: u64, pts_us: u64) {
+        for input in self.inputs.iter_mut().filter(|i| i.seq <= seq && i.visible_from.is_none()) {
+            input.visible_from = Some(pts_us);
+        }
+    }
+
+    /// Capture → glass and input → glass over their rings.
+    #[must_use]
+    pub fn glass(&self) -> GlassStats {
+        GlassStats {
+            capture: Spread::of(&self.captures),
+            input: Spread::of(&self.input_ring),
+            inputs_pending: self.inputs.len(),
         }
     }
 
@@ -246,6 +373,17 @@ impl<C: Clock> Pacer<C> {
         self.ring.push_back(sample);
         self.shown_at = Some(at);
         self.stats.presented = self.stats.presented.saturating_add(1);
+        if let Some(captured) = self.anchor.and_then(|a| a.captured(stamp.pts_us)) {
+            push_ring(&mut self.captures, at.saturating_duration_since(captured));
+        }
+        while let Some(input) = self.inputs.front().copied() {
+            let Some(from) = input.visible_from else { break };
+            if from > stamp.pts_us {
+                break;
+            }
+            self.inputs.pop_front();
+            push_ring(&mut self.input_ring, at.saturating_duration_since(input.sent));
+        }
     }
 
     /// Age of the picture on screen: how long ago it reached the display.
@@ -275,6 +413,14 @@ impl<C: Clock> Pacer<C> {
             ..self.stats
         }
     }
+}
+
+/// Push onto a ring of at most [`RING`].
+fn push_ring(ring: &mut VecDeque<Duration>, sample: Duration) {
+    if ring.len() >= RING {
+        ring.pop_front();
+    }
+    ring.push_back(sample);
 }
 
 /// The `p`th percentile of a sorted slice by nearest rank, or zero when it is empty.
@@ -643,5 +789,80 @@ mod tests {
         assert_eq!(stats.window, RING);
         assert_eq!(stats.presented, u64::try_from(RING).expect("small") + 40);
         assert_eq!(stats.decode_p50, MS, "the slow start has fallen out of the ring");
+    }
+
+    /// With the clocks shared, a frame is timed from its capture too: captured 5 ms before it
+    /// arrived and shown a refresh after that, it took 5 ms and a refresh from capture to glass.
+    /// Without an anchor there is no capture timing at all, never a guess.
+    #[test]
+    fn a_shared_clock_times_frames_from_their_capture() {
+        let clock = FakeClock::new();
+        let mut pacer = Pacer::new(&clock);
+        // The worker's clock reads 7 000 000 µs at the fake clock's epoch.
+        let anchor = ClockAnchor { at: clock.at(Duration::ZERO), host_us: 7_000_000 };
+        let arrived = 20 * MS;
+        let s = FrameStamp {
+            pts_us: 7_000_000 + 15_000,
+            decode_seq: clock.next_seq(),
+            arrived: clock.at(arrived),
+            decoded: clock.at(arrived + MS),
+        };
+        clock.advance(arrived + FRAME);
+        pacer.offer(s);
+        present(&mut pacer, &clock);
+        assert_eq!(pacer.glass().capture.count, 0, "no anchor, no capture timing");
+
+        let mut shared = Pacer::new(&clock);
+        shared.share_clock(anchor);
+        shared.offer(s);
+        present(&mut shared, &clock);
+        let glass = shared.glass();
+        assert_eq!(glass.capture.count, 1);
+        assert_eq!(glass.capture.max, 5 * MS + FRAME);
+    }
+
+    /// The anchor reads only the wire's low 32 bits, so a stamp from just past a wrap of the
+    /// worker's clock still converts to a moment right after the anchor, not 71 minutes off.
+    #[test]
+    fn the_anchor_reads_the_nearest_moment_across_a_wrap() {
+        let at = Instant::now();
+        let anchor = ClockAnchor { at, host_us: (1_u64 << 32) - 1_000 };
+        let captured = anchor.captured((1_u64 << 32) + 2_000).expect("in range");
+        assert_eq!(captured.saturating_duration_since(at), 3 * MS);
+        let before = anchor.captured((1_u64 << 32) - 4_000).expect("in range");
+        assert_eq!(at.saturating_duration_since(before), 3 * MS);
+    }
+
+    /// An input is timed from its send to the first frame shown that has it. The frame found to
+    /// show it may be replaced before a paint; the newer frame shown instead has it too, and
+    /// that is where its clock stops. An input no frame has shown yet stays pending.
+    #[test]
+    fn an_input_is_timed_to_the_first_frame_shown_that_has_it() {
+        let clock = FakeClock::new();
+        let mut pacer = Pacer::new(&clock);
+        pacer.input_sent(1, clock.now_instant());
+        pacer.input_sent(2, clock.now_instant() + 2 * MS);
+        clock.advance(10 * MS);
+        // Frame 1 comes back without it.
+        pacer.offer(stamp(&clock, 1, 10 * MS, MS));
+        present(&mut pacer, &clock);
+        assert_eq!(pacer.glass().input.count, 0);
+        // Frame 2 shows input 1 but is replaced by frame 3 before the paint.
+        pacer.offer(stamp(&clock, 2, 20 * MS, MS));
+        pacer.input_visible(1, 2 * 16_667);
+        pacer.offer(stamp(&clock, 3, 22 * MS, MS));
+        clock.advance(20 * MS);
+        present(&mut pacer, &clock);
+        let glass = pacer.glass();
+        assert_eq!(glass.input.count, 1);
+        assert_eq!(glass.input.max, 30 * MS, "sent at 0, shown at 30 ms with frame 3");
+        assert_eq!(glass.inputs_pending, 1, "input 2 has not been seen");
+        pacer.input_visible(2, 4 * 16_667);
+        pacer.offer(stamp(&clock, 4, 40 * MS, MS));
+        clock.advance(FRAME);
+        present(&mut pacer, &clock);
+        let glass = pacer.glass();
+        assert_eq!((glass.input.count, glass.inputs_pending), (2, 0));
+        assert_eq!(glass.input.p50, 30 * MS);
     }
 }

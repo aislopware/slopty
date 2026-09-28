@@ -1221,3 +1221,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_quality_change_replaces_the_build_of_the_one_before`,
   `news_the_client_has_no_room_for_does_not_hold_input`,
   `a_read_landing_during_a_quality_build_does_not_drop_it`.
+
+- ✅ **Capture and input to the glass are timed from drawn pictures, not from a switch in the
+  product** (2026-09-28, MEASUREMENTS "capture to the glass and input to the glass, from drawn
+  pictures"). A worker a test starts cannot capture, and nothing may ask for Screen Recording,
+  so the capture seam gets a second implementation: `slopty_capture::synthetic::Canvas`. It
+  stands in for each display and draws on the display's beat into `IOSurface`-backed NV12, the
+  same pictures ScreenCaptureKit hands over, stamped on the same host clock. It never draws over
+  a picture the stream or the encoder still holds. The worker platform `screen::synthetic::Drawn`
+  pairs it with the real encoders, and its input sink changes the next picture. The strip of
+  blocks that spells the input count is read back off the decoded picture, so input → glass is
+  timed from pixels that really went through the codec. A platform type rather than an
+  environment switch keeps it out of the product: `ScreenStream` is `Pipeline<Native>`, and only
+  a test names `Pipeline<Drawn>`. The pacer keeps capture → shown beside arrival → shown when it
+  is given a `ClockAnchor`, which is exact only where both ends read mach time (loopback), and
+  input sent → shown for inputs the caller marks. `PacingStats` is unchanged; the new numbers
+  come from `Pacer::glass`. What was found: the encoder is 60–70 % of capture → painted on
+  loopback and sits at its floor. On a tailnet-shaped link, the rate controller's loss rule
+  halves the cadence under 3 % random loss that parity fully repairs, and that doubles input →
+  glass. That is a policy question left open.

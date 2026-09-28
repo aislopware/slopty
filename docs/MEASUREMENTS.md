@@ -5218,15 +5218,11 @@ shell was listed but never delivered a frame), and the other windows on screen b
 user, so none was used. The row stays owed: it needs a window this session starts that keeps
 drawing at the panel's rate.
 
-### Capture to the glass: not reachable yet
+### Capture to the glass
 
-Capture → decoded on loopback is the bench's column above: p50 5.2–9.9 ms. Nothing can yet time
-decoded → presented against a capture: the app self-test (`cargo xtask e2e app`, pair's display
-scenario) starts its own worker from the shell, which cannot capture (no Screen Recording), and
-cannot be pointed at the launchd worker. Screenshots are not an option. Closing it needs one of:
-the e2e harness able to stream from the installed worker, or the pacer (`slopty-client::pacing`)
-keeping capture → present beside arrival → present, which on loopback shares the worker's clock
-(`host_now_us`, mach time).
+Unreachable when this entry was written: a worker started from a shell cannot capture. Measured
+from drawn pictures on 2026-09-28 ("capture to the glass and input to the glass, from drawn
+pictures").
 
 ### Data before parity
 
@@ -7000,3 +6996,117 @@ Clean link (loss 0, 4 ms each way), drag, two pairs at load average 35: before p
 max 8.2–42 ms, after p90 5.5–8.9 / max 30–78 ms. The copies go nowhere there (every one late),
 yet each costs a spawned task and a 2 ms timer on the client and a decode on the worker. The
 tails of both rows come and go with the load, and this run cannot separate that cost from it.
+
+## 2026-09-28 — capture to the glass and input to the glass, from drawn pictures
+
+A worker started from a shell has no Screen Recording, so the stream's source is
+`slopty_capture::synthetic::Canvas`. It stands in for the main display (1920×1080 at 75 Hz here)
+and draws a picture on the display's beat: a dark desktop with a text window scrolling 3 rows a
+frame, and a strip of 16 blocks that spells how many inputs the process has taken. Each picture
+is stamped on the host time clock, as ScreenCaptureKit stamps. `slopty_worker::screen::synthetic::Drawn`
+is the canvas with the real VideoToolbox encoder, so everything after the capture call is the
+product's `Pipeline`: the cadence gate, encode, packetize and send. Its input sink counts each
+event, and the next picture shows the count.
+
+The client side is the product's too: `ScreenRouter`, `spawn_screen` (reassembly, NACK and
+refresh, VideoToolbox decode) and the element's `Pacer`. The pacer now also times capture →
+shown through a `ClockAnchor`, which is exact here because both ends read mach time. It times
+input sent → shown from `input_sent` / `input_visible`, and the test reads the strip off each
+decoded picture to know which frame first shows a click. Between the two ends, datagrams go
+straight into the router on loopback. The tailnet-shaped run sends them down a delay line of
+5 ms each way with 3 % of datagrams dropped (`ScreenRouter::with_loss`), which is
+`harness::TAILNET`. Reports and loss feedback go back to the stream's `StreamControl` 5 ms
+later. A click (`ScreenInput::Button`) is sent every 80–150 ms and reaches `Pipeline::inject`
+one way later. Paints come on a timer at the display's rate standing in for the display link,
+the same stand-in as `screen_start_up_over_quic`'s pacing. The runtime is user-interactive,
+as the app's is. The first second is dropped as warm-up, and then each case runs 20 s.
+
+```sh
+cargo test -p slopty-worker --lib --no-run      # prints target/debug/deps/slopty_worker-<hash>
+mkdir -p /tmp/slopty-glass && cp target/debug/deps/slopty_worker-<hash> /tmp/slopty-glass/slopty_worker
+cd /tmp/slopty-glass && ./slopty_worker --ignored --exact \
+  screen::synthetic::tests::capture_and_input_to_glass --nocapture   # SLOPTY_GLASS_SECONDS=20
+```
+
+The binary runs from `/tmp` because `/Volumes/Lacie` is mounted `noowners`, and every VideoToolbox
+session revalidates the binary's signature from there. There were three runs, with the load
+average between 35 and 92 (other sessions' builds). Each value is p50 / p95 / max in ms, one run
+per cell:
+
+| loopback | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| **capture → painted** | 14.0 / 15.8 / 29.5 | 14.4 / 31.2 / 62.8 | 14.2 / 30.4 / 56.8 |
+| **input sent → painted** (pacer, n=174) | 23.1 / 38.0 / 42.0 | 28.6 / 48.8 / 70.8 | 28.6 / 48.3 / 60.0 |
+| worker encode (submit → VideoToolbox callback) | 7.6 / 10.2 / 13.3 | 10.1 / 15.8 / 33.1 | 8.4 / 13.0 / 28.6 |
+| capture → arrival (encode, packetize, route) | 7.7 / 10.1 / 15.7 | 9.4 / 16.1 / 33.5 | 8.7 / 13.1 / 17.7 |
+| arrival → decoded | 1.1 / 2.2 / 12.6 | 1.4 / 7.5 / 32.8 | 1.9 / 8.2 / 17.2 |
+| capture → decoded | 8.8 / 11.5 / 20.4 | 11.3 / 22.2 / 43.2 | 11.1 / 20.4 / 30.3 |
+| decoded → painted | 4.7 / 6.9 / 15.6 | 4.7 / 15.9 / 47.8 | 3.9 / 15.6 / 36.2 |
+| input at the worker → the capture showing it | 7.8 / 23.2 / 26.5 | 8.9 / 23.8 / 52.7 | 9.3 / 23.9 / 28.2 |
+| frames encoded / s (75 Hz beat, 60 ceiling) | 60.0 | 59.3 | 59.8 |
+
+| tailnet-shaped: 5 ms each way, 3 % loss | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| **capture → painted** | 25.7 / 27.2 / 40.0 | 26.5 / 39.9 / 52.4 | 26.9 / 37.6 / 59.5 |
+| **input sent → painted** (pacer) | 52.4 / 93.1 / 96.9 | 59.7 / 97.1 / 104.3 | 62.4 / 100.9 / 129.1 |
+| worker encode | 7.8 / 9.2 / 25.6 | 9.4 / 16.5 / 45.7 | 7.9 / 12.8 / 27.9 |
+| capture → arrival | 14.0 / 16.0 / 30.1 | 16.5 / 24.7 / 69.0 | 14.5 / 21.5 / 35.6 |
+| arrival → decoded | 1.3 / 2.4 / 5.9 | 2.4 / 8.2 / 23.4 | 1.8 / 5.9 / 16.7 |
+| decoded → painted | 10.4 / 12.2 / 13.8 | 7.8 / 13.8 / 22.3 | 10.6 / 13.4 / 23.1 |
+| input at the worker → the capture showing it | 21.0 / 61.6 / 65.7 | 23.1 / 61.9 / 66.3 | 26.4 / 62.9 / 74.7 |
+| frames encoded / s | 27.1 | 26.7 | 26.0 |
+
+Drawing a picture takes 0.07 ms p50 and 0.2–0.3 ms p95 on the canvas's queue. No frame was lost
+and none failed to decode. The shaped runs recovered 34–59 frames through parity and sent 2–5
+NACKs.
+
+Where the time goes on loopback, capture → painted p50 14 ms:
+
+- **The encoder is 8–10 ms, 60–70 % of the total.** That is its floor on this machine. HEVC and
+  H.264 read 6.4–8.0 ms p50 at 1080p in every earlier row on 2026-09-05, whatever the rate
+  control or content. Nothing on this side of VideoToolbox is left to cut.
+- Packetize and the hand-over to the client are what remains of capture → arrival once the
+  encode is taken out: 0.1–0.3 ms at the median.
+- Decode is 1.1–1.9 ms.
+- The wait for the paint is 4–5 ms. That is the timer's phase and not a cost of the path. The
+  timer and the canvas run at 75 Hz off one clock, so a run holds one phase: anywhere from 0 to
+  13.3 ms, 6.7 ms on average against an unrelated display.
+- Input adds the wait for the next beat that the cadence gate lets through: 8–9 ms p50, which
+  is about half a beat plus the one beat in five the 60 ceiling skips at 75 Hz.
+
+**The one hop clearly above its floor is on the lossy path: input at the worker → the capture
+that shows it, 21–26 ms p50 and 62 ms p95, against 8–9 and 24 on loopback.** 3 % random loss is over
+`OVERUSE_LOSS_PERMILLE`, 20 ‰, so the rate controller reads it as overuse. It cuts to its
+1 Mbit/s floor within a few seconds, `9.0(Cut) 6.8(Cut) … 1.0(Cut)` in a 12 s run. The
+cadence ladder then drops to about 27 fps, so a click waits up to three beats for a frame the
+rung lets through. Parity recovered every lost datagram, so the cut bought nothing the picture
+needed. That is also why input → painted doubles from 23–29 to 52–62 ms p50, while capture →
+painted only rises by the 5 ms flight and the phase. It matches
+`docs/decisions/transport.md`, where a 3 % loss link pins the controller at its floor. Deciding
+loss by what parity could not recover is a policy change with its own measurement, not a small
+fix, so nothing was changed here.
+
+What these numbers leave out:
+
+- **ScreenCaptureKit's own hop.** On 2026-09-05 it read 0.00 ms on the display path, where the
+  frame comes before its display time, and 0.42 ms p50 on the window filter. The real capture →
+  decoded on loopback is the 2026-09-26 bench's 5.2–9.9 ms p50, which agrees with the 8.8–11.3
+  ms here once the display path's early hand-over is allowed for.
+- **QUIC.** Datagrams skip the connection: the loopback column has no transport in it, and the
+  shaped one has a delay line and drops in place of the relay. The rate controller gets no path
+  sample.
+- **The glass.** Painted is a timer's tick. A GPUI window shows a paint one compositor frame or
+  more later, and `Pacer::shown` gets that moment from the window's presentation report in the
+  app. No window presented in this session. The app self-test cannot use the canvas either: its
+  worker is the product binary, which never builds a `Pipeline<Drawn>`. Closing this needs a
+  test switch in `apps/slopty-worker` to serve the canvas, and capture and input → shown in the
+  app's test dump, and then `cargo xtask e2e app`/`pair`.
+- **The application's redraw.** The canvas shows a click on its next beat, and a real
+  application adds its own render.
+
+This is also the moving source at the panel's rate that the 75 Hz row above was owed. At the
+default 60 ceiling on a 75 Hz beat, 59.3–60.0 frames/s were encoded, four beats in five.
+
+`slopty bench screen` now runs the same pacer on a 60 Hz timer and prints capture → painted and
+arrival → painted, loopback only, for a worker that can capture. It was not run: the only such
+worker here is the installed one, and it would capture this Mac's screen.

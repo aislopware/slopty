@@ -1,7 +1,8 @@
 //! `slopty bench screen`: open a screen stream and report what arrives.
 //!
-//! Frame latency is capture timestamp → decoded frame available, on the host time clock, so it
-//! is only meaningful when client and worker share a clock (loopback). Everything else (fps,
+//! Frame latency is capture timestamp → decoded frame available, and → painted on a 60 Hz timer
+//! through the app's pacer, on the host time clock, so both are only meaningful when client and
+//! worker share a clock (loopback). Everything else (fps,
 //! arrival jitter, loss, FEC, NACKs) holds over any path. `SLOPTY_E2E_DROP_PERMILLE` on this
 //! process (or the older `SLOPTY_DROP_PERMILLE`) drops incoming media datagrams from a fixed
 //! seed to simulate a lossy path: the same rate always drops the same datagrams of the
@@ -13,6 +14,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
+use slopty_client::pacing::ClockAnchor;
 use slopty_client::{LinkEvent, WorkerLink};
 use slopty_core::WindowId;
 use slopty_proto::screen::{CaptureTarget, Quality, RateVerdict, ScreenEvent, ScreenRequest};
@@ -20,6 +22,9 @@ use slopty_proto::{ClientMsg, WorkerMsg};
 
 use super::quantiles;
 use crate::client::{Session, connect_to};
+
+/// The paint beat standing in for the display: the one the app self-test's pacing uses.
+const PAINT_PERIOD: Duration = Duration::from_micros(16_667);
 
 /// What to stream and for how long.
 #[derive(Debug, Clone, Copy)]
@@ -138,6 +143,16 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
         .checked_add(Duration::from_secs(bench.seconds))
         .context("run length")?;
 
+    // The app's presentation path with a timer for the display: the element's pacer, offered
+    // every decoded frame and painted on the beat. It times each frame from its capture too,
+    // which is exact on loopback, where the worker's capture clock is this process's.
+    let mut pacer = slopty_client::Pacer::default();
+    let before = slopty_capture::host_now_us();
+    let at = Instant::now();
+    let after = slopty_capture::host_now_us();
+    pacer.share_clock(ClockAnchor { at, host_us: before.midpoint(after) });
+    let mut paint = tokio::time::interval(PAINT_PERIOD);
+    paint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut latency_us: Vec<u64> = Vec::new();
     let mut gaps_us: Vec<u64> = Vec::new();
     let mut first_frame: Option<Instant> = None;
@@ -146,12 +161,18 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     let mut rate: Vec<(f64, u32, RateVerdict, bool)> = Vec::new();
     loop {
         tokio::select! {
+            _tick = paint.tick() => {
+                if let Some(stamp) = pacer.painted() {
+                    pacer.shown(stamp, Instant::now());
+                }
+            }
             changed = frames.changed() => {
                 if changed.is_err() {
                     break;
                 }
                 let frame = frames.borrow_and_update().clone();
                 let Some(frame) = frame else { continue };
+                let _pace = pacer.offer(frame.stamp);
                 let now = Instant::now();
                 first_frame.get_or_insert(now);
                 // The wire carries the low 32 bits of the worker clock in microseconds.
@@ -218,6 +239,21 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
         stats.hold_max.as_secs_f64() * 1e3
     );
     println!("  capture→decoded (worker clock; loopback only): {}", quantiles(&mut latency_us));
+    let glass = pacer.glass().capture;
+    let pacing = pacer.stats();
+    println!(
+        "  capture→painted (60 Hz timer for the display; loopback only): p50 {:.1} ms  p95 {:.1} ms  max {:.1} ms  (last {})",
+        glass.p50.as_secs_f64() * 1e3,
+        glass.p95.as_secs_f64() * 1e3,
+        glass.max.as_secs_f64() * 1e3,
+        glass.count
+    );
+    println!(
+        "  arrival→painted: p50 {:.1} ms  p95 {:.1} ms  max {:.1} ms",
+        pacing.latency_p50.as_secs_f64() * 1e3,
+        pacing.latency_p95.as_secs_f64() * 1e3,
+        pacing.latency_max.as_secs_f64() * 1e3
+    );
     println!("  arrival gap: {}", quantiles(&mut gaps_us));
     println!(
         "  last report: hold p50 {:.1} ms p95 {:.1} ms  jitter {:.1} ms  queue {}",

@@ -5,6 +5,9 @@
 //! macOS, [`ScreenCaptureKit`] implements it with ScreenCaptureKit, the window list and the
 //! accessibility API, streaming `IOSurface`-backed pixel buffers.
 //!
+//! [`synthetic::Canvas`] implements it too, drawing its own pictures instead of capturing: the
+//! stand-in the frame-path measurements stream from where no Screen Recording grant exists.
+//!
 //! Everything is callback driven and thread-agnostic. ScreenCaptureKit runs its own queues;
 //! completion handlers and frames arrive on them, and every callback type here is `Send`.
 //! Frames skip the `Idle` status (nothing changed), so an unchanged screen costs nothing.
@@ -24,6 +27,8 @@ mod snapshot;
 pub mod source;
 #[cfg(target_os = "macos")]
 mod stream;
+#[cfg(target_os = "macos")]
+pub mod synthetic;
 
 #[cfg(target_os = "macos")]
 pub use ax::{HideWatch, resize_window};
