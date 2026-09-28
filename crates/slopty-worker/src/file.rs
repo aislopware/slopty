@@ -8,8 +8,10 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use slopty_core::XferId;
+use slopty_core::{WallMs, XferId};
 use slopty_proto::file::{FILE_BYTES, FileRead, INLINE_FILE_BYTES, WriteResult};
+
+use crate::listing::modified_ms;
 
 /// Read `path` for a tile: the whole file, as text.
 ///
@@ -83,7 +85,7 @@ pub fn announce(read: FileRead) -> (FileRead, Option<(XferId, String)>) {
 /// regardless. Anything but a regular file, and a text past [`FILE_BYTES`], is `Failed` before
 /// anything is touched.
 #[must_use]
-pub fn write(path: &Path, text: &[u8], base_modified_ms: Option<u64>) -> WriteResult {
+pub fn write(path: &Path, text: &[u8], base_modified_ms: Option<WallMs>) -> WriteResult {
     let path = expand_home(path);
     let failed = |error: String| WriteResult::Failed { error };
     if text.len() as u64 > FILE_BYTES {
@@ -129,14 +131,6 @@ pub fn expand_home(path: &Path) -> PathBuf {
         return path.to_path_buf();
     };
     slopty_platform::dirs::home().join(rest)
-}
-
-/// A file's modification time in milliseconds since the Unix epoch, 0 when the OS has none.
-fn modified_ms(meta: &std::fs::Metadata) -> u64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Why something that is there is not a file to read or write.
@@ -201,7 +195,7 @@ mod tests {
             FileRead::Text { text, size, modified_ms, final_newline } => {
                 assert_eq!((text.as_str(), size), ("one\ntwo", 8));
                 assert!(final_newline, "the newline left off is reported");
-                assert!(modified_ms > 0);
+                assert!(!modified_ms.is_zero());
             }
             other => panic!("{other:?}"),
         }
@@ -262,7 +256,7 @@ mod tests {
         let text = |len: usize| FileRead::Text {
             text: "x".repeat(len),
             size: len as u64 + 1,
-            modified_ms: 7,
+            modified_ms: WallMs::from_millis(7),
             final_newline: true,
         };
         let small = text(INLINE_FILE_BYTES);
@@ -275,7 +269,7 @@ mod tests {
             FileRead::Streamed {
                 xfer,
                 size: INLINE_FILE_BYTES as u64 + 2,
-                modified_ms: 7,
+                modified_ms: WallMs::from_millis(7),
                 final_newline: true
             }
         );
@@ -284,7 +278,7 @@ mod tests {
         }
     }
 
-    fn saved(result: &WriteResult) -> u64 {
+    fn saved(result: &WriteResult) -> WallMs {
         match result {
             WriteResult::Saved { modified_ms, .. } => *modified_ms,
             other => panic!("not saved: {other:?}"),
@@ -308,7 +302,7 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(leftovers.len(), 1, "no temporary file stays behind");
 
-        let stale = first.saturating_sub(1);
+        let stale = WallMs::from_millis(first.as_millis().saturating_sub(1));
         assert_eq!(
             write(&path, b"echo three\n", Some(stale)),
             WriteResult::Conflict { modified_ms: first }

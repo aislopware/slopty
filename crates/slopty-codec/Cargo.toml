@@ -39,3 +39,7 @@ pretty_assertions.workspace = true
 objc2-core-audio.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-video.workspace = true
+# `VTCopyVideoEncoderList` and the per-encoder property dictionaries, read by the ignored 4:4:4
+# probe in `tests/chroma444.rs`.
+objc2-video-toolbox = { workspace = true, features = [ "VTVideoEncoderList" ] }
+objc2-core-media.workspace = true

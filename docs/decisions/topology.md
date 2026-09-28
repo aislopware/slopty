@@ -784,3 +784,38 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_doctor_reads_tailscale_as_up_down_or_absent`, the CLI's
     `doctor_report_names_the_binary_and_flags_missing_permissions` and the app's
     `a_health_report_reads_as_the_checklists_doctor`.
+- ✅ **The server speaks one event vocabulary, pushed as it is logged** (2026-09-28, audit
+  finding 25). The server had two: `server::Event` pushed to links, and the `Happening`s of the
+  `Verb::Events` log. The hub called `happen()` and `announce()` in pairs that could drift
+  apart. `server::Event` is gone. `Hub::happen` logs a `HubEvent` under the next sequence
+  number and pushes that same event as `FromServer::Event(HubEvent)`, under the state lock, so
+  a link and a cursor read the same events in the same order. `Happening::Agent` carries the
+  worker's `AgentEvent` whole. A report whose status and source did not change is not an
+  event, since it would fill the log with tool-by-tool noise that each client's own worker
+  link already carries. A session's plain change (a resize, a `cd`) is kept in the listing and
+  is not logged. Its program exiting is (`SessionExited`).
+  - **A lagging link gets the state, not a diff.** The per-link `Told` table rebuilt what a
+    lagging client had been told and took back what no longer held. It is gone: a link gets
+    `Directory` then `Terminals(Vec<(WorkerId, SessionSummary)>)`, both on connect and after a
+    lag, and a client replaces what it showed with them (`SessionAgent::quiet_event` turns each
+    listed agent into an event that raises no attention).
+  - Test: `a_client_gets_the_agents_on_connect_and_again_after_it_lagged` (the lagging link
+    and a link that kept up end up the same, and the pushed events equal the log's).
+    Goldens: `server_terminals`, `server_event_pushed` and `server_reply_events`.
+- ✅ **A worker's load is its own message** (2026-09-28, audit finding 26). `WorkerCaps.load`
+  changed on every tick, so the hub compared capabilities field by field to skip it, and each
+  tick re-sent the whole `WorkerInfo` to every link. Load now travels on its own:
+  `HelloAck.load`, `WorkerMsg::Load`, `ToServer::Load` (the worker sends one right after it
+  registers) and `FromServer::Load { worker, load }`, and `WorkerInfo.load` holds the last one.
+  Capabilities compare with `==`, a `Caps` message that changes nothing sends nothing, and a
+  load tick is never saved. Goldens: `worker_caps`, `worker_hello_ack`, `server_worker_hello`,
+  `server_directory`, `worker_load`, `server_load` and `server_worker_load`.
+- ✅ **One type each for capabilities, health, displays and Tailscale's state** (2026-09-28,
+  audit finding 27). The doctor's `Health` repeated `can_capture`/`can_inject` as
+  `screen_recording`/`post_events`, and the worker worked them out a second time. `Health` now
+  embeds the daemon's `WorkerCaps`, read from its watch, which may be up to one check period
+  (5 s) old. `BackendState` moved to `slopty_proto::tailnet`. The tailnet crate re-exports it,
+  and `ctl::Tailscale::Down` carries it, so the `NotUp` mirror and the worker's mapping between
+  the two are gone. This supersedes that part of the entry above. `DisplayCap` went into
+  `DisplayInfo` (see Platform, "No macOS names on the wire"). Goldens: `ctl_reply_doctor` and
+  `ctl_health_without_tailscale`.

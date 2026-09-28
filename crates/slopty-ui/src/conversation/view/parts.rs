@@ -11,6 +11,7 @@ use gpui::{
     Styled as _, canvas, div, point, px,
 };
 use gpui_kit::component::input::{Input, Textarea};
+use slopty_core::WallMs;
 use slopty_proto::conversation::{ThreadId, ToolDetail, Verdict};
 use slopty_theme::{Rgb, Theme};
 
@@ -217,7 +218,7 @@ impl ConversationView {
         let wait = self
             .held
             .filter(|(ask, _)| *ask == prompt.ask)
-            .and_then(|(_, since)| wait_left(&prompt, since, super::now_ms()));
+            .and_then(|(_, since)| wait_left(&prompt, since, WallMs::now()));
         let allow = kit::button(&theme, "allow-once", "Allow once", ButtonKind::Primary)
             .when(busy, |el| el.opacity(slopty_theme::alpha::PRESSED))
             .on_click(cx.listener(|this, _ev, _w, cx| this.answer(Verdict::Allow, cx)));
@@ -948,11 +949,14 @@ pub fn context_ring(theme: &Theme, used_pct: f64, side: f32) -> AnyElement {
 #[must_use]
 pub fn wait_left(
     prompt: &slopty_proto::conversation::PermissionPrompt,
-    since_ms: u64,
-    now_ms: u64,
+    since_ms: WallMs,
+    now_ms: WallMs,
 ) -> Option<String> {
-    let window = prompt.until_ms.checked_sub(prompt.asked_ms)?;
-    let held = now_ms.saturating_sub(since_ms);
+    if prompt.until_ms < prompt.asked_ms {
+        return None;
+    }
+    let window = prompt.until_ms.millis_since(prompt.asked_ms);
+    let held = now_ms.millis_since(since_ms);
     let left = window.saturating_sub(held);
     let minutes = left.div_ceil(60_000);
     match minutes {
@@ -964,7 +968,7 @@ pub fn wait_left(
 
 #[cfg(test)]
 mod tests {
-    use slopty_core::SessionId;
+    use slopty_core::{SessionId, WallMs};
 
     use super::*;
     use crate::conversation::fixtures;
@@ -974,21 +978,23 @@ mod tests {
     #[test]
     fn the_fallback_counts_down_from_five_minutes() {
         let mut prompt = fixtures::bash_prompt(SessionId::new(), 1);
-        prompt.asked_ms = 1_000_000;
-        prompt.until_ms = prompt.asked_ms + 10 * 60_000;
-        let seen = 50;
-        let at = |minutes: u64| seen + minutes * 60_000;
+        prompt.asked_ms = WallMs::from_millis(1_000_000);
+        prompt.until_ms = prompt.asked_ms.saturating_add(std::time::Duration::from_mins(10));
+        let seen = WallMs::from_millis(50);
+        let at = |minutes: u64| seen.saturating_add(std::time::Duration::from_secs(minutes * 60));
         assert_eq!(wait_left(&prompt, seen, at(0)), None, "ten minutes off");
         assert_eq!(
             wait_left(&prompt, seen, at(5)).as_deref(),
             Some("Falls back to the terminal in 5 min")
         );
         assert_eq!(
-            wait_left(&prompt, seen, at(8) + 1).as_deref(),
+            wait_left(&prompt, seen, at(8).saturating_add(std::time::Duration::from_millis(1)))
+                .as_deref(),
             Some("Falls back to the terminal in 2 min")
         );
         assert_eq!(
-            wait_left(&prompt, seen, at(9) + 30_000).as_deref(),
+            wait_left(&prompt, seen, at(9).saturating_add(std::time::Duration::from_secs(30)))
+                .as_deref(),
             Some("Falls back to the terminal in under a minute")
         );
         assert_eq!(wait_left(&prompt, seen, at(10)), None, "the terminal has it");

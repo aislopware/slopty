@@ -1,4 +1,4 @@
-//! Monotonic time for telemetry and pacing.
+//! Monotonic time for telemetry and pacing, and wall time for what is held and relayed.
 //!
 //! Wall clocks differ between worker and client; every latency figure on the wire is expressed
 //! as a delta or an echoed timestamp in the sender's own monotonic domain.
@@ -157,6 +157,84 @@ impl ops::Sub for Duration {
     }
 }
 
+/// Milliseconds since the Unix epoch, by the clock of the machine that read it.
+///
+/// For what is held and relayed (a file's modification time, when a session started, when the
+/// server heard something), where an age measured at sending would be wrong by the time it is
+/// read. Machines' clocks differ, so a latency is never one of these. Zero means unknown.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct WallMs(u64);
+
+impl WallMs {
+    /// Unknown: the Unix epoch itself.
+    pub const ZERO: Self = Self(0);
+
+    /// The wall clock now.
+    #[must_use]
+    pub fn now() -> Self {
+        Self::of(std::time::SystemTime::now())
+    }
+
+    /// `time` in milliseconds; zero before the epoch.
+    #[must_use]
+    pub fn of(time: std::time::SystemTime) -> Self {
+        let since = time.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        Self(u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    /// From raw milliseconds since the epoch.
+    #[must_use]
+    pub const fn from_millis(ms: u64) -> Self {
+        Self(ms)
+    }
+
+    /// Raw milliseconds since the epoch.
+    #[must_use]
+    pub const fn as_millis(self) -> u64 {
+        self.0
+    }
+
+    /// Whether it says nothing.
+    #[must_use]
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The instant it names; `None` for [`Self::ZERO`].
+    #[must_use]
+    pub fn to_system(self) -> Option<std::time::SystemTime> {
+        if self.is_zero() {
+            return None;
+        }
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(self.0))
+    }
+
+    /// How long after `earlier` this is, saturating at zero.
+    #[must_use]
+    pub const fn since(self, earlier: Self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.0.saturating_sub(earlier.0))
+    }
+
+    /// `span` later, saturating at the end of time.
+    #[must_use]
+    pub fn saturating_add(self, span: std::time::Duration) -> Self {
+        Self(self.0.saturating_add(u64::try_from(span.as_millis()).unwrap_or(u64::MAX)))
+    }
+
+    /// Milliseconds after `earlier`, saturating at zero.
+    #[must_use]
+    pub const fn millis_since(self, earlier: Self) -> u64 {
+        self.0.saturating_sub(earlier.0)
+    }
+}
+
+impl fmt::Debug for WallMs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "WallMs({})", self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +278,23 @@ mod tests {
         }
         assert!(started.elapsed() >= Duration::from_micros(50), "{:?}", started.elapsed());
         assert!(MonoTime::now().as_nanos() > started.as_nanos());
+    }
+
+    /// Wall milliseconds go in and out unchanged, differences saturate, zero is unknown, and
+    /// the clock reads past 2020.
+    #[test]
+    fn wall_milliseconds_round_trip_and_zero_is_unknown() {
+        let at = WallMs::from_millis(1_500);
+        assert_eq!(at.as_millis(), 1_500);
+        assert_eq!(at.since(WallMs::from_millis(500)), std::time::Duration::from_secs(1));
+        assert_eq!(WallMs::from_millis(500).millis_since(at), 0, "saturates");
+        assert_eq!(WallMs::ZERO.to_system(), None);
+        assert_eq!(WallMs::of(at.to_system().unwrap()), at);
+        assert_eq!(
+            at.saturating_add(std::time::Duration::from_millis(5)),
+            WallMs::from_millis(1_505)
+        );
+        assert!(WallMs::now() > WallMs::from_millis(1_577_836_800_000));
+        assert_eq!(serde_json::to_string(&at).unwrap(), "1500", "a bare number on the wire");
     }
 }

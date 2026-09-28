@@ -105,7 +105,7 @@ fn window_info(w: &SCWindow) -> Option<WindowInfo> {
         y: to_f32(frame.origin.y),
         w: to_f32(frame.size.width),
         h: to_f32(frame.size.height),
-        display: 0,
+        display: slopty_core::DisplayId(0),
         on_screen,
     })
 }

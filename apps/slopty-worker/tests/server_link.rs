@@ -220,7 +220,7 @@ mod tests {
         let on = |branch: &'static str| {
             let root = root.clone();
             move |m: &ToServer| {
-                matches!(m, ToServer::SessionOpened(s) if s.id == term.session
+                matches!(m, ToServer::SessionChanged(s) if s.id == term.session
                     && s.cwd.as_deref() == Some(root.as_str())
                     && s.repo.as_deref() == Some(root.as_str())
                     && s.branch.as_deref() == Some(branch))
@@ -236,7 +236,9 @@ mod tests {
             .heard
             .iter()
             .filter_map(|m| match m {
-                ToServer::SessionOpened(s) if s.id == term.session => Some(s.started_ms),
+                ToServer::SessionChanged(s) if s.id == term.session => {
+                    Some(s.started_ms.as_millis())
+                }
                 _ => None,
             })
             .collect();
@@ -478,12 +480,12 @@ mod tests {
             panic!("the terminal opens");
         };
         assert_eq!(term.worker, worker);
-        peer.heard(|m| matches!(m, ToServer::SessionOpened(s) if s.id == term.session)).await;
+        peer.heard(|m| matches!(m, ToServer::SessionChanged(s) if s.id == term.session)).await;
 
         // Resized with no client showing it; the server hears the new size before the answer.
         let size = Size { cols: 100, rows: 30 };
         assert_eq!(peer.ask(Verb::ResizeTerminal { term, size }).await, Outcome::Done);
-        let resized = |m: &ToServer| matches!(m, ToServer::SessionOpened(s) if s.id == term.session && (s.cols, s.rows) == (100, 30));
+        let resized = |m: &ToServer| matches!(m, ToServer::SessionChanged(s) if s.id == term.session && (s.cols, s.rows) == (100, 30));
         assert!(peer.heard.iter().any(resized), "{:?}", peer.heard);
         let tiny = Size { cols: 1, rows: 1 };
         let refused = peer.ask(Verb::ResizeTerminal { term, size: tiny }).await;
@@ -575,14 +577,14 @@ mod tests {
             panic!("the second terminal opens");
         };
         peer.heard(|m| {
-            matches!(m, ToServer::SessionOpened(s) if s.id == quitter.session && (s.cols, s.rows) == (90, 20))
+            matches!(m, ToServer::SessionChanged(s) if s.id == quitter.session && (s.cols, s.rows) == (90, 20))
         })
         .await;
         assert_eq!(
             peer.ask(Verb::SendInput { term: quitter, input: text("exit\n") }).await,
             Outcome::Done
         );
-        let exited = |m: &ToServer| matches!(m, ToServer::SessionOpened(s) if s.id == quitter.session && matches!(s.state, SessionState::Exited { .. }));
+        let exited = |m: &ToServer| matches!(m, ToServer::SessionChanged(s) if s.id == quitter.session && matches!(s.state, SessionState::Exited { .. }));
         tokio::time::timeout(EXIT_BOUND, peer.heard(exited))
             .await
             .expect("the exit is announced within the bound");

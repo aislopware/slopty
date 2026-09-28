@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 
 use serde::Deserialize;
+pub use slopty_proto::tailnet::BackendState;
 
 /// The daemon's view: this node, its peers and the tailnet's name.
 #[derive(Debug, Clone, Deserialize)]
@@ -23,43 +24,6 @@ pub struct Status {
     /// The tailnet, absent before login.
     #[serde(default)]
     pub current_tailnet: Option<Tailnet>,
-}
-
-/// Where the daemon stands (`ipn.State`, written by name).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub enum BackendState {
-    /// Just started, with no state yet.
-    NoState,
-    /// Another user of this machine owns the daemon (Windows).
-    InUseOtherUser,
-    /// Signed out: the node must log in.
-    NeedsLogin,
-    /// Logged in, waiting for an admin to approve the machine.
-    NeedsMachineAuth,
-    /// Turned off by its user.
-    Stopped,
-    /// Connecting.
-    Starting,
-    /// Logged in and up.
-    Running,
-    /// A state this build does not know.
-    #[serde(other)]
-    Other,
-}
-
-impl std::fmt::Display for BackendState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::NoState => "NoState",
-            Self::InUseOtherUser => "InUseOtherUser",
-            Self::NeedsLogin => "NeedsLogin",
-            Self::NeedsMachineAuth => "NeedsMachineAuth",
-            Self::Stopped => "Stopped",
-            Self::Starting => "Starting",
-            Self::Running => "Running",
-            Self::Other => "an unknown state",
-        })
-    }
 }
 
 /// The tailnet the node is on.

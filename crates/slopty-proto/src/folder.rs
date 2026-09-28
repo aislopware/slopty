@@ -1,6 +1,7 @@
 //! A folder tile's listing: the worker reads a directory and says what is in it.
 
 use serde::{Deserialize, Serialize};
+use slopty_core::WallMs;
 
 use crate::orchestration::FileKind;
 
@@ -49,6 +50,6 @@ pub struct FolderEntry {
     pub size: u64,
     /// Entries inside, for a directory that could be read.
     pub items: Option<u32>,
-    /// Last modification, milliseconds since the Unix epoch.
-    pub modified_ms: u64,
+    /// Last modification.
+    pub modified_ms: WallMs,
 }

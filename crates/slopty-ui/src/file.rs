@@ -27,7 +27,7 @@ use gpui_kit::component::input::{
     Editor, EditorState, Input, InputEvent, InputState, RangeDecoration, RangeDecorationCollection,
     RangeDecorationStyle, RopeExt as _,
 };
-use slopty_core::ItemId;
+use slopty_core::{ItemId, WallMs};
 use slopty_proto::file::{FILE_BYTES, FileRead, WriteResult};
 use slopty_theme::{Theme, alpha};
 
@@ -90,7 +90,7 @@ pub enum FileViewEvent {
         /// The whole text, final newline included when the file had one.
         text: String,
         /// The version the edit started from; `None` overwrites whatever is there.
-        base_modified_ms: Option<u64>,
+        base_modified_ms: Option<WallMs>,
     },
     /// "Reload": the edit is dropped; the file is to be read again.
     Reload,
@@ -108,13 +108,13 @@ struct Version {
     text: String,
     /// Whether the file ends with a newline, which the worker's text leaves off.
     newline: bool,
-    /// Its modification time on disk, milliseconds since the Unix epoch.
-    modified_ms: u64,
+    /// Its modification time on disk.
+    modified_ms: WallMs,
 }
 
 impl Version {
     /// The version a text read describes.
-    fn of(text: &str, final_newline: bool, modified_ms: u64) -> Self {
+    fn of(text: &str, final_newline: bool, modified_ms: WallMs) -> Self {
         Self { text: text.to_owned(), newline: final_newline, modified_ms }
     }
 
@@ -584,10 +584,10 @@ impl FileView {
         self.send(None, cx);
     }
 
-    fn send(&mut self, base_modified_ms: Option<u64>, cx: &mut Context<Self>) {
+    fn send(&mut self, base_modified_ms: Option<WallMs>, cx: &mut Context<Self>) {
         let text = self.text(cx);
         let newline = self.base.as_ref().is_some_and(|b| b.newline);
-        let sent = Version { text, newline, modified_ms: base_modified_ms.unwrap_or(0) };
+        let sent = Version { text, newline, modified_ms: base_modified_ms.unwrap_or(WallMs::ZERO) };
         let file = sent.file_text(&sent.text);
         tracing::debug!(path = %self.path, bytes = file.len(), ?base_modified_ms, "save file");
         self.saving = Some(sent);
@@ -613,7 +613,7 @@ impl FileView {
                 self.trouble = None;
             }
             WriteResult::Conflict { modified_ms } => {
-                tracing::info!(path = %self.path, modified_ms, "save refused: changed on disk");
+                tracing::info!(path = %self.path, ?modified_ms, "save refused: changed on disk");
                 self.trouble = Some(Trouble::Conflict);
             }
             WriteResult::Failed { error } => {

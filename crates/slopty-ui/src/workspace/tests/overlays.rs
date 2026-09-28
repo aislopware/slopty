@@ -2,6 +2,7 @@
 //! what the palette reaches and clears out of its way.
 
 use gpui::Modifiers;
+use slopty_core::WallMs;
 
 use super::*;
 
@@ -48,10 +49,23 @@ fn an_inbox_row_says_its_age_first_and_no_word_its_heading_does(cx: &mut TestApp
         let status = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() });
         let detail = Some("$ touch refused.txt".into());
         v.agent_event(
-            AgentEvent { since_ms, status: status.clone(), detail, ..blocked(asking) },
+            AgentEvent {
+                since_ms: WallMs::from_millis(since_ms),
+                status: status.clone(),
+                detail,
+                ..blocked(asking)
+            },
             cx,
         );
-        v.agent_event(AgentEvent { since_ms, status, detail: None, ..blocked(bare) }, cx);
+        v.agent_event(
+            AgentEvent {
+                since_ms: WallMs::from_millis(since_ms),
+                status,
+                detail: None,
+                ..blocked(bare)
+            },
+            cx,
+        );
         let done = Finished {
             command: "cargo clippy".into(),
             exit: Some(101),

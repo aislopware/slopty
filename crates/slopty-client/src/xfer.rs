@@ -12,10 +12,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 use parking_lot::Mutex;
-use slopty_core::XferId;
+use slopty_core::{WallMs, XferId, shell_quote};
 use slopty_net::streams::RawRecv;
 use slopty_net::{ClientMsg, Connection, NetError};
 use slopty_proto::transfer::{
@@ -33,6 +33,55 @@ const ATTEMPTS: u32 = 3;
 /// How long the worker has to answer a [`XferMsg::Resume`].
 const OFFSET_WAIT: Duration = Duration::from_secs(10);
 
+/// Why a transfer stopped on this side.
+#[derive(Debug, thiserror::Error)]
+pub enum XferError {
+    /// A file or directory on this machine could not be read or written. Sending or fetching
+    /// again would fail the same way, so it never is.
+    #[error("{path}: {source}")]
+    Local {
+        /// What was being read or written.
+        path: String,
+        /// The OS's error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A stream was cut: the link dropped, or the worker stopped it. What arrived is kept, and
+    /// the rest is sent again from there.
+    #[error("the stream was cut: {0}")]
+    Cut(String),
+    /// What arrived is not what was sent: more than announced, or a digest that does not
+    /// match. Fetched again.
+    #[error("{0}")]
+    Mismatch(String),
+    /// The worker said the transfer failed, in these words. Fetched again.
+    #[error("{0}")]
+    Worker(String),
+    /// The worker did not answer in time.
+    #[error("the worker did not answer: {0}")]
+    Unanswered(&'static str),
+    /// Somebody cancelled it.
+    #[error("cancelled")]
+    Cancelled,
+    /// The link to the worker is gone.
+    #[error("the worker went away")]
+    LinkClosed,
+}
+
+impl XferError {
+    fn local(path: impl std::fmt::Display, source: std::io::Error) -> Self {
+        Self::Local { path: path.to_string(), source }
+    }
+
+    /// Whether fetching again can do better: a stream cut short, a copy that went wrong, a
+    /// worker that failed or went quiet. Never a file here that cannot be read or written, a
+    /// cancel or a link that is gone.
+    #[must_use]
+    pub const fn worth_retrying(&self) -> bool {
+        matches!(self, Self::Cut(_) | Self::Mismatch(_) | Self::Worker(_) | Self::Unanswered(_))
+    }
+}
+
 /// One file of a transfer, as the sender found it on disk.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Entry {
@@ -42,8 +91,8 @@ pub struct Entry {
     pub name: String,
     /// Size in bytes.
     pub size: u64,
-    /// Last modification, milliseconds since the Unix epoch.
-    pub mtime_ms: u64,
+    /// Last modification.
+    pub mtime_ms: WallMs,
     /// Unix permission bits.
     pub mode: u32,
 }
@@ -87,11 +136,7 @@ fn walk(path: &Path, name: String, top: bool, out: &mut Vec<Entry>) -> std::io::
         }
     } else if meta.is_file() {
         use std::os::unix::fs::PermissionsExt as _;
-        let mtime_ms = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let mtime_ms = meta.modified().map_or(WallMs::ZERO, WallMs::of);
         out.push(Entry {
             path: path.to_owned(),
             name,
@@ -101,27 +146,6 @@ fn walk(path: &Path, name: String, top: bool, out: &mut Vec<Entry>) -> std::io::
         });
     }
     Ok(())
-}
-
-/// `path` as a shell reads it back as one word: as is when every character is plain, else in
-/// single quotes (a quote inside closes, escapes and reopens them).
-#[must_use]
-pub fn shell_quote(path: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%=~".contains(c);
-    if !path.is_empty() && path.chars().all(plain) {
-        return path.to_owned();
-    }
-    let mut out = String::with_capacity(path.len().saturating_add(2));
-    out.push('\'');
-    for c in path.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 /// What a drop on a terminal types: every path quoted, a space after each, as Terminal.app
@@ -164,7 +188,7 @@ struct Attempt {
     arrived: u32,
     /// The digest of each file, from the worker's [`XferMsg::Done`].
     digests: HashMap<String, Hash>,
-    done: Option<oneshot::Sender<Result<(), String>>>,
+    done: Option<oneshot::Sender<Result<(), XferError>>>,
 }
 
 /// A download across its attempts: what each file came to, and who is still writing.
@@ -219,7 +243,7 @@ impl Table {
         if let Some(d) = inner.downloads.remove(&xfer)
             && let Some(done) = d.done
         {
-            let _gone = done.send(Err("cancelled".to_owned()));
+            let _gone = done.send(Err(XferError::Cancelled));
         }
     }
 
@@ -232,7 +256,7 @@ impl Table {
         xfer: XferId,
         into: PathBuf,
         fetch: Arc<Fetch>,
-    ) -> oneshot::Receiver<Result<(), String>> {
+    ) -> oneshot::Receiver<Result<(), XferError>> {
         let (tx, rx) = oneshot::channel();
         let attempt = Attempt {
             into,
@@ -297,16 +321,21 @@ impl Table {
                 true
             }
             XferMsg::Failed { xfer, error, .. } => {
-                let Some(failed) = self.inner.lock().downloads.remove(xfer) else { return false };
-                // A stream waiting for a digest of this attempt stops waiting.
-                failed.fetch.changed.notify_waiters();
-                if let Some(done) = failed.done {
-                    let _gone = done.send(Err(error.clone()));
-                }
-                true
+                self.fail_download(*xfer, XferError::Worker(error.clone()))
             }
             _ => false,
         }
+    }
+
+    /// Attempt `xfer` failed with `error`: its caller hears it, and a stream waiting for one of
+    /// its digests stops waiting. `false` when it was no attempt here.
+    fn fail_download(&self, xfer: XferId, error: XferError) -> bool {
+        let Some(failed) = self.inner.lock().downloads.remove(&xfer) else { return false };
+        failed.fetch.changed.notify_waiters();
+        if let Some(done) = failed.done {
+            let _gone = done.send(Err(error));
+        }
+        true
     }
 
     /// One more file of attempt `xfer` is in place.
@@ -367,13 +396,13 @@ pub async fn upload(
     xfer: XferId,
     files: &[PathBuf],
     dest: Dest,
-) -> Result<(), String> {
+) -> Result<(), XferError> {
     // The walk of a dropped tree is blocking I/O: off the runtime that carries the keystrokes.
-    let files = files.to_vec();
-    let found = tokio::task::spawn_blocking(move || entries(&files))
+    let walked = files.to_vec();
+    let found = tokio::task::spawn_blocking(move || entries(&walked))
         .await
-        .map_err(|e| e.to_string())
-        .and_then(|walked| walked.map_err(|e| e.to_string()));
+        .map_err(|e| XferError::local("the dropped files", std::io::Error::other(e)))
+        .and_then(|walked| walked.map_err(|e| XferError::local("the dropped files", e)));
     let list = match found {
         Ok(list) => list,
         Err(error) => {
@@ -398,7 +427,7 @@ const IN_FLIGHT: usize = 16;
 
 /// A finished stream's acknowledgement as its task hands it back: the file's place in the
 /// list, and whether the worker took every byte.
-type Acked = Option<Result<(usize, Result<(), String>), tokio::task::JoinError>>;
+type Acked = Option<Result<(usize, Result<(), XferError>), tokio::task::JoinError>>;
 
 /// Every file of `list`, the next one's bytes following the last's; the file that could not be
 /// sent and why.
@@ -406,7 +435,7 @@ async fn send_all<'a>(
     up: &Uplink,
     xfer: XferId,
     list: &'a [Entry],
-) -> Result<(), (Option<&'a Entry>, String)> {
+) -> Result<(), (Option<&'a Entry>, XferError)> {
     let mut confirming = tokio::task::JoinSet::new();
     for (ix, entry) in list.iter().enumerate() {
         match send_file(up, xfer, entry, 0).await {
@@ -431,41 +460,52 @@ async fn acknowledged<'a>(
     xfer: XferId,
     list: &'a [Entry],
     done: Acked,
-) -> Result<(), (Option<&'a Entry>, String)> {
+) -> Result<(), (Option<&'a Entry>, XferError)> {
     match done {
         None | Some(Ok((_, Ok(())))) => Ok(()),
         Some(Ok((ix, Err(error)))) => {
-            let entry = list.get(ix).ok_or_else(|| (None, "a file out of the list".to_owned()))?;
+            let entry = list
+                .get(ix)
+                .ok_or_else(|| (None, XferError::Mismatch("a file out of the list".to_owned())))?;
             resume(up, xfer, entry, error).await.map_err(|e| (Some(entry), e))
         }
-        Some(Err(e)) => Err((None, e.to_string())),
+        Some(Err(e)) => Err((None, XferError::Cut(e.to_string()))),
     }
 }
 
-async fn send(up: &Uplink, msg: XferMsg) -> Result<(), String> {
-    up.out.send(ClientMsg::Xfer(msg)).await.map_err(|_closed| "link closed".to_owned())
+async fn send(up: &Uplink, msg: XferMsg) -> Result<(), XferError> {
+    up.out.send(ClientMsg::Xfer(msg)).await.map_err(|_closed| XferError::LinkClosed)
 }
 
-async fn fail(up: &Uplink, xfer: XferId, name: Option<String>, error: &str) {
-    tracing::warn!(%xfer, ?name, error, "upload failed");
-    let _closed = send(up, XferMsg::Failed { xfer, name, error: error.to_owned() }).await;
+async fn fail(up: &Uplink, xfer: XferId, name: Option<String>, error: &XferError) {
+    tracing::warn!(%xfer, ?name, %error, "upload failed");
+    let _closed = send(up, XferMsg::Failed { xfer, name, error: error.to_string() }).await;
 }
 
 /// `entry` again after its stream failed with `error`, from what the worker holds, until it
-/// lands or [`ATTEMPTS`] have failed.
-async fn resume(up: &Uplink, xfer: XferId, entry: &Entry, error: String) -> Result<(), String> {
+/// lands or [`ATTEMPTS`] have failed. Only a cut stream is sent again: a file here that cannot
+/// be read would fail the same way each time.
+async fn resume(
+    up: &Uplink,
+    xfer: XferId,
+    entry: &Entry,
+    error: XferError,
+) -> Result<(), XferError> {
     let mut error = error;
     for _attempt in 1..ATTEMPTS {
         if up.table.cancelled(xfer) {
-            return Err("cancelled".to_owned());
+            return Err(XferError::Cancelled);
+        }
+        if !matches!(error, XferError::Cut(_)) {
+            return Err(error);
         }
         tracing::debug!(%xfer, name = %entry.name, %error, "stream cut; resuming");
         let answer = up.table.wait_offset(xfer, entry.name.clone());
         send(up, XferMsg::Resume { xfer, name: entry.name.clone() }).await?;
         let offset = tokio::time::timeout(OFFSET_WAIT, answer)
             .await
-            .map_err(|_elapsed| "the worker did not say how much it holds".to_owned())?
-            .map_err(|_dropped| "link closed".to_owned())?
+            .map_err(|_elapsed| XferError::Unanswered("how much of the file it holds"))?
+            .map_err(|_dropped| XferError::LinkClosed)?
             .min(entry.size);
         let sent = match send_file(up, xfer, entry, offset).await {
             Ok(acked) => acked.await,
@@ -476,7 +516,7 @@ async fn resume(up: &Uplink, xfer: XferId, entry: &Entry, error: String) -> Resu
             Err(e) => error = e,
         }
     }
-    if up.table.cancelled(xfer) { Err("cancelled".to_owned()) } else { Err(error) }
+    if up.table.cancelled(xfer) { Err(XferError::Cancelled) } else { Err(error) }
 }
 
 /// Send `entry` from `offset` on a bulk stream of its own and finish it; what is returned
@@ -486,7 +526,7 @@ async fn send_file(
     xfer: XferId,
     entry: &Entry,
     offset: u64,
-) -> Result<impl Future<Output = Result<(), String>> + Send + 'static, String> {
+) -> Result<impl Future<Output = Result<(), XferError>> + Send + 'static, XferError> {
     let header = BulkHeader {
         xfer,
         purpose: Purpose::Upload,
@@ -496,27 +536,29 @@ async fn send_file(
         mode: entry.mode,
         offset,
     };
-    let net = |e: NetError| e.to_string();
-    let mut stream = slopty_net::streams::open_bulk(&up.conn, header).await.map_err(net)?;
-    let mut file = tokio::fs::File::open(&entry.path).await.map_err(|e| e.to_string())?;
-    file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|e| e.to_string())?;
+    let local = |e| XferError::local(entry.path.display(), e);
+    // The file first: one that cannot be read opens no stream for the worker to wait on.
+    let mut file = tokio::fs::File::open(&entry.path).await.map_err(local)?;
+    file.seek(std::io::SeekFrom::Start(offset)).await.map_err(local)?;
+    let cut = |e: NetError| XferError::Cut(e.to_string());
+    let mut stream = slopty_net::streams::open_bulk(&up.conn, header).await.map_err(cut)?;
     let mut buf = vec![0_u8; CHUNK];
     loop {
         if up.table.cancelled(xfer) {
             let _reset = stream.reset(0_u32.into());
-            return Err("cancelled".to_owned());
+            return Err(XferError::Cancelled);
         }
-        let n = file.read(&mut buf).await.map_err(|e| e.to_string())?;
+        let n = file.read(&mut buf).await.map_err(local)?;
         let Some(chunk) = buf.get(..n).filter(|c| !c.is_empty()) else { break };
-        stream.write_all(chunk).await.map_err(|e| e.to_string())?;
+        stream.write_all(chunk).await.map_err(|e| XferError::Cut(e.to_string()))?;
     }
-    stream.finish().map_err(|e| e.to_string())?;
+    stream.finish().map_err(|e| XferError::Cut(e.to_string()))?;
     // A stream the worker stopped after the last write surfaces here rather than in a write.
     Ok(async move {
         match stream.stopped().await {
             Ok(None) => Ok(()),
-            Ok(Some(code)) => Err(format!("the worker stopped the stream ({code})")),
-            Err(e) => Err(e.to_string()),
+            Ok(Some(code)) => Err(XferError::Cut(format!("the worker stopped it ({code})"))),
+            Err(e) => Err(XferError::Cut(e.to_string())),
         }
     })
 }
@@ -526,13 +568,14 @@ async fn send_file(
 ///
 /// An attempt cut short (a stream ended early, a digest that does not match, the worker's
 /// `Failed`) is given up and fetched again under a new transfer, naming what is held of each
-/// file, three attempts in all.
+/// file, three attempts in all. One that failed on this side (a file here that cannot be
+/// written) is not.
 pub async fn download(
     up: &Uplink,
     xfer: XferId,
     path: String,
     into: PathBuf,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<Vec<PathBuf>, XferError> {
     let fetch = Arc::new(Fetch::default());
     let mut current = xfer;
     let mut attempt = 0_u32;
@@ -541,11 +584,12 @@ pub async fn download(
         let held = held(&fetch, &into).await;
         let done = up.table.expect_download(current, into.clone(), Arc::clone(&fetch));
         send(up, XferMsg::Fetch { xfer: current, path: path.clone(), held }).await?;
-        let error = match done.await.map_err(|_dropped| "link closed".to_owned())? {
+        let error = match done.await.map_err(|_dropped| XferError::LinkClosed)? {
             Ok(()) => return Ok(fetch.state.lock().landed.clone()),
             Err(error) => error,
         };
-        if up.table.cancelled(xfer) || up.table.cancelled(current) || attempt >= ATTEMPTS {
+        let cancelled = up.table.cancelled(xfer) || up.table.cancelled(current);
+        if cancelled || !error.worth_retrying() || attempt >= ATTEMPTS {
             return Err(error);
         }
         tracing::info!(%current, %path, %error, "download cut; fetching the rest");
@@ -560,7 +604,7 @@ pub async fn download(
 const SETTLE_WAIT: Duration = Duration::from_secs(10);
 
 /// Wait until no stream of the download is being written.
-async fn settle(fetch: &Fetch) -> Result<(), String> {
+async fn settle(fetch: &Fetch) -> Result<(), XferError> {
     let settled = async {
         loop {
             let changed = fetch.changed.notified();
@@ -574,7 +618,7 @@ async fn settle(fetch: &Fetch) -> Result<(), String> {
     };
     tokio::time::timeout(SETTLE_WAIT, settled)
         .await
-        .map_err(|_elapsed| "an earlier stream did not stop".to_owned())
+        .map_err(|_elapsed| XferError::Unanswered("an earlier stream did not stop"))
 }
 
 /// What a retry says it holds: every landed file whole, and the durable bytes of each partial.
@@ -639,8 +683,7 @@ pub async fn receive(table: &Table, header: BulkHeader, mut rx: RawRecv) {
         Err(error) => {
             rx.stop();
             tracing::debug!(%xfer, name = %header.name, %error, "download stream failed");
-            let failed = XferMsg::Failed { xfer, name: Some(header.name), error };
-            table.on_control(&failed);
+            table.fail_download(xfer, error);
         }
     }
     drop(writing);
@@ -652,56 +695,55 @@ async fn write_file(
     dir: &Path,
     header: &BulkHeader,
     rx: &mut RawRecv,
-) -> Result<(), String> {
-    let io = |e: std::io::Error| format!("{}: {e}", header.name);
-    let rel = relative_path(&header.name).ok_or_else(|| format!("bad name {:?}", header.name))?;
+) -> Result<(), XferError> {
+    let name = &header.name;
+    let rel =
+        relative_path(name).ok_or_else(|| XferError::Mismatch(format!("bad name {name:?}")))?;
     let target = dir.join(rel);
-    let had = fetch.state.lock().files.get(&header.name).cloned().flatten();
+    let io = |e| XferError::local(target.display(), e);
+    let had = fetch.state.lock().files.get(name).cloned().flatten();
     if header.offset == header.size && had.as_ref() == Some(&target) {
         // Landed on an earlier attempt, and the worker still has that version.
-        return match rx.chunk(1).await.map_err(|e| e.to_string())? {
+        return match rx.chunk(1).await.map_err(|e| XferError::Cut(e.to_string()))? {
             None => Ok(()),
-            Some(_) => Err(format!("{}: more than announced", header.name)),
+            Some(_) => Err(XferError::Mismatch(format!("{name}: more than announced"))),
         };
     }
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(io)?;
     }
     let partial = partial_of(&target);
-    let (mut file, mut hasher) = open_partial(&partial, header.offset).await.map_err(io)?;
+    let (mut file, mut hasher) = open_partial(&partial, header.offset).await?;
     fetch.state.lock().files.insert(header.name.clone(), None);
     let expected = header.size.saturating_sub(header.offset);
     let mut got = 0_u64;
-    let cut = loop {
+    let cut_at =
+        |got, why| XferError::Cut(format!("{name}: cut at {got} of {expected} bytes: {why}"));
+    loop {
         if !table.current(header.xfer) {
-            break Some("given up".to_owned());
+            return Err(cut_at(got, "given up".to_owned()));
         }
         let chunk = match rx.chunk(CHUNK).await {
             Ok(Some(chunk)) => chunk,
-            Ok(None) => break None,
-            Err(e) => break Some(e.to_string()),
+            Ok(None) => break,
+            Err(e) => return Err(cut_at(got, e.to_string())),
         };
         let n = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         if got.saturating_add(n) > expected {
-            break Some("more than announced".to_owned());
+            return Err(XferError::Mismatch(format!("{name}: more than announced")));
         }
-        if let Err(e) = file.write_all(&chunk).await {
-            break Some(e.to_string());
-        }
+        file.write_all(&chunk).await.map_err(|e| XferError::local(partial.display(), e))?;
         hasher.update(&chunk);
         got = got.saturating_add(n);
-    };
-    if let Some(why) = cut {
-        return Err(format!("{}: cut at {got} of {expected} bytes: {why}", header.name));
     }
     if got != expected {
-        return Err(format!("{}: {got} of {expected} bytes", header.name));
+        return Err(cut_at(got, "the stream ended".to_owned()));
     }
-    let want = wait_digest(table, fetch, header.xfer, &header.name).await?;
+    let want = wait_digest(table, fetch, header.xfer, name).await?;
     if want != *hasher.finalize().as_bytes() {
         drop(file);
         let _gone = tokio::fs::remove_file(&partial).await;
-        return Err(format!("{}: the digest does not match the worker's", header.name));
+        return Err(XferError::Mismatch(format!("{name}: the digest does not match the worker's")));
     }
     landed_data(&file).await.map_err(io)?;
     {
@@ -709,9 +751,7 @@ async fn write_file(
         let mode = std::fs::Permissions::from_mode(header.mode & MODE_BITS);
         file.set_permissions(mode).await.map_err(io)?;
     }
-    let mtime =
-        std::time::SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(header.mtime_ms));
-    if let Some(mtime) = mtime.filter(|_| header.mtime_ms > 0) {
+    if let Some(mtime) = header.mtime_ms.to_system() {
         file.into_std().await.set_modified(mtime).map_err(io)?;
     }
     tokio::fs::rename(&partial, &target).await.map_err(io)?;
@@ -725,33 +765,39 @@ async fn write_file(
 }
 
 /// The partial file, ready to take bytes at `offset`: made afresh at 0, else cut back to
-/// `offset` (which it must hold) with a hasher over what it keeps.
+/// `offset` (which it must hold) with a hasher over what it keeps. A partial file that holds
+/// less than that is a [`XferError::Mismatch`], fetched again from what it does hold.
 async fn open_partial(
     partial: &Path,
     offset: u64,
-) -> std::io::Result<(tokio::fs::File, blake3::Hasher)> {
+) -> Result<(tokio::fs::File, blake3::Hasher), XferError> {
+    let io = |e| XferError::local(partial.display(), e);
+    let short = |held| {
+        XferError::Mismatch(format!("{}: resume at {offset}, {held} bytes held", partial.display()))
+    };
     let mut hasher = blake3::Hasher::new();
     if offset == 0 {
-        return Ok((tokio::fs::File::create(partial).await?, hasher));
+        return Ok((tokio::fs::File::create(partial).await.map_err(io)?, hasher));
     }
-    let mut file = tokio::fs::OpenOptions::new().read(true).write(true).open(partial).await?;
-    let held = file.metadata().await?.len();
+    let mut file =
+        tokio::fs::OpenOptions::new().read(true).write(true).open(partial).await.map_err(io)?;
+    let held = file.metadata().await.map_err(io)?.len();
     if held < offset {
-        return Err(std::io::Error::other(format!("resume at {offset}, but {held} bytes held")));
+        return Err(short(held));
     }
-    file.set_len(offset).await?;
+    file.set_len(offset).await.map_err(io)?;
     let mut buf = vec![0_u8; CHUNK];
     let mut left = offset;
     while left > 0 {
         let want = usize::try_from(left).unwrap_or(CHUNK).min(CHUNK);
-        let n = file.read(buf.get_mut(..want).unwrap_or_default()).await?;
+        let n = file.read(buf.get_mut(..want).unwrap_or_default()).await.map_err(io)?;
         if n == 0 {
-            return Err(std::io::Error::other("the partial file shrank"));
+            return Err(short(offset.saturating_sub(left)));
         }
         hasher.update(buf.get(..n).unwrap_or_default());
         left = left.saturating_sub(n as u64);
     }
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await.map_err(io)?;
     Ok((file, hasher))
 }
 
@@ -761,7 +807,7 @@ async fn wait_digest(
     fetch: &Fetch,
     xfer: XferId,
     name: &str,
-) -> Result<Hash, String> {
+) -> Result<Hash, XferError> {
     let waited = async {
         loop {
             let changed = fetch.changed.notified();
@@ -771,14 +817,14 @@ async fn wait_digest(
                 return Ok(hash);
             }
             if !table.current(xfer) {
-                return Err(format!("{name}: given up"));
+                return Err(XferError::Cut(format!("{name}: given up")));
             }
             changed.await;
         }
     };
     tokio::time::timeout(DIGEST_WAIT, waited)
         .await
-        .map_err(|_elapsed| format!("{name}: the worker sent no digest"))?
+        .map_err(|_elapsed| XferError::Unanswered("the file's digest"))?
 }
 
 #[cfg(test)]
@@ -786,12 +832,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_plain_path_is_typed_as_is_and_anything_else_is_quoted_once() {
-        assert_eq!(shell_quote("/tmp/a-b_c.txt"), "/tmp/a-b_c.txt");
-        assert_eq!(shell_quote("/tmp/with space.png"), "'/tmp/with space.png'");
-        assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
-        assert_eq!(shell_quote("/tmp/$HOME;rm"), "'/tmp/$HOME;rm'");
-        assert_eq!(shell_quote(""), "''");
+    fn dropped_paths_are_typed_quoted_with_a_space_after_each() {
         assert_eq!(
             paste_paths(&["/a b".to_owned(), "/c".to_owned()]),
             "'/a b' /c ",

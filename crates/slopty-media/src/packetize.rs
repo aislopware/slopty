@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use bytes::{BufMut as _, Bytes, BytesMut};
 use reed_solomon_simd::ReedSolomonEncoder;
 use slopty_core::StreamId;
+use slopty_proto::datagram::Channel;
 use slopty_proto::media::{
     FRAME_PREFIX_BYTES, FramePrefix, HEADER_BYTES, Kind, MAX_PAYLOAD, MediaHeader, flags,
 };
@@ -202,6 +203,7 @@ impl Packetizer {
             ltr_token: U64::new(frame.ltr_token.unwrap_or(0)),
         };
         let mut header = MediaHeader {
+            channel: Channel::Media as u8,
             stream: U32::new(self.stream.0),
             frame: U32::new(number),
             index: U16::new(0),
@@ -335,6 +337,7 @@ pub fn audio_datagram(stream: StreamId, seq: u32, send_ms_lo: u8, opus: &[u8]) -
         return None;
     }
     let header = MediaHeader {
+        channel: Channel::Media as u8,
         stream: U32::new(stream.0),
         frame: U32::new(seq),
         index: U16::new(0),
@@ -355,7 +358,7 @@ mod tests {
 
     #[test]
     fn layout_balances_fragments() {
-        for len in [1, 100, 1167, 1168, 1169, 2337, 30_000, 1_000_000] {
+        for len in [1, 100, 1165, 1166, 1167, 2333, 30_000, 1_000_000] {
             let l = layout(len, 200, MAX_PAYLOAD).unwrap();
             let total = len + FRAME_PREFIX_BYTES;
             assert!(
@@ -372,11 +375,11 @@ mod tests {
             ));
         }
         assert_eq!(
-            layout(1168, 200, MAX_PAYLOAD).unwrap(),
-            Layout { data_count: 1, shard_bytes: 1184, parity_count: 1 }
+            layout(1166, 200, MAX_PAYLOAD).unwrap(),
+            Layout { data_count: 1, shard_bytes: 1182, parity_count: 1 }
         );
-        assert_eq!(layout(1169, 0, MAX_PAYLOAD).unwrap().parity_count, 0);
-        assert_eq!(layout(1169, 200, MAX_PAYLOAD).unwrap().data_count, 2);
+        assert_eq!(layout(1167, 0, MAX_PAYLOAD).unwrap().parity_count, 0);
+        assert_eq!(layout(1167, 200, MAX_PAYLOAD).unwrap().data_count, 2);
         assert!(matches!(layout(0, 200, MAX_PAYLOAD), Err(MediaError::Empty)));
         assert!(matches!(
             layout(MAX_DATA_FRAGMENTS * MAX_PAYLOAD, 200, MAX_PAYLOAD),

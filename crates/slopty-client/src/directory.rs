@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use slopty_core::WorkerId;
 use slopty_net::HostAddr;
 use slopty_net::endpoint::WORKER_PORT;
-use slopty_proto::server::{Event, FromServer, Liveness, WorkerInfo};
+use slopty_proto::orchestration::HubEvent;
+use slopty_proto::server::{FromServer, Liveness, WorkerInfo};
+use slopty_proto::terminal::SessionSummary;
 
 /// File name of the cached directory inside the client's data directory.
 pub const CACHE_FILE: &str = "directory.json";
@@ -57,11 +59,16 @@ pub enum Change {
     },
     /// A worker's name or address changed.
     Moved(WorkerId),
+    /// A worker's load moved; the directory holds the new one.
+    Load(WorkerId),
     /// A worker a full directory no longer lists.
     Unlisted(WorkerId),
-    /// Something happened on a worker, boxed: an agent's event is over 200 bytes, the other
-    /// changes under 20.
-    Event(Box<Event>),
+    /// Something happened, as the server logged it; boxed, as an agent's event is over 200
+    /// bytes and the other changes under 20.
+    Event(Box<HubEvent>),
+    /// Every open terminal, and the agent in each: the whole state, replacing what the events
+    /// before it said.
+    Terminals(Vec<(WorkerId, SessionSummary)>),
 }
 
 /// Whether to dial a worker now, and where.
@@ -151,6 +158,14 @@ impl Directory {
             }
             FromServer::Worker(info) => self.upsert(info),
             FromServer::Event(event) => vec![Change::Event(Box::new(event))],
+            FromServer::Terminals(terminals) => vec![Change::Terminals(terminals)],
+            FromServer::Load { worker, load } => match self.workers.get_mut(&worker) {
+                Some(info) => {
+                    info.load = load;
+                    vec![Change::Load(worker)]
+                }
+                None => Vec::new(),
+            },
             FromServer::Welcome { .. }
             | FromServer::Refused(_)
             | FromServer::Request { .. }
@@ -262,10 +277,10 @@ mod tests {
                 agents: Vec::new(),
                 can_capture: true,
                 can_inject: true,
-                load: 0.5,
                 version: "0".to_owned(),
             },
-            last_seen_ms: 0,
+            load: 0.5,
+            last_seen_ms: slopty_core::WallMs::ZERO,
         }
     }
 
@@ -359,7 +374,13 @@ mod tests {
     fn events_pass_through() {
         let worker = WorkerId::new();
         let session = slopty_core::SessionId::new();
-        let event = Event::SessionClosed { worker, session };
+        let event = HubEvent {
+            seq: 1,
+            at_ms: slopty_core::WallMs::from_millis(2),
+            what: slopty_proto::orchestration::Happening::SessionClosed {
+                term: slopty_proto::orchestration::TermRef { worker, session },
+            },
+        };
         assert_eq!(
             linked().apply(FromServer::Event(event.clone())),
             vec![Change::Event(Box::new(event))]

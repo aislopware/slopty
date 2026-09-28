@@ -497,9 +497,9 @@ fn a_file_that_shrank_starts_over() {
 
 #[test]
 fn stamps_are_read_as_utc_milliseconds() {
-    assert_eq!(parse_ms("1970-01-01T00:00:00Z"), Some(0));
-    assert_eq!(parse_ms("2026-09-27T03:15:25.849Z"), Some(1_790_478_925_849));
-    assert_eq!(parse_ms("2024-02-29T23:59:59.5Z"), Some(1_709_251_199_500));
+    assert_eq!(parse_ms("1970-01-01T00:00:00Z"), Some(WallMs::ZERO));
+    assert_eq!(parse_ms("2026-09-27T03:15:25.849Z"), Some(WallMs::from_millis(1_790_478_925_849)));
+    assert_eq!(parse_ms("2024-02-29T23:59:59.5Z"), Some(WallMs::from_millis(1_709_251_199_500)));
     assert_eq!(parse_ms("2026-13-01T00:00:00Z"), None);
     assert_eq!(parse_ms("2026-09-27T03:15:25+02:00"), None, "only UTC is written");
     assert_eq!(parse_ms("yesterday"), None);

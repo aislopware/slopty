@@ -6,7 +6,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::terminal::{OpenSession, SessionState, SessionSummary, TermSize};
 use slopty_pty::protocol::socket_path;
@@ -31,8 +31,8 @@ struct Entry {
     handle: SessionHandle,
     command: Vec<String>,
     exited: Option<i32>,
-    /// When ptyd spawned the child, in Unix milliseconds.
-    started_ms: u64,
+    /// When ptyd spawned the child.
+    started_ms: WallMs,
 }
 
 /// An [`Entry`] taken out of the table's lock, to be summarised.
@@ -41,7 +41,7 @@ struct Listed {
     handle: SessionHandle,
     command: Vec<String>,
     exited: Option<i32>,
-    started_ms: u64,
+    started_ms: WallMs,
 }
 
 impl Listed {
@@ -207,7 +207,7 @@ impl Worker {
             moves: Some(self.inner.moves.clone()),
             touched: Some(self.inner.changes.toucher()),
         })?;
-        let started_ms = attached.started_ms;
+        let started_ms = WallMs::from_millis(attached.started_ms);
         self.inner
             .sessions
             .lock()

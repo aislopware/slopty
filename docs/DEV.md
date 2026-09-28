@@ -17,7 +17,9 @@ dependencies. Each fork carries our commits on its default branch, rebased onto 
 - `bacon` for the watch loop; `cargo nextest run -p <crate>` for one crate.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
 - `cargo xtask e2e <case>` runs the live tests (`docs/TESTING.md`); `cargo xtask e2e server`
-  is the one for the server, its worker link, the CLI and MCP, and takes seconds. Every case
+  is the one for the server, its worker link, the CLI and MCP, and takes seconds.
+  `--filter '<nextest filterset>'` narrows any case to the tests it picks (one golden, one live
+  scenario), and `--no-build` reruns the last build as it is, without cargo. Every case
   runs on this Mac alone: `workers` starts its second worker here, behind a relay shaped like
   the tailnet, so nothing waits on another machine.
 - `cargo xtask fixtures claude [--only <name>]` records the conversation fixtures from a real
@@ -62,6 +64,32 @@ the change you mean to land (`git add <paths>`), gate it, and commit it; the tre
 edit meanwhile. `--quick` is fmt + host clippy + tests; `--fix` runs the fixers on the tree
 first (stage what they changed); `--in-place` checks the tree itself (CI). Per-lane times are
 in the log.
+
+fmt and the tool checks (deny, hakari, shear, typos, taplo, `committed`) take seconds, so they
+run first, side by side, and a failure among them ends the gate before any compile. Then the
+compile lanes run. In the tests lane, nextest and the doctests run side by side once the test
+binaries are built, since cargo holds its lock only while it builds.
+
+A lane that passed leaves a record of its inputs under `target/gate/pass/`: the index entries it
+reads (`mode sha path`, submodules at their pinned commit), the toolchain (`rustc -vV`), the
+xtask binary, the environment cargo and the tests read (values hashed), the macOS and Xcode
+builds, and the tools it runs (for the tools lane also `HEAD`, the last tag and the day, so
+`cargo deny` fetches advisories daily). When a lane's inputs match its record it is skipped
+("inputs unchanged since it last passed"), so rerunning a gate that did not change costs
+seconds. The cargo lanes leave out paths nothing cargo builds or tests reads (`docs/`, the root
+`*.md`, the tools' own configs, `xtask/src/gate/pass.rs` `inert`), so a change to the docs
+alone skips them; an xtask test fails if a crate starts reading one.
+`cargo gate --since-pass` narrows the tests further: when only files inside packages changed
+since the tests lane last passed, nextest runs the tests of those packages, of every package
+that depends on them (from `cargo metadata`, dev-dependencies included) and xtask's. A changed
+file outside the packages (a manifest at the root, `Cargo.lock`, cargo's config, a vendored
+tree) runs them all. Clippy and rustdoc need no flag for this, because cargo already rebuilds
+only the changed crates and their dependents. Either way the gate checks the snapshot of the
+index, and a skipped lane or test has already passed on the same inputs.
+
+The gate's nextest profile is `gate` (`.config/nextest.toml`). It retries the tests named
+there as timing-sensitive, which have failed under the gate's load and pass alone, up to twice.
+A pass on a retry shows as FLAKY in the log. Only a named test gets retries, never a pattern.
 
 `cargo xtask check -p <crate>…` runs the same steps on named crates only, on the working tree:
 what an agent that owns those crates runs before it reports. Its builds name `workspace-hack`

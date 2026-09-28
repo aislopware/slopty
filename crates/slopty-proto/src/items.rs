@@ -6,7 +6,7 @@
 //! the arrangement.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ClientId, ItemId, SessionId, WindowId};
+use slopty_core::{ClientId, DisplayId, ItemId, SessionId, WindowId};
 
 /// What an item shows.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -23,8 +23,8 @@ pub enum ItemKind {
     },
     /// A streamed display.
     Display {
-        /// CoreGraphics display id.
-        display: u32,
+        /// Display.
+        display: DisplayId,
     },
     /// Free text.
     Note {

@@ -4,8 +4,8 @@
 rustc-wrapper = "sccache"
 
 [alias]
-xtask = "run --quiet --package xtask --"
-gate = "run --quiet --package xtask -- gate"
+xtask = "run --quiet --target-dir target/xtask --package xtask --"
+gate = "run --quiet --target-dir target/xtask --package xtask -- gate"
 
 [env]
 # libghostty-vt-sys builds from the vendored ghostty tree; never fetches at build time.

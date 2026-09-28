@@ -19,9 +19,12 @@ use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::folder::Listing;
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::ItemSync;
+use slopty_proto::orchestration::ErrorCode;
 use slopty_proto::screen::{Feedback, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest};
-use slopty_proto::terminal::{CloseReason, SessionSummary, TermEvent, TermRequest, TermSize};
-use slopty_proto::transfer::{ClipMsg, Dest, XferMsg};
+use slopty_proto::terminal::{
+    CloseReason, SessionSummary, TermError, TermEvent, TermRequest, TermSize,
+};
+use slopty_proto::transfer::{ClipFormat, ClipMsg, Dest, XferMsg};
 use slopty_worker::WorkerError;
 use slopty_worker::clip::Paste;
 use slopty_worker::screen::{StreamControl, listing};
@@ -178,7 +181,7 @@ impl Heard {
     /// Whether `msg` still tells the client something; what it tells is noted either way.
     fn admit(&mut self, msg: &WorkerMsg) -> bool {
         match msg {
-            WorkerMsg::SessionOpened(summary) => {
+            WorkerMsg::SessionOpened { summary, .. } | WorkerMsg::SessionChanged(summary) => {
                 self.sessions.insert(summary.id, summary.clone()).as_ref() != Some(summary)
             }
             WorkerMsg::SessionClosed { session, .. } => {
@@ -228,11 +231,13 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     // heard, not lost; `Heard` drops the ones the greeting already told.
     let events = daemon.events.subscribe();
     let caps = daemon.caps.borrow().clone();
+    let load = *daemon.load.borrow();
     let ack = HelloAck {
         worker: daemon.id,
         name: daemon.name.clone(),
         home: daemon.home.clone(),
         caps,
+        load,
         sessions: daemon.worker.summaries().await,
     };
     let mut heard = Heard {
@@ -313,7 +318,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
             }
             Some(feedback) = feedback_rx.recv() => peer.feedback(feedback),
             Some(copy) = copies_rx.recv() => peer.input_copy(copy),
-            Some(clip) = clips_rx.recv() => peer.clip_data(clip.generation, &clip.uti, clip.bytes),
+            Some(clip) = clips_rx.recv() => peer.clip_data(clip.generation, clip.format, clip.bytes),
             Some(done) = done_rx.recv() => {
                 if let Some(why) = peer.done(done) {
                     break Ok(why);
@@ -404,26 +409,26 @@ async fn read_datagrams(
                 break;
             }
         };
-        match slopty_proto::codec::decode_body::<ClientDatagram>(&datagram) {
-            Ok(ClientDatagram::Feedback(f)) => {
+        match ClientDatagram::decode(&datagram) {
+            Some(ClientDatagram::Feedback(f)) => {
                 if feedback.send(f).await.is_err() {
                     break;
                 }
             }
-            Ok(ClientDatagram::Input { session, seq, req }) if req.is_input() => {
+            Some(ClientDatagram::Input { session, seq, req }) if req.is_input() => {
                 if !hand_on(&copies, InputCopy::Term { session, seq, req }) {
                     break;
                 }
             }
-            Ok(ClientDatagram::Input { .. }) => {
+            Some(ClientDatagram::Input { .. }) => {
                 tracing::debug!(len = datagram.len(), "input copy of a request that is not input");
             }
-            Ok(ClientDatagram::ScreenInput { stream, seq, ordered, input }) => {
+            Some(ClientDatagram::ScreenInput { stream, seq, ordered, input }) => {
                 if !hand_on(&copies, InputCopy::Window { stream, seq, ordered, input }) {
                     break;
                 }
             }
-            Err(e) => tracing::debug!(error = %e, len = datagram.len(), "bad datagram"),
+            None => tracing::debug!(len = datagram.len(), "bad datagram"),
         }
     }
 }
@@ -560,15 +565,9 @@ impl InputOrder {
 }
 
 /// Tell the client a request about `session` failed, from a task that may wait for room.
-async fn report(
-    out: &mpsc::Sender<WorkerMsg>,
-    client: ClientId,
-    session: SessionId,
-    e: &(dyn std::fmt::Display + Sync),
-) {
+async fn report(out: &mpsc::Sender<WorkerMsg>, client: ClientId, session: SessionId, e: TermError) {
     tracing::warn!(%client, %session, error = %e, "request failed");
-    let event = TermEvent::Error(e.to_string());
-    let _sent = out.send(WorkerMsg::Term { session, event }).await;
+    let _sent = out.send(WorkerMsg::Term { session, event: TermEvent::Error(e) }).await;
 }
 
 /// Queue `msg` for the client without waiting. A client whose control queue is full has not
@@ -648,7 +647,7 @@ async fn resync(
             let _sent = done.send(Done::SessionClosed(*session));
         }
     }
-    msgs.extend(summaries.into_iter().map(WorkerMsg::SessionOpened));
+    msgs.extend(summaries.into_iter().map(WorkerMsg::SessionChanged));
     msgs.push(WorkerMsg::Items(daemon.items.snapshot()));
     msgs.push(WorkerMsg::Caps(daemon.caps.borrow().clone()));
     // Collected first: the locks must not be held across the sends.
@@ -729,7 +728,7 @@ fn copy_frame(
     // The copy is at least its header and the event. A frame past what the path carries (a
     // screenful redrawn) is not copied at all, rather than copied, held for the delay and
     // dropped at the send.
-    let least = slopty_proto::media::HEADER_BYTES.saturating_add(body.len());
+    let least = slopty_proto::datagram::TERM_OVERHEAD.saturating_add(body.len());
     if !slopty_net::echo::path_takes(conn, least) {
         return;
     }
@@ -756,7 +755,7 @@ async fn pump(
         Ok(stream) => stream,
         Err(e) => {
             let _ignored = handle.detach_sink(client, &sink);
-            return report(&out, client, session, &e).await;
+            return report(&out, client, session, TermError::Stream(e.to_string())).await;
         }
     };
     // Only the actor holds the sink from here, so the pump ends when it lets go.
@@ -866,7 +865,7 @@ impl Peer<'_> {
     /// Tell the client a request about `session` failed, without waiting.
     fn fail(&self, session: SessionId, e: &WorkerError) {
         tracing::warn!(client = %self.client, %session, error = %e, "request failed");
-        self.post(WorkerMsg::Term { session, event: TermEvent::Error(e.to_string()) });
+        self.post(WorkerMsg::Term { session, event: TermEvent::Error(e.term_error()) });
     }
 
     fn handle(&mut self, msg: ClientMsg) {
@@ -875,19 +874,28 @@ impl Peer<'_> {
                 tracing::warn!(client = %self.client, "duplicate Hello ignored");
             }
             ClientMsg::Ping { sent_at } => self.post(WorkerMsg::Pong { sent_at }),
-            ClientMsg::OpenSession(req) => {
+            ClientMsg::OpenSession { request, spec: req } => {
                 let (daemon, client) = (self.daemon.clone(), self.client);
                 let (out, done) = (self.out.clone(), self.done.clone());
                 self.tasks.spawn(async move {
                     let handle = match daemon.worker.open(&req).await {
                         Ok(handle) => handle,
-                        Err(e) => return report(&out, client, SessionId::nil(), &e).await,
+                        Err(e) => {
+                            tracing::warn!(%client, request, error = %e, "open failed");
+                            let (code, message) = (ErrorCode::Failed, e.to_string());
+                            let _sent =
+                                out.send(WorkerMsg::Failed { request, code, message }).await;
+                            return;
+                        }
                     };
                     let session = handle.id();
                     // Whoever opened it sizes it, whichever client attaches first.
                     let _reserved = handle.reserve_driver(client);
                     if let Some(summary) = daemon.worker.summary(session).await {
-                        let _sent = daemon.events.send(WorkerMsg::SessionOpened(summary));
+                        // Its own answer first, then the news for every client, this one too.
+                        let opened = WorkerMsg::SessionOpened { request, summary: summary.clone() };
+                        let _sent = out.send(opened).await;
+                        let _sent = daemon.events.send(WorkerMsg::SessionChanged(summary));
                     }
                     if let Some(delta) = daemon.items.ensure_terminal(session, client) {
                         let _sent = daemon.events.send(WorkerMsg::Items(delta));
@@ -919,9 +927,9 @@ impl Peer<'_> {
                     let _sent = self.daemon.events.send(WorkerMsg::Items(delta));
                 }
                 Err(e) => {
-                    self.fail(SessionId::nil(), &e);
                     // The proposer applied its op to its own copy already; the registry as it
-                    // is puts that copy back in step.
+                    // is puts that copy back in step, and that is all the answer it needs.
+                    tracing::warn!(client = %self.client, error = %e, "item change refused");
                     self.post(WorkerMsg::Items(self.daemon.items.snapshot()));
                 }
             },
@@ -978,10 +986,10 @@ impl Peer<'_> {
     fn done(&mut self, done: Done) -> Option<&'static str> {
         match done {
             Done::Attach { session, size } => self.attach(session, size),
-            Done::PastePlan(Some(Paste::Fetch { generation, utis })) => {
-                tracing::debug!(client = %self.client, generation, ?utis, "paste waits for the clipboard");
-                for uti in utis {
-                    self.post(WorkerMsg::Clip(ClipMsg::Fetch { generation, uti }));
+            Done::PastePlan(Some(Paste::Fetch { generation, formats })) => {
+                tracing::debug!(client = %self.client, generation, ?formats, "paste waits for the clipboard");
+                for format in formats {
+                    self.post(WorkerMsg::Clip(ClipMsg::Fetch { generation, format }));
                 }
                 let until = tokio::time::Instant::now()
                     .checked_add(PASTE_WAIT)
@@ -1090,14 +1098,16 @@ impl Peer<'_> {
                 tracing::debug!(client = %self.client, generation = offer.generation, items = offer.items.len(), "client clipboard offered");
                 self.daemon.clip.offered(self.link, offer);
             }
-            ClipMsg::Fetch { generation, uti } => {
+            ClipMsg::Fetch { generation, format } => {
                 let (daemon, conn, out) =
                     (self.daemon.clone(), self.conn.clone(), self.out.clone());
                 self.tasks.spawn(async move {
-                    crate::xfer::send_clip(&daemon, &conn, &out, generation, uti).await;
+                    crate::xfer::send_clip(&daemon, &conn, &out, generation, format).await;
                 });
             }
-            ClipMsg::Data { generation, uti, bytes } => self.clip_data(generation, &uti, bytes),
+            ClipMsg::Data { generation, format, bytes } => {
+                self.clip_data(generation, format, bytes);
+            }
             ClipMsg::Unavailable { generation } => {
                 tracing::debug!(client = %self.client, generation, "client clipboard gone");
                 self.write_held();
@@ -1107,8 +1117,8 @@ impl Peer<'_> {
 
     /// A representation of the client's clipboard arrived; the held paste goes on once all it
     /// waits for is here.
-    fn clip_data(&mut self, generation: u64, uti: &str, bytes: Vec<u8>) {
-        if self.daemon.clip.supply(self.link, generation, uti, bytes) {
+    fn clip_data(&mut self, generation: u64, format: ClipFormat, bytes: Vec<u8>) {
+        if self.daemon.clip.supply(self.link, generation, format, bytes) {
             self.write_held();
         }
     }
@@ -1374,7 +1384,7 @@ impl Peer<'_> {
                         // Gone already: most often its program exited, and a client closes a
                         // terminal on seeing that.
                         Err(WorkerError::NoSuchSession) => {}
-                        Err(e) => report(&out, client, session, &e).await,
+                        Err(e) => report(&out, client, session, e.term_error()).await,
                     }
                 });
             }
@@ -1439,7 +1449,7 @@ mod tests {
     }
 
     fn opened(id: SessionId) -> WorkerMsg {
-        WorkerMsg::SessionOpened(summary(id))
+        WorkerMsg::SessionChanged(summary(id))
     }
 
     fn summary(id: SessionId) -> SessionSummary {
@@ -1450,7 +1460,7 @@ mod tests {
             repo: None,
             branch: None,
             changes: None,
-            started_ms: 0,
+            started_ms: slopty_core::WallMs::ZERO,
             cols: 80,
             rows: 24,
             state: SessionState::Running,
@@ -1482,13 +1492,13 @@ mod tests {
         assert!(heard.admit(&opened(new)));
         assert!(!heard.admit(&opened(new)), "told once");
         let mut exited = opened(new);
-        if let WorkerMsg::SessionOpened(summary) = &mut exited {
+        if let WorkerMsg::SessionChanged(summary) = &mut exited {
             summary.state = SessionState::Exited { status: 3 };
         }
         assert!(heard.admit(&exited), "its program exited: the new state is news");
         assert!(!heard.admit(&exited), "and told once");
         let mut edited = exited.clone();
-        if let WorkerMsg::SessionOpened(summary) = &mut edited {
+        if let WorkerMsg::SessionChanged(summary) = &mut edited {
             summary.changes = Some(RepoChanges { files: 1, added: 3, removed: 0 });
         }
         assert!(heard.admit(&edited), "its working tree moved");
@@ -1823,7 +1833,7 @@ mod lossy {
         let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
         let (mut stream, _opened) = Pipeline::<Fake<Gated>>::open(
             STREAM,
-            CaptureTarget::Display(display),
+            CaptureTarget::Display(slopty_core::DisplayId(display)),
             Quality::default(),
             sink,
             |_event| {},
@@ -1878,7 +1888,8 @@ mod lossy {
             worker: WorkerId::new(),
             name: "lossy".to_owned(),
             home: String::new(),
-            caps: slopty_proto::server::WorkerCaps::default(),
+            caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+            load: 0.0,
             sessions: Vec::new(),
         };
         accepted.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();

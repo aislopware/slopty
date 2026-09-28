@@ -5,7 +5,9 @@
 //! hint, the header's context chip, the changed-files list).
 
 use std::collections::HashMap;
+use std::time::Duration;
 
+use slopty_core::WallMs;
 use slopty_proto::conversation::{
     AgentRun, Body, Entry, Meters, ResultStatus, ShellStatus, ThreadId, ToolDetail, Turn,
 };
@@ -146,11 +148,11 @@ pub fn context_hint(meters: &Meters, last_context: Option<u64>) -> Option<String
 /// A time of day from ms since the Unix epoch, in this machine's zone: "14:05". `None` for
 /// a record with no stamp.
 #[must_use]
-pub fn clock(ms: u64) -> Option<String> {
-    if ms == 0 {
+pub fn clock(at: WallMs) -> Option<String> {
+    if at.is_zero() {
         return None;
     }
-    let secs = i64::try_from(ms / 1_000).ok()?;
+    let secs = i64::try_from(at.as_millis() / 1_000).ok()?;
     let local = secs.checked_add(utc_offset(secs))?;
     let day = local.rem_euclid(86_400);
     Some(format!("{:02}:{:02}", day / 3_600, (day % 3_600) / 60))
@@ -235,7 +237,7 @@ pub fn files<'a>(entries: impl IntoIterator<Item = (&'a ThreadId, &'a Entry)>) -
 }
 
 /// When an entry's record was last added to: a call's result, else its own stamp.
-fn settled_ms(entry: &Entry) -> u64 {
+fn settled_ms(entry: &Entry) -> WallMs {
     match &entry.body {
         Body::Tool(call) => call.result.as_ref().map_or(entry.at_ms, |r| r.at_ms.max(entry.at_ms)),
         _ => entry.at_ms,
@@ -248,15 +250,15 @@ fn settled_ms(entry: &Entry) -> u64 {
 pub fn thought_ms(entries: &[Entry], at: usize) -> Option<u64> {
     let this = entries.get(at)?.at_ms;
     let before = settled_ms(entries.get(at.checked_sub(1)?)?);
-    (before > 0 && this > before).then(|| this.saturating_sub(before))
+    (!before.is_zero() && this > before).then(|| this.millis_since(before))
 }
 
 /// When each task went in progress and when it was done, by task id, from the calls that
 /// kept the list: a task update, or a whole list written at once.
 #[must_use]
-pub fn task_times(entries: &[Entry]) -> HashMap<String, (Option<u64>, Option<u64>)> {
-    let mut times: HashMap<String, (Option<u64>, Option<u64>)> = HashMap::new();
-    let mut mark = |id: &str, status: &str, at: u64| {
+pub fn task_times(entries: &[Entry]) -> HashMap<String, (Option<WallMs>, Option<WallMs>)> {
+    let mut times: HashMap<String, (Option<WallMs>, Option<WallMs>)> = HashMap::new();
+    let mut mark = |id: &str, status: &str, at: WallMs| {
         let slot = times.entry(id.to_owned()).or_default();
         match status {
             "in_progress" => slot.0 = slot.0.or(Some(at)),
@@ -291,8 +293,11 @@ pub fn task_times(entries: &[Entry]) -> HashMap<String, (Option<u64>, Option<u64
 /// Bash calls and subagents started with `run_in_background`, oldest first.
 #[must_use]
 pub fn background(entries: &[Entry]) -> Vec<&Entry> {
-    let since =
-        entries.iter().rev().find(|e| matches!(e.body, Body::Prompt(_))).map_or(0, |e| e.at_ms);
+    let since = entries
+        .iter()
+        .rev()
+        .find(|e| matches!(e.body, Body::Prompt(_)))
+        .map_or(WallMs::ZERO, |e| e.at_ms);
     entries
         .iter()
         .filter(|entry| {
@@ -303,7 +308,9 @@ pub fn background(entries: &[Entry]) -> Vec<&Entry> {
                         || bash.finished_ms.unwrap_or(entry.at_ms) >= since
                 }
                 ToolDetail::Agent(agent) if agent.background => {
-                    let ended = agent.duration_ms.map(|d| entry.at_ms.saturating_add(d));
+                    let ended = agent
+                        .duration_ms
+                        .map(|d| entry.at_ms.saturating_add(Duration::from_millis(d)));
                     agent.status == AgentRun::Running || ended.unwrap_or(entry.at_ms) >= since
                 }
                 _ => false,
@@ -344,6 +351,7 @@ pub fn short_dir(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use slopty_core::WallMs;
     use slopty_proto::conversation::Usage;
 
     use super::*;
@@ -355,7 +363,7 @@ mod tests {
     fn a_session_is_named_by_its_first_prompt() {
         let prompt = |id: &str, text: &str, command: Option<&str>| Entry {
             id: id.to_owned(),
-            at_ms: 0,
+            at_ms: WallMs::ZERO,
             body: Body::Prompt(slopty_proto::conversation::Prompt {
                 text: slopty_proto::conversation::Clipped {
                     text: text.to_owned(),

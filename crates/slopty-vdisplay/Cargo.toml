@@ -1,0 +1,21 @@
+[package]
+name = "slopty-vdisplay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A virtual display sized to one client, through CoreGraphics' CGVirtualDisplay on macOS"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2.workspace = true
+objc2.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-graphics = { workspace = true, features = [ "CGDisplayConfiguration" ] }
+objc2-foundation.workspace = true

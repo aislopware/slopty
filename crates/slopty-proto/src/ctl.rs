@@ -14,6 +14,8 @@ use serde_json::Value;
 use slopty_core::{SessionId, WorkerId};
 
 use crate::screen::CaptureTarget;
+use crate::server::WorkerCaps;
+use crate::tailnet::BackendState;
 use crate::terminal::SessionSummary;
 
 /// Environment variable naming the session a process runs in (its [`SessionId`]).
@@ -50,16 +52,15 @@ pub enum CtlRequest {
 }
 
 /// What `slopty worker doctor` shows: the daemon's own view of its permissions and links.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Health {
     /// Daemon version.
     pub version: String,
     /// Path of the daemon binary (which is what TCC grants permissions to).
     pub exe: String,
-    /// Screen Recording granted (windows and displays can be streamed).
-    pub screen_recording: bool,
-    /// Accessibility / post-event access granted (remote-window input is delivered).
-    pub post_events: bool,
+    /// What it can do as it last looked, as the server's directory lists it: Screen Recording
+    /// is [`WorkerCaps::can_capture`], Accessibility [`WorkerCaps::can_inject`].
+    pub caps: WorkerCaps,
     /// Where it listens (`[::]:45550` is every interface, both families).
     pub listen: String,
     /// Address ranges whose peers it admits by address, besides loopback and the tailnet.
@@ -88,8 +89,8 @@ pub enum Tailscale {
     },
     /// It answered, and it is not up.
     Down {
-        /// Where it stands instead.
-        backend: NotUp,
+        /// Where it stands instead: never [`BackendState::Running`].
+        backend: BackendState,
     },
     /// Its `LocalAPI` is there and did not answer.
     Unreachable {
@@ -100,41 +101,8 @@ pub enum Tailscale {
     Absent,
 }
 
-/// Where a Tailscale that is not up stands: its backend state (`ipn.State`), by its own name.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum NotUp {
-    /// Just started, with no state yet.
-    NoState,
-    /// Another user of the machine owns the daemon.
-    InUseOtherUser,
-    /// Signed out.
-    NeedsLogin,
-    /// Waiting for an admin to approve the machine.
-    NeedsMachineAuth,
-    /// Turned off.
-    Stopped,
-    /// Connecting.
-    Starting,
-    /// A state the worker does not know.
-    Other,
-}
-
-impl std::fmt::Display for NotUp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::NoState => "NoState",
-            Self::InUseOtherUser => "InUseOtherUser",
-            Self::NeedsLogin => "NeedsLogin",
-            Self::NeedsMachineAuth => "NeedsMachineAuth",
-            Self::Stopped => "Stopped",
-            Self::Starting => "Starting",
-            Self::Other => "in an unknown state",
-        })
-    }
-}
-
 /// Daemon → CLI.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum CtlReply {
     /// Status.
@@ -147,7 +115,7 @@ pub enum CtlReply {
         sessions: Vec<SessionSummary>,
     },
     /// Health report.
-    Doctor(Health),
+    Doctor(Box<Health>),
     /// Screen streams.
     Screens {
         /// Open right now.

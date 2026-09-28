@@ -53,7 +53,8 @@ mod tests {
                 worker,
                 name: "worker".to_owned(),
                 home: String::new(),
-                caps: slopty_proto::server::WorkerCaps::default(),
+                caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+                load: 0.0,
                 sessions: Vec::new(),
             };
             client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
@@ -139,5 +140,80 @@ mod tests {
         };
         let ratio = model.as_secs_f64() / path.as_secs_f64();
         assert!(ratio >= 0.5, "16 MiB in {took:?}, BBR.min_rtt {ratio:.2}× the path's: {s:?}");
+    }
+
+    /// A file here that cannot be read fails the upload at once as a local error: the worker
+    /// hears `Failed`, never a `Resume`, and no bulk stream opens for it to wait on. It used to
+    /// be taken for a cut stream and resumed twice before it failed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_file_fails_as_local_and_is_not_resumed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use slopty_client::LinkEvent;
+        use slopty_client::xfer::XferError;
+
+        let listener =
+            WorkerListener::bind(slopty_net::endpoint::any(0), Admission::default()).unwrap();
+        let worker_at: HostAddr =
+            SocketAddr::from(([127, 0, 0, 1], listener.local_addr().unwrap().port())).into();
+        let worker = WorkerId::new();
+        let accepted = tokio::spawn(async move {
+            let mut client = listener.accept().await.unwrap();
+            let ack = HelloAck {
+                worker,
+                name: "worker".to_owned(),
+                home: String::new(),
+                caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+                load: 0.0,
+                sessions: Vec::new(),
+            };
+            client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
+            client
+        });
+        let endpoint = bind_client().unwrap();
+        let hello = Hello { client: ClientId::new(), name: "test".to_owned() };
+        let conn = connect(&endpoint, &worker_at, hello).await.unwrap();
+        let mut link = WorkerLink::start_forwarding(conn);
+        let mut events = link.events().unwrap();
+        let mut client = tokio::time::timeout(WAIT, accepted).await.unwrap().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("locked");
+        std::fs::write(&path, b"secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let xfer = XferId::new();
+        link.remote().upload(xfer, vec![path], Dest::SessionCwd(SessionId::new()));
+
+        let error = tokio::time::timeout(WAIT, async {
+            loop {
+                if let Some(LinkEvent::XferFailed { xfer: failed, error }) = events.recv().await
+                    && failed == xfer
+                {
+                    return error;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(error, XferError::Local { .. }), "{error:?}");
+        assert!(!error.worth_retrying());
+
+        let mut heard = Vec::new();
+        loop {
+            let msg = tokio::time::timeout(WAIT, client.rx.recv()).await.unwrap().unwrap();
+            let failed = matches!(msg, ClientMsg::Xfer(XferMsg::Failed { .. }));
+            heard.push(msg);
+            if failed {
+                break;
+            }
+        }
+        assert!(
+            !heard.iter().any(|m| matches!(m, ClientMsg::Xfer(XferMsg::Resume { .. }))),
+            "no resume: {heard:?}"
+        );
+        let opened =
+            tokio::time::timeout(Duration::from_millis(300), streams::accept_uni(&client.conn))
+                .await;
+        assert!(opened.is_err(), "no bulk stream opened");
     }
 }

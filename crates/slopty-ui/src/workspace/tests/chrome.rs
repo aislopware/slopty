@@ -2,6 +2,8 @@
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use slopty_core::WallMs;
+
 use super::*;
 
 /// One worker with `shells` shells (a directory, a branch and a start each) and `notes` notes,
@@ -21,7 +23,7 @@ fn crowd(
         summaries.push(SessionSummary {
             branch: Some("main".into()),
             changes: None,
-            started_ms: u64::try_from(started).unwrap(),
+            started_ms: WallMs::from_millis(u64::try_from(started).unwrap()),
             ..summary(session, Some(&format!("/Users/me/src/project_{n}")))
         });
         items.push(Item {
@@ -389,8 +391,11 @@ fn working_lists_the_agents_at_their_turn_and_ticks_their_time(cx: &mut TestAppC
     let since_ms = ms_ago(Duration::from_secs(65));
     view.update_in(cx, |v, _w, cx| {
         for session in &sessions {
-            let working =
-                AgentEvent { status: AgentStatus::Working, since_ms, ..blocked(*session) };
+            let working = AgentEvent {
+                status: AgentStatus::Working,
+                since_ms: WallMs::from_millis(since_ms),
+                ..blocked(*session)
+            };
             v.agent_event(working, cx);
         }
     });
@@ -666,7 +671,7 @@ fn plus_lists_what_to_open_and_runs_it_as_its_keys_do(cx: &mut TestAppContext) {
     assert!(
         matches!(
             sent.as_slice(),
-            [ClientMsg::OpenSession(OpenSession { cwd: Some(cwd), .. })] if cwd == "/tmp/work"
+            [ClientMsg::OpenSession { spec: OpenSession { cwd: Some(cwd), .. }, .. }] if cwd == "/tmp/work"
         ),
         "{sent:?}"
     );

@@ -299,8 +299,10 @@ struct Worker {
     /// Its home directory as its hello said, so a path under it reads `~/…`; `None` until a
     /// link has said, or when the daemon has none.
     home: Option<String>,
-    /// What it can do and how it is doing, as its link or the server's directory last said.
+    /// What it can do, as its link or the server's directory last said.
     caps: Option<WorkerCaps>,
+    /// Its one-minute load average, as its link or the server last said.
+    load: Option<f32>,
     /// `slopty hook install` has been offered on this worker once.
     hooks_offered: bool,
     /// The paths the worker was last asked to watch for its file tiles, sorted.
@@ -337,6 +339,7 @@ impl Worker {
             path: None,
             home: None,
             caps: None,
+            load: None,
             hooks_offered: false,
             watched: Vec::new(),
             titles_requested: false,
@@ -644,6 +647,8 @@ pub struct WorkspaceView {
     /// Agent terminals' conversation faces.
     faces: faces::Faces,
     pending_focus_note: Option<ItemId>,
+    /// The number the next `OpenSession` goes under, for its answer to name.
+    next_open: std::cell::Cell<slopty_proto::RequestId>,
     /// A file tile whose editor takes the keyboard on the next frame.
     pending_focus_file: Option<ItemId>,
     /// A folder tile that takes the keyboard on the next frame.
@@ -814,6 +819,7 @@ impl WorkspaceView {
             pending_focus: None,
             faces: faces::Faces::default(),
             pending_focus_note: None,
+            next_open: std::cell::Cell::new(1),
             pending_focus_file: None,
             pending_focus_folder: None,
             pending_focus_picker: false,

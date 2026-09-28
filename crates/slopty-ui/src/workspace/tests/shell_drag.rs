@@ -3,8 +3,9 @@
 use std::path::PathBuf;
 
 use slopty_client::remote::Remote;
+use slopty_client::xfer::XferError;
 use slopty_core::XferId;
-use slopty_proto::transfer::Dest;
+use slopty_proto::transfer::{ClipFormat, Dest};
 
 use super::*;
 
@@ -17,17 +18,18 @@ impl Remote for Echoes {
 
     fn cancel(&self, _xfer: XferId) {}
 
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, String> {
-        let file = into.join(path.rsplit('/').next().ok_or("no name")?);
-        std::fs::write(&file, &path).map_err(|e| e.to_string())?;
+    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+        let file = into
+            .join(path.rsplit('/').next().ok_or_else(|| XferError::Worker("no name".to_owned()))?);
+        std::fs::write(&file, &path).map_err(|e| XferError::Worker(e.to_string()))?;
         Ok(vec![file])
     }
 
-    fn clip_data(&self, _generation: u64, _uti: &str, _wait: Duration) -> Option<Vec<u8>> {
+    fn clip_data(&self, _generation: u64, _format: ClipFormat, _wait: Duration) -> Option<Vec<u8>> {
         None
     }
 
-    fn send_clip(&self, _generation: u64, _uti: String, _bytes: Vec<u8>) {}
+    fn send_clip(&self, _generation: u64, _format: ClipFormat, _bytes: Vec<u8>) {}
 
     fn forward(&self, _port: u16) -> Option<u16> {
         None

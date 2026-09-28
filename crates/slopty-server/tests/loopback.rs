@@ -31,7 +31,6 @@ mod tests {
             agents: Vec::new(),
             can_capture: false,
             can_inject: false,
-            load: 0.1,
             version: "0".to_owned(),
         }
     }
@@ -78,8 +77,14 @@ mod tests {
         tokio::time::timeout(PATIENCE, connect(&endpoint, &addr, role)).await.unwrap()
     }
 
+    /// The next message but the logged events, which the hub's own tests cover.
     async fn next(link: &mut ServerLink) -> FromServer {
-        tokio::time::timeout(PATIENCE, link.rx.recv()).await.unwrap().unwrap()
+        loop {
+            match tokio::time::timeout(PATIENCE, link.rx.recv()).await.unwrap().unwrap() {
+                FromServer::Event(_) => {}
+                other => return other,
+            }
+        }
     }
 
     #[tokio::test]
@@ -102,6 +107,11 @@ mod tests {
         assert_eq!(directory[0].worker, id);
         assert_eq!(directory[0].liveness, Liveness::Online);
         assert_eq!(directory[0].address, "127.0.0.1:45999", "the seen IP, the registered port");
+        assert_eq!(
+            next(&mut client).await,
+            FromServer::Terminals(Vec::new()),
+            "then the terminals"
+        );
 
         client
             .tx
@@ -216,6 +226,7 @@ mod tests {
             connect(&endpoint, &HostAddr::from(relay_addr), worker_role(id)).await.unwrap();
         let mut client = dial(&server, client_role()).await.unwrap();
         let _directory = next(&mut client).await;
+        let _terminals = next(&mut client).await;
 
         cut.store(true, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();

@@ -2,7 +2,7 @@
 //! labels, in the headless workspace.
 
 use gpui::Modifiers;
-use slopty_core::WindowId;
+use slopty_core::{DisplayId, WindowId};
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
 
 use super::*;
@@ -231,7 +231,7 @@ fn the_empty_workspace_begins_a_terminal_an_agent_or_a_window(cx: &mut TestAppCo
     assert!(
         matches!(
             fake.drain().as_slice(),
-            [ClientMsg::OpenSession(OpenSession { command, .. })] if command.is_empty()
+            [ClientMsg::OpenSession { spec: OpenSession { command, .. }, .. }] if command.is_empty()
         ),
         "a shell"
     );
@@ -239,7 +239,7 @@ fn the_empty_workspace_begins_a_terminal_an_agent_or_a_window(cx: &mut TestAppCo
     assert!(
         matches!(
             fake.drain().as_slice(),
-            [ClientMsg::OpenSession(OpenSession { command, .. })]
+            [ClientMsg::OpenSession { spec: OpenSession { command, .. }, .. }]
                 if command == &[AGENT_COMMAND.to_owned()]
         ),
         "an agent"
@@ -263,10 +263,16 @@ fn listing(title: &str) -> ScreenEvent {
             y: 0.0,
             w: 1200.0,
             h: 800.0,
-            display: 1,
+            display: DisplayId(1),
             on_screen: true,
         }],
-        displays: vec![DisplayInfo { id: 1, w: 1728.0, h: 1117.0, scale: 2.0, hz: 120.0 }],
+        displays: vec![DisplayInfo {
+            id: DisplayId(1),
+            w: 1728.0,
+            h: 1117.0,
+            scale: 2.0,
+            hz: 120.0,
+        }],
     }
 }
 

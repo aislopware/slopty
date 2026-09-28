@@ -16,6 +16,7 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
     div,
 };
+use slopty_core::WallMs;
 use slopty_proto::conversation::{
     AgentDetail, AgentRun, BashDetail, Entry, Patch, QuestionDetail, ResultStatus, ThreadId,
     ToolCall, ToolDetail,
@@ -485,9 +486,8 @@ impl ConversationView {
                 _ => None,
             })
         });
-        let elapsed = (running && entry.at_ms > 0).then(|| {
-            crate::kit::duration(Duration::from_millis(super::now_ms().saturating_sub(entry.at_ms)))
-        });
+        let elapsed = (running && !entry.at_ms.is_zero())
+            .then(|| crate::kit::duration(WallMs::now().since(entry.at_ms)));
         let facts = [
             agent.tool_uses.map(|n| tools::count(n, "tool use", "tool uses")),
             agent.tokens.map(|n| format!("{} tokens", tools::tokens(n))),

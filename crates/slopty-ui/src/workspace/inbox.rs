@@ -226,8 +226,8 @@ impl WorkspaceView {
         let worker = self.workers.get(&waiting.worker).map(|w| w.name.as_str()).unwrap_or_default();
         let age = agent
             .map(|a| a.since_ms)
-            .filter(|since| *since > 0)
-            .map(|since| Duration::from_millis(now_ms.saturating_sub(since)));
+            .filter(|since| !since.is_zero())
+            .map(|since| Duration::from_millis(now_ms.saturating_sub(since.as_millis())));
         Row {
             id: format!("inbox-waiting-{session}"),
             status: Status::NeedsYou,

@@ -71,7 +71,7 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path) -> Resul
         }
         CtlReply::Doctor(health) => {
             print!("{}", doctor_report(&health, DESKTOP));
-            if DESKTOP && !(health.screen_recording && health.post_events) {
+            if DESKTOP && !(health.caps.can_capture && health.caps.can_inject) {
                 bail!("permissions missing; see above");
             }
         }
@@ -126,14 +126,14 @@ const DESKTOP: bool = cfg!(target_os = "macos");
 /// names the path to add in System Settings; a worker with no `desktop` to stream needs none.
 fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
     let mark = |ok: bool| if ok { "✔" } else { "✘" };
-    let screen = if h.screen_recording {
+    let screen = if h.caps.can_capture {
         String::new()
     } else {
         "  → System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording: add the \
          daemon binary above, then `slopty worker install` (or restart the daemon)"
             .to_owned()
     };
-    let post = if h.post_events {
+    let post = if h.caps.can_inject {
         String::new()
     } else {
         "  → System Settings ▸ Privacy & Security ▸ Accessibility: add the daemon binary above"
@@ -164,8 +164,8 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
     };
     let grants = if desktop {
         vec![
-            format!("{} Screen Recording{screen}", mark(h.screen_recording)),
-            format!("{} Accessibility (remote-window input){post}", mark(h.post_events)),
+            format!("{} Screen Recording{screen}", mark(h.caps.can_capture)),
+            format!("{} Accessibility (remote-window input){post}", mark(h.caps.can_inject)),
         ]
     } else {
         vec!["no desktop to stream here: terminals, files and agents only".to_owned()]
@@ -188,7 +188,8 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::ctl::NotUp;
+    use slopty_proto::server::{Os, WorkerCaps};
+    use slopty_proto::tailnet::BackendState;
 
     use super::*;
 
@@ -210,8 +211,11 @@ mod tests {
         let h = slopty_proto::ctl::Health {
             version: "0.3.0".to_owned(),
             exe: "/opt/slopty/bin/slopty-worker".to_owned(),
-            screen_recording: true,
-            post_events: false,
+            caps: WorkerCaps {
+                can_capture: true,
+                can_inject: false,
+                ..WorkerCaps::bare(Os::MacOs)
+            },
             listen: "[::]:45550".to_owned(),
             allow: vec!["10.0.0.0/8".to_owned()],
             tailscale: Tailscale::Up {
@@ -243,7 +247,7 @@ mod tests {
         assert!(report.contains("✘ no Tailscale this daemon can read"), "{report}");
         let with =
             |tailscale| doctor_report(&slopty_proto::ctl::Health { tailscale, ..h.clone() }, true);
-        let report = with(Tailscale::Down { backend: NotUp::Stopped });
+        let report = with(Tailscale::Down { backend: BackendState::Stopped });
         assert!(report.contains("✘ Tailscale is Stopped:"), "{report}");
         let report = with(Tailscale::Unreachable { error: "timed out".to_owned() });
         assert!(report.contains("✘ Tailscale did not answer (timed out)"), "{report}");

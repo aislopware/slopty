@@ -141,6 +141,11 @@ async fn session(
     tracing::info!(server = %name, %remote, "registered with the server");
     let (out, out_rx) = mpsc::channel::<ToServer>(OUT_DEPTH);
     let mut writer = tokio::spawn(write(tx, out_rx));
+    // A registration carries no load: the server hears it first here, then each move of it.
+    let load = *daemon.load.borrow();
+    if out.send(ToServer::Load(load)).await.is_err() {
+        return Ok("the writer stopped");
+    }
     let mut requests = JoinSet::new();
     let why = loop {
         tokio::select! {
@@ -158,7 +163,7 @@ async fn session(
                         if let (Some(session), Outcome::Done) = (resized, &outcome)
                             && let Some(summary) = orchestrator.summary(session).await
                         {
-                            let _sent = out.send(ToServer::SessionOpened(summary)).await;
+                            let _sent = out.send(ToServer::SessionChanged(summary)).await;
                         }
                         let _sent = out.send(ToServer::Reply { id, outcome }).await;
                     });
@@ -169,11 +174,12 @@ async fn session(
             },
             ev = events.recv() => {
                 let msg = match ev {
-                    Ok(WorkerMsg::SessionOpened(summary)) => ToServer::SessionOpened(summary),
+                    Ok(WorkerMsg::SessionChanged(summary)) => ToServer::SessionChanged(summary),
                     Ok(WorkerMsg::SessionClosed { session, reason }) => {
                         ToServer::SessionClosed { session, reason }
                     }
                     Ok(WorkerMsg::Agent(event)) => ToServer::Agent(event),
+                    Ok(WorkerMsg::Load(load)) => ToServer::Load(load),
                     Ok(_) => continue,
                     // What was missed is in a fresh registration.
                     Err(broadcast::error::RecvError::Lagged(_)) => break "fell behind the daemon's events",

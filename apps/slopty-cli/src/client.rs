@@ -4,11 +4,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use slopty_core::ClientId;
+use slopty_core::{ClientId, SessionId};
 use slopty_net::client::{WorkerConn, bind_client, connect};
 use slopty_net::known::{KnownWorker, KnownWorkers};
-use slopty_net::{Endpoint, HostAddr};
+use slopty_net::{ClientMsg, Endpoint, HostAddr, WorkerMsg};
+use slopty_proto::RequestId;
 use slopty_proto::handshake::Hello;
+use slopty_proto::terminal::OpenSession;
 
 /// How long a closing endpoint may take to tell its peers.
 const CLOSE_GRACE: Duration = Duration::from_millis(500);
@@ -93,10 +95,36 @@ pub struct Session {
 }
 
 impl Session {
+    /// Open a terminal as `spec` says, and wait for the worker's answer to this request: the
+    /// news of other clients' terminals, which may come first, is not it.
+    pub async fn open(&mut self, spec: OpenSession) -> Result<SessionId> {
+        let request = OPEN_REQUEST;
+        self.conn.tx.send(&ClientMsg::OpenSession { request, spec }).await?;
+        loop {
+            if let Some(answer) = open_answer(request, self.conn.rx.recv().await?) {
+                return answer;
+            }
+        }
+    }
+
     /// Close cleanly.
     pub async fn close(self) {
         self.conn.close();
         close_endpoint(&self.endpoint).await;
+    }
+}
+
+/// The one open request a command's connection makes.
+const OPEN_REQUEST: RequestId = 1;
+
+/// What `msg` answers of open request `request`; `None` when it is about something else.
+fn open_answer(request: RequestId, msg: WorkerMsg) -> Option<Result<SessionId>> {
+    match msg {
+        WorkerMsg::SessionOpened { request: r, summary } if r == request => Some(Ok(summary.id)),
+        WorkerMsg::Failed { request: r, message, .. } if r == request => {
+            Some(Err(anyhow::anyhow!("the worker could not open it: {message}")))
+        }
+        _other => None,
     }
 }
 
@@ -174,4 +202,62 @@ pub async fn ping(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
     println!("  quic path: {}", slopty_net::endpoint::describe_path(&session.conn.conn));
     session.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_core::WallMs;
+    use slopty_proto::orchestration::ErrorCode;
+    use slopty_proto::terminal::{SessionState, SessionSummary};
+
+    use super::*;
+
+    fn summary(id: SessionId) -> SessionSummary {
+        SessionSummary {
+            id,
+            title: "zsh".to_owned(),
+            cwd: Some("/w".to_owned()),
+            repo: None,
+            branch: None,
+            changes: None,
+            started_ms: WallMs::from_millis(1),
+            cols: 80,
+            rows: 24,
+            state: SessionState::Running,
+            viewers: 1,
+            command: Vec::new(),
+            agent: None,
+        }
+    }
+
+    /// While an open waits, another client's terminal changes its directory and a second
+    /// open's answer goes by: the open takes neither, only the answer to its own request.
+    #[test]
+    fn an_open_takes_its_own_answer_when_another_session_changes_meanwhile() {
+        let (theirs, mine) = (SessionId::new(), SessionId::new());
+        let heard = [
+            WorkerMsg::SessionChanged(summary(theirs)),
+            WorkerMsg::SessionOpened { request: OPEN_REQUEST + 1, summary: summary(theirs) },
+            WorkerMsg::SessionOpened { request: OPEN_REQUEST, summary: summary(mine) },
+            WorkerMsg::SessionChanged(summary(mine)),
+        ];
+        let answered: Vec<Option<SessionId>> = heard
+            .into_iter()
+            .map(|msg| open_answer(OPEN_REQUEST, msg).map(|a| a.unwrap()))
+            .collect();
+        assert_eq!(answered, [None, None, Some(mine), None]);
+    }
+
+    /// A failed open is an error of that request only, with the worker's words.
+    #[test]
+    fn a_failed_open_is_its_own_requests_error() {
+        let failed = |request| WorkerMsg::Failed {
+            request,
+            code: ErrorCode::Failed,
+            message: "no such directory".to_owned(),
+        };
+        assert!(open_answer(OPEN_REQUEST, failed(OPEN_REQUEST + 1)).is_none());
+        let error = open_answer(OPEN_REQUEST, failed(OPEN_REQUEST)).unwrap().unwrap_err();
+        assert!(error.to_string().contains("no such directory"), "{error}");
+    }
 }

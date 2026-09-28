@@ -8,7 +8,7 @@
 //! [`crate::ClientMsg::WriteFile`] inline, or a bulk stream ([`crate::transfer::Purpose::Save`]).
 
 use serde::{Deserialize, Serialize};
-use slopty_core::XferId;
+use slopty_core::{WallMs, XferId};
 
 /// Bytes a file tile edits at most: a file larger than this is [`FileRead::TooLarge`], and a
 /// save of more is refused.
@@ -28,8 +28,8 @@ pub enum FileRead {
         text: String,
         /// Size on disk, bytes.
         size: u64,
-        /// Last modification, milliseconds since the Unix epoch.
-        modified_ms: u64,
+        /// Last modification.
+        modified_ms: WallMs,
         /// The file ends with a newline, which `text` leaves off; a save puts it back.
         final_newline: bool,
     },
@@ -57,8 +57,8 @@ pub enum FileRead {
         xfer: XferId,
         /// Size on disk, bytes.
         size: u64,
-        /// Last modification, milliseconds since the Unix epoch.
-        modified_ms: u64,
+        /// Last modification.
+        modified_ms: WallMs,
         /// The file ends with a newline, which the streamed text leaves off.
         final_newline: bool,
     },
@@ -71,13 +71,13 @@ pub enum WriteResult {
     Saved {
         /// Size on disk now, bytes.
         size: u64,
-        /// Modification time now, milliseconds since the Unix epoch.
-        modified_ms: u64,
+        /// Modification time now.
+        modified_ms: WallMs,
     },
     /// The file changed on disk since the version the edit started from; nothing was written.
     Conflict {
-        /// Its modification time on disk, milliseconds since the Unix epoch.
-        modified_ms: u64,
+        /// Its modification time on disk.
+        modified_ms: WallMs,
     },
     /// Not written.
     Failed {

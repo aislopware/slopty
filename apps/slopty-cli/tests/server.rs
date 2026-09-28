@@ -8,16 +8,16 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::{Value, json};
-    use slopty_core::{SessionId, WorkerId};
+    use slopty_core::{SessionId, WallMs, WorkerId};
     use slopty_net::admission::Admission;
     use slopty_net::server::ServerListener;
     use slopty_proto::agent::{
         AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent,
     };
-    use slopty_proto::orchestration::{ErrorCode, Input, Outcome, TermRef, Verb};
-    use slopty_proto::server::{
-        Event, FromServer, Liveness, Os, Role, ToServer, WorkerCaps, WorkerInfo,
+    use slopty_proto::orchestration::{
+        ErrorCode, Happening, HubEvent, Input, Outcome, TermRef, Verb,
     };
+    use slopty_proto::server::{FromServer, Liveness, Os, Role, ToServer, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -54,10 +54,10 @@ mod tests {
                 agents: Vec::new(),
                 can_capture: true,
                 can_inject: true,
-                load: 0.5,
                 version: "0.1.0".to_owned(),
             },
-            last_seen_ms: 1,
+            load: 0.5,
+            last_seen_ms: WallMs::from_millis(1),
         }]
     }
 
@@ -69,7 +69,7 @@ mod tests {
             repo: None,
             branch: None,
             changes: None,
-            started_ms: 0,
+            started_ms: WallMs::ZERO,
             cols: 80,
             rows: 24,
             state: SessionState::Running,
@@ -85,7 +85,7 @@ mod tests {
             kind: AgentKind::ClaudeCode,
             status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
             source: AgentSource::Hook,
-            since_ms: 0,
+            since_ms: WallMs::ZERO,
         }
     }
 
@@ -388,9 +388,13 @@ mod tests {
             detail: Some("Which branch?".to_owned()),
             attention: true,
             source: AgentSource::Hook,
-            since_ms: 0,
+            since_ms: WallMs::ZERO,
         };
-        let pushed = FromServer::Event(Event::Agent { worker: studio(), event });
+        let pushed = FromServer::Event(HubEvent {
+            seq: 1,
+            at_ms: WallMs::ZERO,
+            what: Happening::Agent { worker: studio(), event },
+        });
         fake.push.send(Some(pushed)).unwrap();
         let note = mcp.next().await;
         assert_eq!(note["method"], "notifications/message", "{note}");

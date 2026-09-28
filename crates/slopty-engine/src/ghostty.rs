@@ -28,6 +28,7 @@ use crate::placeholder::{self, Runs};
 use crate::{EngineConfig, EngineError, EngineEvent, convert, osc133, search};
 
 mod read;
+mod redraw;
 
 pub use read::{CommandBlock, Position, ScreenText, TextLines, TextSince};
 
@@ -132,6 +133,13 @@ pub struct GhosttyEngine {
     uri_buf: Vec<u8>,
     /// Watches the bytes for `OSC 133;A` and `133;D`, which libghostty does not surface.
     osc: osc133::Scanner,
+    /// What the shell redraws after a resize, as the last `133;A` said (see [`redraw`]).
+    prompt_redraw: osc133::Redraw,
+    /// The last mark was a prompt start, not an output start or a command end: the cursor is
+    /// in the prompt or its input.
+    at_prompt: bool,
+    /// At a prompt, the bytes so far end outside any sequence, so the engine may write its own.
+    prompt_at_ground: bool,
     /// Exit status reported on an absolute line (the row the cursor was on at the `D`).
     exit_marks: BTreeMap<u64, Option<u8>>,
     /// Absolute lines a primary prompt started on (`133;A`).
@@ -301,6 +309,9 @@ impl GhosttyEngine {
             scratch: String::with_capacity(16),
             uri_buf: vec![0; 256],
             osc: osc133::Scanner::default(),
+            prompt_redraw: osc133::Redraw::default(),
+            at_prompt: false,
+            prompt_at_ground: false,
             exit_marks: BTreeMap::new(),
             prompt_starts: BTreeSet::new(),
             forced_rows: BTreeSet::new(),
@@ -505,6 +516,8 @@ impl GhosttyEngine {
         self.generation = self.generation.wrapping_add(1);
         self.term.vt_write(rest);
         self.settle_or_bump();
+        self.prompt_at_ground =
+            self.at_prompt && redraw::ends_at_ground(self.prompt_at_ground, rest);
         if !self.on_alt {
             self.alt_prefix = alt_prefix_of(chunk).to_vec();
         }
@@ -545,8 +558,14 @@ impl GhosttyEngine {
                 *starts = starts.split_off(&base);
             });
         }
+        self.at_prompt = matches!(mark, osc133::Mark::PromptStart { .. });
+        // The mark's terminator was the last byte fed.
+        self.prompt_at_ground = self.at_prompt;
         match mark {
-            osc133::Mark::PromptStart => {
+            osc133::Mark::PromptStart { redraw } => {
+                if let Some(redraw) = redraw {
+                    self.prompt_redraw = redraw;
+                }
                 let (marks, starts) = (&mut self.exit_marks, &mut self.prompt_starts);
                 remark(marks, starts, &mut self.remarked_rows, line, |_, starts| {
                     starts.insert(line);
@@ -1653,6 +1672,9 @@ impl GhosttyEngine {
             self.anchor = None;
             self.primary_anchor = None;
         }
+        if size.cols != self.size.cols {
+            self.clear_prompt_before_reflow()?;
+        }
         self.term.resize(
             size.cols,
             size.rows,
@@ -2193,6 +2215,55 @@ mod tests {
         let f = e.full_frame(0).unwrap();
         assert_eq!(text(&f), shown, "the primary, resized under the alternate screen");
         assert_eq!((f.cursor.row, f.cursor.col), (2, 4));
+    }
+
+    /// A shell redraws its prompt after a resize from the row it counts up to at the old width.
+    /// zsh's one-row prompt that a narrower screen wraps onto two rows is redrawn from the
+    /// second, below a stale copy of its head, unless the prompt was cleared first. libghostty
+    /// clears it only for a shell that said it redraws (`133;A;redraw=1`; libghostty-vt's
+    /// default for embedders is off), and on its own from the cursor's row only (see
+    /// `ghostty/redraw.rs`); the engine clears it from its first row, at the old width, and
+    /// the redraw lands where the prompt was.
+    #[test]
+    fn a_prompt_the_shell_redraws_is_cleared_on_resize() {
+        let rows = |f: &Frame| {
+            f.updates.iter().map(|u| u.line.text().trim_end().to_owned()).collect::<Vec<_>>()
+        };
+        let zsh = |a: &[u8], typed: &[u8]| {
+            let mut e = engine(40, 6);
+            let ps1 = [a, b"/var/folders/xy/T/s/repo % \x1b]133;B\x07"].concat();
+            e.write(b"~ % pwd\r\n/var/folders/xy/T/s/repo\r\n");
+            e.write(&ps1);
+            e.write(typed);
+            e.resize(TermSize { cols: 20, ..e.size() }).unwrap();
+            // zle's refresh after SIGWINCH: back to its prompt's first row, clear, draw again.
+            e.write(b"\r\x1b[J");
+            e.write(&ps1);
+            rows(&e.full_frame(0).unwrap())
+        };
+        let output = ["~ % pwd", "/var/folders/xy/T/s/", "repo"];
+        let redrawn = ["/var/folders/xy/T/s/", "repo %"];
+        let head = ["/var/folders/xy/T/s/"];
+        let stale = [&output[..], &head[..], &redrawn[..]].concat();
+        assert_eq!(zsh(b"\x1b]133;A\x07", b""), stale, "no `redraw`: nothing is cleared");
+        let cleared = [&output[..], &redrawn[..], &[""]].concat();
+        assert_eq!(zsh(b"\x1b]133;A;redraw=1\x07", b""), cleared);
+        // A resize between two reads of one sequence: the engine writes nothing into it.
+        let split = zsh(b"\x1b]133;A;redraw=1\x07", b"\x1b[3");
+        assert_eq!(split, stale, "left to libghostty");
+
+        // bash redraws only the prompt's last row: `redraw=1` would lose the rows above it.
+        let bash = |a: &[u8]| {
+            let mut e = engine(20, 4);
+            let ps1 = [a, b"ctx\r\n$ \x1b]133;B\x07"].concat();
+            e.write(&ps1);
+            e.write(b"echo hi");
+            e.resize(TermSize { cols: 30, ..e.size() }).unwrap();
+            e.write(b"\r\x1b[K$ \x1b]133;B\x07echo hi");
+            rows(&e.full_frame(0).unwrap())
+        };
+        assert_eq!(bash(b"\x1b]133;A;redraw=last\x07"), ["ctx", "$ echo hi", "", ""]);
+        assert_eq!(bash(b"\x1b]133;A;redraw=1\x07"), ["", "$ echo hi", "", ""]);
     }
 
     #[test]

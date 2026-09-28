@@ -7,7 +7,9 @@
 # interactive shell ~/.bashrc. --noprofile / --norc travel the same way and are honoured. Then
 # it installs the OSC 133 marks:
 #
-#   133;A / 133;B  around PS1 (inside \[ \], invisible to the width count); A;k=s / B around PS2
+#   133;A / 133;B  around PS1 (inside \[ \], invisible to the width count); A;k=s / B around PS2.
+#                  `redraw=last`: after a resize readline redraws the prompt's last row only, so
+#                  the terminal clears that row and keeps the ones above
 #   133;C          from a DEBUG trap: the first command after a prompt (our own tiny preexec)
 #   133;D;<status> from PROMPT_COMMAND, before the next prompt, only when a C is open
 #
@@ -62,7 +64,7 @@ _slopty_arm() {
     printf '\033]7;file://%s%s\007' "$HOSTNAME" "${_slopty_dir// /%20}"
     case $PS1 in
         *'133;A'*) ;;
-        *) PS1='\[\033]133;A\007\]'"$PS1"'\[\033]133;B\007\]' ;;
+        *) PS1='\[\033]133;A;redraw=last\007\]'"$PS1"'\[\033]133;B\007\]' ;;
     esac
     case $PS2 in
         *'133;A;k=s'*) ;;

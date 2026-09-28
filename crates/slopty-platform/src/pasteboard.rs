@@ -15,6 +15,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use slopty_proto::transfer::ClipFormat;
 /// The private type every Slopty write carries: who wrote it, and which generation
 /// (`slopty_proto::transfer::origin_bytes`).
 pub use slopty_proto::transfer::ORIGIN_TYPE;
@@ -30,6 +31,26 @@ pub const TEXT_UTI: &str = "public.utf8-plain-text";
 
 /// A file's URL, one per item: what Finder's copy puts on the pasteboard.
 pub const FILE_URL_UTI: &str = "public.file-url";
+
+/// The pasteboard type clipboard sync's `format` has on Apple's pasteboards: its uniform type
+/// identifier.
+#[must_use]
+pub const fn uti_of(format: ClipFormat) -> &'static str {
+    match format {
+        ClipFormat::FileUrls => FILE_URL_UTI,
+        ClipFormat::Png => "public.png",
+        ClipFormat::Tiff => "public.tiff",
+        ClipFormat::Rtf => "public.rtf",
+        ClipFormat::Html => "public.html",
+        ClipFormat::Text => TEXT_UTI,
+    }
+}
+
+/// The format a pasteboard type is, when clipboard sync carries it.
+#[must_use]
+pub fn format_of(uti: &str) -> Option<ClipFormat> {
+    ClipFormat::ALL.into_iter().find(|&format| uti_of(format) == uti)
+}
 
 /// Answers a promised representation with its bytes, or nothing when it cannot be had.
 pub type Provide = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;

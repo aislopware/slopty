@@ -36,7 +36,7 @@
 //! that shows twice travels once.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ClientId, SessionId};
+use slopty_core::{ClientId, SessionId, WallMs};
 
 /// A clipping limit: whichever of the two is reached first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,8 +200,8 @@ pub struct Entry {
     /// Stable id: the `tool_use_id` of a tool call, else the record's `uuid` (with `:<block>`
     /// for an answer or thinking block).
     pub id: String,
-    /// When the record was written, in ms since the Unix epoch; 0 when it says nothing.
-    pub at_ms: u64,
+    /// When the record was written; zero when it says nothing.
+    pub at_ms: WallMs,
     /// What it is.
     pub body: Body,
 }
@@ -313,7 +313,7 @@ pub struct ToolResult {
     /// error.
     pub text: Option<Clipped>,
     /// When the result was written.
-    pub at_ms: u64,
+    pub at_ms: WallMs,
     /// Images it returned: a screenshot, a picture read from a file.
     pub images: Vec<Image>,
 }
@@ -531,7 +531,7 @@ pub struct BashDetail {
     /// Where a background command's output goes; the worker tails it.
     pub output_file: Option<String>,
     /// When a background command finished, by Claude Code's notice of it.
-    pub finished_ms: Option<u64>,
+    pub finished_ms: Option<WallMs>,
 }
 
 /// Where a shell command stands.
@@ -731,11 +731,11 @@ pub struct ThreadState {
 pub struct Turn {
     /// The prompt entry that opened it; empty for work before a thread's first prompt.
     pub prompt: String,
-    /// When the prompt was sent, in ms since the Unix epoch.
-    pub started_ms: u64,
+    /// When the prompt was sent.
+    pub started_ms: WallMs,
     /// When Claude Code closed the turn (its end-of-turn record); `None` while it runs, or
     /// when the transcript never says.
-    pub ended_ms: Option<u64>,
+    pub ended_ms: Option<WallMs>,
     /// The models that answered in it, in the order they first did (`claude-opus-5-5`).
     pub models: Vec<String>,
     /// Requests the model answered.
@@ -968,6 +968,7 @@ pub struct Blob {
     /// BLAKE3 of `data`, in hex, as [`Image::digest`].
     pub digest: String,
     /// The encoded picture, as its [`Image::media_type`] says.
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 
@@ -1074,10 +1075,10 @@ pub struct PermissionPrompt {
     pub suggestions: Vec<Suggestion>,
     /// The session's permission mode (`default`, `plan`, `acceptEdits`, …).
     pub mode: Option<String>,
-    /// When Claude Code asked, in ms since the Unix epoch by the worker's clock.
-    pub asked_ms: u64,
+    /// When Claude Code asked, by the worker's clock.
+    pub asked_ms: WallMs,
     /// When the worker gives up holding it and the TUI's dialog shows instead, on that clock.
-    pub until_ms: u64,
+    pub until_ms: WallMs,
 }
 
 /// One permission update "allow always" applies.

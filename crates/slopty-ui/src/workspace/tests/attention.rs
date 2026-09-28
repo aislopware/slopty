@@ -4,13 +4,13 @@
 use std::sync::Arc;
 
 use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
-use slopty_core::ClientId;
+use slopty_core::{ClientId, WallMs};
 use slopty_platform::notify::Memory;
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{Item, ItemOp, ItemSync};
-use slopty_proto::server::WorkerCaps;
+use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::terminal::{SessionState, SessionSummary};
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
@@ -159,7 +159,8 @@ fn worker(
         worker: slopty_core::WorkerId::new(),
         name: name.to_owned(),
         home: String::new(),
-        caps: WorkerCaps::default(),
+        caps: WorkerCaps::bare(Os::MacOs),
+        load: 0.0,
         sessions: Vec::new(),
     };
     let me = ClientId::new();
@@ -198,7 +199,7 @@ fn summary(id: SessionId) -> SessionSummary {
         repo: None,
         branch: None,
         changes: None,
-        started_ms: 0,
+        started_ms: WallMs::ZERO,
         cols: 80,
         rows: 24,
         state: SessionState::Running,
@@ -224,7 +225,7 @@ fn the_look_names_the_tile_and_says_what_the_agent_asks(cx: &mut TestAppContext)
                 detail: Some("$ cargo test".into()),
                 attention: true,
                 source: AgentSource::Hook,
-                since_ms: 0,
+                since_ms: WallMs::ZERO,
             },
             cx,
         );

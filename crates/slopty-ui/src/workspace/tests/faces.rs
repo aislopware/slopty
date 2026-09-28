@@ -1,6 +1,7 @@
 //! An agent terminal's conversation face in the workspace: the toggle, what it follows, what
 //! its composer types into the PTY, and its answers to a held prompt.
 
+use slopty_core::WallMs;
 use slopty_proto::conversation::{ConversationRequest, PermissionEvent, Settled, Verdict};
 
 use super::*;
@@ -390,7 +391,8 @@ fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppCo
         }),
         result: None,
     };
-    let entry = Entry { id: "toolu_1".into(), at_ms: 0, body: Body::Tool(Box::new(call)) };
+    let entry =
+        Entry { id: "toolu_1".into(), at_ms: WallMs::ZERO, body: Body::Tool(Box::new(call)) };
     let upsert = Change::Upsert { thread: ThreadId::Main, entry };
     view.update_in(cx, |v, _w, cx| {
         v.conversation_event(session, ConversationEvent::Changes(vec![upsert]), cx);

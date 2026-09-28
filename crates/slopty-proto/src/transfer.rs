@@ -9,7 +9,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ClientId, SessionId, WorkerId, XferId};
+use slopty_core::{ClientId, SessionId, WallMs, WorkerId, XferId};
 
 /// Clipboard contents at most this big ride inline in an [`Offer`] or [`ClipMsg::Data`];
 /// anything bigger is fetched over a bulk stream.
@@ -72,17 +72,63 @@ pub enum Peer {
     Worker(WorkerId),
 }
 
+/// A representation clipboard sync carries, whatever the platform calls it.
+///
+/// Each end maps it to its own pasteboard's types at its board (an Apple UTI on a Mac, a MIME
+/// type elsewhere). Anything else on a clipboard stays where it is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum ClipFormat {
+    /// Files, as `file://` URLs one per line (`text/uri-list`).
+    FileUrls,
+    /// `image/png`.
+    Png,
+    /// `image/tiff`, what a Mac screenshot is on its pasteboard.
+    Tiff,
+    /// `text/rtf`.
+    Rtf,
+    /// `text/html`.
+    Html,
+    /// `text/plain`, UTF-8.
+    Text,
+}
+
+impl ClipFormat {
+    /// Every format, richest first: the order an offer lists them in.
+    pub const ALL: [Self; 6] =
+        [Self::FileUrls, Self::Png, Self::Tiff, Self::Rtf, Self::Html, Self::Text];
+
+    /// The MIME type.
+    #[must_use]
+    pub const fn mime(self) -> &'static str {
+        match self {
+            Self::FileUrls => "text/uri-list",
+            Self::Png => "image/png",
+            Self::Tiff => "image/tiff",
+            Self::Rtf => "text/rtf",
+            Self::Html => "text/html",
+            Self::Text => "text/plain;charset=utf-8",
+        }
+    }
+
+    /// A picture: what a paste into a program that reads pictures off the pasteboard takes.
+    #[must_use]
+    pub const fn is_picture(self) -> bool {
+        matches!(self, Self::Png | Self::Tiff)
+    }
+}
+
 /// One representation of the clipboard's contents.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ClipItem {
-    /// Uniform type identifier (`public.utf8-plain-text`, `public.png`, `public.html`). One
-    /// item per type: `public.file-url` holds every file's URL, one per line.
-    pub uti: String,
+    /// What it is. One item per format: [`ClipFormat::FileUrls`] holds every file's URL, one
+    /// per line.
+    pub format: ClipFormat,
     /// Size in bytes.
     pub size: u64,
     /// Digest of the bytes: equal digests are the same contents, so an echo is recognised.
     pub hash: Hash,
     /// The bytes, when they fit [`INLINE_CLIP_BYTES`] and the type is plain text.
+    #[serde(with = "serde_bytes")]
     pub inline: Option<Vec<u8>>,
 }
 
@@ -107,12 +153,12 @@ pub enum ClipMsg {
     Watch(bool),
     /// Either way: the sender's clipboard changed.
     Offer(Offer),
-    /// Either way: send representation `uti` of offer `generation`.
+    /// Either way: send representation `format` of offer `generation`.
     Fetch {
         /// The offer.
         generation: u64,
         /// Which representation.
-        uti: String,
+        format: ClipFormat,
     },
     /// Either way: the answer to a [`ClipMsg::Fetch`], inline when it fits
     /// [`INLINE_CLIP_BYTES`]; a bigger one arrives as a bulk stream with [`Purpose::Clip`].
@@ -120,8 +166,9 @@ pub enum ClipMsg {
         /// The offer.
         generation: u64,
         /// Which representation.
-        uti: String,
+        format: ClipFormat,
         /// The bytes.
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
     },
     /// Either way: that offer or representation is gone (the clipboard changed again).
@@ -158,7 +205,7 @@ pub enum Purpose {
         /// The offer.
         generation: u64,
         /// Which representation.
-        uti: String,
+        format: ClipFormat,
     },
     /// Worker → client: the text of a file read too big to inline, announced on the control
     /// stream by [`crate::file::FileRead::Streamed`] with the same transfer.
@@ -170,7 +217,7 @@ pub enum Purpose {
         path: String,
         /// The modification time of the version the edit started from; `None` writes
         /// regardless.
-        base_modified_ms: Option<u64>,
+        base_modified_ms: Option<WallMs>,
     },
 }
 
@@ -186,8 +233,8 @@ pub struct BulkHeader {
     pub name: String,
     /// Whole file size.
     pub size: u64,
-    /// Last modification, milliseconds since the Unix epoch.
-    pub mtime_ms: u64,
+    /// Last modification; zero when unknown.
+    pub mtime_ms: WallMs,
     /// Unix permission bits, within [`MODE_BITS`].
     pub mode: u32,
     /// The bytes that follow start here: non-zero when resuming.

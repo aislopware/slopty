@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use slopty_core::{SessionId, WorkerId};
+use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
@@ -70,7 +70,7 @@ pub struct WorkerView {
     version: String,
     can_capture: bool,
     can_inject: bool,
-    last_seen_ms: u64,
+    last_seen_ms: WallMs,
     terminals: usize,
     waiting: Vec<WaitingView>,
 }
@@ -226,7 +226,7 @@ pub struct EntryView<'a> {
     name: &'a str,
     kind: &'static str,
     size: u64,
-    modified_ms: u64,
+    modified_ms: WallMs,
 }
 
 /// What is at a path, for JSON.
@@ -236,7 +236,7 @@ pub struct StatView<'a> {
     exists: bool,
     kind: Option<&'static str>,
     size: Option<u64>,
-    modified_ms: Option<u64>,
+    modified_ms: Option<WallMs>,
     /// Permission bits in octal, `"755"`.
     mode: Option<String>,
 }
@@ -253,7 +253,7 @@ pub struct EventsView<'a> {
 #[derive(Debug, Serialize)]
 pub struct EventView<'a> {
     seq: u64,
-    at_ms: u64,
+    at_ms: WallMs,
     kind: &'static str,
     worker: WorkerId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -476,7 +476,7 @@ impl Overview {
                 arch: w.caps.arch.clone(),
                 cpus: w.caps.cpus,
                 memory: w.caps.memory,
-                load: w.caps.load,
+                load: w.load,
                 version: w.caps.version.clone(),
                 can_capture: w.caps.can_capture,
                 can_inject: w.caps.can_inject,
@@ -853,12 +853,12 @@ pub fn event(e: &HubEvent) -> EventView<'_> {
             view.term = Some(term_string(*term));
             view.exit_status = Some(*status);
         }
-        Happening::Agent { term, kind, status, detail } => {
+        Happening::Agent { worker, event } => {
             view.kind = "agent";
-            view.worker = term.worker;
-            view.term = Some(term_string(*term));
-            view.agent = Some(reported(*kind, status, None));
-            view.detail = detail.as_deref();
+            view.worker = *worker;
+            view.term = Some(term_string(TermRef { worker: *worker, session: event.session }));
+            view.agent = Some(reported(event.kind, &event.status, None));
+            view.detail = event.detail.as_deref();
         }
     }
     view
@@ -880,11 +880,12 @@ pub fn event_text<S: std::hash::BuildHasher>(
         }
         Happening::SessionClosed { term: t } => format!("closed  {}", term(t)),
         Happening::SessionExited { term: t, status } => format!("exited  {}  {status}", term(t)),
-        Happening::Agent { term: t, kind, status, detail } => {
-            let said = format!("{}  {}", agent_name(*kind), status_text(status, None));
-            match detail {
-                Some(detail) => format!("agent   {}  {said}: {detail}", term(t)),
-                None => format!("agent   {}  {said}", term(t)),
+        Happening::Agent { worker: w, event } => {
+            let t = TermRef { worker: *w, session: event.session };
+            let said = format!("{}  {}", agent_name(event.kind), status_text(&event.status, None));
+            match &event.detail {
+                Some(detail) => format!("agent   {}  {said}: {detail}", term(&t)),
+                None => format!("agent   {}  {said}", term(&t)),
             }
         }
     };
@@ -1024,7 +1025,7 @@ pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
                     view.term = Some(term_string(TermRef { worker, session: *session }));
                 }
                 ItemKind::Window { window } => view.window = Some(window.0),
-                ItemKind::Display { display } => view.display = Some(*display),
+                ItemKind::Display { display } => view.display = Some(display.0),
                 ItemKind::Note { text } => view.text = Some(text),
                 ItemKind::File { path } | ItemKind::Folder { path } => view.path = Some(path),
                 ItemKind::Browser { url } => view.url = Some(url),
@@ -1077,7 +1078,7 @@ pub fn screens<'a>(windows: &'a [WindowInfo], displays: &[DisplayInfo]) -> Scree
                 window: w.id.0,
                 app: &w.app,
                 title: &w.title,
-                display: w.display,
+                display: w.display.0,
                 on_screen: w.on_screen,
                 width: w.w,
                 height: w.h,
@@ -1086,7 +1087,7 @@ pub fn screens<'a>(windows: &'a [WindowInfo], displays: &[DisplayInfo]) -> Scree
         displays: displays
             .iter()
             .map(|d| DisplayView {
-                display: d.id,
+                display: d.id.0,
                 width: d.w,
                 height: d.h,
                 scale: d.scale,
@@ -1144,7 +1145,7 @@ fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::agent::AgentKind;
+    use slopty_proto::agent::{AgentEvent, AgentKind};
     use slopty_proto::server::WorkerCaps;
 
     use super::*;
@@ -1170,7 +1171,6 @@ mod tests {
             agents: Vec::new(),
             can_capture: true,
             can_inject: true,
-            load: 1.5,
             version: "0.1.0".to_owned(),
         }
     }
@@ -1183,7 +1183,7 @@ mod tests {
             repo: None,
             branch: None,
             changes: None,
-            started_ms: 0,
+            started_ms: WallMs::ZERO,
             cols: 120,
             rows: 40,
             state,
@@ -1201,7 +1201,8 @@ mod tests {
                 address: "100.64.0.3:45550".to_owned(),
                 liveness: Liveness::Online,
                 caps: caps("26.5"),
-                last_seen_ms: 1_790_000_000_000,
+                load: 1.5,
+                last_seen_ms: WallMs::from_millis(1_790_000_000_000),
             },
             WorkerInfo {
                 worker: worker(2),
@@ -1209,14 +1210,19 @@ mod tests {
                 address: "100.64.0.7:45550".to_owned(),
                 liveness: Liveness::Unreachable,
                 caps: caps("26.5.1"),
-                last_seen_ms: 1_789_999_990_000,
+                load: 1.5,
+                last_seen_ms: WallMs::from_millis(1_789_999_990_000),
             },
         ];
         let with_agent = |mut summary: SessionSummary, status: AgentStatus| {
             let source =
                 if blocked(&status).is_some() { AgentSource::Hook } else { AgentSource::Title };
-            summary.agent =
-                Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source, since_ms: 0 });
+            summary.agent = Some(SessionAgent {
+                kind: AgentKind::ClaudeCode,
+                status,
+                source,
+                since_ms: WallMs::ZERO,
+            });
             summary
         };
         let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
@@ -1307,7 +1313,7 @@ mod tests {
             kind: AgentKind::ClaudeCode,
             status: AgentStatus::Blocked(BlockReason::Question),
             source: AgentSource::Hook,
-            since_ms: 0,
+            since_ms: WallMs::ZERO,
         };
         let json = serde_json::to_value(agent(Some(&blocked))).unwrap();
         assert_eq!(
@@ -1357,8 +1363,18 @@ mod tests {
     #[test]
     fn a_directory_and_a_stat_read_as_views() {
         let entries = vec![
-            DirEntry { name: "src".to_owned(), kind: FileKind::Dir, size: 96, modified_ms: 5 },
-            DirEntry { name: "a.rs".to_owned(), kind: FileKind::File, size: 12, modified_ms: 6 },
+            DirEntry {
+                name: "src".to_owned(),
+                kind: FileKind::Dir,
+                size: 96,
+                modified_ms: WallMs::from_millis(5),
+            },
+            DirEntry {
+                name: "a.rs".to_owned(),
+                kind: FileKind::File,
+                size: 12,
+                modified_ms: WallMs::from_millis(6),
+            },
         ];
         let json = serde_json::to_value(dir("/r", &entries, 3)).unwrap();
         assert_eq!(
@@ -1369,7 +1385,12 @@ mod tests {
         );
         assert_eq!((json["total"].as_u64(), json["truncated"].as_bool()), (Some(3), Some(true)));
         assert_eq!(dir_text(&entries, 3), "SIZE  NAME\n96    src/\n12    a.rs\n… 1 more\n");
-        let found = FileStat { kind: FileKind::File, size: 4, modified_ms: 9, mode: 0o644 };
+        let found = FileStat {
+            kind: FileKind::File,
+            size: 4,
+            modified_ms: WallMs::from_millis(9),
+            mode: 0o644,
+        };
         let json = serde_json::to_value(stat("/r/a", Some(&found))).unwrap();
         assert_eq!(json["mode"], "644");
         assert_eq!(json["exists"], true);
@@ -1390,7 +1411,7 @@ mod tests {
             events: vec![
                 HubEvent {
                     seq: 7,
-                    at_ms: 100,
+                    at_ms: WallMs::from_millis(100),
                     what: Happening::Worker {
                         worker: worker(1),
                         name: "mac-studio".to_owned(),
@@ -1399,12 +1420,19 @@ mod tests {
                 },
                 HubEvent {
                     seq: 8,
-                    at_ms: 101,
+                    at_ms: WallMs::from_millis(101),
                     what: Happening::Agent {
-                        term,
-                        kind: AgentKind::ClaudeCode,
-                        status: AgentStatus::Blocked(BlockReason::Question),
-                        detail: Some("Which branch?".to_owned()),
+                        worker: term.worker,
+                        event: AgentEvent {
+                            session: term.session,
+                            kind: AgentKind::ClaudeCode,
+                            status: AgentStatus::Blocked(BlockReason::Question),
+                            agent_session: None,
+                            detail: Some("Which branch?".to_owned()),
+                            attention: true,
+                            source: AgentSource::Hook,
+                            since_ms: WallMs::ZERO,
+                        },
                     },
                 },
             ],

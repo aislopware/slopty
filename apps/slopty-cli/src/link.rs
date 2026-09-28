@@ -17,9 +17,10 @@ use slopty_net::endpoint::SERVER_PORT;
 use slopty_net::redial::Redial;
 use slopty_net::server::{DialError, ServerLink, connect};
 use slopty_net::{Endpoint, HostAddr, NetError};
+use slopty_proto::RequestId;
 use slopty_proto::codec::CodecError;
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, Verb};
-use slopty_proto::server::{FromServer, RequestId, Role, ToServer};
+use slopty_proto::server::{FromServer, Role, ToServer};
 use slopty_tools::Dispatch;
 use tokio::sync::{broadcast, mpsc, oneshot};
 

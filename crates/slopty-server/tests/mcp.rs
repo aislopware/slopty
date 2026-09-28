@@ -85,7 +85,6 @@ mod tests {
             agents: Vec::new(),
             can_capture: false,
             can_inject: false,
-            load: 0.1,
             version: "0".to_owned(),
         }
     }

@@ -152,11 +152,11 @@ mod tests {
 
     /// The client's loss feedback, as the worker's connection answers it.
     fn answer(control: &StreamControl<Drawn>, bytes: &[u8]) {
-        match slopty_proto::codec::decode_body::<ClientDatagram>(bytes) {
-            Ok(ClientDatagram::Feedback(Feedback::Nack { frame, fragments, .. })) => {
+        match ClientDatagram::decode(bytes) {
+            Some(ClientDatagram::Feedback(Feedback::Nack { frame, fragments, .. })) => {
                 control.nack(frame, &fragments);
             }
-            Ok(ClientDatagram::Feedback(Feedback::Refresh {
+            Some(ClientDatagram::Feedback(Feedback::Refresh {
                 last_good_frame, keyframe, ..
             })) => {
                 control.request_refresh(last_good_frame, keyframe);

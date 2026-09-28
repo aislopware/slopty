@@ -174,3 +174,22 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
     answers, so a refusal (a name too long, an `Add` of a held id) used to leave that copy out
     of step until the next connection. The worker now follows the error with a snapshot to that
     client alone. Test: `slopty-workerd` `a_refused_item_op_brings_its_proposer_the_registry`.
+- ✅ **An open is answered to its own request; a change of a session is its own message**
+  (2026-09-28, audit finding 20). `WorkerMsg::SessionOpened` used to be the answer to an
+  `OpenSession`, and the news of any session that opened, exited, moved directory or resized.
+  `slopty open` took the first one after its request, so another client's `cd` could attach it
+  to the wrong shell, which becomes likely with many clients on one worker. Now:
+  - `ClientMsg::OpenSession { request, spec }` carries a number the client picks.
+  - The opener alone gets `SessionOpened { request, summary }` back, on its own control stream.
+    Every client, the opener too, then gets `SessionChanged(summary)` on the shared broadcast,
+    along with every other change: an exit, a move, a resize or a resync. The server's
+    `ToServer::SessionChanged` is the same news going up.
+  - A failed open is `WorkerMsg::Failed { request, code, message }`. It is no longer a
+    `TermEvent::Error` on the nil session that a client could only log.
+  - A refused item op carries no request number. Its answer stays the snapshot the proposer
+    gets, and the reason is logged on the worker.
+  - The CLI's `attach` and `bench echo` both call `Session::open`, which waits for its own
+    request's answer. Tests: `an_open_takes_its_own_answer_when_another_session_changes_meanwhile`
+    and `a_failed_open_is_its_own_requests_error` (`slopty-cli`). Goldens:
+    `client_open_session`, `worker_session_opened`, `worker_session_changed` and
+    `worker_failed`.

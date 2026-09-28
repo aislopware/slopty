@@ -33,7 +33,7 @@ use gpui::{
     Subscription, Task, Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
-use slopty_core::{ClientId, SessionId};
+use slopty_core::{ClientId, SessionId, WallMs};
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::conversation::{
     AgentRun, Body, ConversationEvent, LiveKind, PermissionEvent, TextRef, ThreadId, ToolDetail,
@@ -232,7 +232,7 @@ pub struct ConversationView {
     grown: usize,
     /// The permission prompt on show and when, by this client's clock, it came: its fallback
     /// counts down from here, whatever the worker's clock says.
-    held: Option<(u64, u64)>,
+    held: Option<(u64, WallMs)>,
     /// Ticks once a second while the agent works and the face shows (the elapsed time).
     clock: Option<Task<()>>,
     focus: FocusHandle,
@@ -271,13 +271,6 @@ fn attachment_name(what: &Attach) -> String {
             many => format!("{} files", many.len()),
         },
     }
-}
-
-/// Now, in ms since the Unix epoch by this client's clock.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 impl ConversationView {
@@ -580,7 +573,7 @@ impl ConversationView {
         let asked = self.approvals.prompt().is_some();
         match event {
             PermissionEvent::Asked(prompt) => {
-                self.held = Some((prompt.ask, now_ms()));
+                self.held = Some((prompt.ask, WallMs::now()));
                 self.approvals.asked(*prompt);
                 self.deny_open = false;
                 self.ask_all = false;
@@ -708,9 +701,9 @@ impl ConversationView {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let going = this
                     .update(cx, |this, cx| {
-                        let bound = now_ms().saturating_sub(
+                        let bound = WallMs::from_millis(WallMs::now().as_millis().saturating_sub(
                             u64::try_from(PENDING_FOR.as_millis()).unwrap_or(u64::MAX),
-                        );
+                        ));
                         if this.model.expire_pending(bound) {
                             this.rebuild(cx);
                         }
@@ -1123,7 +1116,7 @@ impl ConversationView {
             return;
         }
         self.composer.update(cx, |c, cx| c.set_value("", window, cx));
-        self.model.sent(text.trim().to_owned(), self.working(), now_ms());
+        self.model.sent(text.trim().to_owned(), self.working(), WallMs::now());
         self.list.scroll_to_end();
         self.list.set_follow_mode(FollowMode::Tail);
         self.rebuild(cx);

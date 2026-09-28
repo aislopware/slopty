@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use slopty_core::XferId;
+use slopty_core::{WallMs, XferId};
 use slopty_net::streams::{self, RawRecv};
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::file::{FILE_BYTES, FileRead, WriteResult};
@@ -25,7 +25,7 @@ const CHUNK: usize = 256 << 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Meta {
     size: u64,
-    modified_ms: u64,
+    modified_ms: WallMs,
     final_newline: bool,
 }
 
@@ -130,7 +130,7 @@ pub(super) async fn send_save(
     conn: &Connection,
     path: String,
     text: String,
-    base_modified_ms: Option<u64>,
+    base_modified_ms: Option<WallMs>,
 ) -> Option<WorkerMsg> {
     let size = text.len() as u64;
     let header = BulkHeader {
@@ -138,14 +138,14 @@ pub(super) async fn send_save(
         purpose: Purpose::Save { path: path.clone(), base_modified_ms },
         name: String::new(),
         size,
-        mtime_ms: 0,
+        mtime_ms: WallMs::ZERO,
         mode: 0,
         offset: 0,
     };
     let sent = async {
         let mut send = streams::open_bulk(conn, header).await?;
-        send.write_all(text.as_bytes()).await.map_err(|e| NetError::Stream(e.to_string()))?;
-        send.finish().map_err(|e| NetError::Stream(e.to_string()))
+        send.write_all(text.as_bytes()).await.map_err(|e| NetError::stream(&e))?;
+        send.finish().map_err(|e| NetError::stream(&e))
     };
     match sent.await {
         Ok(()) => {
@@ -164,7 +164,7 @@ pub(super) async fn send_save(
 mod tests {
     use super::*;
 
-    fn streamed(xfer: XferId, modified_ms: u64) -> FileRead {
+    fn streamed(xfer: XferId, modified_ms: WallMs) -> FileRead {
         FileRead::Streamed { xfer, size: 10, modified_ms, final_newline: true }
     }
 
@@ -181,7 +181,10 @@ mod tests {
     fn a_streamed_read_is_handed_on_once_both_halves_are_here() {
         let mut join = Join::default();
         let (a, b) = (XferId::new(), XferId::new());
-        assert!(join.on_read("/a".to_owned(), streamed(a, 1)).is_none(), "waits for the text");
+        assert!(
+            join.on_read("/a".to_owned(), streamed(a, WallMs::from_millis(1))).is_none(),
+            "waits for the text"
+        );
         let msg = join.on_text(a, Ok("alpha".to_owned()));
         assert_eq!(
             msg,
@@ -190,14 +193,14 @@ mod tests {
                 read: FileRead::Text {
                     text: "alpha".to_owned(),
                     size: 10,
-                    modified_ms: 1,
+                    modified_ms: WallMs::from_millis(1),
                     final_newline: true
                 },
             })
         );
         assert!(join.on_text(b, Ok("beta".to_owned())).is_none(), "the text came first");
         assert_eq!(
-            text_of(join.on_read("/b".to_owned(), streamed(b, 2))),
+            text_of(join.on_read("/b".to_owned(), streamed(b, WallMs::from_millis(2)))),
             Some(("/b".to_owned(), "beta".to_owned()))
         );
         assert!(join.latest.is_empty() && join.announced.is_empty() && join.early.is_empty());
@@ -209,13 +212,13 @@ mod tests {
     fn a_newer_read_of_the_path_drops_the_text_still_on_its_way() {
         let mut join = Join::default();
         let (old, new) = (XferId::new(), XferId::new());
-        assert!(join.on_read("/f".to_owned(), streamed(old, 1)).is_none());
+        assert!(join.on_read("/f".to_owned(), streamed(old, WallMs::from_millis(1))).is_none());
         let gone = FileRead::Missing { error: "No such file or directory".to_owned() };
         assert!(join.on_read("/f".to_owned(), gone).is_some(), "an inline read goes on at once");
         assert!(join.on_text(old, Ok("stale".to_owned())).is_none(), "and the old text is dropped");
 
-        assert!(join.on_read("/f".to_owned(), streamed(old, 1)).is_none());
-        assert!(join.on_read("/f".to_owned(), streamed(new, 2)).is_none());
+        assert!(join.on_read("/f".to_owned(), streamed(old, WallMs::from_millis(1))).is_none());
+        assert!(join.on_read("/f".to_owned(), streamed(new, WallMs::from_millis(2))).is_none());
         assert_eq!(
             text_of(join.on_text(new, Ok("fresh".to_owned()))),
             Some(("/f".to_owned(), "fresh".to_owned()))
@@ -230,7 +233,7 @@ mod tests {
     fn a_broken_stream_is_a_missing_file_with_the_reason() {
         let mut join = Join::default();
         let xfer = XferId::new();
-        assert!(join.on_read("/f".to_owned(), streamed(xfer, 1)).is_none());
+        assert!(join.on_read("/f".to_owned(), streamed(xfer, WallMs::from_millis(1))).is_none());
         assert_eq!(
             join.on_text(xfer, Err("The read was cut off".to_owned())),
             Some(WorkerMsg::File {

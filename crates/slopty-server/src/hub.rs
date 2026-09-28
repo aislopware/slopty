@@ -4,7 +4,8 @@
 //! A worker's connection is its lease ([`Lease`]): registering takes it, dropping it (the link
 //! ended, cleanly or by the idle timeout) marks the worker [`Liveness::Unreachable`], and
 //! [`GONE_AFTER`] later, with no reconnect, [`Liveness::Gone`]. Every change goes out to every
-//! client and agent link as [`FromServer::Worker`] or [`FromServer::Event`].
+//! client and agent link as [`FromServer::Worker`], [`FromServer::Load`] or
+//! [`FromServer::Event`].
 //!
 //! A worker set up again (a new data directory) registers under a new id with its old name,
 //! from its old address. Nothing else can be listening there, so the entries it replaces are
@@ -18,9 +19,10 @@
 //! keeps the table that does it once per key. The hub keeps its own only for the one effect it
 //! owns, forgetting a worker.
 //!
-//! Every change of liveness, terminal and agent status also goes into a bounded log of
-//! [`HubEvent`]s under one sequence, which [`Verb::Events`] reads from a cursor and waits on:
-//! one call watches the whole fleet, over MCP's stateless HTTP as well as a QUIC link.
+//! Every change of liveness, terminal and agent status goes into a bounded log of [`HubEvent`]s
+//! under one sequence, and the same event goes out to every link as it is logged: a link pushed
+//! it and a [`Verb::Events`] reading from a cursor see one vocabulary in one order, and one call
+//! watches the whole fleet, over MCP's stateless HTTP as well as a QUIC link.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
@@ -28,15 +30,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
-use slopty_core::{SessionId, WorkerId};
+use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_proto::RequestId;
 use slopty_proto::agent::{AgentStatus, SessionAgent};
 use slopty_proto::orchestration::{
     ErrorCode, EventFilter, Happening, HubEvent, IdempotencyKey, KEY_LIFETIME, Outcome, TermRef,
     Verb,
 };
-use slopty_proto::server::{
-    Event, FromServer, Liveness, Refusal, Registration, RequestId, ToServer, WorkerCaps, WorkerInfo,
-};
+use slopty_proto::server::{FromServer, Liveness, Refusal, Registration, ToServer, WorkerInfo};
 use slopty_proto::terminal::{SessionState, SessionSummary};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -204,8 +205,8 @@ impl Hub {
     }
 
     /// The directory as it should be persisted, updated only when the registry changes shape
-    /// (a worker appears, is renamed, moves, changes capabilities other than its load, or loses
-    /// its link), never on a load tick.
+    /// (a worker appears, is renamed, moves, changes capabilities, or loses its link), never on
+    /// a load tick.
     #[must_use]
     pub fn persisted(&self) -> watch::Receiver<Vec<WorkerInfo>> {
         self.inner.persist.subscribe()
@@ -235,7 +236,9 @@ impl Hub {
             address: SocketAddr::new(ip, listen.port()).to_string(),
             liveness: Liveness::Online,
             caps,
-            last_seen_ms: now_ms(),
+            // The worker reports it right after its hello.
+            load: 0.0,
+            last_seen_ms: WallMs::now(),
         };
         let link = Some(Link { tx, pending: HashMap::new() });
         let replaced: Vec<WorkerId> = state
@@ -284,11 +287,9 @@ impl Hub {
         }
         for session in gone {
             self.happen(Happening::SessionClosed { term: TermRef { worker, session } });
-            self.announce(FromServer::Event(Event::SessionClosed { worker, session }));
         }
         for summary in opened {
-            self.happen(Happening::SessionOpened { worker, summary: summary.clone() });
-            self.announce(FromServer::Event(Event::SessionOpened { worker, summary }));
+            self.happen(Happening::SessionOpened { worker, summary });
         }
         if reshaped || !replaced.is_empty() {
             self.persist(&state);
@@ -504,7 +505,6 @@ impl Hub {
     fn close_all(&self, worker: WorkerId, sessions: &[SessionSummary]) {
         for session in sessions.iter().map(|s| s.id) {
             self.happen(Happening::SessionClosed { term: TermRef { worker, session } });
-            self.announce(FromServer::Event(Event::SessionClosed { worker, session }));
         }
     }
 
@@ -512,17 +512,21 @@ impl Hub {
         let _no_listeners = self.inner.events.send(msg);
     }
 
-    /// Log an event under the next sequence number and wake the waiting [`Verb::Events`].
-    /// Called under the state lock, so the log's order is the order changes were made.
+    /// Log an event under the next sequence number, wake the waiting [`Verb::Events`] and
+    /// push it to every link. Called under the state lock, so the log's order and every link's
+    /// are the order changes were made.
     fn happen(&self, what: Happening) {
         let mut log = self.inner.log.lock();
         let seq = log.next;
         log.next = seq.saturating_add(1);
-        log.ring.push_back(HubEvent { seq, at_ms: now_ms(), what });
+        let event = HubEvent { seq, at_ms: WallMs::now(), what };
+        log.ring.push_back(event.clone());
         if log.ring.len() > EVENT_LOG {
             log.ring.pop_front();
         }
         self.inner.head.send_replace(log.next);
+        drop(log);
+        self.announce(FromServer::Event(event));
     }
 
     fn persist(&self, state: &State) {
@@ -540,7 +544,7 @@ impl Hub {
         }
         entry.link = None;
         entry.info.liveness = Liveness::Unreachable;
-        entry.info.last_seen_ms = now_ms();
+        entry.info.last_seen_ms = WallMs::now();
         let info = entry.info.clone();
         tracing::info!(%worker, name = %info.name, "worker unreachable");
         let (name, liveness) = (info.name.clone(), info.liveness);
@@ -623,7 +627,7 @@ impl Lease {
         if entry.generation != self.generation {
             return;
         }
-        entry.info.last_seen_ms = now_ms();
+        entry.info.last_seen_ms = WallMs::now();
         let worker = self.worker;
         match msg {
             ToServer::Reply { id, outcome } => {
@@ -635,14 +639,17 @@ impl Lease {
                 }
             }
             ToServer::Caps(caps) => {
-                let reshaped = !same_caps(&entry.info.caps, &caps);
-                entry.info.caps = caps;
-                hub.announce(FromServer::Worker(entry.info.clone()));
-                if reshaped {
+                if entry.info.caps != caps {
+                    entry.info.caps = caps;
+                    hub.announce(FromServer::Worker(entry.info.clone()));
                     hub.persist(&state);
                 }
             }
-            ToServer::SessionOpened(summary) => {
+            ToServer::Load(load) => {
+                entry.info.load = load;
+                hub.announce(FromServer::Load { worker, load });
+            }
+            ToServer::SessionChanged(summary) => {
                 // A known session reports a change (a resize, a new directory): no event of its
                 // own, but for its program exiting.
                 if let Some(known) = entry.sessions.iter_mut().find(|s| s.id == summary.id) {
@@ -655,34 +662,31 @@ impl Lease {
                     known.clone_from(&summary);
                 } else {
                     entry.sessions.push(summary.clone());
-                    hub.happen(Happening::SessionOpened { worker, summary: summary.clone() });
+                    hub.happen(Happening::SessionOpened { worker, summary });
                 }
-                hub.announce(FromServer::Event(Event::SessionOpened { worker, summary }));
             }
             ToServer::SessionClosed { session, .. } => {
                 entry.sessions.retain(|s| s.id != session);
                 hub.happen(Happening::SessionClosed { term: TermRef { worker, session } });
-                hub.announce(FromServer::Event(Event::SessionClosed { worker, session }));
             }
             ToServer::Agent(event) => {
                 let listed = entry.sessions.iter_mut().find(|s| s.id == event.session);
-                let before = listed.as_ref().map(|s| s.agent.as_ref().map(|a| &a.status));
-                // A report of the status already known (the same tool again) is no change.
-                let same = before
-                    .is_some_and(|before| before.unwrap_or(&AgentStatus::None) == &event.status);
+                let before =
+                    listed.as_ref().map(|s| s.agent.as_ref().map(|a| (&a.status, a.source)));
+                // A report of the status already known (the same tool again, a new detail) is
+                // no change: the log would fill with them, and a link's own worker says it.
+                let same = before.is_some_and(|before| {
+                    before.map_or(event.status == AgentStatus::None, |(status, source)| {
+                        *status == event.status && source == event.source
+                    })
+                });
                 if let Some(summary) = listed {
                     summary.agent =
                         (event.status != AgentStatus::None).then(|| SessionAgent::from(&event));
                 }
                 if !same {
-                    hub.happen(Happening::Agent {
-                        term: TermRef { worker, session: event.session },
-                        kind: event.kind,
-                        status: event.status.clone(),
-                        detail: event.detail.clone(),
-                    });
+                    hub.happen(Happening::Agent { worker, event });
                 }
-                hub.announce(FromServer::Event(Event::Agent { worker, event }));
             }
             ToServer::Hello { .. } | ToServer::Request { .. } => {
                 tracing::debug!(%worker, "ignored a message a worker does not send");
@@ -755,41 +759,9 @@ fn listing(state: &State) -> Vec<WorkerInfo> {
     out
 }
 
-/// Whether two infos persist the same: name, address and capabilities but for the load.
+/// Whether two infos persist the same: name, address and capabilities.
 fn same_shape(a: &WorkerInfo, b: &WorkerInfo) -> bool {
-    a.worker == b.worker
-        && a.name == b.name
-        && a.address == b.address
-        && same_caps(&a.caps, &b.caps)
-}
-
-/// Equal but for the load, which moves every report and is not worth a save.
-fn same_caps(a: &WorkerCaps, b: &WorkerCaps) -> bool {
-    let WorkerCaps {
-        os,
-        os_version,
-        arch,
-        cpus,
-        memory,
-        encoders,
-        displays,
-        agents,
-        can_capture,
-        can_inject,
-        load: _load,
-        version,
-    } = a;
-    *os == b.os
-        && *os_version == b.os_version
-        && *arch == b.arch
-        && *cpus == b.cpus
-        && *memory == b.memory
-        && *encoders == b.encoders
-        && *displays == b.displays
-        && *agents == b.agents
-        && *can_capture == b.can_capture
-        && *can_inject == b.can_inject
-        && *version == b.version
+    a.worker == b.worker && a.name == b.name && a.address == b.address && a.caps == b.caps
 }
 
 fn error(code: ErrorCode, message: &str) -> Outcome {
@@ -819,18 +791,11 @@ fn run_seed() -> u64 {
         .map_or(1, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX).max(1))
 }
 
-/// Milliseconds since the Unix epoch.
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, BlockReason};
     use slopty_proto::orchestration::{Screen, TermRef};
-    use slopty_proto::server::Os;
+    use slopty_proto::server::{Os, WorkerCaps};
     use slopty_proto::terminal::CloseReason;
 
     use super::*;
@@ -847,7 +812,6 @@ pub(crate) mod tests {
             agents: Vec::new(),
             can_capture: true,
             can_inject: true,
-            load: 0.5,
             version: "0.1.0".to_owned(),
         }
     }
@@ -860,7 +824,7 @@ pub(crate) mod tests {
             repo: None,
             branch: None,
             changes: None,
-            started_ms: 0,
+            started_ms: WallMs::ZERO,
             cols: 80,
             rows: 24,
             state: SessionState::Running,
@@ -893,6 +857,29 @@ pub(crate) mod tests {
         }
     }
 
+    /// The next message of the directory, past the events.
+    async fn next_listing(rx: &mut broadcast::Receiver<FromServer>) -> FromServer {
+        loop {
+            match rx.recv().await.unwrap() {
+                FromServer::Event(_) => {}
+                other => return other,
+            }
+        }
+    }
+
+    /// The next terminal opened or closed, past everything else.
+    async fn next_session(rx: &mut broadcast::Receiver<FromServer>) -> Happening {
+        loop {
+            if let FromServer::Event(HubEvent {
+                what: what @ (Happening::SessionOpened { .. } | Happening::SessionClosed { .. }),
+                ..
+            }) = rx.recv().await.unwrap()
+            {
+                return what;
+            }
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_lease_goes_unreachable_then_gone_and_comes_back_online() {
         let hub = Hub::new("server".to_owned(), Vec::new());
@@ -903,20 +890,20 @@ pub(crate) mod tests {
         let info = &hub.directory()[0];
         assert_eq!((info.liveness, info.address.as_str()), (Liveness::Online, "100.64.0.7:45550"));
         assert!(
-            matches!(events.recv().await.unwrap(), FromServer::Worker(w) if w.liveness == Liveness::Online)
+            matches!(next_listing(&mut events).await, FromServer::Worker(w) if w.liveness == Liveness::Online)
         );
 
         drop(lease);
         assert_eq!(liveness(&hub, worker), Liveness::Unreachable, "at once when the link ends");
         assert!(
-            matches!(events.recv().await.unwrap(), FromServer::Worker(w) if w.liveness == Liveness::Unreachable)
+            matches!(next_listing(&mut events).await, FromServer::Worker(w) if w.liveness == Liveness::Unreachable)
         );
         tokio::time::sleep(GONE_AFTER.checked_sub(Duration::from_millis(100)).unwrap()).await;
         assert_eq!(liveness(&hub, worker), Liveness::Unreachable, "not gone before 20 s");
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(liveness(&hub, worker), Liveness::Gone);
         assert!(
-            matches!(events.recv().await.unwrap(), FromServer::Worker(w) if w.liveness == Liveness::Gone)
+            matches!(next_listing(&mut events).await, FromServer::Worker(w) if w.liveness == Liveness::Gone)
         );
 
         let (tx, _rx) = mpsc::channel(8);
@@ -1021,7 +1008,10 @@ pub(crate) mod tests {
         let verbs = [
             Verb::ReadConversation { term, thread: ThreadId::Main, since: None, max: 50 },
             Verb::AnswerPermission { term, ask: 3, verdict: Verdict::Allow },
-            Verb::CaptureStill { worker, target: CaptureTarget::Display(1) },
+            Verb::CaptureStill {
+                worker,
+                target: CaptureTarget::Display(slopty_core::DisplayId(1)),
+            },
             Verb::Upload {
                 worker,
                 path: "/w/a".to_owned(),
@@ -1098,7 +1088,7 @@ pub(crate) mod tests {
         let (tx, _rx) = mpsc::channel(8);
         let lease = hub.register(registration(worker, vec![summary(first)]), ip(), tx).unwrap();
         let mut events = hub.subscribe();
-        lease.handle(ToServer::SessionOpened(summary(second)));
+        lease.handle(ToServer::SessionChanged(summary(second)));
         lease.handle(ToServer::SessionClosed { session: first, reason: CloseReason::Exited });
         let Outcome::Terminals(list) = hub.dispatch(Verb::ListTerminals { worker: None }).await
         else {
@@ -1106,25 +1096,23 @@ pub(crate) mod tests {
         };
         assert_eq!(list, vec![(worker, summary(second))]);
         assert!(
-            matches!(events.recv().await.unwrap(), FromServer::Event(Event::SessionOpened { summary, .. }) if summary.id == second)
+            matches!(next_session(&mut events).await, Happening::SessionOpened { summary, .. } if summary.id == second)
         );
         assert!(
-            matches!(events.recv().await.unwrap(), FromServer::Event(Event::SessionClosed { session, .. }) if session == first)
+            matches!(next_session(&mut events).await, Happening::SessionClosed { term } if term.session == first)
         );
         let elsewhere = hub.dispatch(Verb::ListTerminals { worker: Some(WorkerId::new()) }).await;
         assert!(matches!(elsewhere, Outcome::Error { code: ErrorCode::UnknownWorker, .. }));
 
         // A re-registration reports the difference.
         drop(lease);
-        let _drain = events.recv().await;
         let (tx, _rx) = mpsc::channel(8);
         let _lease = hub.register(registration(worker, vec![summary(first)]), ip(), tx).unwrap();
-        let _online = events.recv().await;
         assert!(
-            matches!(events.recv().await.unwrap(), FromServer::Event(Event::SessionClosed { session, .. }) if session == second)
+            matches!(next_session(&mut events).await, Happening::SessionClosed { term } if term.session == second)
         );
         assert!(
-            matches!(events.recv().await.unwrap(), FromServer::Event(Event::SessionOpened { summary, .. }) if summary.id == first)
+            matches!(next_session(&mut events).await, Happening::SessionOpened { summary, .. } if summary.id == first)
         );
     }
 
@@ -1146,11 +1134,16 @@ pub(crate) mod tests {
                 detail: None,
                 attention: false,
                 source,
-                since_ms: 0,
+                since_ms: WallMs::ZERO,
             })
         };
         let agent = |status, source| {
-            Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source, since_ms: 0 })
+            Some(SessionAgent {
+                kind: AgentKind::ClaudeCode,
+                status,
+                source,
+                since_ms: WallMs::ZERO,
+            })
         };
         let listed = async || {
             let Outcome::Terminals(list) = hub.dispatch(Verb::ListTerminals { worker: None }).await
@@ -1181,9 +1174,11 @@ pub(crate) mod tests {
         assert!(persisted.has_changed().unwrap(), "a new worker");
         assert_eq!(persisted.borrow_and_update().len(), 1);
 
-        lease.handle(ToServer::Caps(WorkerCaps { load: 3.0, ..caps() }));
+        lease.handle(ToServer::Load(3.0));
         assert!(!persisted.has_changed().unwrap(), "a load tick is not a change of shape");
-        assert!((hub.directory()[0].caps.load - 3.0).abs() < f32::EPSILON, "but it is live");
+        assert!((hub.directory()[0].load - 3.0).abs() < f32::EPSILON, "but it is live");
+        lease.handle(ToServer::Caps(caps()));
+        assert!(!persisted.has_changed().unwrap(), "nor are the same capabilities again");
 
         lease.handle(ToServer::Caps(WorkerCaps { can_capture: false, ..caps() }));
         assert!(persisted.has_changed().unwrap(), "a permission change is");
@@ -1200,7 +1195,8 @@ pub(crate) mod tests {
             address: "100.64.0.9:45550".to_owned(),
             liveness: Liveness::Online,
             caps: caps(),
-            last_seen_ms: 1,
+            load: 0.0,
+            last_seen_ms: WallMs::from_millis(1),
         };
         let hub = Hub::new("server".to_owned(), vec![info.clone()]);
         assert_eq!(hub.directory(), vec![WorkerInfo { liveness: Liveness::Gone, ..info }]);
@@ -1215,7 +1211,7 @@ pub(crate) mod tests {
             detail: None,
             attention: false,
             source: AgentSource::Hook,
-            since_ms: 0,
+            since_ms: WallMs::ZERO,
         })
     }
 
@@ -1239,7 +1235,7 @@ pub(crate) mod tests {
         let (worker, session) = (WorkerId::new(), SessionId::new());
         let (tx, _rx) = mpsc::channel(8);
         let lease = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
-        lease.handle(ToServer::SessionOpened(summary(session)));
+        lease.handle(ToServer::SessionChanged(summary(session)));
         let (seen, next, _) = events(&hub, Some(now), 0).await;
         let whats: Vec<&Happening> = seen.iter().map(|e| &e.what).collect();
         assert!(
@@ -1250,18 +1246,18 @@ pub(crate) mod tests {
             "{whats:?}"
         );
         assert_eq!((seen[0].seq, seen[1].seq, next), (now, now + 1, now + 2));
-        lease.handle(ToServer::SessionOpened(summary(session)));
+        lease.handle(ToServer::SessionChanged(summary(session)));
         assert!(events(&hub, Some(next), 0).await.0.is_empty(), "a known session's update");
         let exited =
             SessionSummary { state: SessionState::Exited { status: 2 }, ..summary(session) };
-        lease.handle(ToServer::SessionOpened(exited.clone()));
+        lease.handle(ToServer::SessionChanged(exited.clone()));
         let (seen, next, _) = events(&hub, Some(next), 0).await;
         assert!(
             matches!(seen.as_slice(), [HubEvent { what: Happening::SessionExited { term, status: 2 }, .. }]
                 if term.session == session),
             "the program's exit is an event: {seen:?}"
         );
-        lease.handle(ToServer::SessionOpened(exited));
+        lease.handle(ToServer::SessionChanged(exited));
         assert!(events(&hub, Some(next), 0).await.0.is_empty(), "and only once");
 
         // A wait wakes for the next event, however long before its timeout it comes.
@@ -1276,8 +1272,8 @@ pub(crate) mod tests {
         let (woke, after, _) = waiting.await.unwrap();
         let term = TermRef { worker, session };
         assert!(
-            matches!(woke.as_slice(), [HubEvent { what: Happening::Agent { term: t, status, .. }, .. }]
-                if *t == term && *status == blocked),
+            matches!(woke.as_slice(), [HubEvent { what: Happening::Agent { worker: w, event }, .. }]
+                if TermRef { worker: *w, session: event.session } == term && event.status == blocked),
             "{woke:?}"
         );
         lease.handle(agent_report(session, blocked));
@@ -1302,7 +1298,13 @@ pub(crate) mod tests {
         assert!(
             matches!(
                 needs.as_slice(),
-                [HubEvent { what: Happening::Agent { status: AgentStatus::Idle, .. }, .. }]
+                [HubEvent {
+                    what: Happening::Agent {
+                        event: AgentEvent { status: AgentStatus::Idle, .. },
+                        ..
+                    },
+                    ..
+                }]
             ),
             "{needs:?}"
         );
@@ -1416,7 +1418,13 @@ pub(crate) mod tests {
         assert!(
             matches!(
                 events.as_slice(),
-                [HubEvent { what: Happening::Agent { status: AgentStatus::Idle, .. }, .. }]
+                [HubEvent {
+                    what: Happening::Agent {
+                        event: AgentEvent { status: AgentStatus::Idle, .. },
+                        ..
+                    },
+                    ..
+                }]
             ),
             "{events:?}"
         );
@@ -1432,8 +1440,11 @@ pub(crate) mod tests {
         let closed = |links: &mut broadcast::Receiver<FromServer>| {
             let mut closed = Vec::new();
             while let Ok(msg) = links.try_recv() {
-                if let FromServer::Event(Event::SessionClosed { worker, session }) = msg {
-                    closed.push(TermRef { worker, session });
+                if let FromServer::Event(HubEvent {
+                    what: Happening::SessionClosed { term }, ..
+                }) = msg
+                {
+                    closed.push(term);
                 }
             }
             closed
@@ -1498,7 +1509,7 @@ pub(crate) mod tests {
         assert!(hub.directory().is_empty());
         assert!(persisted.borrow_and_update().is_empty(), "the state file loses it");
         assert!(
-            matches!(links.recv().await.unwrap(), FromServer::Directory(list) if list.is_empty())
+            matches!(next_listing(&mut links).await, FromServer::Directory(list) if list.is_empty())
         );
         let (heard, ..) = events(&hub, Some(from), 0).await;
         assert!(
@@ -1546,7 +1557,8 @@ pub(crate) mod tests {
             address: address.to_owned(),
             liveness: Liveness::Online,
             caps: caps(),
-            last_seen_ms: 1,
+            load: 0.0,
+            last_seen_ms: WallMs::from_millis(1),
         };
         let old = known("studio", "100.64.0.7:45550");
         let namesake = known("studio", "100.64.0.8:45550");
@@ -1560,8 +1572,10 @@ pub(crate) mod tests {
         let listed: Vec<WorkerId> = hub.directory().iter().map(|w| w.worker).collect();
         assert_eq!(listed.len(), 2, "{listed:?}");
         assert!(listed.contains(&first) && listed.contains(&namesake.worker), "{listed:?}");
-        assert!(matches!(events.recv().await.unwrap(), FromServer::Worker(w) if w.worker == first));
-        let FromServer::Directory(heard) = events.recv().await.unwrap() else {
+        assert!(
+            matches!(next_listing(&mut events).await, FromServer::Worker(w) if w.worker == first)
+        );
+        let FromServer::Directory(heard) = next_listing(&mut events).await else {
             panic!("the directory again, without the replaced entry")
         };
         assert_eq!(heard, hub.directory());

@@ -7269,3 +7269,92 @@ Over a real connection with 3 % random loss, BBRv3 lowers its long-term inflight
 probing round loses more than 2 %, and the controller's cap at 90 % of `cwnd × 8 / rtt` then
 bounds the target however the policy reads the loss. How far that holds a stream down on such
 a path needs the same run over QUIC.
+
+## 2026-09-28 — 4:4:4 HEVC on the low-latency encoder: what VideoToolbox offers and what it costs
+
+Mac Studio M1 Max, macOS 27.0 (26A428), SDK MacOSX27.0, load average 7–9. The probe is
+`crates/slopty-codec/tests/chroma444.rs`: three ignored tests that open no window and capture
+nothing. They ask the framework (`VTCopyVideoEncoderList`, `VTCopySupportedPropertyDictionaryForEncoder`),
+open sessions fed synthetic pictures, parse the SPS each one writes, decode it with
+`RequireHardwareAcceleratedVideoDecoder`, and time and score a synthetic code-editor picture:
+8×16 cells of one-pixel-stroke glyphs in the Monokai palette on its dark ground, scrolled a
+line (16 px) a frame over six pictures. Sessions are set up like the worker's (real time, no
+reordering, infinite GOP, LTR asked for), one frame in flight, pts at 60 fps.
+
+```sh
+cargo test -p slopty-codec --test chroma444 --no-run   # target/debug/deps/chroma444-<hash>
+cp target/debug/deps/chroma444-<hash> /tmp/chroma444 && cd /tmp
+nice -n 10 ./chroma444 --ignored --nocapture --test-threads=1 chroma_444_capabilities
+nice -n 10 ./chroma444 --ignored --nocapture --test-threads=1 chroma_444_encode_time
+nice -n 10 ./chroma444 --ignored --nocapture --test-threads=1 chroma_444_rate_quality
+```
+
+**What the framework lists.** Two HEVC encoders: `com.apple.videotoolbox.videoencoder.ave.hevc`
+(hardware) and `…hevc.vcp` (software, profiles Main, Main10, MainStill and Monochrome only).
+Asking for `EnableLowLatencyRateControl` + `RequireHardwareAcceleratedVideoEncoder` selects a
+third, `…videoencoder.hevc.rtvc`, absent from the list. Its `ProfileLevel` supported values are
+`HEVC_Main_AutoLevel`, `HEVC_Main10_AutoLevel`, `HEVC_MainStill_AutoLevel`,
+`HEVC_Main444_AutoLevel`, `HEVC_Main42210_AutoLevel`, `HEVC_Main44410_AutoLevel`,
+`HEVC_Monochrome_AutoLevel` and `HEVC_Monochrome10_AutoLevel`. The SDK's
+`VTCompressionProperties.h` exports only Main, Main10, Main42210 and the two Monochromes. The
+low-latency encoder lists `EnableLTR`. The plain hardware encoder does not, and refuses it
+(`-12900`). `VTIsHardwareDecodeSupported(HEVC)` is true.
+
+**What the sessions write** (SPS `profile_idc`, `chroma_format_idc`, bit depth; `ltr` is
+`EnableLTR`'s status):
+
+| encoder | profile | fed | SPS | LTR |
+| --- | --- | --- | --- | --- |
+| low-latency | Main (shipped) | `420f` | 1, 4:2:0, 8 | 0 |
+| low-latency | none, Main, Main42210 | any, `444f` and `xf44` included | 1, 4:2:0, 8 | 0 |
+| low-latency | Main444 (from its list) | `444f` | **4 (RExt), 4:4:4, 8** | 0 |
+| low-latency | Main444 | `420f`, `xf22`, `xf44`, `BGRA` | 1, 4:2:0, 8 (silently) | 0 |
+| low-latency | Main44410 (from its list) | `xf44`, `420f`, `xf22`, `BGRA` | **4, 4:4:4, 10** | 0 |
+| low-latency | Main44410 | `444f` | 4, 4:4:4, 8 | 0 |
+| hardware, no low-latency | none | `444f` / `xf44` | 4, 4:4:4, 8 / 10 | −12900 |
+| hardware, no low-latency | Main444 / Main44410 / Main42210 | any | 4:4:4 8 / 4:4:4 10 / 4:2:2 10 | −12900 |
+
+The low-latency encoder's Main42210 is accepted (status 0) and ignored: it writes Main 4:2:0.
+Its Main444 writes 4:4:4 only when fed `444f`; anything else comes out 4:2:0 with no error.
+Every 4:4:4 and 4:2:2 stream decodes with the hardware decoder required
+(`UsingHardwareAcceleratedVideoDecoder` true) straight to `444f` / `xf44` / `xf22`.
+
+**Encode time**, submit → callback, 180 frames, one in flight (p50 / p95 / max, ms; the
+spent rate is what the rate controller used of the target on this picture):
+
+| mode | 1920×1080 at 16 Mbit/s | spent | 5120×2880 at 60 Mbit/s | spent |
+| --- | --- | --- | --- | --- |
+| low-latency Main 4:2:0 (shipped) | 7.72 / 8.01 / 8.71 | 6.9 | 35.29 / 47.66 / 127.2 | 25.3 |
+| low-latency Main444, `444f` | 7.88 / 8.93 / 29.3 | 11.4 | 35.79 / 46.73 / 113.1 | 42.6 |
+| low-latency Main44410, `xf44` | 7.73 / 8.14 / 9.86 | 10.8 | 35.88 / 47.65 / 91.7 | 36.2 |
+| low-latency Main44410, `BGRA` | 8.01 / 8.50 / 12.85 | 10.7 | 41.55 / 43.05 / 72.7 | 36.7 |
+| low-latency Main444, `BGRA` (writes 4:2:0) | 9.56 / 11.78 / 25.9 | 6.7 | 47.03 / 53.85 / 80.6 | 21.8 |
+| hardware Main 4:2:0, no low-latency | 9.66 / 10.22 / 11.27 | 7.8 | 18.44 / 30.87 / 65.5 | 29.5 |
+| hardware Main444, no low-latency | 10.21 / 13.92 / 21.36 | 12.5 | 18.85 / 29.30 / 67.9 | 41.5 |
+
+An earlier run at lower load read the same p50s (1080p 7.64–7.76 ms for every low-latency mode,
+5K 35.1–35.4 ms) with 5K maxima of 36–40 ms; the 5K tails above are load. 4:4:4 costs the
+low-latency encoder nothing in time at either size. `BGRA` costs a conversion inside the
+session: 0.3 ms at 1080p and 6 ms at 5K. Separate finding: the low-latency encoder takes
+35 ms a 5K frame on this chip, about 28 fps, where the plain hardware encoder takes 18.
+
+**Rate against quality**, 1080p, 90 frames, PSNR of the last decoded frame against the 4:4:4
+source (luma, and Cb and Cr together at full resolution; a 4:2:0 frame's chroma is replicated
+over its 2×2 block). "Source" is the picture in the input format before encoding: box-filtered
+4:2:0 already loses the chroma to 29.05 dB.
+
+| mode | source | 4 Mbit/s target | 8 | 16 | 32 |
+| --- | --- | --- | --- | --- | --- |
+| low-latency 4:2:0 (shipped) | 57.33 / 29.05 | 3.45 → 44.48 / 28.48 | 7.27 → 52.93 / 28.88 | 6.94 → 53.22 / 28.89 | 6.85 → 53.80 / 28.89 |
+| low-latency Main444, `444f` | 57.33 / 62.56 | 3.34 → 37.95 / 35.57 | 6.92 → 49.36 / 44.65 | 11.63 → 53.14 / 51.42 | 11.17 → 53.84 / 53.12 |
+| low-latency Main44410, `xf44` | 67.95 / 69.97 | 3.34 → 35.14 / 35.13 | 6.92 → 47.47 / 43.95 | 11.12 → 55.29 / 52.77 | 10.63 → 56.42 / 54.95 |
+| low-latency Main44410, `BGRA` | — | 3.41 → 35.32 / 35.37 | 7.00 → 46.84 / 43.88 | 11.11 → 51.83 / 51.42 | 10.55 → 52.20 / 52.94 |
+| hardware Main444, no low-latency | 57.33 / 62.56 | 2.98 → 34.27 / 36.44 | 5.86 → 40.26 / 41.04 | 13.80 → 50.64 / 51.25 | 22.06 → 55.90 / 58.58 |
+
+Cells are spent Mbit/s → luma / chroma dB. The `BGRA` rows are scored against the BT.709
+reference and the session's own RGB → YCbCr conversion, so part of their luma gap is the
+conversion, not the codec. Read at equal luma: the shipped 4:2:0 stream saturates at 6.9 Mbit/s
+with 53.2 dB luma and 28.9 dB chroma; the 10-bit 4:4:4 stream reaches 55.3 dB luma and 52.8 dB
+chroma at 11.1 Mbit/s, about 1.6× the bits for 24 dB more chroma. Below the 4:2:0 saturation
+rate 4:4:4 loses: at 3.4 Mbit/s it is 35 dB luma against 44.5, at 7 Mbit/s 47.5 against 52.9.
+At no rate does 4:2:0 get its chroma above 29 dB, the subsampling ceiling.

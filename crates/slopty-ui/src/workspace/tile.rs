@@ -441,7 +441,7 @@ impl WorkspaceView {
             ItemKind::Window { window } => {
                 self.titles.get(&item.id).cloned().unwrap_or_else(|| format!("Window {}", window.0))
             }
-            ItemKind::Display { display } => format!("Display {display}"),
+            ItemKind::Display { display } => format!("Display {}", display.0),
             ItemKind::Note { text } => self
                 .note_facts
                 .get(&item.id)

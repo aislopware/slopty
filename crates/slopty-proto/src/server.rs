@@ -10,11 +10,12 @@
 //! that each side sends its role's messages, framed by [`crate::codec`] like the rest.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{SessionId, WorkerId};
+use slopty_core::{SessionId, WallMs, WorkerId};
 
+use crate::RequestId;
 use crate::agent::AgentEvent;
-use crate::orchestration::{IdempotencyKey, Outcome, Verb};
-use crate::screen::VideoCodec;
+use crate::orchestration::{HubEvent, IdempotencyKey, Outcome, Verb};
+use crate::screen::{DisplayInfo, VideoCodec};
 use crate::terminal::{CloseReason, SessionSummary};
 
 /// Who is dialling the server.
@@ -52,28 +53,12 @@ pub struct Registration {
 }
 
 /// Operating system of a worker.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Os {
     /// macOS.
-    #[default]
     MacOs,
     /// Linux.
     Linux,
-}
-
-/// A display a worker can stream.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
-pub struct DisplayCap {
-    /// Display id (opaque, the worker's own numbering).
-    pub id: u32,
-    /// Size in points.
-    pub w: f32,
-    /// Size in points.
-    pub h: f32,
-    /// Backing scale.
-    pub scale: f32,
-    /// Refresh rate.
-    pub hz: f32,
 }
 
 /// An agent installed on a worker.
@@ -85,9 +70,12 @@ pub struct InstalledAgent {
     pub version: String,
 }
 
-/// What a worker can do and how it is doing, sent at registration and whenever it changes.
-/// The default is a worker that says nothing about itself: no permission, no display, no agent.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+/// What a worker can do, sent at registration and whenever it changes.
+///
+/// How loaded it is moves all the time and travels on its own ([`ToServer::Load`],
+/// [`crate::WorkerMsg::Load`]), so two of these compare equal exactly when the worker can do
+/// the same things.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct WorkerCaps {
     /// Operating system.
     pub os: Os,
@@ -102,17 +90,36 @@ pub struct WorkerCaps {
     /// Hardware video encoders.
     pub encoders: Vec<VideoCodec>,
     /// Displays.
-    pub displays: Vec<DisplayCap>,
+    pub displays: Vec<DisplayInfo>,
     /// Coding agents installed.
     pub agents: Vec<InstalledAgent>,
     /// Screen capture is permitted (macOS Screen Recording granted).
     pub can_capture: bool,
     /// Input injection is permitted (macOS Accessibility granted).
     pub can_inject: bool,
-    /// One-minute load average.
-    pub load: f32,
     /// Worker software version.
     pub version: String,
+}
+
+impl WorkerCaps {
+    /// A worker on `os` that says nothing else about itself: no permission, no display, no
+    /// encoder, no agent.
+    #[must_use]
+    pub const fn bare(os: Os) -> Self {
+        Self {
+            os,
+            os_version: String::new(),
+            arch: String::new(),
+            cpus: 0,
+            memory: 0,
+            encoders: Vec::new(),
+            displays: Vec::new(),
+            agents: Vec::new(),
+            can_capture: false,
+            can_inject: false,
+            version: String::new(),
+        }
+    }
 }
 
 /// Whether the server can reach a worker.
@@ -139,12 +146,11 @@ pub struct WorkerInfo {
     pub liveness: Liveness,
     /// Capabilities as last reported.
     pub caps: WorkerCaps,
-    /// Milliseconds since the Unix epoch when the server last heard from it.
-    pub last_seen_ms: u64,
+    /// Its one-minute load average as last reported.
+    pub load: f32,
+    /// When the server last heard from it.
+    pub last_seen_ms: WallMs,
 }
-
-/// A request id, unique per link and direction.
-pub type RequestId = u64;
 
 /// Dialer → server.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -170,10 +176,10 @@ pub enum ToServer {
         /// The answer.
         outcome: Outcome,
     },
-    /// A worker's capabilities changed (permission granted, a display attached, load).
+    /// A worker's capabilities changed (permission granted, a display attached).
     Caps(WorkerCaps),
-    /// A worker opened a terminal.
-    SessionOpened(SessionSummary),
+    /// A worker's terminal is new or changed (its program exited, its directory moved).
+    SessionChanged(SessionSummary),
     /// A worker's terminal ended.
     SessionClosed {
         /// Which.
@@ -183,6 +189,8 @@ pub enum ToServer {
     },
     /// A worker's agent changed status.
     Agent(AgentEvent),
+    /// A worker's one-minute load average moved.
+    Load(f32),
 }
 
 /// Server → dialer.
@@ -211,12 +219,25 @@ pub enum FromServer {
         /// The answer.
         outcome: Outcome,
     },
-    /// For a client or agent: the whole directory, sent after `Welcome`.
+    /// For a client or agent: the whole directory, sent after `Welcome` and again after the
+    /// link fell behind.
     Directory(Vec<WorkerInfo>),
     /// For a client or agent: one worker appeared or changed.
     Worker(WorkerInfo),
-    /// For a client or agent: something happened on a worker.
-    Event(Event),
+    /// For a client or agent: something happened on a worker, numbered in the log
+    /// [`Verb::Events`] reads.
+    Event(HubEvent),
+    /// For a client or agent: every terminal on every worker, each with its agent, sent after
+    /// the directory. What the client showed of terminals and agents before is replaced.
+    Terminals(Vec<(WorkerId, SessionSummary)>),
+    /// For a client or agent: a worker's load moved. Its own message, so a tick of it resends
+    /// nothing else and changes nothing that is saved.
+    Load {
+        /// Which.
+        worker: WorkerId,
+        /// Its 1-minute load average.
+        load: f32,
+    },
 }
 
 /// Why the server refused a hello.
@@ -238,30 +259,4 @@ impl Refusal {
             Self::DuplicateWorker => "A worker with this id is already connected",
         }
     }
-}
-
-/// Something that happened on a worker, fanned out to clients and agents.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Event {
-    /// A terminal opened.
-    SessionOpened {
-        /// Where.
-        worker: WorkerId,
-        /// What.
-        summary: SessionSummary,
-    },
-    /// A terminal ended.
-    SessionClosed {
-        /// Where.
-        worker: WorkerId,
-        /// Which.
-        session: SessionId,
-    },
-    /// An agent changed status.
-    Agent {
-        /// Where.
-        worker: WorkerId,
-        /// What.
-        event: AgentEvent,
-    },
 }

@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use slopty_agent::live::Overlay;
 use slopty_agent::{Hook, permission};
-use slopty_core::{ClientId, SessionId};
+use slopty_core::{ClientId, SessionId, WallMs};
 use slopty_net::framed::FramedSend;
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::codec::CodecError;
@@ -98,13 +98,6 @@ pub enum Command {
     },
 }
 
-/// Now, in ms since the Unix epoch.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
 /// The decision the relay waiting on `session`'s permission prompt `hook`, for at most
 /// `relay_wait`, gets.
 ///
@@ -119,8 +112,8 @@ pub async fn ask(
     relay_gone: impl Future<Output = ()>,
 ) -> Decision {
     let wait = relay_wait.saturating_sub(HOLD_MARGIN);
-    let asked_ms = now_ms();
-    let until_ms = asked_ms.saturating_add(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
+    let asked_ms = WallMs::now();
+    let until_ms = asked_ms.saturating_add(wait);
     let (reply, decided) = oneshot::channel();
     let Some(prompt) = hold(daemon, session, hook, reply, (asked_ms, until_ms)) else {
         return Decision::Pass;
@@ -153,7 +146,7 @@ fn hold(
     session: SessionId,
     hook: &Hook,
     reply: oneshot::Sender<Decision>,
-    (asked_ms, until_ms): (u64, u64),
+    (asked_ms, until_ms): (WallMs, WallMs),
 ) -> Option<PermissionPrompt> {
     let mut follows = daemon.follows.lock();
     let id = follows.holds.ask(session, |id| Pending {
@@ -311,7 +304,7 @@ async fn follow(
             if whole {
                 live.extend(overlay.clear_all());
             }
-            live.extend(overlay.update(&seen.borrow().live, now, now_ms()));
+            live.extend(overlay.update(&seen.borrow().live, now, WallMs::now()));
             live.extend(overlay.settle(&changes));
             live.extend(overlay.expire(now));
         }

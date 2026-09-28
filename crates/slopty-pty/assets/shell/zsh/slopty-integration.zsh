@@ -1,7 +1,8 @@
 # Slopty shell integration for zsh: OSC 133 prompt marks, so the client can draw command
 # blocks, jump between prompts, copy a command's output and tint a failed command.
 #
-#   133;A  prompt starts (put in PS1, so a theme that rebuilds the prompt keeps it)
+#   133;A  prompt starts (put in PS1, so a theme that rebuilds the prompt keeps it); `redraw=1`
+#          says zle redraws all of it after a resize, so the terminal clears it first
 #   133;B  input starts (end of PS1)
 #   133;C  output starts (preexec)
 #   133;D;<status>  command ended (precmd, before the next prompt)
@@ -24,7 +25,7 @@ _slopty_precmd() {
     'builtin' 'print' -n -- $'\e]7;file://'"${HOST}${_slopty_dir// /%20}"$'\a'
     # Marks inside PS1/PS2 so zle redraws keep them; %{ %} hides them from width counting.
     if [[ "$PS1" != *$'\e]133;A'* ]]; then
-        PS1=$'%{\e]133;A\a%}'"$PS1"$'%{\e]133;B\a%}'
+        PS1=$'%{\e]133;A;redraw=1\a%}'"$PS1"$'%{\e]133;B\a%}'
     fi
     if [[ -n "$PS2" && "$PS2" != *$'\e]133;A;k=s'* ]]; then
         PS2=$'%{\e]133;A;k=s\a%}'"$PS2"$'%{\e]133;B\a%}'

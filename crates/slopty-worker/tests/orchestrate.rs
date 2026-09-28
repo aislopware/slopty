@@ -6,7 +6,7 @@
 mod orchestrate {
     use std::time::Duration;
 
-    use slopty_core::SessionId;
+    use slopty_core::{SessionId, WallMs};
     use slopty_proto::WorkerMsg;
     use slopty_proto::agent::{
         AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent,
@@ -41,7 +41,7 @@ mod orchestrate {
                 kind: AgentKind::ClaudeCode,
                 status,
                 source: AgentSource::Hook,
-                since_ms: 0,
+                since_ms: WallMs::ZERO,
             })
         }
 
@@ -57,7 +57,7 @@ mod orchestrate {
             detail: None,
             attention: true,
             source: AgentSource::Hook,
-            since_ms: 0,
+            since_ms: WallMs::ZERO,
         })
     }
 

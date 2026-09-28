@@ -58,3 +58,18 @@ pub enum WorkerError {
     #[error(transparent)]
     Screen(#[from] ScreenError),
 }
+
+impl WorkerError {
+    /// This failure of a request about a terminal, as its client is told it.
+    #[must_use]
+    pub fn term_error(&self) -> slopty_proto::terminal::TermError {
+        use slopty_proto::terminal::TermError;
+        match self {
+            Self::NoSuchSession | Self::SessionClosed => TermError::NoSuchSession,
+            Self::Pty(e) => TermError::Write(e.to_string()),
+            Self::Engine(_) | Self::NoSuchItem | Self::Items(_) | Self::Screen(_) => {
+                TermError::Engine(self.to_string())
+            }
+        }
+    }
+}

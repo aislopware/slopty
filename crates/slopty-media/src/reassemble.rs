@@ -710,8 +710,7 @@ impl Reassembler {
         let header = *header;
         let payload = datagram.slice(HEADER_BYTES..);
         match header.kind() {
-            // A terminal frame's copy is the link's to route and never reaches a stream.
-            None | Some(Kind::Term) => Ingest::Ignored(Ignored::Malformed),
+            None => Ingest::Ignored(Ignored::Malformed),
             Some(Kind::Audio) => Ingest::Audio { seq: header.frame.get(), payload },
             Some(Kind::Heartbeat) => Ingest::Heartbeat,
             Some(Kind::Cursor) => {

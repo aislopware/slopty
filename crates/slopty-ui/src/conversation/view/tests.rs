@@ -5,7 +5,7 @@ use gpui::{
     Entity, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
     VisualTestContext, point, px, size,
 };
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
 use slopty_proto::conversation::ConversationEvent;
 use slopty_theme::Theme;
 
@@ -498,7 +498,7 @@ fn the_prompt_rail_draws_only_when_its_prompts_change(cx: &mut TestAppContext) {
 
     let text = Clipped { text: "One more thing".into(), lines: 1, chars: 14, full: None };
     let prompt = Prompt { text, images: Vec::new(), command: None };
-    let entry = Entry { id: "p7".into(), at_ms: 0, body: Body::Prompt(prompt) };
+    let entry = Entry { id: "p7".into(), at_ms: WallMs::ZERO, body: Body::Prompt(prompt) };
     let upsert = Change::Upsert { thread: ThreadId::Main, entry };
     feed(&view, cx, vec![ConversationEvent::Changes(vec![upsert])]);
     assert!(renders(cx) > drawn, "a new prompt draws it again");

@@ -1218,7 +1218,7 @@ done"#
             TermEvent::Error(message) => Some(message.clone()),
             _ => None,
         });
-        assert!(refused.unwrap().contains("not reading"));
+        assert_eq!(refused, Some(slopty_proto::terminal::TermError::InputFull));
         assert_eq!(session.snapshot().await.unwrap().viewers, 1, "the actor answers");
         session.close();
         let _killed = child.kill().await;

@@ -293,7 +293,8 @@ mod tests {
             worker: WorkerId::new(),
             name: "worker".to_owned(),
             home: String::new(),
-            caps: slopty_proto::server::WorkerCaps::default(),
+            caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+            load: 0.0,
             sessions: Vec::new(),
         };
         client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();

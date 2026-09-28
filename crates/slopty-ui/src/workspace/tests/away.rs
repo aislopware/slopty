@@ -1,6 +1,8 @@
 //! Closing, taking back and saving while a worker comes and goes: what the human did while it
 //! was away lands when it is back, and nothing is left waiting on an answer that cannot come.
 
+use slopty_core::WallMs;
+
 use super::*;
 
 /// The link to `fake`'s worker comes back on a new channel, with `sessions` running there;
@@ -42,7 +44,7 @@ fn file_tile(
     let read = slopty_proto::file::FileRead::Text {
         text: "# Notes".to_owned(),
         size: 8,
-        modified_ms: 1_000,
+        modified_ms: WallMs::from_millis(1_000),
         final_newline: true,
     };
     let key = fake.key;

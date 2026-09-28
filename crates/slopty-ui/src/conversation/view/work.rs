@@ -24,6 +24,7 @@ use gpui::{
     ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, div,
     px, relative,
 };
+use slopty_core::WallMs;
 use slopty_proto::conversation::{
     AgentDetail, AgentRun, BashDetail, Body, Clipped, Entry, ResultStatus, ShellStatus, Task,
     ThreadId, ToolCall, ToolDetail,
@@ -84,11 +85,11 @@ pub(super) struct Work {
 
 /// The work `entry` started in the background, as of `now_ms`.
 #[must_use]
-pub(super) fn work_of(entry: &Entry, now_ms: u64) -> Option<Work> {
+pub(super) fn work_of(entry: &Entry, now_ms: WallMs) -> Option<Work> {
     let Body::Tool(call) = &entry.body else { return None };
-    let since = |end: Option<u64>| {
+    let since = |end: Option<WallMs>| {
         let end = end.unwrap_or(now_ms);
-        (entry.at_ms > 0 && end > entry.at_ms).then(|| end.saturating_sub(entry.at_ms))
+        (!entry.at_ms.is_zero() && end > entry.at_ms).then(|| end.millis_since(entry.at_ms))
     };
     match &call.detail {
         ToolDetail::Bash(bash) => {
@@ -519,7 +520,7 @@ impl ConversationView {
         }));
         let list = open.then(|| {
             let times = figures::task_times(thread.entries());
-            let now = super::now_ms();
+            let now = WallMs::now();
             div()
                 .flex()
                 .flex_col()
@@ -534,12 +535,8 @@ impl ConversationView {
                     };
                     let (started, ended) = times.get(&task.id).copied().unwrap_or_default();
                     let took = match (task.status.as_str(), started, ended) {
-                        ("completed", Some(a), Some(b)) if b > a => {
-                            Some(kit::duration(Duration::from_millis(b.saturating_sub(a))))
-                        }
-                        ("in_progress", Some(a), _) if now > a => {
-                            Some(kit::duration(Duration::from_millis(now.saturating_sub(a))))
-                        }
+                        ("completed", Some(a), Some(b)) if b > a => Some(kit::duration(b.since(a))),
+                        ("in_progress", Some(a), _) if now > a => Some(kit::duration(now.since(a))),
                         _ => None,
                     };
                     div()
@@ -611,7 +608,7 @@ impl ConversationView {
     #[must_use]
     pub(super) fn background_work(&self) -> Vec<Work> {
         let Some(main) = self.model.thread(&ThreadId::Main) else { return Vec::new() };
-        let now = super::now_ms();
+        let now = WallMs::now();
         figures::background(main.entries()).into_iter().filter_map(|e| work_of(e, now)).collect()
     }
 
@@ -862,6 +859,7 @@ impl ConversationView {
 
 #[cfg(test)]
 mod tests {
+    use slopty_core::WallMs;
     use slopty_proto::conversation::{AgentDetail, ToolResult};
 
     use super::*;
@@ -878,7 +876,7 @@ mod tests {
                 status,
                 text: None,
                 images: Vec::new(),
-                at_ms: 0,
+                at_ms: WallMs::ZERO,
             }),
         }
     }
@@ -898,27 +896,33 @@ mod tests {
             stdout: None,
             stderr: None,
             output_file: None,
-            finished_ms,
+            finished_ms: finished_ms.map(WallMs::from_millis),
         }
     }
 
     fn entry(detail: ToolDetail) -> Entry {
-        Entry { id: "t1".to_owned(), at_ms: 10_000, body: Body::Tool(Box::new(call(detail, None))) }
+        Entry {
+            id: "t1".to_owned(),
+            at_ms: WallMs::from_millis(10_000),
+            body: Body::Tool(Box::new(call(detail, None))),
+        }
     }
 
     /// Background work says what it is, how it stands and how long it ran: a command by its
     /// first line until it ends, then by when it ended; a subagent by its own figure.
     #[test]
     fn background_work_says_how_it_stands() {
-        let running =
-            work_of(&entry(ToolDetail::Bash(bash(ShellStatus::Running, None, None))), 13_000)
-                .unwrap();
+        let running = work_of(
+            &entry(ToolDetail::Bash(bash(ShellStatus::Running, None, None))),
+            WallMs::from_millis(13_000),
+        )
+        .unwrap();
         assert_eq!(
             (running.name.as_str(), running.standing, running.word.as_str(), running.took_ms),
             ("cargo build --release", Standing::Running, "Running", Some(3_000))
         );
         let failed = ToolDetail::Bash(bash(ShellStatus::Failed, Some(101), Some(15_000)));
-        let failed = work_of(&entry(failed), 99_000).unwrap();
+        let failed = work_of(&entry(failed), WallMs::from_millis(99_000)).unwrap();
         assert_eq!((failed.standing, failed.word.as_str()), (Standing::Failed, "Exit 101"));
         assert_eq!(failed.took_ms, Some(5_000), "to when it ended, not to now");
         let agent = ToolDetail::Agent(AgentDetail {
@@ -933,12 +937,12 @@ mod tests {
             tool_uses: None,
             duration_ms: Some(42_000),
         });
-        let agent = work_of(&entry(agent), 99_000).unwrap();
+        let agent = work_of(&entry(agent), WallMs::from_millis(99_000)).unwrap();
         assert_eq!(
             (agent.name.as_str(), agent.word.as_str(), agent.took_ms, agent.agent.as_deref()),
             ("Survey the chips", "Done", Some(42_000), Some("x1"))
         );
-        assert!(work_of(&entry(other()), 0).is_none());
+        assert!(work_of(&entry(other()), WallMs::ZERO).is_none());
     }
 
     /// A plan's title is its first heading, else it is a proposed plan; its word follows the

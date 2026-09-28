@@ -12,28 +12,51 @@ use objc2_core_media::{
     CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMSampleAttachmentKey_NotSync,
     kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
 };
-use objc2_core_video::{CVPixelBuffer, kCVImageBufferYCbCrMatrix_ITU_R_709_2};
+use objc2_core_video::{
+    CVPixelBuffer, CVPixelBufferGetPixelFormatType, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+};
 use objc2_video_toolbox::{
-    VTCompressionSession, VTEncodeInfoFlags, kVTCompressionPropertyKey_AllowFrameReordering,
-    kVTCompressionPropertyKey_AllowOpenGOP, kVTCompressionPropertyKey_AverageBitRate,
-    kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_EnableLTR,
-    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxFrameDelayCount,
-    kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    VTCompressionSession, VTEncodeInfoFlags, VTSession, VTSessionCopySupportedPropertyDictionary,
+    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
+    kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_DataRateLimits,
+    kVTCompressionPropertyKey_EnableLTR, kVTCompressionPropertyKey_ExpectedFrameRate,
+    kVTCompressionPropertyKey_MaxFrameDelayCount, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_MaximumRealTimeFrameRate,
     kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTCompressionPropertyKey_YCbCrMatrix, kVTEncodeFrameOptionKey_AcknowledgedLTRTokens,
     kVTEncodeFrameOptionKey_ForceKeyFrame, kVTEncodeFrameOptionKey_ForceLTRRefresh,
     kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
-    kVTPropertyNotSupportedErr, kVTSampleAttachmentKey_RequireLTRAcknowledgementToken,
+    kVTPropertyNotSupportedErr, kVTPropertySupportedValueListKey,
+    kVTSampleAttachmentKey_RequireLTRAcknowledgementToken,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
 use slopty_proto::screen::VideoCodec;
 
 use crate::cf::{self, check};
-use crate::video::{EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder};
+use crate::video::{Chroma, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder};
 use crate::{CodecError, PixelBuffer, annexb};
+
+/// The 10-bit 4:4:4 profile's `ProfileLevel` value. The low-latency HEVC encoder lists it in its
+/// own supported values (`VTCopySupportedPropertyDictionaryForEncoder`, macOS 27.0 on an M1 Max)
+/// but no SDK header exports it (`VTCompressionProperties.h` in the macOS 27.0 SDK stops at
+/// `kVTProfileLevel_HEVC_Main42210_AutoLevel`), so the session's own string is looked up by this
+/// name and used, never this literal.
+const MAIN_444_10: &str = "HEVC_Main44410_AutoLevel";
+
+impl Chroma {
+    /// The `CVPixelFormatType` a session of this chroma is fed: full-range NV12 (`420f`) for
+    /// 4:2:0, full-range 10-bit bi-planar 4:4:4 (`xf44`) for 4:4:4.
+    #[must_use]
+    pub const fn pixel_format(self) -> u32 {
+        match self {
+            Self::Subsampled => objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            Self::Full => kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+        }
+    }
+}
 
 /// Which rate-control mode a session runs in. The worker only ever runs the low-latency one;
 /// the other exists for the measurement that rejected it (`experiments` feature).
@@ -94,6 +117,7 @@ pub struct Encoder {
     session: CFRetained<VTCompressionSession>,
     config: EncoderConfig,
     rate_control: RateControl,
+    chroma: Chroma,
     ltr: bool,
     // Declared last so it outlives the session's `Drop` (the callback's refcon points at it).
     _shared: Arc<Shared>,
@@ -113,6 +137,7 @@ impl std::fmt::Debug for Encoder {
         f.debug_struct("Encoder")
             .field("config", &self.config)
             .field("rate_control", &self.rate_control)
+            .field("chroma", &self.chroma)
             .field("ltr", &self.ltr)
             .finish_non_exhaustive()
     }
@@ -125,7 +150,17 @@ impl Encoder {
         config: EncoderConfig,
         sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
     ) -> Result<Self, CodecError> {
-        Self::with_rate_control(config, RateControl::LowLatency, Box::new(sink))
+        Self::with_chroma(config, Chroma::Subsampled, sink)
+    }
+
+    /// A low-latency session carrying `chroma`. [`Chroma::Full`] is HEVC only, and every
+    /// picture must then be in the format [`Chroma::pixel_format`] names for the capture.
+    pub fn with_chroma(
+        config: EncoderConfig,
+        chroma: Chroma,
+        sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+    ) -> Result<Self, CodecError> {
+        Self::with_rate_control(config, RateControl::LowLatency, chroma, Box::new(sink))
     }
 
     /// A session in another rate-control mode, for the measurement that compares them.
@@ -135,14 +170,18 @@ impl Encoder {
         rate_control: RateControl,
         sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
     ) -> Result<Self, CodecError> {
-        Self::with_rate_control(config, rate_control, Box::new(sink))
+        Self::with_rate_control(config, rate_control, Chroma::Subsampled, Box::new(sink))
     }
 
     fn with_rate_control(
         config: EncoderConfig,
         rate_control: RateControl,
+        chroma: Chroma,
         sink: Sink,
     ) -> Result<Self, CodecError> {
+        if chroma == Chroma::Full && config.codec != VideoCodec::Hevc {
+            return Err(CodecError::NoFullChroma(config.codec));
+        }
         let shared = Arc::new(Shared { sink, codec: config.codec });
         // SAFETY: framework-provided constant string.
         let hardware_key =
@@ -166,6 +205,15 @@ impl Encoder {
             VideoCodec::Hevc => kCMVideoCodecType_HEVC,
             VideoCodec::H264 => kCMVideoCodecType_H264,
         };
+        // A 4:4:4 session says what it is fed; a 4:2:0 one takes the capture's NV12 as it comes.
+        let source_format = CFNumber::new_i64(i64::from(chroma.pixel_format()));
+        let source = (chroma == Chroma::Full).then(|| {
+            CFDictionary::<CFString, CFType>::from_slices(
+                // SAFETY: framework-provided constant string.
+                &[unsafe { kCVPixelBufferPixelFormatTypeKey }],
+                &[&*source_format],
+            )
+        });
         let mut raw: *mut VTCompressionSession = ptr::null_mut();
         // SAFETY: all pointers are valid for the call; the refcon is the `Arc<Shared>` kept
         // alive by this `Encoder` until the session is invalidated (see `Drop`).
@@ -176,7 +224,7 @@ impl Encoder {
                 i32::try_from(config.height).unwrap_or(i32::MAX),
                 codec_type,
                 Some(spec.as_opaque()),
-                None,
+                source.as_deref().map(CFDictionary::as_opaque),
                 None,
                 Some(output_callback),
                 Arc::as_ptr(&shared).cast_mut().cast::<c_void>(),
@@ -189,7 +237,8 @@ impl Encoder {
         };
         // SAFETY: `create` returned a +1 reference.
         let session = unsafe { CFRetained::from_raw(raw) };
-        let mut encoder = Self { session, config, rate_control, ltr: false, _shared: shared };
+        let mut encoder =
+            Self { session, config, rate_control, chroma, ltr: false, _shared: shared };
         encoder.configure()?;
         // SAFETY: the session is fully configured; this only pre-allocates encoder resources.
         let status = unsafe { encoder.session.prepare_to_encode_frames() };
@@ -201,6 +250,12 @@ impl Encoder {
     #[must_use]
     pub const fn config(&self) -> &EncoderConfig {
         &self.config
+    }
+
+    /// The colour the stream carries.
+    #[must_use]
+    pub const fn chroma(&self) -> Chroma {
+        self.chroma
     }
 
     /// True when the encoder accepted long-term references.
@@ -323,20 +378,63 @@ impl Encoder {
                 self.set_optional(key, value, name);
             }
         }
-        let profile: &CFString = match self.config.codec {
-            // SAFETY: framework-provided constant string.
-            VideoCodec::Hevc => unsafe { kVTProfileLevel_HEVC_Main_AutoLevel },
-            // SAFETY: framework-provided constant string.
-            VideoCodec::H264 => unsafe { kVTProfileLevel_H264_High_AutoLevel },
+        let profile: CFRetained<CFString> = match (self.config.codec, self.chroma) {
+            (VideoCodec::Hevc, Chroma::Subsampled) => {
+                // SAFETY: framework-provided constant string.
+                unsafe { kVTProfileLevel_HEVC_Main_AutoLevel }.retain()
+            }
+            (VideoCodec::H264, Chroma::Subsampled) => {
+                // SAFETY: framework-provided constant string.
+                unsafe { kVTProfileLevel_H264_High_AutoLevel }.retain()
+            }
+            (VideoCodec::Hevc, Chroma::Full) => self
+                .advertised_profile(MAIN_444_10)
+                .ok_or(CodecError::NoFullChroma(VideoCodec::Hevc))?,
+            (VideoCodec::H264, Chroma::Full) => {
+                return Err(CodecError::NoFullChroma(VideoCodec::H264));
+            }
         };
         // SAFETY: framework-provided constant string.
         let profile_key = unsafe { kVTCompressionPropertyKey_ProfileLevel };
-        self.set(profile_key, profile, "ProfileLevel")?;
+        self.set(profile_key, &profile, "ProfileLevel")?;
         self.set_bitrate(self.config.bitrate_bps)?;
         // SAFETY: framework-provided constant string.
         let ltr_key = unsafe { kVTCompressionPropertyKey_EnableLTR };
         self.ltr = self.set_optional(ltr_key, cf::boolean(true), "EnableLTR");
         Ok(())
+    }
+
+    /// The session's own `ProfileLevel` value named `name`, from the supported-value list it
+    /// advertises (`VTSessionCopySupportedPropertyDictionary`).
+    fn advertised_profile(&self, name: &str) -> Option<CFRetained<CFString>> {
+        // SAFETY: framework-provided constant strings.
+        let (profile_key, list_key) =
+            unsafe { (kVTCompressionPropertyKey_ProfileLevel, kVTPropertySupportedValueListKey) };
+        let entry = self.supported_dictionary()?.get(profile_key)?;
+        let entry = entry.downcast::<CFDictionary>().ok()?;
+        // SAFETY: VTSession.h: each property's entry is a dictionary keyed by CFString.
+        let entry: CFRetained<CFDictionary<CFString, CFType>> =
+            unsafe { CFRetained::cast_unchecked(entry) };
+        let list = entry.get(list_key)?.downcast::<CFArray>().ok()?;
+        // SAFETY: the supported-value list is a CFArray of property values; each is only read.
+        let list: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(list) };
+        list.iter()
+            .filter_map(|value| value.downcast::<CFString>().ok())
+            .find(|value| value.to_string() == name)
+    }
+
+    /// The session's `VTSessionCopySupportedPropertyDictionary`, keyed by property name.
+    fn supported_dictionary(&self) -> Option<CFRetained<CFDictionary<CFString, CFType>>> {
+        let session: NonNull<CFType> = NonNull::from(self.session.as_ref());
+        // SAFETY: VTSession.h: a `VTCompressionSessionRef` is a `VTSessionRef`; read only.
+        let session: &VTSession = unsafe { session.cast::<VTSession>().as_ref() };
+        let mut raw: *const CFDictionary = ptr::null();
+        // SAFETY: valid session and out pointer; the dictionary comes back +1 (Copy rule).
+        let status =
+            unsafe { VTSessionCopySupportedPropertyDictionary(session, NonNull::from(&mut raw)) };
+        let raw = NonNull::new(raw.cast_mut()).filter(|_| status == 0)?;
+        // SAFETY: +1 reference from the copy call, keyed by `CFString`s (VTSession.h).
+        Some(unsafe { CFRetained::from_raw(raw.cast()) })
     }
 
     /// Tell the session how many frames a second it is now being given.
@@ -390,6 +488,10 @@ impl Encoder {
         pts_us: u64,
         options: &FrameOptions,
     ) -> Result<(), CodecError> {
+        let format = CVPixelBufferGetPixelFormatType(image);
+        if self.chroma == Chroma::Full && format != Chroma::Full.pixel_format() {
+            return Err(CodecError::NotFullChroma(format));
+        }
         let mut keys: Vec<&CFString> = Vec::new();
         let mut values: Vec<&CFType> = Vec::new();
         let tokens: CFRetained<CFArray<CFNumber>>;
@@ -644,11 +746,8 @@ fn parameter_sets(
 /// The rate-control comparison and the property probes behind the encoder's DECISIONS entries.
 #[cfg(feature = "experiments")]
 mod experiments {
-    use std::ptr::{self, NonNull};
-
-    use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
+    use objc2_core_foundation::{CFNumber, CFRetained, CFString};
     use objc2_video_toolbox::{
-        VTSession, VTSessionCopySupportedPropertyDictionary,
         kVTCompressionPropertyKey_MaxAllowedFrameQP, kVTCompressionPropertyKey_MinAllowedFrameQP,
         kVTCompressionPropertyKey_VBVBufferDuration, kVTCompressionPropertyKey_VBVMaxBitRate,
         kVTCompressionPropertyKey_VariableBitRate,
@@ -710,21 +809,10 @@ mod experiments {
         /// (`VTSessionCopySupportedPropertyDictionary`).
         #[must_use]
         pub fn supported_properties(&self) -> Vec<String> {
-            let ptr: NonNull<CFType> = NonNull::from(self.session.as_ref());
-            // SAFETY: a `VTCompressionSessionRef` is a `VTSessionRef` (VTSession.h); read only.
-            let session: &VTSession = unsafe { ptr.cast::<VTSession>().as_ref() };
-            let mut raw: *const CFDictionary = ptr::null();
-            // SAFETY: valid session and out pointer; the dictionary comes back +1 (Copy rule).
-            let status = unsafe {
-                VTSessionCopySupportedPropertyDictionary(session, NonNull::from(&mut raw))
-            };
-            let Some(raw) = NonNull::new(raw.cast_mut()) else {
-                tracing::debug!(status, "no supported-property dictionary");
+            let Some(dict) = self.supported_dictionary() else {
+                tracing::debug!("no supported-property dictionary");
                 return Vec::new();
             };
-            // SAFETY: +1 reference from the copy call, keyed by `CFString`s (VTSession.h).
-            let dict: CFRetained<CFDictionary<CFString, CFType>> =
-                unsafe { CFRetained::from_raw(raw.cast()) };
             let (keys, _values) = dict.to_vecs();
             let mut names: Vec<String> = keys.iter().map(ToString::to_string).collect();
             names.sort_unstable();
@@ -985,6 +1073,173 @@ mod tests {
             drx.recv_timeout(std::time::Duration::from_secs(60)).expect("a decoded frame");
         assert_eq!(format, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
         assert_eq!(matrix.as_deref(), Some(bt709.as_str()), "the frame carries the matrix");
+    }
+
+    /// A full-range 10-bit bi-planar 4:4:4 frame (`xf44`) whose Cb alternates column by column,
+    /// detail that 4:2:0 averages away.
+    fn frame_444(index: usize) -> CFRetained<CVPixelBuffer> {
+        use objc2_core_video::{
+            CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
+            CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        let mut raw: *mut CVPixelBuffer = ptr::null_mut();
+        // SAFETY: CoreVideo rule: a valid out-pointer and no attributes.
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                W,
+                H,
+                Chroma::Full.pixel_format(),
+                None,
+                NonNull::from(&mut raw),
+            )
+        };
+        assert_eq!(status, 0);
+        // SAFETY: +1 reference from the create call.
+        let buffer = unsafe { CFRetained::from_raw(NonNull::new(raw).unwrap()) };
+        // SAFETY: CoreVideo rule: lock before touching the planes.
+        let locked =
+            unsafe { CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::empty()) };
+        assert_eq!(locked, 0);
+        for plane in 0..2 {
+            let base = CVPixelBufferGetBaseAddressOfPlane(&buffer, plane).cast::<u8>();
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, plane);
+            // Two bytes a sample; the chroma plane interleaves Cb and Cr.
+            let width = if plane == 0 { 2 * W } else { 4 * W };
+            for y in 0..H {
+                // SAFETY: the plane is locked, so row `y < H` starts inside its mapping.
+                let start = unsafe { base.add(y * stride) };
+                // SAFETY: the row spans `stride >= width` writable bytes of the locked plane.
+                let row = unsafe { std::slice::from_raw_parts_mut(start, width) };
+                for (x, cell) in row.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                    let value: u16 = match (plane, x % 2, (x / 2) % 2) {
+                        (0, ..) => u16::try_from((x + y + index * 7) % 800 + 120).unwrap(),
+                        (_, 0, 0) => 256, // Cb, even column
+                        (_, 0, _) => 768, // Cb, odd column
+                        _ => 512,         // Cr
+                    };
+                    // CVPixelBuffer.h: 10 bits in the high bits of a little-endian 16.
+                    *cell = (value << 6).to_le_bytes();
+                }
+            }
+        }
+        // SAFETY: matches the lock above.
+        let unlocked =
+            unsafe { CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::empty()) };
+        assert_eq!(unlocked, 0);
+        buffer
+    }
+
+    fn full_chroma_encoder(tx: std::sync::mpsc::Sender<EncodedPacket>) -> Encoder {
+        let config = EncoderConfig {
+            width: u32::try_from(W).unwrap(),
+            height: u32::try_from(H).unwrap(),
+            codec: VideoCodec::Hevc,
+            fps: 60,
+            bitrate_bps: 8_000_000,
+        };
+        Encoder::with_chroma(config, Chroma::Full, move |packet| {
+            let _receiver_gone = tx.send(packet);
+        })
+        .unwrap()
+    }
+
+    /// A 4:4:4 session on the low-latency encoder keeps its long-term references, says 4:4:4 in
+    /// its SPS, and decodes in hardware to a 4:4:4 picture that still has the column-by-column
+    /// colour a 4:2:0 stream averages to one value.
+    #[test]
+    fn a_full_chroma_stream_is_444_end_to_end() {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+            CVPixelBufferGetPixelFormatType, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+            CVPixelBufferUnlockBaseAddress,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let encoder = full_chroma_encoder(tx);
+        assert_eq!(encoder.chroma(), Chroma::Full);
+        assert!(encoder.ltr_enabled(), "the low-latency 4:4:4 session has LTR");
+        let frames = 5;
+        for i in 0..frames {
+            let options = FrameOptions { force_keyframe: i == 0, ..FrameOptions::default() };
+            encoder.encode(&frame_444(i), u64::try_from(i).unwrap() * 16_667, &options).unwrap();
+        }
+        encoder.flush().unwrap();
+        let packets = collect(&rx, frames);
+        assert_eq!(packets.len(), frames);
+        let keyframe = packets.first().filter(|p| p.keyframe).expect("a keyframe first");
+        let unit = annexb::AccessUnit::parse(&keyframe.data, annexb::hevc::is_parameter_set);
+        let formats: Vec<annexb::hevc::SampleFormat> = unit
+            .parameter_sets()
+            .iter()
+            .filter_map(|set| annexb::hevc::sample_format(set))
+            .collect();
+        let full = annexb::hevc::SampleFormat { chroma_format_idc: 3, bit_depth: 10 };
+        assert_eq!(formats, vec![full], "the SPS says 4:4:4, 10-bit");
+
+        let (dtx, drx) = std::sync::mpsc::channel();
+        let mut decoder = crate::Decoder::new(VideoCodec::Hevc, move |frame| {
+            let image = frame.image.as_cv();
+            let format = CVPixelBufferGetPixelFormatType(image);
+            // SAFETY: CoreVideo rule: lock before reading the planes.
+            let locked =
+                unsafe { CVPixelBufferLockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
+            assert_eq!(locked, 0);
+            let base = CVPixelBufferGetBaseAddressOfPlane(image, 1).cast::<u8>();
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(image, 1);
+            // SAFETY: the chroma plane is locked; row `H / 2` holds `W` interleaved 16-bit CbCr
+            // pairs, `4 * W <= stride` bytes, inside its mapping.
+            let start = unsafe { base.add(H / 2 * stride) };
+            // SAFETY: `4 * W` readable bytes of the locked plane start at `start`.
+            let row = unsafe { std::slice::from_raw_parts(start, 4 * W) };
+            let cb: Vec<u16> = row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&[lo, hi, _, _]| u16::from_le_bytes([lo, hi]) >> 6)
+                .collect();
+            // SAFETY: matches the lock above.
+            let unlocked =
+                unsafe { CVPixelBufferUnlockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
+            assert_eq!(unlocked, 0);
+            let _receiver_gone = dtx.send((format, cb));
+        });
+        for p in &packets {
+            decoder.decode(&p.data, p.pts_us).unwrap();
+        }
+        let (format, cb) =
+            drx.recv_timeout(std::time::Duration::from_secs(60)).expect("a decoded frame");
+        assert_eq!(format, Chroma::Full.pixel_format(), "decoded straight to xf44");
+        let swing = cb.windows(2).map(|w| u32::from(w[0].abs_diff(w[1]))).sum::<u32>()
+            / u32::try_from(cb.len() - 1).unwrap();
+        assert!(swing > 360, "Cb alternates 256/768 column by column, mean swing {swing}");
+    }
+
+    /// Fed a 4:2:0 picture, the hardware would quietly encode 4:2:0 under a 4:4:4 profile; the
+    /// session refuses it instead.
+    #[test]
+    fn a_full_chroma_session_refuses_a_subsampled_picture() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let encoder = full_chroma_encoder(tx);
+        let err = encoder.encode(&frame(0), 0, &FrameOptions::default()).unwrap_err();
+        assert!(
+            matches!(err, CodecError::NotFullChroma(f) if f == Chroma::Subsampled.pixel_format()),
+            "{err}"
+        );
+    }
+
+    /// 4:4:4 is an HEVC profile; H.264 has none on this encoder.
+    #[test]
+    fn full_chroma_is_hevc_only() {
+        let config = EncoderConfig {
+            width: u32::try_from(W).unwrap(),
+            height: u32::try_from(H).unwrap(),
+            codec: VideoCodec::H264,
+            fps: 60,
+            bitrate_bps: 2_000_000,
+        };
+        let err = Encoder::with_chroma(config, Chroma::Full, |_packet| {}).unwrap_err();
+        assert!(matches!(err, CodecError::NoFullChroma(VideoCodec::H264)), "{err}");
     }
 
     /// What turning VideoToolbox's output into a packet costs on its callback thread: a 62 KB

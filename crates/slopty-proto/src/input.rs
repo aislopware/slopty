@@ -141,6 +141,20 @@ pub enum MouseButton {
     Forward,
 }
 
+impl MouseButton {
+    /// Its bit in a set of buttons held: left 1, right 2, middle 4, back 8, forward 16.
+    #[must_use]
+    pub const fn bit(self) -> u8 {
+        match self {
+            Self::Left => 1,
+            Self::Right => 1 << 1,
+            Self::Middle => 1 << 2,
+            Self::Back => 1 << 3,
+            Self::Forward => 1 << 4,
+        }
+    }
+}
+
 /// Pointer action.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum MouseAction {

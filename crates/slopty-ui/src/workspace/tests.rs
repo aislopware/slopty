@@ -10,7 +10,7 @@ use gpui::{
     VisualTestContext, point, px, size,
 };
 use slopty_client::layout::{TileRef, WorkerKey};
-use slopty_core::{ClientId, ItemId, SessionId, StreamId};
+use slopty_core::{ClientId, ItemId, SessionId, StreamId, WallMs};
 use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, SemanticMark, Style, TermModes};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{
@@ -19,6 +19,7 @@ use slopty_proto::agent::{
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::screen::{CaptureTarget, ScreenEvent, ScreenRequest};
+use slopty_proto::server::Os;
 use slopty_proto::terminal::{
     Frame, OpenSession, SessionState, SessionSummary, TermEvent, TermRequest,
 };
@@ -95,13 +96,12 @@ fn connect(
 /// A Mac worker that says all is well: every grant, this build's version.
 fn healthy() -> WorkerCaps {
     WorkerCaps {
-        os: slopty_proto::server::Os::MacOs,
+        os: Os::MacOs,
         os_version: "26.5".into(),
         can_capture: true,
         can_inject: true,
-        load: 2.1,
         version: env!("CARGO_PKG_VERSION").into(),
-        ..WorkerCaps::default()
+        ..WorkerCaps::bare(Os::MacOs)
     }
 }
 
@@ -112,6 +112,7 @@ fn hello(name: &str, sessions: Vec<SessionSummary>) -> HelloAck {
         name: name.to_owned(),
         home: String::new(),
         caps: healthy(),
+        load: 2.1,
         sessions,
     }
 }
@@ -124,7 +125,7 @@ fn summary(session: SessionId, cwd: Option<&str>) -> SessionSummary {
         repo: None,
         branch: None,
         changes: None,
-        started_ms: 0,
+        started_ms: WallMs::ZERO,
         cols: 80,
         rows: 24,
         state: SessionState::Running,
@@ -363,7 +364,7 @@ fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
     let text = slopty_proto::file::FileRead::Text {
         text: "# Notes".to_owned(),
         size: 8,
-        modified_ms: 1_000,
+        modified_ms: WallMs::from_millis(1_000),
         final_newline: true,
     };
     let key = studio.key;
@@ -384,10 +385,11 @@ fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
         [ClientMsg::WriteFile {
             path: path.to_owned(),
             text: "x# Notes\n".to_owned(),
-            base_modified_ms: Some(1_000),
+            base_modified_ms: Some(WallMs::from_millis(1_000)),
         }]
     );
-    let saved = slopty_proto::file::WriteResult::Saved { size: 9, modified_ms: 2_000 };
+    let saved =
+        slopty_proto::file::WriteResult::Saved { size: 9, modified_ms: WallMs::from_millis(2_000) };
     view.update_in(cx, |v, _w, cx| v.file_written(key, path, &saved, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_none(), "saved: the dot goes");
@@ -423,7 +425,10 @@ fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mu
     cx.simulate_keystrokes("cmd-t");
     let sent = fake.drain();
     assert!(
-        matches!(sent.as_slice(), [ClientMsg::OpenSession(OpenSession { cwd: None, .. })]),
+        matches!(
+            sent.as_slice(),
+            [ClientMsg::OpenSession { spec: OpenSession { cwd: None, .. }, .. }]
+        ),
         "no shell to inherit from: {sent:?}"
     );
     let session = SessionId::new();
@@ -445,7 +450,7 @@ fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mu
     assert!(
         matches!(
             sent.as_slice(),
-            [ClientMsg::OpenSession(OpenSession { cwd: Some(cwd), command, .. })]
+            [ClientMsg::OpenSession { spec: OpenSession { cwd: Some(cwd), command, .. }, .. }]
                 if cwd == "/tmp/work" && command.is_empty()
         ),
         "{sent:?}"
@@ -455,7 +460,7 @@ fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mu
     assert!(
         matches!(
             sent.as_slice(),
-            [ClientMsg::OpenSession(OpenSession { command, .. })]
+            [ClientMsg::OpenSession { spec: OpenSession { command, .. }, .. }]
                 if command == &[AGENT_COMMAND.to_owned()]
         ),
         "{sent:?}"
@@ -467,6 +472,45 @@ fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mu
         "right of it"
     );
     assert_eq!(focused(&view, cx), Some(second));
+}
+
+/// Keys typed into a program that stopped reading are refused on the worker, and the person
+/// hears it as a notice rather than the log alone; so does an open the worker could not do,
+/// named by where it was asked. Each open goes under a number of its own.
+#[gpui::test]
+fn a_refused_input_and_a_failed_open_are_notices(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let _tile = opens(&view, cx, &fake, session, fake.me, 1);
+    let full = TermEvent::Error(slopty_proto::terminal::TermError::InputFull);
+    view.update_in(cx, |v, _window, cx| v.term_event(session, full, cx));
+    cx.run_until_parked();
+    let notices = view.read_with(cx, WorkspaceView::toast_texts);
+    assert!(
+        notices.iter().any(|n| n.starts_with("The program is not reading its input")),
+        "{notices:?}"
+    );
+
+    cx.simulate_keystrokes("cmd-t");
+    cx.simulate_keystrokes("cmd-t");
+    let requests: Vec<u64> = fake
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::OpenSession { request, .. } => Some(request),
+            _ => None,
+        })
+        .collect();
+    assert!(requests.len() == 2 && requests[0] != requests[1], "{requests:?}");
+    let key = fake.key;
+    view.update_in(cx, |v, _window, cx| v.open_failed(key, "no such directory", cx));
+    cx.run_until_parked();
+    let notices = view.read_with(cx, WorkspaceView::toast_texts);
+    assert!(
+        notices.iter().any(|n| n == "Could not open a terminal on studio: no such directory"),
+        "{notices:?}"
+    );
 }
 
 /// What another client opens lands at the end of the strip that holds that worker's tiles,
@@ -1168,7 +1212,7 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
                 detail: None,
                 attention: true,
                 source: AgentSource::Hook,
-                since_ms: 0,
+                since_ms: WallMs::ZERO,
             },
             cx,
         );
@@ -1193,7 +1237,12 @@ fn the_summaries_seed_the_agents_before_any_event(cx: &mut TestAppContext) {
     let key = WorkerKey::new(7);
     let (waiting, working) = (SessionId::new(), SessionId::new());
     let with = |session, status, source| SessionSummary {
-        agent: Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source, since_ms: 0 }),
+        agent: Some(SessionAgent {
+            kind: AgentKind::ClaudeCode,
+            status,
+            source,
+            since_ms: WallMs::ZERO,
+        }),
         ..summary(session, None)
     };
     let permission = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() });
@@ -1249,7 +1298,7 @@ fn blocked(session: SessionId) -> AgentEvent {
         detail: None,
         attention: true,
         source: AgentSource::Hook,
-        since_ms: 0,
+        since_ms: WallMs::ZERO,
     }
 }
 

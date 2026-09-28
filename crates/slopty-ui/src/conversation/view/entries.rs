@@ -17,6 +17,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px, relative,
 };
 use gpui_kit::component::text::{TextView, TextViewStyle};
+use slopty_core::WallMs;
 use slopty_proto::conversation::{
     Body, Clipped, Compact, Entry, LiveKind, Note, NoteKind, Prompt, ThreadId, ToolCall,
 };
@@ -306,7 +307,7 @@ impl ConversationView {
     }
 
     /// A time of day at the meta size, shown with the row's copy.
-    fn clock_label(&self, at_ms: u64, group: &'static str) -> Option<AnyElement> {
+    fn clock_label(&self, at_ms: WallMs, group: &'static str) -> Option<AnyElement> {
         let s = self.theme.surfaces;
         let touch = self.theme.density == slopty_theme::Density::TOUCH;
         figures::clock(at_ms).map(|time| {
@@ -1190,8 +1191,9 @@ impl ConversationView {
             }
             _ => call.result.as_ref()?.at_ms,
         };
-        let ms = ended.checked_sub(entry.at_ms).filter(|ms| *ms >= 1_000 && entry.at_ms > 0)?;
-        Some(crate::kit::duration(Duration::from_millis(ms)))
+        let took = ended.since(entry.at_ms);
+        (took >= Duration::from_secs(1) && !entry.at_ms.is_zero())
+            .then(|| crate::kit::duration(took))
     }
 
     /// Whether a click on a call's title shows more or less of it.
@@ -1426,10 +1428,8 @@ impl ConversationView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let thinking = self.model.live(&ThreadId::Main).any(|(_, b)| b.kind == LiveKind::Thinking);
-        let since = self.agent.as_ref().map_or(0, |a| a.since_ms);
-        let elapsed = (since > 0).then(|| {
-            crate::kit::duration(Duration::from_millis(super::now_ms().saturating_sub(since)))
-        });
+        let since = self.agent.as_ref().map_or(WallMs::ZERO, |a| a.since_ms);
+        let elapsed = (!since.is_zero()).then(|| crate::kit::duration(WallMs::now().since(since)));
         let written = self
             .model
             .thread(&ThreadId::Main)

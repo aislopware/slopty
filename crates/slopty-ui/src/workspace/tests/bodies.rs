@@ -3,6 +3,7 @@
 //! shows, and the column divider's double-click.
 
 use gpui::{Bounds, MouseButton, MouseDownEvent, MouseUpEvent};
+use slopty_core::WallMs;
 
 use super::*;
 use crate::icons::Status;
@@ -54,7 +55,7 @@ fn the_unsaved_dot_follows_the_title(cx: &mut TestAppContext) {
     let text = slopty_proto::file::FileRead::Text {
         text: "# Notes".to_owned(),
         size: 8,
-        modified_ms: 1_000,
+        modified_ms: WallMs::from_millis(1_000),
         final_newline: true,
     };
     let key = studio.key;

@@ -16,7 +16,8 @@ use slopty_client::server::{ServerEvent, ServerTask};
 use slopty_core::WorkerId;
 use slopty_net::HostAddr;
 use slopty_net::server::ServerLink;
-use slopty_proto::server::{Event, FromServer, Liveness, Refusal, WorkerCaps};
+use slopty_proto::orchestration::Happening;
+use slopty_proto::server::{FromServer, Liveness, Refusal, WorkerCaps};
 use slopty_ui::workspace::WorkerStatus;
 
 use crate::net::DialFailed;
@@ -289,31 +290,52 @@ impl Workspace {
                     self.drop_slot(id, cx);
                 }
             }
-            Change::Event(event) => match *event {
-                Event::Agent { worker, event } => {
+            Change::Load(id) => {
+                let load = self.directory.get(id).map(|w| w.load);
+                if let (Some(load), Some(slot)) = (load, self.slot(id).filter(|s| !s.linked())) {
+                    let key = slot.key;
+                    self.view.update(cx, |v, cx| v.set_worker_load(key, load, cx));
+                }
+            }
+            Change::Event(event) => match event.what {
+                Happening::Agent { worker, event } => {
                     let key = worker_key(worker);
                     self.view.update(cx, |v, cx| v.server_agent_event(key, event, cx));
                 }
-                Event::SessionClosed { session, .. } => {
-                    self.view.update(cx, |v, cx| v.server_session_closed(session, cx));
+                Happening::SessionClosed { term } => {
+                    self.view.update(cx, |v, cx| v.server_session_closed(term.session, cx));
                 }
-                Event::SessionOpened { .. } => {}
+                // The directory carries liveness, and a worker's own link its terminals.
+                Happening::Worker { .. }
+                | Happening::WorkerRemoved { .. }
+                | Happening::SessionOpened { .. }
+                | Happening::SessionExited { .. } => {}
             },
+            Change::Terminals(terminals) => {
+                let agents = terminals
+                    .into_iter()
+                    .filter_map(|(worker, s)| {
+                        Some((worker_key(worker), s.agent.as_ref()?.quiet_event(s.id)))
+                    })
+                    .collect();
+                self.view.update(cx, |v, cx| v.server_agents_replace(agents, cx));
+            }
         }
     }
 
     /// What the directory says each worker can do, for those whose own link is down: a link
     /// that is up says so itself, and more recently.
     fn directory_caps(&self, cx: &mut Context<Self>) {
-        let listed: Vec<(WorkerKey, WorkerCaps)> = self
+        let listed: Vec<(WorkerKey, WorkerCaps, f32)> = self
             .directory
             .workers()
             .filter(|info| self.slot(info.worker).is_some_and(|slot| !slot.linked()))
-            .map(|info| (worker_key(info.worker), info.caps.clone()))
+            .map(|info| (worker_key(info.worker), info.caps.clone(), info.load))
             .collect();
         self.view.update(cx, |v, cx| {
-            for (key, caps) in listed {
+            for (key, caps, load) in listed {
                 v.set_worker_caps(key, caps, cx);
+                v.set_worker_load(key, load, cx);
             }
         });
     }

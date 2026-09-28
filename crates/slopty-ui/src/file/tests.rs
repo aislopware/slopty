@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
+use slopty_core::WallMs;
 
 use super::*;
 
@@ -13,7 +14,12 @@ type Events = Rc<RefCell<Vec<FileViewEvent>>>;
 
 fn text_read(text: &str, newline: bool, modified_ms: u64) -> FileRead {
     let size = u64::try_from(text.len()).unwrap_or(0).saturating_add(u64::from(newline));
-    FileRead::Text { text: text.to_owned(), size, modified_ms, final_newline: newline }
+    FileRead::Text {
+        text: text.to_owned(),
+        size,
+        modified_ms: WallMs::from_millis(modified_ms),
+        final_newline: newline,
+    }
 }
 
 /// A tile for `path` in its own window, its events recorded, drawn once.
@@ -86,7 +92,7 @@ fn cmd_s_sends_the_edit_based_on_the_version_it_started_from(cx: &mut TestAppCon
         events.borrow().as_slice(),
         [FileViewEvent::Save {
             text: "// hi\nfn a() {}\nlet b = 1;\n".to_owned(),
-            base_modified_ms: Some(1_000),
+            base_modified_ms: Some(WallMs::from_millis(1_000)),
         }],
         "the whole text, the file's final newline kept, based on the read"
     );
@@ -96,7 +102,7 @@ fn cmd_s_sends_the_edit_based_on_the_version_it_started_from(cx: &mut TestAppCon
     assert_eq!(events.borrow().len(), 1);
 
     view.update(cx, |v, cx| {
-        v.written(WriteResult::Saved { size: 26, modified_ms: 2_000 }, cx);
+        v.written(WriteResult::Saved { size: 26, modified_ms: WallMs::from_millis(2_000) }, cx);
     });
     view.read_with(cx, |v, _| {
         assert!(!v.dirty() && !v.saving() && v.trouble().is_none(), "saved and clean");
@@ -117,7 +123,10 @@ fn a_file_without_a_final_newline_is_saved_without_one(cx: &mut TestAppContext) 
     view.update(cx, FileView::save);
     assert_eq!(
         events.borrow().as_slice(),
-        [FileViewEvent::Save { text: "zone".to_owned(), base_modified_ms: Some(5) }]
+        [FileViewEvent::Save {
+            text: "zone".to_owned(),
+            base_modified_ms: Some(WallMs::from_millis(5))
+        }]
     );
 }
 
@@ -153,7 +162,9 @@ fn reload_drops_the_edit_for_the_disk_s_text(cx: &mut TestAppContext) {
     types(&view, cx, "mine ");
     cx.simulate_keystrokes("cmd-s");
     // The worker refused: the file changed since the read.
-    view.update(cx, |v, cx| v.written(WriteResult::Conflict { modified_ms: 1_700 }, cx));
+    view.update(cx, |v, cx| {
+        v.written(WriteResult::Conflict { modified_ms: WallMs::from_millis(1_700) }, cx);
+    });
     view.read_with(cx, |v, _| assert_eq!(v.trouble(), Some(&Trouble::Conflict)));
     let id = view.read_with(cx, |v, _| *v.id().as_uuid());
     click(cx, format!("file-reload-{id}"));
@@ -308,7 +319,7 @@ fn a_twenty_thousand_line_file_stays_editable(cx: &mut TestAppContext) {
         _ => None,
     });
     let (saved, base) = saved.unwrap_or_default();
-    assert_eq!(base, Some(5));
+    assert_eq!(base, Some(WallMs::from_millis(5)));
     assert_eq!(saved.lines().count(), 20_001);
     assert!(saved.ends_with("// padding to a source-like width\n"), "the final newline");
     assert_eq!(saved.lines().nth(19_990), Some("// edited near the end"));

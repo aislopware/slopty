@@ -12,10 +12,10 @@
 //!   session, below the session streams) carries [`conversation::ConversationEvent`]s.
 //! * **Tunnel streams** — client-opened bidirectional streams after the control stream, one per
 //!   forwarded TCP connection, opening with [`transfer::TunnelOpen`].
-//! * **Media datagrams** — unreliable QUIC datagrams with a fixed [`media::MediaHeader`] followed
-//!   by a fragment of an encoded video frame, an audio packet, or a cursor update.
-//! * **Echo copies** — a keystroke's input request and the small frame that answers it also go once
-//!   as a datagram each ([`datagram`]), taken only in order, so a lost packet costs a datagram's
+//! * **Datagrams** — unreliable QUIC datagrams, each opening with one [`datagram::Channel`] byte.
+//!   Media is a fixed [`media::MediaHeader`] followed by a fragment of an encoded video frame, an
+//!   audio packet, or a cursor update. A keystroke's input request and the small frame that answers
+//!   it also go once as a datagram each, taken only in order, so a lost packet costs a datagram's
 //!   trip rather than QUIC's probe timeout.
 //! * **The worker's control socket** — local only, between the worker and the CLI, the hook relay
 //!   and the app on the same Mac: one line of JSON each way ([`ctl`]).
@@ -37,6 +37,7 @@ pub mod input;
 pub mod items;
 pub mod media;
 pub mod orchestration;
+pub mod ptyd;
 pub mod screen;
 pub mod server;
 pub mod tailnet;
@@ -44,7 +45,11 @@ pub mod terminal;
 pub mod transfer;
 
 use serde::{Deserialize, Serialize};
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
+
+/// A caller's number for one request, echoed in its answer so the caller takes its own answer
+/// and not another's. Unique per link and direction.
+pub type RequestId = u64;
 
 /// Everything a client sends on the control stream.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -58,8 +63,15 @@ pub enum ClientMsg {
         /// The request.
         req: terminal::TermRequest,
     },
-    /// Create a new session; the worker answers with `WorkerMsg::SessionOpened`.
-    OpenSession(terminal::OpenSession),
+    /// Create a new session. The worker answers this client with `WorkerMsg::SessionOpened`
+    /// or `WorkerMsg::Failed` under `request`, and tells every client of the session with
+    /// `WorkerMsg::SessionChanged`.
+    OpenSession {
+        /// Echoed in the answer.
+        request: RequestId,
+        /// The session wanted.
+        spec: terminal::OpenSession,
+    },
     /// Item registry operation (worker is authoritative; this is a proposal).
     Items(items::ItemOp),
     /// Remote window request.
@@ -107,7 +119,7 @@ pub enum ClientMsg {
         text: String,
         /// The modification time of the version the edit started from; the worker refuses
         /// with a conflict when the file on disk is newer. `None` writes regardless.
-        base_modified_ms: Option<u64>,
+        base_modified_ms: Option<WallMs>,
     },
     /// Clipboard sync.
     Clip(transfer::ClipMsg),
@@ -129,7 +141,7 @@ impl ClientMsg {
         match self {
             Self::Hello(_) => "Hello",
             Self::Term { .. } => "Term",
-            Self::OpenSession(_) => "OpenSession",
+            Self::OpenSession { .. } => "OpenSession",
             Self::Items(_) => "Items",
             Self::Screen(_) => "Screen",
             Self::Ping { .. } => "Ping",
@@ -152,8 +164,13 @@ impl ClientMsg {
 pub enum WorkerMsg {
     /// Reply to `Hello`.
     HelloAck(handshake::HelloAck),
-    /// A session now exists (in reply to `OpenSession`, or created by another client).
-    SessionOpened(terminal::SessionSummary),
+    /// The answer to this client's `ClientMsg::OpenSession`: the session it asked for.
+    SessionOpened {
+        /// The request's number.
+        request: RequestId,
+        /// The new session.
+        summary: terminal::SessionSummary,
+    },
     /// A session is gone.
     SessionClosed {
         /// Which one.
@@ -224,7 +241,7 @@ pub enum WorkerMsg {
     /// time it changes. Never sent over a link that is not on a tailnet.
     Path(tailnet::LinkPath),
     /// What the worker can do changed since [`handshake::HelloAck::caps`]: a permission
-    /// granted or taken, a display attached, the load moved.
+    /// granted or taken, a display attached.
     Caps(server::WorkerCaps),
     /// A permission prompt of a session this client follows, or its end.
     Permission(conversation::PermissionEvent),
@@ -235,6 +252,20 @@ pub enum WorkerMsg {
         /// What was there.
         listing: folder::Listing,
     },
+    /// A session exists and is now as summarised: new (whoever opened it), or changed (its
+    /// program exited, its directory, branch or size moved).
+    SessionChanged(terminal::SessionSummary),
+    /// A request this client numbered failed.
+    Failed {
+        /// The request's number.
+        request: RequestId,
+        /// What kind of failure.
+        code: orchestration::ErrorCode,
+        /// For a person to read.
+        message: String,
+    },
+    /// The worker's one-minute load average moved since [`handshake::HelloAck::load`].
+    Load(f32),
 }
 
 impl WorkerMsg {
@@ -243,7 +274,7 @@ impl WorkerMsg {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::HelloAck(_) => "HelloAck",
-            Self::SessionOpened(_) => "SessionOpened",
+            Self::SessionOpened { .. } => "SessionOpened",
             Self::SessionClosed { .. } => "SessionClosed",
             Self::Term { .. } => "Term",
             Self::Items(_) => "Items",
@@ -261,6 +292,9 @@ impl WorkerMsg {
             Self::Caps(_) => "Caps",
             Self::Permission(_) => "Permission",
             Self::Folder { .. } => "Folder",
+            Self::SessionChanged(_) => "SessionChanged",
+            Self::Failed { .. } => "Failed",
+            Self::Load(_) => "Load",
         }
     }
 }

@@ -4,20 +4,17 @@
 //! it (requests) goes through a queue to its writer. A client or agent link gets the fleet's
 //! state (the directory, then every terminal and the agent in it), then every change, and the
 //! answers to its requests, each request dispatched on a task of its own so a long `WaitFor`
-//! holds up nothing behind it. A link that falls behind the changes gets the state again, with
-//! what it was told that no longer holds taken back.
+//! holds up nothing behind it. A link that falls behind the changes gets the state again, which
+//! replaces everything it was told before.
 
-use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
-use slopty_core::{SessionId, WorkerId};
 use slopty_net::NetError;
 use slopty_net::framed::{FramedRecv, FramedSend};
 use slopty_net::server::{AcceptedLink, ServerListener};
-use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus};
 use slopty_proto::codec::CodecError;
 use slopty_proto::orchestration::{ErrorCode, Outcome};
-use slopty_proto::server::{Event, FromServer, Role, ToServer};
+use slopty_proto::server::{FromServer, Role, ToServer};
 use slopty_tailnet::LocalApi;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
@@ -164,13 +161,11 @@ async fn client(hub: Hub, link: AcceptedLink, name: String) {
     tracing::info!(%name, %remote, "client connected");
     // Subscribed before the state is read, so no change falls between the two.
     let mut changes = hub.subscribe();
-    let mut told = Told::default();
     let welcome = FromServer::Welcome { name: hub.name().to_owned() };
     if tx.send(&welcome).await.is_err() {
         return;
     }
-    let state = told.resync(&hub);
-    if tell(&mut tx, &mut told, state).await.is_err() {
+    if tell(&mut tx, state(&hub)).await.is_err() {
         return;
     }
     let (out, mut replies) = mpsc::channel(LINK_QUEUE);
@@ -187,12 +182,12 @@ async fn client(hub: Hub, link: AcceptedLink, name: String) {
                 Ok(change) => vec![change],
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     tracing::debug!(%name, missed, "client lagged; sending the state again");
-                    told.resync(&hub)
+                    state(&hub)
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
         };
-        if let Err(e) = tell(&mut tx, &mut told, msgs).await {
+        if let Err(e) = tell(&mut tx, msgs).await {
             tracing::info!(%name, %remote, error = %e, "client link write failed");
             break;
         }
@@ -227,105 +222,32 @@ async fn read_requests(
     }
 }
 
-/// Send `msgs` in order, noting each as told.
-async fn tell(
-    tx: &mut FramedSend<FromServer>,
-    told: &mut Told,
-    msgs: Vec<FromServer>,
-) -> Result<(), NetError> {
+/// Send `msgs` in order.
+async fn tell(tx: &mut FramedSend<FromServer>, msgs: Vec<FromServer>) -> Result<(), NetError> {
     for msg in msgs {
-        told.note(&msg);
         send_to_client(tx, msg).await?;
     }
     Ok(())
 }
 
-/// The agents a link's client was last told of, so the state sent again after it lagged can
-/// take back each one that ended or left its terminal in the changes it never heard.
-#[derive(Debug, Default)]
-struct Told {
-    agents: HashMap<(WorkerId, SessionId), (AgentKind, AgentSource)>,
-}
-
-impl Told {
-    fn note(&mut self, msg: &FromServer) {
-        match msg {
-            FromServer::Event(Event::Agent { worker, event }) => {
-                let key = (*worker, event.session);
-                if event.status == AgentStatus::None {
-                    self.agents.remove(&key);
-                } else {
-                    self.agents.insert(key, (event.kind, event.source));
-                }
-            }
-            FromServer::Event(Event::SessionClosed { worker, session }) => {
-                self.agents.remove(&(*worker, *session));
-            }
-            _other => {}
-        }
-    }
-
-    /// The state from the registry: the directory, then each terminal and its agent, then the
-    /// end of every agent this client was told of that the registry no longer has. Quiet: a
-    /// state sent again raises no attention of its own.
-    fn resync(&self, hub: &Hub) -> Vec<FromServer> {
-        let (directory, terminals) = hub.state();
-        let open: HashSet<(WorkerId, SessionId)> =
-            terminals.iter().map(|(worker, s)| (*worker, s.id)).collect();
-        let mut msgs = vec![FromServer::Directory(directory)];
-        let mut agents = HashSet::new();
-        for (worker, summary) in terminals {
-            let (session, agent) = (summary.id, summary.agent.clone());
-            msgs.push(FromServer::Event(Event::SessionOpened { worker, summary }));
-            if let Some(agent) = agent {
-                agents.insert((worker, session));
-                let event = quiet(session, agent.kind, agent.status, agent.source, agent.since_ms);
-                msgs.push(FromServer::Event(Event::Agent { worker, event }));
-            }
-        }
-        for (&(worker, session), &(kind, source)) in &self.agents {
-            if agents.contains(&(worker, session)) {
-                continue;
-            }
-            msgs.push(FromServer::Event(if open.contains(&(worker, session)) {
-                Event::Agent { worker, event: quiet(session, kind, AgentStatus::None, source, 0) }
-            } else {
-                Event::SessionClosed { worker, session }
-            }));
-        }
-        msgs
-    }
-}
-
-const fn quiet(
-    session: SessionId,
-    kind: AgentKind,
-    status: AgentStatus,
-    source: AgentSource,
-    since_ms: u64,
-) -> AgentEvent {
-    AgentEvent {
-        session,
-        kind,
-        status,
-        agent_session: None,
-        detail: None,
-        attention: false,
-        source,
-        since_ms,
-    }
+/// The fleet's state: the directory, then every terminal and the agent in it.
+fn state(hub: &Hub) -> Vec<FromServer> {
+    let (directory, terminals) = hub.state();
+    vec![FromServer::Directory(directory), FromServer::Terminals(terminals)]
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
+    use slopty_core::{SessionId, WallMs, WorkerId};
     use slopty_net::HostAddr;
     use slopty_net::admission::Admission;
     use slopty_net::client::bind_client;
     use slopty_net::server::connect;
-    use slopty_proto::agent::BlockReason;
-    use slopty_proto::orchestration::{EventFilter, Verb};
+    use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
+    use slopty_proto::orchestration::{EventFilter, Happening, HubEvent, Verb};
     use slopty_proto::terminal::CloseReason;
 
     use super::*;
@@ -362,25 +284,37 @@ mod tests {
     }
 
     fn report(session: SessionId, status: AgentStatus) -> ToServer {
-        ToServer::Agent(quiet(session, AgentKind::ClaudeCode, status, AgentSource::Hook, 0))
+        let agent = SessionAgent {
+            kind: AgentKind::ClaudeCode,
+            status,
+            source: AgentSource::Hook,
+            since_ms: WallMs::ZERO,
+        };
+        ToServer::Agent(agent.quiet_event(session))
     }
 
     /// What a client shows of the agents the server reports, as the app keeps it: the status
-    /// of each session with one, taken off when the agent leaves or the terminal closes.
-    fn apply(shown: &mut HashMap<SessionId, AgentStatus>, told: &mut Told, msgs: Vec<FromServer>) {
+    /// of each session with one, all of them replaced by a snapshot of the terminals, taken
+    /// off when the agent leaves or the terminal closes.
+    fn apply(shown: &mut HashMap<SessionId, AgentStatus>, msgs: Vec<FromServer>) {
         for msg in msgs {
-            told.note(&msg);
             match msg {
-                FromServer::Event(Event::Agent { event, .. })
+                FromServer::Terminals(terminals) => {
+                    shown.clear();
+                    shown.extend(
+                        terminals.into_iter().filter_map(|(_, s)| Some((s.id, s.agent?.status))),
+                    );
+                }
+                FromServer::Event(HubEvent { what: Happening::Agent { event, .. }, .. })
                     if event.status == AgentStatus::None =>
                 {
                     shown.remove(&event.session);
                 }
-                FromServer::Event(Event::Agent { event, .. }) => {
+                FromServer::Event(HubEvent { what: Happening::Agent { event, .. }, .. }) => {
                     shown.insert(event.session, event.status);
                 }
-                FromServer::Event(Event::SessionClosed { session, .. }) => {
-                    shown.remove(&session);
+                FromServer::Event(HubEvent { what: Happening::SessionClosed { term }, .. }) => {
+                    shown.remove(&term.session);
                 }
                 _other => {}
             }
@@ -388,11 +322,13 @@ mod tests {
     }
 
     /// A client gets every agent's status when it connects, and after it fell behind the
-    /// changes it gets them again with what it no longer should show taken back: an agent that
-    /// left, a terminal that closed, one that opened, a status that moved.
+    /// changes the state again replaces all it was shown: an agent that left, a terminal that
+    /// closed, one that opened, a status that moved. A client that kept up reads the same from
+    /// the pushed events, which are the log's own.
     #[tokio::test]
     async fn a_client_gets_the_agents_on_connect_and_again_after_it_lagged() {
         let hub = Hub::new("server".to_owned(), Vec::new());
+        let mut pushed = hub.subscribe();
         let worker = WorkerId::new();
         let [left, closed, moved, opened] = [(); 4].map(|()| SessionId::new());
         let (tx, _rx) = mpsc::channel(8);
@@ -404,31 +340,50 @@ mod tests {
             lease.handle(report(session, blocked.clone()));
         }
 
-        let (mut shown, mut told) = (HashMap::new(), Told::default());
-        let state = told.resync(&hub);
-        assert!(matches!(state.first(), Some(FromServer::Directory(list)) if list.len() == 1));
-        apply(&mut shown, &mut told, state);
+        let mut shown = HashMap::new();
+        let first = state(&hub);
+        assert!(matches!(first.first(), Some(FromServer::Directory(list)) if list.len() == 1));
+        apply(&mut shown, first);
         let all_blocked: HashMap<_, _> =
             [left, closed, moved].into_iter().map(|s| (s, blocked.clone())).collect();
         assert_eq!(shown, all_blocked, "on connect");
+        let mut kept_up = shown.clone();
+        while pushed.try_recv().is_ok() {}
+        let cursor = read_log(&hub, None).await.1;
 
         // Changes the lagging client never hears.
         lease.handle(report(left, AgentStatus::None));
         lease.handle(ToServer::SessionClosed { session: closed, reason: CloseReason::Exited });
         lease.handle(report(moved, AgentStatus::Working));
-        lease.handle(ToServer::SessionOpened(summary(opened)));
+        lease.handle(ToServer::SessionChanged(summary(opened)));
         lease.handle(report(opened, blocked.clone()));
 
-        let state = told.resync(&hub);
-        apply(&mut shown, &mut told, state);
+        apply(&mut shown, state(&hub));
         let now: HashMap<_, _> = [(moved, AgentStatus::Working), (opened, blocked)].into();
         assert_eq!(shown, now, "after the lag");
-        assert!(
-            told.resync(&hub)
-                .iter()
-                .all(|m| !matches!(m, FromServer::Event(Event::SessionClosed { .. }))),
-            "nothing left to take back"
-        );
+
+        let mut events = Vec::new();
+        while let Ok(msg) = pushed.try_recv() {
+            events.push(msg);
+        }
+        let pushed_events: Vec<HubEvent> = events
+            .iter()
+            .filter_map(|m| match m {
+                FromServer::Event(e) => Some(e.clone()),
+                _other => None,
+            })
+            .collect();
+        assert_eq!(pushed_events.len(), 5, "every change pushed once: {pushed_events:?}");
+        assert_eq!(read_log(&hub, Some(cursor)).await.0, pushed_events, "the log's own events");
+        apply(&mut kept_up, events);
+        assert_eq!(kept_up, now, "the pushed events say the same");
+    }
+
+    async fn read_log(hub: &Hub, since: Option<u64>) -> (Vec<HubEvent>, u64) {
+        match hub.dispatch(Verb::Events { since, timeout_ms: 0, filter: EventFilter::All }).await {
+            Outcome::Events { events, next, .. } => (events, next),
+            other => panic!("not events: {other:?}"),
+        }
     }
 
     async fn until(what: &str, done: impl Fn() -> bool) {

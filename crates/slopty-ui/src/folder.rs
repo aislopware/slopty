@@ -626,7 +626,9 @@ impl FolderView {
         } else {
             String::new()
         };
-        let age = age(entry.modified_ms, now).map(crate::palette::age_label).unwrap_or_default();
+        let age = age(entry.modified_ms.as_millis(), now)
+            .map(crate::palette::age_label)
+            .unwrap_or_default();
         let column = |text: String, width: f32| {
             crate::kit::meta(crate::kit::tabular(div()), theme)
                 .flex_none()
@@ -954,6 +956,8 @@ pub fn count_label(n: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    use slopty_core::WallMs;
+
     use super::*;
 
     #[test]
@@ -980,7 +984,7 @@ mod tests {
                 hidden,
                 size: 6,
                 items: None,
-                modified_ms: 0,
+                modified_ms: WallMs::ZERO,
             };
             let plain = RowInk::of(&theme, &file("README.md", false), false);
             let hidden = RowInk::of(&theme, &file(".env", true), false);

@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use slopty_core::WallMs;
 use slopty_proto::conversation::{
     Body, Change, Clipped, ConversationEvent, Entry, Image, Live, LiveId, LiveKind, Meters, Origin,
     Output, Part, Task, TextRef, ThreadId, Turn,
@@ -135,7 +136,7 @@ pub struct Pending {
     /// It was sent while the agent worked: Claude Code holds it until the turn ends.
     pub queued: bool,
     /// When it was sent, in ms since the Unix epoch by this client's clock.
-    pub sent_ms: u64,
+    pub sent_ms: WallMs,
 }
 
 /// What [`Model::apply`] changed.
@@ -378,13 +379,13 @@ impl Model {
     }
 
     /// A message the composer sent. `queued` when the agent was working.
-    pub fn sent(&mut self, text: String, queued: bool, sent_ms: u64) {
+    pub fn sent(&mut self, text: String, queued: bool, sent_ms: WallMs) {
         self.pending.push(Pending { text, queued, sent_ms });
     }
 
     /// Forget pending messages sent before `before_ms` that never showed up (a slash command
     /// Claude Code ran without recording a prompt). Returns whether any went.
-    pub fn expire_pending(&mut self, before_ms: u64) -> bool {
+    pub fn expire_pending(&mut self, before_ms: WallMs) -> bool {
         let was = self.pending.len();
         self.pending.retain(|p| p.sent_ms >= before_ms);
         was != self.pending.len()
@@ -486,6 +487,7 @@ pub enum Expanded<'a> {
 
 #[cfg(test)]
 mod tests {
+    use slopty_core::WallMs;
     use slopty_proto::conversation::{Prompt, ResultStatus, ToolCall, ToolDetail, ToolResult};
 
     use super::*;
@@ -497,7 +499,7 @@ mod tests {
     fn prompt(id: &str, text: &str, command: Option<&str>) -> Entry {
         Entry {
             id: id.to_owned(),
-            at_ms: 1,
+            at_ms: WallMs::from_millis(1),
             body: Body::Prompt(Prompt {
                 text: clipped(text),
                 images: Vec::new(),
@@ -507,7 +509,7 @@ mod tests {
     }
 
     fn text(id: &str, words: &str) -> Entry {
-        Entry { id: id.to_owned(), at_ms: 2, body: Body::Text(clipped(words)) }
+        Entry { id: id.to_owned(), at_ms: WallMs::from_millis(2), body: Body::Text(clipped(words)) }
     }
 
     fn upsert(entry: Entry) -> Change {
@@ -556,7 +558,7 @@ mod tests {
         model.apply(ConversationEvent::Current);
         let call = |result: Option<ToolResult>| Entry {
             id: "toolu_1".to_owned(),
-            at_ms: 3,
+            at_ms: WallMs::from_millis(3),
             body: Body::Tool(Box::new(ToolCall {
                 name: "Bash".to_owned(),
                 detail: ToolDetail::Other { input: clipped("{}") },
@@ -571,7 +573,7 @@ mod tests {
         model.apply(ConversationEvent::Changes(vec![upsert(call(Some(ToolResult {
             status: ResultStatus::Ok,
             text: None,
-            at_ms: 4,
+            at_ms: WallMs::from_millis(4),
             images: Vec::new(),
         })))]));
         assert_eq!(ids(&model), ["p1", "toolu_1", "t1"], "the result lands on its call");
@@ -584,7 +586,10 @@ mod tests {
             id: "toolu_1".to_owned(),
         }]));
         assert_eq!(ids(&model), ["p1", "t1"]);
-        assert_eq!(model.thread(&ThreadId::Main).unwrap().entry("t1").map(|e| e.at_ms), Some(2));
+        assert_eq!(
+            model.thread(&ThreadId::Main).unwrap().entry("t1").map(|e| e.at_ms),
+            Some(WallMs::from_millis(2))
+        );
     }
 
     /// A message sent from the composer shows until the transcript records its prompt:
@@ -593,9 +598,9 @@ mod tests {
     fn a_sent_message_waits_until_its_prompt_is_recorded() {
         let mut model = Model::default();
         model.apply(ConversationEvent::Current);
-        model.sent("first".to_owned(), false, 10);
-        model.sent("/compact keep it short".to_owned(), true, 11);
-        model.sent("!ls".to_owned(), true, 12);
+        model.sent("first".to_owned(), false, WallMs::from_millis(10));
+        model.sent("/compact keep it short".to_owned(), true, WallMs::from_millis(11));
+        model.sent("!ls".to_owned(), true, WallMs::from_millis(12));
         assert_eq!(model.pending().len(), 3);
         model.apply(ConversationEvent::Changes(vec![upsert(prompt("p1", "first", None))]));
         assert_eq!(model.pending().len(), 2);
@@ -607,9 +612,12 @@ mod tests {
         assert_eq!(model.pending().iter().map(|p| p.text.as_str()).collect::<Vec<_>>(), ["!ls"]);
         model.apply(ConversationEvent::Changes(vec![upsert(prompt("p3", "ls", Some("!")))]));
         assert!(model.pending().is_empty());
-        model.sent("/help".to_owned(), false, 20);
-        assert!(!model.expire_pending(20), "not older than the bound");
-        assert!(model.expire_pending(21), "a command that never shows up goes");
+        model.sent("/help".to_owned(), false, WallMs::from_millis(20));
+        assert!(!model.expire_pending(WallMs::from_millis(20)), "not older than the bound");
+        assert!(
+            model.expire_pending(WallMs::from_millis(21)),
+            "a command that never shows up goes"
+        );
     }
 
     /// Live blocks start, grow and clear by id; a replay clears them all.

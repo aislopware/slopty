@@ -7,10 +7,11 @@ use std::rc::Rc;
 use gpui::{ExternalPaths, FileDropEvent};
 use slopty_client::remote::Remote;
 use slopty_client::tunnel::Forward;
+use slopty_client::xfer::XferError;
 use slopty_core::XferId;
 use slopty_platform::pasteboard::{Memory, Pasteboard, TEXT_UTI};
 use slopty_proto::orchestration::Port;
-use slopty_proto::transfer::{ClipItem, ClipMsg, Dest, Offer, Peer, XferMsg};
+use slopty_proto::transfer::{ClipFormat, ClipItem, ClipMsg, Dest, Offer, Peer, XferMsg};
 
 use super::*;
 use crate::conversation::ConversationView;
@@ -21,7 +22,7 @@ use crate::conversation::composer::Attachment;
 enum Call {
     Upload(XferId, Vec<PathBuf>, Dest),
     Cancel(XferId),
-    SendClip(u64, String, Vec<u8>),
+    SendClip(u64, ClipFormat, Vec<u8>),
     Forward(u16),
 }
 
@@ -43,23 +44,24 @@ impl Remote for Recorder {
         self.0.send(Call::Cancel(xfer)).unwrap();
     }
 
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, String> {
-        let name = path.rsplit('/').next().ok_or("no name")?;
+    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+        let name =
+            path.rsplit('/').next().ok_or_else(|| XferError::Worker("no name".to_owned()))?;
         let file = into.join(name);
-        std::fs::write(&file, &path).map_err(|e| e.to_string())?;
+        std::fs::write(&file, &path).map_err(|e| XferError::Worker(e.to_string()))?;
         Ok(vec![file])
     }
 
-    fn clip_data(&self, _generation: u64, uti: &str, _wait: Duration) -> Option<Vec<u8>> {
-        match uti {
-            "public.png" => Some(b"PNG".to_vec()),
-            "public.file-url" => Some(WORKER_FILES.to_vec()),
+    fn clip_data(&self, _generation: u64, format: ClipFormat, _wait: Duration) -> Option<Vec<u8>> {
+        match format {
+            ClipFormat::Png => Some(b"PNG".to_vec()),
+            ClipFormat::FileUrls => Some(WORKER_FILES.to_vec()),
             _ => None,
         }
     }
 
-    fn send_clip(&self, generation: u64, uti: String, bytes: Vec<u8>) {
-        self.0.send(Call::SendClip(generation, uti, bytes)).unwrap();
+    fn send_clip(&self, generation: u64, format: ClipFormat, bytes: Vec<u8>) {
+        self.0.send(Call::SendClip(generation, format, bytes)).unwrap();
     }
 
     fn forward(&self, port: u16) -> Option<u16> {
@@ -143,7 +145,7 @@ fn worker_copied_files(generation: u64) -> Offer {
         origin: Peer::Worker(slopty_core::WorkerId::new()),
         generation,
         items: vec![ClipItem {
-            uti: "public.file-url".to_owned(),
+            format: ClipFormat::FileUrls,
             size: WORKER_FILES.len() as u64,
             hash: crate::clipboard::digest(WORKER_FILES),
             inline: None,
@@ -166,7 +168,7 @@ fn files_copied_here_paste_into_a_shell_as_a_drop(cx: &mut TestAppContext) {
     opens(&view, cx, &studio, shell, studio.me, 1);
     let offer = offers(&studio.drain()).pop().expect("announced on focus");
     assert_eq!(offer.items.len(), 1);
-    assert_eq!(offer.items[0].uti, "public.file-url", "the URLs alone");
+    assert_eq!(offer.items[0].format, ClipFormat::FileUrls, "the URLs alone");
 
     paste_in(&view, cx, shell);
     let Call::Upload(xfer, files, dest) = calls.try_recv().expect("an upload") else {
@@ -375,13 +377,13 @@ fn offers_land_as_promises_and_fetches_are_answered(cx: &mut TestAppContext) {
         generation: 3,
         items: vec![
             ClipItem {
-                uti: "public.png".to_owned(),
+                format: ClipFormat::Png,
                 size: 3,
                 hash: crate::clipboard::digest(b"PNG"),
                 inline: None,
             },
             ClipItem {
-                uti: TEXT_UTI.to_owned(),
+                format: ClipFormat::Text,
                 size: 2,
                 hash: crate::clipboard::digest(b"hi"),
                 inline: Some(b"hi".to_vec()),
@@ -397,19 +399,19 @@ fn offers_land_as_promises_and_fetches_are_answered(cx: &mut TestAppContext) {
     let shell = SessionId::new();
     opens(&view, cx, &studio, shell, studio.me, 1);
     let mine = offers(&studio.drain()).pop().expect("announced on focus");
-    let fetch = ClipMsg::Fetch { generation: mine.generation, uti: TEXT_UTI.to_owned() };
+    let fetch = ClipMsg::Fetch { generation: mine.generation, format: ClipFormat::Text };
     view.update_in(cx, |v, _window, _cx| v.clip_message(key, fetch));
     match calls.try_recv().unwrap() {
-        Call::SendClip(generation, uti, bytes) => {
+        Call::SendClip(generation, format, bytes) => {
             assert_eq!(
-                (generation, uti.as_str(), bytes.as_slice()),
-                (mine.generation, TEXT_UTI, &b"mine"[..])
+                (generation, format, bytes.as_slice()),
+                (mine.generation, ClipFormat::Text, &b"mine"[..])
             );
         }
         other => panic!("{other:?}"),
     }
     let stale =
-        ClipMsg::Fetch { generation: mine.generation.wrapping_add(5), uti: TEXT_UTI.to_owned() };
+        ClipMsg::Fetch { generation: mine.generation.wrapping_add(5), format: ClipFormat::Text };
     view.update_in(cx, |v, _window, _cx| v.clip_message(key, stale));
     let sent = studio.drain();
     assert!(matches!(sent.as_slice(), [ClientMsg::Clip(ClipMsg::Unavailable { .. })]), "{sent:?}");
@@ -424,16 +426,16 @@ impl Remote for Serves {
 
     fn cancel(&self, _xfer: XferId) {}
 
-    fn download(&self, _path: String, _into: PathBuf) -> Result<Vec<PathBuf>, String> {
-        Err("clipboard only".to_owned())
+    fn download(&self, _path: String, _into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+        Err(XferError::Worker("clipboard only".to_owned()))
     }
 
-    fn clip_data(&self, _generation: u64, _uti: &str, _wait: Duration) -> Option<Vec<u8>> {
+    fn clip_data(&self, _generation: u64, _format: ClipFormat, _wait: Duration) -> Option<Vec<u8>> {
         self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(self.0.to_vec())
     }
 
-    fn send_clip(&self, _generation: u64, _uti: String, _bytes: Vec<u8>) {}
+    fn send_clip(&self, _generation: u64, _format: ClipFormat, _bytes: Vec<u8>) {}
 
     fn forward(&self, _port: u16) -> Option<u16> {
         None
@@ -453,7 +455,7 @@ fn a_promise_is_fetched_over_the_link_the_worker_has_now(cx: &mut TestAppContext
         origin: Peer::Worker(slopty_core::WorkerId::new()),
         generation: 3,
         items: vec![ClipItem {
-            uti: "public.png".to_owned(),
+            format: ClipFormat::Png,
             size: 3,
             hash: crate::clipboard::digest(b"PNG"),
             inline: None,

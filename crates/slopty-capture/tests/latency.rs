@@ -16,6 +16,8 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    use slopty_core::DisplayId;
+
     /// Block this test thread: it waits for another process's window or for a stream to settle.
     #[expect(clippy::disallowed_methods, reason = "a test thread, not library code")]
     fn pause(d: Duration) {
@@ -439,8 +441,8 @@ mod tests {
             .expect("window entirely on one display");
         let display_id =
             slopty_capture::display_enclosing(&slopty_capture::window_bounds(id).unwrap()).unwrap();
-        let display =
-            Target::resolve(&content, CaptureTarget::Display(display_id)).expect("display target");
+        let display = Target::resolve(&content, CaptureTarget::Display(DisplayId(display_id)))
+            .expect("display target");
         eprintln!("window {window:?}\ncrop {crop:?}\ndisplay {display:?}");
         eprintln!("| path | depth | frames | p50 / p95 / max | display→pts | gaps |");
         eprintln!("| --- | --- | --- | --- | --- | --- |");

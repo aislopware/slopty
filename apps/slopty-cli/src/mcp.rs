@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 use slopty_core::WorkerId;
 use slopty_net::client::bind_client;
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason, SessionAgent};
-use slopty_proto::orchestration::TermRef;
-use slopty_proto::server::{Event, FromServer, Role};
+use slopty_proto::orchestration::{Happening, HubEvent, TermRef};
+use slopty_proto::server::{FromServer, Role};
 use slopty_tools::mcp::Handler;
 use slopty_tools::view;
 use tokio::sync::broadcast;
@@ -86,10 +86,19 @@ async fn forward_needs(mut pushed: broadcast::Receiver<FromServer>, peer: Peer<R
             FromServer::Worker(w) => {
                 names.insert(w.worker, w.name);
             }
-            FromServer::Event(Event::SessionClosed { worker, session }) => {
-                last.remove(&TermRef { worker, session });
+            // The state after a lag: what it shows needs no note, only a change after it does.
+            FromServer::Terminals(terminals) => {
+                last = terminals
+                    .into_iter()
+                    .filter_map(|(worker, s)| {
+                        Some((TermRef { worker, session: s.id }, s.agent?.status))
+                    })
+                    .collect();
             }
-            FromServer::Event(Event::Agent { worker, event }) => {
+            FromServer::Event(HubEvent { what: Happening::SessionClosed { term }, .. }) => {
+                last.remove(&term);
+            }
+            FromServer::Event(HubEvent { what: Happening::Agent { worker, event }, .. }) => {
                 let term = TermRef { worker, session: event.session };
                 let before = last.insert(term, event.status.clone());
                 let name = names.get(&worker).map(String::as_str);
@@ -178,7 +187,7 @@ mod tests {
             detail: Some("Waiting for permission: Bash".to_owned()),
             attention: true,
             source: AgentSource::Hook,
-            since_ms: 0,
+            since_ms: slopty_core::WallMs::ZERO,
         }
     }
 

@@ -24,7 +24,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
-use slopty_core::XferId;
+use slopty_core::{WallMs, XferId};
 use slopty_proto::transfer::{Dest, Hash, MAX_FILES, MODE_BITS, partial_of, relative_path};
 use tokio::sync::{Notify, watch};
 
@@ -155,7 +155,7 @@ pub const REMEMBERED_SENDS: usize = 4096;
 #[derive(Debug, Default)]
 struct Sent {
     /// By path on this worker: the size and modification time sent, and when (a sequence).
-    files: HashMap<PathBuf, ((u64, u64), u64)>,
+    files: HashMap<PathBuf, ((u64, WallMs), u64)>,
     next: u64,
 }
 
@@ -551,13 +551,12 @@ impl Receiving {
 
     /// The file is whole: give it `mode` (when not 0) and its modification time, hand its
     /// bytes to the drive and rename it into place.
-    pub fn finish(self, mode: u32, mtime_ms: u64) -> Result<Landed, XferError> {
+    pub fn finish(self, mode: u32, mtime: WallMs) -> Result<Landed, XferError> {
         use std::os::unix::fs::PermissionsExt as _;
         if self.at != self.size {
             return Err(XferError::Incomplete { got: self.at, size: self.size });
         }
-        let mtime = SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(mtime_ms));
-        if let Some(mtime) = mtime.filter(|_| mtime_ms > 0) {
+        if let Some(mtime) = mtime.to_system() {
             self.file.set_modified(mtime)?;
         }
         if mode & MODE_BITS != 0 {
@@ -599,8 +598,8 @@ pub struct Outgoing {
     pub path: PathBuf,
     /// Bytes.
     pub size: u64,
-    /// Modification time, milliseconds since the Unix epoch.
-    pub mtime_ms: u64,
+    /// Modification time.
+    pub mtime_ms: WallMs,
     /// Permission bits.
     pub mode: u32,
 }
@@ -625,11 +624,7 @@ pub fn outgoing(path: &Path) -> std::io::Result<Vec<Outgoing>> {
                 tracing::warn!(path = %at.display(), "skipped: name is not UTF-8");
                 continue;
             };
-            let mtime_ms = meta
-                .modified()
-                .ok()
-                .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
-                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            let mtime_ms = meta.modified().map_or(WallMs::ZERO, WallMs::of);
             out.push(Outgoing {
                 name,
                 path: at,
@@ -675,7 +670,7 @@ mod tests {
         assert!(!target.exists() && partial_of(&target).exists());
         assert!(matches!(rx.write(b"too many!!"), Err(XferError::Overrun { size: 10 })));
         rx.write(b"world").unwrap();
-        let landed = rx.finish(0o600, 1_700_000_000_000).unwrap();
+        let landed = rx.finish(0o600, WallMs::from_millis(1_700_000_000_000)).unwrap();
         assert_eq!(landed.hash, *blake3::hash(b"helloworld").as_bytes());
         assert_eq!(std::fs::read(&target).unwrap(), b"helloworld");
         assert!(!partial_of(&target).exists());
@@ -702,13 +697,13 @@ mod tests {
         ));
         let mut rx = Receiving::open(&target, 40_000, body.len() as u64).unwrap();
         rx.write(&body[40_000..90_000]).unwrap();
-        let short = Receiving::finish(rx, 0, 0);
+        let short = Receiving::finish(rx, 0, WallMs::ZERO);
         assert!(matches!(short, Err(XferError::Incomplete { got: 90_000, .. })));
         assert!(!target.exists(), "a short file keeps its partial name");
         let mut rx = Receiving::open(&target, durable(&target), body.len() as u64).unwrap();
         assert_eq!(rx.at(), 90_000);
         rx.write(&body[90_000..]).unwrap();
-        let landed = rx.finish(0, 0).unwrap();
+        let landed = rx.finish(0, WallMs::ZERO).unwrap();
         assert_eq!(landed.hash, *blake3::hash(&body).as_bytes());
         assert_eq!(std::fs::read(&target).unwrap(), body);
     }
@@ -798,7 +793,7 @@ mod tests {
         let landed = t.target(done, "whole.txt").unwrap();
         let mut rx = Receiving::open(&landed, 0, 4).unwrap();
         rx.write(b"four").unwrap();
-        let whole = rx.finish(0, 0).unwrap();
+        let whole = rx.finish(0, WallMs::ZERO).unwrap();
         assert!(t.landed(done, "whole.txt", whole).is_some());
 
         let fresh = transfers(dir.path());
@@ -858,7 +853,7 @@ mod tests {
             name: name.to_owned(),
             path: dir.path().join(name),
             size,
-            mtime_ms,
+            mtime_ms: WallMs::from_millis(mtime_ms),
             mode: 0o644,
         };
         let first = [file("a", 100, 1), file("b", 50, 1), file("c", 10, 1)];

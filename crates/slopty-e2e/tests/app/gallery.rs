@@ -147,8 +147,11 @@ fn this_mac_report(screen_recording: bool) -> String {
     let health = slopty_proto::ctl::Health {
         version: "0.1.0".to_owned(),
         exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
-        screen_recording,
-        post_events: true,
+        caps: slopty_proto::server::WorkerCaps {
+            can_capture: screen_recording,
+            can_inject: true,
+            ..slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs)
+        },
         listen: "[::]:45550".to_owned(),
         allow: Vec::new(),
         tailscale: slopty_proto::ctl::Tailscale::Up {

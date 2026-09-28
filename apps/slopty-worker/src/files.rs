@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use slopty_core::ClientId;
+use slopty_core::{ClientId, WallMs};
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::transfer::{BulkHeader, Purpose};
@@ -44,7 +44,7 @@ pub async fn send_file(
     tracing::info!(%client, %path, kind, "read file");
     let modified_ms = match &read {
         FileRead::Streamed { modified_ms, .. } => *modified_ms,
-        _ => 0,
+        _ => WallMs::ZERO,
     };
     if out.send(WorkerMsg::File { path: path.clone(), read }).await.is_err() {
         return false;
@@ -61,8 +61,8 @@ pub async fn send_file(
         };
         let sent = async {
             let mut send = slopty_net::streams::open_bulk(conn, header).await?;
-            send.write_all(text.as_bytes()).await.map_err(|e| NetError::Stream(e.to_string()))?;
-            send.finish().map_err(|e| NetError::Stream(e.to_string()))
+            send.write_all(text.as_bytes()).await.map_err(|e| NetError::stream(&e))?;
+            send.finish().map_err(|e| NetError::stream(&e))
         };
         // The client's link says the read broke; the connection's own end is its loop's to see.
         if let Err(e) = sent.await {
@@ -79,7 +79,7 @@ pub async fn write(
     out: &mpsc::Sender<WorkerMsg>,
     path: String,
     text: Vec<u8>,
-    base_modified_ms: Option<u64>,
+    base_modified_ms: Option<WallMs>,
 ) {
     let target = path.clone();
     let bytes = text.len();

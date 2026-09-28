@@ -35,6 +35,114 @@ pub mod hevc {
     pub fn is_parameter_set(nal: &[u8]) -> bool {
         matches!(nal_type(nal), Some(VPS | SPS | PPS))
     }
+
+    /// How an SPS samples its pictures (H.265 7.4.3.2).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct SampleFormat {
+        /// 1 for 4:2:0, 2 for 4:2:2, 3 for 4:4:4 (0 is monochrome).
+        pub chroma_format_idc: u32,
+        /// Bits per luma sample.
+        pub bit_depth: u32,
+    }
+
+    /// The sample format of an SPS NAL unit (header included); `None` for anything that is not
+    /// a well-formed SPS.
+    #[must_use]
+    pub fn sample_format(nal: &[u8]) -> Option<SampleFormat> {
+        if nal_type(nal)? != SPS {
+            return None;
+        }
+        let mut bits = Rbsp::new(nal.get(2..)?);
+        // sps_video_parameter_set_id u(4), sps_max_sub_layers_minus1 u(3), nesting flag u(1).
+        bits.skip(4)?;
+        let sub_layers = usize::try_from(bits.read(3)?).ok()?;
+        bits.skip(1)?;
+        // profile_tier_level: the general profile and level, 88 + 8 bits (H.265 7.3.3).
+        bits.skip(96)?;
+        let mut present = [(false, false); 7];
+        for layer in present.iter_mut().take(sub_layers) {
+            *layer = (bits.flag()?, bits.flag()?);
+        }
+        if sub_layers > 0 {
+            bits.skip(2_usize.checked_mul(8_usize.checked_sub(sub_layers)?)?)?;
+        }
+        for &(profile, level) in present.iter().take(sub_layers) {
+            if profile {
+                bits.skip(88)?;
+            }
+            if level {
+                bits.skip(8)?;
+            }
+        }
+        bits.exp_golomb()?; // sps_seq_parameter_set_id
+        let chroma_format_idc = bits.exp_golomb()?;
+        if chroma_format_idc == 3 {
+            bits.skip(1)?; // separate_colour_plane_flag
+        }
+        bits.exp_golomb()?; // pic_width_in_luma_samples
+        bits.exp_golomb()?; // pic_height_in_luma_samples
+        if bits.flag()? {
+            for _ in 0..4 {
+                bits.exp_golomb()?; // conformance window offsets
+            }
+        }
+        let bit_depth = bits.exp_golomb()?.checked_add(8)?;
+        Some(SampleFormat { chroma_format_idc, bit_depth })
+    }
+
+    /// An RBSP read bit by bit, emulation-prevention bytes (`00 00 03`) dropped.
+    struct Rbsp<'a> {
+        bytes: &'a [u8],
+        byte: usize,
+        bit: u32,
+        zeros: u8,
+        current: u8,
+    }
+
+    impl<'a> Rbsp<'a> {
+        const fn new(bytes: &'a [u8]) -> Self {
+            Self { bytes, byte: 0, bit: 8, zeros: 0, current: 0 }
+        }
+
+        fn next_byte(&mut self) -> Option<u8> {
+            let mut b = *self.bytes.get(self.byte)?;
+            self.byte = self.byte.checked_add(1)?;
+            if self.zeros >= 2 && b == 3 {
+                self.zeros = 0;
+                b = *self.bytes.get(self.byte)?;
+                self.byte = self.byte.checked_add(1)?;
+            }
+            self.zeros = if b == 0 { self.zeros.saturating_add(1) } else { 0 };
+            Some(b)
+        }
+
+        fn flag(&mut self) -> Option<bool> {
+            if self.bit == 8 {
+                self.current = self.next_byte()?;
+                self.bit = 0;
+            }
+            let set = self.current.checked_shl(self.bit)? & 0x80 != 0;
+            self.bit = self.bit.checked_add(1)?;
+            Some(set)
+        }
+
+        fn read(&mut self, n: u32) -> Option<u32> {
+            (0..n).try_fold(0_u32, |acc, _| Some(acc.checked_shl(1)? | u32::from(self.flag()?)))
+        }
+
+        fn skip(&mut self, n: usize) -> Option<()> {
+            (0..n).try_for_each(|_| self.flag().map(drop))
+        }
+
+        /// An unsigned Exp-Golomb code, H.265 9.2.
+        fn exp_golomb(&mut self) -> Option<u32> {
+            let mut zeros = 0_u32;
+            while !self.flag()? {
+                zeros = zeros.checked_add(1).filter(|z| *z < 32)?;
+            }
+            1_u32.checked_shl(zeros)?.checked_sub(1)?.checked_add(self.read(zeros)?)
+        }
+    }
 }
 
 /// H.264 NAL unit types that carry parameter sets.
@@ -213,6 +321,50 @@ mod tests {
         assert_eq!(h264::nal_type(&[0x65]), Some(h264::IDR));
         assert!(h264::is_parameter_set(&[0x68]));
         assert_eq!(hevc::nal_type(&[]), None);
+    }
+
+    /// SPSs the M1 Max's low-latency encoder wrote at 320×180 (2026-09-28) for Main, Main 4:4:4
+    /// and Main 4:4:4 10: two temporal sub-layers and emulation-prevention bytes, so the parser
+    /// walks both.
+    const SPS_420: [u8; 86] = [
+        0x42, 0x01, 0x03, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x03, 0x00, 0x3f, 0x00, 0x00, 0xa0, 0x0a, 0x08, 0x0c, 0x1f, 0x3e, 0x20, 0x10, 0xee, 0x45,
+        0x20, 0x82, 0xe7, 0xe1, 0x3d, 0x0b, 0xea, 0x1b, 0xd5, 0x0f, 0xea, 0xa0, 0x8f, 0x55, 0x41,
+        0x3e, 0xaa, 0xa0, 0xaf, 0x55, 0x54, 0x17, 0xea, 0xaa, 0xa0, 0xcf, 0x55, 0x55, 0x41, 0xbe,
+        0xaa, 0xaa, 0xa0, 0xef, 0x55, 0x55, 0x54, 0x1f, 0xea, 0xaa, 0xaa, 0xa0, 0x43, 0xd5, 0x55,
+        0x55, 0x52, 0x9b, 0x81, 0x01, 0x00, 0x81, 0xfc, 0x20, 0x10, 0x40,
+    ];
+    const SPS_444: [u8; 85] = [
+        0x42, 0x01, 0x03, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00, 0xbe, 0x08, 0x00, 0x00, 0x03, 0x00,
+        0x00, 0x5d, 0x00, 0x00, 0x90, 0x01, 0x41, 0x01, 0x83, 0xe3, 0x71, 0x00, 0x87, 0x72, 0x29,
+        0x04, 0x17, 0x3f, 0x09, 0xe8, 0x5f, 0x50, 0xde, 0xa8, 0x7f, 0x55, 0x04, 0x7a, 0xaa, 0x09,
+        0xf5, 0x55, 0x05, 0x7a, 0xaa, 0xa0, 0xbf, 0x55, 0x55, 0x06, 0x7a, 0xaa, 0xaa, 0x0d, 0xf5,
+        0x55, 0x55, 0x07, 0x7a, 0xaa, 0xaa, 0xa0, 0xff, 0x55, 0x55, 0x55, 0x02, 0x1e, 0xaa, 0xaa,
+        0xaa, 0x94, 0xdc, 0x08, 0x08, 0x04, 0x0f, 0xe1, 0x00, 0x82,
+    ];
+
+    const SPS_444_10: [u8; 86] = [
+        0x42, 0x01, 0x03, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00, 0xbc, 0x08, 0x00, 0x00, 0x03, 0x00,
+        0x00, 0x5d, 0x00, 0x00, 0x90, 0x01, 0x41, 0x01, 0x83, 0xe3, 0x5b, 0x10, 0x08, 0x77, 0x22,
+        0x90, 0x41, 0x73, 0xf0, 0x9e, 0x85, 0xf5, 0x0d, 0xea, 0x87, 0xf5, 0x50, 0x47, 0xaa, 0xa0,
+        0x9f, 0x55, 0x50, 0x57, 0xaa, 0xaa, 0x0b, 0xf5, 0x55, 0x50, 0x67, 0xaa, 0xaa, 0xa0, 0xdf,
+        0x55, 0x55, 0x50, 0x77, 0xaa, 0xaa, 0xaa, 0x0f, 0xf5, 0x55, 0x55, 0x50, 0x21, 0xea, 0xaa,
+        0xaa, 0xa9, 0x4d, 0xc0, 0x80, 0x80, 0x40, 0xfe, 0x10, 0x08, 0x20,
+    ];
+
+    #[test]
+    fn the_sps_says_which_chroma_format_the_stream_is() {
+        let format = |chroma_format_idc, bit_depth| {
+            Some(hevc::SampleFormat { chroma_format_idc, bit_depth })
+        };
+        assert_eq!(hevc::sample_format(&SPS_420), format(1, 8), "Main");
+        assert_eq!(hevc::sample_format(&SPS_444), format(3, 8), "Main 4:4:4");
+        assert_eq!(hevc::sample_format(&SPS_444_10), format(3, 10), "Main 4:4:4 10");
+        let pps = [0x44, 0x01, 0xc0, 0x72, 0xf0, 0x5b, 0x24];
+        assert_eq!(hevc::sample_format(&pps), None, "not an SPS");
+        assert_eq!(hevc::sample_format(&SPS_444[..12]), None, "cut off in the profile");
+        assert_eq!(hevc::sample_format(&SPS_444[..24]), None, "cut off before the bit depth");
+        assert_eq!(hevc::sample_format(&[]), None);
     }
 
     #[test]

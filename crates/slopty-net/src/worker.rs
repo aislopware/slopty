@@ -70,7 +70,7 @@ impl WorkerListener {
 
     /// Where it listens.
     pub fn local_addr(&self) -> Result<SocketAddr, NetError> {
-        self.endpoint.local_addr().map_err(|e| NetError::Bind(e.to_string()))
+        self.endpoint.local_addr().map_err(|e| NetError::io("the endpoint's address", e))
     }
 
     /// Who it lets in.

@@ -29,6 +29,9 @@ pub struct HelloAck {
     /// What the worker can do and how it is doing, as the server's directory lists it; later
     /// changes come as [`WorkerMsg::Caps`](crate::WorkerMsg::Caps).
     pub caps: WorkerCaps,
+    /// Its one-minute load average; later moves come as
+    /// [`WorkerMsg::Load`](crate::WorkerMsg::Load).
+    pub load: f32,
     /// Sessions currently alive on the worker, so the client can reattach immediately.
     pub sessions: Vec<SessionSummary>,
 }

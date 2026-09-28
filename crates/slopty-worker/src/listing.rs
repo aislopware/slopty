@@ -10,7 +10,6 @@
 use std::collections::BinaryHeap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use slopty_proto::folder::{FOLDER_ENTRIES, FolderEntry, Listing};
 use slopty_proto::orchestration::FileKind;
@@ -126,12 +125,9 @@ pub(crate) fn kind(t: std::fs::FileType) -> FileKind {
     }
 }
 
-/// Last modification, milliseconds since the Unix epoch; 0 when the OS does not say.
-pub(crate) fn modified_ms(meta: &std::fs::Metadata) -> u64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+/// Last modification; zero when the OS does not say.
+pub(crate) fn modified_ms(meta: &std::fs::Metadata) -> slopty_core::WallMs {
+    meta.modified().map_or(slopty_core::WallMs::ZERO, slopty_core::WallMs::of)
 }
 
 #[cfg(test)]
@@ -179,7 +175,7 @@ mod tests {
             (by("b.txt").kind, by("b.txt").size, by("b.txt").items),
             (FileKind::File, 5, None)
         );
-        assert!(by("b.txt").modified_ms > 1_700_000_000_000);
+        assert!(by("b.txt").modified_ms > slopty_core::WallMs::from_millis(1_700_000_000_000));
     }
 
     /// Past the cap only the first entries in the folder's order come, and the count is whole:

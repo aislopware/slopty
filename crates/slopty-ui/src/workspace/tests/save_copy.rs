@@ -6,9 +6,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use slopty_client::remote::Remote;
-use slopty_core::XferId;
+use slopty_client::xfer::XferError;
+use slopty_core::{WallMs, XferId};
 use slopty_proto::file::{FILE_BYTES, FileRead, INLINE_FILE_BYTES};
-use slopty_proto::transfer::Dest;
+use slopty_proto::transfer::{ClipFormat, Dest};
 
 use super::*;
 
@@ -24,19 +25,23 @@ impl Remote for Files {
 
     fn cancel(&self, _xfer: XferId) {}
 
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, String> {
-        self.asked.send(path.clone()).map_err(|e| e.to_string())?;
-        let bytes = self.held.get(&path).ok_or("No such file or directory")?;
-        let file = into.join(path.rsplit('/').next().ok_or("no name")?);
-        std::fs::write(&file, bytes).map_err(|e| e.to_string())?;
+    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+        self.asked.send(path.clone()).map_err(|e| XferError::Worker(e.to_string()))?;
+        let bytes = self
+            .held
+            .get(&path)
+            .ok_or_else(|| XferError::Worker("No such file or directory".to_owned()))?;
+        let file = into
+            .join(path.rsplit('/').next().ok_or_else(|| XferError::Worker("no name".to_owned()))?);
+        std::fs::write(&file, bytes).map_err(|e| XferError::Worker(e.to_string()))?;
         Ok(vec![file])
     }
 
-    fn clip_data(&self, _generation: u64, _uti: &str, _wait: Duration) -> Option<Vec<u8>> {
+    fn clip_data(&self, _generation: u64, _format: ClipFormat, _wait: Duration) -> Option<Vec<u8>> {
         None
     }
 
-    fn send_clip(&self, _generation: u64, _uti: String, _bytes: Vec<u8>) {}
+    fn send_clip(&self, _generation: u64, _format: ClipFormat, _bytes: Vec<u8>) {}
 
     fn forward(&self, _port: u16) -> Option<u16> {
         None
@@ -104,7 +109,7 @@ fn a_file_tiles_copy_is_saved_whole_where_the_panel_says(cx: &mut TestAppContext
     let shown = FileRead::Text {
         text: String::from_utf8(text.clone()).unwrap().trim_end_matches('\n').to_owned(),
         size: text.len() as u64,
-        modified_ms: 1,
+        modified_ms: WallMs::from_millis(1),
         final_newline: true,
     };
     let dest = save("/w/src/main.rs", shown, "main copy.rs", cx);

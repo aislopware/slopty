@@ -6,7 +6,9 @@
 #![forbid(unsafe_code)]
 
 mod id;
+mod shell;
 mod time;
 
-pub use id::{ClientId, ItemId, SessionId, StreamId, WindowId, WorkerId, XferId};
-pub use time::{Duration, MonoTime};
+pub use id::{ClientId, DisplayId, ItemId, SessionId, StreamId, WindowId, WorkerId, XferId};
+pub use shell::shell_quote;
+pub use time::{Duration, MonoTime, WallMs};

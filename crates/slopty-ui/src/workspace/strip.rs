@@ -1036,7 +1036,7 @@ impl WorkspaceView {
                     branch: summary.branch.clone(),
                     cwd,
                 };
-                places.push((item.and_then(rank), summary.started_ms, place));
+                places.push((item.and_then(rank), summary.started_ms.as_millis(), place));
             }
         }
         places.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));

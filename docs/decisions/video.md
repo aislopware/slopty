@@ -1283,3 +1283,94 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   delay gradient, and adding one is a wire change that no measurement asked for. Tests:
   `repaired_random_loss_holds_the_rate`, `repaired_loss_with_a_growing_hold_or_queue_cuts`,
   `unrepaired_or_heavy_loss_cuts`, `the_overuse_lines_are_exclusive`.
+
+- 🔬 **A display sized to the client comes from `CGVirtualDisplay`, found at runtime**
+  (2026-09-28, `.research/virtual-display-2026-09-28.md`). A headless Mac, or a client whose
+  screen is not the worker's (an iPad, a 5K display), should get a desktop at its own size and
+  scale rather than a crop of a physical display. macOS 26 has no public API for that; the
+  private `CGVirtualDisplay`, `CGVirtualDisplayDescriptor`, `CGVirtualDisplayMode` and
+  `CGVirtualDisplaySettings` classes are what DeskPad, Chromium's test and remoting code,
+  BetterDisplay and opendisplay use, with the same selectors in the 26.4 header dump and on
+  this Mac's 27.0 runtime. `slopty-vdisplay` looks the classes up by name and checks every
+  selector before it sends one, so a macOS that drops them yields `Unavailable` and the worker
+  streams a physical display. The sizing policy (`plan`) is pure. A client scale of 2 or more
+  gets a hiDPI mode given in points, since macOS only backs at 2×. Sides are clamped to a
+  480-point floor and, keeping the aspect, to 8K. A 1× mode's sides are rounded down to even for
+  the 4:2:0 encoder. Refresh is clamped to 30–120 Hz and defaults to 60. The panel is sized at
+  109 or 218 PPI, Apple's desktop densities, so macOS takes the one mode offered as native. The
+  descriptor's maximum is fixed at creation, so it is the longest side plus a quarter, on both
+  axes: the tile can grow and the client rotate through `applySettings:` without recreating
+  the display, which would redistribute every window. Vendor is "SLP" in EDID letters, and
+  product and serial come from an FNV-1a hash of a stable client identity. macOS files
+  arrangement, mode and mirroring under that triple, so a returning client finds its own. The
+  hash is pinned by a test. The mode is enforced, not set once: `enforce` picks the exact mode
+  from `CGDisplayCopyAllDisplayModes` with the duplicate low-resolution modes listed, where a 2×
+  mode and its 1× twin share a point size. It sets that mode and breaks any mirror in one
+  `kCGConfigureForSession` transaction, and it is called again on every reconfiguration,
+  because macOS assigns its own default and may restore a saved mode later. Creation needs the
+  main thread, so the one test that makes a real display runs a probe binary as its own child.
+  It is ignored and gated on `SLOPTY_VDISPLAY_E2E=1`, because a new display rearranges the
+  screens of whoever is using the Mac. It has not been run: the create, rotate and teardown
+  path, refresh above 60 Hz and the lock screen are unproven. Tests:
+  `every_plan_is_even_consistent_and_within_its_maximum` and its siblings in `plan/tests.rs`,
+  `a_missing_class_or_selector_is_unavailable`, `the_descriptor_carries_the_plan`,
+  `the_settings_offer_the_mode_in_points_at_2x`,
+  `creating_off_the_main_thread_is_refused_before_any_display_exists`, and the ignored
+  `a_virtual_display_takes_its_mode_rotates_and_goes_away`.
+
+- ✅ **4:4:4 exists on the low-latency hardware encoder: HEVC Main 4:4:4 10 fed `xf44`, as a
+  per-stream chroma option** (2026-09-28, M1 Max, macOS 27.0; MEASUREMENTS.md, "4:4:4 HEVC on
+  the low-latency encoder"). This supersedes "No 4:4:4 hardware path exists" in the first entry.
+  The low-latency encoder (`…videoencoder.hevc.rtvc`, the one `EnableLowLatencyRateControl`
+  selects) advertises `HEVC_Main444_AutoLevel` and `HEVC_Main44410_AutoLevel` in its own
+  `ProfileLevel` supported values although no SDK header exports them. With Main44410 it writes
+  an RExt SPS (`chroma_format_idc` 3, 10-bit) and keeps `EnableLTR`, so LTR recovery holds. The
+  plain hardware encoder can do 4:4:4 but refuses LTR, as before. The hardware decoder takes the
+  stream straight to `xf44`. Encode time is unchanged: 7.73 against 7.72 ms p50 at 1080p and
+  35.9 against 35.3 at 5K. On coloured text it buys 24 dB of chroma PSNR (52.8 against 28.9 dB,
+  the 4:2:0 ceiling at every rate) and 2 dB of luma. It costs about 1.6× the bits at
+  saturation, 11.1 against 6.9 Mbit/s at 1080p. Below the 4:2:0 saturation rate it is worse,
+  47.5 against 52.9 dB luma at 7 Mbit/s. So it is an option a stream asks for when its link
+  carries the rate, not a new default. Rulings:
+  1. *Main44410 fed `xf44`, not Main444 fed `444f`.* ScreenCaptureKit's `pixelFormat` lists
+     `xf44` (full-range 10-bit 4:4:4, `SCStream.h`, macOS 27.0 SDK) and no 8-bit 4:4:4, and
+     Main444 writes 4:2:0 for any input but `444f`. Against `444f`, `xf44` trails by 1–3 dB of
+     luma below saturation and leads by 2 dB at it. `BGRA` into Main44410 also stays 4:4:4, but
+     the conversion inside the session costs 0.3 ms at 1080p and 6 ms at 5K, so the capture
+     delivers `xf44`.
+  2. *The profile string is the session's own.* `slopty_codec::Encoder::with_chroma(config,
+     Chroma::Full, sink)` looks `HEVC_Main44410_AutoLevel` up in the session's
+     `VTSessionCopySupportedPropertyDictionary` and sets the `CFString` the framework handed
+     back. It fails with `NoFullChroma` when the encoder does not list the value, and H.264 fails
+     the same way.
+  3. *A 4:4:4 session refuses a picture that is not `xf44`* (`NotFullChroma`). The hardware
+     would otherwise write 4:2:0 under a 4:4:4 profile without a word, as the probe shows for
+     Main444.
+  4. *The decoder follows the SPS.* `Decoder` parses `chroma_format_idc` and the bit depth
+     (`annexb::hevc::sample_format`) and asks for `xf44` (or `444f` for an 8-bit 4:4:4 stream),
+     rebuilding its session when that changes, so a 4:4:4 stream is never subsampled on the way
+     out. 4:2:0 streams decode to `420f` as before.
+  Also found: the low-latency encoder takes 35 ms per 5K frame on this chip (about 28 fps), where
+  the plain hardware encoder takes 18. A 5K stream at 60 fps is out of reach on an M1 Max
+  whatever the chroma.
+  Not yet wired, in dependency order:
+  (a) *GPUI fork* (`crates/gpui_apple/src/metal_renderer.rs`, `draw_surfaces`). It asserts
+      `420f` and makes `R8Unorm` + `RG8Unorm` textures, so an `xf44` picture would panic the
+      client. It needs `xf44` accepted, with `R16Unorm` + `RG16Unorm` from planes 0 and 1. The
+      shader is unchanged, since it samples normalised coordinates and the chroma plane is
+      simply full size; the scale is 65535/65472 off, 0.1 %.
+  (b) *Wire* (`slopty-proto`, `screen::Quality`). A `chroma: Chroma` field, 4:2:0 by default,
+      with its golden, and `slopty_codec::EncoderConfig` gains the same field so that
+      `VideoToolbox::new` passes it on and `Encoder::with_chroma` folds into `new`. A client
+      asks for 4:4:4 only when its decoder takes it: the macOS client yes, iOS/iPadOS unproven,
+      because the probe's decode half has not run on a device.
+  (c) *Capture* (`slopty-capture`, `PixelFormat`). A `Yuv444Full10` variant mapped to
+      `kCVPixelFormatType_444YpCbCr10BiPlanarFullRange` with the BT.709 matrix already set. The
+      worker (`screen.rs`, the `EncoderConfig` built from `Quality`) picks it when
+      `quality.chroma` is full.
+  (d) *Rate.* A 4:4:4 stream should start its adaptive ceiling about 1.6× higher, or stay 4:2:0
+      below roughly 10 Mbit/s at 1080p. That needs a measurement on a real link first.
+  Tests: `a_full_chroma_stream_is_444_end_to_end`,
+  `a_full_chroma_session_refuses_a_subsampled_picture`, `full_chroma_is_hevc_only`,
+  `the_sps_says_which_chroma_format_the_stream_is`, and the ignored probes in
+  `tests/chroma444.rs`.

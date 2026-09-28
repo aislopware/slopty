@@ -3196,6 +3196,7 @@ mod shape_tests {
 #[cfg(target_vendor = "apple")]
 mod tests {
     use slopty_codec::audio::{CHANNELS, FRAME_SAMPLES};
+    use slopty_core::DisplayId;
 
     use super::*;
 
@@ -3330,8 +3331,8 @@ mod tests {
             shared.id = StreamId(id);
             StatsHandle(Arc::new(shared))
         };
-        registry.insert(&"alice", CaptureTarget::Display(1), handle(1));
-        registry.insert(&"bob", CaptureTarget::Display(2), handle(2));
+        registry.insert(&"alice", CaptureTarget::Display(DisplayId(1)), handle(1));
+        registry.insert(&"bob", CaptureTarget::Display(DisplayId(2)), handle(2));
         let (live, closed) = registry.summaries();
         assert_eq!(
             live.iter().map(|s| (s.client.as_str(), s.stream)).collect::<Vec<_>>(),
@@ -3346,7 +3347,7 @@ mod tests {
         assert_eq!(closed.iter().map(|s| s.stream).collect::<Vec<_>>(), [1]);
         assert_eq!(*counts.lock(), [1, 2, 1], "the observer hears every change, in order");
         for id in 10..u32::try_from(CLOSED_KEEP).unwrap_or(u32::MAX).saturating_add(12) {
-            registry.insert(&"carol", CaptureTarget::Display(id), handle(id));
+            registry.insert(&"carol", CaptureTarget::Display(DisplayId(id)), handle(id));
             registry.remove(&"carol", StreamId(id));
         }
         let (_live, closed) = registry.summaries();

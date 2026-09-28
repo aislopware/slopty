@@ -391,7 +391,7 @@ pub struct TerminalView {
     clip_hook: Option<ClipHook>,
     /// A ⌘C whose history is still arriving.
     copying: Option<Copying>,
-    /// The buttons whose press went to the program (one bit each, as [`button_bit`]): their
+    /// The buttons whose press went to the program (one bit each, as [`ProtoButton::bit`]): their
     /// release goes there too, and a drag with one of them down.
     program_buttons: u8,
     /// The cell the program was last told the pointer is on: a move within it is not news.
@@ -2985,7 +2985,7 @@ impl TerminalView {
             return;
         };
         self.selection = None;
-        self.program_buttons |= button_bit(button);
+        self.program_buttons |= button.bit();
         self.reported_cell = Some((col, row));
         self.report_mouse(MouseAction::Press, Some(button), event.position, event.modifiers, cx);
     }
@@ -3240,9 +3240,9 @@ impl TerminalView {
     fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // The release of a button whose press the program heard goes to it too.
         if let Some(button) = proto_button(event.button)
-            && self.program_buttons & button_bit(button) != 0
+            && self.program_buttons & button.bit() != 0
         {
-            self.program_buttons &= !button_bit(button);
+            self.program_buttons &= !button.bit();
             self.report_mouse(
                 MouseAction::Release,
                 Some(button),
@@ -3628,17 +3628,6 @@ const fn proto_button(button: MouseButton) -> Option<ProtoButton> {
 /// A pointer move reported to the program: the one request a newer one makes stale.
 const fn is_motion(req: &TermRequest) -> bool {
     matches!(req, TermRequest::Mouse(MouseEvent { action: MouseAction::Motion, .. }))
-}
-
-/// `button`'s bit in [`TerminalView::program_buttons`].
-const fn button_bit(button: ProtoButton) -> u8 {
-    match button {
-        ProtoButton::Left => 1,
-        ProtoButton::Right => 1 << 1,
-        ProtoButton::Middle => 1 << 2,
-        ProtoButton::Back => 1 << 3,
-        ProtoButton::Forward => 1 << 4,
-    }
 }
 
 /// Rows either side of the one under the pointer that a link is looked for over: a link wraps
@@ -4744,8 +4733,9 @@ mod tests {
             std::iter::from_fn(|| rx.try_recv().ok())
                 .map(|msg| match msg {
                     ClientMsg::Clip(ClipMsg::Offer(offer)) => {
-                        let utis: Vec<String> = offer.items.into_iter().map(|i| i.uti).collect();
-                        format!("offer {}", utis.join(","))
+                        let formats: Vec<&str> =
+                            offer.items.iter().map(|i| i.format.mime()).collect();
+                        format!("offer {}", formats.join(","))
                     }
                     ClientMsg::Term {
                         req: TermRequest::PastePicture(PasteChord::Command), ..
@@ -4770,7 +4760,7 @@ mod tests {
         board.copy(&[("public.png", b"\x89PNG a screenshot")]);
         cx.simulate_keystrokes("cmd-v");
         cx.run_until_parked();
-        assert_eq!(sent(&mut rx), ["offer public.png", "picture then cmd-v"], "the offer first");
+        assert_eq!(sent(&mut rx), ["offer image/png", "picture then cmd-v"], "the offer first");
         cx.simulate_keystrokes("ctrl-v");
         cx.run_until_parked();
         assert_eq!(sent(&mut rx), ["picture then Mods(CTRL)-V"], "heard already: no second offer");

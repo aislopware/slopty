@@ -563,7 +563,7 @@ impl WorkspaceView {
                     mark: agent.and_then(Status::of_agent),
                     worker: self.worker_label(tile.worker),
                     cwd: self.session_tail(session),
-                    age: summary.and_then(|s| session_age(s.started_ms)),
+                    age: summary.and_then(|s| session_age(s.started_ms.as_millis())),
                 };
                 Some((rank, row))
             })

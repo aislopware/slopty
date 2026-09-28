@@ -15,7 +15,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
-use slopty_core::WindowId;
+use slopty_core::{DisplayId, WindowId};
 use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{ErrorCode, EventFilter, IdempotencyKey, Input, Size, WaitUntil};
@@ -429,7 +429,7 @@ impl CaptureStillArgs {
     fn target(&self) -> Result<CaptureTarget, ToolError> {
         match (self.window, self.display) {
             (Some(id), None) => Ok(CaptureTarget::Window(WindowId(id))),
-            (None, Some(id)) => Ok(CaptureTarget::Display(id)),
+            (None, Some(id)) => Ok(CaptureTarget::Display(DisplayId(id))),
             _ => Err(ToolError::invalid("give exactly one of window, display")),
         }
     }
@@ -471,7 +471,7 @@ impl OpenItemArgs {
             self.file.map(|path| ItemKind::File { path }),
             self.note.map(|text| ItemKind::Note { text }),
             self.window.map(|id| ItemKind::Window { window: WindowId(id) }),
-            self.display.map(|display| ItemKind::Display { display }),
+            self.display.map(|display| ItemKind::Display { display: DisplayId(display) }),
         ];
         let mut given = kinds.into_iter().flatten();
         match (given.next(), given.next()) {
@@ -1085,7 +1085,7 @@ async fn with_progress<T>(wait: impl Future<Output = T>, progress: Option<Progre
 mod tests {
     use parking_lot::Mutex;
     use serde_json::json;
-    use slopty_core::{ItemId, SessionId, WorkerId};
+    use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
     use slopty_proto::conversation::{Clipped, PermissionPrompt, ThreadId, ToolDetail};
     use slopty_proto::items::Item;
     use slopty_proto::orchestration::{
@@ -1145,10 +1145,10 @@ mod tests {
                         agents: Vec::new(),
                         can_capture: false,
                         can_inject: false,
-                        load: 0.0,
                         version: "0".to_owned(),
                     },
-                    last_seen_ms: 0,
+                    load: 0.0,
+                    last_seen_ms: WallMs::ZERO,
                 }]),
                 Verb::ListTerminals { .. } => Outcome::Terminals(vec![(
                     studio(),
@@ -1159,7 +1159,7 @@ mod tests {
                         repo: None,
                         branch: None,
                         changes: None,
-                        started_ms: 0,
+                        started_ms: WallMs::ZERO,
                         cols: 80,
                         rows: 24,
                         state: SessionState::Running,
@@ -1207,8 +1207,8 @@ mod tests {
                             detail: ToolDetail::Other { input: text },
                             suggestions: Vec::new(),
                             mode: None,
-                            asked_ms: 0,
-                            until_ms: 0,
+                            asked_ms: WallMs::ZERO,
+                            until_ms: WallMs::ZERO,
                         }],
                     }))
                 }

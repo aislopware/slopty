@@ -5,7 +5,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
-    use slopty_core::{ClientId, SessionId, WorkerId};
+    use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
     use slopty_net::admission::Admission;
     use slopty_net::client::{bind_client, connect, connect_addr};
     use slopty_net::streams::{self, Uni};
@@ -24,7 +24,8 @@ mod tests {
             worker,
             name: "worker".to_owned(),
             home: String::new(),
-            caps: slopty_proto::server::WorkerCaps::default(),
+            caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+            load: 0.0,
             sessions: Vec::new(),
         }
     }
@@ -138,7 +139,7 @@ mod tests {
             purpose,
             name: "dir/f.bin".to_owned(),
             size,
-            mtime_ms: 1,
+            mtime_ms: WallMs::from_millis(1),
             mode: 0o644,
             offset: 0,
         }

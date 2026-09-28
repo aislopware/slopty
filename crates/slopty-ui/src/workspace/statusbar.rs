@@ -660,7 +660,8 @@ impl WorkspaceView {
         };
         let path = w.path.as_ref().filter(|_| health.is_none()).map(path_label);
         // The machine under the name, once the worker has said what it is.
-        let machine = w.caps.as_ref().filter(|c| !c.os_version.is_empty()).map(host_line);
+        let machine =
+            w.caps.as_ref().filter(|c| !c.os_version.is_empty()).map(|c| host_line(c, w.load));
         let machine_known = machine.is_some();
         let detail = match health {
             Some((mark, word)) => div().text_color(hsla(mark.tone(theme))).child(word),

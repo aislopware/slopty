@@ -416,7 +416,7 @@ impl Orchestrator {
         handle.mark_if_unset(Position { line: 0, col: 0, epoch: 0 });
         let session = handle.id();
         if let Some(summary) = inner.worker.summary(session).await {
-            let _sent = inner.events.send(WorkerMsg::SessionOpened(summary));
+            let _sent = inner.events.send(WorkerMsg::SessionChanged(summary));
         }
         if let Some(delta) = inner.items.ensure_terminal(session, by) {
             let _sent = inner.events.send(WorkerMsg::Items(delta));
@@ -852,6 +852,7 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
 
 #[cfg(test)]
 mod tests {
+    use slopty_core::WallMs;
     use slopty_proto::orchestration::FileKind;
 
     use super::*;
@@ -939,7 +940,11 @@ mod tests {
         );
         assert_eq!(total, 3);
         assert_eq!(entries[1].size, 5);
-        assert!(entries[1].modified_ms > 1_700_000_000_000, "{:?}", entries[1]);
+        assert!(
+            entries[1].modified_ms > WallMs::from_millis(1_700_000_000_000),
+            "{:?}",
+            entries[1]
+        );
         let (first, total) = list_dir(dir.path(), 1).unwrap();
         assert_eq!((first.len(), total), (1, 3), "bounded, with the whole count");
         assert_eq!(list_dir(&dir.path().join("nope"), 10).unwrap_err().code, ErrorCode::Failed);

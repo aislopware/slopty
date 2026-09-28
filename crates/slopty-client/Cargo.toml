@@ -25,6 +25,7 @@ rustix.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 
 # The decoders behind remote windows and displays, which only Apple clients show.

@@ -491,6 +491,7 @@ mod tests {
         )
         .await;
         assert_marks(&text, "zsh");
+        assert!(has_mark(&text, "A;redraw=1"), "zle redraws the whole prompt: {text:?}");
         assert_cwd(&text, "zsh");
         assert!(
             text.contains("zdotdir= env=ran sudo=sudo: function"),
@@ -546,6 +547,7 @@ mod tests {
             )
             .await;
             assert_marks(&text, bash);
+            assert!(has_mark(&text, "A;redraw=last"), "{bash} redraws a row: {text:?}");
             assert_cwd(&text, bash);
             assert!(
                 text.contains("rc=ran profile= login= sudo=function"),
@@ -594,6 +596,7 @@ mod tests {
         )
         .await;
         assert_marks(&text, "fish");
+        assert!(has_mark(&text, "A;redraw=1"), "fish redraws the whole prompt: {text:?}");
         assert_cwd(&text, "fish");
         // fish 4 marks on its own and the snippet only records that it loaded; on fish 3 it
         // wraps the prompt.

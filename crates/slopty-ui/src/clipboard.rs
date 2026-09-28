@@ -23,20 +23,18 @@ use slopty_client::layout::WorkerKey;
 use slopty_client::remote::Remote;
 use slopty_core::ClientId;
 use slopty_platform::pasteboard::{
-    CONCEALED_UTI, FILE_URL_UTI, ORIGIN_TYPE, Pasteboard, Provide, TEXT_UTI, TRANSIENT_UTI, Write,
+    CONCEALED_UTI, ORIGIN_TYPE, Pasteboard, Provide, TRANSIENT_UTI, Write, format_of, uti_of,
 };
 use slopty_proto::ClientMsg;
-use slopty_proto::transfer::{ClipItem, ClipMsg, Hash, INLINE_CLIP_BYTES, Offer, Peer};
+use slopty_proto::transfer::{ClipFormat, ClipItem, ClipMsg, Hash, INLINE_CLIP_BYTES, Offer, Peer};
 use tokio::sync::watch;
 
 use crate::terminal::ClipPaste;
 
 /// The representations synced, richest first. File URLs name files on one machine only; files
 /// move by a transfer instead.
-pub const SYNCED: [&str; 5] = ["public.png", "public.tiff", "public.rtf", "public.html", TEXT_UTI];
-
-/// The synced representations that are pictures.
-const PICTURES: [&str; 2] = ["public.png", "public.tiff"];
+pub const SYNCED: [ClipFormat; 5] =
+    [ClipFormat::Png, ClipFormat::Tiff, ClipFormat::Rtf, ClipFormat::Html, ClipFormat::Text];
 
 /// Files on the clipboard, for a paste that moves them.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -72,7 +70,7 @@ struct Held {
     /// a concealed password, nothing synced).
     offer: Option<Offer>,
     /// Their bytes, to answer a fetch.
-    reps: Vec<(String, Vec<u8>)>,
+    reps: Vec<(ClipFormat, Vec<u8>)>,
 }
 
 /// The pasteboard and the bookkeeping that keeps it in step with the workers.
@@ -143,24 +141,24 @@ impl ClipSync {
             || has(CONCEALED_UTI)
             || has(TRANSIENT_UTI);
         let urls = if skip { Vec::new() } else { self.board.file_urls() };
-        let reps: Vec<(String, Vec<u8>)> = if skip {
+        let reps: Vec<(ClipFormat, Vec<u8>)> = if skip {
             Vec::new()
         } else if !urls.is_empty() {
-            vec![(FILE_URL_UTI.to_owned(), urls.join("\n").into_bytes())]
+            vec![(ClipFormat::FileUrls, urls.join("\n").into_bytes())]
         } else {
             SYNCED
-                .iter()
-                .filter(|uti| has(uti))
-                .filter_map(|uti| self.board.data(uti).map(|bytes| ((*uti).to_owned(), bytes)))
+                .into_iter()
+                .filter(|&format| has(uti_of(format)))
+                .filter_map(|format| self.board.data(uti_of(format)).map(|bytes| (format, bytes)))
                 .collect()
         };
         let items: Vec<ClipItem> = reps
             .iter()
-            .map(|(uti, bytes)| ClipItem {
-                uti: uti.clone(),
+            .map(|(format, bytes)| ClipItem {
+                format: *format,
                 size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
                 hash: digest(bytes),
-                inline: (uti == TEXT_UTI && bytes.len() <= INLINE_CLIP_BYTES)
+                inline: (*format == ClipFormat::Text && bytes.len() <= INLINE_CLIP_BYTES)
                     .then(|| bytes.clone()),
             })
             .collect();
@@ -200,8 +198,9 @@ impl ClipSync {
         let Some(held) = self.held.as_ref().filter(|h| h.offer.is_some()) else {
             return ClipPaste::Text;
         };
-        let has = |uti: &str| held.reps.iter().any(|(t, _)| t == uti);
-        if !PICTURES.iter().any(|uti| has(uti)) || has(TEXT_UTI) {
+        let has = |format: ClipFormat| held.reps.iter().any(|(f, _)| *f == format);
+        let picture = held.reps.iter().any(|(f, _)| f.is_picture());
+        if !picture || has(ClipFormat::Text) {
             return ClipPaste::Text;
         }
         let offer = self.offer_for(worker, me).map(|o| ClientMsg::Clip(ClipMsg::Offer(o)));
@@ -224,16 +223,16 @@ impl ClipSync {
         (!paths.is_empty()).then_some(ClipFiles::Here(paths))
     }
 
-    /// The bytes of `uti` in this client's offer `generation`, for a worker's fetch; `None`
+    /// The bytes in `format` of this client's offer `generation`, for a worker's fetch; `None`
     /// once the clipboard has moved on.
     #[must_use]
-    pub fn answer(&self, generation: u64, uti: &str) -> Option<Vec<u8>> {
+    pub fn answer(&self, generation: u64, format: ClipFormat) -> Option<Vec<u8>> {
         let held = self.held.as_ref()?;
         if held.offer.as_ref()?.generation != generation || self.board.change_count() != held.count
         {
             return None;
         }
-        held.reps.iter().find(|(t, _)| t == uti).map(|(_, bytes)| bytes.clone())
+        held.reps.iter().find(|(f, _)| *f == format).map(|(_, bytes)| bytes.clone())
     }
 
     /// Worker `from`'s clipboard changed: put its offer here, inline text now and the rest as
@@ -242,8 +241,8 @@ impl ClipSync {
     /// them is only what else the offer holds, their names as text.
     pub fn receive(&mut self, from: WorkerKey, offer: &Offer, provide: Provide) {
         let items: Vec<&ClipItem> =
-            offer.items.iter().filter(|i| SYNCED.contains(&i.uti.as_str())).collect();
-        let files = offer.items.iter().any(|i| i.uti == FILE_URL_UTI);
+            offer.items.iter().filter(|i| SYNCED.contains(&i.format)).collect();
+        let files = offer.items.iter().any(|i| i.format == ClipFormat::FileUrls);
         if items.is_empty() && !files {
             return;
         }
@@ -253,7 +252,7 @@ impl ClipSync {
                 |h| {
                     items
                         .iter()
-                        .all(|i| h.reps.iter().any(|(t, b)| *t == i.uti && digest(b) == i.hash))
+                        .all(|i| h.reps.iter().any(|(f, b)| *f == i.format && digest(b) == i.hash))
                 },
             );
         if same {
@@ -263,8 +262,8 @@ impl ClipSync {
         let mut write = Write { origin: origin(offer), ..Write::default() };
         for item in items {
             match &item.inline {
-                Some(bytes) => write.data.push((item.uti.clone(), bytes.clone())),
-                None => write.promised.push(item.uti.clone()),
+                Some(bytes) => write.data.push((uti_of(item.format).to_owned(), bytes.clone())),
+                None => write.promised.push(uti_of(item.format).to_owned()),
             }
         }
         if !write.promised.is_empty() {
@@ -300,13 +299,14 @@ impl ClipSync {
 #[must_use]
 pub fn provider(link: LinkNow, offer: &Offer, wait: Duration) -> Provide {
     let generation = offer.generation;
-    let hashes: Vec<(String, Hash)> = offer.items.iter().map(|i| (i.uti.clone(), i.hash)).collect();
+    let hashes: Vec<(ClipFormat, Hash)> = offer.items.iter().map(|i| (i.format, i.hash)).collect();
     Arc::new(move |uti: &str| {
+        let format = format_of(uti)?;
         let remote = link.borrow().clone()?;
-        let bytes = remote.clip_data(generation, uti, wait)?;
-        let listed = hashes.iter().any(|(t, h)| t == uti && *h == digest(&bytes));
+        let bytes = remote.clip_data(generation, format, wait)?;
+        let listed = hashes.iter().any(|(f, h)| *f == format && *h == digest(&bytes));
         if !listed {
-            tracing::debug!(generation, uti, "clipboard bytes not the ones offered; dropped");
+            tracing::debug!(generation, ?format, "clipboard bytes not the ones offered; dropped");
         }
         listed.then_some(bytes)
     })
@@ -351,7 +351,7 @@ mod tests {
     use std::sync::Arc;
 
     use slopty_core::WorkerId;
-    use slopty_platform::pasteboard::Memory;
+    use slopty_platform::pasteboard::{Memory, TEXT_UTI};
 
     use super::*;
 
@@ -361,7 +361,7 @@ mod tests {
 
     fn text_item(text: &str) -> ClipItem {
         ClipItem {
-            uti: TEXT_UTI.to_owned(),
+            format: ClipFormat::Text,
             size: text.len() as u64,
             hash: digest(text.as_bytes()),
             inline: Some(text.as_bytes().to_vec()),
@@ -386,22 +386,22 @@ mod tests {
             ("public.file-url", b"file:///x"),
         ]);
         let offer = sync.offer_for(studio, me).unwrap();
-        let utis: Vec<_> = offer.items.iter().map(|i| i.uti.as_str()).collect();
-        assert_eq!(utis, ["public.png", TEXT_UTI], "richest first, no file URLs");
+        let formats: Vec<_> = offer.items.iter().map(|i| i.format).collect();
+        assert_eq!(formats, [ClipFormat::Png, ClipFormat::Text], "richest first, no file URLs");
         assert_eq!(offer.items[1].inline.as_deref(), Some(&b"hello"[..]));
         assert!(offer.items[0].inline.is_none(), "a picture is fetched");
         assert_eq!(offer.items[0].hash, digest(&png));
         assert!(sync.offer_for(studio, me).is_none(), "told already");
         assert!(sync.offer_for(WorkerKey::new(2), me).is_some(), "the other worker was not");
-        assert_eq!(sync.answer(offer.generation, "public.png"), Some(png));
+        assert_eq!(sync.answer(offer.generation, ClipFormat::Png), Some(png));
         board.copy(&[(TEXT_UTI, b"newer")]);
-        assert_eq!(sync.answer(offer.generation, "public.png"), None, "the clipboard moved on");
+        assert_eq!(sync.answer(offer.generation, ClipFormat::Png), None, "the clipboard moved on");
     }
 
     #[test]
     fn a_worker_offer_lands_as_text_and_promises_and_is_never_announced_back() {
         let (board, mut sync, me, studio) = setup();
-        let png = ClipItem { uti: "public.png".to_owned(), size: 4, hash: [1; 32], inline: None };
+        let png = ClipItem { format: ClipFormat::Png, size: 4, hash: [1; 32], inline: None };
         let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let log = Arc::clone(&asked);
         let provide: Provide = Arc::new(move |uti: &str| {
@@ -441,17 +441,17 @@ mod tests {
         assert!(sync.offer_for(studio, me).is_some());
         board.copy_files(&["file:///Users/me/a%20b.txt", "file:///tmp/c"]);
         let offer = sync.offer_for(studio, me).expect("the files replace the text");
-        let utis: Vec<_> = offer.items.iter().map(|i| i.uti.as_str()).collect();
-        assert_eq!(utis, [FILE_URL_UTI]);
+        let formats: Vec<_> = offer.items.iter().map(|i| i.format).collect();
+        assert_eq!(formats, [ClipFormat::FileUrls]);
         assert_eq!(
-            sync.answer(offer.generation, FILE_URL_UTI).as_deref(),
+            sync.answer(offer.generation, ClipFormat::FileUrls).as_deref(),
             Some(&b"file:///Users/me/a%20b.txt\nfile:///tmp/c"[..])
         );
         let here = vec![PathBuf::from("/Users/me/a b.txt"), PathBuf::from("/tmp/c")];
         assert_eq!(sync.files(), Some(ClipFiles::Here(here)));
 
         let noop: Provide = Arc::new(|_: &str| None);
-        let url = ClipItem { uti: FILE_URL_UTI.to_owned(), size: 9, hash: [3; 32], inline: None };
+        let url = ClipItem { format: ClipFormat::FileUrls, size: 9, hash: [3; 32], inline: None };
         sync.receive(studio, &worker_offer(4, vec![url, text_item("a.txt")]), noop);
         assert_eq!(board.data(TEXT_UTI).as_deref(), Some(&b"a.txt"[..]), "the names as text");
         assert_eq!(sync.files(), Some(ClipFiles::Worker { worker: studio, generation: 4 }));

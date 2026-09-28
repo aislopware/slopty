@@ -321,6 +321,8 @@ pub mod headless {
 
     #[cfg(test)]
     mod tests {
+        use slopty_core::DisplayId;
+
         use super::*;
 
         /// Asking a headless worker for its screens, an encoder or input is refused as
@@ -331,12 +333,12 @@ pub mod headless {
             NoCapture::enumerate(move |got| tx.send(got.map(drop)).unwrap());
             assert!(matches!(rx.recv().unwrap(), Err(CaptureError::Unsupported)));
             assert!(matches!(
-                NoCapture::resolve(&(), CaptureTarget::Display(1)),
+                NoCapture::resolve(&(), CaptureTarget::Display(DisplayId(1))),
                 Err(CaptureError::Unsupported)
             ));
             assert!(!NoCapture::can_capture());
             assert!(matches!(NoAudio::new(), Err(CodecError::NoAudio)));
-            let mut input = NoInput::new(CaptureTarget::Display(1), 2.0);
+            let mut input = NoInput::new(CaptureTarget::Display(DisplayId(1)), 2.0);
             assert!(matches!(input.focus(), Err(InputError::Unsupported)));
         }
     }

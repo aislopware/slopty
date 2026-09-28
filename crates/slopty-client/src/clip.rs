@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 use slopty_net::ClientMsg;
-use slopty_proto::transfer::{ClipMsg, INLINE_CLIP_BYTES, Offer};
+use slopty_proto::transfer::{ClipFormat, ClipMsg, INLINE_CLIP_BYTES, Offer};
 use tokio::sync::mpsc;
 
 /// Representations up to this size are fetched as soon as the worker announces them, so a paste
@@ -34,7 +34,7 @@ enum Slot {
 struct State {
     /// The worker's latest offer.
     generation: Option<u64>,
-    slots: HashMap<(u64, String), Slot>,
+    slots: HashMap<(u64, ClipFormat), Slot>,
     /// The link is gone: nothing more is asked, and nothing more will answer.
     closed: bool,
 }
@@ -61,13 +61,13 @@ impl ClipCache {
         state.generation = Some(offer.generation);
         state.slots.retain(|(generation, _), _| *generation == offer.generation);
         for item in &offer.items {
-            let key = (offer.generation, item.uti.clone());
+            let key = (offer.generation, item.format);
             if let Some(bytes) = &item.inline {
                 state.slots.insert(key, Slot::Ready(bytes.clone()));
             } else if item.size <= PREFETCH_BYTES
                 && !state.closed
                 && !state.slots.contains_key(&key)
-                && self.ask(offer.generation, &item.uti)
+                && self.ask(offer.generation, item.format)
             {
                 state.slots.insert(key, Slot::Asked);
             }
@@ -76,9 +76,9 @@ impl ClipCache {
         self.changed.notify_all();
     }
 
-    /// Ask the worker for `uti` of offer `generation`; whether the fetch went out.
-    fn ask(&self, generation: u64, uti: &str) -> bool {
-        let fetch = ClipMsg::Fetch { generation, uti: uti.to_owned() };
+    /// Ask the worker for `format` of offer `generation`; whether the fetch went out.
+    fn ask(&self, generation: u64, format: ClipFormat) -> bool {
+        let fetch = ClipMsg::Fetch { generation, format };
         match self.out.try_send(ClientMsg::Clip(fetch)) {
             Ok(()) => true,
             Err(e) => {
@@ -102,13 +102,13 @@ impl ClipCache {
         self.changed.notify_all();
     }
 
-    /// Bytes of `uti` in offer `generation` arrived.
-    pub fn fill(&self, generation: u64, uti: String, bytes: Vec<u8>) {
+    /// Bytes of `format` in offer `generation` arrived.
+    pub fn fill(&self, generation: u64, format: ClipFormat, bytes: Vec<u8>) {
         let mut state = self.state.lock();
         if state.generation.is_some_and(|g| g != generation) {
             return;
         }
-        state.slots.insert((generation, uti), Slot::Ready(bytes));
+        state.slots.insert((generation, format), Slot::Ready(bytes));
         drop(state);
         self.changed.notify_all();
     }
@@ -129,8 +129,8 @@ impl ClipCache {
     /// business (data, or an offer withdrawn), so the UI need not hear it.
     pub fn on_control(&self, msg: &ClipMsg) -> bool {
         match msg {
-            ClipMsg::Data { generation, uti, bytes } => {
-                self.fill(*generation, uti.clone(), bytes.clone());
+            ClipMsg::Data { generation, format, bytes } => {
+                self.fill(*generation, *format, bytes.clone());
                 true
             }
             ClipMsg::Unavailable { generation } => {
@@ -145,20 +145,20 @@ impl ClipCache {
         }
     }
 
-    /// The bytes of `uti` in offer `generation`: from the cache, else asked for and waited on
+    /// The bytes of `format` in offer `generation`: from the cache, else asked for and waited on
     /// for at most `wait`. `None` when the offer is gone, the link is, or the worker did not
     /// answer in time. Blocks the calling thread; the answer arrives on the link's tasks, never
     /// this thread.
     #[must_use]
-    pub fn wait(&self, generation: u64, uti: &str, wait: Duration) -> Option<Vec<u8>> {
+    pub fn wait(&self, generation: u64, format: ClipFormat, wait: Duration) -> Option<Vec<u8>> {
         let deadline = Instant::now().checked_add(wait)?;
-        let key = (generation, uti.to_owned());
+        let key = (generation, format);
         let mut state = self.state.lock();
         if !state.slots.contains_key(&key) {
-            if state.closed || !self.ask(generation, uti) {
+            if state.closed || !self.ask(generation, format) {
                 return None;
             }
-            state.slots.insert(key.clone(), Slot::Asked);
+            state.slots.insert(key, Slot::Asked);
         }
         loop {
             match state.slots.get(&key) {
@@ -168,7 +168,7 @@ impl ClipCache {
             }
             if self.changed.wait_until(&mut state, deadline).timed_out() {
                 drop(state);
-                tracing::debug!(generation, uti, "clipboard fetch timed out");
+                tracing::debug!(generation, ?format, "clipboard fetch timed out");
                 return None;
             }
         }
@@ -192,14 +192,16 @@ mod tests {
         Offer { origin: Peer::Client(ClientId::new()), generation, items }
     }
 
-    fn item(uti: &str, size: u64, inline: Option<&[u8]>) -> ClipItem {
-        ClipItem { uti: uti.to_owned(), size, hash: [0; 32], inline: inline.map(<[u8]>::to_vec) }
+    fn item(format: ClipFormat, size: u64, inline: Option<&[u8]>) -> ClipItem {
+        ClipItem { format, size, hash: [0; 32], inline: inline.map(<[u8]>::to_vec) }
     }
 
-    fn fetches(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<(u64, String)> {
+    fn fetches(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<(u64, ClipFormat)> {
         std::iter::from_fn(|| rx.try_recv().ok())
             .filter_map(|m| match m {
-                ClientMsg::Clip(ClipMsg::Fetch { generation, uti }) => Some((generation, uti)),
+                ClientMsg::Clip(ClipMsg::Fetch { generation, format }) => {
+                    Some((generation, format))
+                }
                 _ => None,
             })
             .collect()
@@ -212,46 +214,46 @@ mod tests {
         cache.offer(&offer(
             3,
             vec![
-                item("public.utf8-plain-text", 2, Some(b"hi")),
-                item("public.png", 900, None),
-                item("public.tiff", PREFETCH_BYTES + 1, None),
+                item(ClipFormat::Text, 2, Some(b"hi")),
+                item(ClipFormat::Png, 900, None),
+                item(ClipFormat::Tiff, PREFETCH_BYTES + 1, None),
             ],
         ));
-        assert_eq!(fetches(&mut rx), [(3, "public.png".to_owned())], "the big one waits");
-        let text = cache.wait(3, "public.utf8-plain-text", Duration::ZERO);
+        assert_eq!(fetches(&mut rx), [(3, ClipFormat::Png)], "the big one waits");
+        let text = cache.wait(3, ClipFormat::Text, Duration::ZERO);
         assert_eq!(text.as_deref(), Some(&b"hi"[..]));
-        cache.fill(3, "public.png".to_owned(), vec![1, 2]);
-        assert_eq!(cache.wait(3, "public.png", Duration::ZERO), Some(vec![1, 2]));
+        cache.fill(3, ClipFormat::Png, vec![1, 2]);
+        assert_eq!(cache.wait(3, ClipFormat::Png, Duration::ZERO), Some(vec![1, 2]));
     }
 
     #[test]
     fn a_paste_asks_once_and_waits_for_the_answer_from_another_thread() {
         let (tx, mut rx) = mpsc::channel(8);
         let cache = std::sync::Arc::new(ClipCache::new(tx));
-        cache.offer(&offer(4, vec![item("public.tiff", PREFETCH_BYTES + 1, None)]));
+        cache.offer(&offer(4, vec![item(ClipFormat::Tiff, PREFETCH_BYTES + 1, None)]));
         let filler = std::sync::Arc::clone(&cache);
         let answer = std::thread::spawn(move || {
             while filler.state.lock().slots.is_empty() {
                 std::thread::yield_now();
             }
-            filler.fill(4, "public.tiff".to_owned(), vec![7; 3]);
+            filler.fill(4, ClipFormat::Tiff, vec![7; 3]);
         });
-        let got = cache.wait(4, "public.tiff", Duration::from_secs(10));
+        let got = cache.wait(4, ClipFormat::Tiff, Duration::from_secs(10));
         answer.join().unwrap();
         assert_eq!(got, Some(vec![7; 3]));
-        assert_eq!(fetches(&mut rx), [(4, "public.tiff".to_owned())]);
+        assert_eq!(fetches(&mut rx), [(4, ClipFormat::Tiff)]);
     }
 
     #[test]
     fn a_withdrawn_or_superseded_offer_answers_nothing_and_does_not_hang() {
         let (tx, _rx) = mpsc::channel(8);
         let cache = ClipCache::new(tx);
-        cache.offer(&offer(5, vec![item("public.png", 10, None)]));
+        cache.offer(&offer(5, vec![item(ClipFormat::Png, 10, None)]));
         cache.gone(5);
-        assert_eq!(cache.wait(5, "public.png", Duration::from_secs(5)), None);
+        assert_eq!(cache.wait(5, ClipFormat::Png, Duration::from_secs(5)), None);
         cache.offer(&offer(6, Vec::new()));
-        cache.fill(5, "public.png".to_owned(), vec![1]);
-        assert_eq!(cache.wait(5, "public.png", Duration::from_millis(10)), None, "stale data");
+        cache.fill(5, ClipFormat::Png, vec![1]);
+        assert_eq!(cache.wait(5, ClipFormat::Png, Duration::from_millis(10)), None, "stale data");
     }
 
     /// A paste waiting on a link that goes stops then, not at its deadline; one on a link that
@@ -260,8 +262,8 @@ mod tests {
     fn a_paste_on_a_dead_link_answers_at_once() {
         let (tx, mut rx) = mpsc::channel(8);
         let cache = std::sync::Arc::new(ClipCache::new(tx));
-        cache.offer(&offer(8, vec![item("public.tiff", PREFETCH_BYTES + 1, None)]));
-        cache.fill(8, "public.rtf".to_owned(), vec![5]);
+        cache.offer(&offer(8, vec![item(ClipFormat::Tiff, PREFETCH_BYTES + 1, None)]));
+        cache.fill(8, ClipFormat::Rtf, vec![5]);
         let closer = std::sync::Arc::clone(&cache);
         let close = std::thread::spawn(move || {
             while closer.state.lock().slots.len() < 2 {
@@ -270,20 +272,20 @@ mod tests {
             closer.close();
         });
         let started = Instant::now();
-        assert_eq!(cache.wait(8, "public.tiff", Duration::from_secs(30)), None);
+        assert_eq!(cache.wait(8, ClipFormat::Tiff, Duration::from_secs(30)), None);
         close.join().unwrap();
         assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-        assert_eq!(fetches(&mut rx), [(8, "public.tiff".to_owned())]);
+        assert_eq!(fetches(&mut rx), [(8, ClipFormat::Tiff)]);
 
-        assert_eq!(cache.wait(8, "public.png", Duration::from_secs(30)), None);
-        assert_eq!(cache.wait(8, "public.rtf", Duration::from_secs(30)), Some(vec![5]));
+        assert_eq!(cache.wait(8, ClipFormat::Png, Duration::from_secs(30)), None);
+        assert_eq!(cache.wait(8, ClipFormat::Rtf, Duration::from_secs(30)), Some(vec![5]));
         assert!(fetches(&mut rx).is_empty(), "a closed link is asked nothing");
 
         let (tx, rx) = mpsc::channel(8);
         let orphan = ClipCache::new(tx);
         drop(rx);
         let started = Instant::now();
-        assert_eq!(orphan.wait(9, "public.png", Duration::from_secs(30)), None);
+        assert_eq!(orphan.wait(9, ClipFormat::Png, Duration::from_secs(30)), None);
         assert!(started.elapsed() < Duration::from_secs(5), "an unsendable fetch is not waited on");
     }
 }

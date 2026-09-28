@@ -1425,3 +1425,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   load's own tails. A copy of every move at 160 Hz is a lot of redundancy for the moves, whose
   worth is only that a newer one may pass a lost one; copying only moves that follow a gap is
   the next thing to measure.
+- ✅ **Every datagram starts with its channel** (2026-09-28, audit finding 24). A worker's echo
+  copy used to carry a 16-byte `MediaHeader` with nothing set but `kind = Term`. `Kind::Term`
+  sat among the media kinds, and the reassembler had to reject it. Datagrams from the client
+  were a postcard enum instead. Now the first byte of every datagram, in both directions, is a
+  `datagram::Channel`: `Media` 0, `Term` 1, `Feedback` 2, `Input` 3 or `ScreenInput` 4.
+  - `MediaHeader.channel` is the media header's first byte (17 bytes now), so a media packet
+    keeps its zerocopy parse. `MAX_PAYLOAD` is rounded down to even, for the parity shards.
+  - An echo copy is `[Term][session][event]`, 15 bytes less than before (`TERM_OVERHEAD`, 18).
+  - `ClientDatagram::encode`/`decode` put the channel byte in front of the postcard body.
+    `Kind::Term` is gone.
+  - A new kind of datagram is a new channel, not a fake media kind.
+  - Test: `a_datagram_of_each_channel_round_trips` (`slopty-proto`) and the header offsets in
+    `slopty-media`'s pipeline test. Goldens: `media_heartbeat`, `worker_frame_copy`,
+    `client_input_copy`, `client_screen_input_copy`, `client_nack` and `client_refresh`.
+- ✅ **Byte payloads serialize as bytes** (2026-09-28, audit finding 1). Every `Vec<u8>` payload
+  on the wire has `#[serde(with = "serde_bytes")]`: `TermRequest::Raw`, clipboard items and
+  data, conversation blobs, orchestration writes, upload parts, file outcomes and stills.
+  Postcard writes both forms the same way, so no golden moved. A format that tells the two
+  apart would get the compact form.
+- ✅ **A transfer retries only what a retry can fix** (2026-09-28, audit finding 18).
+  - **`slopty_client::xfer::XferError`** separates `Local` (a file here that cannot be read or
+    written, with its `io::Error` as the source) from `Cut`, `Mismatch`, `Worker`,
+    `Unanswered`, `Cancelled` and `LinkClosed`. An upload resumes only after `Cut`. A download
+    is fetched again after `Cut`, `Mismatch`, `Worker` or `Unanswered`, never after `Local`.
+    `send_file` opens and seeks the local file before it opens a stream, so a file it cannot
+    read never makes the worker wait. Before, a local `File::open` failure was treated as a
+    cut: two `Resume` round trips, then a failure.
+  - **`NetError::Io { context, source }`** is the variant for disk errors (transfers, saves,
+    the known-workers store). `Bind` keeps its `io::Error` as the source, and
+    `Store(serde_json::Error)` is kept for a store that does not parse. A stream's write error
+    goes through `NetError::stream`, which keeps its cause chain.
+  - Test: `an_unreadable_file_fails_as_local_and_is_not_resumed` (`slopty-client`).
+- ✅ **Wall-clock times are `WallMs`** (2026-09-28, audit finding 10). A newtype in
+  `slopty-core` over milliseconds since the Unix epoch, serialized transparently so no golden
+  moved. It covers every wall time on the wire: session starts, file modification times, agent
+  and conversation stamps, prompts and their deadlines, `HubEvent.at_ms` and a worker's last
+  sighting. Zero means unknown. `WallMs::to_system` and `since` replace the hand-rolled epoch
+  arithmetic, and `slopty_core::shell_quote` replaces the three copies of shell quoting.
+  Test: `wall_milliseconds_round_trip_and_zero_is_unknown`.

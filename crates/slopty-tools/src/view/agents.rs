@@ -66,8 +66,8 @@ pub struct HeldView<'a> {
     /// What `allow_always` grants.
     always: &'a [Suggestion],
     mode: Option<&'a str>,
-    asked_ms: u64,
-    until_ms: u64,
+    asked_ms: slopty_core::WallMs,
+    until_ms: slopty_core::WallMs,
 }
 
 fn held(prompt: &PermissionPrompt) -> HeldView<'_> {
@@ -213,7 +213,7 @@ pub fn moved(moved: &Moved) -> MovedView<'_> {
 
 #[cfg(test)]
 mod tests {
-    use slopty_core::{SessionId, WorkerId};
+    use slopty_core::{SessionId, WallMs, WorkerId};
     use slopty_proto::conversation::{Clipped, Prompt};
     use slopty_proto::orchestration::ThreadInfo;
 
@@ -234,7 +234,7 @@ mod tests {
             thread: ThreadId::Main,
             entries: vec![Entry {
                 id: "u1".to_owned(),
-                at_ms: 1,
+                at_ms: WallMs::from_millis(1),
                 body: Body::Prompt(Prompt { text, images: Vec::new(), command: None }),
             }],
             start: 7,

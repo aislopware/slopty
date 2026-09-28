@@ -211,6 +211,7 @@ fn pick_item(worker: WorkerId, items: &[Item], prefix: &str) -> Result<ItemRef, 
 
 #[cfg(test)]
 mod tests {
+    use slopty_core::WallMs;
     use slopty_proto::server::{Os, WorkerCaps};
     use slopty_proto::terminal::SessionState;
 
@@ -233,10 +234,10 @@ mod tests {
                 agents: Vec::new(),
                 can_capture: false,
                 can_inject: false,
-                load: 0.0,
                 version: "0".to_owned(),
             },
-            last_seen_ms: 0,
+            load: 0.0,
+            last_seen_ms: WallMs::ZERO,
         }
     }
 
@@ -321,7 +322,7 @@ mod tests {
             repo: None,
             branch: None,
             changes: None,
-            started_ms: 0,
+            started_ms: WallMs::ZERO,
             cols: 80,
             rows: 24,
             state: SessionState::Running,

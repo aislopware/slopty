@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result};
 use slopty_agent::Hook;
 use slopty_core::SessionId;
 use slopty_proto::WorkerMsg;
-use slopty_proto::ctl::{CtlReply, CtlRequest, Health, NotUp, PermissionAnswer, Tailscale};
+use slopty_proto::ctl::{CtlReply, CtlRequest, Health, PermissionAnswer, Tailscale};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -52,7 +52,7 @@ async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
             name: daemon.name.clone(),
             sessions: daemon.worker.summaries().await,
         },
-        CtlRequest::Doctor => CtlReply::Doctor(doctor(&daemon).await),
+        CtlRequest::Doctor => CtlReply::Doctor(Box::new(doctor(&daemon).await)),
         CtlRequest::Screens => {
             let (live, closed) = daemon.screens.summaries();
             CtlReply::Screens { live, closed }
@@ -95,56 +95,22 @@ async fn tailscale(api: Option<&slopty_tailnet::LocalApi>) -> Tailscale {
 
 /// What the doctor says of a Tailscale that answered with `status`.
 fn tailscale_of(status: &slopty_tailnet::Status) -> Tailscale {
-    use slopty_tailnet::BackendState as State;
-    let backend = match status.backend_state {
-        State::Running => {
-            let me = status.me.as_ref();
-            return Tailscale::Up {
-                node: me.map(|n| n.name().to_owned()).unwrap_or_default(),
-                ip: me.and_then(slopty_tailnet::Node::ipv4),
-            };
-        }
-        State::NoState => NotUp::NoState,
-        State::InUseOtherUser => NotUp::InUseOtherUser,
-        State::NeedsLogin => NotUp::NeedsLogin,
-        State::NeedsMachineAuth => NotUp::NeedsMachineAuth,
-        State::Stopped => NotUp::Stopped,
-        State::Starting => NotUp::Starting,
-        State::Other => NotUp::Other,
-    };
-    Tailscale::Down { backend }
-}
-
-/// Whether this worker may capture the screen: Screen Recording on macOS.
-#[cfg(target_os = "macos")]
-fn can_capture() -> bool {
-    slopty_capture::can_capture()
-}
-
-/// A worker without a desktop to stream captures nothing.
-#[cfg(not(target_os = "macos"))]
-const fn can_capture() -> bool {
-    false
-}
-
-/// Whether this worker may post input events: Accessibility on macOS.
-#[cfg(target_os = "macos")]
-fn can_post() -> bool {
-    slopty_input::can_post()
-}
-
-/// A worker without a desktop to stream injects no input.
-#[cfg(not(target_os = "macos"))]
-const fn can_post() -> bool {
-    false
+    if status.backend_state != slopty_tailnet::BackendState::Running {
+        return Tailscale::Down { backend: status.backend_state };
+    }
+    let me = status.me.as_ref();
+    Tailscale::Up {
+        node: me.map(|n| n.name().to_owned()).unwrap_or_default(),
+        ip: me.and_then(slopty_tailnet::Node::ipv4),
+    }
 }
 
 async fn doctor(daemon: &Daemon) -> Health {
+    let caps = daemon.caps.borrow().clone();
     Health {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         exe: std::env::current_exe().map_or_else(|_| "?".to_owned(), |p| p.display().to_string()),
-        screen_recording: can_capture(),
-        post_events: can_post(),
+        caps,
         listen: daemon.listen.to_string(),
         allow: daemon.listener.admission().ranges().iter().map(ToString::to_string).collect(),
         tailscale: tailscale(daemon.listener.admission().local_api().as_ref()).await,
@@ -215,9 +181,15 @@ mod tests {
             }
         );
         let signed_out = status(r#"{"BackendState":"NeedsLogin","Self":null}"#);
-        assert_eq!(tailscale_of(&signed_out), Tailscale::Down { backend: NotUp::NeedsLogin });
+        assert_eq!(
+            tailscale_of(&signed_out),
+            Tailscale::Down { backend: slopty_tailnet::BackendState::NeedsLogin }
+        );
         let unknown = status(r#"{"BackendState":"Rebooting"}"#);
-        assert_eq!(tailscale_of(&unknown), Tailscale::Down { backend: NotUp::Other });
+        assert_eq!(
+            tailscale_of(&unknown),
+            Tailscale::Down { backend: slopty_tailnet::BackendState::Other }
+        );
         assert_eq!(tailscale(None).await, Tailscale::Absent);
     }
 }

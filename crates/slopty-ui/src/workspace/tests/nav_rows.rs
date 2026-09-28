@@ -4,6 +4,7 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::Modifiers;
+use slopty_core::WallMs;
 
 use super::*;
 
@@ -95,7 +96,7 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
         let summary = SessionSummary {
             branch: Some("main".into()),
             changes: None,
-            started_ms: u64::try_from(started).unwrap(),
+            started_ms: WallMs::from_millis(u64::try_from(started).unwrap()),
             ..summary(session, Some("/Users/me/oss/slopty"))
         };
         v.session_opened(key, summary, cx);
@@ -288,7 +289,8 @@ fn the_plus_on_a_worker_opens_a_shell_there(cx: &mut TestAppContext) {
     click(cx, leak(format!("nav-new-shell-{}", laptop.key)));
     let sent = laptop.drain();
     assert!(
-        sent.iter().any(|m| matches!(m, ClientMsg::OpenSession(o) if o.command.is_empty())),
+        sent.iter()
+            .any(|m| matches!(m, ClientMsg::OpenSession { spec: o, .. } if o.command.is_empty())),
         "{sent:?}"
     );
     assert!(shown(cx, selector("nav-tile", tile.item)), "the header did not fold");
@@ -314,7 +316,7 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
         sessions.push(SessionSummary {
             branch: Some("main".into()),
             changes: None,
-            started_ms: u64::try_from(started).unwrap(),
+            started_ms: WallMs::from_millis(u64::try_from(started).unwrap()),
             ..summary(session, Some(&format!("/Users/me/src/project_{n}")))
         });
         items.push(Item {
@@ -450,7 +452,7 @@ fn a_resting_agent_reads_its_last_word_and_its_age(cx: &mut TestAppContext) {
         let rest = AgentEvent {
             status: AgentStatus::Idle,
             detail: Some("done".into()),
-            since_ms,
+            since_ms: WallMs::from_millis(since_ms),
             ..blocked(session)
         };
         v.agent_event(rest, cx);

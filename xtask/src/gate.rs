@@ -6,12 +6,25 @@
 //! the next `git commit` records. Stage what you mean to land, then gate it. The cargo steps run as
 //! parallel **lanes**, each on its own target dir under `target/gate/` (cargo serialises
 //! concurrent builds that share one), so the wall time is the longest lane, not the sum.
+//!
+//! The tool checks (fmt, deny, hakari, shear, typos, taplo, committed) take seconds, so they run
+//! first, side by side, and a failure among them stops the gate before a compile starts.
+//!
+//! A lane whose inputs are exactly those of its last pass is not run again ([`pass`]): the
+//! index entries it reads, the toolchain, the environment and the tools. `--since-pass` goes
+//! further for the tests: when only files inside packages changed since that pass, nextest runs
+//! the tests of those packages and of every package that depends on them. Either way the lanes
+//! run on the snapshot of the index, and a lane that is not run passed on the same inputs.
+
+mod pass;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
+use pass::{Inputs, Plan, Scope};
 use xshell::{Shell, cmd};
 
 use crate::tools::{LINUX_CRATES, TRIPLES, has, host_only_present, quiet_step, repo_root};
@@ -25,12 +38,28 @@ pub struct Options {
     pub quick: bool,
     /// Check the working tree in place instead of a snapshot (CI, or a tree nobody edits).
     pub in_place: bool,
+    /// Run only the tests of the packages changed since the tests lane last passed, and of
+    /// their dependents.
+    pub since_pass: bool,
 }
 
 /// The build lanes, each with its own target dir and a share of the cores. The host clippy
 /// pass and the tests are the long ones; the rest fill the gaps.
 const LANES: [(&str, u8); 5] =
     [("tools", 1), ("clippy host", 4), ("clippy ios", 4), ("tests", 6), ("rustdoc", 3)];
+
+/// The nextest profile of the gate's tests lane (`.config/nextest.toml`).
+const NEXTEST_PROFILE: &str = "gate";
+
+/// A shell in `tree` on lane `name`'s target dir with its share of the cores.
+fn lane_shell(tree: &Utf8Path, gate_dir: &Utf8Path, name: &str) -> Result<Shell> {
+    let jobs = LANES.iter().find(|(n, _)| *n == name).map_or(4, |(_, j)| *j);
+    let sh = Shell::new()?;
+    sh.change_dir(tree);
+    sh.set_var("CARGO_TARGET_DIR", gate_dir.join(name.replace(' ', "-")));
+    sh.set_var("CARGO_BUILD_JOBS", jobs.to_string());
+    Ok(sh)
+}
 
 pub fn run(sh: &Shell, opts: Options) -> Result<()> {
     let started = Instant::now();
@@ -44,6 +73,9 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
     if lock.try_lock().is_err() {
         bail!("another `cargo gate` is running on this checkout; wait for it");
     }
+    if opts.in_place && opts.since_pass {
+        bail!("--since-pass compares snapshots of the index; it cannot check the tree in place");
+    }
     if opts.fix {
         // Fixers write to the working tree; the snapshot reads the index, so stage their edits.
         fmt(sh, true)?;
@@ -51,82 +83,214 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
         shear(sh, true)?;
         typos(sh, true)?;
     }
-    let tree = if opts.in_place { root.clone() } else { snapshot(&root)? };
-    // A formatting failure should not cost a build: checked first, alone, in a second.
-    let tree_sh = Shell::new()?;
-    tree_sh.change_dir(&tree);
-    fmt(&tree_sh, false)?;
-    let lanes = root.join("target").join("gate");
-    let lane = |name: &str| -> Result<Shell> {
-        let jobs = LANES.iter().find(|(n, _)| *n == name).map_or(4, |(_, j)| *j);
-        let sh = Shell::new()?;
-        sh.change_dir(&tree);
-        sh.set_var("CARGO_TARGET_DIR", lanes.join(name.replace(' ', "-")));
-        sh.set_var("CARGO_BUILD_JOBS", jobs.to_string());
-        Ok(sh)
+    // In place, the tree is whatever is on disk, which no record describes: every lane runs.
+    let (tree, inputs) = if opts.in_place {
+        (root.clone(), None)
+    } else {
+        let (tree, listing) = snapshot(&root)?;
+        let inputs = Inputs::gather(&gate_dir, &tree, listing)?;
+        (tree, Some(inputs))
     };
-    let main = || -> Result<Shell> {
+    let inputs = inputs.as_ref();
+    let lane = |name: &str| lane_shell(&tree, &gate_dir, name);
+    let checkout = || -> Result<Shell> {
         let sh = Shell::new()?;
         sh.change_dir(&root);
         Ok(sh)
     };
+
+    // Seconds of tool checks, then minutes of compiles: a tool failure stops the gate first.
     let quick = opts.quick;
-    let results: Vec<(&str, Result<()>)> = std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        if !quick {
-            handles.push((
-                "tools",
-                scope.spawn(|| -> Result<()> {
-                    let sh = lane("tools")?;
-                    deny(&sh)?;
-                    hakari(&sh, false)?;
-                    shear(&sh, false)?;
-                    typos(&sh, false)?;
-                    // `committed` reads the history, which only the checkout has.
-                    commits(&main()?)
-                }),
-            ));
+    let first: Vec<(&str, Result<()>)> = std::thread::scope(|scope| {
+        let fmt_check = scope.spawn(|| -> Result<()> {
+            let sh = Shell::new()?;
+            sh.change_dir(&tree);
+            fmt(&sh, false)
+        });
+        let tools = (!quick).then(|| {
+            scope.spawn(|| {
+                let tools = Lane {
+                    name: "tools",
+                    scope: Scope::Tree,
+                    extra: tools_extra(&checkout()?)?,
+                    since_pass: false,
+                };
+                cached(inputs, &tree, &tools, |_| tools_lane(|| lane("tools"), &checkout()?))
+            })
+        });
+        let mut results = vec![("fmt", join(fmt_check))];
+        if let Some(tools) = tools {
+            results.push(("tools", join(tools)));
         }
-        handles.push(("clippy host", scope.spawn(|| lint_host(&lane("clippy host")?))));
+        results
+    });
+    report(&first, started)?;
+
+    let build = |name| Lane { name, scope: Scope::Build, extra: String::new(), since_pass: false };
+    let second: Vec<(&str, Result<()>)> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        handles.push((
+            "clippy host",
+            scope.spawn(|| {
+                cached(inputs, &tree, &build("clippy host"), |_| lint_host(&lane("clippy host")?))
+            }),
+        ));
         if !quick {
             handles.push((
                 "clippy ios",
-                scope.spawn(|| -> Result<()> {
-                    let sh = lane("clippy ios")?;
-                    lint_ios(&sh)?;
-                    lint_linux(&sh)
+                scope.spawn(|| {
+                    cached(inputs, &tree, &build("clippy ios"), |_| {
+                        let sh = lane("clippy ios")?;
+                        lint_ios(&sh)?;
+                        lint_linux(&sh)
+                    })
                 }),
             ));
         }
-        handles.push(("tests", scope.spawn(|| test(&lane("tests")?, &[]))));
+        handles.push((
+            "tests",
+            scope.spawn(|| {
+                let tests = Lane {
+                    name: "tests",
+                    scope: Scope::Build,
+                    extra: pass::tool_id("cargo-nextest"),
+                    since_pass: opts.since_pass,
+                };
+                cached(inputs, &tree, &tests, |only| {
+                    test_lane(&lane("tests")?, lane("tests")?, only)
+                })
+            }),
+        ));
         if !quick {
-            handles.push(("rustdoc", scope.spawn(|| doc(&lane("rustdoc")?, false))));
+            handles.push((
+                "rustdoc",
+                scope.spawn(|| {
+                    cached(inputs, &tree, &build("rustdoc"), |_| doc(&lane("rustdoc")?, false))
+                }),
+            ));
         }
-        handles
-            .into_iter()
-            .map(|(name, handle)| {
-                let result = handle
-                    .join()
-                    .unwrap_or_else(|panic| Err(anyhow::anyhow!("lane panicked: {panic:?}")));
-                (name, result)
-            })
-            .collect()
+        handles.into_iter().map(|(name, handle)| (name, join(handle))).collect()
     });
+    report(&second, started)?;
+    println!("✔ gate passed ({:.1?})", started.elapsed());
+    Ok(())
+}
+
+fn join(handle: std::thread::ScopedJoinHandle<'_, Result<()>>) -> Result<()> {
+    handle.join().unwrap_or_else(|panic| Err(anyhow::anyhow!("lane panicked: {panic:?}")))
+}
+
+/// Print every failed lane and fail if there was one.
+fn report(results: &[(&str, Result<()>)], started: Instant) -> Result<()> {
     let failed: Vec<&str> = results
-        .into_iter()
-        .filter_map(|(name, result)| match result {
-            Ok(()) => None,
-            Err(e) => {
-                eprintln!("✘ {name}: {e:#}");
-                Some(name)
-            }
+        .iter()
+        .filter_map(|(name, result)| {
+            let e = result.as_ref().err()?;
+            eprintln!("✘ {name}: {e:#}");
+            Some(*name)
         })
         .collect();
     if !failed.is_empty() {
         bail!("gate failed: {} ({:.1?})", failed.join(", "), started.elapsed());
     }
-    println!("✔ gate passed ({:.1?})", started.elapsed());
     Ok(())
+}
+
+/// A lane as the pass records see it.
+struct Lane<'a> {
+    name: &'a str,
+    /// The index entries it reads.
+    scope: Scope,
+    /// What it reads besides them and the inputs common to every lane.
+    extra: String,
+    /// It may run on the packages changed since its last pass only.
+    since_pass: bool,
+}
+
+/// Run `lane` through `check` unless its inputs are those of its last pass, and record them
+/// when it passes. `check` gets the packages to narrow to under `--since-pass`, or `None` for
+/// all of them.
+fn cached(
+    inputs: Option<&Inputs>,
+    tree: &Utf8Path,
+    lane: &Lane<'_>,
+    check: impl FnOnce(Option<&[String]>) -> Result<()>,
+) -> Result<()> {
+    let Some(inputs) = inputs else { return check(None) };
+    let name = lane.name;
+    let key = inputs.key(name, lane.scope, &lane.extra);
+    let plan = inputs.plan(name, &key, lane.since_pass, tree)?;
+    let only = match &plan {
+        Plan::Skip => {
+            println!("  ✓ {name}: inputs unchanged since it last passed");
+            return Ok(());
+        }
+        Plan::Only(packages) => {
+            println!("  {name}: changed since its last pass: {}", packages.join(" "));
+            Some(packages.as_slice())
+        }
+        Plan::Run => None,
+    };
+    check(only)?;
+    inputs.record(name, &key)
+}
+
+/// What the tools lane reads besides the tree: the tools themselves, the history `committed`
+/// lints, and the day, so `cargo deny` sees new advisories at least daily.
+fn tools_extra(checkout: &Shell) -> Result<String> {
+    let mut extra: String = ["cargo-deny", "cargo-hakari", "cargo-shear", "typos", "committed"]
+        .into_iter()
+        .map(pass::tool_id)
+        .collect();
+    let head = cmd!(checkout, "git rev-parse HEAD").quiet().read()?;
+    let tag = cmd!(checkout, "git describe --tags --abbrev=0").quiet().ignore_stderr().read();
+    let day = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / 86_400);
+    let _written = writeln!(extra, "head {head}\ntag {}\nday {day}", tag.unwrap_or_default());
+    Ok(extra)
+}
+
+/// deny, hakari, shear and typos on the snapshot (each in a shell from `on_tree`) and
+/// `committed` on the checkout's history, side by side; every failure is reported.
+fn tools_lane(on_tree: impl Fn() -> Result<Shell> + Sync, checkout: &Shell) -> Result<()> {
+    let on_tree = &on_tree;
+    let results: Vec<Result<()>> = std::thread::scope(|scope| {
+        let handles = [
+            scope.spawn(move || deny(&on_tree()?)),
+            scope.spawn(move || hakari(&on_tree()?, false)),
+            scope.spawn(move || shear(&on_tree()?, false)),
+            scope.spawn(move || typos(&on_tree()?, false)),
+        ];
+        // `committed` reads the history, which only the checkout has.
+        let mut results = vec![commits(checkout)];
+        results.extend(handles.into_iter().map(join));
+        results
+    });
+    let errors: Vec<String> =
+        results.into_iter().filter_map(Result::err).map(|e| format!("{e:#}")).collect();
+    if errors.is_empty() { Ok(()) } else { bail!("{}", errors.join("; ")) }
+}
+
+/// The gate's tests: build every test binary, then run nextest (on `only`'s packages when
+/// given) and the doctests side by side. Cargo holds the target dir's lock only while it
+/// builds, and the build is done, so neither waits for the other.
+fn test_lane(sh: &Shell, doc_sh: Shell, only: Option<&[String]>) -> Result<()> {
+    quiet_step("nextest build", cmd!(sh, "cargo nextest run --workspace --no-run"))?;
+    let filter: Vec<String> = only.map_or_else(Vec::new, |packages| {
+        let expr = packages.iter().map(|p| format!("package(={p})")).collect::<Vec<_>>();
+        vec!["--no-tests=warn".to_owned(), "-E".to_owned(), expr.join(" | ")]
+    });
+    std::thread::scope(|scope| {
+        let doctests = scope
+            .spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test --workspace --doc")));
+        let tests = quiet_step(
+            "nextest",
+            cmd!(sh, "cargo nextest run --workspace --profile {NEXTEST_PROFILE} {filter...}"),
+        );
+        let doctests = join(doctests);
+        tests.and(doctests)
+    })
 }
 
 /// Sync the **index** (what `git commit` would record, not the working tree) into
@@ -135,8 +299,9 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
 /// read in one `git cat-file --batch` pass; a manifest of the blob each path was last written
 /// from keeps unchanged files untouched, so cargo in the snapshot rebuilds exactly what changed.
 /// Paths the index no longer lists are removed; a submodule (`vendor/ghostty`) is a symlink to
-/// a checkout at the commit the index pins ([`submodule_at`]).
-fn snapshot(root: &Utf8Path) -> Result<Utf8PathBuf> {
+/// a checkout at the commit the index pins ([`submodule_at`]). Returns the tree and the index's
+/// entries it holds.
+fn snapshot(root: &Utf8Path) -> Result<(Utf8PathBuf, Vec<pass::Entry>)> {
     let started = Instant::now();
     let gate = root.join("target").join("gate");
     let tree = gate.join("tree");
@@ -153,6 +318,7 @@ fn snapshot(root: &Utf8Path) -> Result<Utf8PathBuf> {
     let mut after: HashMap<String, String> = HashMap::new();
     let mut wanted: HashSet<String> = HashSet::new();
     let mut fetch: Vec<(String, String, bool)> = Vec::new();
+    let mut listing = Vec::new();
     for entry in listed.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
         let entry = std::str::from_utf8(entry).context("an index path is not UTF-8")?;
         let Some((meta, rel)) = entry.split_once('\t') else { continue };
@@ -165,6 +331,7 @@ fn snapshot(root: &Utf8Path) -> Result<Utf8PathBuf> {
             bail!("{rel} is unmerged in the index");
         }
         wanted.insert(rel.to_owned());
+        listing.push(pass::Entry { path: rel.to_owned(), id: format!("{mode} {sha}") });
         let dst = tree.join(rel);
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
@@ -199,7 +366,7 @@ fn snapshot(root: &Utf8Path) -> Result<Utf8PathBuf> {
         wanted.len(),
         started.elapsed()
     );
-    Ok(tree)
+    Ok((tree, listing))
 }
 
 /// A checkout of submodule `rel` at the commit the index pins, under `target/gate/modules/`:

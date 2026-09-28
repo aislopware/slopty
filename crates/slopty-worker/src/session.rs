@@ -16,7 +16,7 @@ use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
 use slopty_proto::codec;
 use slopty_proto::terminal::{
     ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, TermColors,
-    TermEvent, TermRequest, TermSize,
+    TermError, TermEvent, TermRequest, TermSize,
 };
 use slopty_pty::PtyMaster;
 use slopty_pty::protocol::OutputFrame;
@@ -670,11 +670,6 @@ struct Input {
 /// bound. Several full pastes of a large file fit.
 const INPUT_MAX_BYTES: usize = 16 << 20;
 
-/// Input refused because [`INPUT_MAX_BYTES`] already wait for the program.
-#[derive(Debug, thiserror::Error)]
-#[error("the terminal's program is not reading its input; {} MiB are waiting already", INPUT_MAX_BYTES >> 20)]
-struct InputFull;
-
 /// Where one keystroke is on its way through the actor, for the trace that takes the echo
 /// round trip apart (MEASUREMENTS.md, "the keystroke path, stage by stage"). Three stamps at
 /// trace level and nothing else: the cost when tracing is off is two `Option` writes.
@@ -1283,7 +1278,9 @@ impl Actor {
     /// Queue bytes for the PTY behind whatever is still waiting, and write what fits now. A
     /// key sequence number they carry is acknowledged once they are all written. Bytes that
     /// would take the queue past [`INPUT_MAX_BYTES`] are refused whole.
-    fn queue_input(&mut self, bytes: &[u8], origin: Origin) -> Result<(), InputFull> {
+    /// Queue `bytes` for the tty; [`TermError::InputFull`] when [`INPUT_MAX_BYTES`] already wait
+    /// for the program.
+    fn queue_input(&mut self, bytes: &[u8], origin: Origin) -> Result<(), TermError> {
         if bytes.is_empty() || self.pty_closed {
             return Ok(());
         }
@@ -1294,7 +1291,7 @@ impl Actor {
                 queued = self.input.pending.len(),
                 "input refused: the program is not reading"
             );
-            return Err(InputFull);
+            return Err(TermError::InputFull);
         }
         self.input.pending.extend_from_slice(bytes);
         self.input.queued = self.input.queued.saturating_add(bytes.len() as u64);
@@ -1355,7 +1352,7 @@ impl Actor {
         self.input.pending.clear();
         self.input.ends.clear();
         self.input.written = self.input.queued;
-        self.broadcast(&TermEvent::Error(e.to_string()));
+        self.broadcast(&TermEvent::Error(TermError::Write(e.to_string())));
     }
 
     /// The next diff for the viewers that follow the diffs and have room for it, and every row
@@ -1377,7 +1374,7 @@ impl Actor {
                 Ok(None) => {}
                 Err(e) => {
                     tracing::error!(session = %self.id, error = %e, "frame build failed");
-                    self.broadcast(&TermEvent::Error(e.to_string()));
+                    self.broadcast(&TermEvent::Error(TermError::Engine(e.to_string())));
                 }
             }
         } else {
@@ -1491,7 +1488,7 @@ impl Actor {
     fn whole_frame(&mut self) -> Result<(Outbound, Vec<Outbound>), Option<Outbound>> {
         let (frame, images) = self.engine.join_frame(self.ack_seq).map_err(|e| {
             tracing::error!(session = %self.id, error = %e, "whole frame failed");
-            self.encode(&TermEvent::Error(e.to_string()))
+            self.encode(&TermEvent::Error(TermError::Engine(e.to_string())))
         })?;
         let frame = self.encode(&TermEvent::Frame(frame)).ok_or(None)?;
         let images = images.into_iter().filter_map(|u| self.encode(&image_event(u))).collect();
@@ -1906,7 +1903,7 @@ impl Actor {
                     Ok((start, lines)) => {
                         self.send_to(client, &TermEvent::Lines { start, lines });
                     }
-                    Err(e) => self.send_to(client, &TermEvent::Error(e.to_string())),
+                    Err(e) => self.send_to(client, &engine_error(&e)),
                 }
                 Ok(())
             }
@@ -1919,18 +1916,22 @@ impl Actor {
                     Err(slopty_engine::EngineError::Pattern(message)) => {
                         self.send_to(client, &TermEvent::SearchInvalid { needle, message });
                     }
-                    Err(e) => self.send_to(client, &TermEvent::Error(e.to_string())),
+                    Err(e) => self.send_to(client, &engine_error(&e)),
                 }
                 Ok(())
             }
         };
-        let queued = result.map_err(|e| e.to_string()).and_then(|()| {
-            self.queue_input(&bytes, Origin::Viewer { key }).map_err(|full| full.to_string())
-        });
+        let queued = result
+            .map_err(|e| TermError::Engine(e.to_string()))
+            .and_then(|()| self.queue_input(&bytes, Origin::Viewer { key }));
         if let Err(e) = queued {
             self.send_to(client, &TermEvent::Error(e));
         }
     }
+}
+
+fn engine_error(e: &slopty_engine::EngineError) -> TermEvent {
+    TermEvent::Error(TermError::Engine(e.to_string()))
 }
 
 async fn sleep_until_due(due: Option<tokio::time::Instant>) {

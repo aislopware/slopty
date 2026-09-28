@@ -37,7 +37,7 @@ pub use decoder::{
 pub use encoder::RateControl;
 #[cfg(target_os = "macos")]
 pub use encoder::{Encoder, VideoToolbox};
-pub use video::{AudioEncoder, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder};
+pub use video::{AudioEncoder, Chroma, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder};
 
 /// Codec failures. The `OSStatus` codes are VideoToolbox's (`kVT*Err`, negative).
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -62,6 +62,13 @@ pub enum CodecError {
     /// The codec is not supported on this platform.
     #[error("unsupported codec {0:?}")]
     Unsupported(slopty_proto::screen::VideoCodec),
+    /// The encoder offers no 4:4:4 profile for this codec.
+    #[error("no 4:4:4 encoder for {0:?}")]
+    NoFullChroma(slopty_proto::screen::VideoCodec),
+    /// A 4:4:4 session was handed a picture in another pixel format (the four-character code);
+    /// the hardware would have encoded it as 4:2:0.
+    #[error("a 4:4:4 session needs xf44 pictures, got {0:#010x}")]
+    NotFullChroma(u32),
     /// This platform has no audio encoder (`docs/decisions/platform.md`, "Linux seams").
     #[error("no audio encoder on this platform")]
     NoAudio,

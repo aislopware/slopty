@@ -17,7 +17,7 @@ use slopty_core::SessionId;
 use slopty_grid::{Color, Line, Style, StyleFlags, Underline};
 use slopty_net::{ClientMsg, WorkerMsg};
 use slopty_proto::input::CellMetrics;
-use slopty_proto::terminal::{CloseReason, OpenSession, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{CloseReason, OpenSession, TermRequest, TermSize};
 
 use crate::client::{Session, connect_to};
 
@@ -32,25 +32,8 @@ pub async fn open(
 ) -> Result<ExitCode> {
     let mut session = connect_to(data_dir, worker).await?;
     let size = local_size()?;
-    session
-        .conn
-        .tx
-        .send(&ClientMsg::OpenSession(OpenSession {
-            size,
-            cwd,
-            command,
-            env: Vec::new(),
-            title: None,
-            attach: true,
-        }))
-        .await?;
-    let id = loop {
-        match session.conn.rx.recv().await? {
-            WorkerMsg::SessionOpened(s) => break s.id,
-            WorkerMsg::Term { event: TermEvent::Error(e), .. } => bail!("worker: {e}"),
-            _other => {}
-        }
-    };
+    let spec = OpenSession { size, cwd, command, env: Vec::new(), title: None, attach: true };
+    let id = session.open(spec).await?;
     run(session, id).await
 }
 

@@ -416,7 +416,8 @@ mod tests {
             worker: slopty_core::WorkerId::new(),
             name: "bench".to_owned(),
             home: String::new(),
-            caps: slopty_proto::server::WorkerCaps::default(),
+            caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+            load: 0.0,
             sessions: Vec::new(),
         };
         accepted.tx.send(&slopty_net::WorkerMsg::HelloAck(ack)).await.unwrap();
@@ -559,7 +560,11 @@ pub mod fake {
         }
 
         fn target_bounds(target: CaptureTarget) -> Option<Rect> {
-            if target == CaptureTarget::Display(SLOW_DISPLAY.load(Ordering::SeqCst)) {
+            if target
+                == CaptureTarget::Display(slopty_core::DisplayId(
+                    SLOW_DISPLAY.load(Ordering::SeqCst),
+                ))
+            {
                 READING.store(true, Ordering::SeqCst);
                 #[expect(
                     clippy::disallowed_methods,
@@ -672,7 +677,7 @@ pub mod fake {
     impl InputSink for Noted {
         fn new(target: CaptureTarget, scale: f64) -> Self {
             let display = match target {
-                CaptureTarget::Display(id) => id,
+                CaptureTarget::Display(id) => id.0,
                 CaptureTarget::Window(_) => 0,
             };
             Self { display, scale, pointer: PointerWatch::default() }
@@ -832,7 +837,7 @@ mod serving {
         tokio::task::JoinHandle<()>,
     ) {
         let queued = note(display);
-        let target = CaptureTarget::Display(display);
+        let target = CaptureTarget::Display(slopty_core::DisplayId(display));
         let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
         let (mut stream, _opened) =
             Pipeline::<P>::open(StreamId(display), target, Quality::default(), sink, |_event| {})

@@ -4,10 +4,13 @@
 # Loaded because slopty-ptyd prepends its data dir to XDG_DATA_DIRS (fish reads
 # <dir>/fish/vendor_conf.d/*.fish from every entry). fish 4.0 and later emit the marks on
 # their own (A;click_events=1 / B / C;cmdline_url= / D;<status>, ST-terminated), so on those
-# this file only records that it loaded. On fish 3, vendor snippets run before config.fish, so
-# the prompt is wrapped on the first fish_prompt event, after the user's prompt is defined:
+# this file only says, once, that fish redraws its whole prompt after a resize (an A with
+# `redraw=1` ahead of the first prompt's own, on the same fresh line): the terminal then clears
+# the prompt first, as a terminal assuming kitty's default does. On fish 3, vendor snippets run
+# before config.fish, so the prompt is wrapped on the first fish_prompt event, after the user's
+# prompt is defined:
 #
-#   133;A / 133;B  around fish_prompt's output
+#   133;A / 133;B  around fish_prompt's output (A with `redraw=1`)
 #   133;C          on fish_preexec
 #   133;D;<status> on fish_postexec, only when a C is open
 #
@@ -36,7 +39,7 @@ if status is-interactive; and test "$__slopty_integrated" = 1; and not string ma
             end
         end
         function fish_prompt
-            __slopty_mark A
+            __slopty_mark 'A;redraw=1'
             __slopty_user_prompt
             __slopty_mark B
         end
@@ -53,6 +56,13 @@ if status is-interactive; and test "$__slopty_integrated" = 1; and not string ma
             set -e __slopty_running
             __slopty_mark "D;$__slopty_status"
         end
+    end
+end
+
+if status is-interactive; and test "$__slopty_integrated" = 1
+    function __slopty_redraw --on-event fish_prompt
+        functions -e __slopty_redraw
+        printf '\e]133;A;redraw=1\a'
     end
 end
 

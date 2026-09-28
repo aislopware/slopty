@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use rustix::process::Signal;
 use slopty_core::SessionId;
 use slopty_proto::codec;
+use slopty_proto::ptyd::PtydError;
 use slopty_pty::fdpass;
 use slopty_pty::protocol::{MAX_CHECKPOINT_BYTES, PtydEvent, PtydRequest};
 use slopty_pty::shell_integration::ShellIntegration;
@@ -183,8 +184,8 @@ impl Connection {
         Ok(())
     }
 
-    async fn error(&self, id: Option<SessionId>, message: impl Into<String>) -> Result<()> {
-        self.reply(&PtydEvent::Error { id, message: message.into() }, None).await
+    async fn error(&self, id: Option<SessionId>, error: PtydError) -> Result<()> {
+        self.reply(&PtydEvent::Error { id, message: error.to_string() }, None).await
     }
 
     fn session(&self, id: SessionId) -> Option<Arc<Session>> {
@@ -195,7 +196,7 @@ impl Connection {
         match req {
             PtydRequest::Spawn { id, spec } => {
                 if self.session(id).is_some() {
-                    return self.error(Some(id), "session id already exists").await;
+                    return self.error(Some(id), PtydError::SessionExists).await;
                 }
                 match Session::spawn(
                     id,
@@ -210,15 +211,15 @@ impl Connection {
                         self.state.sessions.lock().insert(id, session);
                         self.reply(&PtydEvent::Spawned { id, pid: info.pid }, None).await
                     }
-                    Err(e) => self.error(Some(id), e.to_string()).await,
+                    Err(e) => self.error(Some(id), PtydError::Os(e.to_string())).await,
                 }
             }
             PtydRequest::Attach { id } => {
                 let Some(session) = self.session(id) else {
-                    return self.error(Some(id), "no such session").await;
+                    return self.error(Some(id), PtydError::NoSuchSession).await;
                 };
                 if !session.claim(self.id) {
-                    return self.error(Some(id), "attached by another connection").await;
+                    return self.error(Some(id), PtydError::AttachedElsewhere).await;
                 }
                 // Held from the claim on, so the connection's drop lets go of it whatever
                 // happens from here.
@@ -267,7 +268,7 @@ impl Connection {
             }
             PtydRequest::Close { id } => {
                 let Some(session) = self.state.sessions.lock().remove(&id) else {
-                    return self.error(Some(id), "no such session").await;
+                    return self.error(Some(id), PtydError::NoSuchSession).await;
                 };
                 self.attached.remove(&id);
                 if session.info().exited.is_none() {

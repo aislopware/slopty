@@ -13,11 +13,11 @@ use slopty_client::remote::Remote;
 use slopty_client::tunnel::Forward;
 use slopty_client::xfer::paste_paths;
 use slopty_core::{SessionId, XferId};
-use slopty_platform::pasteboard::{FILE_URL_UTI, Pasteboard};
+use slopty_platform::pasteboard::Pasteboard;
 use slopty_proto::ClientMsg;
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
-use slopty_proto::transfer::{ClipMsg, Dest, XferMsg};
+use slopty_proto::transfer::{ClipFormat, ClipMsg, Dest, XferMsg};
 
 use super::WorkspaceView;
 use super::actions::{ListPorts, SaveCopy};
@@ -230,7 +230,7 @@ impl WorkspaceView {
                 let Some(remote) = self.remote(worker) else { return };
                 let task = cx.background_executor().spawn(async move {
                     remote
-                        .clip_data(generation, FILE_URL_UTI, CLIP_WAIT)
+                        .clip_data(generation, ClipFormat::FileUrls, CLIP_WAIT)
                         .map(|b| file_url_paths(&b))
                 });
                 cx.spawn(async move |this, cx| {
@@ -290,14 +290,16 @@ impl WorkspaceView {
         let into = scratch.clone();
         let task = cx.background_executor().spawn(async move {
             let bytes = remote
-                .clip_data(generation, FILE_URL_UTI, CLIP_WAIT)
+                .clip_data(generation, ClipFormat::FileUrls, CLIP_WAIT)
                 .ok_or_else(|| "the copied files are gone".to_owned())?;
             let mut landed = Vec::new();
             for (n, path) in file_url_paths(&bytes).into_iter().enumerate() {
                 let name = path.file_name().ok_or_else(|| "a file with no name".to_owned())?;
                 let dir = into.join(n.to_string());
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-                remote.download(path.to_string_lossy().into_owned(), dir.clone())?;
+                remote
+                    .download(path.to_string_lossy().into_owned(), dir.clone())
+                    .map_err(|e| e.to_string())?;
                 landed.push(dir.join(name));
             }
             Ok::<_, String>(landed)
@@ -349,11 +351,11 @@ impl WorkspaceView {
                 let provide = provider(clip.link(key), &offer, CLIP_WAIT);
                 clip.receive(key, &offer, provide);
             }
-            ClipMsg::Fetch { generation, uti } => {
-                let bytes = clip.borrow().answer(generation, &uti);
+            ClipMsg::Fetch { generation, format } => {
+                let bytes = clip.borrow().answer(generation, format);
                 let remote = self.workers.get(&key).and_then(|w| w.link.as_ref()?.remote.clone());
                 match (bytes, remote) {
-                    (Some(bytes), Some(remote)) => remote.send_clip(generation, uti, bytes),
+                    (Some(bytes), Some(remote)) => remote.send_clip(generation, format, bytes),
                     _ => self.send(key, ClientMsg::Clip(ClipMsg::Unavailable { generation })),
                 }
             }
@@ -776,8 +778,7 @@ impl WorkspaceView {
             return;
         };
         let name = worker_name(&source).to_owned();
-        let downloads = std::env::var_os("HOME")
-            .map_or_else(std::env::temp_dir, |home| PathBuf::from(home).join("Downloads"));
+        let downloads = slopty_platform::web::downloads_dir(&slopty_platform::dirs::home());
         let chosen = cx.prompt_for_new_path(&downloads, Some(&name));
         cx.spawn(async move |this, cx| {
             let dest = match chosen.await {
@@ -863,6 +864,7 @@ fn bring_down_to(remote: &dyn Remote, source: &str, dest: &std::path::Path) -> R
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
     let moved = remote
         .download(source.to_owned(), staging.clone())
+        .map_err(|e| e.to_string())
         .and_then(|landed| slopty_platform::file_drop::out::landed_top(&landed, &staging))
         .and_then(|top| std::fs::rename(top, dest).map_err(|e| e.to_string()));
     let _cleaned = std::fs::remove_dir_all(&staging);

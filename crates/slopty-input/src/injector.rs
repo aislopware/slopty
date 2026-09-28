@@ -180,7 +180,7 @@ impl<B: Backend> Injector<B> {
     /// held posts nothing. Called when the stream ends, and on drop.
     pub fn release_all(&mut self) {
         for button in BUTTONS {
-            if self.held & button_bit(button) == 0 {
+            if self.held & button.bit() == 0 {
                 continue;
             }
             self.set_held(button, false);
@@ -263,9 +263,9 @@ impl<B: Backend> Injector<B> {
     }
 
     const fn move_type(&self) -> CGEventType {
-        if self.held & button_bit(MouseButton::Left) != 0 {
+        if self.held & MouseButton::Left.bit() != 0 {
             CGEventType::LeftMouseDragged
-        } else if self.held & button_bit(MouseButton::Right) != 0 {
+        } else if self.held & MouseButton::Right.bit() != 0 {
             CGEventType::RightMouseDragged
         } else if self.held != 0 {
             CGEventType::OtherMouseDragged
@@ -276,9 +276,9 @@ impl<B: Backend> Injector<B> {
 
     const fn set_held(&mut self, button: MouseButton, down: bool) {
         if down {
-            self.held |= button_bit(button);
+            self.held |= button.bit();
         } else {
-            self.held &= !button_bit(button);
+            self.held &= !button.bit();
         }
     }
 
@@ -359,16 +359,6 @@ pub fn to_point(bounds: Rect, scale: f64, x: f64, y: f64) -> CGPoint {
     CGPoint::new(px.clamp(bounds.x, bounds.x + bounds.w), py.clamp(bounds.y, bounds.y + bounds.h))
 }
 
-const fn button_bit(button: MouseButton) -> u8 {
-    match button {
-        MouseButton::Left => 1,
-        MouseButton::Right => 2,
-        MouseButton::Middle => 4,
-        MouseButton::Back => 8,
-        MouseButton::Forward => 16,
-    }
-}
-
 /// Event type, CG button class and button number for a press or release.
 const fn button_event(button: MouseButton, down: bool) -> (CGEventType, CGMouseButton, i64) {
     match (button, down) {
@@ -409,7 +399,7 @@ pub fn flags_for(mods: Mods) -> CGEventFlags {
 
 #[cfg(test)]
 mod tests {
-    use slopty_core::WindowId;
+    use slopty_core::{DisplayId, WindowId};
     use slopty_proto::screen::ScrollPhase;
 
     use super::*;
@@ -427,7 +417,7 @@ mod tests {
     }
 
     fn display() -> Injector<Recorder> {
-        Injector::with_backend(CaptureTarget::Display(1), 1.0, Recorder::display(BOUNDS))
+        Injector::with_backend(CaptureTarget::Display(DisplayId(1)), 1.0, Recorder::display(BOUNDS))
     }
 
     fn pt(x: f64, y: f64) -> CGPoint {
@@ -788,7 +778,7 @@ mod tests {
         }
         let tap = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let backend = Shared(Recorder::display(BOUNDS), std::rc::Rc::clone(&tap));
-        let mut inj = Injector::with_backend(CaptureTarget::Display(1), 1.0, backend);
+        let mut inj = Injector::with_backend(CaptureTarget::Display(DisplayId(1)), 1.0, backend);
         inj.inject(&ScreenInput::Key {
             code: KeyCode::MetaLeft,
             action: KeyAction::Press,

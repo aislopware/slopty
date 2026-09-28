@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher as _};
 use std::time::Duration;
 
+use slopty_core::WallMs;
 use slopty_proto::conversation::{
     Body, Entry, LiveId, LiveKind, ResultStatus, ThreadId, ToolCall, ToolDetail, Turn, WriteKind,
 };
@@ -417,7 +418,7 @@ fn turns(entries: &[Entry]) -> Vec<std::ops::Range<usize>> {
 /// Code stamped when it closed the turn.
 fn fold_of(turn: &[Entry], figures: Option<&Turn>) -> Fold {
     let mut fold = Fold::default();
-    let start = turn.first().map_or(0, |e| e.at_ms);
+    let start = turn.first().map_or(WallMs::ZERO, |e| e.at_ms);
     let mut end = start;
     for entry in turn {
         end = end.max(entry.at_ms);
@@ -438,13 +439,13 @@ fn fold_of(turn: &[Entry], figures: Option<&Turn>) -> Fold {
             _ => {}
         }
     }
-    fold.took_ms = (start > 0 && end > start).then(|| end.saturating_sub(start));
+    fold.took_ms = (!start.is_zero() && end > start).then(|| end.millis_since(start));
     if let Some(figures) = figures
         && let Some(ended) = figures.ended_ms
-        && figures.started_ms > 0
+        && !figures.started_ms.is_zero()
         && ended > figures.started_ms
     {
-        fold.took_ms = Some(ended.saturating_sub(figures.started_ms));
+        fold.took_ms = Some(ended.millis_since(figures.started_ms));
     }
     fold
 }

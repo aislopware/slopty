@@ -52,7 +52,10 @@ pub fn run(sh: &Shell, opts: &Options) -> Result<()> {
         bail!("{tag} already exists; no releasable commits since");
     }
     if !opts.skip_gate {
-        crate::gate::run(sh, crate::gate::Options { fix: false, quick: false, in_place: false })?;
+        crate::gate::run(
+            sh,
+            crate::gate::Options { fix: false, quick: false, in_place: false, since_pass: false },
+        )?;
     }
     set_version(sh, &version)?;
     step("cargo update --workspace", &cmd!(sh, "cargo update --workspace --offline"))?;

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use slopty_client::{LinkEvent, WorkerLink};
+use slopty_proto::ClientMsg;
 use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
-use slopty_proto::{ClientMsg, WorkerMsg};
 
 use crate::client::{Session, connect_to};
 
@@ -32,25 +32,16 @@ async fn drain(events: &mut tokio::sync::mpsc::Receiver<LinkEvent>, quiet: Durat
 pub async fn echo(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<()> {
     let mut session = connect_to(data_dir, needle).await?;
     let size = TermSize { cols: 60, rows: 12, ..TermSize::default() };
-    session
-        .conn
-        .tx
-        .send(&ClientMsg::OpenSession(OpenSession {
+    let id = session
+        .open(OpenSession {
             size,
             cwd: None,
             command: vec!["/bin/cat".to_owned()],
             env: Vec::new(),
             title: Some("bench echo".to_owned()),
             attach: true,
-        }))
+        })
         .await?;
-    let id = loop {
-        match session.conn.rx.recv().await? {
-            WorkerMsg::SessionOpened(s) => break s.id,
-            WorkerMsg::Term { event: TermEvent::Error(e), .. } => bail!("worker: {e}"),
-            _other => {}
-        }
-    };
     let Session { conn, endpoint, .. } = session;
     let mut link = WorkerLink::start(conn);
     let mut events = link.events().context("events")?;

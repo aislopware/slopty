@@ -15,7 +15,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 
 pub use slopty_platform::privacy::Pane;
-use slopty_proto::ctl::NotUp;
+use slopty_proto::tailnet::BackendState;
 
 use crate::net;
 
@@ -88,7 +88,7 @@ pub enum Tailnet {
     /// Tailscale runs here and names this node so.
     Reachable(String),
     /// Tailscale answered, and it is not up.
-    Down(NotUp),
+    Down(BackendState),
     /// Tailscale is there and did not answer.
     Unreachable,
     /// No Tailscale the worker can read.
@@ -113,8 +113,8 @@ impl From<slopty_proto::ctl::Health> for Doctor {
         };
         Self {
             version: health.version,
-            screen_recording: health.screen_recording,
-            accessibility: health.post_events,
+            screen_recording: health.caps.can_capture,
+            accessibility: health.caps.can_inject,
             tailnet,
         }
     }
@@ -357,13 +357,16 @@ pub fn checklist(worker: &Worker, logs: &str) -> [Line; 4] {
 }
 
 /// A Tailscale that is not up, in words: its own for the common states, else not up.
-const fn tailscale_state(state: NotUp) -> &'static str {
+const fn tailscale_state(state: BackendState) -> &'static str {
     match state {
-        NotUp::Stopped => "stopped",
-        NotUp::NeedsLogin => "signed out",
-        NotUp::NeedsMachineAuth => "waiting for approval",
-        NotUp::Starting => "starting",
-        NotUp::NoState | NotUp::InUseOtherUser | NotUp::Other => "not up",
+        BackendState::Stopped => "stopped",
+        BackendState::NeedsLogin => "signed out",
+        BackendState::NeedsMachineAuth => "waiting for approval",
+        BackendState::Starting => "starting",
+        BackendState::NoState
+        | BackendState::InUseOtherUser
+        | BackendState::Running
+        | BackendState::Other => "not up",
     }
 }
 
@@ -494,7 +497,7 @@ mod mac {
                     line.push(b'\n');
                     let reply = service::ask(&socket, &line).await.ok()?;
                     match serde_json::from_str(&reply).ok()? {
-                        CtlReply::Doctor(health) => Some(Doctor::from(health)),
+                        CtlReply::Doctor(health) => Some(Doctor::from(*health)),
                         other => {
                             tracing::warn!(?other, "doctor: not a health report");
                             None
@@ -578,7 +581,7 @@ mod tests {
     fn the_doctor_maps_to_lines_and_buttons() {
         use Mark::{Advisory, Missing, Ok};
         use slopty_ui::icons::Status::{Done, Failed, Idle, NeedsYou};
-        let down = Tailnet::Down(NotUp::Stopped);
+        let down = Tailnet::Down(BackendState::Stopped);
         let lines = checklist(&Worker::Up(doctor(false, false, down)), "");
         assert_eq!(marks(&lines), [Ok, Missing, Missing, Advisory]);
         assert_eq!(
@@ -638,8 +641,11 @@ mod tests {
         let health = slopty_proto::ctl::Health {
             version: "0.3.0".to_owned(),
             exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
-            screen_recording: true,
-            post_events: false,
+            caps: slopty_proto::server::WorkerCaps {
+                can_capture: true,
+                can_inject: false,
+                ..slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs)
+            },
             listen: "[::]:45550".to_owned(),
             allow: Vec::new(),
             tailscale: Tailscale::Up {
@@ -656,9 +662,9 @@ mod tests {
         let health = slopty_proto::ctl::Health { tailscale: bare, ..health };
         let by_address = Tailnet::Reachable("100.64.0.3".to_owned());
         assert_eq!(Doctor::from(health.clone()).tailnet, by_address, "no name: the address");
-        let signed_out = Tailscale::Down { backend: NotUp::NeedsLogin };
+        let signed_out = Tailscale::Down { backend: BackendState::NeedsLogin };
         let health = slopty_proto::ctl::Health { tailscale: signed_out, ..health };
-        assert_eq!(Doctor::from(health.clone()).tailnet, Tailnet::Down(NotUp::NeedsLogin));
+        assert_eq!(Doctor::from(health.clone()).tailnet, Tailnet::Down(BackendState::NeedsLogin));
         let lines = checklist(&Worker::Up(Doctor::from(health.clone())), "");
         assert_eq!(lines[3].detail, "Tailscale is signed out, so only this Mac reaches it.");
         let silent = Tailscale::Unreachable { error: "timed out".to_owned() };

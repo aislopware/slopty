@@ -49,11 +49,9 @@ impl KnownWorkers {
     /// Load `path`, or create it with a fresh client id.
     pub fn open(path: &Path) -> Result<Self, NetError> {
         let file: File = match std::fs::read(path) {
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|e| NetError::Store(e.to_string()))?
-            }
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(NetError::Store)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => File::default(),
-            Err(e) => return Err(NetError::Store(e.to_string())),
+            Err(e) => return Err(NetError::io(path.display(), e)),
         };
         let fresh = file.client_id.is_none();
         let me = Self {
@@ -123,9 +121,9 @@ impl KnownWorkers {
     }
 
     fn save(&self) -> Result<(), NetError> {
-        let store = |e: std::io::Error| NetError::Store(e.to_string());
+        let store = |e| NetError::io(self.path.display(), e);
         let file = File { client_id: Some(self.client), workers: self.workers.clone() };
-        let json = serde_json::to_vec_pretty(&file).map_err(|e| NetError::Store(e.to_string()))?;
+        let json = serde_json::to_vec_pretty(&file).map_err(NetError::Store)?;
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(store)?;
         }

@@ -43,7 +43,7 @@ impl WorkspaceView {
         ack: HelloAck,
         cx: &mut Context<Self>,
     ) {
-        let HelloAck { name, home, caps, sessions, .. } = ack;
+        let HelloAck { name, home, caps, load, sessions, .. } = ack;
         let known: Vec<SessionId> = self
             .workers
             .get(&key)
@@ -55,6 +55,7 @@ impl WorkspaceView {
         w.link = Some(link);
         w.home = (!home.is_empty()).then_some(home);
         w.caps = Some(caps);
+        w.load = Some(load);
         w.path = None;
         w.awaiting_snapshot = true;
         w.titles_requested = false;
@@ -235,14 +236,31 @@ impl WorkspaceView {
         }
     }
 
-    /// What `key` can do and how it is doing changed: a permission granted, a display attached,
-    /// its load. The link's word and the server directory's land here alike.
+    /// What `key` can do changed: a permission granted, a display attached. The link's word
+    /// and the server directory's land here alike.
     pub fn set_worker_caps(&mut self, key: WorkerKey, caps: WorkerCaps, cx: &mut Context<Self>) {
         let Some(w) = self.workers.get_mut(&key) else { return };
         if w.caps.as_ref() != Some(&caps) {
             w.caps = Some(caps);
             cx.notify();
         }
+    }
+
+    /// `key`'s load average moved, as its link or the server says.
+    pub fn set_worker_load(&mut self, key: WorkerKey, load: f32, cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get_mut(&key) else { return };
+        if w.load != Some(load) {
+            w.load = Some(load);
+            cx.notify();
+        }
+    }
+
+    /// An open this client asked of `key` failed: the tile it would have made never comes, so
+    /// the person hears why.
+    pub fn open_failed(&mut self, key: WorkerKey, message: &str, cx: &mut Context<Self>) {
+        let name = self.workers.get(&key).map_or("the worker", |w| w.name.as_str());
+        let text = format!("Could not open a terminal on {name}: {message}");
+        self.show_notice(text, cx);
     }
 
     /// How the tailnet carries the link to `key`, when its worker has said.
@@ -484,10 +502,14 @@ impl WorkspaceView {
             let needle = needle.clone();
             self.find_answered(session, &needle, *total, cx);
         }
-        match (self.terminals.get(&session), event) {
-            (Some(view), event) => view.update(cx, |v, cx| v.apply(event, cx)),
-            (None, TermEvent::Error(e)) => tracing::warn!(%session, error = %e, "worker"),
-            (None, _other) => {}
+        // A refusal the person caused (typing into a program that stopped reading, a request
+        // of a terminal that ended) is theirs to see, not only the log's.
+        if let TermEvent::Error(error) = &event {
+            tracing::warn!(%session, %error, "worker");
+            self.show_notice(error.to_string(), cx);
+        }
+        if let Some(view) = self.terminals.get(&session) {
+            view.update(cx, |v, cx| v.apply(event, cx));
         }
     }
 
@@ -687,7 +709,7 @@ impl WorkspaceView {
                     self.add_screen_item(
                         key,
                         CaptureTarget::Display(d.id),
-                        format!("Display {}", d.id),
+                        format!("Display {}", d.id.0),
                         cx,
                     );
                 }

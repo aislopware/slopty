@@ -24,9 +24,9 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ItemId, SessionId, WorkerId, XferId};
+use slopty_core::{ItemId, SessionId, WallMs, WorkerId, XferId};
 
-use crate::agent::{AgentKind, AgentStatus, SessionAgent};
+use crate::agent::{AgentEvent, AgentKind, AgentStatus, SessionAgent};
 use crate::conversation::{Entry, Meters, Origin, PermissionPrompt, Task, ThreadId, Verdict};
 use crate::items::{Item, ItemKind};
 use crate::screen::{CaptureTarget, DisplayInfo, WindowInfo};
@@ -294,6 +294,7 @@ pub enum Verb {
         /// Absolute path, or `~/…`.
         path: String,
         /// New contents.
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
     },
     /// TCP ports listening in a worker's terminals' process trees.
@@ -437,6 +438,7 @@ pub enum UploadPart {
         /// Where they go in the file.
         offset: u64,
         /// At most the worker's cap on one read.
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
     },
     /// Every part is sent: the upload holds `size` bytes whose BLAKE3 digest is `digest`, and
@@ -514,23 +516,25 @@ impl EventFilter {
             Self::All => true,
             Self::AgentNeedsInput => matches!(
                 what,
-                Happening::Agent {
-                    status: AgentStatus::Blocked(_) | AgentStatus::Idle | AgentStatus::Done,
-                    ..
-                }
+                Happening::Agent { event, .. }
+                    if matches!(
+                        event.status,
+                        AgentStatus::Blocked(_) | AgentStatus::Idle | AgentStatus::Done
+                    )
             ),
         }
     }
 }
 
-/// Something the server heard, numbered in the order it heard it.
+/// Something the server heard, numbered in the order it heard it: what [`Verb::Events`]
+/// returns and what a client or agent link is pushed as it happens, one log for both.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct HubEvent {
     /// Its place in the server's one sequence. Each run starts it at the run's start time in
     /// microseconds, so a cursor from an earlier run never falls inside the new one's range.
     pub seq: u64,
-    /// Milliseconds since the Unix epoch when the server heard it.
-    pub at_ms: u64,
+    /// When the server heard it.
+    pub at_ms: WallMs,
     /// What.
     pub what: Happening,
 }
@@ -566,16 +570,13 @@ pub enum Happening {
         /// Which.
         term: TermRef,
     },
-    /// An agent's status changed.
+    /// An agent's status changed, or where its status came from did; its status is
+    /// [`AgentStatus::None`] when it left.
     Agent {
         /// Where.
-        term: TermRef,
-        /// Which agent.
-        kind: AgentKind,
-        /// Its new status; `None` when it left.
-        status: AgentStatus,
-        /// What it says, for a human.
-        detail: Option<String>,
+        worker: WorkerId,
+        /// What, as the worker reported it.
+        event: AgentEvent,
     },
     /// A terminal's program exited; the terminal stays, its last screen readable, until it is
     /// closed.
@@ -609,8 +610,8 @@ pub struct DirEntry {
     pub kind: FileKind,
     /// Bytes.
     pub size: u64,
-    /// Last modification, milliseconds since the Unix epoch.
-    pub modified_ms: u64,
+    /// Last modification.
+    pub modified_ms: WallMs,
 }
 
 /// What is at a path.
@@ -620,8 +621,8 @@ pub struct FileStat {
     pub kind: FileKind,
     /// Bytes.
     pub size: u64,
-    /// Last modification, milliseconds since the Unix epoch.
-    pub modified_ms: u64,
+    /// Last modification.
+    pub modified_ms: WallMs,
     /// Permission bits (`0o755`).
     pub mode: u32,
 }
@@ -741,6 +742,7 @@ pub enum Outcome {
     /// For [`Verb::ReadFile`]: the bytes from `offset` on, and the file's whole size.
     File {
         /// What was read.
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
         /// Where they start in the file.
         offset: u64,
@@ -795,6 +797,7 @@ pub enum Outcome {
     /// fits one reply.
     Still {
         /// The PNG file's bytes.
+        #[serde(with = "serde_bytes")]
         png: Vec<u8>,
         /// Pixels across.
         width: u32,

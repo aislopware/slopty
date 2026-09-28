@@ -398,6 +398,22 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Every agent the server knows, as its state after a connect or a lag gives them: what it
+    /// said before is replaced. None raises attention; a change after it does.
+    pub fn server_agents_replace(
+        &mut self,
+        agents: Vec<(WorkerKey, AgentEvent)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.server_agents = agents
+            .into_iter()
+            .filter(|(_, event)| event.status != AgentStatus::None)
+            .map(|(worker, event)| (event.session, (worker, event)))
+            .collect();
+        self.count_needs_you(cx);
+        cx.notify();
+    }
+
     /// The server says a session ended.
     pub fn server_session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         if self.server_agents.remove(&session).is_some() {
@@ -630,6 +646,7 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
+    use slopty_core::WallMs;
     use slopty_proto::agent::{AgentKind, AgentSource};
 
     use super::*;
@@ -643,7 +660,7 @@ mod tests {
             detail: detail.map(str::to_owned),
             attention: false,
             source: AgentSource::Hook,
-            since_ms: 0,
+            since_ms: WallMs::ZERO,
         }
     }
 

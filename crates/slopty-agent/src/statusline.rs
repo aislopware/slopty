@@ -21,6 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use slopty_core::shell_quote;
 
 use crate::{Hook, HookEvent};
 
@@ -81,11 +82,6 @@ pub fn wrapper_command(slopty: &str, theirs: Option<&str>) -> String {
 /// Whether a status-line command is the wrapper (never run it from itself).
 fn is_wrapper(command: &str) -> bool {
     command.contains(&format!(" {WRAPPER_WORDS}"))
-}
-
-/// A word the shell reads back as `word`.
-fn shell_quote(word: &str) -> String {
-    format!("'{}'", word.replace('\'', r"'\''"))
 }
 
 /// The command of a `statusLine` setting, unless it is the wrapper's.

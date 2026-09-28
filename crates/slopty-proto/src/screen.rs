@@ -1,7 +1,7 @@
 //! Remote windows and displays: enumeration, stream setup, input, telemetry.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{Duration, StreamId, WindowId};
+use slopty_core::{DisplayId, Duration, StreamId, WindowId};
 
 use crate::input::{KeyAction, KeyCode, Mods, MouseButton};
 
@@ -25,7 +25,7 @@ pub struct WindowInfo {
     /// Bounds.
     pub h: f32,
     /// Display the window is on.
-    pub display: u32,
+    pub display: DisplayId,
     /// On screen (not minimised or on another Space).
     pub on_screen: bool,
 }
@@ -33,8 +33,8 @@ pub struct WindowInfo {
 /// A display on the worker.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct DisplayInfo {
-    /// CoreGraphics display id.
-    pub id: u32,
+    /// Identity.
+    pub id: DisplayId,
     /// Bounds in points.
     pub w: f32,
     /// Bounds.
@@ -51,7 +51,7 @@ pub enum CaptureTarget {
     /// One window (with its child windows).
     Window(WindowId),
     /// A whole display.
-    Display(u32),
+    Display(DisplayId),
 }
 
 /// Video codec.

@@ -655,7 +655,7 @@ impl ScreenView {
             last_frame: None,
             fold: None,
             label: match target {
-                CaptureTarget::Display(id) => format!("Remote display {id}").into(),
+                CaptureTarget::Display(id) => format!("Remote display {}", id.0).into(),
                 CaptureTarget::Window(id) => format!("Remote window {}", id.0).into(),
             },
             renders: 0,
@@ -2377,6 +2377,7 @@ fn is_paste_chord(keystroke: &Keystroke) -> bool {
 #[cfg(test)]
 mod tests {
     use gpui::AppContext as _;
+    use slopty_core::DisplayId;
 
     use super::*;
 
@@ -2479,7 +2480,7 @@ mod tests {
         let (out, rx) = mpsc::channel(16);
         let opened = Opened {
             stream: StreamId(4),
-            target: CaptureTarget::Display(2),
+            target: CaptureTarget::Display(DisplayId(2)),
             size: (800, 600),
             quality: Quality { scale: 1.0, ..Quality::default() },
         };
@@ -2853,7 +2854,7 @@ mod tests {
     fn windowed(
         cx: &mut gpui::TestAppContext,
     ) -> (gpui::Entity<ScreenView>, mpsc::Receiver<ClientMsg>, &mut gpui::VisualTestContext) {
-        windowed_on(cx, CaptureTarget::Display(2))
+        windowed_on(cx, CaptureTarget::Display(DisplayId(2)))
     }
 
     /// [`windowed`], streaming `target`.
@@ -3196,7 +3197,7 @@ mod tests {
         let (out, mut rx) = mpsc::channel(1);
         let opened = Opened {
             stream: StreamId(4),
-            target: CaptureTarget::Display(2),
+            target: CaptureTarget::Display(DisplayId(2)),
             size: (800, 600),
             quality: Quality { scale: 1.0, ..Quality::default() },
         };

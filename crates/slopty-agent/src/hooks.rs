@@ -428,14 +428,14 @@ mod tests {
         };
         assert_eq!(
             line(&[]),
-            json!({ "type": "command", "command": "'/opt/Slopty/slopty' hook statusline" })
+            json!({ "type": "command", "command": "/opt/Slopty/slopty hook statusline" })
         );
         let given = r#"{"statusLine":{"type":"command","command":"my-line --short","padding":1}}"#;
         assert_eq!(
             line(&["--settings", given]),
             json!({
                 "type": "command",
-                "command": "'/opt/Slopty/slopty' hook statusline --command 'my-line --short'",
+                "command": "/opt/Slopty/slopty hook statusline --command 'my-line --short'",
                 "padding": 1,
             })
         );
@@ -448,7 +448,7 @@ mod tests {
             line(&[]),
             json!({
                 "type": "command",
-                "command": "'/opt/Slopty/slopty' hook statusline",
+                "command": "/opt/Slopty/slopty hook statusline",
                 "refreshInterval": 5,
             }),
             "found in the files: the wrapper looks it up itself"
@@ -456,7 +456,7 @@ mod tests {
         let ours = json!({ "statusLine": { "command": statusline::wrapper_command(relay, None) } });
         assert_eq!(
             line(&["--settings", &ours.to_string()])["command"],
-            json!("'/opt/Slopty/slopty' hook statusline"),
+            json!("/opt/Slopty/slopty hook statusline"),
             "the wrapper never wraps itself"
         );
     }

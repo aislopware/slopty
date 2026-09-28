@@ -1,22 +1,25 @@
-//! Datagram header for media (video fragments, parity, audio, cursor position), and the kind
-//! byte that tells a terminal frame's copy from them.
+//! Datagram header for media (video fragments, parity, audio, cursor position, heartbeats).
 //!
-//! Fixed 16-byte layout, little-endian, `zerocopy` so a receiver reads it in place with no parsing
-//! and a sender writes it into the front of a buffer with no allocation. Everything after the
-//! header is opaque to this module.
+//! Fixed 17-byte layout, little-endian, `zerocopy` so a receiver reads it in place with no parsing
+//! and a sender writes it into the front of a buffer with no allocation. Its first byte is the
+//! datagram's channel, [`Channel::Media`], as every datagram's first byte is its channel
+//! ([`crate::datagram`]). Everything after the header is opaque to this module.
 
 use zerocopy::little_endian::{I32, U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::datagram::Channel;
 
 /// Largest datagram we will ever send. Under the 1280-byte IPv6 minimum MTU after QUIC/UDP
 /// overhead, so it never fragments on a `WireGuard` or cellular path.
 pub const MAX_DATAGRAM: usize = 1200;
 
-/// Bytes of [`MediaHeader`].
-pub const HEADER_BYTES: usize = 16;
+/// Bytes of [`MediaHeader`], its channel byte included.
+pub const HEADER_BYTES: usize = 17;
 
-/// Bytes available for payload after the header.
-pub const MAX_PAYLOAD: usize = MAX_DATAGRAM - HEADER_BYTES;
+/// Bytes available for payload after the header, rounded down to even: parity shards are cut
+/// to an even size, and every fragment of a frame carries as many bytes as its shards.
+pub const MAX_PAYLOAD: usize = (MAX_DATAGRAM - HEADER_BYTES) & !1;
 
 /// Datagram kinds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -34,9 +37,6 @@ pub enum Kind {
     /// datagram left for a while, so the receiver's stall clock keeps running on silence from
     /// the link alone.
     Heartbeat = 4,
-    /// Not media: a copy of a terminal frame, a [`crate::datagram::TermDatagram`] in postcard
-    /// after the header, whose other fields are zero.
-    Term = 5,
 }
 
 impl Kind {
@@ -49,7 +49,6 @@ impl Kind {
             2 => Some(Self::Audio),
             3 => Some(Self::Cursor),
             4 => Some(Self::Heartbeat),
-            5 => Some(Self::Term),
             _ => None,
         }
     }
@@ -73,6 +72,8 @@ pub mod flags {
 )]
 #[repr(C)]
 pub struct MediaHeader {
+    /// [`Channel::Media`] as `u8`: the datagram's channel byte.
+    pub channel: u8,
     /// Stream this belongs to (matches `StreamId`).
     pub stream: U32,
     /// Frame number within the stream (video), packet number (audio), or update seq (cursor).
@@ -93,10 +94,10 @@ pub struct MediaHeader {
 }
 
 impl MediaHeader {
-    /// Parse the front of a datagram; `None` if it is too short.
+    /// Parse the front of a datagram; `None` if it is too short or on another channel.
     #[must_use]
     pub fn parse(datagram: &[u8]) -> Option<(&Self, &[u8])> {
-        Self::ref_from_prefix(datagram).ok()
+        Self::ref_from_prefix(datagram).ok().filter(|(h, _)| h.channel == Channel::Media as u8)
     }
 
     /// The kind, if valid.
@@ -174,6 +175,7 @@ mod tests {
     #[test]
     fn header_round_trips_through_bytes() {
         let h = MediaHeader {
+            channel: Channel::Media as u8,
             stream: U32::new(7),
             frame: U32::new(123_456),
             index: U16::new(3),
@@ -188,7 +190,8 @@ mod tests {
         buf[HEADER_BYTES] = 0xee;
         let (parsed, payload) = MediaHeader::parse(&buf).unwrap();
         assert_eq!(parsed, &h);
-        assert_eq!(payload.len(), MAX_PAYLOAD);
+        assert_eq!(payload.len(), MAX_DATAGRAM - HEADER_BYTES);
+        assert!(MAX_PAYLOAD.is_multiple_of(2) && MAX_PAYLOAD <= payload.len());
         assert_eq!(payload[0], 0xee);
         assert!(parsed.is_parity());
         assert_eq!(parsed.kind(), Some(Kind::VideoParity));
@@ -220,8 +223,17 @@ mod tests {
     }
 
     #[test]
+    fn another_channel_is_not_media() {
+        let mut datagram = [0_u8; HEADER_BYTES];
+        assert!(MediaHeader::parse(&datagram).is_some());
+        datagram[0] = Channel::Term as u8;
+        assert!(MediaHeader::parse(&datagram).is_none());
+    }
+
+    #[test]
     fn layout_is_little_endian_and_packed() {
         let h = MediaHeader {
+            channel: Channel::Media as u8,
             stream: U32::new(0x0102_0304),
             frame: U32::new(0),
             index: U16::new(0x0506),
@@ -232,7 +244,8 @@ mod tests {
             send_ms_lo: 0,
         };
         let b = h.as_bytes();
-        assert_eq!(&b[..4], &[4, 3, 2, 1]);
-        assert_eq!(&b[8..10], &[6, 5]);
+        assert_eq!(b[0], Channel::Media as u8, "the channel byte leads");
+        assert_eq!(&b[1..5], &[4, 3, 2, 1]);
+        assert_eq!(&b[9..11], &[6, 5]);
     }
 }

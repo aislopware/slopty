@@ -4,7 +4,7 @@
 //! itself is used through its own TUI in the terminal; nothing here drives it.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
 
 /// Which agent.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -78,11 +78,29 @@ pub struct SessionAgent {
     /// Where the status came from; anything short of [`AgentSource::Hook`] means the hooks are
     /// not installed (or have not spoken yet).
     pub source: AgentSource,
-    /// When the status last entered its phase, in milliseconds since the Unix epoch by the
-    /// worker's clock: busy (working or a tool), blocked, done or idle. A tool call inside a
-    /// turn keeps the stamp, so a client reads how long the turn has run, and since the
-    /// worker's table carries it, a client that reconnects reads the same. `0` with no agent.
-    pub since_ms: u64,
+    /// When the status last entered its phase, by the worker's clock: busy (working or a
+    /// tool), blocked, done or idle. A tool call inside a turn keeps the stamp, so a client
+    /// reads how long the turn has run, and since the worker's table carries it, a client that
+    /// reconnects reads the same. Zero with no agent.
+    pub since_ms: WallMs,
+}
+
+impl SessionAgent {
+    /// This state of `session`'s agent as an event that raises no attention: what a snapshot
+    /// of the terminals tells a client that missed the changes.
+    #[must_use]
+    pub fn quiet_event(&self, session: SessionId) -> AgentEvent {
+        AgentEvent {
+            session,
+            kind: self.kind,
+            status: self.status.clone(),
+            agent_session: None,
+            detail: None,
+            attention: false,
+            source: self.source,
+            since_ms: self.since_ms,
+        }
+    }
 }
 
 /// Worker → client.
@@ -102,11 +120,11 @@ pub struct AgentEvent {
     pub attention: bool,
     /// Where the status came from.
     pub source: AgentSource,
-    /// When the status last entered its phase, in milliseconds since the Unix epoch by the
-    /// worker's clock: busy (working or a tool), blocked, done or idle. A tool call inside a
-    /// turn keeps the stamp, so a client reads how long the turn has run, and since the
-    /// worker's table carries it, a client that reconnects reads the same. `0` with no agent.
-    pub since_ms: u64,
+    /// When the status last entered its phase, by the worker's clock: busy (working or a
+    /// tool), blocked, done or idle. A tool call inside a turn keeps the stamp, so a client
+    /// reads how long the turn has run, and since the worker's table carries it, a client that
+    /// reconnects reads the same. Zero with no agent.
+    pub since_ms: WallMs,
 }
 
 impl From<&AgentEvent> for SessionAgent {

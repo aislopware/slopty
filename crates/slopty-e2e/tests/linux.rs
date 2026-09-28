@@ -82,19 +82,24 @@ mod tests {
             let ack = conn.ack.clone();
             let mut link = WorkerLink::start(conn);
             let mut events = link.events().context("the link's events")?;
-            link.send(ClientMsg::OpenSession(OpenSession {
-                size,
-                cwd: Some("~".to_owned()),
-                command: command.iter().map(|&a| a.to_owned()).collect(),
-                env: Vec::new(),
-                title: Some("linux e2e".to_owned()),
-                attach: true,
-            }))
+            link.send(ClientMsg::OpenSession {
+                request: 1,
+                spec: OpenSession {
+                    size,
+                    cwd: Some("~".to_owned()),
+                    command: command.iter().map(|&a| a.to_owned()).collect(),
+                    env: Vec::new(),
+                    title: Some("linux e2e".to_owned()),
+                    attach: true,
+                },
+            })
             .await?;
             let session = tokio::time::timeout(STEP, async {
                 loop {
                     match events.recv().await {
-                        Some(LinkEvent::Control(WorkerMsg::SessionOpened(s))) => break Ok(s.id),
+                        Some(LinkEvent::Control(WorkerMsg::SessionOpened { summary, .. })) => {
+                            break Ok(summary.id);
+                        }
                         Some(LinkEvent::Control(WorkerMsg::Term {
                             event: TermEvent::Error(e),
                             ..

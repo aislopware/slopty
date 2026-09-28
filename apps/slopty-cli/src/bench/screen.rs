@@ -86,7 +86,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
 
     let target = match (bench.window, bench.display) {
         (Some(w), _) => CaptureTarget::Window(WindowId(w)),
-        (None, Some(d)) => CaptureTarget::Display(d),
+        (None, Some(d)) => CaptureTarget::Display(slopty_core::DisplayId(d)),
         (None, None) => {
             out.send(ClientMsg::Screen(ScreenRequest::List)).await?;
             loop {

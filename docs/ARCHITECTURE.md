@@ -54,7 +54,10 @@ admits the same way, with the `[server] allow` ranges.
 | Control | one bidirectional stream, length-prefixed `postcard` messages | hello, open/close, resize, item registry sync, agent events |
 | Terminal | one unidirectional stream per session, worker→client; input on the control stream | grid **row diffs** from the worker-side VT engine, scrollback line pages on demand |
 | Media | unreliable datagrams (RFC 9221) | HEVC fragments + Reed–Solomon parity, Opus audio, cursor position/shape; client → worker: `Feedback` (NACK, refresh), each datagram standing alone so a lost one never holds the next back |
-| Echo copies | one datagram per keystroke and per echo, 2 ms after its stream copy | client → worker: every input request again (`ClientDatagram::Input`, numbered per session in the order the control stream carries them); worker → client: every diff built while input is being answered, when it fits one datagram (a `Kind::Term` header, then `TermDatagram`) |
+| Echo copies | one datagram per keystroke and per echo, 2 ms after its stream copy | client → worker: every input request again (`ClientDatagram::Input`, numbered per session in the order the control stream carries them); worker → client: every diff built while input is being answered, when it fits one datagram (`TermDatagram`) |
+
+Every datagram, in both directions, starts with one `datagram::Channel` byte: media, terminal
+echo, feedback, input or window input. For media it is the first byte of the `MediaHeader`.
 
 Inside a packet, the control and session streams go first, then media datagrams, then tunnels and
 files (`slopty_net::streams::AHEAD_OF_DATAGRAMS`, on a noq patched with
@@ -312,7 +315,7 @@ requirement the identifier rather than the hash and one approval enough for good
 its capabilities (`slopty-worker::caps`), where its listener is bound (the server lists it at
 that address, at the loopback address it dialed from when bound to loopback, or at the machine's
 tailnet address when it listens everywhere and dialed over loopback) and its sessions, forwards
-session and agent events,
+session and agent events and, as a message of its own, its load average,
 and redials with capped backoff when the link drops. Every `SessionSummary` carries the agent
 running in the session, its status and the signal that status came from (`SessionAgent`), read
 from the daemon's agent table (`Worker::summaries`), and the working tree's changes against
@@ -329,7 +332,10 @@ matches output from a per-session mark, as `expect` does. `slopty-worker::ports`
 listeners in each terminal's process tree through libproc. The server's hub answers two verbs
 itself: `Events`, a long poll on a bounded log of what it hears from every worker (liveness,
 terminals opened and closed, agent status changes) read from a cursor, which is how one agent
-watches the whole fleet over stateless HTTP; and `ForgetWorker`. Files are read in ranges of at
+watches the whole fleet over stateless HTTP; and `ForgetWorker`. Each event it logs is pushed
+as it is, `FromServer::Event(HubEvent)`, to every client and agent link. A link gets the state
+(`Directory`, then `Terminals`) on connect and again when it falls behind, and replaces what it
+showed with it. Files are read in ranges of at
 most 8 MiB with the whole size reported, directories listed with `ListDir`, paths checked with
 `Stat`; a terminal opened by a verb takes a size, and `ResizeTerminal` resizes one no client
 shows. A verb that changes something may carry an idempotency key on its request; the worker
@@ -510,7 +516,8 @@ sent at −1: above files, below video.
 - **Clipboard: announce, then fetch.** The worker reads `NSPasteboard.changeCount` every 200 ms,
   but only while some connection has sent `Watch(true)`. A client sends that while a remote
   tile has focus and the app is frontmost. A change goes out as an `Offer`: every
-  representation (text, PNG, TIFF, RTF, HTML, file URLs) with its size and BLAKE3 digest.
+  representation (text, PNG, TIFF, RTF, HTML, file URLs) with its size and BLAKE3 digest. The
+  wire names each by a `ClipFormat`, which the `Board` seam maps to a pasteboard type.
   Plain text of 64 KiB or less rides inline. Concealed and transient contents are never
   offered.
   - The macOS client puts promises on the general pasteboard (`NSPasteboardItem` data
@@ -654,6 +661,14 @@ otherwise wait for the next datagram, which on a still screen is a heartbeat awa
 (`hud_lines`) and `slopty bench screen`, and `slopty-client::pacing` carries the arrival →
 present numbers beside them. Transport: ACKs within 2 ms and a 32-packet initial
 window (`slopty-net::endpoint`).
+
+**A display sized to the client.** `slopty-vdisplay` makes a virtual display for one client
+through CoreGraphics' private `CGVirtualDisplay`, looked up at runtime (decisions/video.md, "A
+display sized to the client"). `plan` turns the client's pixels, scale and refresh into a fixed
+descriptor and a mode; `VirtualDisplay` is created on the main thread, resized in place with
+`applySettings:`, held to its mode by `enforce` and removed when dropped. Its
+`display_id` is then an ordinary display target for capture and input. It is not wired into
+the worker yet.
 
 ## 4. Workspace
 

@@ -450,7 +450,7 @@ impl CaptureSource for Canvas {
             v.next_multiple_of(2)
         };
         Ok(CanvasTarget {
-            display: id,
+            display: id.0,
             native: (px(display.w), px(display.h)),
             scale: display.scale,
         })

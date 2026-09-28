@@ -517,18 +517,18 @@ impl WorkspaceView {
         title: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        tracing::debug!(?command, ?cwd, %key, "open session");
-        self.send(
-            key,
-            ClientMsg::OpenSession(OpenSession {
-                size: TermSize::default(),
-                cwd,
-                command,
-                env: Vec::new(),
-                title,
-                attach: false,
-            }),
-        );
+        let request = self.next_open.get();
+        self.next_open.set(request.wrapping_add(1));
+        tracing::debug!(?command, ?cwd, %key, request, "open session");
+        let spec = OpenSession {
+            size: TermSize::default(),
+            cwd,
+            command,
+            env: Vec::new(),
+            title,
+            attach: false,
+        };
+        self.send(key, ClientMsg::OpenSession { request, spec });
         cx.notify();
     }
 

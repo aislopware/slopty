@@ -120,7 +120,7 @@ impl GhosttyEngine {
             self.commands.pop_front();
         }
         match mark {
-            osc133::Mark::PromptStart => {
+            osc133::Mark::PromptStart { .. } => {
                 if self.commands.back().is_some_and(|b| b.output.is_none()) {
                     self.commands.pop_back();
                 }

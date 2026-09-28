@@ -352,7 +352,8 @@ fn the_empty_workspace_offers_where_shells_stand(cx: &mut TestAppContext) {
     let cwd = places.get(1).map(|p| p.cwd.clone());
     let sent = fake.drain();
     assert!(
-        sent.iter().any(|m| matches!(m, ClientMsg::OpenSession(open) if open.cwd == cwd)),
+        sent.iter()
+            .any(|m| matches!(m, ClientMsg::OpenSession { spec: open, .. } if open.cwd == cwd)),
         "a shell in {cwd:?}: {sent:?}"
     );
 }

@@ -1,7 +1,7 @@
 //! Terminal sessions: lifecycle, input, frames.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
 use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, TermModes};
 
 use crate::input::{CellMetrics, KeyEvent, MouseEvent};
@@ -54,6 +54,17 @@ pub struct OpenSession {
     pub attach: bool,
 }
 
+/// How the tty's line discipline treats input right now, as the worker reads it from `termios`:
+/// what decides whether a client may draw a keystroke it has not seen echoed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LineDiscipline {
+    /// `ECHO`: the tty echoes what is typed. Off at a password prompt.
+    pub echo: bool,
+    /// `ICANON`: input is edited a line at a time (a shell's `read`, `cat`), not handed to the
+    /// program key by key.
+    pub canonical: bool,
+}
+
 /// Lifecycle state of a session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SessionState {
@@ -86,10 +97,10 @@ pub struct SessionSummary {
     /// in the background after the same moments the branch is read; `None` outside a
     /// repository, before the first count, or when git could not say.
     pub changes: Option<RepoChanges>,
-    /// Milliseconds since the Unix epoch when the session's program was spawned. Wall clock,
-    /// because the summary is held and relayed (the server hands it to clients that join
-    /// later) and an age measured at sending would be wrong by the time it is read.
-    pub started_ms: u64,
+    /// When the session's program was spawned. Wall clock, because the summary is held and
+    /// relayed (the server hands it to clients that join later) and an age measured at sending
+    /// would be wrong by the time it is read.
+    pub started_ms: WallMs,
     /// Current size.
     pub cols: u16,
     /// Current size.
@@ -151,7 +162,7 @@ pub enum TermRequest {
     /// Paste text (worker applies bracketed paste if the mode is on).
     Paste(String),
     /// Raw bytes to the PTY (tooling, tests).
-    Raw(Vec<u8>),
+    Raw(#[serde(with = "serde_bytes")] Vec<u8>),
     /// ⌘K: drop the history and repaint the prompt at the top. The worker erases the
     /// scrollback as if the program had asked (`CSI 3 J`, so a replay agrees) and sends the
     /// shell ⌃L for the screen.
@@ -410,6 +421,27 @@ pub const MAX_OSC52_BYTES: usize = 256 * 1024;
 /// image it dropped from its own ledger when a placement needs it again.
 pub const IMAGE_CACHE_BYTES: usize = 48 * 1024 * 1024;
 
+/// Why a request about a session failed.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, thiserror::Error)]
+pub enum TermError {
+    /// The program is not reading its input, and the worker's queue of it is full: what was
+    /// typed was refused rather than held without bound.
+    #[error("The program is not reading its input; what was typed was dropped")]
+    InputFull,
+    /// The worker has no such session: it ended.
+    #[error("The terminal has ended")]
+    NoSuchSession,
+    /// Writing to the terminal failed.
+    #[error("Writing to the terminal failed: {0}")]
+    Write(String),
+    /// The terminal engine could not do it: a frame, lines, a search, a key to encode.
+    #[error("The terminal could not do it: {0}")]
+    Engine(String),
+    /// The session stream to this client could not be opened.
+    #[error("The terminal's stream did not open: {0}")]
+    Stream(String),
+}
+
 /// Worker → client on the session stream.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum TermEvent {
@@ -459,8 +491,8 @@ pub enum TermEvent {
         /// True when this client now drives the size.
         you: bool,
     },
-    /// Something went wrong with a request.
-    Error(String),
+    /// A request about the session failed, or the session could not go on serving it.
+    Error(TermError),
     /// Reply to `TermRequest::Search`.
     Matches {
         /// The needle these are for (replies can cross in flight).

@@ -7,8 +7,14 @@
 //! `SLOPTY_DATA_DIR` under `target/e2e/` so nothing installed is touched, runs nextest with
 //! output visible, and prints what ran. No ad-hoc key presses, screenshots or window
 //! probing outside these tests: what they need is asserted inside them.
+//!
+//! Every suite runs from a recorded build: its test binary is built and listed once
+//! (`cargo nextest list --list-type binaries-only`), and nextest runs that list with
+//! `--binaries-metadata`, so `--no-build` reruns the last build without calling cargo at all.
+//! Other sessions build in this checkout's `target/` too; a rerun that goes through cargo waits on
+//! their build lock and rebuilds what they edited.
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use clap::{Args, ValueEnum};
 use xshell::{Shell, cmd};
 
@@ -99,6 +105,16 @@ pub struct E2eOpts {
     /// Which simulator the `ios` case uses.
     #[arg(long, value_enum, default_value_t)]
     sim: crate::ios::SimKind,
+    /// A nextest filterset narrowing the case, such as
+    /// `test(a_folder_tile_browses_the_worker)`. `--accept` and `--review` then touch only the
+    /// goldens the chosen tests render. A suite it matches nothing in is skipped; matching
+    /// nothing in every suite fails.
+    #[arg(long, short = 'E')]
+    filter: Option<String>,
+    /// Build nothing: rerun the binaries and the test binaries the last run built, as they are.
+    /// For a rerun right after a build; an edit since then is not in it.
+    #[arg(long)]
+    no_build: bool,
 }
 
 /// One nextest invocation.
@@ -299,18 +315,37 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         None
     };
 
-    // Build every binary a suite may spawn up front, so a test never shells out to cargo.
-    // `slopty-e2e` is in there for its own helper binaries (the idle window).
-    // The app carries the `e2e` feature (renderer access for `Render`). `--bins`, not
-    // `--bin slopty-app`: a `--bin` filter applies to every selected package and would leave
-    // the daemons stale.
-    step(
-        "build daemons and app",
-        &cmd!(
-            sh,
-            "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e"
-        ),
-    )?;
+    let reuse = sh.current_dir().join("target/e2e/reuse");
+    let cargo_metadata = reuse.join("cargo-metadata.json");
+    let recorded = |suite: &Suite| reuse.join(format!("{}-{}.json", suite.package, suite.test));
+    if opts.no_build {
+        if let Some(missing) =
+            suites.iter().find(|s| !recorded(s).exists() || !cargo_metadata.exists())
+        {
+            bail!(
+                "no build of {} {} to reuse: run once without --no-build",
+                missing.package,
+                missing.test
+            );
+        }
+        println!("▶ reusing the last build (--no-build)");
+    } else {
+        // Build every binary a suite may spawn up front, so a test never shells out to cargo.
+        // `slopty-e2e` is in there for its own helper binaries (the idle window).
+        // The app carries the `e2e` feature (renderer access for `Render`). `--bins`, not
+        // `--bin slopty-app`: a `--bin` filter applies to every selected package and would leave
+        // the daemons stale.
+        step(
+            "build daemons and app",
+            &cmd!(
+                sh,
+                "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e"
+            ),
+        )?;
+        std::fs::create_dir_all(&reuse)?;
+        let metadata = cmd!(sh, "cargo metadata --format-version 1").quiet().read()?;
+        std::fs::write(&cargo_metadata, metadata)?;
+    }
 
     // The iOS case also needs the app in a booted simulator; the test launches it there.
     let simulator = matches!(opts.case, Case::Ios | Case::SmoothIos | Case::PairIos)
@@ -326,25 +361,55 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         .transpose()?;
 
     let mut failed = Vec::new();
+    let mut matched = 0_usize;
     for suite in &suites {
         let _gate = suite.gate.map(|gate| sh.push_env(gate, "1"));
-        let (package, test) = (suite.package, suite.test);
-        let filter: &[&str] = if suite.filter.is_empty() { &[] } else { &[suite.filter] };
+        let title = format!("{} {} {}", suite.package, suite.test, suite.filter);
+        let title = title.trim();
+        let binaries = recorded(suite);
+        if !opts.no_build && build_suite(sh, suite, &binaries).is_err() {
+            failed.push(title.to_owned());
+            continue;
+        }
+        let expr = filterset(suite.filter, opts.filter.as_deref());
+        let expr: &[String] = expr.as_ref().map_or(&[], |e| std::slice::from_ref(e));
+        let filter_flag: &[&str] = if expr.is_empty() { &[] } else { &["-E"] };
         let threads: &[&str] = if suite.serial { &["--test-threads", "1"] } else { &[] };
-        let title = format!("{package} {test} {}", suite.filter);
         let command = cmd!(
             sh,
-            "cargo nextest run -p {package} --test {test} --no-capture --no-fail-fast {threads...} {filter...}"
+            "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} --no-capture --no-fail-fast {threads...} {filter_flag...} {expr...}"
         );
-        if step(title.trim(), &command).is_err() {
-            failed.push(title);
-        }
+        println!("▶ {title}");
+        let started = std::time::Instant::now();
+        let status = std::process::Command::from(command)
+            .status()
+            .with_context(|| format!("start nextest for {title}"))?;
+        let outcome = match status.code() {
+            Some(0) => {
+                matched = matched.saturating_add(1);
+                "✓"
+            }
+            // Nextest's "no tests to run": the filter picked nothing in this suite.
+            Some(NO_TESTS_RUN) if opts.filter.is_some() => "–",
+            _ => {
+                matched = matched.saturating_add(1);
+                failed.push(title.to_owned());
+                "✘"
+            }
+        };
+        println!("  {outcome} {title} ({:.1?})", started.elapsed());
     }
     if let Some((_, _, udid)) = &simulator {
         // A simulator left booted keeps CoreAudio busy long after: the client's audio player
         // then takes tens of seconds to open and the screen worker's test times out in the
         // next gate (gate 307, 2026-09-15).
         cmd!(sh, "xcrun simctl shutdown {udid}").ignore_status().quiet().run()?;
+    }
+    if let Some(filter) = &opts.filter
+        && matched == 0
+        && failed.is_empty()
+    {
+        bail!("e2e {:?}: `{filter}` matched no test", opts.case);
     }
     if failed.is_empty() {
         println!(
@@ -355,5 +420,51 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Ok(())
     } else {
         bail!("e2e {:?}: failed {}", opts.case, failed.join(", "))
+    }
+}
+
+/// Nextest's exit code when the filters leave no test to run.
+const NO_TESTS_RUN: i32 = 4;
+
+/// Build `suite`'s test binary and record where it is, for nextest to run without cargo.
+fn build_suite(sh: &Shell, suite: &Suite, binaries: &std::path::Path) -> Result<()> {
+    let (package, test) = (suite.package, suite.test);
+    println!("▶ build {package} {test}");
+    let started = std::time::Instant::now();
+    let listed = cmd!(
+        sh,
+        "cargo nextest list -p {package} --test {test} --list-type binaries-only --message-format json"
+    )
+    .read();
+    let ok = listed.is_ok();
+    println!("  {} build {package} {test} ({:.1?})", if ok { "✓" } else { "✘" }, started.elapsed());
+    std::fs::write(binaries, listed?)?;
+    Ok(())
+}
+
+/// The nextest filterset for a suite: its own name filter and the caller's, both.
+fn filterset(suite: &str, caller: Option<&str>) -> Option<String> {
+    let own = (!suite.is_empty()).then(|| format!("test(~{suite})"));
+    match (own, caller) {
+        (Some(own), Some(caller)) => Some(format!("{own} & ({caller})")),
+        (Some(own), None) => Some(own),
+        (None, Some(caller)) => Some(caller.to_owned()),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::filterset;
+
+    #[test]
+    fn a_caller_filter_narrows_the_suites_own() {
+        assert_eq!(
+            filterset("on_the_mac", Some("test(pans) | test(zooms)")).as_deref(),
+            Some("test(~on_the_mac) & (test(pans) | test(zooms))")
+        );
+        assert_eq!(filterset("", Some("test(x)")).as_deref(), Some("test(x)"));
+        assert_eq!(filterset("on_the_mac", None).as_deref(), Some("test(~on_the_mac)"));
+        assert_eq!(filterset("", None), None);
     }
 }

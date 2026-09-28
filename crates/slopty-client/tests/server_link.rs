@@ -38,10 +38,10 @@ mod tests {
                 agents: Vec::new(),
                 can_capture: false,
                 can_inject: false,
-                load: 0.0,
                 version: "0".to_owned(),
             },
-            last_seen_ms: 0,
+            load: 0.0,
+            last_seen_ms: slopty_core::WallMs::ZERO,
         }
     }
 

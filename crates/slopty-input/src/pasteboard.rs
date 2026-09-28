@@ -19,94 +19,45 @@ use objc2_app_kit::{
 };
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSData, NSString, NSURL};
-pub use slopty_proto::transfer::ORIGIN_TYPE;
+pub use slopty_proto::transfer::{ClipFormat, ORIGIN_TYPE};
 /// nspasteboard.org's marker for a secret (a password manager's copy); never synced.
 pub const CONCEALED_TYPE: &str = "org.nspasteboard.ConcealedType";
 /// nspasteboard.org's marker for contents that are about to go again; never synced.
 pub const TRANSIENT_TYPE: &str = "org.nspasteboard.TransientType";
 
-/// The representations clipboard sync carries, richest first.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Rep {
-    /// `public.file-url`, one per item.
-    FileUrl,
-    /// `public.png`.
-    Png,
-    /// `public.tiff`, what a Mac screenshot is on the pasteboard.
-    Tiff,
-    /// `public.rtf`.
-    Rtf,
-    /// `public.html`.
-    Html,
-    /// `public.utf8-plain-text`.
-    Text,
-}
-
-impl Rep {
-    /// Every representation, richest first.
-    pub const ALL: [Self; 6] =
-        [Self::FileUrl, Self::Png, Self::Tiff, Self::Rtf, Self::Html, Self::Text];
-}
-
-// The type names on the wire are Apple's UTIs; on macOS they come from AppKit's statics. Another
-// platform names them in its own module.
+// The formats on the wire are platform-neutral ([`ClipFormat`]); a board speaks its own
+// platform's type names, and this is where the two meet. On macOS the names come from
+// AppKit's statics; elsewhere a board's types are MIME types.
 #[cfg(target_os = "macos")]
-impl Rep {
-    /// The uniform type identifier, as AppKit spells it.
-    #[must_use]
-    pub fn uti(self) -> String {
-        // SAFETY: the `NSPasteboardType*` statics are AppKit constants, valid for the process
-        // lifetime.
-        let kind: &NSPasteboardType = unsafe {
-            match self {
-                Self::FileUrl => NSPasteboardTypeFileURL,
-                Self::Png => NSPasteboardTypePNG,
-                Self::Tiff => NSPasteboardTypeTIFF,
-                Self::Rtf => NSPasteboardTypeRTF,
-                Self::Html => NSPasteboardTypeHTML,
-                Self::Text => NSPasteboardTypeString,
-            }
-        };
-        kind.to_string()
-    }
-
-    /// The representation `uti` names, if clipboard sync carries it.
-    #[must_use]
-    pub fn of(uti: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|rep| rep.uti() == uti)
-    }
-}
-
-// Off macOS there are no AppKit statics to read, so the names are spelled out; on macOS a test
-// holds them to AppKit's.
-#[cfg(any(not(target_os = "macos"), test))]
-impl Rep {
-    /// The uniform type identifier this representation travels as.
-    const fn wire_uti(self) -> &'static str {
-        match self {
-            Self::FileUrl => "public.file-url",
-            Self::Png => "public.png",
-            Self::Tiff => "public.tiff",
-            Self::Rtf => "public.rtf",
-            Self::Html => "public.html",
-            Self::Text => "public.utf8-plain-text",
+/// The type `format` has on this platform's pasteboard: the UTI AppKit names it by.
+#[must_use]
+pub fn board_type(format: ClipFormat) -> String {
+    // SAFETY: the `NSPasteboardType*` statics are AppKit constants, valid for the process
+    // lifetime.
+    let kind: &NSPasteboardType = unsafe {
+        match format {
+            ClipFormat::FileUrls => NSPasteboardTypeFileURL,
+            ClipFormat::Png => NSPasteboardTypePNG,
+            ClipFormat::Tiff => NSPasteboardTypeTIFF,
+            ClipFormat::Rtf => NSPasteboardTypeRTF,
+            ClipFormat::Html => NSPasteboardTypeHTML,
+            ClipFormat::Text => NSPasteboardTypeString,
         }
-    }
+    };
+    kind.to_string()
 }
 
 #[cfg(not(target_os = "macos"))]
-impl Rep {
-    /// The uniform type identifier, as the wire spells it.
-    #[must_use]
-    pub fn uti(self) -> String {
-        self.wire_uti().to_owned()
-    }
+/// The type `format` has on this platform's pasteboard: its MIME type.
+#[must_use]
+pub fn board_type(format: ClipFormat) -> String {
+    format.mime().to_owned()
+}
 
-    /// The representation `uti` names, if clipboard sync carries it.
-    #[must_use]
-    pub fn of(uti: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|rep| rep.wire_uti() == uti)
-    }
+/// The format a pasteboard type is, if clipboard sync carries it.
+#[must_use]
+pub fn format_of(board_type: &str) -> Option<ClipFormat> {
+    ClipFormat::ALL.into_iter().find(|&format| self::board_type(format) == board_type)
 }
 
 /// One pasteboard item: its representations, as (type, bytes).
@@ -118,8 +69,8 @@ pub trait Board: Send + Sync {
     fn change_count(&self) -> isize;
     /// The types the first item holds.
     fn types(&self) -> Vec<String>;
-    /// The first item's bytes of type `uti`.
-    fn data(&self, uti: &str) -> Option<Vec<u8>>;
+    /// The first item's bytes of type `kind`.
+    fn data(&self, kind: &str) -> Option<Vec<u8>>;
     /// The `public.file-url` of every item that has one, as a path URL: a file named by
     /// reference (`file:///.file/id=…`, as Finder copies) means nothing on another machine.
     fn file_urls(&self) -> Vec<String>;
@@ -145,7 +96,7 @@ impl Board for Unsupported {
         Vec::new()
     }
 
-    fn data(&self, _uti: &str) -> Option<Vec<u8>> {
+    fn data(&self, _kind: &str) -> Option<Vec<u8>> {
         None
     }
 
@@ -239,17 +190,16 @@ impl Board for MacBoard {
             .unwrap_or_default()
     }
 
-    fn data(&self, uti: &str) -> Option<Vec<u8>> {
+    fn data(&self, kind: &str) -> Option<Vec<u8>> {
         let _turn = ONE_AT_A_TIME.lock();
         // `dataForType:` copies the bytes out of the pasteboard server.
-        Some(self.first_item()?.dataForType(&NSString::from_str(uti))?.to_vec())
+        Some(self.first_item()?.dataForType(&NSString::from_str(kind))?.to_vec())
     }
 
     fn file_urls(&self) -> Vec<String> {
         let _turn = ONE_AT_A_TIME.lock();
         let Some(items) = self.board().pasteboardItems() else { return Vec::new() };
-        let kind = Rep::FileUrl.uti();
-        let kind = NSString::from_str(&kind);
+        let kind = NSString::from_str(&board_type(ClipFormat::FileUrls));
         items
             .iter()
             .filter_map(|item| {
@@ -268,10 +218,10 @@ impl Board for MacBoard {
             .iter()
             .map(|reps| {
                 let item = NSPasteboardItem::new();
-                for (uti, bytes) in reps {
+                for (kind, bytes) in reps {
                     // `setData:forType:` copies the data; a type the item refuses is left out.
                     let _set =
-                        item.setData_forType(&NSData::with_bytes(bytes), &NSString::from_str(uti));
+                        item.setData_forType(&NSData::with_bytes(bytes), &NSString::from_str(kind));
                 }
                 ProtocolObject::from_retained(item)
             })
@@ -282,17 +232,17 @@ impl Board for MacBoard {
 
 #[cfg(test)]
 mod unsupported_tests {
-    use super::{Board as _, Rep, Unsupported};
+    use super::{Board as _, ClipFormat, Unsupported, board_type};
 
     /// A board with no clipboard behind it offers nothing and refuses a paste.
     #[test]
     fn an_unsupported_board_holds_nothing_and_refuses_writes() {
         let board = Unsupported;
-        let text = vec![(Rep::Text.uti(), b"hi".to_vec())];
+        let text = vec![(board_type(ClipFormat::Text), b"hi".to_vec())];
         assert_eq!(board.write(&[text]), None);
         assert_eq!(board.change_count(), 0);
         assert!(board.types().is_empty() && board.file_urls().is_empty());
-        assert_eq!(board.data(&Rep::Text.uti()), None);
+        assert_eq!(board.data(&board_type(ClipFormat::Text)), None);
     }
 }
 
@@ -301,20 +251,12 @@ mod unsupported_tests {
 mod tests {
     use super::*;
 
-    /// The names another platform spells out are AppKit's, which the wire carries.
-    #[test]
-    fn the_spelled_out_type_names_are_appkits() {
-        for rep in Rep::ALL {
-            assert_eq!(rep.uti(), rep.wire_uti(), "{rep:?}");
-        }
-    }
-
     /// Readers and writers on several threads at once, as the worker's poller and a paste are,
     /// each see whole contents and nothing crashes.
     #[test]
     fn threads_take_turns_on_the_pasteboard() {
         let board = MacBoard::unique();
-        let text = Rep::Text.uti();
+        let text = board_type(ClipFormat::Text);
         std::thread::scope(|scope| {
             for n in 0..4_u8 {
                 let (board, text) = (&board, &text);
@@ -334,12 +276,24 @@ mod tests {
         board.release();
     }
 
+    /// Each format is a UTI on a Mac's pasteboard, and each of those UTIs is that format again;
+    /// a type clipboard sync does not carry is no format.
     #[test]
-    fn the_reps_are_apples_utis() {
-        assert_eq!(Rep::Text.uti(), "public.utf8-plain-text");
-        assert_eq!(Rep::FileUrl.uti(), "public.file-url");
-        assert_eq!(Rep::of("public.png"), Some(Rep::Png));
-        assert_eq!(Rep::of("com.adobe.pdf"), None);
+    fn each_format_is_an_apple_uti_and_back() {
+        let utis = [
+            (ClipFormat::FileUrls, "public.file-url"),
+            (ClipFormat::Png, "public.png"),
+            (ClipFormat::Tiff, "public.tiff"),
+            (ClipFormat::Rtf, "public.rtf"),
+            (ClipFormat::Html, "public.html"),
+            (ClipFormat::Text, "public.utf8-plain-text"),
+        ];
+        for (format, uti) in utis {
+            assert_eq!(board_type(format), uti);
+            assert_eq!(format_of(uti), Some(format));
+        }
+        assert_eq!(format_of("com.adobe.pdf"), None);
+        assert_eq!(format_of(ORIGIN_TYPE), None);
     }
 
     /// A named pasteboard takes items, says what it holds, moves its count on a write, and
@@ -348,8 +302,8 @@ mod tests {
     fn a_named_board_round_trips_items() {
         let board = MacBoard::unique();
         let before = board.change_count();
-        let text = Rep::Text.uti();
-        let url = Rep::FileUrl.uti();
+        let text = board_type(ClipFormat::Text);
+        let url = board_type(ClipFormat::FileUrls);
         let items = vec![
             vec![(url.clone(), b"file:///tmp/a".to_vec()), (ORIGIN_TYPE.to_owned(), b"o".to_vec())],
             vec![(url, b"file:///tmp/b".to_vec())],

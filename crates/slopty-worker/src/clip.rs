@@ -21,9 +21,11 @@ use std::path::Path;
 
 use bytes::Bytes;
 use parking_lot::Mutex;
-use slopty_input::pasteboard::{Board, CONCEALED_TYPE, Item, ORIGIN_TYPE, Rep, TRANSIENT_TYPE};
+use slopty_input::pasteboard::{
+    Board, CONCEALED_TYPE, Item, ORIGIN_TYPE, TRANSIENT_TYPE, board_type,
+};
 use slopty_proto::transfer::{
-    ClipItem, Hash, INLINE_CLIP_BYTES, Offer, Peer, origin_bytes, parse_origin,
+    ClipFormat, ClipItem, Hash, INLINE_CLIP_BYTES, Offer, Peer, origin_bytes, parse_origin,
 };
 use tokio::sync::watch;
 
@@ -41,7 +43,7 @@ pub fn digest(bytes: &[u8]) -> Hash {
     blake3::hash(bytes).into()
 }
 
-/// `path` as a `file://` URL, the bytes of a `public.file-url` item.
+/// `path` as a `file://` URL, the bytes of a [`ClipFormat::FileUrls`] item.
 #[must_use]
 fn file_url(path: &Path) -> String {
     use std::fmt::Write as _;
@@ -69,7 +71,7 @@ pub enum Paste {
         /// The client's offer.
         generation: u64,
         /// Representations to fetch.
-        utis: Vec<String>,
+        formats: Vec<ClipFormat>,
     },
 }
 
@@ -92,7 +94,7 @@ struct State {
     /// The last announced offer's generation.
     generation: u64,
     /// What the last offer announced, for fetches.
-    offered: Option<(u64, Vec<(String, Bytes)>)>,
+    offered: Option<(u64, Vec<(ClipFormat, Bytes)>)>,
     /// Digests of what was last announced or written: contents among them are an echo.
     last: HashSet<Hash>,
     /// Each link's last offer.
@@ -102,19 +104,19 @@ struct State {
 #[derive(Debug)]
 struct Incoming {
     offer: Offer,
-    fetched: HashMap<String, Vec<u8>>,
+    fetched: HashMap<ClipFormat, Vec<u8>>,
     written: bool,
 }
 
 impl Incoming {
     /// Representations the paste still waits for.
-    fn missing(&self) -> Vec<String> {
+    fn missing(&self) -> Vec<ClipFormat> {
         self.offer
             .items
             .iter()
-            .filter(|i| writable(&i.uti) && i.inline.is_none() && i.size <= MAX_REP_BYTES)
-            .filter(|i| !self.fetched.contains_key(&i.uti))
-            .map(|i| i.uti.clone())
+            .filter(|i| writable(i.format) && i.inline.is_none() && i.size <= MAX_REP_BYTES)
+            .filter(|i| !self.fetched.contains_key(&i.format))
+            .map(|i| i.format)
             .collect()
     }
 }
@@ -138,20 +140,20 @@ impl State {
 
     /// Announce `reps` as the next offer from `me`, unless they are what was last announced or
     /// written.
-    fn announce(&mut self, me: Peer, reps: Vec<(String, Bytes)>) -> Option<Offer> {
-        let (_uti, key) = reps.first()?;
+    fn announce(&mut self, me: Peer, reps: Vec<(ClipFormat, Bytes)>) -> Option<Offer> {
+        let (_format, key) = reps.first()?;
         if self.last.contains(&digest(key)) {
             return None;
         }
         self.generation = self.generation.wrapping_add(1);
-        let text = Rep::Text.uti();
         let items = reps
             .iter()
-            .map(|(uti, bytes)| ClipItem {
-                uti: uti.clone(),
+            .map(|(format, bytes)| ClipItem {
+                format: *format,
                 size: bytes.len() as u64,
                 hash: digest(bytes),
-                inline: (*uti == text && bytes.len() <= INLINE_CLIP_BYTES).then(|| bytes.to_vec()),
+                inline: (*format == ClipFormat::Text && bytes.len() <= INLINE_CLIP_BYTES)
+                    .then(|| bytes.to_vec()),
             })
             .collect::<Vec<_>>();
         self.last = items.iter().map(|i| i.hash).collect();
@@ -159,12 +161,12 @@ impl State {
         Some(Offer { origin: me, generation: self.generation, items })
     }
 
-    fn fetch(&self, generation: u64, uti: &str) -> Option<Bytes> {
+    fn fetch(&self, generation: u64, format: ClipFormat) -> Option<Bytes> {
         let (current, reps) = self.offered.as_ref()?;
         if *current != generation {
             return None;
         }
-        reps.iter().find(|(t, _b)| t == uti).map(|(_t, b)| b.clone())
+        reps.iter().find(|(f, _b)| *f == format).map(|(_f, b)| b.clone())
     }
 
     /// What `client`'s paste needs; `None` when its offer is whole and still to be written.
@@ -178,20 +180,26 @@ impl State {
             inc.written = true;
             return Some(Paste::Ready);
         }
-        let utis = inc.missing();
-        (!utis.is_empty()).then_some(Paste::Fetch { generation: inc.offer.generation, utis })
+        let formats = inc.missing();
+        (!formats.is_empty()).then_some(Paste::Fetch { generation: inc.offer.generation, formats })
     }
 
-    fn supply(&mut self, client: Link, generation: u64, uti: &str, bytes: Vec<u8>) -> bool {
+    fn supply(
+        &mut self,
+        client: Link,
+        generation: u64,
+        format: ClipFormat,
+        bytes: Vec<u8>,
+    ) -> bool {
         let Some(inc) = self.incoming.get_mut(&client) else { return false };
         if inc.offer.generation != generation {
             return false;
         }
-        let listed = inc.offer.items.iter().find(|i| i.uti == uti);
+        let listed = inc.offer.items.iter().find(|i| i.format == format);
         if listed.is_none_or(|i| i.hash != digest(&bytes)) {
-            tracing::debug!(%client, uti, "clipboard data that does not match its offer; dropped");
+            tracing::debug!(%client, ?format, "clipboard data that does not match its offer; dropped");
         } else {
-            inc.fetched.insert(uti.to_owned(), bytes);
+            inc.fetched.insert(format, bytes);
         }
         inc.missing().is_empty()
     }
@@ -206,12 +214,12 @@ impl State {
         let mut reps: Item = Vec::new();
         let mut hashes = HashSet::new();
         for item in &inc.offer.items {
-            if !writable(&item.uti) {
+            if !writable(item.format) {
                 continue;
             }
-            if let Some(bytes) = item.inline.clone().or_else(|| inc.fetched.remove(&item.uti)) {
+            if let Some(bytes) = item.inline.clone().or_else(|| inc.fetched.remove(&item.format)) {
                 hashes.insert(item.hash);
-                reps.push((item.uti.clone(), bytes));
+                reps.push((board_type(item.format), bytes));
             }
         }
         if reps.is_empty() {
@@ -291,34 +299,34 @@ impl<B: Board> Clipboard<B> {
 
     /// The representations of the pasteboard's first item clipboard sync carries, richest
     /// first; file URLs are every item's, one per line.
-    fn read(&self, types: &[String]) -> Vec<(String, Bytes)> {
+    fn read(&self, types: &[String]) -> Vec<(ClipFormat, Bytes)> {
         let mut reps = Vec::new();
-        for rep in Rep::ALL {
-            let uti = rep.uti();
-            let bytes = if rep == Rep::FileUrl {
+        for format in ClipFormat::ALL {
+            let kind = board_type(format);
+            let bytes = if format == ClipFormat::FileUrls {
                 let urls = self.board.file_urls();
                 if urls.is_empty() {
                     continue;
                 }
                 urls.join("\n").into_bytes()
-            } else if types.contains(&uti) {
-                let Some(bytes) = self.board.data(&uti) else { continue };
+            } else if types.contains(&kind) {
+                let Some(bytes) = self.board.data(&kind) else { continue };
                 bytes
             } else {
                 continue;
             };
             if bytes.len() as u64 <= MAX_REP_BYTES {
-                reps.push((uti, Bytes::from(bytes)));
+                reps.push((format, Bytes::from(bytes)));
             }
         }
         reps
     }
 
-    /// Representation `uti` of the worker's offer `generation`; `None` when that offer is not the
-    /// current one (the pasteboard changed again) or never listed it.
+    /// Representation `format` of the worker's offer `generation`; `None` when that offer is not
+    /// the current one (the pasteboard changed again) or never listed it.
     #[must_use]
-    pub fn fetch(&self, generation: u64, uti: &str) -> Option<Bytes> {
-        self.state.lock().fetch(generation, uti)
+    pub fn fetch(&self, generation: u64, format: ClipFormat) -> Option<Bytes> {
+        self.state.lock().fetch(generation, format)
     }
 
     /// `client`'s clipboard changed to `offer`; it reaches the pasteboard on that client's
@@ -338,10 +346,16 @@ impl<B: Board> Clipboard<B> {
         })
     }
 
-    /// Bytes of representation `uti` of `client`'s offer `generation` arrived. `true` once
+    /// Bytes of representation `format` of `client`'s offer `generation` arrived. `true` once
     /// every representation the paste waits for is here.
-    pub fn supply(&self, client: Link, generation: u64, uti: &str, bytes: Vec<u8>) -> bool {
-        self.state.lock().supply(client, generation, uti, bytes)
+    pub fn supply(
+        &self,
+        client: Link,
+        generation: u64,
+        format: ClipFormat,
+        bytes: Vec<u8>,
+    ) -> bool {
+        self.state.lock().supply(client, generation, format, bytes)
     }
 
     /// Put `client`'s offer on the pasteboard, with what of it is here (inline text and what was
@@ -355,7 +369,7 @@ impl<B: Board> Clipboard<B> {
     /// Put `paths` on the pasteboard as file URLs, one item each, so ⌘V in Finder or an app
     /// pastes the files. Not announced: they are the clients' own files.
     pub fn write_files(&self, paths: &[impl AsRef<Path>]) -> bool {
-        let url = Rep::FileUrl.uti();
+        let url = board_type(ClipFormat::FileUrls);
         let generation = self.state.lock().generation;
         let mut items: Vec<Item> =
             paths.iter().map(|p| vec![(url.clone(), file_url(p.as_ref()).into_bytes())]).collect();
@@ -378,8 +392,8 @@ impl<B: Board> Clipboard<B> {
 
 /// Whether a representation a client offers can go on the worker's pasteboard as it is: a
 /// client's file URLs name files on the client, which travel as a transfer instead.
-fn writable(uti: &str) -> bool {
-    Rep::of(uti).is_some_and(|rep| rep != Rep::FileUrl)
+fn writable(format: ClipFormat) -> bool {
+    format != ClipFormat::FileUrls
 }
 
 #[cfg(test)]
@@ -416,13 +430,13 @@ mod tests {
             items.first().map(|i| i.iter().map(|(t, _b)| t.clone()).collect()).unwrap_or_default()
         }
 
-        fn data(&self, uti: &str) -> Option<Vec<u8>> {
+        fn data(&self, kind: &str) -> Option<Vec<u8>> {
             let items = self.items.lock();
-            items.first()?.iter().find(|(t, _b)| t == uti).map(|(_t, b)| b.clone())
+            items.first()?.iter().find(|(t, _b)| t == kind).map(|(_t, b)| b.clone())
         }
 
         fn file_urls(&self) -> Vec<String> {
-            let url = Rep::FileUrl.uti();
+            let url = board_type(ClipFormat::FileUrls);
             let urls = |items: &[Item]| -> Vec<String> {
                 let found = items.iter().filter_map(|i| i.iter().find(|(t, _b)| *t == url));
                 found.map(|(_t, b)| String::from_utf8_lossy(b).into_owned()).collect()
@@ -446,7 +460,7 @@ mod tests {
     }
 
     fn text() -> String {
-        Rep::Text.uti()
+        board_type(ClipFormat::Text)
     }
 
     #[test]
@@ -475,20 +489,20 @@ mod tests {
         let c = clip();
         c.watch(next_link(), true);
         let big = vec![b'x'; INLINE_CLIP_BYTES + 1];
-        let png = Rep::Png.uti();
+        let png = board_type(ClipFormat::Png);
         c.board().copy(&[(&text(), &big), (&png, b"\x89PNG"), ("com.example.private", b"p")]);
         let offer = c.poll().unwrap();
-        let utis: Vec<&str> = offer.items.iter().map(|i| i.uti.as_str()).collect();
-        assert_eq!(utis, [png.as_str(), text().as_str()], "richest first, unknown types left out");
+        let formats: Vec<ClipFormat> = offer.items.iter().map(|i| i.format).collect();
+        assert_eq!(formats, [ClipFormat::Png, ClipFormat::Text], "richest first, unknown left out");
         assert!(offer.items.iter().all(|i| i.inline.is_none()), "text over the cap is fetched");
         assert_eq!(offer.items[1].size, big.len() as u64);
         assert_eq!(offer.items[1].hash, digest(&big));
-        assert_eq!(c.fetch(offer.generation, &png).unwrap(), &b"\x89PNG"[..]);
-        assert_eq!(c.fetch(offer.generation, "public.rtf"), None, "never listed");
+        assert_eq!(c.fetch(offer.generation, ClipFormat::Png).unwrap(), &b"\x89PNG"[..]);
+        assert_eq!(c.fetch(offer.generation, ClipFormat::Rtf), None, "never listed");
         c.board().copy(&[(&text(), b"newer")]);
         let newer = c.poll().unwrap();
         assert!(newer.generation > offer.generation);
-        assert_eq!(c.fetch(offer.generation, &png), None, "the old offer is gone");
+        assert_eq!(c.fetch(offer.generation, ClipFormat::Png), None, "the old offer is gone");
     }
 
     #[test]
@@ -512,7 +526,7 @@ mod tests {
             origin: Peer::Client(ClientId::nil()),
             generation,
             items: vec![ClipItem {
-                uti: text(),
+                format: ClipFormat::Text,
                 size: body.len() as u64,
                 hash: digest(body),
                 inline: Some(body.to_vec()),
@@ -542,24 +556,28 @@ mod tests {
     fn a_paste_fetches_what_was_not_inline_then_writes_it_once() {
         let c = clip();
         let a = next_link();
-        let png = Rep::Png.uti();
+        let png = board_type(ClipFormat::Png);
         let picture = b"\x89PNG picture".to_vec();
-        let url = Rep::FileUrl.uti();
         c.offered(
             a,
             Offer {
                 origin: Peer::Client(ClientId::nil()),
                 generation: 7,
                 items: vec![
-                    ClipItem { uti: url, size: 9, hash: digest(b"file:///x"), inline: None },
                     ClipItem {
-                        uti: png.clone(),
+                        format: ClipFormat::FileUrls,
+                        size: 9,
+                        hash: digest(b"file:///x"),
+                        inline: None,
+                    },
+                    ClipItem {
+                        format: ClipFormat::Png,
                         size: picture.len() as u64,
                         hash: digest(&picture),
                         inline: None,
                     },
                     ClipItem {
-                        uti: text(),
+                        format: ClipFormat::Text,
                         size: 2,
                         hash: digest(b"hi"),
                         inline: Some(b"hi".to_vec()),
@@ -567,11 +585,12 @@ mod tests {
                 ],
             },
         );
-        let Paste::Fetch { generation, utis } = c.paste(a) else { panic!("a fetch first") };
-        assert_eq!((generation, utis), (7, vec![png.clone()]), "a client's file URL is not pasted");
-        assert!(!c.supply(a, 7, &png, b"tampered".to_vec()), "a digest mismatch is dropped");
-        assert!(!c.supply(a, 6, &png, picture.clone()), "another offer's data");
-        assert!(c.supply(a, 7, &png, picture.clone()));
+        let Paste::Fetch { generation, formats } = c.paste(a) else { panic!("a fetch first") };
+        assert_eq!((generation, formats), (7, vec![ClipFormat::Png]), "a file URL is not pasted");
+        let png_format = ClipFormat::Png;
+        assert!(!c.supply(a, 7, png_format, b"tampered".to_vec()), "a digest mismatch is dropped");
+        assert!(!c.supply(a, 6, png_format, picture.clone()), "another offer's data");
+        assert!(c.supply(a, 7, png_format, picture.clone()));
         assert!(c.write_incoming(a));
         assert_eq!(c.board().data(&png).unwrap(), picture);
         assert_eq!(c.board().data(&text()).unwrap(), b"hi");
@@ -593,19 +612,19 @@ mod tests {
     fn a_clients_copied_files_replace_its_offer_and_write_nothing() {
         let c = clip();
         let a = next_link();
-        let offer = |generation, uti: String, body: &[u8], inline: bool| Offer {
+        let offer = |generation, format, body: &[u8], inline: bool| Offer {
             origin: Peer::Client(ClientId::nil()),
             generation,
             items: vec![ClipItem {
-                uti,
+                format,
                 size: body.len() as u64,
                 hash: digest(body),
                 inline: inline.then(|| body.to_vec()),
             }],
         };
-        c.offered(a, offer(1, text(), b"older text", true));
+        c.offered(a, offer(1, ClipFormat::Text, b"older text", true));
         assert!(c.write_files(&["/tmp/staged.txt"]));
-        c.offered(a, offer(2, Rep::FileUrl.uti(), b"file:///Users/me/a.txt", false));
+        c.offered(a, offer(2, ClipFormat::FileUrls, b"file:///Users/me/a.txt", false));
         assert_eq!(c.paste(a), Paste::Ready, "nothing to fetch");
         assert_eq!(c.board().file_urls(), ["file:///tmp/staged.txt"], "the staged files stay");
         assert_eq!(c.board().data(&text()), None);

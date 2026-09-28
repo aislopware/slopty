@@ -231,7 +231,7 @@ mod tests {
         let mut reply = String::new();
         BufReader::new(rd).read_line(&mut reply).await.unwrap();
         match serde_json::from_str(reply.trim()).unwrap() {
-            slopty_proto::ctl::CtlReply::Doctor(health) => health,
+            slopty_proto::ctl::CtlReply::Doctor(health) => *health,
             other => panic!("unexpected ctl reply: {other:?}"),
         }
     }
@@ -251,11 +251,10 @@ mod tests {
         worker.tx.send(&ClientMsg::Items(ItemOp::Add(note.clone()))).await.unwrap();
         let stale = Item { kind: ItemKind::Note { text: "stale".to_owned() }, ..note.clone() };
         worker.tx.send(&ClientMsg::Items(ItemOp::Add(stale))).await.unwrap();
-        let mut refused = false;
+        // The greeting's snapshot is empty; the one that holds an item is the refusal's answer.
         loop {
             match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {
-                WorkerMsg::Term { event: TermEvent::Error(_), .. } => refused = true,
-                WorkerMsg::Items(ItemSync::Snapshot { items, .. }) if refused => {
+                WorkerMsg::Items(ItemSync::Snapshot { items, .. }) if !items.is_empty() => {
                     assert_eq!(items, [note], "the held item, not the refused one");
                     break;
                 }
@@ -277,21 +276,24 @@ mod tests {
         let home = std::env::var("HOME").unwrap();
         worker
             .tx
-            .send(&ClientMsg::OpenSession(OpenSession {
-                size,
-                cwd: Some("~".to_owned()),
-                command: vec!["/bin/sh".to_owned()],
-                env: vec![("PS1".to_owned(), "$ ".to_owned())],
-                title: None,
-                attach: true,
-            }))
+            .send(&ClientMsg::OpenSession {
+                request: 1,
+                spec: OpenSession {
+                    size,
+                    cwd: Some("~".to_owned()),
+                    command: vec!["/bin/sh".to_owned()],
+                    env: vec![("PS1".to_owned(), "$ ".to_owned())],
+                    title: None,
+                    attach: true,
+                },
+            })
             .await
             .unwrap();
         // The item snapshot (sent right after HelloAck) and the item delta for the new
         // terminal item interleave with SessionOpened on the control stream; skip them.
         let session = loop {
             match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {
-                WorkerMsg::SessionOpened(summary) => break summary.id,
+                WorkerMsg::SessionOpened { summary, .. } => break summary.id,
                 WorkerMsg::Items(_sync) => {}
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
@@ -390,19 +392,22 @@ mod tests {
         let size = TermSize { cols: 80, rows: 24, ..TermSize::default() };
         worker
             .tx
-            .send(&ClientMsg::OpenSession(OpenSession {
-                size,
-                cwd: None,
-                command: vec!["/bin/cat".to_owned()],
-                env: Vec::new(),
-                title: None,
-                attach: true,
-            }))
+            .send(&ClientMsg::OpenSession {
+                request: 1,
+                spec: OpenSession {
+                    size,
+                    cwd: None,
+                    command: vec!["/bin/cat".to_owned()],
+                    env: Vec::new(),
+                    title: None,
+                    attach: true,
+                },
+            })
             .await
             .unwrap();
         let (_session, mut frames) = session_stream(&worker).await;
         let session = next_msg(&mut worker, |m| match m {
-            WorkerMsg::SessionOpened(summary) => Some(summary.id),
+            WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
             _ => None,
         })
         .await;
@@ -622,9 +627,9 @@ mod tests {
             title: None,
             attach,
         };
-        worker.tx.send(&ClientMsg::OpenSession(open)).await.unwrap();
+        worker.tx.send(&ClientMsg::OpenSession { request: 1, spec: open }).await.unwrap();
         let session = next_msg(worker, |m| match m {
-            WorkerMsg::SessionOpened(summary) => Some(summary.id),
+            WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
             _ => None,
         })
         .await;
@@ -747,19 +752,22 @@ mod tests {
         let size = TermSize { cols: 40, rows: 6, ..TermSize::default() };
         worker
             .tx
-            .send(&ClientMsg::OpenSession(OpenSession {
-                size,
-                cwd: None,
-                command: vec!["/bin/sh".to_owned()],
-                env: vec![("PS1".to_owned(), "$ ".to_owned())],
-                title: None,
-                attach: true,
-            }))
+            .send(&ClientMsg::OpenSession {
+                request: 1,
+                spec: OpenSession {
+                    size,
+                    cwd: None,
+                    command: vec!["/bin/sh".to_owned()],
+                    env: vec![("PS1".to_owned(), "$ ".to_owned())],
+                    title: None,
+                    attach: true,
+                },
+            })
             .await
             .unwrap();
         let session = loop {
             match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {
-                WorkerMsg::SessionOpened(summary) => break summary.id,
+                WorkerMsg::SessionOpened { summary, .. } => break summary.id,
                 WorkerMsg::Items(_sync) => {}
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
@@ -1670,19 +1678,22 @@ mod tests {
         let (_endpoint, mut worker) = dial(addr).await;
         worker
             .tx
-            .send(&ClientMsg::OpenSession(OpenSession {
-                size: TermSize { cols: 40, rows: 6, ..TermSize::default() },
-                cwd: Some("~".to_owned()),
-                command: vec!["/bin/sh".to_owned()],
-                env: vec![("PS1".to_owned(), "$ ".to_owned())],
-                title: None,
-                attach: true,
-            }))
+            .send(&ClientMsg::OpenSession {
+                request: 1,
+                spec: OpenSession {
+                    size: TermSize { cols: 40, rows: 6, ..TermSize::default() },
+                    cwd: Some("~".to_owned()),
+                    command: vec!["/bin/sh".to_owned()],
+                    env: vec![("PS1".to_owned(), "$ ".to_owned())],
+                    title: None,
+                    attach: true,
+                },
+            })
             .await
             .unwrap();
         let session = loop {
             match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {
-                WorkerMsg::SessionOpened(summary) => break summary.id,
+                WorkerMsg::SessionOpened { summary, .. } => break summary.id,
                 WorkerMsg::Items(_sync) => {}
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
@@ -1741,23 +1752,26 @@ mod tests {
         let size = TermSize { cols: 200, rows: 4, ..TermSize::default() };
         worker
             .tx
-            .send(&ClientMsg::OpenSession(OpenSession {
-                size,
-                cwd: None,
-                // Raw and silent: each byte comes back once, from `cat`, as it is read.
-                command: vec![
-                    "/bin/sh".to_owned(),
-                    "-c".to_owned(),
-                    "stty raw -echo; exec cat".to_owned(),
-                ],
-                env: Vec::new(),
-                title: None,
-                attach: true,
-            }))
+            .send(&ClientMsg::OpenSession {
+                request: 1,
+                spec: OpenSession {
+                    size,
+                    cwd: None,
+                    // Raw and silent: each byte comes back once, from `cat`, as it is read.
+                    command: vec![
+                        "/bin/sh".to_owned(),
+                        "-c".to_owned(),
+                        "stty raw -echo; exec cat".to_owned(),
+                    ],
+                    env: Vec::new(),
+                    title: None,
+                    attach: true,
+                },
+            })
             .await
             .unwrap();
         let session = next_msg(&mut worker, |m| match m {
-            WorkerMsg::SessionOpened(summary) => Some(summary.id),
+            WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
             _ => None,
         })
         .await;
@@ -3394,18 +3408,21 @@ mod tests {
     async fn open_shell(worker: &mut WorkerConn, cwd: &std::path::Path) -> SessionId {
         worker
             .tx
-            .send(&ClientMsg::OpenSession(OpenSession {
-                size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
-                cwd: Some(cwd.to_string_lossy().into_owned()),
-                command: vec!["/bin/sh".to_owned()],
-                env: vec![("PS1".to_owned(), "$ ".to_owned())],
-                title: None,
-                attach: false,
-            }))
+            .send(&ClientMsg::OpenSession {
+                request: 1,
+                spec: OpenSession {
+                    size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    command: vec!["/bin/sh".to_owned()],
+                    env: vec![("PS1".to_owned(), "$ ".to_owned())],
+                    title: None,
+                    attach: false,
+                },
+            })
             .await
             .unwrap();
         next_msg(worker, |m| match m {
-            WorkerMsg::SessionOpened(summary) => Some(summary.id),
+            WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
             _ => None,
         })
         .await
@@ -3421,15 +3438,15 @@ mod tests {
     /// change is not announced. All on a named pasteboard, never the user's.
     #[tokio::test]
     async fn the_clipboard_is_announced_fetched_and_pasted_both_ways() {
-        use slopty_input::pasteboard::{Board as _, ORIGIN_TYPE, Rep};
+        use slopty_input::pasteboard::{Board as _, ORIGIN_TYPE, board_type};
         use slopty_proto::input::{KeyAction, KeyCode, Mods};
         use slopty_proto::screen::ScreenInput;
-        use slopty_proto::transfer::{ClipItem, ClipMsg, Offer, Peer, Purpose};
+        use slopty_proto::transfer::{ClipFormat, ClipItem, ClipMsg, Offer, Peer, Purpose};
 
         let dir = tempfile::tempdir().unwrap();
         let board = TestBoard(slopty_input::MacBoard::named(&pasteboard_name(dir.path())));
         let (_guard, mut worker) = connect(dir.path()).await;
-        let (text, png) = (Rep::Text.uti(), Rep::Png.uti());
+        let (text, png) = (board_type(ClipFormat::Text), board_type(ClipFormat::Png));
         let offered = |m| match m {
             WorkerMsg::Clip(ClipMsg::Offer(offer)) => Some(offer),
             _ => None,
@@ -3443,8 +3460,8 @@ mod tests {
         board.0.write(&[copied]).unwrap();
         let offer = next_msg(&mut worker, offered).await;
         assert_eq!(offer.origin, Peer::Worker(worker.ack.worker));
-        let utis: Vec<&str> = offer.items.iter().map(|i| i.uti.as_str()).collect();
-        assert_eq!(utis, [png.as_str(), text.as_str()], "richest first");
+        let formats: Vec<ClipFormat> = offer.items.iter().map(|i| i.format).collect();
+        assert_eq!(formats, [ClipFormat::Png, ClipFormat::Text], "richest first");
         assert_eq!(offer.items[0].inline, None, "a picture is listed, not pushed");
         assert_eq!(
             (offer.items[0].size, offer.items[0].hash),
@@ -3453,18 +3470,18 @@ mod tests {
         assert_eq!(offer.items[1].inline.as_deref(), Some(&b"copied on the worker"[..]));
 
         let generation = offer.generation;
-        let fetch = ClipMsg::Fetch { generation, uti: png.clone() };
+        let fetch = ClipMsg::Fetch { generation, format: ClipFormat::Png };
         worker.tx.send(&ClientMsg::Clip(fetch)).await.unwrap();
         let Uni::Bulk { header, mut rx } =
             tokio::time::timeout(STEP, streams::accept_uni(&worker.conn)).await.unwrap().unwrap()
         else {
             panic!("the picture comes as a bulk stream");
         };
-        assert_eq!(header.purpose, Purpose::Clip { generation, uti: png.clone() });
+        assert_eq!(header.purpose, Purpose::Clip { generation, format: ClipFormat::Png });
         assert!(drain(&mut rx).await == picture, "the picture arrives whole");
         worker
             .tx
-            .send(&ClientMsg::Clip(ClipMsg::Fetch { generation, uti: text.clone() }))
+            .send(&ClientMsg::Clip(ClipMsg::Fetch { generation, format: ClipFormat::Text }))
             .await
             .unwrap();
         let data = next_msg(&mut worker, |m| match m {
@@ -3481,13 +3498,13 @@ mod tests {
             generation: 1,
             items: vec![
                 ClipItem {
-                    uti: png.clone(),
+                    format: ClipFormat::Png,
                     size: theirs.len() as u64,
                     hash: digest(&theirs),
                     inline: None,
                 },
                 ClipItem {
-                    uti: text.clone(),
+                    format: ClipFormat::Text,
                     size: 15,
                     hash: digest(b"from the client"),
                     inline: Some(b"from the client".to_vec()),
@@ -3506,13 +3523,13 @@ mod tests {
         };
         let input = ScreenRequest::Input { stream: slopty_core::StreamId(77), input: chord };
         worker.tx.send(&ClientMsg::Screen(input)).await.unwrap();
-        let (generation, uti) = next_msg(&mut worker, |m| match m {
-            WorkerMsg::Clip(ClipMsg::Fetch { generation, uti }) => Some((generation, uti)),
+        let (generation, format) = next_msg(&mut worker, |m| match m {
+            WorkerMsg::Clip(ClipMsg::Fetch { generation, format }) => Some((generation, format)),
             _ => None,
         })
         .await;
-        assert_eq!((generation, uti.as_str()), (1, png.as_str()), "only what was not inline");
-        let data = ClipMsg::Data { generation, uti, bytes: theirs.clone() };
+        assert_eq!((generation, format), (1, ClipFormat::Png), "only what was not inline");
+        let data = ClipMsg::Data { generation, format, bytes: theirs.clone() };
         worker.tx.send(&ClientMsg::Clip(data)).await.unwrap();
         let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
         while board.0.data(&png).as_deref() != Some(theirs.as_slice()) {
@@ -3538,13 +3555,13 @@ mod tests {
     /// user's.
     #[tokio::test]
     async fn a_shells_picture_paste_sets_the_pasteboard_before_the_chord_goes_on() {
-        use slopty_input::pasteboard::{Board as _, ORIGIN_TYPE, Rep};
+        use slopty_input::pasteboard::{Board as _, ORIGIN_TYPE, board_type};
         use slopty_proto::terminal::PasteChord;
-        use slopty_proto::transfer::{ClipItem, ClipMsg, Offer, Peer};
+        use slopty_proto::transfer::{ClipFormat, ClipItem, ClipMsg, Offer, Peer};
 
         let dir = tempfile::tempdir().unwrap();
         let board = TestBoard(slopty_input::MacBoard::named(&pasteboard_name(dir.path())));
-        let png = Rep::Png.uti();
+        let png = board_type(ClipFormat::Png);
         // A fresh pasteboard's first read can take seconds, longer than the worker holds a
         // paste: pay for it here, not inside the hold the test times.
         assert_eq!(board.0.data(&png), None);
@@ -3556,7 +3573,7 @@ mod tests {
             origin: Peer::Client(ClientId::new()),
             generation: 4,
             items: vec![ClipItem {
-                uti: png.clone(),
+                format: ClipFormat::Png,
                 size: picture.len() as u64,
                 hash: digest(&picture),
                 inline: None,
@@ -3568,12 +3585,12 @@ mod tests {
         let typed = TermRequest::Raw(b"echo after-'the-picture'\n".to_vec());
         worker.tx.send(&ClientMsg::Term { session, req: typed }).await.unwrap();
 
-        let (generation, uti) = next_msg(&mut worker, |m| match m {
-            WorkerMsg::Clip(ClipMsg::Fetch { generation, uti }) => Some((generation, uti)),
+        let (generation, format) = next_msg(&mut worker, |m| match m {
+            WorkerMsg::Clip(ClipMsg::Fetch { generation, format }) => Some((generation, format)),
             _ => None,
         })
         .await;
-        assert_eq!((generation, uti.as_str()), (4, png.as_str()));
+        assert_eq!((generation, format), (4, ClipFormat::Png));
         let early = tokio::time::timeout(
             Duration::from_millis(400),
             wait_for_text(&mut events, "after-the-picture"),
@@ -3582,7 +3599,7 @@ mod tests {
         assert!(early.is_err(), "the line typed after the paste waits for the picture");
         assert_ne!(board.0.data(&png).as_deref(), Some(picture.as_slice()));
 
-        let data = ClipMsg::Data { generation, uti, bytes: picture.clone() };
+        let data = ClipMsg::Data { generation, format, bytes: picture.clone() };
         worker.tx.send(&ClientMsg::Clip(data)).await.unwrap();
         wait_for_text(&mut events, "after-the-picture").await;
         assert!(
@@ -3612,7 +3629,7 @@ mod tests {
             purpose: Purpose::Upload,
             name: name.to_owned(),
             size: size as u64,
-            mtime_ms: 1_700_000_000_000,
+            mtime_ms: slopty_core::WallMs::from_millis(1_700_000_000_000),
             mode: 0o640,
             offset,
         };
@@ -3944,7 +3961,7 @@ mod tests {
         worker.tx.send(&ClientMsg::WatchFiles { paths: vec![name.clone()] }).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let save = |text: &str, base: Option<u64>| ClientMsg::WriteFile {
+        let save = |text: &str, base: Option<slopty_core::WallMs>| ClientMsg::WriteFile {
             path: name.clone(),
             text: text.to_owned(),
             base_modified_ms: base,
@@ -4061,7 +4078,7 @@ mod tests {
         assert!(watched >= base);
 
         let edited = format!("{text}\n// edited near the end\n");
-        let save = |base: Option<u64>| ClientMsg::WriteFile {
+        let save = |base: Option<slopty_core::WallMs>| ClientMsg::WriteFile {
             path: name.clone(),
             text: edited.clone(),
             base_modified_ms: base,
@@ -4080,7 +4097,11 @@ mod tests {
         };
         assert_eq!(std::fs::read_to_string(&path).unwrap(), edited, "the whole edit landed");
 
-        link.send(save(Some(base.min(saved).saturating_sub(1)))).await.unwrap();
+        link.send(save(Some(slopty_core::WallMs::from_millis(
+            base.min(saved).as_millis().saturating_sub(1),
+        ))))
+        .await
+        .unwrap();
         let conflict = loop {
             if let WorkerMsg::Written { result, .. } = next_file_event(&mut events, &name).await {
                 break result;
@@ -4161,25 +4182,29 @@ mod tests {
         let (_guard, mut worker) = connect(dir.path()).await;
         worker
             .tx
-            .send(&ClientMsg::OpenSession(OpenSession {
-                size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
-                cwd: Some(repo.to_string_lossy().into_owned()),
-                // The directory report a shell's prompt hook prints (OSC 7), then nothing more.
-                command: vec![
-                    "/bin/sh".to_owned(),
-                    "-c".to_owned(),
-                    r#"printf '\033]7;file://localhost%s\007' "$PWD"; exec sleep 60"#.to_owned(),
-                ],
-                env: Vec::new(),
-                title: None,
-                attach: false,
-            }))
+            .send(&ClientMsg::OpenSession {
+                request: 1,
+                spec: OpenSession {
+                    size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
+                    cwd: Some(repo.to_string_lossy().into_owned()),
+                    // The directory report a shell's prompt hook prints (OSC 7), then nothing more.
+                    command: vec![
+                        "/bin/sh".to_owned(),
+                        "-c".to_owned(),
+                        r#"printf '\033]7;file://localhost%s\007' "$PWD"; exec sleep 60"#
+                            .to_owned(),
+                    ],
+                    env: Vec::new(),
+                    title: None,
+                    attach: false,
+                },
+            })
             .await
             .unwrap();
         let expected = RepoChanges { files: 2, added: 2, removed: 1 };
         let root = repo.to_string_lossy().into_owned();
         next_msg(&mut worker, |m| match m {
-            WorkerMsg::SessionOpened(s)
+            WorkerMsg::SessionOpened { summary: s, .. } | WorkerMsg::SessionChanged(s)
                 if s.repo.as_deref() == Some(root.as_str()) && s.changes == Some(expected) =>
             {
                 Some(())
@@ -4212,7 +4237,7 @@ mod tests {
         assert!(matches!(ctl(&sock, &hook).await, CtlReply::Ok { .. }));
         let agent = agent_of(&sock).await.flatten().expect("the hook gave the shell an agent");
         let since_ms = agent.since_ms;
-        assert!(since_ms > 0, "stamped when the turn began");
+        assert!(!since_ms.is_zero(), "stamped when the turn began");
         assert_eq!(
             agent,
             SessionAgent {

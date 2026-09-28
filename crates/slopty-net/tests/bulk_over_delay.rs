@@ -25,7 +25,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use slopty_core::{ClientId, WorkerId, XferId};
+    use slopty_core::{ClientId, WallMs, WorkerId, XferId};
     use slopty_net::admission::Admission;
     use slopty_net::client::{bind_client, connect_addr};
     use slopty_net::congestion::Snapshot;
@@ -67,7 +67,8 @@ mod tests {
                 worker,
                 name: "worker".to_owned(),
                 home: String::new(),
-                caps: slopty_proto::server::WorkerCaps::default(),
+                caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+                load: 0.0,
                 sessions: Vec::new(),
             };
             client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
@@ -88,7 +89,7 @@ mod tests {
             purpose: Purpose::Upload,
             name: "f.bin".to_owned(),
             size: SIZE as u64,
-            mtime_ms: 1,
+            mtime_ms: WallMs::from_millis(1),
             mode: 0o644,
             offset: 0,
         };

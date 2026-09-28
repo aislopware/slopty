@@ -48,8 +48,23 @@ pub use slopty_proto::{ClientMsg, WorkerMsg};
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
     /// Binding the endpoint failed.
-    #[error("bind: {0}")]
-    Bind(String),
+    #[error("bind {addr}: {source}")]
+    Bind {
+        /// The address it was bound to.
+        addr: String,
+        /// The OS's error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Reading or writing a file failed: a transfer's, a save's or the known-workers store.
+    #[error("{context}: {source}")]
+    Io {
+        /// What was read or written.
+        context: String,
+        /// The OS's error.
+        #[source]
+        source: std::io::Error,
+    },
     /// An address that does not parse.
     #[error("address: {0}")]
     Address(String),
@@ -74,9 +89,9 @@ pub enum NetError {
     /// The peer sent something we did not expect at this point.
     #[error("protocol violation: {0}")]
     Protocol(&'static str),
-    /// Known-workers store I/O.
+    /// The known-workers store does not parse, or would not serialize.
     #[error("store: {0}")]
-    Store(String),
+    Store(#[source] serde_json::Error),
     /// The worker closed the connection because the tailnet grants this device no role there
     /// ([`worker::close_code::NOT_GRANTED`]).
     #[error("not granted by the tailnet policy")]
@@ -84,12 +99,19 @@ pub enum NetError {
 }
 
 impl NetError {
+    /// An I/O error on `context` (a path, or what was being done).
+    #[must_use]
+    pub fn io(context: impl std::fmt::Display, source: std::io::Error) -> Self {
+        Self::Io { context: context.to_string(), source }
+    }
+
     /// A stream error with its source chain: noq's `ReadError::ConnectionLost` displays as
     /// just "connection lost", and the reason (timed out, reset, closed by peer) is the part
     /// worth logging.
     /// A close by the peer with [`worker::close_code::NOT_GRANTED`] anywhere in the chain is
     /// [`NetError::NotGranted`].
-    pub(crate) fn stream(e: &(dyn std::error::Error + 'static)) -> Self {
+    #[must_use]
+    pub fn stream(e: &(dyn std::error::Error + 'static)) -> Self {
         if closed_with(e) == Some(u64::from(worker::close_code::NOT_GRANTED)) {
             return Self::NotGranted;
         }

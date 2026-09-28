@@ -72,6 +72,11 @@ enum Cmd {
         /// `target/gate/tree` (CI, where the tree is the commit).
         #[arg(long)]
         in_place: bool,
+        /// Run only the tests of the packages whose files changed since the tests lane last
+        /// passed, and of every package that depends on them (all of them when a file outside
+        /// the packages changed).
+        #[arg(long)]
+        since_pass: bool,
     },
     /// Delete the build units and incremental caches nothing has used for a while, in every
     /// target dir under `target/` (also run, skipping busy dirs, after `check` and `gate`).
@@ -182,8 +187,8 @@ fn main() -> Result<()> {
             prune::auto();
             checked
         }
-        Cmd::Gate { fix, quick, in_place } => {
-            let gated = gate::run(&sh, gate::Options { fix, quick, in_place });
+        Cmd::Gate { fix, quick, in_place, since_pass } => {
+            let gated = gate::run(&sh, gate::Options { fix, quick, in_place, since_pass });
             prune::auto();
             gated
         }

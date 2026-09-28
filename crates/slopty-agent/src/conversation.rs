@@ -54,6 +54,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::Value;
+use slopty_core::WallMs;
 pub use slopty_proto::conversation::{
     AgentDetail, AgentRun, Answer, BashDetail, Body, Cap, Change, Clipped, Compact, EditDetail,
     Entry, GlobDetail, GrepDetail, Hunk, IMAGE_BYTES, Image, Link, McpDetail, Note, NoteKind,
@@ -168,7 +169,7 @@ impl Thread {
 /// Something that names a call not seen yet.
 #[derive(Debug)]
 enum Pending {
-    Result { uuid: String, at_ms: u64, block: Value, result: Option<Value> },
+    Result { uuid: String, at_ms: WallMs, block: Value, result: Option<Value> },
     Notice(Notice),
 }
 
@@ -184,7 +185,7 @@ struct Notice {
     /// A subagent's figures, from its `<usage>`: tokens, tool uses, how long it ran.
     usage: (Option<u64>, Option<u64>, Option<u64>),
     /// When the record carrying it was written.
-    at_ms: u64,
+    at_ms: WallMs,
 }
 
 /// The changes one read makes, an entry updated twice kept once at its first place.
@@ -353,7 +354,7 @@ impl Conversation {
             if str_at(record, "operation") == Some("enqueue")
                 && let Some(mut notice) = str_at(record, "content").and_then(parse_notice)
             {
-                notice.at_ms = str_at(record, "timestamp").and_then(parse_ms).unwrap_or(0);
+                notice.at_ms = str_at(record, "timestamp").and_then(parse_ms).unwrap_or_default();
                 self.notice(notice, batch);
             }
             return;
@@ -381,7 +382,7 @@ impl Conversation {
         else {
             return;
         };
-        let at_ms = str_at(record, "timestamp").and_then(parse_ms).unwrap_or(0);
+        let at_ms = str_at(record, "timestamp").and_then(parse_ms).unwrap_or_default();
         let context = Ctx { thread: &thread, uuid, at_ms, made_at };
         if !dropped.is_empty() {
             if let Some(t) = self.threads.get_mut(&thread) {
@@ -875,7 +876,7 @@ impl Conversation {
         };
         let before = entry.clone();
         let started = entry.at_ms;
-        let at = (notice.at_ms > 0).then_some(notice.at_ms);
+        let at = (!notice.at_ms.is_zero()).then_some(notice.at_ms);
         let Body::Tool(call) = &mut entry.body else { return };
         match &mut call.detail {
             ToolDetail::Bash(bash) => {
@@ -906,9 +907,11 @@ impl Conversation {
                 let (tokens, tool_uses, duration) = notice.usage;
                 agent.tokens = agent.tokens.or(tokens);
                 agent.tool_uses = agent.tool_uses.or(tool_uses);
-                let ran = at.filter(|_| agent.status != AgentRun::Running && started > 0);
-                agent.duration_ms =
-                    agent.duration_ms.or(duration).or_else(|| ran?.checked_sub(started));
+                let ran = at.filter(|_| agent.status != AgentRun::Running && !started.is_zero());
+                agent.duration_ms = agent
+                    .duration_ms
+                    .or(duration)
+                    .or_else(|| ran?.as_millis().checked_sub(started.as_millis()));
             }
             _ => return,
         }
@@ -942,7 +945,7 @@ impl Conversation {
 struct Ctx<'a> {
     thread: &'a ThreadId,
     uuid: &'a str,
-    at_ms: u64,
+    at_ms: WallMs,
     made_at: usize,
 }
 
@@ -1461,7 +1464,7 @@ fn parse_notice(text: &str) -> Option<Notice> {
         summary: field("summary"),
         result: field("result"),
         usage: usage_in(body),
-        at_ms: 0,
+        at_ms: WallMs::ZERO,
     })
 }
 
@@ -1614,7 +1617,7 @@ fn ms_of(ms: f64) -> u64 {
 }
 
 /// An RFC 3339 UTC stamp (`2026-09-27T03:15:25.849Z`) in ms since the Unix epoch.
-fn parse_ms(stamp: &str) -> Option<u64> {
+fn parse_ms(stamp: &str) -> Option<WallMs> {
     let (date, time) = stamp.split_once('T')?;
     let time = time.strip_suffix('Z')?;
     let mut ymd = date.splitn(3, '-').map(str::parse::<i64>);
@@ -1630,7 +1633,7 @@ fn parse_ms(stamp: &str) -> Option<u64> {
         .checked_add(hour.checked_mul(3_600)?)?
         .checked_add(minute.checked_mul(60)?)?
         .checked_add(second)?;
-    u64::try_from(seconds.checked_mul(1_000)?.checked_add(millis)?).ok()
+    u64::try_from(seconds.checked_mul(1_000)?.checked_add(millis)?).ok().map(WallMs::from_millis)
 }
 
 /// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's `days_from_civil`).

@@ -104,6 +104,18 @@ impl fmt::Display for WindowId {
     }
 }
 
+/// A display on the worker, in the worker's own numbering (the `CGDirectDisplayID` on macOS).
+/// Like a [`WindowId`], it means something only on the worker that listed it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
+#[serde(transparent)]
+pub struct DisplayId(pub u32);
+
+impl fmt::Display for DisplayId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "display#{}", self.0)
+    }
+}
+
 /// A connection-scoped stream identity allocated by the worker.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
 #[serde(transparent)]
@@ -143,8 +155,9 @@ mod tests {
     }
 
     #[test]
-    fn window_and_stream_ids_display_their_kind() {
+    fn window_stream_and_display_ids_display_their_kind() {
         assert_eq!(WindowId(3).to_string(), "window#3");
         assert_eq!(StreamId(4).to_string(), "stream#4");
+        assert_eq!(DisplayId(1).to_string(), "display#1");
     }
 }

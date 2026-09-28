@@ -49,7 +49,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
 use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
 
 use crate::detect::Program;
@@ -508,8 +508,8 @@ pub struct Tracker {
     /// Calls waiting on the human (a permission, a question) by `tool_use_id`: the agent
     /// fires calls in batches, so a result from beside one of these does not release it.
     blocks: BTreeSet<String>,
-    /// When the status entered its [`phase`] (Unix ms), what [`AgentEvent::since_ms`] says.
-    since_ms: u64,
+    /// When the status entered its [`phase`], what [`AgentEvent::since_ms`] says.
+    since_ms: WallMs,
 }
 
 /// The part of a status an elapsed time runs across: a tool call inside a turn is still the
@@ -522,13 +522,6 @@ const fn phase(status: &AgentStatus) -> u8 {
         AgentStatus::Blocked(_) => 3,
         AgentStatus::Done => 4,
     }
-}
-
-/// Now, in milliseconds since the Unix epoch; a clock set before 1970 reads as the epoch.
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 impl Default for Tracker {
@@ -545,7 +538,7 @@ impl Default for Tracker {
             absent: 0,
             process: None,
             blocks: BTreeSet::new(),
-            since_ms: 0,
+            since_ms: WallMs::ZERO,
         }
     }
 }
@@ -581,7 +574,7 @@ impl Tracker {
     /// Take `status`, stamping the time when it starts a new phase.
     fn enter(&mut self, status: AgentStatus) {
         if phase(&status) != phase(&self.status) {
-            self.since_ms = if status == AgentStatus::None { 0 } else { now_ms() };
+            self.since_ms = if status == AgentStatus::None { WallMs::ZERO } else { WallMs::now() };
         }
         self.status = status;
     }
@@ -1110,14 +1103,14 @@ mod tests {
     /// reconnect. Stamps are backdated by hand so a change is visible without waiting.
     #[test]
     fn the_status_is_stamped_when_its_phase_changes() {
-        const EARLIER: u64 = 1_000;
+        const EARLIER: WallMs = WallMs::from_millis(1_000);
         let sid = SessionId::new();
         let mut t = Tracker::default();
-        assert_eq!(t.event(sid).since_ms, 0, "no agent, no stamp");
-        let before = now_ms();
+        assert_eq!(t.event(sid).since_ms, WallMs::ZERO, "no agent, no stamp");
+        let before = WallMs::now();
         let prompt = hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"go"}"#);
         let e = t.apply(sid, &prompt).expect("working");
-        assert!(e.since_ms >= before, "stamped from the clock: {}", e.since_ms);
+        assert!(e.since_ms >= before, "stamped from the clock: {:?}", e.since_ms);
         t.since_ms = EARLIER;
         let tool = hook(
             r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
@@ -1132,7 +1125,7 @@ mod tests {
         let agent = slopty_proto::agent::SessionAgent::from(&t.event(sid));
         assert_eq!(agent.since_ms, e.since_ms, "and so does a summary");
         let e = t.apply(sid, &hook(r#"{"hook_event_name":"SessionEnd"}"#)).expect("gone");
-        assert_eq!(e.since_ms, 0, "an ended agent has no stamp");
+        assert_eq!(e.since_ms, WallMs::ZERO, "an ended agent has no stamp");
     }
 
     #[test]

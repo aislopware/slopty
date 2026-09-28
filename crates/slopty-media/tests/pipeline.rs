@@ -877,11 +877,17 @@ mod tests {
             h.rx.ingest(&Bytes::from_static(&[1, 2, 3]), h.now),
             Ingest::Ignored(Ignored::Malformed)
         );
+        let mut other_channel = s0.datagrams[0].to_vec();
+        other_channel[0] = slopty_proto::datagram::Channel::Term as u8;
+        assert_eq!(
+            h.rx.ingest(&Bytes::from(other_channel), h.now),
+            Ingest::Ignored(Ignored::Malformed)
+        );
         let mut foreign = s0.datagrams[0].to_vec();
-        foreign[0] ^= 1;
+        foreign[1] ^= 1;
         assert_eq!(h.rx.ingest(&Bytes::from(foreign), h.now), Ingest::Ignored(Ignored::Foreign));
         let mut bad_kind = s0.datagrams[0].to_vec();
-        bad_kind[13] = 200;
+        bad_kind[14] = 200;
         assert_eq!(h.rx.ingest(&Bytes::from(bad_kind), h.now), Ingest::Ignored(Ignored::Malformed));
         let mut odd = s0.datagrams[0].to_vec();
         odd.push(0);
@@ -1081,14 +1087,14 @@ mod tests {
         // nothing is tracked for it.
         let mut h = Harness::new();
         let s0 = h.send(&frame_bytes(1, 2_000), true, false);
-        // The header: `index` is the little-endian u16 at byte 8, `data_count` at byte 10,
-        // `parity_count` the byte at 12.
+        // The header: `index` is the little-endian u16 at byte 9, `data_count` at byte 11,
+        // `parity_count` the byte at 13 (the channel byte leads).
         let mut no_data = s0.datagrams[2].to_vec();
-        no_data[8] = 0;
-        no_data[10] = 0;
+        no_data[9] = 0;
+        no_data[11] = 0;
         assert_eq!(h.rx.ingest(&Bytes::from(no_data), h.now), Ingest::Ignored(Ignored::Malformed));
         let mut past_the_end = s0.datagrams[2].to_vec();
-        past_the_end[8] = 3;
+        past_the_end[9] = 3;
         assert_eq!(
             h.rx.ingest(&Bytes::from(past_the_end), h.now),
             Ingest::Ignored(Ignored::Malformed)
@@ -1098,8 +1104,8 @@ mod tests {
         h.deliver(&s0.datagrams[..1]);
         // Two data and no parity: three fragments as before, one count wrong.
         let mut wrong_count = s0.datagrams[1].to_vec();
-        wrong_count[10] = 3;
-        wrong_count[12] = 0;
+        wrong_count[11] = 3;
+        wrong_count[13] = 0;
         let (header, _) = MediaHeader::parse(&wrong_count).unwrap();
         assert_eq!((header.data_count.get(), header.parity_count), (3, 0));
         assert_eq!(

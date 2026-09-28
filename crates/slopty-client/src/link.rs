@@ -68,8 +68,8 @@ pub enum LinkEvent {
     XferFailed {
         /// The transfer.
         xfer: XferId,
-        /// Why, for a person.
-        error: String,
+        /// Why.
+        error: crate::xfer::XferError,
     },
     /// An event of a conversation this client follows, in the order the worker sent it. The
     /// stream ending (an unfollow, the session gone) sends nothing more.
@@ -525,7 +525,7 @@ impl ScreenNumbers {
             ordered: place.ordered,
             input: input.clone(),
         };
-        slopty_proto::codec::encode_body(&copy).ok().map(Bytes::from)
+        copy.encode().ok()
     }
 }
 
@@ -544,7 +544,7 @@ fn input_copy(session: SessionId, seq: u64, req: &TermRequest) -> Option<Bytes> 
         return None;
     }
     let copy = ClientDatagram::Input { session, seq, req: req.clone() };
-    slopty_proto::codec::encode_body(&copy).ok().map(Bytes::from)
+    copy.encode().ok()
 }
 
 /// Where each session's frame copies go: the pump of its newest stream.
@@ -725,7 +725,7 @@ async fn receive_bulk(
 ) {
     match header.purpose.clone() {
         Purpose::Download => crate::xfer::receive(&table, header, rx).await,
-        Purpose::Clip { generation, uti } => {
+        Purpose::Clip { generation, format } => {
             if header.size > MAX_CLIP_BYTES {
                 tracing::warn!(generation, size = header.size, "clipboard too big; refused");
                 rx.stop();
@@ -744,7 +744,7 @@ async fn receive_bulk(
                     }
                 }
             }
-            clips.fill(generation, uti, bytes);
+            clips.fill(generation, format, bytes);
         }
         Purpose::Upload | Purpose::Save { .. } => {
             tracing::debug!(xfer = %header.xfer, "a worker does not upload or save; stopping it");
@@ -944,7 +944,7 @@ mod tests {
         .iter()
         .map(|msg| {
             let copy = numbers.number(msg)?;
-            match slopty_proto::codec::decode_body(&copy).unwrap() {
+            match ClientDatagram::decode(&copy).unwrap() {
                 ClientDatagram::ScreenInput { stream, seq, ordered, .. } => {
                     Some((stream, seq, ordered))
                 }
@@ -977,7 +977,7 @@ mod tests {
         let req = TermRequest::Raw(b"x".to_vec());
         assert!(!too_long(&req), "lifted past the pacer");
         let copy = input_copy(session, 7, &req).unwrap();
-        let decoded: ClientDatagram = slopty_proto::codec::decode_body(&copy).unwrap();
+        let decoded = ClientDatagram::decode(&copy).unwrap();
         assert_eq!(decoded, ClientDatagram::Input { session, seq: 7, req });
         let long = TermRequest::Paste("x".repeat(slopty_proto::media::MAX_DATAGRAM + 1));
         assert!(too_long(&long), "paced");

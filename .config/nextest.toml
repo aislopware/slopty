@@ -63,3 +63,18 @@ max-threads = 2
 [[profile.default.overrides]]
 filter = 'package(slopty-codec) & !test(player_starts_and_drains)'
 test-group = 'videotoolbox'
+
+# The gate's tests lane (`cargo gate`): the default profile, plus retries for the tests named
+# below. They time the session actor against the rest of the suite's load: in a loaded gate they
+# have missed their deadline, and alone they pass (2026-09-28). A pass on a retry shows as FLAKY
+# in the gate log; failing every try still fails the gate. Name a test here only when it is
+# timing-sensitive this way, never by pattern.
+[profile.gate]
+
+[[profile.gate.overrides]]
+filter = '''
+package(slopty-worker) & binary(session_actor) & (
+    test(=actor::a_slow_viewer_is_skipped_then_caught_up_never_dropped)
+    | test(=actor::a_silent_command_after_a_clear_is_seen_running_at_once))
+'''
+retries = { backoff = "fixed", count = 2, delay = "1s" }

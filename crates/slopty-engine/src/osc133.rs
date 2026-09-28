@@ -7,6 +7,19 @@
 //! mark. The scanner keeps its state across writes: a sequence split over two PTY reads is
 //! still found.
 
+/// Which of its prompt a shell redraws after a resize, as libghostty-vt reads `133;A;redraw=`:
+/// it clears those rows first. The terminal keeps the last one an `A` gave.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Redraw {
+    /// Nothing: libghostty-vt's default for embedders.
+    #[default]
+    Off,
+    /// The whole prompt (`redraw=1`: zsh, fish).
+    Full,
+    /// Its last row (`redraw=last`: bash).
+    Last,
+}
+
 /// Longest OSC payload worth collecting; `133;D;<status>` fits with room for parameters.
 const MAX_PAYLOAD: usize = 32;
 
@@ -50,7 +63,11 @@ pub struct Found {
 pub enum Mark {
     /// `133;A`: a primary prompt starts on the cursor row (`k=s`/`k=c` continuations are not
     /// reported; they are rows of the same prompt).
-    PromptStart,
+    PromptStart {
+        /// What the shell said it redraws after a resize (kitty's `redraw`, ghostty's
+        /// `redraw=last`), when an `A` said it.
+        redraw: Option<Redraw>,
+    },
     /// `133;C`: the command's output starts on the cursor row. libghostty takes the row
     /// out of the prompt on it but writes no cell, so the row would not be in a frame.
     OutputStart,
@@ -152,8 +169,19 @@ fn mark(payload: &[u8]) -> Option<Mark> {
         // `P` is a prompt start without `A`'s fresh line: what zsh's line-init prints when
         // a theme rebuilt PS1 after the marks went in, with the prompt already drawn.
         b'A' | b'P' => {
-            let continuation = params.any(|p| p == b"k=s" || p == b"k=c");
-            (!continuation).then_some(Mark::PromptStart)
+            let (mut continuation, mut redraw) = (false, None);
+            for param in params {
+                match param {
+                    b"k=s" | b"k=c" => continuation = true,
+                    b"redraw=0" => redraw = Some(Redraw::Off),
+                    b"redraw=1" => redraw = Some(Redraw::Full),
+                    b"redraw=last" => redraw = Some(Redraw::Last),
+                    _ => {}
+                }
+            }
+            // libghostty reads `redraw` on a fresh-line prompt start (`A`) only.
+            let redraw = redraw.filter(|_| kind == b'A');
+            (!continuation).then_some(Mark::PromptStart { redraw })
         }
         b'C' => Some(Mark::OutputStart),
         b'D' => {
@@ -194,18 +222,32 @@ mod tests {
     #[test]
     fn prompt_starts_but_not_continuations() {
         let mut s = Scanner::default();
-        let start = Some(Found { end: 8, mark: Mark::PromptStart });
+        let start = Some(Found { end: 8, mark: Mark::PromptStart { redraw: None } });
         assert_eq!(s.scan(b"\x1b]133;A\x07$ "), start);
         assert_eq!(
             s.scan(b"\x1b]133;A;cl=line\x07"),
-            Some(Found { end: 16, mark: Mark::PromptStart })
+            Some(Found { end: 16, mark: Mark::PromptStart { redraw: None } })
         );
         assert_eq!(
             s.scan(b"\x1b]133;A;k=s\x07\x1b]133;P;k=i\x07\x1b]133;B\x07"),
-            Some(Found { end: 24, mark: Mark::PromptStart }),
+            Some(Found { end: 24, mark: Mark::PromptStart { redraw: None } }),
             "the continuation is skipped, the in-place P is a start, B is nothing"
         );
         assert_eq!(s.scan(b"\x1b]133;A;k=c\x07"), None);
+    }
+
+    #[test]
+    fn a_prompt_start_carries_what_the_shell_redraws() {
+        let mut s = Scanner::default();
+        let redraw = |s: &mut Scanner, bytes: &[u8]| match s.scan(bytes) {
+            Some(Found { mark: Mark::PromptStart { redraw }, .. }) => redraw,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(redraw(&mut s, b"\x1b]133;A;redraw=1\x07"), Some(Redraw::Full));
+        assert_eq!(redraw(&mut s, b"\x1b]133;A;cl=line;redraw=last\x07"), Some(Redraw::Last));
+        assert_eq!(redraw(&mut s, b"\x1b]133;A;redraw=0\x1b\\"), Some(Redraw::Off));
+        assert_eq!(redraw(&mut s, b"\x1b]133;A;redraw=2\x07"), None, "not a value");
+        assert_eq!(redraw(&mut s, b"\x1b]133;P;k=i;redraw=1\x07"), None, "read on `A` only");
     }
 
     #[test]
@@ -218,7 +260,7 @@ mod tests {
         );
         assert_eq!(
             s.scan(b"\x1b]133;P;k=i\x07"),
-            Some(Found { end: 12, mark: Mark::PromptStart }),
+            Some(Found { end: 12, mark: Mark::PromptStart { redraw: None } }),
             "P is a prompt start too, drawn in place"
         );
         assert_eq!(s.scan(b"\x1b]133;P;k=s\x07"), None, "a continuation, as with A");

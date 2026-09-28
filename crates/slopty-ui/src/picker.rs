@@ -282,13 +282,13 @@ impl WindowPicker {
                 section: Section::Displays,
                 line: Line::new(
                     IconName::Monitor,
-                    format!("Display {}", d.id),
+                    format!("Display {}", d.id.0),
                     format!("{}×{} @{}× {}Hz", d.w, d.h, d.scale, d.hz),
                 ),
                 on_pick: PickerEvent::Pick {
                     target: CaptureTarget::Display(d.id),
                     size: (d.w, d.h),
-                    title: format!("Display {}", d.id),
+                    title: format!("Display {}", d.id.0),
                 },
             });
         }
@@ -570,7 +570,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use slopty_core::WindowId;
+    use slopty_core::{DisplayId, WindowId};
 
     use super::*;
 
@@ -592,7 +592,7 @@ mod tests {
             y: 0.0,
             w: 1200.0,
             h: 800.0,
-            display: 1,
+            display: DisplayId(1),
             on_screen,
         }
     }
@@ -633,7 +633,8 @@ mod tests {
             window(21, "Safari", "", true),
             window(40, "Music", "Music", false),
         ];
-        let displays = vec![DisplayInfo { id: 2, w: 1728.0, h: 1117.0, scale: 2.0, hz: 120.0 }];
+        let displays =
+            vec![DisplayInfo { id: DisplayId(2), w: 1728.0, h: 1117.0, scale: 2.0, hz: 120.0 }];
         let picker =
             cx.new(|cx| WindowPicker::new(sessions, windows, displays, Theme::default(), cx));
         let picked: Rc<RefCell<Vec<PickerEvent>>> = Rc::default();
@@ -720,7 +721,7 @@ mod tests {
         assert!(
             matches!(
                 &events[1],
-                PickerEvent::Pick { target: CaptureTarget::Display(2), size, title }
+                PickerEvent::Pick { target: CaptureTarget::Display(DisplayId(2)), size, title }
                     if *size == (1728.0, 1117.0) && title == "Display 2"
             ),
             "{events:?}"
@@ -787,7 +788,8 @@ mod tests {
 
         picker.update(cx, |p, cx| {
             p.query.clear();
-            let displays = vec![DisplayInfo { id: 1, w: 1728.0, h: 1117.0, scale: 2.0, hz: 120.0 }];
+            let displays =
+                vec![DisplayInfo { id: DisplayId(1), w: 1728.0, h: 1117.0, scale: 2.0, hz: 120.0 }];
             p.set_listing(vec![window(20, "Safari", "Rust docs", true)], displays, cx);
         });
         assert!(!picker.read_with(cx, |p, _| p.is_loading()));

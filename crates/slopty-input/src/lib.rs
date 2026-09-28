@@ -43,7 +43,7 @@ pub use backend::{Backend, Event, Post, Recorder, Route, System};
 pub use injector::{Injector, can_post, flags_for, request_post, to_point};
 #[cfg(target_os = "macos")]
 pub use pasteboard::MacBoard;
-pub use pasteboard::{Board, Rep};
+pub use pasteboard::{Board, ClipFormat, board_type, format_of};
 pub use pointer::{Pointer, PointerWatch};
 use slopty_capture::Rect;
 use slopty_proto::screen::{CaptureTarget, ScreenInput};

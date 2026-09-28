@@ -9,7 +9,7 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::{Value, json};
-    use slopty_core::{SessionId, WorkerId};
+    use slopty_core::{SessionId, WallMs, WorkerId};
     use slopty_net::HostAddr;
     use slopty_net::admission::Admission;
     use slopty_net::client::bind_client;
@@ -45,7 +45,6 @@ mod tests {
                 agents: Vec::new(),
                 can_capture: false,
                 can_inject: false,
-                load: 0.1,
                 version: "0".to_owned(),
             },
             sessions: vec![SessionSummary {
@@ -55,7 +54,7 @@ mod tests {
                 repo: None,
                 branch: None,
                 changes: None,
-                started_ms: 0,
+                started_ms: WallMs::ZERO,
                 cols: 80,
                 rows: 24,
                 state: SessionState::Running,
@@ -71,7 +70,7 @@ mod tests {
             kind: AgentKind::ClaudeCode,
             status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
             source: AgentSource::Hook,
-            since_ms: 0,
+            since_ms: WallMs::ZERO,
         }
     }
 

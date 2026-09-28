@@ -2,6 +2,7 @@
 
 use bytes::{BufMut as _, Bytes, BytesMut};
 use slopty_core::StreamId;
+use slopty_proto::datagram::Channel;
 use slopty_proto::media::{CURSOR_BYTES, CursorUpdate, HEADER_BYTES, Kind, MediaHeader};
 use zerocopy::little_endian::{I32, U16, U32};
 use zerocopy::{FromBytes as _, IntoBytes as _};
@@ -17,6 +18,7 @@ pub fn cursor_datagram(
     visible: bool,
 ) -> Bytes {
     let header = MediaHeader {
+        channel: Channel::Media as u8,
         stream: U32::new(stream.0),
         frame: U32::new(seq),
         index: U16::new(0),

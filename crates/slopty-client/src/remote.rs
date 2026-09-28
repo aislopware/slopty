@@ -7,15 +7,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use slopty_core::XferId;
+use slopty_core::{WallMs, XferId};
 use slopty_net::{ClientMsg, Connection};
-use slopty_proto::transfer::{BulkHeader, ClipMsg, Dest, Purpose, XferMsg};
+use slopty_proto::transfer::{BulkHeader, ClipFormat, ClipMsg, Dest, Purpose, XferMsg};
 use tokio::sync::mpsc;
 
 use crate::LinkEvent;
 use crate::clip::{ClipCache, fits_inline};
 use crate::tunnel::Forwards;
-use crate::xfer::{self, Uplink};
+use crate::xfer::{self, Uplink, XferError};
 
 /// Files and clipboard bytes to and from one worker.
 pub trait Remote: Send + Sync + std::fmt::Debug {
@@ -29,15 +29,15 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
 
     /// Bring the worker's `path` (a file, or a directory as its files) into the directory
     /// `into`, blocking until every file has landed. Never call it on the main thread.
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, String>;
+    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError>;
 
-    /// The bytes of representation `uti` of the worker's clipboard offer `generation`, waiting
-    /// at most `wait` for them. Blocks: this is what a pasteboard's data provider calls.
-    fn clip_data(&self, generation: u64, uti: &str, wait: Duration) -> Option<Vec<u8>>;
+    /// The bytes in `format` of the worker's clipboard offer `generation`, waiting at most
+    /// `wait` for them. Blocks: this is what a pasteboard's data provider calls.
+    fn clip_data(&self, generation: u64, format: ClipFormat, wait: Duration) -> Option<Vec<u8>>;
 
     /// Answer the worker's fetch of this client's offer `generation`: inline when it fits,
     /// else on a bulk stream.
-    fn send_clip(&self, generation: u64, uti: String, bytes: Vec<u8>);
+    fn send_clip(&self, generation: u64, format: ClipFormat, bytes: Vec<u8>);
 
     /// Serve the worker's loopback `port` on this machine, until the link goes, and say
     /// where: the same port when it is free here, else the next free one. `None` on a link
@@ -93,25 +93,25 @@ impl Remote for LinkRemote {
         }
     }
 
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, String> {
+    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
         let up = self.up.clone();
         let conn = self.conn().clone();
         let xfer = XferId::new();
         self.runtime.block_on(async move {
             tokio::select! {
                 landed = xfer::download(&up, xfer, path, into) => landed,
-                () = async { conn.closed().await; } => Err("the worker went away".to_owned()),
+                () = async { conn.closed().await; } => Err(XferError::LinkClosed),
             }
         })
     }
 
-    fn clip_data(&self, generation: u64, uti: &str, wait: Duration) -> Option<Vec<u8>> {
-        self.clips.wait(generation, uti, wait)
+    fn clip_data(&self, generation: u64, format: ClipFormat, wait: Duration) -> Option<Vec<u8>> {
+        self.clips.wait(generation, format, wait)
     }
 
-    fn send_clip(&self, generation: u64, uti: String, bytes: Vec<u8>) {
+    fn send_clip(&self, generation: u64, format: ClipFormat, bytes: Vec<u8>) {
         if fits_inline(bytes.len()) {
-            let data = ClientMsg::Clip(ClipMsg::Data { generation, uti, bytes });
+            let data = ClientMsg::Clip(ClipMsg::Data { generation, format, bytes });
             if let Err(e) = self.up.out.try_send(data) {
                 tracing::debug!(error = %e, "clipboard data not sent");
             }
@@ -121,10 +121,10 @@ impl Remote for LinkRemote {
         self.runtime.spawn(async move {
             let header = BulkHeader {
                 xfer: XferId::new(),
-                purpose: Purpose::Clip { generation, uti },
+                purpose: Purpose::Clip { generation, format },
                 name: String::new(),
                 size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-                mtime_ms: 0,
+                mtime_ms: WallMs::ZERO,
                 mode: 0o600,
                 offset: 0,
             };

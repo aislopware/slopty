@@ -2268,8 +2268,16 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Items(sync)) => {
             view.update(cx, |v, cx| v.apply_sync(key, sync, cx));
         }
-        LinkEvent::Control(WorkerMsg::SessionOpened(summary)) => {
+        LinkEvent::Control(
+            WorkerMsg::SessionOpened { summary, .. } | WorkerMsg::SessionChanged(summary),
+        ) => {
             view.update(cx, |v, cx| v.session_opened(key, summary, cx));
+        }
+        LinkEvent::Control(WorkerMsg::Failed { message, .. }) => {
+            view.update(cx, |v, cx| v.open_failed(key, &message, cx));
+        }
+        LinkEvent::Control(WorkerMsg::Load(load)) => {
+            view.update(cx, |v, cx| v.set_worker_load(key, load, cx));
         }
         LinkEvent::Control(WorkerMsg::SessionClosed { session, .. }) => {
             view.update(cx, |v, cx| v.session_closed(session, cx));
@@ -2317,7 +2325,7 @@ fn apply_link_event(
             view.update(cx, |v, cx| v.ports_changed(session, forwards, cx));
         }
         LinkEvent::XferFailed { xfer, error } => {
-            view.update(cx, |v, cx| v.xfer_failed(xfer, &error, cx));
+            view.update(cx, |v, cx| v.xfer_failed(xfer, &error.to_string(), cx));
         }
         LinkEvent::Conversation { session, event } => {
             view.update(cx, |v, cx| v.conversation_event(session, event, cx));

@@ -161,10 +161,13 @@ pub struct Daemon {
     pub wake: Arc<parking_lot::Mutex<slopty_worker::wake::Wake<Assertions>>>,
     /// How each client's packets travel, from this machine's Tailscale.
     pub paths: tailnet::Paths,
-    /// What this worker can do and how it is doing, kept current for the whole daemon's life
+    /// What this worker can do, kept current for the whole daemon's life
     /// ([`slopty_worker::caps::watch`]): every client's greeting carries it, a change goes out
     /// as `WorkerMsg::Caps`, and the server link registers with it.
     pub caps: tokio::sync::watch::Receiver<slopty_proto::server::WorkerCaps>,
+    /// The one-minute load average, kept current beside [`Self::caps`]: in every client's
+    /// greeting, and a move goes out as `WorkerMsg::Load` and `ToServer::Load`.
+    pub load: tokio::sync::watch::Receiver<f32>,
     /// The daemon's home directory, which a client writes as `~`.
     pub home: String,
     /// Who follows which agent's conversation, and the permission prompts held for them.
@@ -290,22 +293,31 @@ fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) 
     tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, caps));
 }
 
-/// Keep `caps` current (the agents' versions follow once their `--version` answers) and tell
-/// every client each change.
+/// Keep `caps` and `load` current (the agents' versions follow once their `--version`
+/// answers) and tell every client each change.
 fn watch_caps(
     caps: tokio::sync::watch::Sender<slopty_proto::server::WorkerCaps>,
+    load: tokio::sync::watch::Sender<f32>,
     events: broadcast::Sender<slopty_proto::WorkerMsg>,
 ) {
     let mut changed = caps.subscribe();
+    let mut moved = load.subscribe();
+    let load_events = events.clone();
     tokio::spawn(async move {
         let agents = slopty_worker::caps::installed_agents().await;
         caps.send_modify(|c| c.agents.clone_from(&agents));
-        slopty_worker::caps::watch(caps, agents).await;
+        slopty_worker::caps::watch(caps, load, agents).await;
     });
     tokio::spawn(async move {
         while changed.changed().await.is_ok() {
             let now = changed.borrow_and_update().clone();
             let _sent = events.send(slopty_proto::WorkerMsg::Caps(now));
+        }
+    });
+    tokio::spawn(async move {
+        while moved.changed().await.is_ok() {
+            let now = *moved.borrow_and_update();
+            let _sent = load_events.send(slopty_proto::WorkerMsg::Load(now));
         }
     });
 }
@@ -363,7 +375,8 @@ async fn run() -> Result<()> {
     });
     let paths = tailnet::Paths::spawn(listener.admission().clone());
     let (caps_tx, caps) = tokio::sync::watch::channel(slopty_worker::caps::probe(&[]));
-    watch_caps(caps_tx, events.clone());
+    let (load_tx, load) = tokio::sync::watch::channel(slopty_worker::caps::load());
+    watch_caps(caps_tx, load_tx, events.clone());
     let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
     let mod_path = modsock::beside(&ctl_path);
     let claude_mod = match slopty_agent::claude_mod::install(&data_dir) {
@@ -395,6 +408,7 @@ async fn run() -> Result<()> {
         wake,
         paths,
         caps,
+        load,
         home: slopty_platform::dirs::home().to_str().map(str::to_owned).unwrap_or_default(),
         follows: Arc::default(),
         claude_mod,
@@ -427,7 +441,8 @@ async fn run() -> Result<()> {
                 tracing::info!(%session, status, "child exited");
                 daemon.worker.on_exit(session, status);
                 if let Some(summary) = daemon.worker.summary(session).await {
-                    let _sent = daemon.events.send(slopty_proto::WorkerMsg::SessionOpened(summary));
+                    let _sent =
+                        daemon.events.send(slopty_proto::WorkerMsg::SessionChanged(summary));
                 }
             }
             let _sent = ptyd_gone_tx.send(());
@@ -441,7 +456,8 @@ async fn run() -> Result<()> {
         async move {
             while let Some(session) = moves.recv().await {
                 if let Some(summary) = daemon.worker.summary(session).await {
-                    let _sent = daemon.events.send(slopty_proto::WorkerMsg::SessionOpened(summary));
+                    let _sent =
+                        daemon.events.send(slopty_proto::WorkerMsg::SessionChanged(summary));
                 }
             }
         }

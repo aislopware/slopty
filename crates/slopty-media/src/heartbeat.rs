@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use bytes::{BufMut as _, Bytes, BytesMut};
 use slopty_core::StreamId;
+use slopty_proto::datagram::Channel;
 use slopty_proto::media::{HEADER_BYTES, Kind, MediaHeader};
 use zerocopy::IntoBytes as _;
 use zerocopy::little_endian::{U16, U32};
@@ -28,6 +29,7 @@ pub const HEARTBEAT_AFTER: Duration = match STALL_GAP.checked_div(2) {
 #[must_use]
 pub fn heartbeat_datagram(stream: StreamId, seq: u32, send_ms_lo: u8) -> Bytes {
     let header = MediaHeader {
+        channel: Channel::Media as u8,
         stream: U32::new(stream.0),
         frame: U32::new(seq),
         index: U16::new(0),

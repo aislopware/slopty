@@ -248,7 +248,7 @@ mod tests {
 
     use objc2_core_foundation::CGPoint;
     use objc2_core_graphics::{CGEventFlags, CGEventType};
-    use slopty_core::WindowId;
+    use slopty_core::{DisplayId, WindowId};
     use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton};
 
     use super::*;
@@ -463,7 +463,7 @@ mod tests {
         let unread = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
         let (tap, posts) = Tap::new(Recorder::display(unread));
         let reads = Arc::clone(&tap.reads);
-        let mut sink = InputThread::spawn(CaptureTarget::Display(1), 1.0, tap);
+        let mut sink = InputThread::spawn(CaptureTarget::Display(DisplayId(1)), 1.0, tap);
         let (_never, pause) = mpsc::channel::<()>();
         let probed = |x: f64| Some(Rect { x, y: 0.0, w: 800.0, h: 600.0 });
         let run = BOUNDS_TTL.saturating_mul(3);
@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(window.pointer().get(), Pointer::Placed(Some((110.0, 70.0))));
 
         let (tap, posts) = Tap::new(Recorder::display(bounds));
-        let mut display = InputThread::spawn(CaptureTarget::Display(1), 2.0, tap);
+        let mut display = InputThread::spawn(CaptureTarget::Display(DisplayId(1)), 2.0, tap);
         display.inject(&ScreenInput::Move { x: 20.0, y: 40.0 }).unwrap();
         let _moved = next(&posts);
         assert_eq!(display.pointer().get(), Pointer::Real);

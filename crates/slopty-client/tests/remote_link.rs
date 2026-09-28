@@ -10,7 +10,7 @@ mod tests {
     use std::time::Duration;
 
     use slopty_client::{LinkEvent, WorkerLink};
-    use slopty_core::{ClientId, SessionId, WorkerId, XferId};
+    use slopty_core::{ClientId, SessionId, WallMs, WorkerId, XferId};
     use slopty_net::admission::Admission;
     use slopty_net::client::{bind_client, connect};
     use slopty_net::streams::{self, RawRecv, Uni};
@@ -20,7 +20,7 @@ mod tests {
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::orchestration::Port;
     use slopty_proto::transfer::{
-        BulkHeader, ClipItem, ClipMsg, Dest, Offer, Peer, Purpose, XferMsg,
+        BulkHeader, ClipFormat, ClipItem, ClipMsg, Dest, Offer, Peer, Purpose, XferMsg,
     };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::mpsc;
@@ -43,7 +43,8 @@ mod tests {
                 worker,
                 name: "worker".to_owned(),
                 home: String::new(),
-                caps: slopty_proto::server::WorkerCaps::default(),
+                caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+                load: 0.0,
                 sessions: Vec::new(),
             };
             client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
@@ -150,7 +151,7 @@ mod tests {
             purpose: Purpose::Download,
             name: "todo.txt".to_owned(),
             size: body.len() as u64,
-            mtime_ms: 0,
+            mtime_ms: WallMs::ZERO,
             mode: 0o640,
             offset: 0,
         };
@@ -180,7 +181,7 @@ mod tests {
             purpose: Purpose::Download,
             name: name.to_owned(),
             size: size as u64,
-            mtime_ms: 1_700_000_000_000,
+            mtime_ms: WallMs::from_millis(1_700_000_000_000),
             mode: 0o644,
             offset,
         }
@@ -284,7 +285,11 @@ mod tests {
             client.tx.send(&WorkerMsg::Xfer(done(xfer, "a.txt", b"abc"))).await.unwrap();
         }
         let failed = tokio::task::spawn_blocking(move || waiting.join().unwrap()).await.unwrap();
-        assert!(failed.unwrap_err().contains("digest"), "three tries, then the reason");
+        let error = failed.unwrap_err();
+        assert!(
+            matches!(&error, slopty_client::xfer::XferError::Mismatch(why) if why.contains("digest")),
+            "three tries, then the reason: {error:?}"
+        );
         assert!(!into.path().join("a.txt").exists());
         assert!(!into.path().join("a.txt.partial").exists(), "bad bytes are not kept to resume");
     }
@@ -322,7 +327,7 @@ mod tests {
             origin: Peer::Worker(WorkerId::new()),
             generation: 9,
             items: vec![ClipItem {
-                uti: "public.png".to_owned(),
+                format: ClipFormat::Png,
                 size: png.len() as u64,
                 hash: *blake3::hash(&png).as_bytes(),
                 inline: None,
@@ -330,19 +335,19 @@ mod tests {
         };
         client.tx.send(&WorkerMsg::Clip(ClipMsg::Offer(offer))).await.unwrap();
         let remote = link.remote();
-        let paste = std::thread::spawn(move || remote.clip_data(9, "public.png", WAIT));
-        let (generation, uti) = expect(&mut client, |m| match m {
-            ClientMsg::Clip(ClipMsg::Fetch { generation, uti }) => Some((generation, uti)),
+        let paste = std::thread::spawn(move || remote.clip_data(9, ClipFormat::Png, WAIT));
+        let (generation, format) = expect(&mut client, |m| match m {
+            ClientMsg::Clip(ClipMsg::Fetch { generation, format }) => Some((generation, format)),
             _ => None,
         })
         .await;
-        assert_eq!((generation, uti.as_str()), (9, "public.png"));
+        assert_eq!((generation, format), (9, ClipFormat::Png));
         let header = BulkHeader {
             xfer: XferId::new(),
-            purpose: Purpose::Clip { generation, uti },
+            purpose: Purpose::Clip { generation, format },
             name: String::new(),
             size: png.len() as u64,
-            mtime_ms: 0,
+            mtime_ms: WallMs::ZERO,
             mode: 0o600,
             offset: 0,
         };

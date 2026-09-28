@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod golden {
-    use slopty_core::{ClientId, MonoTime, SessionId, StreamId, XferId};
+    use slopty_core::{ClientId, MonoTime, SessionId, StreamId, WallMs, XferId};
     use slopty_grid::{
         Cursor, CursorShape, Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes,
     };
@@ -19,7 +19,8 @@ mod golden {
         TermRequest,
     };
     use slopty_proto::transfer::{
-        BulkHeader, ClipItem, ClipMsg, Dest, Offer, Peer, Purpose, TunnelOpen, UniHead, XferMsg,
+        BulkHeader, ClipFormat, ClipItem, ClipMsg, Dest, Offer, Peer, Purpose, TunnelOpen, UniHead,
+        XferMsg,
     };
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
     use uuid::Uuid;
@@ -166,11 +167,11 @@ mod golden {
     fn feedback() {
         let nack =
             Feedback::Nack { stream: StreamId(7), frame: 0x0102_0304, fragments: vec![2, 5] };
-        let bytes = codec::encode_body(&ClientDatagram::Feedback(nack)).expect("encodes");
+        let bytes = ClientDatagram::Feedback(nack).encode().expect("encodes");
         insta::assert_snapshot!("client_nack", hex(&bytes));
         let refresh =
             Feedback::Refresh { stream: StreamId(7), last_good_frame: 300, keyframe: true };
-        let bytes = codec::encode_body(&ClientDatagram::Feedback(refresh)).expect("encodes");
+        let bytes = ClientDatagram::Feedback(refresh).encode().expect("encodes");
         insta::assert_snapshot!("client_refresh", hex(&bytes));
     }
 
@@ -182,7 +183,7 @@ mod golden {
             seq: 12,
             req: TermRequest::Raw(b"x".to_vec()),
         };
-        let bytes = codec::encode_body(&copy).expect("encodes");
+        let bytes = copy.encode().expect("encodes");
         insta::assert_snapshot!("client_input_copy", hex(&bytes));
     }
 
@@ -203,11 +204,11 @@ mod golden {
                 mods: Mods::SUPER,
             },
         };
-        let bytes = codec::encode_body(&copy).expect("encodes");
+        let bytes = copy.encode().expect("encodes");
         insta::assert_snapshot!("client_screen_input_copy", hex(&bytes));
     }
 
-    /// An echo's copy: a `Term` media header, then the session and the event.
+    /// An echo's copy: the `Term` channel byte, then the session and the event.
     #[test]
     fn frame_copy() {
         let event = TermEvent::Frame(Frame {
@@ -249,7 +250,7 @@ mod golden {
                 detail: Some("$ cargo test".to_owned()),
                 attention: true,
                 source: AgentSource::Hook,
-                since_ms: 1_790_000_060_000,
+                since_ms: WallMs::from_millis(1_790_000_060_000),
             }),
         );
         // The same session attributed without hooks: the pill is the same, the source is not.
@@ -263,7 +264,7 @@ mod golden {
                 detail: None,
                 attention: false,
                 source: AgentSource::Process,
-                since_ms: 1_790_000_060_000,
+                since_ms: WallMs::from_millis(1_790_000_060_000),
             }),
         );
         snap("client_install_hooks", &ClientMsg::InstallHooks);
@@ -294,7 +295,6 @@ mod golden {
             agents: Vec::new(),
             can_capture: false,
             can_inject: true,
-            load: 2.5,
             version: "0.1.0".to_owned(),
         };
         snap(
@@ -304,10 +304,50 @@ mod golden {
                 name: "mac-studio".to_owned(),
                 home: "/Users/w".to_owned(),
                 caps: caps.clone(),
+                load: 2.5,
                 sessions: Vec::new(),
             }),
         );
         snap("worker_caps", &WorkerMsg::Caps(WorkerCaps { can_capture: true, ..caps }));
+        snap("worker_load", &WorkerMsg::Load(3.25));
+    }
+
+    /// A session asked for under the client's number, and the typed failure that answers it
+    /// when it cannot be opened; a session's own failure is typed too.
+    #[test]
+    fn open_session_and_failures() {
+        use slopty_proto::orchestration::ErrorCode;
+        use slopty_proto::terminal::{OpenSession, TermError, TermSize};
+        snap(
+            "client_open_session",
+            &ClientMsg::OpenSession {
+                request: 5,
+                spec: OpenSession {
+                    size: TermSize::default(),
+                    cwd: Some("/w".to_owned()),
+                    command: Vec::new(),
+                    env: vec![("A".to_owned(), "1".to_owned())],
+                    title: None,
+                    attach: true,
+                },
+            },
+        );
+        snap(
+            "worker_failed",
+            &WorkerMsg::Failed {
+                request: 5,
+                code: ErrorCode::Failed,
+                message: "No such directory: /w".to_owned(),
+            },
+        );
+        snap(
+            "worker_term_error_input_full",
+            &WorkerMsg::Term { session: session(), event: TermEvent::Error(TermError::InputFull) },
+        );
+        snap(
+            "worker_term_error_engine",
+            &TermEvent::Error(TermError::Engine("lines evicted".to_owned())),
+        );
     }
 
     /// Where a session runs: the directory it reports, the repository the worker resolved it
@@ -316,33 +356,31 @@ mod golden {
     #[test]
     fn session_place() {
         use slopty_proto::terminal::{SessionState, SessionSummary};
+        let summary = SessionSummary {
+            id: session(),
+            title: "zsh".to_owned(),
+            cwd: Some("/w/slopty/crates/ui".to_owned()),
+            repo: Some("/w/slopty".to_owned()),
+            branch: Some("main".to_owned()),
+            changes: Some(slopty_proto::terminal::RepoChanges { files: 3, added: 12, removed: 4 }),
+            started_ms: WallMs::from_millis(1_790_000_000_000),
+            cols: 80,
+            rows: 24,
+            state: SessionState::Running,
+            viewers: 1,
+            command: vec!["/bin/zsh".to_owned(), "-l".to_owned()],
+            agent: Some(slopty_proto::agent::SessionAgent {
+                kind: slopty_proto::agent::AgentKind::ClaudeCode,
+                status: slopty_proto::agent::AgentStatus::Working,
+                source: slopty_proto::agent::AgentSource::Hook,
+                since_ms: WallMs::from_millis(1_790_000_060_000),
+            }),
+        };
         snap(
             "worker_session_opened",
-            &WorkerMsg::SessionOpened(SessionSummary {
-                id: session(),
-                title: "zsh".to_owned(),
-                cwd: Some("/w/slopty/crates/ui".to_owned()),
-                repo: Some("/w/slopty".to_owned()),
-                branch: Some("main".to_owned()),
-                changes: Some(slopty_proto::terminal::RepoChanges {
-                    files: 3,
-                    added: 12,
-                    removed: 4,
-                }),
-                started_ms: 1_790_000_000_000,
-                cols: 80,
-                rows: 24,
-                state: SessionState::Running,
-                viewers: 1,
-                command: vec!["/bin/zsh".to_owned(), "-l".to_owned()],
-                agent: Some(slopty_proto::agent::SessionAgent {
-                    kind: slopty_proto::agent::AgentKind::ClaudeCode,
-                    status: slopty_proto::agent::AgentStatus::Working,
-                    source: slopty_proto::agent::AgentSource::Hook,
-                    since_ms: 1_790_000_060_000,
-                }),
-            }),
+            &WorkerMsg::SessionOpened { request: 5, summary: summary.clone() },
         );
+        snap("worker_session_changed", &WorkerMsg::SessionChanged(summary));
         snap(
             "worker_term_cwd",
             &WorkerMsg::Term {
@@ -394,7 +432,7 @@ mod golden {
                 read: slopty_proto::file::FileRead::Text {
                     text: "fn main() {}\n// more".to_owned(),
                     size: 4096,
-                    modified_ms: 1_788_000_000_000,
+                    modified_ms: WallMs::from_millis(1_788_000_000_000),
                     final_newline: false,
                 },
             },
@@ -406,7 +444,7 @@ mod golden {
                 read: slopty_proto::file::FileRead::Streamed {
                     xfer: XferId::from_uuid(Uuid::from_u128(0x0f11e)),
                     size: 1_400_000,
-                    modified_ms: 1_788_000_000_000,
+                    modified_ms: WallMs::from_millis(1_788_000_000_000),
                     final_newline: true,
                 },
             },
@@ -425,7 +463,7 @@ mod golden {
                 purpose: Purpose::FileText,
                 name: String::new(),
                 size: 1_399_999,
-                mtime_ms: 1_788_000_000_000,
+                mtime_ms: WallMs::from_millis(1_788_000_000_000),
                 mode: 0,
                 offset: 0,
             }),
@@ -436,11 +474,11 @@ mod golden {
                 xfer: XferId::from_uuid(Uuid::from_u128(0x5a7e)),
                 purpose: Purpose::Save {
                     path: "/w/slopty/src/big.rs".to_owned(),
-                    base_modified_ms: Some(1_788_000_000_000),
+                    base_modified_ms: Some(WallMs::from_millis(1_788_000_000_000)),
                 },
                 name: String::new(),
                 size: 1_400_001,
-                mtime_ms: 0,
+                mtime_ms: WallMs::ZERO,
                 mode: 0,
                 offset: 0,
             }),
@@ -457,7 +495,7 @@ mod golden {
             &ClientMsg::WriteFile {
                 path: "/w/slopty/notes.md".to_owned(),
                 text: "# Notes\n".to_owned(),
-                base_modified_ms: Some(1_700_000_000_000),
+                base_modified_ms: Some(WallMs::from_millis(1_700_000_000_000)),
             },
         );
         snap(
@@ -465,7 +503,7 @@ mod golden {
             &WorkerMsg::Written {
                 path: "/w/slopty/notes.md".to_owned(),
                 result: slopty_proto::file::WriteResult::Conflict {
-                    modified_ms: 1_700_000_000_500,
+                    modified_ms: WallMs::from_millis(1_700_000_000_500),
                 },
             },
         );
@@ -582,7 +620,7 @@ mod golden {
                             hidden: true,
                             size: 0,
                             items: Some(12),
-                            modified_ms: 1_788_000_000_000,
+                            modified_ms: WallMs::from_millis(1_788_000_000_000),
                         },
                         FolderEntry {
                             name: "main.rs".to_owned(),
@@ -591,7 +629,7 @@ mod golden {
                             hidden: false,
                             size: 4096,
                             items: None,
-                            modified_ms: 1_788_000_000_500,
+                            modified_ms: WallMs::from_millis(1_788_000_000_500),
                         },
                     ],
                     total: 3,
@@ -687,6 +725,7 @@ mod golden {
         use zerocopy::IntoBytes as _;
         use zerocopy::little_endian::{U16, U32};
         let header = MediaHeader {
+            channel: slopty_proto::datagram::Channel::Media as u8,
             stream: U32::new(7),
             frame: U32::new(0x0102_0304),
             index: U16::new(0),
@@ -709,13 +748,13 @@ mod golden {
                 generation: 3,
                 items: vec![
                     ClipItem {
-                        uti: "public.utf8-plain-text".to_owned(),
+                        format: ClipFormat::Text,
                         size: 3,
                         hash: [1; 32],
                         inline: Some(b"fox".to_vec()),
                     },
                     ClipItem {
-                        uti: "public.png".to_owned(),
+                        format: ClipFormat::Png,
                         size: 1 << 20,
                         hash: [2; 32],
                         inline: None,
@@ -726,13 +765,13 @@ mod golden {
         snap("client_clip_watch", &ClientMsg::Clip(ClipMsg::Watch(true)));
         snap(
             "worker_clip_fetch",
-            &WorkerMsg::Clip(ClipMsg::Fetch { generation: 3, uti: "public.png".to_owned() }),
+            &WorkerMsg::Clip(ClipMsg::Fetch { generation: 3, format: ClipFormat::Png }),
         );
         snap(
             "worker_clip_data",
             &WorkerMsg::Clip(ClipMsg::Data {
                 generation: 3,
-                uti: "public.html".to_owned(),
+                format: ClipFormat::Html,
                 bytes: b"<b>fox</b>".to_vec(),
             }),
         );
@@ -789,7 +828,7 @@ mod golden {
                 purpose: Purpose::Upload,
                 name: "src/a.rs".to_owned(),
                 size: 4096,
-                mtime_ms: 1_700_000_000_000,
+                mtime_ms: WallMs::from_millis(1_700_000_000_000),
                 mode: 0o644,
                 offset: 1024,
             }),
@@ -946,10 +985,9 @@ mod golden {
     fn server_links() {
         use slopty_core::WorkerId;
         use slopty_proto::orchestration::{Line, Outcome, TermRef, Verb};
-        use slopty_proto::screen::VideoCodec;
+        use slopty_proto::screen::{DisplayInfo, VideoCodec};
         use slopty_proto::server::{
-            DisplayCap, FromServer, Liveness, Os, Registration, Role, ToServer, WorkerCaps,
-            WorkerInfo,
+            FromServer, Liveness, Os, Registration, Role, ToServer, WorkerCaps, WorkerInfo,
         };
 
         let worker = WorkerId::from_uuid(Uuid::from_u128(0x77));
@@ -960,11 +998,16 @@ mod golden {
             cpus: 24,
             memory: 128 << 30,
             encoders: vec![VideoCodec::Hevc, VideoCodec::H264],
-            displays: vec![DisplayCap { id: 1, w: 2560.0, h: 1440.0, scale: 2.0, hz: 120.0 }],
+            displays: vec![DisplayInfo {
+                id: slopty_core::DisplayId(1),
+                w: 2560.0,
+                h: 1440.0,
+                scale: 2.0,
+                hz: 120.0,
+            }],
             agents: Vec::new(),
             can_capture: true,
             can_inject: true,
-            load: 1.5,
             version: "0.1.0".to_owned(),
         };
         snap(
@@ -1010,16 +1053,36 @@ mod golden {
                 address: "100.64.0.7:45570".to_owned(),
                 liveness: Liveness::Online,
                 caps,
-                last_seen_ms: 1_790_000_000_000,
+                load: 1.5,
+                last_seen_ms: WallMs::from_millis(1_790_000_000_000),
             }),
         );
+        snap("server_load", &ToServer::Load(0.75));
+        let summary = slopty_proto::terminal::SessionSummary {
+            id: session(),
+            title: "zsh".to_owned(),
+            cwd: None,
+            repo: None,
+            branch: None,
+            changes: None,
+            started_ms: WallMs::from_millis(1_790_000_000_000),
+            cols: 80,
+            rows: 24,
+            state: slopty_proto::terminal::SessionState::Running,
+            viewers: 0,
+            command: Vec::new(),
+            agent: None,
+        };
+        snap("server_session_changed", &ToServer::SessionChanged(summary.clone()));
+        snap("server_terminals", &FromServer::Terminals(vec![(worker, summary)]));
+        snap("server_worker_load", &FromServer::Load { worker, load: 0.75 });
     }
 }
 
 #[cfg(test)]
 mod orchestration {
-    use slopty_core::{ItemId, SessionId, WindowId, WorkerId};
-    use slopty_proto::agent::{AgentKind, AgentStatus, BlockReason};
+    use slopty_core::{DisplayId, ItemId, SessionId, WallMs, WindowId, WorkerId};
+    use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
     use slopty_proto::codec;
     use slopty_proto::items::{Item, ItemKind};
     use slopty_proto::orchestration::{
@@ -1092,13 +1155,13 @@ mod orchestration {
             name: "src".to_owned(),
             kind: FileKind::Dir,
             size: 96,
-            modified_ms: 1_790_000_000_000,
+            modified_ms: WallMs::from_millis(1_790_000_000_000),
         };
         snap("server_reply_dir", &reply(Outcome::Dir { entries: vec![entry], total: 2 }));
         let stat = FileStat {
             kind: FileKind::File,
             size: 12,
-            modified_ms: 1_790_000_000_000,
+            modified_ms: WallMs::from_millis(1_790_000_000_000),
             mode: 0o644,
         };
         snap("server_reply_stat", &reply(Outcome::Stat(Some(stat))));
@@ -1118,14 +1181,23 @@ mod orchestration {
         snap("server_request_events", &asked);
         let event = HubEvent {
             seq: 41,
-            at_ms: 1_790_000_000_000,
+            at_ms: WallMs::from_millis(1_790_000_000_000),
             what: Happening::Agent {
-                term: term(),
-                kind: AgentKind::ClaudeCode,
-                status: AgentStatus::Blocked(BlockReason::Question),
-                detail: Some("Which branch?".to_owned()),
+                worker: term().worker,
+                event: AgentEvent {
+                    session: term().session,
+                    kind: AgentKind::ClaudeCode,
+                    status: AgentStatus::Blocked(BlockReason::Question),
+                    agent_session: None,
+                    detail: Some("Which branch?".to_owned()),
+                    attention: true,
+                    source: AgentSource::Hook,
+                    since_ms: WallMs::from_millis(1_789_999_990_000),
+                },
             },
         };
+        // Pushed to a client link as it happens, the same event the log answers with.
+        snap("server_event_pushed", &FromServer::Event(event.clone()));
         let answer = Outcome::Events { events: vec![event], next: 42, missed: 0 };
         snap("server_reply_events", &FromServer::Reply { id: 9, outcome: answer });
         let key = Some(IdempotencyKey::new("0199a1b1-c3d4-7000-8000-00000000cafe").expect("a key"));
@@ -1134,7 +1206,7 @@ mod orchestration {
         snap("server_request_forget", &forget);
         let exited = HubEvent {
             seq: 43,
-            at_ms: 1_790_000_000_000,
+            at_ms: WallMs::from_millis(1_790_000_000_000),
             what: Happening::SessionExited { term: term(), status: -9 },
         };
         let answer = Outcome::Events { events: vec![exited], next: 44, missed: 0 };
@@ -1180,10 +1252,10 @@ mod orchestration {
             y: 25.0,
             w: 1280.0,
             h: 800.0,
-            display: 1,
+            display: DisplayId(1),
             on_screen: true,
         };
-        let display = DisplayInfo { id: 1, w: 2560.0, h: 1440.0, scale: 2.0, hz: 120.0 };
+        let display = DisplayInfo { id: DisplayId(1), w: 2560.0, h: 1440.0, scale: 2.0, hz: 120.0 };
         let screens = Outcome::Screens { windows: vec![window], displays: vec![display] };
         snap("server_reply_screens", &reply(screens));
     }
@@ -1226,7 +1298,11 @@ mod orchestration {
                 },
             ],
             thread: ThreadId::Main,
-            entries: vec![Entry { id: "u1".to_owned(), at_ms: 7, body: prompt }],
+            entries: vec![Entry {
+                id: "u1".to_owned(),
+                at_ms: WallMs::from_millis(7),
+                body: prompt,
+            }],
             start: 40,
             next: 41,
             total: 41,
@@ -1243,8 +1319,8 @@ mod orchestration {
                 detail: ToolDetail::Other { input: text("{}") },
                 suggestions: Vec::new(),
                 mode: Some("default".to_owned()),
-                asked_ms: 1_790_000_000_000,
-                until_ms: 1_790_000_595_000,
+                asked_ms: WallMs::from_millis(1_790_000_000_000),
+                until_ms: WallMs::from_millis(1_790_000_595_000),
             }],
         };
         snap("server_reply_conversation", &reply(Outcome::Conversation(Box::new(page))));
@@ -1339,7 +1415,7 @@ mod size_report {
 /// stream carries.
 #[cfg(test)]
 mod conversation {
-    use slopty_core::{ClientId, SessionId};
+    use slopty_core::{ClientId, SessionId, WallMs};
     use slopty_proto::conversation::{
         AgentDetail, AgentRun, Answer, BashDetail, Blob, Body, Change, Clipped, Compact,
         ConversationEvent, ConversationRequest, EditDetail, Entry, GlobDetail, Grant, GrepDetail,
@@ -1402,7 +1478,7 @@ mod conversation {
     fn entry(id: &str, body: Body) -> Change {
         Change::Upsert {
             thread: ThreadId::Main,
-            entry: Entry { id: id.to_owned(), at_ms: 7, body },
+            entry: Entry { id: id.to_owned(), at_ms: WallMs::from_millis(7), body },
         }
     }
 
@@ -1418,7 +1494,12 @@ mod conversation {
     }
 
     fn tool(id: &str, name: &str, detail: ToolDetail, status: ResultStatus) -> Change {
-        let result = ToolResult { status, text: Some(text("out")), at_ms: 9, images: Vec::new() };
+        let result = ToolResult {
+            status,
+            text: Some(text("out")),
+            at_ms: WallMs::from_millis(9),
+            images: Vec::new(),
+        };
         entry(
             id,
             Body::Tool(Box::new(ToolCall { name: name.to_owned(), detail, result: Some(result) })),
@@ -1512,8 +1593,8 @@ mod conversation {
                 },
             ],
             mode: Some("default".to_owned()),
-            asked_ms: 1_700_000_000_000,
-            until_ms: 1_700_000_594_000,
+            asked_ms: WallMs::from_millis(1_700_000_000_000),
+            until_ms: WallMs::from_millis(1_700_000_594_000),
         };
         snap(
             "worker_permission_asked",
@@ -1661,8 +1742,8 @@ mod conversation {
                     thread: ThreadId::Main,
                     turn: Turn {
                         prompt: "u1".to_owned(),
-                        started_ms: 7,
-                        ended_ms: Some(9),
+                        started_ms: WallMs::from_millis(7),
+                        ended_ms: Some(WallMs::from_millis(9)),
                         models: vec!["claude-opus-5-5".to_owned()],
                         requests: 3,
                         usage: Usage {
@@ -1692,7 +1773,7 @@ mod conversation {
             stdout: Some(clipped("…ok", Part::Stdout)),
             stderr: Some(clipped("…err", Part::Stderr)),
             output_file: Some("/tmp/b1.out".to_owned()),
-            finished_ms: Some(12),
+            finished_ms: Some(WallMs::from_millis(12)),
         };
         snap(
             "conversation_tools",
@@ -1875,12 +1956,14 @@ mod ctl {
 
     use serde::Serialize;
     use serde::de::DeserializeOwned;
-    use slopty_core::{SessionId, WindowId, WorkerId};
+    use slopty_core::{DisplayId, SessionId, WallMs, WindowId, WorkerId};
     use slopty_proto::ctl::{
-        CtlReply, CtlRequest, Decision, Health, LtrStats, NotUp, PermissionAnswer, PermissionAsk,
+        CtlReply, CtlRequest, Decision, Health, LtrStats, PermissionAnswer, PermissionAsk,
         Quantiles, ScreenStats, ScreenSummary, Tailscale,
     };
-    use slopty_proto::screen::CaptureTarget;
+    use slopty_proto::screen::{CaptureTarget, VideoCodec};
+    use slopty_proto::server::{Os, WorkerCaps};
+    use slopty_proto::tailnet::BackendState;
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use uuid::Uuid;
 
@@ -1900,8 +1983,19 @@ mod ctl {
         Health {
             version: "0.1.0".to_owned(),
             exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
-            screen_recording: true,
-            post_events: false,
+            caps: WorkerCaps {
+                os: Os::MacOs,
+                os_version: "26.5".to_owned(),
+                arch: "aarch64".to_owned(),
+                cpus: 12,
+                memory: 32 << 30,
+                encoders: vec![VideoCodec::Hevc],
+                displays: Vec::new(),
+                agents: Vec::new(),
+                can_capture: true,
+                can_inject: false,
+                version: "0.1.0".to_owned(),
+            },
             listen: "[::]:45550".to_owned(),
             allow: vec!["10.0.0.0/8".to_owned()],
             tailscale: Tailscale::Up {
@@ -1954,7 +2048,7 @@ mod ctl {
                     repo: None,
                     branch: None,
                     changes: None,
-                    started_ms: 1_790_000_000_000,
+                    started_ms: WallMs::from_millis(1_790_000_000_000),
                     cols: 80,
                     rows: 24,
                     state: SessionState::Exited { status: 1 },
@@ -1964,9 +2058,9 @@ mod ctl {
                 }],
             },
         );
-        snap("ctl_reply_doctor", &CtlReply::Doctor(health()));
+        snap("ctl_reply_doctor", &CtlReply::Doctor(Box::new(health())));
         snap("ctl_health_without_tailscale", &Health { tailscale: Tailscale::Absent, ..health() });
-        snap("ctl_tailscale_down", &Tailscale::Down { backend: NotUp::NeedsLogin });
+        snap("ctl_tailscale_down", &Tailscale::Down { backend: BackendState::NeedsLogin });
         let error = "tailscale's local API did not answer within 2s".to_owned();
         snap("ctl_tailscale_unreachable", &Tailscale::Unreachable { error });
     }
@@ -2021,7 +2115,7 @@ mod ctl {
                 closed: vec![ScreenSummary {
                     client: "MacBook".to_owned(),
                     stream: 1,
-                    target: CaptureTarget::Display(1),
+                    target: CaptureTarget::Display(DisplayId(1)),
                     stats: ScreenStats::default(),
                 }],
             },

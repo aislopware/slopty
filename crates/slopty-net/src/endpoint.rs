@@ -232,7 +232,7 @@ fn bind_with(
     server: bool,
     transport: TransportConfig,
 ) -> Result<Endpoint, NetError> {
-    let bind_err = |e: std::io::Error| NetError::Bind(format!("{local}: {e}"));
+    let bind_err = |source| NetError::Bind { addr: local.to_string(), source };
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(local),
         socket2::Type::DGRAM,

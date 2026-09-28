@@ -205,3 +205,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and a dialog popup centres and keeps presses on it. Slopty draws its own dialogs and centres
     its field rows itself, so nothing here was a workaround to delete; the perf pass over six
     components (context menu, notification, accordion, searchable list) comes for free.
+
+- ✅ **The gate skips what it already passed, and xtask builds apart** (2026-09-28, at the user's
+  request to stop waiting on gates). Each lane records its inputs when it passes (the index's
+  `mode sha path` lines, submodules at their pins, `rustc -vV`, the xtask binary's hash, the
+  environment cargo and the tests read, the macOS/Xcode builds and tool binaries; for the tools
+  lane also HEAD, the last tag and the day) under `target/gate/pass/`, and a lane whose inputs
+  are identical is skipped: a no-op re-gate went from about 73 s to 2.5 s. Every lane still runs
+  on the index snapshot, so what passes is exactly what is staged. fmt and the tool checks run
+  first and stop the gate before any compile. `cargo gate --since-pass` tests only the packages
+  changed since the tests lane last passed plus their dependents (one slopty-ui change: 72 s to
+  22 s). The `gate` nextest profile retries the two session-actor tests that time a loaded
+  machine, reporting a retried pass as flaky. `cargo xtask e2e --filter <filterset>` reruns one
+  test (and accepts only the goldens it renders); `--no-build` reuses the last build. The `xtask`
+  and `gate` aliases build xtask in `target/xtask`: in the shared `target/` it waited 2 min 05 s
+  behind other builds just to start, apart it starts in about 1 s.

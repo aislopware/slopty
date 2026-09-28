@@ -446,7 +446,8 @@ impl WorkspaceView {
         let remote = self.workers.get(&worker).and_then(|w| w.link.as_ref()?.remote.clone())?;
         let source = path.to_owned();
         let fetch: Fetch = Arc::new(move |into: &Path| {
-            let landed = remote.download(source.clone(), into.to_path_buf())?;
+            let landed =
+                remote.download(source.clone(), into.to_path_buf()).map_err(|e| e.to_string())?;
             out::landed_top(&landed, into)
         });
         Offer::of(path, folder, fetch)

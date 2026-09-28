@@ -45,7 +45,7 @@ pub enum Effect {
     /// The child exited.
     Exited(i32),
     /// The worker reported an error for a request.
-    Error(String),
+    Error(slopty_proto::terminal::TermError),
     /// Search hits for `needle`.
     Matches {
         /// The needle they answer.
@@ -1112,6 +1112,7 @@ const fn input_start(line: &Line) -> Option<u16> {
 mod tests {
     use pretty_assertions::assert_eq;
     use slopty_grid::{Cell, RowUpdate, Style};
+    use slopty_proto::terminal::TermError;
 
     use super::*;
 
@@ -1216,8 +1217,8 @@ mod tests {
             vec![Effect::ClipboardWrite("copied".into())]
         );
         assert_eq!(
-            state.apply(TermEvent::Error("lost".into())),
-            vec![Effect::Error("lost".into())]
+            state.apply(TermEvent::Error(TermError::InputFull)),
+            vec![Effect::Error(TermError::InputFull)]
         );
         let colors = ColorOverrides { bg: Some([0x28, 0x2c, 0x34]), ..ColorOverrides::default() };
         assert_eq!(state.apply(TermEvent::Colors(colors.clone())), vec![]);

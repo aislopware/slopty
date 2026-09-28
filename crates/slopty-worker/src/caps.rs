@@ -1,17 +1,18 @@
-//! What this worker can do and how it is doing ([`WorkerCaps`]), for the server's directory.
+//! What this worker can do ([`WorkerCaps`]) and how loaded it is, for the server's directory.
 //!
 //! Most of it is fixed for the life of the daemon (OS, CPUs, memory, encoders, the agents on
 //! `PATH`). A Screen Recording or Accessibility grant, a display attached and the load change
 //! without anyone telling us, so [`watch()`] looks at them every 5 s and publishes a new value
-//! only when something a caller would act on changed.
+//! only when something a caller would act on changed. The load goes out on its own, so what
+//! the worker can do compares equal until it changes.
 
 #[cfg(target_os = "macos")]
 use std::ffi::CStr;
 use std::time::Duration;
 
 use slopty_proto::agent::AgentKind;
-use slopty_proto::screen::VideoCodec;
-use slopty_proto::server::{DisplayCap, InstalledAgent, Os, WorkerCaps};
+use slopty_proto::screen::{DisplayInfo, VideoCodec};
+use slopty_proto::server::{InstalledAgent, Os, WorkerCaps};
 use tokio::sync::watch;
 
 /// How often permissions and displays are looked at: TCC and display changes come with no
@@ -43,7 +44,7 @@ async fn version_of(program: &str) -> Option<String> {
         direct.arg("--version");
         direct
     } else {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
         let mut login = tokio::process::Command::new(shell);
         login.args(["-l", "-i", "-c", &format!("{program} --version")]);
         login
@@ -75,7 +76,6 @@ pub fn probe(agents: &[InstalledAgent]) -> WorkerCaps {
         agents: agents.to_vec(),
         can_capture: desktop.can_capture,
         can_inject: desktop.can_inject,
-        load: load(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
@@ -83,7 +83,7 @@ pub fn probe(agents: &[InstalledAgent]) -> WorkerCaps {
 /// What this worker offers of its desktop.
 struct Desktop {
     encoders: Vec<VideoCodec>,
-    displays: Vec<DisplayCap>,
+    displays: Vec<DisplayInfo>,
     can_capture: bool,
     can_inject: bool,
 }
@@ -96,7 +96,7 @@ fn desktop() -> Desktop {
         // Every Apple-silicon Mac encodes both in hardware (VideoToolbox).
         encoders: vec![VideoCodec::Hevc, VideoCodec::H264],
         // Without Screen Recording no display can be streamed, so none is offered.
-        displays: if can_capture { displays() } else { Vec::new() },
+        displays: if can_capture { slopty_capture::active_displays() } else { Vec::new() },
         can_capture,
         can_inject: slopty_input::can_post(),
     }
@@ -107,17 +107,6 @@ fn desktop() -> Desktop {
 #[cfg(not(target_os = "macos"))]
 const fn desktop() -> Desktop {
     Desktop { encoders: Vec::new(), displays: Vec::new(), can_capture: false, can_inject: false }
-}
-
-/// The displays, from CoreGraphics. The watch reads them every few seconds, and a
-/// ScreenCaptureKit enumeration that often raises the private-window consent prompt again and
-/// again until someone at this Mac allows it.
-#[cfg(target_os = "macos")]
-fn displays() -> Vec<DisplayCap> {
-    slopty_capture::active_displays()
-        .into_iter()
-        .map(|d| DisplayCap { id: d.id, w: d.w, h: d.h, scale: d.scale, hz: d.hz })
-        .collect()
 }
 
 /// macOS's product version (`26.5`).
@@ -157,32 +146,43 @@ fn memory() -> u64 {
     info.totalram.saturating_mul(u64::from(info.mem_unit))
 }
 
-/// Keep `caps` current until every receiver is gone: permissions and displays every 5 s, the
-/// load every 30 s when it moved by more than 0.5.
-pub async fn watch(caps: watch::Sender<WorkerCaps>, agents: Vec<InstalledAgent>) {
+/// Keep `caps` and `load` current until every receiver of both is gone.
+///
+/// Permissions and displays every 5 s (the displays from CoreGraphics, since a ScreenCaptureKit
+/// enumeration that often raises the private-window consent prompt again and again), the load
+/// every 30 s when it moved by more than 0.5.
+pub async fn watch(
+    caps: watch::Sender<WorkerCaps>,
+    load: watch::Sender<f32>,
+    agents: Vec<InstalledAgent>,
+) {
     let mut tick = tokio::time::interval(CHECK_PERIOD);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut load_at = tokio::time::Instant::now();
     loop {
         tick.tick().await;
-        if caps.is_closed() {
+        if caps.is_closed() && load.is_closed() {
             return;
         }
-        let mut next = probe(&agents);
-        let load_due = load_at.elapsed() >= LOAD_PERIOD;
-        if load_due {
-            load_at = tokio::time::Instant::now();
-        }
+        let next = probe(&agents);
         caps.send_if_modified(|current| {
-            if !load_due || (next.load - current.load).abs() <= LOAD_STEP {
-                next.load = current.load;
-            }
             let changed = *current != next;
             if changed {
                 *current = next;
             }
             changed
         });
+        if load_at.elapsed() >= LOAD_PERIOD {
+            load_at = tokio::time::Instant::now();
+            let now = self::load();
+            load.send_if_modified(|current| {
+                let moved = (now - *current).abs() > LOAD_STEP;
+                if moved {
+                    *current = now;
+                }
+                moved
+            });
+        }
     }
 }
 
@@ -265,7 +265,7 @@ mod tests {
         assert!(caps.memory >= 1 << 30, "{caps:?}");
         assert!(caps.cpus >= 1);
         assert_eq!(caps.arch, "aarch64");
-        assert!(caps.load >= 0.0);
+        assert!(load() >= 0.0);
         assert_eq!(caps.encoders, [VideoCodec::Hevc, VideoCodec::H264]);
     }
 

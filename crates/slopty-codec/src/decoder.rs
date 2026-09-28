@@ -17,6 +17,8 @@ use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
     kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
     kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_444YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
 };
 use objc2_video_toolbox::{
     VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
@@ -134,6 +136,8 @@ pub struct Decoder {
     codec: VideoCodec,
     session: Option<CFRetained<VTDecompressionSession>>,
     format: Option<CFRetained<CMFormatDescription>>,
+    /// The session's output `CVPixelFormatType`, chosen from the stream's chroma format.
+    output: u32,
     parameter_sets: Vec<Vec<u8>>,
     shared: Arc<Shared>,
 }
@@ -210,6 +214,7 @@ impl Decoder {
             codec,
             session: None,
             format: None,
+            output: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
             parameter_sets: Vec::new(),
             shared: Arc::new(Shared { sink: Box::new(sink), lost: AtomicBool::new(false) }),
         }
@@ -312,9 +317,10 @@ impl Decoder {
     /// Build a format description from parameter sets and (re)create the session.
     fn configure(&mut self, sets: &[Vec<u8>]) -> Result<(), CodecError> {
         let format = format_description(self.codec, sets)?;
+        let output = output_format(self.codec, sets);
         if let Some(session) = self.session.as_ref() {
             // SAFETY: both objects are valid for the call.
-            if unsafe { session.can_accept_format_description(&format) } {
+            if output == self.output && unsafe { session.can_accept_format_description(&format) } {
                 self.format = Some(format);
                 return Ok(());
             }
@@ -322,12 +328,10 @@ impl Decoder {
             unsafe { session.invalidate() }
             self.session = None;
         }
-        // Full-range bi-planar 4:2:0, the format the worker captures and encodes, so the decoder
-        // writes its output directly and runs no conversion pass; GPUI's surface path samples
-        // the two planes through `CVMetalTextureCache`.
-        let format_type = CFNumber::new_i32(i32::from_ne_bytes(
-            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange.to_ne_bytes(),
-        ));
+        // The format the worker captured and encoded, so the decoder writes its output directly
+        // and runs no conversion pass; GPUI's surface path samples the two planes through
+        // `CVMetalTextureCache`.
+        let format_type = CFNumber::new_i64(i64::from(output));
         let attrs = CFDictionary::<CFString, CFType>::from_slices(
             &[
                 // SAFETY: framework-provided constant string.
@@ -371,7 +375,26 @@ impl Decoder {
         )?;
         self.session = Some(session);
         self.format = Some(format);
+        self.output = output;
         Ok(())
+    }
+}
+
+/// The output a stream decodes into without a conversion: full-range bi-planar 4:4:4 at the
+/// stream's depth when its SPS says 4:4:4, full-range NV12 otherwise. Asking a 4:4:4 stream for
+/// NV12 would have VideoToolbox subsample the colour the stream was made to keep.
+fn output_format(codec: VideoCodec, sets: &[Vec<u8>]) -> u32 {
+    let full = match codec {
+        VideoCodec::Hevc => sets
+            .iter()
+            .filter_map(|set| hevc::sample_format(set))
+            .find(|format| format.chroma_format_idc == 3),
+        VideoCodec::H264 => None,
+    };
+    match full {
+        Some(format) if format.bit_depth > 8 => kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+        Some(_) => kCVPixelFormatType_444YpCbCr8BiPlanarFullRange,
+        None => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
     }
 }
 

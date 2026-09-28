@@ -98,6 +98,7 @@ toml_parser = { version = "1" }
 winnow = { version = "1" }
 
 [target.aarch64-apple-darwin.dependencies]
+block2 = { version = "0.6" }
 concurrent-queue = { version = "2" }
 either = { version = "1", default-features = false, features = ["use_std"] }
 errno = { version = "0.3" }
@@ -112,12 +113,13 @@ objc2 = { version = "0.6" }
 objc2-app-kit = { version = "0.3" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColor", "CGColorSpace", "CGContext", "CGDataProvider", "CGDirectDisplay", "CGDisplayStream", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGFont", "CGGeometry", "CGImage", "CGPath", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "objc2", "std"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColor", "CGColorSpace", "CGContext", "CGDataProvider", "CGDirectDisplay", "CGDisplayConfiguration", "CGDisplayStream", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGFont", "CGGeometry", "CGImage", "CGPath", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "objc2", "std"] }
 objc2-core-media = { version = "0.3", default-features = false, features = ["CMAttachment", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSync", "CMTaggedBufferGroup", "CMTime", "CMTimeRange", "objc2", "objc2-core-audio-types", "objc2-core-video", "std"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "std"] }
 objc2-foundation = { version = "0.3" }
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["SCError", "SCScreenshotManager", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "std"] }
 objc2-user-notifications = { version = "0.3" }
+objc2-video-toolbox = { version = "0.3", default-features = false, features = ["VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "VTVideoEncoderList", "objc2-core-media", "objc2-core-video", "std"] }
 regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 semver = { version = "1", features = ["serde"] }

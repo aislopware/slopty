@@ -38,7 +38,7 @@
 
 use std::collections::HashSet;
 use std::mem::{Discriminant, discriminant};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -50,6 +50,7 @@ use gpui::{
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
+use slopty_core::WallMs;
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::server::{Os, WorkerCaps};
@@ -322,14 +323,18 @@ pub(super) fn worker_warning(caps: &WorkerCaps) -> Option<String> {
     (!wrong.is_empty()).then(|| wrong.join(META_SEPARATOR))
 }
 
-/// A worker's machine in a line, as the hosts list reads it: `macOS 26.5 · load 2.1`.
-pub(super) fn host_line(caps: &WorkerCaps) -> String {
+/// A worker's machine in a line, as the hosts list reads it: `macOS 26.5 · load 2.1`, without
+/// the load until one is known.
+pub(super) fn host_line(caps: &WorkerCaps, load: Option<f32>) -> String {
     let os = match caps.os {
         Os::MacOs => "macOS",
         Os::Linux => "Linux",
     };
     let os = format!("{os} {}", caps.os_version).trim().to_owned();
-    format!("{os}{META_SEPARATOR}load {:.1}", caps.load)
+    match load {
+        Some(load) => format!("{os}{META_SEPARATOR}load {load:.1}"),
+        None => os,
+    }
 }
 
 /// How a link's packets travel, as the chrome names it, and whether that is the slow path: a
@@ -446,8 +451,7 @@ const fn at_rest(agent: &AgentEvent) -> bool {
 
 /// The wall clock in Unix milliseconds, as the workers stamp an agent's change.
 fn now_ms() -> u64 {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    u64::try_from(now.as_millis()).unwrap_or(u64::MAX)
+    WallMs::now().as_millis()
 }
 
 /// The unseen dot: something ended there while the human was elsewhere. It sits centred in a
@@ -877,8 +881,10 @@ impl WorkspaceView {
                     .session_tail(*session)
                     .filter(|p| p != "~" || doing.is_some() || branch.is_some());
                 let meta = meta_line([doing.as_deref(), place.as_deref(), branch]);
-                let since =
-                    resting.map_or_else(|| summary.map_or(0, |s| s.started_ms), |a| a.since_ms);
+                let since = resting.map_or_else(
+                    || summary.map_or(0, |s| s.started_ms.as_millis()),
+                    |a| a.since_ms.as_millis(),
+                );
                 (meta, age_at(since, now))
             }
             // The header's place; a page named by its address says nothing more.
@@ -1018,7 +1024,14 @@ impl WorkspaceView {
         let cwd = self.session_tail(at.session);
         let worker = self.worker_name(at.worker);
         let place = meta_line([Some(worker.as_str()), cwd.as_deref()]);
-        NavAgent { at, status, title, words, place, since_ms: agent.map_or(0, |a| a.since_ms) }
+        NavAgent {
+            at,
+            status,
+            title,
+            words,
+            place,
+            since_ms: agent.map_or(0, |a| a.since_ms.as_millis()),
+        }
     }
 
     /// The words an agent's row under *Working* says.

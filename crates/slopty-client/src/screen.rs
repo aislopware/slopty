@@ -968,9 +968,9 @@ fn observed_parity(stats: &ReassemblerStats) -> u16 {
 /// Encode loss feedback for one datagram. A fragment list too long for a datagram degrades to
 /// "every fragment", which the worker answers with the whole frame.
 fn encode_feedback(feedback: Feedback) -> Bytes {
-    let encode = |feedback| slopty_proto::codec::encode_body(&ClientDatagram::Feedback(feedback));
+    let encode = |feedback| ClientDatagram::Feedback(feedback).encode();
     let feedback = match encode(feedback.clone()) {
-        Ok(body) if body.len() <= MAX_DATAGRAM => return Bytes::from(body),
+        Ok(body) if body.len() <= MAX_DATAGRAM => return body,
         Ok(_) | Err(_) => feedback,
     };
     let whole = match feedback {
@@ -979,13 +979,13 @@ fn encode_feedback(feedback: Feedback) -> Bytes {
         }
         refresh @ Feedback::Refresh { .. } => refresh,
     };
-    encode(whole).map(Bytes::from).unwrap_or_default()
+    encode(whole).unwrap_or_default()
 }
 
 /// The feedback in a datagram [`encode_feedback`] made.
 #[cfg(test)]
 fn decode_feedback(bytes: &[u8]) -> Option<Feedback> {
-    match slopty_proto::codec::decode_body(bytes).ok()? {
+    match ClientDatagram::decode(bytes)? {
         ClientDatagram::Feedback(feedback) => Some(feedback),
         ClientDatagram::Input { .. } | ClientDatagram::ScreenInput { .. } => None,
     }
@@ -1121,10 +1121,11 @@ mod feedback_tests {
 mod tests {
     use super::*;
 
-    /// A datagram for `stream`, frame `frame`: a 16-byte little-endian header and one payload
-    /// byte, the shape `MediaHeader::parse` reads.
+    /// A datagram for `stream`, frame `frame`: the media channel byte, the rest of a
+    /// little-endian header and one payload byte, the shape `MediaHeader::parse` reads.
     fn datagram(stream: u32, frame: u32) -> Bytes {
-        let mut d = Vec::with_capacity(17);
+        let mut d = Vec::with_capacity(slopty_proto::media::HEADER_BYTES + 1);
+        d.push(slopty_proto::datagram::Channel::Media as u8);
         d.extend_from_slice(&stream.to_le_bytes());
         d.extend_from_slice(&frame.to_le_bytes());
         d.extend_from_slice(&[0_u8; 8]);

@@ -302,8 +302,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use parking_lot::Mutex;
+    use slopty_core::WallMs;
     use slopty_proto::orchestration::FileStat;
-    use slopty_proto::server::{Liveness, WorkerCaps, WorkerInfo};
+    use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
 
     use super::*;
 
@@ -367,8 +368,9 @@ mod tests {
                     name: "mac-studio".to_owned(),
                     address: String::new(),
                     liveness: Liveness::Online,
-                    caps: WorkerCaps::default(),
-                    last_seen_ms: 0,
+                    caps: WorkerCaps::bare(Os::MacOs),
+                    load: 0.0,
+                    last_seen_ms: WallMs::ZERO,
                 }]),
                 Verb::Upload { path, upload, part, .. } => {
                     let step = match &part {
@@ -405,7 +407,9 @@ mod tests {
                     let found = self.file(&path).map(|bytes| FileStat {
                         kind: FileKind::File,
                         size: u64::try_from(bytes.len()).unwrap(),
-                        modified_ms: u64::from(bytes.first().copied().unwrap_or(0)),
+                        modified_ms: WallMs::from_millis(u64::from(
+                            bytes.first().copied().unwrap_or(0),
+                        )),
                         mode: 0o644,
                     });
                     Outcome::Stat(found)

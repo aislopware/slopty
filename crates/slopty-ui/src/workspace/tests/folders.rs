@@ -8,10 +8,11 @@ use std::rc::Rc;
 
 use gpui::{ExternalPaths, FileDropEvent};
 use slopty_client::remote::Remote;
-use slopty_core::XferId;
+use slopty_client::xfer::XferError;
+use slopty_core::{WallMs, XferId};
 use slopty_proto::folder::{FolderEntry, Listing};
 use slopty_proto::orchestration::FileKind;
-use slopty_proto::transfer::{Dest, XferMsg};
+use slopty_proto::transfer::{ClipFormat, Dest, XferMsg};
 
 use super::*;
 
@@ -23,7 +24,7 @@ fn entry(name: &str, kind: FileKind) -> FolderEntry {
         hidden: name.starts_with('.'),
         size: 120,
         items: (kind == FileKind::Dir).then_some(2),
-        modified_ms: 1_700_000_000_000,
+        modified_ms: WallMs::from_millis(1_700_000_000_000),
     }
 }
 
@@ -224,18 +225,19 @@ impl Remote for Uploads {
     fn cancel(&self, _xfer: XferId) {}
 
     /// Writes a file named as the path's last part, whose text is the path.
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, String> {
-        let name = path.rsplit('/').next().ok_or("no name")?;
+    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+        let name =
+            path.rsplit('/').next().ok_or_else(|| XferError::Worker("no name".to_owned()))?;
         let file = into.join(name);
-        std::fs::write(&file, &path).map_err(|e| e.to_string())?;
+        std::fs::write(&file, &path).map_err(|e| XferError::Worker(e.to_string()))?;
         Ok(vec![file])
     }
 
-    fn clip_data(&self, _generation: u64, _uti: &str, _wait: Duration) -> Option<Vec<u8>> {
+    fn clip_data(&self, _generation: u64, _format: ClipFormat, _wait: Duration) -> Option<Vec<u8>> {
         None
     }
 
-    fn send_clip(&self, _generation: u64, _uti: String, _bytes: Vec<u8>) {}
+    fn send_clip(&self, _generation: u64, _format: ClipFormat, _bytes: Vec<u8>) {}
 
     fn forward(&self, _port: u16) -> Option<u16> {
         None

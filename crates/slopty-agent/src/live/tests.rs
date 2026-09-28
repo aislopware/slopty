@@ -48,7 +48,7 @@ fn stop(turn: &str, step: u32) -> ModEvent {
 }
 
 fn upsert(thread: ThreadId, id: &str, body: Body) -> Change {
-    Change::Upsert { thread, entry: Entry { id: id.to_owned(), at_ms: 0, body } }
+    Change::Upsert { thread, entry: Entry { id: id.to_owned(), at_ms: WallMs::ZERO, body } }
 }
 
 fn plain(text: &str) -> Clipped {
@@ -125,7 +125,7 @@ fn the_transcript_settles_every_recorded_block() {
         }
         assert!(board.blocks().values().all(|b| b.stopped.is_some()), "{scenario}: all stopped");
         assert!(
-            Overlay::default().update(&board, now, 0).is_empty(),
+            Overlay::default().update(&board, now, WallMs::ZERO).is_empty(),
             "{scenario}: too late to show"
         );
         let mut streaming = board.clone();
@@ -133,7 +133,7 @@ fn the_transcript_settles_every_recorded_block() {
             block.stopped = None;
         }
         let mut overlay = Overlay::default();
-        let shown = overlay.update(&streaming, now, 0);
+        let shown = overlay.update(&streaming, now, WallMs::ZERO);
         let starts = shown.iter().filter(|l| matches!(l, Live::Start { .. })).count();
         assert_eq!(starts, board.blocks().len(), "{scenario}");
 
@@ -145,7 +145,10 @@ fn the_transcript_settles_every_recorded_block() {
         let cleared = overlay.settle(&changes);
         assert_eq!(cleared.len(), starts, "{scenario}: {cleared:?}");
         assert!(overlay.is_empty(), "{scenario}: {overlay:?}");
-        assert!(overlay.update(&streaming, now, 0).is_empty(), "{scenario}: settled stay settled");
+        assert!(
+            overlay.update(&streaming, now, WallMs::ZERO).is_empty(),
+            "{scenario}: settled stay settled"
+        );
     }
 }
 
@@ -195,22 +198,22 @@ fn a_follower_gets_only_what_is_new() {
     let mut overlay = Overlay::default();
     board.apply(&text(at("t", 0, 0), "Sun"), now);
     assert_eq!(
-        overlay.update(&board, now, 0),
+        overlay.update(&board, now, WallMs::ZERO),
         [
             Live::Start { thread: ThreadId::Main, id: id("t", 0, 0), kind: LiveKind::Text },
             Live::Append { id: id("t", 0, 0), text: "Sun".to_owned() },
         ]
     );
-    assert!(overlay.update(&board, now, 0).is_empty(), "nothing new");
+    assert!(overlay.update(&board, now, WallMs::ZERO).is_empty(), "nothing new");
     board.apply(&text(at("t", 0, 0), "day"), now);
     board.apply(&text(at("t", 0, 0), " noon"), now);
     assert_eq!(
-        overlay.update(&board, now, 0),
+        overlay.update(&board, now, WallMs::ZERO),
         [Live::Append { id: id("t", 0, 0), text: "day noon".to_owned() }],
         "two pieces between looks come as one"
     );
     board.apply(&ModEvent::Bye, now);
-    assert_eq!(overlay.update(&board, now, 0), [Live::Clear { id: id("t", 0, 0) }]);
+    assert_eq!(overlay.update(&board, now, WallMs::ZERO), [Live::Clear { id: id("t", 0, 0) }]);
 }
 
 /// The answer's entry settles its block and nothing else; a block no entry matches goes after
@@ -222,7 +225,7 @@ fn blocks_settle_on_their_entry_or_after_the_grace() {
     let mut overlay = Overlay::default();
     board.apply(&text(at("t", 0, 0), "Hello there."), now);
     board.apply(&ModEvent::Thinking { at: at("t", 0, 1), text: "hmm".to_owned() }, now);
-    overlay.update(&board, now, 0);
+    overlay.update(&board, now, WallMs::ZERO);
     let other = upsert(ThreadId::Main, "u0:0", Body::Text(plain("Something else.")));
     let elsewhere =
         upsert(ThreadId::Agent("a".to_owned()), "u1:0", Body::Text(plain("Hello there.")));
@@ -233,10 +236,13 @@ fn blocks_settle_on_their_entry_or_after_the_grace() {
     assert!(overlay.expire(now + SETTLE_GRACE).is_empty(), "the thinking's step has not stopped");
     let later = now + Duration::from_secs(1);
     board.apply(&stop("t", 0), later);
-    overlay.update(&board, later, 0);
+    overlay.update(&board, later, WallMs::ZERO);
     assert!(overlay.expire(later + SETTLE_GRACE / 2).is_empty());
     assert_eq!(overlay.expire(later + SETTLE_GRACE), [Live::Clear { id: id("t", 0, 1) }]);
-    assert!(overlay.update(&board, later + SETTLE_GRACE, 0).is_empty(), "not shown again");
+    assert!(
+        overlay.update(&board, later + SETTLE_GRACE, WallMs::ZERO).is_empty(),
+        "not shown again"
+    );
 
     let gone = later + KEEP_STOPPED;
     board.apply(&ModEvent::Other, gone);
@@ -257,7 +263,7 @@ fn a_call_settles_by_its_id_and_a_long_answer_by_its_head() {
         ModEvent::Tool { at: at("t", 0, 1), id: "toolu_1".to_owned(), name: "Bash".to_owned() };
     board.apply(&call, now);
     board.apply(&text(at("t", 0, 0), "a long answer"), now);
-    overlay.update(&board, now, 0);
+    overlay.update(&board, now, WallMs::ZERO);
     let clipped = Clipped {
         text: "a long…".to_owned(),
         lines: 1,
@@ -309,19 +315,27 @@ fn only_a_fresh_entry_settles_and_a_partial_block_settles_on_its_whole() {
     let mut overlay = Overlay::default();
     board.apply(&ModEvent::Thinking { at: at("t", 0, 0), text: "hmm".to_owned() }, now);
     board.apply(&text(at("t", 0, 1), "Hello th"), now);
-    overlay.update(&board, now, wall);
+    overlay.update(&board, now, WallMs::from_millis(wall));
     let stamped = |id: &str, at_ms, body| Change::Upsert {
         thread: ThreadId::Main,
         entry: Entry { id: id.to_owned(), at_ms, body },
     };
     let old = [
-        stamped("u0:0", wall - 60_000, Body::Thinking(plain("earlier"))),
-        stamped("u0:1", wall - 60_000, Body::Text(plain("Hello there, again."))),
+        stamped("u0:0", WallMs::from_millis(wall - 60_000), Body::Thinking(plain("earlier"))),
+        stamped(
+            "u0:1",
+            WallMs::from_millis(wall - 60_000),
+            Body::Text(plain("Hello there, again.")),
+        ),
     ];
     assert!(overlay.settle(&old).is_empty(), "entries from a minute before");
     let fresh = [
-        stamped("u1:0", wall + 400, Body::Thinking(plain("A summary of the thinking."))),
-        stamped("u1:1", wall - 500, Body::Text(plain("Hello there."))),
+        stamped(
+            "u1:0",
+            WallMs::from_millis(wall + 400),
+            Body::Thinking(plain("A summary of the thinking.")),
+        ),
+        stamped("u1:1", WallMs::from_millis(wall - 500), Body::Text(plain("Hello there."))),
     ];
     assert_eq!(
         overlay.settle(&fresh),

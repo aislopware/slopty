@@ -258,7 +258,7 @@ pub fn mode_label(mode: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use slopty_core::SessionId;
+    use slopty_core::{SessionId, WallMs};
     use slopty_proto::conversation::{Clipped, ToolDetail};
 
     use super::*;
@@ -273,8 +273,8 @@ mod tests {
             },
             suggestions: Vec::new(),
             mode: Some("default".to_owned()),
-            asked_ms: 1,
-            until_ms: 2,
+            asked_ms: WallMs::from_millis(1),
+            until_ms: WallMs::from_millis(2),
         }
     }
 

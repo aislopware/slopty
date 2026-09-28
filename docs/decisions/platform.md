@@ -343,3 +343,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     PTY custodian for its whole life.
   - Test: `fs::tests::replace_swaps_the_contents_whole_and_keeps_the_mode`,
     `dirs::tests::the_home_is_absolute_and_the_environments`.
+- ✅ **No macOS names on the wire** (2026-09-28, audit finding 21).
+  - **The clipboard names its formats.** `ClipFormat` is one of `FileUrls`, `Png`, `Tiff`,
+    `Rtf`, `Html` or `Text`, each with a MIME type (`ClipFormat::mime`). It replaced the Apple
+    UTI strings in `ClipItem`, `ClipMsg::Fetch`/`Data` and `Purpose::Clip`. The pasteboard seam
+    maps it: `slopty_input::board_type` gives the AppKit type on a Mac and the MIME type
+    elsewhere, and `format_of` reads a board's type back. There is no `Other(String)`, because
+    the sync offers only formats it knows how to write, so an unknown one has nowhere to go.
+  - **A display is a `DisplayId`**, a newtype in `slopty-core`, not a bare `u32` that happened
+    to be a CoreGraphics id. `server::DisplayCap` duplicated `screen::DisplayInfo` and is gone,
+    so `WorkerCaps.displays` carries `DisplayInfo`.
+  - **`Os` has no default.** A worker says what it runs on. `WorkerCaps::bare(os)` is the
+    fixture constructor.
+  - **The shell fallback is `/bin/sh`** when `SHELL` is unset, not `/bin/zsh`, which a Linux
+    worker may not have.
+  - Goldens: `client_clip_offer`, `worker_clip_data` and `worker_clip_fetch`. Tests:
+    `each_format_is_an_apple_uti_and_back` (`slopty-input`).

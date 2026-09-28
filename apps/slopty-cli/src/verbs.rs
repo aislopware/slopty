@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use slopty_core::WindowId;
+use slopty_core::{DisplayId, WindowId};
 use slopty_net::client::bind_client;
 use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
@@ -251,7 +251,7 @@ impl TargetArgs {
     fn target(&self) -> Result<CaptureTarget> {
         match (self.window, self.display) {
             (Some(id), None) => Ok(CaptureTarget::Window(WindowId(id))),
-            (None, Some(id)) => Ok(CaptureTarget::Display(id)),
+            (None, Some(id)) => Ok(CaptureTarget::Display(DisplayId(id))),
             _ => bail!("give one of --window, --display"),
         }
     }
@@ -357,7 +357,9 @@ impl KindArgs {
             (None, Some(path), None, None, None) => Ok(ItemKind::File { path }),
             (None, None, Some(text), None, None) => Ok(ItemKind::Note { text }),
             (None, None, None, Some(id), None) => Ok(ItemKind::Window { window: WindowId(id) }),
-            (None, None, None, None, Some(display)) => Ok(ItemKind::Display { display }),
+            (None, None, None, None, Some(display)) => {
+                Ok(ItemKind::Display { display: DisplayId(display) })
+            }
             _ => bail!("give one of --url, --file, --note, --window, --display"),
         }
     }
@@ -1032,7 +1034,7 @@ mod tests {
         };
         assert_eq!(
             (target.target().unwrap(), out.to_str()),
-            (CaptureTarget::Display(1), Some("/tmp/d.png"))
+            (CaptureTarget::Display(DisplayId(1)), Some("/tmp/d.png"))
         );
         parse(&["capture", "--window", "1", "--display", "2", "--out", "x"]).unwrap_err();
         let VerbCmd::Push { local, path, .. } = parse(&["push", "a.tar", "~/a.tar"]).unwrap()

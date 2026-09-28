@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
 use slopty_proto::conversation::{
     BashDetail, Change, Clipped, ConversationEvent, Grant, PermissionPrompt, ShellStatus,
     Suggestion, ToolDetail,
@@ -319,7 +319,7 @@ pub fn bash_prompt(session: SessionId, ask: u64) -> PermissionPrompt {
             destination: Some("localSettings".into()),
         }],
         mode: None,
-        asked_ms: 0,
-        until_ms: 600_000,
+        asked_ms: WallMs::ZERO,
+        until_ms: WallMs::from_millis(600_000),
     }
 }

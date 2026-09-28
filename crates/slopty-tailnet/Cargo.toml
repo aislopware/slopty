@@ -21,6 +21,7 @@ hyper = { workspace = true, features = [ "client" ] }
 hyper-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+slopty-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 parking_lot = { workspace = true, optional = true }

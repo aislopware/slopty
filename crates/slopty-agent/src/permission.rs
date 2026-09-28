@@ -33,7 +33,7 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
 use slopty_proto::conversation::{Grant, PermissionPrompt, Suggestion, Verdict};
 use slopty_proto::ctl::Decision;
 
@@ -99,8 +99,8 @@ pub fn prompt(
     session: SessionId,
     ask: u64,
     hook: &Hook,
-    asked_ms: u64,
-    until_ms: u64,
+    asked_ms: WallMs,
+    until_ms: WallMs,
 ) -> PermissionPrompt {
     let tool = hook.tool_name.clone().unwrap_or_default();
     let input = hook.tool_input.clone().unwrap_or(Value::Null);
@@ -205,7 +205,13 @@ mod tests {
             .to_string(),
         )
         .expect("hook");
-        let prompt = prompt(SessionId::nil(), 7, &hook, 1_000, 2_000);
+        let prompt = prompt(
+            SessionId::nil(),
+            7,
+            &hook,
+            WallMs::from_millis(1_000),
+            WallMs::from_millis(2_000),
+        );
         assert_eq!(
             (prompt.tool.as_str(), prompt.ask, prompt.mode.as_deref()),
             ("Edit", 7, Some("default"))

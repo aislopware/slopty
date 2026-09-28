@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use slopty_core::{ClientId, XferId};
+use slopty_core::{ClientId, WallMs, XferId};
 use slopty_net::streams::{self, RawRecv, Uni};
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::file::{FILE_BYTES, WriteResult};
-use slopty_proto::transfer::{BulkHeader, Hash, INLINE_CLIP_BYTES, Purpose, XferMsg};
+use slopty_proto::transfer::{BulkHeader, ClipFormat, Hash, INLINE_CLIP_BYTES, Purpose, XferMsg};
 use slopty_worker::clip::MAX_REP_BYTES;
 use slopty_worker::xfer::{Landed, Receiving, Transfers, XferError, outgoing};
 use tokio::io::AsyncReadExt as _;
@@ -29,8 +29,8 @@ const BEGIN_WAIT: Duration = Duration::from_secs(5);
 pub struct ClipData {
     /// The client's offer.
     pub generation: u64,
-    /// Which representation.
-    pub uti: String,
+    /// In which format.
+    pub format: ClipFormat,
     /// The bytes.
     pub bytes: Vec<u8>,
 }
@@ -81,9 +81,9 @@ async fn take(
         }
         Uni::Bulk { header, mut rx } => match header.purpose.clone() {
             Purpose::Upload => receive(daemon, header, rx, out).await,
-            Purpose::Clip { generation, uti } => {
+            Purpose::Clip { generation, format } => {
                 if let Some(bytes) = read_whole(&header, &mut rx, MAX_REP_BYTES).await {
-                    let _sent = clips.send(ClipData { generation, uti, bytes }).await;
+                    let _sent = clips.send(ClipData { generation, format, bytes }).await;
                 }
             }
             Purpose::Save { path, base_modified_ms } => {
@@ -309,7 +309,7 @@ async fn send_file(
     header: BulkHeader,
     path: &std::path::Path,
 ) -> Result<Hash, NetError> {
-    let io = |e: std::io::Error| NetError::Stream(e.to_string());
+    let io = |e| NetError::io(path.display(), e);
     let (size, offset) = (header.size, header.offset);
     let mut file = tokio::fs::File::open(path).await.map_err(io)?;
     let mut hasher = blake3::Hasher::new();
@@ -319,7 +319,8 @@ async fn send_file(
         let want = usize::try_from(offset.saturating_sub(read)).unwrap_or(CHUNK).min(CHUNK);
         let n = file.read(buf.get_mut(..want).unwrap_or_default()).await.map_err(io)?;
         if n == 0 {
-            return Err(NetError::Stream(format!("the file is shorter than {offset} bytes")));
+            let short = format!("shorter than the {offset} bytes to resume from");
+            return Err(io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, short)));
         }
         hasher.update(buf.get(..n).unwrap_or_default());
         read = read.saturating_add(n as u64);
@@ -334,10 +335,10 @@ async fn send_file(
         let n = usize::try_from((n as u64).min(size.saturating_sub(sent))).unwrap_or(n);
         let bytes = buf.get(..n).unwrap_or_default();
         hasher.update(bytes);
-        send.write_all(bytes).await.map_err(|e| NetError::Stream(e.to_string()))?;
+        send.write_all(bytes).await.map_err(|e| NetError::stream(&e))?;
         sent = sent.saturating_add(n as u64);
     }
-    send.finish().map_err(|e| NetError::Stream(e.to_string()))?;
+    send.finish().map_err(|e| NetError::stream(&e))?;
     Ok(hasher.finalize().into())
 }
 
@@ -348,24 +349,24 @@ pub async fn send_clip(
     conn: &Connection,
     out: &mpsc::Sender<WorkerMsg>,
     generation: u64,
-    uti: String,
+    format: ClipFormat,
 ) {
     use slopty_proto::transfer::ClipMsg;
-    let Some(bytes) = daemon.clip.fetch(generation, &uti) else {
+    let Some(bytes) = daemon.clip.fetch(generation, format) else {
         let _sent = out.send(WorkerMsg::Clip(ClipMsg::Unavailable { generation })).await;
         return;
     };
     if bytes.len() <= INLINE_CLIP_BYTES {
-        let data = ClipMsg::Data { generation, uti, bytes: bytes.to_vec() };
+        let data = ClipMsg::Data { generation, format, bytes: bytes.to_vec() };
         let _sent = out.send(WorkerMsg::Clip(data)).await;
         return;
     }
     let header = BulkHeader {
         xfer: XferId::new(),
-        purpose: Purpose::Clip { generation, uti },
+        purpose: Purpose::Clip { generation, format },
         name: String::new(),
         size: bytes.len() as u64,
-        mtime_ms: 0,
+        mtime_ms: WallMs::ZERO,
         mode: 0,
         offset: 0,
     };
@@ -373,8 +374,8 @@ pub async fn send_clip(
     drop(tokio::spawn(async move {
         let sent = async {
             let mut send = streams::open_bulk(&conn, header).await?;
-            send.write_all(&bytes).await.map_err(|e| NetError::Stream(e.to_string()))?;
-            send.finish().map_err(|e| NetError::Stream(e.to_string()))
+            send.write_all(&bytes).await.map_err(|e| NetError::stream(&e))?;
+            send.finish().map_err(|e| NetError::stream(&e))
         };
         if let Err(e) = sent.await {
             tracing::debug!(generation, error = %e, "clipboard data not sent");

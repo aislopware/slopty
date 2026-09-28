@@ -6,6 +6,7 @@ mod tests {
     use std::time::Duration;
 
     use objc2_core_graphics::CGMainDisplayID;
+    use slopty_core::DisplayId;
     use slopty_input::Injector;
     use slopty_proto::screen::{CaptureTarget, ScreenInput};
 
@@ -28,12 +29,12 @@ mod tests {
             return;
         }
         let display = CGMainDisplayID();
-        let bounds = slopty_capture::target_bounds(CaptureTarget::Display(display))
+        let bounds = slopty_capture::target_bounds(CaptureTarget::Display(DisplayId(display)))
             .expect("main display has bounds");
         let (start_x, start_y) = slopty_capture::pointer_location();
 
         // A 1:1 stream, so stream pixels are display points.
-        let mut injector = Injector::new(CaptureTarget::Display(display), 1.0);
+        let mut injector = Injector::new(CaptureTarget::Display(DisplayId(display)), 1.0);
         let (x, y) = (bounds.w * FRACTION, bounds.h * FRACTION);
         injector.inject(&ScreenInput::Move { x: to_f32(x), y: to_f32(y) }).expect("post");
         tokio::time::sleep(Duration::from_millis(50)).await;

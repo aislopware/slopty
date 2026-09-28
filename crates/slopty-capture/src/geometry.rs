@@ -47,7 +47,7 @@ pub fn display_refresh_hz(id: u32) -> Option<f64> {
 #[must_use]
 pub fn target_refresh_hz(target: CaptureTarget) -> Option<f64> {
     let display = match target {
-        CaptureTarget::Display(id) => id,
+        CaptureTarget::Display(id) => id.0,
         CaptureTarget::Window(id) => first_display_under(&window_bounds(id)?)?,
     };
     display_refresh_hz(display)
@@ -84,7 +84,7 @@ pub fn display_info(id: u32) -> DisplayInfo {
     };
     let hz = display_refresh_hz(id).unwrap_or(60.0);
     DisplayInfo {
-        id,
+        id: slopty_core::DisplayId(id),
         w: to_f32(frame.size.width),
         h: to_f32(frame.size.height),
         scale,
@@ -165,7 +165,7 @@ pub fn pointer_moves() -> u32 {
 pub fn target_bounds(target: CaptureTarget) -> Option<Rect> {
     match target {
         CaptureTarget::Window(id) => window_bounds(id),
-        CaptureTarget::Display(id) => Some(Rect::from_cg(CGDisplayBounds(id))),
+        CaptureTarget::Display(id) => Some(Rect::from_cg(CGDisplayBounds(id.0))),
     }
 }
 
@@ -385,7 +385,7 @@ mod tests {
         }
         for d in &displays {
             assert!(d.w > 0.0 && d.h > 0.0 && d.scale >= 1.0 && d.hz > 0.0, "{d:?}");
-            assert!((display_bounds(d.id).w - f64::from(d.w)).abs() < 0.5, "{d:?}");
+            assert!((display_bounds(d.id.0).w - f64::from(d.w)).abs() < 0.5, "{d:?}");
         }
     }
 

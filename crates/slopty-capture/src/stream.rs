@@ -118,7 +118,7 @@ impl Target {
                 Ok(Self::window(kind, &window))
             }
             CaptureTarget::Display(id) => {
-                let display = content.display(id).ok_or(CaptureError::NotFound(kind))?;
+                let display = content.display(id.0).ok_or(CaptureError::NotFound(kind))?;
                 Ok(Self::display(kind, &display))
             }
         }

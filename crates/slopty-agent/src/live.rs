@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::Value;
+use slopty_core::WallMs;
 use slopty_proto::conversation::{Body, Change, Clipped, Live, LiveId, LiveKind, Meters, ThreadId};
 
 use crate::claude_mod::{MOD_CLAUDE_VERSIONS, MOD_PROTOCOL};
@@ -34,7 +35,7 @@ pub const KEEP_SILENT: Duration = Duration::from_secs(120);
 
 /// How much older than the moment a follower first saw a block its entry may say it is, in
 /// ms: the transcript's clock is Claude Code's, and it stamps a record when it writes it.
-const ENTRY_SLACK_MS: u64 = 2_000;
+const ENTRY_SLACK: Duration = Duration::from_secs(2);
 
 /// One request from the mod.
 #[derive(Debug, Deserialize)]
@@ -364,9 +365,8 @@ struct Shown {
     text: String,
     /// When this follower saw its step stop.
     stopped: Option<Instant>,
-    /// When this follower first saw it, in ms since the Unix epoch: an entry stamped well
-    /// before that is an older one.
-    since_ms: u64,
+    /// When this follower first saw it: an entry stamped well before that is an older one.
+    since_ms: WallMs,
 }
 
 /// What one follower has been shown of a session's board.
@@ -384,11 +384,11 @@ impl Overlay {
         self.shown.is_empty()
     }
 
-    /// What to send for this follower to see `board` as it is at `now` (`wall_ms` since the
-    /// Unix epoch): new blocks and what the others grew by, and a clear for each block the
+    /// What to send for this follower to see `board` as it is at `now` (`wall` by the wall
+    /// clock): new blocks and what the others grew by, and a clear for each block the
     /// board let go. A block whose step stopped before this follower first saw it is left to
     /// the transcript.
-    pub fn update(&mut self, board: &Board, now: Instant, wall_ms: u64) -> Vec<Live> {
+    pub fn update(&mut self, board: &Board, now: Instant, wall: WallMs) -> Vec<Live> {
         let mut out = Vec::new();
         let gone: Vec<LiveId> =
             self.shown.keys().filter(|id| !board.blocks.contains_key(*id)).cloned().collect();
@@ -414,7 +414,7 @@ impl Overlay {
                     kind: block.kind.clone(),
                     text: String::new(),
                     stopped: None,
-                    since_ms: wall_ms,
+                    since_ms: wall,
                 }
             });
             if let Some(more) = block.text.get(shown.text.len()..).filter(|more| !more.is_empty()) {
@@ -436,8 +436,8 @@ impl Overlay {
         for change in changes {
             let Change::Upsert { thread, entry } = change else { continue };
             let matched = self.shown.iter().find(|(_, shown)| {
-                let fresh = entry.at_ms == 0
-                    || entry.at_ms.saturating_add(ENTRY_SLACK_MS) >= shown.since_ms;
+                let fresh = entry.at_ms.is_zero()
+                    || entry.at_ms.saturating_add(ENTRY_SLACK) >= shown.since_ms;
                 shown.thread == *thread
                     && match (&shown.kind, &entry.body) {
                         (LiveKind::Text, Body::Text(text)) => fresh && same_text(&shown.text, text),

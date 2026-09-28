@@ -1926,3 +1926,47 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **The worker sends a title once until it changes** (2026-09-28). A prompt that sets the
   title on every draw no longer broadcasts the same `TermEvent::Title` to every viewer each
   time. Test: session actor `a_title_is_sent_once_until_it_changes`.
+
+- ✅ **A prompt the shell redraws is cleared before a resize** (2026-09-28). The `folder` golden
+  showed zsh's prompt path twice after the column narrowed: the head of the old prompt above
+  the redrawn one. Two layers lost ghostty's clear-on-resize (`Screen.clearPromptForRedraw`).
+  - libghostty-vt's C API starts every terminal with `shell_redraws_prompt = false`
+    (`c/terminal.zig`: embedders may not run ghostty's shell integration), so the clear
+    happens only for a shell that opts in with `133;A;redraw=`. The integrations now do, as
+    ghostty's rules have it: zsh `redraw=1` (zle redraws the whole prompt), bash
+    `redraw=last` (readline redraws the last row only; `redraw=1` would lose the rows above),
+    fish 3 `redraw=1` in its wrapped prompt, and fish 4, which prints its own `A` without the
+    option, gets one `133;A;redraw=1` ahead of its first prompt.
+  - Opted in, libghostty still cleared only the cursor's row. Its reflow copies a row's
+    prompt mark onto every row the row wraps onto (`PageList` `copyRowMetadata`), and its
+    clear starts at the nearest prompt start above the cursor, which after a narrowing is the
+    cursor's own row. Upstream bug; vendor/ghostty is a pristine submodule, so the engine
+    works around it: before a change of width, with `redraw=1` in force, the cursor in a
+    prompt (the last mark an `A`) and the parser at ground (judged from the last escape of
+    the bytes fed at the prompt), it clears the prompt at the old width from its first row
+    down (`CUP` + `EL 2`), as libghostty's `promptIterator` finds it on the marks the shell
+    printed, and puts the cursor at the start of its row. The blank prompt rows stay rows
+    through the reflow, so zsh's count up lands on the prompt's first row: no stale copy and
+    no blank row left above it. Delete `ghostty/redraw.rs` when ghostty's reflow marks the
+    wrapped rows as continuations.
+  - Tests: engine `a_prompt_the_shell_redraws_is_cleared_on_resize` (no option leaves the
+    stale head; `redraw=1` redraws in place; a resize inside a split sequence writes
+    nothing; bash's `redraw=last` keeps its first row), `ground_is_judged_from_the_last_escape_on`,
+    `a_prompt_start_carries_what_the_shell_redraws`; the real zsh, bash and fish tests in
+    `slopty-pty` assert the option each shell prints.
+- ✅ **A terminal's errors are typed, and a person sees them** (2026-09-28, audit finding 18).
+  - **`TermError` replaces the string in `TermEvent::Error`.** Its variants are `InputFull`,
+    `NoSuchSession`, `Write`, `Engine` and `Stream`. `InputFull` is sent when a program stopped
+    reading its input and the worker refused what was typed. Before, it was a string that the
+    terminal view only logged, so the person typing never learned their keys were dropped. Now
+    the workspace shows every `TermError` as a notice on the tile, in sentence case.
+    `WorkerError::term_error` maps the worker's own errors onto it.
+  - **The pty daemon's failures are `slopty_proto::ptyd::PtydError`.** Its variants are
+    `SessionExists`, `NoSuchSession`, `AttachedElsewhere` and `Os`, so the worker can tell a gone
+    session from one an older connection still holds. `slopty-ptyd` builds each refusal from
+    it. Until `slopty-pty` carries the type in `PtydEvent::Error` and `PtyError::Daemon`, it
+    still travels as its text.
+  - **One `LineDiscipline` (`echo`, `canonical`) lives in `slopty_proto::terminal`**, for the
+    engine and the pty crate to share. `MouseButton::bit()` is the one encoding of a held
+    button.
+  - Goldens: `worker_term_error_input_full` and `worker_term_error_engine`.
