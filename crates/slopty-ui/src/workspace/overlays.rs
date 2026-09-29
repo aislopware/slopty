@@ -76,7 +76,7 @@ impl WorkspaceView {
     #[must_use]
     pub fn palette_lines(&self, cx: &Context<Self>) -> Vec<PaletteItem> {
         let mut items: Vec<PaletteItem> = self
-            .session_rows(cx)
+            .session_rows()
             .into_iter()
             .map(|row| {
                 let icon = if row.status.is_some() {
@@ -102,9 +102,9 @@ impl WorkspaceView {
             if matches!(item.kind, ItemKind::Terminal { .. }) {
                 continue;
             }
-            let title = self.tile_title(item, cx);
+            let title = self.tile_title(item);
             let line = PaletteItem::item(&title, kind_icon(item, false), item.id)
-                .placed(self.tile_place(item, cx));
+                .placed(self.tile_place(item));
             items.push(line.on_worker(self.worker_label(tile.worker)));
         }
         items.extend(self.worker_lines());
@@ -490,8 +490,7 @@ impl WorkspaceView {
             .filter_map(|tile| {
                 let (total, run) = self.find_hits.get(&tile.item)?;
                 let item = self.item(tile)?;
-                (*total > 0)
-                    .then(|| PaletteItem::hits(&self.tile_title(item, cx), *total, run.clone()))
+                (*total > 0).then(|| PaletteItem::hits(&self.tile_title(item), *total, run.clone()))
             })
             .collect();
         if let Some(palette) = &self.palette {
@@ -525,7 +524,7 @@ impl WorkspaceView {
             return;
         }
         let theme = self.theme.clone();
-        let sessions = self.session_rows(cx);
+        let sessions = self.session_rows();
         let picker = cx.new(|cx| WindowPicker::loading(sessions, theme, cx));
         self.watch_picker(key, &picker, cx);
     }
@@ -546,7 +545,7 @@ impl WorkspaceView {
             return;
         }
         let theme = self.theme.clone();
-        let sessions = self.session_rows(cx);
+        let sessions = self.session_rows();
         let picker = cx.new(|cx| WindowPicker::new(sessions, windows, displays, theme, cx));
         self.watch_picker(key, &picker, cx);
     }
@@ -592,7 +591,7 @@ impl WorkspaceView {
 
     /// The terminal sessions for the picker and the palette: agents waiting on the human
     /// first, then by [`Self::recency_rank`].
-    pub(super) fn session_rows(&self, cx: &Context<Self>) -> Vec<SessionRow> {
+    pub(super) fn session_rows(&self) -> Vec<SessionRow> {
         // Wall clock, as the worker stamped the start: the summary may be relayed long after.
         let now_ms = super::inbox::wall_ms();
         let session_age = |started_ms: u64| {
@@ -611,7 +610,7 @@ impl WorkspaceView {
                 let summary = self.summary(session);
                 let row = SessionRow {
                     session,
-                    title: self.tile_title(item, cx),
+                    title: self.tile_title(item),
                     status: agent.map(agent_status_text),
                     needs_you,
                     mark: agent.and_then(Status::of_agent),

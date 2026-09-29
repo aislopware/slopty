@@ -45,7 +45,7 @@ mod actor {
     ) -> (session::SessionHandle, tokio::process::Child, mpsc::Receiver<Tap>) {
         let (tap, tap_rx) = mpsc::channel(64);
         let pty = Pty::open(size(40, 6)).unwrap();
-        let child = pty
+        let slopty_pty::Spawned { child, term } = pty
             .spawn(&SpawnSpec {
                 command: command.iter().map(|s| (*s).to_owned()).collect(),
                 cwd: None,
@@ -56,6 +56,7 @@ mod actor {
         let handle = session::spawn(SessionStart {
             id: SessionId::new(),
             master: pty.into_master(),
+            term,
             checkpoint,
             backlog: Vec::new(),
             tap,
@@ -106,7 +107,9 @@ mod actor {
         mut pred: impl FnMut(&[TermEvent], &slopty_grid::Screen) -> bool,
     ) -> (Vec<TermEvent>, slopty_grid::Screen) {
         let mut seen = Vec::new();
-        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+        // Only a guard against a hang: a flood forks a `sleep` per line, and on a three-core
+        // runner a 150-line one has not reached its end within 10 s (2026-09-30).
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(30)).unwrap();
         loop {
             let ev = tokio::time::timeout_at(deadline, viewer.rx.recv())
                 .await
@@ -672,13 +675,14 @@ mod actor {
             env: Vec::new(),
             size: size(40, 6),
         };
-        let mut child = pty.spawn(&spec).unwrap();
+        let slopty_pty::Spawned { mut child, term } = pty.spawn(&spec).unwrap();
         let (tap, _tap_rx) = mpsc::channel(64);
         let restored =
             Restored { saved_ms: slopty_core::WallMs::from_millis(7), command: Vec::new() };
         let reopened = session::spawn(SessionStart {
             id: SessionId::new(),
             master: pty.into_master(),
+            term,
             checkpoint: Vec::new(),
             backlog: Vec::new(),
             tap,

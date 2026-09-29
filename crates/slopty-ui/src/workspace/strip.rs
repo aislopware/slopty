@@ -13,6 +13,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -140,6 +141,9 @@ pub(super) struct Drawn {
     pub marks_near: Cell<bool>,
     pub marks_timer: RefCell<Option<gpui::Task<()>>>,
     pub marks_gen: Cell<u64>,
+    /// A frame of motion is asked for and not yet run: one chain of them, however many
+    /// builds and pointer moves ask.
+    pub motion: Cell<bool>,
 }
 
 /// What a body takes from its tile: its zoom, and what else its kind is laid out by.
@@ -170,6 +174,7 @@ impl Default for Drawn {
             marks_near: Cell::default(),
             marks_timer: RefCell::default(),
             marks_gen: Cell::default(),
+            motion: Cell::default(),
         }
     }
 }
@@ -365,6 +370,12 @@ impl WorkspaceView {
         if matches!(ev.delta, ScrollDelta::Lines(_)) {
             return;
         }
+        if ev.momentum_phase.is_some() {
+            if self.gesture.swallow_coast {
+                cx.stop_propagation();
+            }
+            return;
+        }
         match ev.touch_phase {
             TouchPhase::Started => {
                 self.end_gesture(true, cx);
@@ -394,12 +405,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         match self.gesture.phase {
-            Phase::Idle => {
-                if self.gesture.swallow_coast {
-                    cx.stop_propagation();
-                }
-            }
-            Phase::Content => {}
+            Phase::Idle | Phase::Content => {}
             Phase::Undecided => match self.gesture.lock.feed(-dx, -dy) {
                 Axis::Undecided => {
                     // Until the axis is known, a sideways step is held back; an up-or-down
@@ -701,12 +707,24 @@ impl WorkspaceView {
     /// time and the strip's view, `host`, is built again. The workspace is updated but not
     /// notified, which is news only for what is inside the strip's view: a frame of motion
     /// draws nothing else.
-    pub(super) fn motion_frame(this: WeakEntity<Self>, host: EntityId, window: &Window) {
+    /// One is asked for at a time (`drawn.motion`): a build or a pointer move that asks again
+    /// before it runs adds nothing.
+    pub(super) fn motion_frame(
+        this: WeakEntity<Self>,
+        drawn: &Rc<Drawn>,
+        host: EntityId,
+        window: &Window,
+    ) {
+        if drawn.motion.replace(true) {
+            return;
+        }
+        let drawn = Rc::clone(drawn);
         window.on_next_frame(move |window, cx| {
+            drawn.motion.set(false);
             let edge = this.update(cx, |this, _cx| this.advance(window)).unwrap_or(false);
             cx.notify(host);
             if edge {
-                Self::motion_frame(this, host, window);
+                Self::motion_frame(this, &drawn, host, window);
             }
         });
     }
@@ -723,7 +741,7 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let frame = self.layout.frame();
         if frame.animating {
-            Self::motion_frame(cx.weak_entity(), host, window);
+            Self::motion_frame(cx.weak_entity(), &self.drawn, host, window);
         }
         let drawn = &self.drawn;
         drawn.builds.set(drawn.builds.get().wrapping_add(1));
@@ -779,7 +797,7 @@ impl WorkspaceView {
         let this = cx.weak_entity();
         let measure = canvas(
             {
-                let (this, drawn) = (this.clone(), std::rc::Rc::clone(drawn));
+                let (this, drawn) = (this.clone(), Rc::clone(drawn));
                 move |bounds, _window, cx| Self::strip_measured(&this, &drawn, bounds, cx)
             },
             move |bounds, (), window, _cx| {

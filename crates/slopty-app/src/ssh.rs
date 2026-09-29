@@ -330,6 +330,13 @@ pub struct Sheet {
     _enter: [gpui::Subscription; 3],
 }
 
+impl Sheet {
+    /// Whether an input method is composing in one of the fields: its keys are its own.
+    pub fn composing(&self, cx: &gpui::App) -> bool {
+        [&self.host, &self.user, &self.port].into_iter().any(|f| f.read(cx).is_composing())
+    }
+}
+
 /// A run from the sheet, numbered so an answer for one left behind is dropped.
 #[derive(Debug)]
 struct Run {

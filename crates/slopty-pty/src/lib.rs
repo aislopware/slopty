@@ -27,7 +27,7 @@ pub mod ssh;
 pub mod terminfo;
 
 pub use client::PtydClient;
-pub use pty::{Pty, PtyMaster, SpawnSpec};
+pub use pty::{Pty, PtyMaster, SpawnSpec, Spawned};
 pub use ring::Ring;
 
 /// PTY errors.

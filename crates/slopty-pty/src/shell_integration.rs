@@ -640,7 +640,7 @@ mod tests {
             env,
             size,
         };
-        let mut child = pty.spawn_with(&spec, Some(&si)).unwrap();
+        let mut child = pty.spawn_with(&spec, Some(&si)).unwrap().child;
         let master = PtyMaster::new(pty.into_master()).unwrap();
         master.write_all(input.as_bytes()).await.unwrap();
         let mut out = Vec::new();

@@ -309,19 +309,25 @@ fn swipe(
     steps: u8,
     momentum: u8,
 ) {
-    let event = |phase, dx: f32, dy: f32| ScrollWheelEvent {
+    let event = |phase, momentum_phase, dx: f32, dy: f32| ScrollWheelEvent {
         position: at,
         delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
         modifiers: Modifiers::default(),
         touch_phase: phase,
+        momentum_phase,
     };
-    cx.simulate_event(event(TouchPhase::Started, 0.0, 0.0));
+    cx.simulate_event(event(TouchPhase::Started, None, 0.0, 0.0));
     for _ in 0..steps {
-        cx.simulate_event(event(TouchPhase::Moved, dx, dy));
+        cx.simulate_event(event(TouchPhase::Moved, None, dx, dy));
     }
-    cx.simulate_event(event(TouchPhase::Ended, 0.0, 0.0));
-    for _ in 0..momentum {
-        cx.simulate_event(event(TouchPhase::Moved, dx, dy));
+    cx.simulate_event(event(TouchPhase::Ended, None, 0.0, 0.0));
+    for step in 0..momentum {
+        let phase = match step {
+            0 => TouchPhase::Started,
+            _ if Some(step) == momentum.checked_sub(1) => TouchPhase::Ended,
+            _ => TouchPhase::Moved,
+        };
+        cx.simulate_event(event(TouchPhase::Moved, Some(phase), dx, dy));
     }
     cx.run_until_parked();
 }
@@ -488,7 +494,7 @@ fn a_refused_input_and_a_failed_open_are_notices(cx: &mut TestAppContext) {
     let full = TermEvent::Error(slopty_proto::terminal::TermError::InputFull);
     view.update_in(cx, |v, _window, cx| v.term_event(session, full, cx));
     cx.run_until_parked();
-    let notices = view.read_with(cx, WorkspaceView::toast_texts);
+    let notices = view.read_with(cx, |v, _| v.toast_texts());
     assert!(
         notices.iter().any(|n| n.starts_with("The program is not reading its input")),
         "{notices:?}"
@@ -508,7 +514,7 @@ fn a_refused_input_and_a_failed_open_are_notices(cx: &mut TestAppContext) {
     let key = fake.key;
     view.update_in(cx, |v, _window, cx| v.open_failed(key, "no such directory", cx));
     cx.run_until_parked();
-    let notices = view.read_with(cx, WorkspaceView::toast_texts);
+    let notices = view.read_with(cx, |v, _| v.toast_texts());
     assert!(
         notices.iter().any(|n| n == "Could not open a terminal on studio: no such directory"),
         "{notices:?}"
@@ -718,6 +724,38 @@ fn a_sideways_swipe_pages_the_strip_and_its_momentum_is_swallowed(cx: &mut TestA
     assert_eq!(offset, Some(0), "the terminal under the swipe did not scroll");
 }
 
+/// Only momentum is swallowed after a strip swipe: a mouse that scrolls in pixels and reports
+/// no phases, right after one, scrolls the terminal under it.
+#[gpui::test]
+fn a_mouse_scroll_after_a_strip_swipe_reaches_the_terminal(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &fake, session, fake.me, 1);
+    view.update_in(cx, |v, _w, cx| {
+        let TermEvent::Frame(mut f) = frame(&["$ echo hi", "hi", ""]) else { return };
+        f.first_visible_line = LineIndex(50);
+        f.total_lines = 53;
+        v.term_event(session, TermEvent::Frame(f), cx);
+    });
+    cx.run_until_parked();
+    let at = cx.debug_bounds(selector("item", tile.item)).unwrap().center();
+    swipe(cx, at, (60.0, 0.0), 8, 0);
+    for _ in 0..4 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.0), px(30.0))),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+            momentum_phase: None,
+        });
+    }
+    cx.run_until_parked();
+    let offset =
+        view.read_with(cx, |v, cx| v.terminal(session).unwrap().read(cx).state().view_offset());
+    assert!(offset > 0, "the mouse scrolled the shell's history");
+}
+
 /// A vertical swipe over a terminal is the terminal's: it scrolls into its history and the
 /// strip holds still.
 #[gpui::test]
@@ -754,6 +792,7 @@ fn cmd_alt_wheel_steps_the_columns(cx: &mut TestAppContext) {
         delta: ScrollDelta::Lines(point(1.0, 0.0)),
         modifiers: Modifiers { platform: true, alt: true, ..Modifiers::default() },
         touch_phase: TouchPhase::Moved,
+        momentum_phase: None,
     });
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(second), "one notch, one column left");
@@ -1082,7 +1121,7 @@ fn a_tile_is_named_from_its_header(cx: &mut TestAppContext) {
     let api = ClientMsg::Items(ItemOp::Rename { id: tile.item, name: Some("api".to_owned()) });
     assert_eq!(sent, vec![api], "the name alone");
     assert!(cx.debug_bounds(selector("rename", tile.item)).is_none(), "and it closed");
-    let title = view.read_with(cx, |v, cx| v.tile_title(v.item(tile).unwrap(), cx));
+    let title = view.read_with(cx, |v, _| v.tile_title(v.item(tile).unwrap()));
     assert_eq!(title, "api");
 }
 
@@ -1345,7 +1384,7 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
     assert_eq!(view.read_with(cx, |v, _| v.needs_you_on(laptop)), 1);
     cx.simulate_keystrokes("cmd-shift-a");
     cx.run_until_parked();
-    let notice = view.read_with(cx, WorkspaceView::toast_text);
+    let notice = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(notice.as_deref(), Some("laptop is not reachable from here"));
 
     view.update_in(cx, |v, _w, cx| v.forget_server_agents(Some(laptop), cx));

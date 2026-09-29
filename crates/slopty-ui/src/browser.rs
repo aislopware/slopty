@@ -402,6 +402,20 @@ impl BrowserView {
         self.snapshot.is_some()
     }
 
+    /// What decides where the native page stands over its tile, or that it hides: a bar over
+    /// or under it, a dialog on its picture, a failure, a local address to open it at. When
+    /// it changes the page is placed again.
+    #[must_use]
+    pub const fn placing(&self) -> Placing {
+        Placing {
+            find: self.search.is_some(),
+            downloads: self.downloads.len(),
+            dialog: self.dialog.is_some(),
+            failed: self.page.failed.is_some(),
+            local: self.local.is_some(),
+        }
+    }
+
     /// Where the page's area was last laid out, in window coordinates: where the page goes
     /// whenever its tile is drawn.
     #[must_use]
@@ -765,6 +779,12 @@ impl BrowserView {
         self.dialog.as_ref().map(|d| &d.dialog)
     }
 
+    /// A prompt's field, while one is up.
+    #[cfg(test)]
+    pub(crate) fn dialog_field(&self) -> Option<Entity<InputState>> {
+        self.dialog.as_ref().and_then(|d| d.input.clone())
+    }
+
     /// Whether a script's dialog holds the keyboard: the sheet, or a prompt's field.
     #[must_use]
     pub fn dialog_has_keyboard(&self, window: &Window, cx: &gpui::App) -> bool {
@@ -1040,6 +1060,16 @@ pub fn worker_url(page: &str, loaded: &str, item: &str) -> String {
     };
     let on_loaded = split_origin(page).is_some_and(|(s, a, _)| s == ls && a == la);
     if on_loaded { format!("{is}://{ia}{tail}") } else { page.to_owned() }
+}
+
+/// What decides where a page stands over its tile ([`BrowserView::placing`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Placing {
+    find: bool,
+    downloads: usize,
+    dialog: bool,
+    failed: bool,
+    local: bool,
 }
 
 /// A PNG as GPUI keeps pictures: premultiplied BGRA.

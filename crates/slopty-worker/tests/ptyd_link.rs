@@ -7,9 +7,9 @@ mod ptyd_link {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use slopty_core::SessionId;
+    use slopty_core::{ClientId, SessionId};
     use slopty_proto::agent::SessionAgent;
-    use slopty_proto::terminal::{OpenSession, TermSize};
+    use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
     use slopty_pty::{PtydClient, SpawnSpec};
     use slopty_worker::Worker;
     use slopty_worker::orchestrate::Agents;
@@ -96,6 +96,57 @@ mod ptyd_link {
         let announced = tokio::time::timeout(WAIT, reports.moves.recv()).await.unwrap();
         assert_eq!(announced, Some(id), "the adoption is announced");
         assert!(worker.get(id).is_ok(), "adopted once the older worker let go");
+        worker.close(id).await.unwrap();
+    }
+
+    /// A shell ptyd started as `xterm-256color` is answered as one by the worker that adopts
+    /// it: XTGETTCAP `TN` names the terminal the shell was told it is on, whatever this host
+    /// would give a new shell.
+    #[tokio::test]
+    async fn an_adopted_shell_is_answered_for_the_term_ptyd_gave_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ptyd, socket) = ptyd(dir.path()).await;
+        let term = "xterm-256color";
+        let digit = |d: u8| char::from_digit(u32::from(d), 16).unwrap().to_ascii_uppercase();
+        let hex: String = term.bytes().flat_map(|b| [digit(b >> 4), digit(b & 0xf)]).collect();
+        let expected = format!("\x1bP1+r544E={hex}\x1b\\");
+        let answer = dir.path().join("answer");
+        // Asks only once the worker holds the master, which it shows by typing a line: a query
+        // that waited in the backlog would be replayed, never answered.
+        let script = format!(
+            "read x; stty -icanon -echo; printf '\\033P+q544e\\033\\\\'; \
+             dd bs=1 count={} of='{}' 2>/dev/null; sleep 60",
+            expected.len(),
+            answer.display()
+        );
+        let (mut spawner, _exits) = PtydClient::connect(&socket).await.unwrap();
+        let id = SessionId::new();
+        let spec = SpawnSpec {
+            command: vec!["/bin/sh".into(), "-c".into(), script],
+            cwd: None,
+            env: vec![("TERM".into(), term.into())],
+            size: TermSize::default(),
+        };
+        spawner.spawn(id, spec).await.unwrap();
+        drop(spawner);
+
+        let (worker, _reports) =
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"))
+                .await
+                .unwrap();
+        let session = worker.get(id).expect("adopted at connect");
+        session.request(ClientId::new(), TermRequest::Raw(b"go\r".to_vec())).unwrap();
+        let got = tokio::time::timeout(WAIT, async {
+            loop {
+                match std::fs::read(&answer) {
+                    Ok(got) if got.len() == expected.len() => break got,
+                    _ => tokio::time::sleep(Duration::from_millis(25)).await,
+                }
+            }
+        })
+        .await
+        .expect("the shell hears an answer");
+        assert_eq!(String::from_utf8_lossy(&got), expected);
         worker.close(id).await.unwrap();
     }
 

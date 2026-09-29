@@ -14,7 +14,8 @@
    keeps showing the old state while every assertion on state passes. `retained::stale` is the
    oracle: it takes what the window last painted (every quad and sprite with its bounds, clip
    and colour, as sorted lines), draws the same state again with every view built from scratch,
-   and names the lines only one side holds. `workspace/tests/retained.rs` runs it after each
+   and names the lines only one side holds. When two scratch draws differ (something moves),
+   the lines both agree on must still be in the frame shown. `workspace/tests/retained.rs` runs it after each
    step of an echo, a command starting (in a shell on the strip and in one scrolled off it), a
    spring, a trackpad scroll, a hover, a window resize and the overview around a stream, and a
    page tile whose page fails as it is drawn, with the workspace's clock held so a frame of motion and its scratch twin fall on

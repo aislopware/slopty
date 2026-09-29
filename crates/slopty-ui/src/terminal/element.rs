@@ -44,6 +44,8 @@ pub struct CellMetrics {
     pub cell_width: Pixels,
     /// Height of one row.
     pub line_height: Pixels,
+    /// Height of one row before the overview's zoom: what a frame at another zoom scales.
+    pub unzoomed_line_height: Pixels,
     /// Grid size that fits.
     pub cols: u16,
     /// Grid size that fits.
@@ -374,9 +376,10 @@ impl Pattern {
 }
 
 /// The pieces a dotted or dashed stroke is drawn in, over cells `cells` of a row whose first
-/// cell starts at `x0`, its top at `y`: each piece snapped to the device's pixels at `scale`,
-/// so every cell of a run draws the same pattern however its edge falls. Nothing for a solid
-/// or wavy stroke, which is drawn whole.
+/// cell starts at `x0`, its top at `y`, each piece snapped to the device's pixels at `scale`.
+/// The pattern is laid by the cell's width as it is, not as a cell's edges round: at a
+/// fractional width every cell of a run holds as many dots, as far apart to the pixel.
+/// Nothing for a solid or wavy stroke, which is drawn whole.
 fn pattern_pieces(
     pattern: Pattern,
     x0: Pixels,
@@ -385,42 +388,47 @@ fn pattern_pieces(
     (y, thickness): (Pixels, Pixels),
     scale: f32,
 ) -> Vec<Bounds<Pixels>> {
-    let device = |p: Pixels| (f32::from(p) * scale).round();
     let point_of = |d: f32| px(d / scale);
-    let thick = device(thickness).max(1.0);
-    let top = device(y);
+    let thick = (f32::from(thickness) * scale).round().max(1.0);
+    let top = (f32::from(y) * scale).round();
+    let (start, cell) = (f32::from(x0) * scale, f32::from(cell_width) * scale);
     let mut out = Vec::new();
-    for col in cells {
-        let left = device(x0 + cell_width * f32::from(col));
-        let width = device(x0 + cell_width * f32::from(col.saturating_add(1))) - left;
-        let mut piece = |from: f32, to: f32| {
-            let (from, to) = (from.round().max(0.0), to.round().min(width));
-            if to > from {
-                let origin = point(point_of(left + from), point_of(top));
-                out.push(Bounds::new(origin, size(point_of(to - from), point_of(thick))));
-            }
-        };
-        match pattern {
-            Pattern::Dotted => {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "a cell's width in device pixels over twice a stroke, at least 1"
-                )]
-                let dots = (width / (thick * 2.0)).floor().max(1.0) as u16;
-                let slot = width / f32::from(dots);
-                for dot in 0..dots {
-                    let from = f32::from(dot).mul_add(slot, (slot - thick) / 2.0);
+    let mut piece = |from: f32, to: f32| {
+        let (from, to) = (from.round(), to.round());
+        if to > from {
+            let origin = point(point_of(from), point_of(top));
+            out.push(Bounds::new(origin, size(point_of(to - from), point_of(thick))));
+        }
+    };
+    match pattern {
+        Pattern::Dotted => {
+            let dots = (cell / (thick * 2.0)).floor().max(1.0);
+            let pitch = cell / dots;
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a cell's width in device pixels over twice a stroke, at least 1"
+            )]
+            let per_cell = dots as u16;
+            for col in cells {
+                for dot in 0..per_cell {
+                    let slot = f32::from(col).mul_add(dots, f32::from(dot));
+                    let centre = slot.mul_add(pitch, start + pitch / 2.0);
+                    let from = (centre - thick / 2.0).round();
                     piece(from, from + thick);
                 }
             }
-            Pattern::Dashed => {
-                let dash = (width / 3.0).floor() + 1.0;
-                piece(0.0, dash);
-                piece(width - dash, width);
-            }
-            Pattern::Solid | Pattern::Wavy => {}
         }
+        Pattern::Dashed => {
+            let dash = (cell / 3.0).floor() + 1.0;
+            for col in cells {
+                let left = f32::from(col).mul_add(cell, start).round();
+                let right = f32::from(col.saturating_add(1)).mul_add(cell, start).round();
+                piece(left, (left + dash).min(right));
+                piece((right - dash).max(left), right);
+            }
+        }
+        Pattern::Solid | Pattern::Wavy => {}
     }
     out
 }
@@ -1434,6 +1442,7 @@ impl Element for TerminalElement {
             origin,
             cell_width,
             line_height,
+            unzoomed_line_height: base_line_height,
             cols,
             rows,
             pixel_scale: scale / zoom,
@@ -1451,15 +1460,16 @@ impl Element for TerminalElement {
         self.view.update(cx, |view, cx| view.fitted(fitted, metrics, cx));
         // The pointer can leave the right edge without a move this element hears: to another
         // app (the window going inactive), or by the tile moving under a still pointer. Here the
-        // bar is only ever let go; a real move is what brings it up.
+        // bar is only ever let go; a real move is what brings it up. Where the pointer is, is
+        // not read: that would build the view again for every move over the window.
         let active = window.is_window_active();
-        let deactivated = id.is_some_and(|id| {
-            window.with_element_state(id, |was: Option<bool>, _| {
-                (was.unwrap_or(active) && !active, active)
+        let left = id.is_some_and(|id| {
+            window.with_element_state(id, |was: Option<(bool, Bounds<Pixels>)>, _| {
+                let (was_active, was_at) = was.unwrap_or((active, bounds));
+                ((was_active && !active) || was_at != bounds, (active, bounds))
             })
         });
-        let pointer = window.mouse_position();
-        if deactivated || !(bounds.contains(&pointer) && near_scrollbar(&metrics, pointer)) {
+        if left {
             self.view.update(cx, |view, cx| view.pointer_near_scrollbar(false, cx));
         }
 
@@ -1997,16 +2007,27 @@ impl Element for TerminalElement {
             }
             let inside = bounds.contains(&event.position);
             let near = inside && near_scrollbar(&m, event.position);
-            view.update(cx, |view, cx| {
-                view.pointer_moved();
-                view.pointer_near_scrollbar(near, cx);
-            });
             // Over the grid the hovered block follows the pointer. Where something covers the
             // grid it holds, so the block's own facts and the sticky header over it keep it.
-            if !inside {
-                view.update(cx, |view, cx| view.pointer_over(None, cx));
-            } else if grid_hitbox.is_hovered(window) {
-                view.update(cx, |view, cx| view.pointer_over(Some(event.position), cx));
+            let over = if inside {
+                grid_hitbox.is_hovered(window).then_some(Some(event.position))
+            } else {
+                Some(None)
+            };
+            // Every shell hears every move: one updated for nothing would be built again
+            // whenever the strip around it is.
+            let (news, block) = {
+                let v = view.read(cx);
+                (v.pointer_news(near), over.is_some_and(|at| v.pointer_over(at)))
+            };
+            if news || block {
+                view.update(cx, |view, cx| {
+                    view.pointer_moved();
+                    view.pointer_near_scrollbar(near, cx);
+                    if block {
+                        cx.notify();
+                    }
+                });
             }
         });
         // Out of the window the pointer is not near anything, and no move says so.
@@ -2015,7 +2036,9 @@ impl Element for TerminalElement {
             if phase == DispatchPhase::Bubble {
                 view.update(cx, |view, cx| {
                     view.pointer_near_scrollbar(false, cx);
-                    view.pointer_over(None, cx);
+                    if view.pointer_over(None) {
+                        cx.notify();
+                    }
                 });
             }
         });
@@ -2488,6 +2511,7 @@ mod tests {
             origin: point(px(10.0), px(20.0)),
             cell_width: px(8.0 / scale * zoom),
             line_height: px(17.0 / scale * zoom),
+            unzoomed_line_height: px(17.0 / scale),
             cols: 80,
             rows: 24,
             pixel_scale: scale / zoom,
@@ -3171,5 +3195,27 @@ mod tests {
         cx.simulate_resize(size(px(600.0), px(300.0)));
         cx.run_until_parked();
         assert!(gone(cx), "the edge moved away from a still pointer");
+    }
+
+    /// At a fractional cell width, where cells round to unequal widths on the device, every
+    /// cell of a dotted run holds as many dots, and the dots stand as far apart to the pixel.
+    #[test]
+    fn dots_are_spaced_alike_at_a_fractional_cell_width() {
+        let (cell_width, scale, cells) = (px(5.6), 2.0, 0_u16..20);
+        let dots = pattern_pieces(
+            Pattern::Dotted,
+            px(3.3),
+            cell_width,
+            cells.clone(),
+            (px(10.0), px(1.5)),
+            scale,
+        );
+        let lefts: Vec<f32> = dots.iter().map(|d| f32::from(d.origin.x) * scale).collect();
+        assert_eq!(lefts.len() % cells.len(), 0, "as many dots in every cell: {lefts:?}");
+        let gaps: Vec<f32> = lefts.windows(2).map(|w| w[1] - w[0]).collect();
+        let (least, most) =
+            gaps.iter().fold((f32::MAX, 0.0_f32), |(l, m), g| (l.min(*g), m.max(*g)));
+        assert!(most - least <= 1.0, "evenly spaced to the pixel: {gaps:?}");
+        assert!(lefts.iter().all(|l| l.fract().abs() < f32::EPSILON), "on device pixels");
     }
 }

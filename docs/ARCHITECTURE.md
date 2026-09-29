@@ -135,10 +135,12 @@ The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**
   presses, or cursor keys under alternate scroll). ⌘-click opens the link under the pointer:
 the OSC 8 run the worker put on the row, else the URL found in the cached row text
 (`slopty-ui::terminal::url`); ⌘-hover underlines it. A file path under the pointer
-(`src/main.rs:12:5`, `url::path_at_col`) opens the same way: ⌘-click types
-`${EDITOR:-vi} +12 'src/main.rs'` at the prompt, or opens a file tile for it while a command
-runs and on a tap the phone's key-bar ⌘ armed (`TerminalViewEvent::ViewFile`, the workspace
-making the path absolute against the shell's directory, `WorkspaceView::absolute_in_session`).
+(`src/main.rs:12:5`, `url::path_at_col`) opens the same way: ⌘-click opens a file tile for it
+at its line (`TerminalViewEvent::ViewFile`, the workspace making the path absolute against the
+shell's directory, `WorkspaceView::absolute_in_session`). Nothing is typed at the prompt: every
+session's `$EDITOR` is Slopty's own, which would open the same tile and hold the shell until it
+closed. A file too large for a tile offers a terminal editor instead, passing over Slopty's own
+(`url::editor_command`).
 - **Prediction**: the client applies mosh-style speculative echo for printable keys, confidence
   gated on measured RTT, reconciled against the next authoritative diff (see `slopty-predict`).
 - Terminal size is owned by one **driver** client (the one that opened the session, else the
@@ -1111,7 +1113,17 @@ of what they show of each body (a shell's title and command, a stream's first fr
 a face's turn, approval and header chips), taken in the body's observer and passed on only to
 the views that show what changed. The strip hands a body its zoom and size through
 `hand_over`, which compares with what it handed the frame before (`Handed`) rather than reading
-the body. A value measured while drawing (the strip's width inset, a terminal's fitted grid, a
+the body. The file tile's unsaved mark, a page's address, title, back button and placing, and a
+folder's parent button are facts too, so a caret's blink or a page's load builds the header
+that shows them and not the strip. A frame of motion is asked for once at a time
+(`strip::Drawn::motion`), however many builds and pointer moves ask for the next one.
+A shell does not read where the pointer is while it draws, since that is news with every move
+over the window: its element lets the scrollbar go when the window goes inactive or the grid
+moves, and its listeners update the view only when a move changes something in it (a row
+reported to a program, the ⌘-hovered cell, the block hovered), keeping the pointer's place in a
+cell that no build reads as a change. A shell lays out its block headers at the zoom it is
+handed before the frame, so a frame of a spring, which moves or zooms its grid, builds it once
+and not a second time for the metrics its element measured. A value measured while drawing (the strip's width inset, a terminal's fitted grid, a
 stream's painted bounds) is compared in prepaint and, when it moved, sent as a notify after the
 frame (`cx.defer`, or `Window::on_next_frame` on a weak handle), because a notify raised in the
 middle of a draw only marks the view. For the same reason what a view shows is a function of
@@ -1121,8 +1133,11 @@ list has followed its tail (`kit::painted_while`). What a view keeps but does no
 written through the view after a frame: a typed key is timed when its frame reaches the display,
 into a record the terminal shares with its element (`TerminalView::latency_record`), since an
 update of the view there would count as a change and build it again with the strip's next
-frame. Reduce Motion is read again with the settings poll, and a change reaches the workspace,
-the icons' spinners, GPUI's own flag (which gpui-kit's animations follow) and every window. A
+frame. Reduce Motion is watched rather than polled: on the Mac an observer of
+`NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`, on iOS of
+`UIAccessibilityReduceMotionStatusDidChangeNotification` (`slopty_platform::motion::watch_reduce_motion`),
+and a change reaches the workspace, the icons' spinners, GPUI's own flag (which gpui-kit's
+animations follow) and every window. A
 view the strip moves (a spring, a scroll) is built again in its new place: the fork replays a
 view only where it was drawn.
 `retained::stale` checks all of it: it draws the same state from scratch and diffs the painted

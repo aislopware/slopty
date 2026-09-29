@@ -840,10 +840,6 @@ impl FileView {
                 let at = text.line_start_offset(line.min(text.lines_len().saturating_sub(1)));
                 e.set_selected_range(at..at, cx);
             });
-            // The editor scrolls to the caret as it paints, after it laid its lines out at the
-            // old scroll, and the notify it raises there wakes nothing: the next frame draws
-            // the lines around the caret.
-            window.request_animation_frame();
         }
     }
 

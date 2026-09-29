@@ -232,6 +232,7 @@ impl Connection {
                     dropped: handed.dropped,
                     size: handed.size,
                     started_ms: handed.started_ms,
+                    term: handed.term,
                 };
                 self.reply(&ev, Some(session.master_fd())).await
             }

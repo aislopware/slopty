@@ -9282,6 +9282,25 @@ A keystroke's parse is 220–650× cheaper. The first parse pays 20–30 % more 
 keeps no states, once per file. It now starts as the text arrives: the editor hands a text set
 whole over as an edit too, so the first colours used to wait out the 60 ms typing pause.
 
+What the kept parse holds for the largest file still coloured (`COLOURED_BYTES`, 2 MiB of
+Rust, 51 125 lines): the process's resident size after the parse less before it, the grammars
+loaded first. A state is kept apart only when none of the last 64 kept is equal to it
+(`RECENT_STATES`), so most lines share one.
+
+```sh
+target/debug/deps/slopty_ui-<hash> --ignored --nocapture --exact \
+  highlight::editor::tests::memory_of_a_parse_kept
+```
+
+| states kept | resident | states held apart |
+|---|---|---|
+| one per line | 81.5 MB | 51 124 |
+| shared with the last 16 | 30.4 MB | 4 873 |
+| shared with the last 64 | 27.4 MB | 2 332 |
+
+What remains is mostly the spans, one list per line. The first parse of the 2 000-line file
+took 204–257 ms with sharing, as without it, and a keystroke's parse 0.23 ms.
+
 
 ## 2026-09-30 — ghostty `0538f7535`
 
@@ -9643,3 +9662,85 @@ whether the ACK fits: a release loop of 2 000 000 ACK frames per row, load about
 
 The loop was a scratch test and is not kept. `ack_size_is_its_encoded_length` (a proptest)
 holds the computed size equal to the encoded one.
+
+## 2026-09-30 — frames read a row's cells at once (libghostty-rs PR stack #83–#95)
+
+Mac Studio M1 Max, macOS 27.0, `cargo xtask bench` (release, retired instructions per
+operation, median), other sessions building throughout. The engine's frame build read every
+cell of a dirty row through the render state's cell iterator, one call into libghostty per
+field (`next`, `raw_cell`, `semantic_content`, `has_styling`, `wide`, `has_text`,
+`graphemes_utf8`). Now it takes the row's raw cells in one read (`RowIteration::cells_raw`,
+upstream #85) and decodes each packed cell in Rust from the layout libghostty publishes in
+its type manifest (`CellLayout`, fork `32963c5`..`fe69e05`). The cell iterator is positioned
+(`select`) only for a styled cell's style and a cluster's codepoints. `read_line`, which
+serves `FetchLines`, decodes its cells the same way.
+
+```sh
+cargo xtask bench --filter frame_cost
+cargo xtask bench --filter fetch_lines
+cargo xtask bench --filter search
+```
+
+| series | before | raw cells, one getter per field | raw cells, decoded |
+| --- | --- | --- | --- |
+| `engine.frame_cost.take_frame` (a typed byte, 60×12) | 34 387 | 24 969 | **21 197 (−38 %)** |
+| `engine.scroll_frame_cost.80x24` (an Enter at a bottom prompt) | 881 613 | 611 314 | **493 884 (−44 %)** |
+| `engine.scroll_frame_cost.200x60` | 5 301 725 | 3 659 592 | **2 942 736 (−44 %)** |
+| `engine.fetch_lines_cost.4096_rows` | 124 790 604 | — | **103 177 530 (−17 %)** |
+
+Wall p50 of the 200×60 scroll frame went from 333 µs to 158 µs. The frame's bulk cursor read
+(`Snapshot::cursor`, one call for four) is in the last column too.
+
+- Each getter costs about 65–80 instructions, the call and the Rust `Result` around it. A
+  release loop over 80 cells (a scratch example in the fork, not kept) read two fields in
+  10.8–15.3 ns a cell through the getters and all seven in 3.0 ns decoded.
+- The decoded cell went through `CellLayout::linked()` per cell at first (a `OnceLock` read and
+  seven layout loads, 23 % of the scroll frame in a samply profile at 20 kHz); the layout is
+  now looked up once per frame and per fetched row, and the shifts carry no overflow check
+  (`wrapping_shr`, every `lsb` is below 64 once the layout is read). That step is
+  597 603 → 493 884 on the 80×24 scroll.
+- What the profile leaves: `build_frame` itself 35 %, `Line::eq` (comparing the row with the
+  one the viewers hold, `slopty-grid`) 16 %, `blank_line` 5 %, `Runs::finish` 3 %.
+
+**A scrolled row that reads as its line is kept, not rebuilt.** libghostty marks every row
+dirty when the viewport's pin moves, which is every line of output at the bottom, and clears
+the page's own row dirty bits as it does, so the engine built every row of the screen again
+and compared each with the line the viewers held (`Line::eq` above). Now the record keeps,
+beside each held line, the raw cells and the two row flags it was built from (`Prints`, one
+allocation for the whole screen, overwritten in place while nothing scrolls). A dirty row whose
+raw cells and flags equal its print, and whose styles still resolve to the held line's (a
+freed style id can be taken by another style, leaving a cell's bits as they were), keeps the
+held line; rows with links, clusters, placeholders or a mark the engine forced are always
+built.
+
+| series | before | after |
+| --- | --- | --- |
+| `engine.scroll_frame_cost.80x24` | 493 884 | **123 681 (−75 %)** |
+| `engine.scroll_frame_cost.200x60` | 2 942 736 | **364 303 (−88 %)** |
+| `engine.frame_cost.take_frame` | 21 197 | 21 877 (+3 %) |
+
+Against the start of the day the scroll frame is −86 % and −93 % (881 613 and 5 301 725). The
+keystroke's frame pays for comparing and printing its one dirty row. Wall p50 of the 200×60
+scroll: 26 µs. The allocation budgets hold (`tests/allocs.rs`): the spare print buffer is sized
+during typing frames, not in the frame that scrolls.
+
+**Search's formatter streamed** (upstream #91, `Formatter::format` into a `Vec`): the plain
+text of the history is written into the string's own buffer instead of into a libghostty
+allocation copied out, and blank rows no longer need the out-of-memory workaround.
+
+| series | before | after |
+| --- | --- | --- |
+| `engine.search_cost.1000_lines.format` | 3 000 073 | 2 697 389 (−10 %) |
+| `engine.search_cost.10000_lines.format` | 30 086 990 | 27 124 250 (−10 %) |
+| `engine.search_cost.50000_lines.format` | 152 761 532 | 137 358 987 (−10 %) |
+
+The plain and regex series, whose code did not change, moved by 1.5 % or less.
+
+**libghostty's binary snapshot against the VT checkpoint** (not adopted, see
+docs/decisions/terminal.md): 80×24 with 10 000 lines of history filled as `checkpoint_cost`
+fills it, best of five in a release example in the fork (not kept):
+
+| | VT formatter / replay | binary snapshot |
+| --- | --- | --- |
+| write | 1 902 µs, 688 611 bytes | 580 µs, 2 069 729 bytes |
+| restore into a fresh terminal | 2 259 µs | 2 628 µs |

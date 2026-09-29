@@ -102,13 +102,13 @@ fn the_clipboard_is_typed_into_the_focused_window(cx: &mut TestAppContext) {
     type_it(cx);
     let all = typed(&sent(&mut fake, cx)).concat();
     assert_eq!(all, "é".repeat(512), "1 KB of two-byte characters, none cut in half");
-    let said = view.read_with(cx, WorkspaceView::toast_text);
+    let said = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(said.as_deref(), Some("Typed the first 1 KB of the clipboard"));
 
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
     type_it(cx);
     assert!(typed(&sent(&mut fake, cx)).is_empty());
-    let said = view.read_with(cx, WorkspaceView::toast_text);
+    let said = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(said.as_deref(), Some("The clipboard holds no text"));
 }
 
@@ -313,7 +313,7 @@ fn system_shortcuts_go_to_the_remote_mac_per_tile(cx: &mut TestAppContext) {
     toggle(cx);
     assert!(*asked.borrow(), "Accessibility is asked for");
     assert!(!on(cx, first), "and the window keeps to this Mac");
-    let said = view.read_with(cx, WorkspaceView::toast_text);
+    let said = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(said.as_deref(), Some("Allow Slopty in Accessibility to send system shortcuts"));
 
     let keys = Keys::default();
@@ -321,7 +321,7 @@ fn system_shortcuts_go_to_the_remote_mac_per_tile(cx: &mut TestAppContext) {
     view.update(cx, |v, _| v.set_key_port(Box::new(keys)));
     toggle(cx);
     assert!(on(cx, first) && !on(cx, second), "per tile");
-    let said = view.read_with(cx, WorkspaceView::toast_text);
+    let said = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(said.as_deref(), Some("System shortcuts go to studio"));
     assert_eq!(armed.borrow().as_slice(), [true], "taken while it has the keyboard");
     let header = format!("system-keys-{}", first.item.as_uuid());
@@ -359,7 +359,7 @@ fn system_shortcuts_go_to_the_remote_mac_per_tile(cx: &mut TestAppContext) {
     cx.run_until_parked();
     toggle(cx);
     assert!(!on(cx, first));
-    let said = view.read_with(cx, WorkspaceView::toast_text);
+    let said = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(said.as_deref(), Some("System shortcuts stay on this Mac"));
     assert_eq!(armed.borrow().last(), Some(&false));
 }
@@ -410,6 +410,6 @@ fn a_notice_says_when_only_the_chord_list_goes(cx: &mut TestAppContext) {
     let keys = Keys { chords_only: true, ..Keys::default() };
     let (_tile, armed) = armed_window(&view, cx, keys);
     assert_eq!(armed.borrow().as_slice(), [true]);
-    let said = view.read_with(cx, WorkspaceView::toast_text);
+    let said = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(said.as_deref(), Some(ONLY_CHORDS));
 }

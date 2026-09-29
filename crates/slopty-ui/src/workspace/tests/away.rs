@@ -230,11 +230,11 @@ fn taking_one_tile_back_leaves_the_other_offer(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
-    assert_eq!(view.read_with(cx, WorkspaceView::toast_texts).len(), 2);
+    assert_eq!(view.read_with(cx, |v, _| v.toast_texts()).len(), 2);
     cx.simulate_keystrokes("cmd-z");
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.layout().contains(third)), "the latest came back");
-    let left = view.read_with(cx, WorkspaceView::toast_texts);
+    let left = view.read_with(cx, |v, _| v.toast_texts());
     assert_eq!(left.len(), 1, "{left:?}");
     assert!(left[0].starts_with("Closed"), "{left:?}");
 }

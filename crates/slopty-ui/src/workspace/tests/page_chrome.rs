@@ -99,6 +99,46 @@ fn a_script_s_dialog_waits_in_its_tile_for_the_answer(cx: &mut TestAppContext) {
     assert!(workspace_focused(&view, cx));
 }
 
+/// While an input method composes a word in a prompt's field, ↩ and Esc are the input
+/// method's: the page's question stays unanswered until the word is committed.
+#[gpui::test]
+fn a_prompt_waits_while_its_answer_is_composed(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let tile = page(&view, cx, &fake);
+    let answers: Rc<RefCell<Vec<Option<String>>>> = Rc::default();
+    let sink = Rc::clone(&answers);
+    let prompt = Dialog::new(
+        DialogKind::Prompt { default: String::new() },
+        "Your name?".to_owned(),
+        move |a| sink.borrow_mut().push(a),
+    );
+    from_page(&view, cx, tile, WebEvent::Dialog(prompt));
+    let field =
+        view.read_with(cx, |v, cx| v.browser(tile.item).and_then(|b| b.read(cx).dialog_field()));
+    let Some(field) = field else { panic!("a prompt's field") };
+    cx.update(|window, cx| {
+        field.update(cx, |f, cx| {
+            f.replace_and_mark_text_in_range(None, "an", Some(2..2), window, cx);
+        });
+    });
+    cx.run_until_parked();
+    for key in ["enter", "escape"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert!(answers.borrow().is_empty(), "{key} mid-word answers nothing");
+        assert!(cx.debug_bounds(selector("page-dialog", tile.item)).is_some(), "{key}: still up");
+    }
+    cx.update(|window, cx| {
+        field.update(cx, |f, cx| f.replace_text_in_range(None, "An", window, cx));
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(*answers.borrow(), [Some("An".to_owned())], "the word committed, ↩ sends it");
+}
+
 /// ⌘F on a page is a find bar above it, the keyboard in its field: typing asks the page,
 /// its answer shows, and Esc closes the bar and gives the workspace the keyboard back.
 #[gpui::test]

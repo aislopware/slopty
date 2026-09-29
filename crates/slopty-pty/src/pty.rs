@@ -33,6 +33,16 @@ pub struct SpawnSpec {
     pub size: TermSize,
 }
 
+/// A child spawned on a PTY, and the terminfo name it was given as `TERM`.
+#[derive(Debug)]
+pub struct Spawned {
+    /// The child.
+    pub child: tokio::process::Child,
+    /// Its `TERM`: [`default_term`] at the moment it was spawned, unless the spec's own
+    /// variables named another. Whoever answers the child's terminal queries answers as this.
+    pub term: String,
+}
+
 /// An open pseudo-terminal pair. The slave is opened once for the child and closed in the parent
 /// right after spawn.
 #[derive(Debug)]
@@ -86,7 +96,7 @@ impl Pty {
     }
 
     /// Spawn `spec` on this PTY as a new session with the slave as its controlling terminal.
-    pub fn spawn(&self, spec: &SpawnSpec) -> Result<tokio::process::Child, PtyError> {
+    pub fn spawn(&self, spec: &SpawnSpec) -> Result<Spawned, PtyError> {
         self.spawn_with(spec, None)
     }
 
@@ -96,7 +106,7 @@ impl Pty {
         &self,
         spec: &SpawnSpec,
         integration: Option<&ShellIntegration>,
-    ) -> Result<tokio::process::Child, PtyError> {
+    ) -> Result<Spawned, PtyError> {
         let slave = self.slave.try_clone().map_err(|e| PtyError::os("dup slave", e))?;
         let (program, args, arg0) = resolve_command(&spec.command);
         let injection = integration.map(|si| si.apply(&program, &args, arg0.as_deref(), &spec.env));
@@ -111,7 +121,22 @@ impl Pty {
             cmd.arg0(arg0);
         }
         cmd.current_dir(spec.cwd.clone().unwrap_or_else(home));
-        cmd.env("TERM", default_term());
+        // Decided once: `default_term` changes when the terminfo is installed, and the child's
+        // `TERM` and the name reported with it must be the same. The spec's own variables come
+        // last, so a `TERM` among them is the child's.
+        let term = spec
+            .env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "TERM")
+            .map_or_else(|| default_term().to_owned(), |(_, v)| v.clone());
+        if term.len() > MAX_TERM_BYTES {
+            return Err(PtyError::os(
+                "TERM",
+                io::Error::new(io::ErrorKind::InvalidInput, "longer than a terminfo name"),
+            ));
+        }
+        cmd.env("TERM", &term);
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "slopty");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
@@ -160,7 +185,7 @@ impl Pty {
             .kill_on_drop(false)
             .spawn()
             .map_err(|e| PtyError::os("spawn", e))?;
-        Ok(child)
+        Ok(Spawned { child, term })
     }
 }
 
@@ -396,6 +421,10 @@ pub fn home() -> PathBuf {
     std::env::home_dir().filter(|h| h.is_absolute()).unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// The longest `TERM` a child is given. A terminfo entry is a file named after its terminal, so
+/// no usable name is longer than `NAME_MAX`; the bound lets the name ride in ptyd's replies.
+pub const MAX_TERM_BYTES: usize = 255;
+
 /// `xterm-ghostty` when its terminfo is installed (ghostty's entry is the most complete), else
 /// `xterm-256color`.
 ///
@@ -433,7 +462,8 @@ mod tests {
                 env: Vec::new(),
                 size: size(),
             })
-            .unwrap();
+            .unwrap()
+            .child;
         let master = PtyMaster::new(pty.into_master()).unwrap();
         let mut out = Vec::new();
         let mut buf = [0_u8; 1024];
@@ -451,6 +481,26 @@ mod tests {
         assert!(text.contains("10 40"), "stty should see our size: {text}");
         let status = child.wait().await.unwrap();
         assert!(status.success());
+    }
+
+    /// The `TERM` a child is given is the one reported with it: the default, or the spec's own.
+    #[tokio::test]
+    async fn the_term_reported_is_the_one_the_child_sees() {
+        for env in [Vec::new(), vec![("TERM".to_owned(), "vt100".to_owned())]] {
+            let pty = Pty::open(size()).unwrap();
+            let spawned = pty
+                .spawn(&SpawnSpec {
+                    command: vec!["/bin/sh".into(), "-c".into(), "echo \"<$TERM>\"".into()],
+                    cwd: None,
+                    env: env.clone(),
+                    size: size(),
+                })
+                .unwrap();
+            let expected = if let [(_, v)] = env.as_slice() { v.as_str() } else { default_term() };
+            assert_eq!(spawned.term, expected);
+            let master = PtyMaster::new(pty.into_master()).unwrap();
+            read_until(&master, format!("<{expected}>").as_bytes()).await;
+        }
     }
 
     /// Read `master` until `needle` has come.
@@ -480,7 +530,8 @@ mod tests {
                 env: Vec::new(),
                 size: size(),
             })
-            .unwrap();
+            .unwrap()
+            .child;
         let master = PtyMaster::new(pty.into_master()).unwrap();
         read_until(&master, b"password").await;
         let at_password = master.line_discipline().unwrap();

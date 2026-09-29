@@ -9,7 +9,8 @@ use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
 use libghostty_vt::screen::{
-    CellContentTag, CellSemanticContent, GridRef, Screen as VtScreen, TrackedGridRef,
+    Cell as VtCell, CellContentTag, CellFields, CellLayout, CellSemanticContent, GridRef,
+    RowSemanticPrompt, Screen as VtScreen, TrackedGridRef,
 };
 use libghostty_vt::style::{PaletteIndex, RgbColor};
 use libghostty_vt::terminal::{
@@ -19,15 +20,15 @@ use libghostty_vt::terminal::{
 use libghostty_vt::{Terminal, focus, key, mouse, paste};
 use slopty_core::{Duration, MonoTime};
 use slopty_grid::{
-    Cell, CellText, CellWidth, Cursor, CursorShape, Hyperlink, Line, LineFlags, LineIndex,
-    RowUpdate, SemanticMark, Style, TermModes,
+    Cell, CellText, CellWidth, Cursor, Hyperlink, Line, LineFlags, LineIndex, RowUpdate,
+    SemanticMark, Style, TermModes,
 };
 use slopty_proto::input::{
     KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseButton, MouseEvent,
 };
 use slopty_proto::terminal::{
-    ColorOverrides, Frame, LineDiscipline, PixelRect, Placement, PointerShape, Progress,
-    ProgressState, TermColors, TermSize,
+    ColorOverrides, Frame, LineDiscipline, MAX_OSC52_BYTES, PixelRect, Placement, PointerShape,
+    Progress, ProgressState, TermColors, TermSize,
 };
 
 use crate::graphics::{self, ImageUpload, Ledger, Shipped};
@@ -144,6 +145,8 @@ pub struct GhosttyEngine {
     /// The record's list of rows before the last frame replaced it, emptied, for the next
     /// frame's record to be built in.
     spare_rows: Vec<Option<Arc<Line>>>,
+    /// The same for the record's prints.
+    spare_prints: Prints,
     /// Scratch for OSC 8 URIs (`ghostty_grid_ref_hyperlink_uri` wants a caller buffer).
     uri_buf: Vec<u8>,
     /// Watches the bytes for `OSC 133;A` and `133;D`, which libghostty does not surface.
@@ -153,8 +156,6 @@ pub struct GhosttyEngine {
     /// The last mark was a prompt start, not an output start or a command end: the cursor is
     /// in the prompt or its input.
     at_prompt: bool,
-    /// At a prompt, the bytes so far end outside any sequence, so the engine may write its own.
-    prompt_at_ground: bool,
     /// Exit status reported on an absolute line (the row the cursor was on at the `D`).
     exit_marks: BTreeMap<u64, Option<u8>>,
     /// Absolute lines a primary prompt started on (`133;A`).
@@ -216,6 +217,83 @@ struct Shown {
     cols: u16,
     first: u64,
     rows: Vec<Option<Arc<Line>>>,
+    /// What each held line was read from, index for index with `rows`.
+    prints: Prints,
+}
+
+/// A row's flags that reach its line: a wrap continuation, and its prompt state.
+type RowFlags = (bool, RowSemanticPrompt);
+
+/// What the held lines were read from: each row's raw cells, all rows in one allocation, and
+/// the two row flags that reach the line. libghostty marks every row dirty when the screen
+/// scrolls, so a frame after one line of output re-reads the whole screen; a row that reads as
+/// its print holds the line it was built into, which is kept without building it again or
+/// comparing it cell by cell. A row whose raw cells do not say everything (links, clusters,
+/// placeholders, a mark the engine forced) has no flags, so it never matches.
+#[derive(Debug, Default)]
+struct Prints {
+    cells: Vec<VtCell>,
+    /// Per row: where its cells start in `cells`, and its flags.
+    rows: Vec<(usize, Option<RowFlags>)>,
+}
+
+impl Prints {
+    fn clear(&mut self) {
+        self.cells.clear();
+        self.rows.clear();
+    }
+
+    /// Record row `i`: over its own print when the record is kept in place, as the next row
+    /// otherwise.
+    fn record(
+        &mut self,
+        i: usize,
+        in_place: bool,
+        cells: impl ExactSizeIterator<Item = VtCell>,
+        flags: Option<RowFlags>,
+    ) {
+        if !in_place {
+            self.push(cells, flags);
+            return;
+        }
+        let Some(&(start, _)) = self.rows.get(i) else { return };
+        let end = self.rows.get(i.saturating_add(1)).map_or(self.cells.len(), |&(next, _)| next);
+        match self.cells.get_mut(start..end) {
+            Some(slot) if slot.len() == cells.len() => {
+                for (dst, src) in slot.iter_mut().zip(cells) {
+                    *dst = src;
+                }
+                if let Some(row) = self.rows.get_mut(i) {
+                    row.1 = flags;
+                }
+            }
+            // A row of another width cannot be matched; keep its cells, drop its flags.
+            _ => {
+                if let Some(row) = self.rows.get_mut(i) {
+                    row.1 = None;
+                }
+            }
+        }
+    }
+
+    /// Record the next row: its raw cells and, when it may be matched later, its flags.
+    fn push(&mut self, cells: impl Iterator<Item = VtCell>, flags: Option<RowFlags>) {
+        self.rows.push((self.cells.len(), flags));
+        self.cells.extend(cells);
+    }
+
+    /// Row `i`'s cells and flags.
+    fn row(&self, i: usize) -> Option<(&[VtCell], Option<RowFlags>)> {
+        let &(start, flags) = self.rows.get(i)?;
+        let end = self.rows.get(i.checked_add(1)?).map_or(self.cells.len(), |&(next, _)| next);
+        Some((self.cells.get(start..end)?, flags))
+    }
+
+    /// Row `i`'s cells and flags, when it has flags.
+    fn get(&self, i: usize) -> Option<(&[VtCell], RowFlags)> {
+        let (cells, flags) = self.row(i)?;
+        Some((cells, flags?))
+    }
 }
 
 impl Shown {
@@ -241,6 +319,18 @@ impl Shown {
     /// The line held at absolute `line`, moved out for the next frame's record.
     fn take(&mut self, line: u64) -> Option<Arc<Line>> {
         self.slot(line)?.take()
+    }
+
+    /// What the line held at absolute `line` was read from, flags or not.
+    fn print_row(&self, line: u64) -> Option<(&[VtCell], Option<RowFlags>)> {
+        let i = usize::try_from(line.checked_sub(self.first)?).ok()?;
+        self.prints.row(i)
+    }
+
+    /// What the line held at absolute `line` was read from.
+    fn print_at(&self, line: u64) -> Option<(&[VtCell], RowFlags)> {
+        let i = usize::try_from(line.checked_sub(self.first)?).ok()?;
+        self.prints.get(i)
     }
 
     fn forget(&mut self, line: u64) {
@@ -287,6 +377,9 @@ impl GhosttyEngine {
         // Kitty graphics: a storage limit turns the protocol on; the decoder is per thread,
         // and the engine lives on its session's thread.
         term.set_kitty_image_storage_limit(graphics::KITTY_STORAGE_BYTES)?;
+        // A kitty clipboard write (OSC 5522) is buffered whole before the callback sees it, up
+        // to 64 MiB by default; nothing past the session's ceiling would be passed on anyway.
+        term.set_clipboard_write_max_bytes(Some(MAX_OSC52_BYTES))?;
         kitty_graphics::set_png_decoder(Some(Box::new(graphics::PngDecoder)))?;
         let dark = slopty_theme::TerminalPalette::DARK.wire();
         set_colors(&mut term, &dark)?;
@@ -334,11 +427,11 @@ impl GhosttyEngine {
             scratch: String::with_capacity(16),
             spare_line: None,
             spare_rows: Vec::new(),
+            spare_prints: Prints::default(),
             uri_buf: vec![0; 256],
             osc: osc133::Scanner::default(),
             prompt_redraw: osc133::Redraw::default(),
             at_prompt: false,
-            prompt_at_ground: false,
             exit_marks: BTreeMap::new(),
             prompt_starts: BTreeSet::new(),
             forced_rows: BTreeSet::new(),
@@ -545,8 +638,6 @@ impl GhosttyEngine {
         self.generation = self.generation.wrapping_add(1);
         self.term.vt_write(rest);
         self.settle_or_bump();
-        self.prompt_at_ground =
-            self.at_prompt && redraw::ends_at_ground(self.prompt_at_ground, rest);
         if !self.on_alt {
             self.alt_prefix = alt_prefix_of(chunk).to_vec();
         }
@@ -588,8 +679,6 @@ impl GhosttyEngine {
             });
         }
         self.at_prompt = matches!(mark, osc133::Mark::PromptStart { .. });
-        // The mark's terminator was the last byte fed.
-        self.prompt_at_ground = self.at_prompt;
         match mark {
             osc133::Mark::PromptStart { redraw } => {
                 if let Some(redraw) = redraw {
@@ -674,13 +763,14 @@ impl GhosttyEngine {
     }
 
     fn cursor(snapshot: &libghostty_vt::render::Snapshot<'_, '_>) -> Result<Cursor, EngineError> {
-        let (row, col) = snapshot.cursor_viewport()?.map_or((0, 0), |c| (c.y, c.x));
+        let cursor = snapshot.cursor()?;
+        let (row, col) = cursor.viewport.map_or((0, 0), |c| (c.y, c.x));
         Ok(Cursor {
             row,
             col,
-            shape: snapshot.cursor_visual_style().map_or(CursorShape::Block, convert::cursor_shape),
-            visible: snapshot.cursor_visible()?,
-            blink: snapshot.cursor_blinking()?,
+            shape: convert::cursor_shape(cursor.visual_style),
+            visible: cursor.visible,
+            blink: cursor.blinking,
         })
     }
 
@@ -770,7 +860,20 @@ impl GhosttyEngine {
         let mut shown = std::mem::take(&mut self.spare_rows);
         shown.reserve(usize::from(rows));
         let known = self.shown.holds(self.epoch, cols, rows);
+        // Nothing scrolled: the record's prints are the rows' own, and only the rows read again
+        // are printed again, in place.
+        let in_place = known && take != Take::Joiner && self.shown.first == first;
+        let mut prints = if in_place {
+            std::mem::take(&mut self.shown.prints)
+        } else {
+            let mut spare = std::mem::take(&mut self.spare_prints);
+            spare.clear();
+            spare.rows.reserve(usize::from(rows));
+            spare.cells.reserve(usize::from(rows).saturating_mul(usize::from(cols)));
+            spare
+        };
 
+        let layout = CellLayout::linked();
         let mut row_iter = self.rows_iter.update(&snapshot)?;
         let mut y: u16 = 0;
         // Placeholder cells of virtual kitty placements, gathered from every row (a run that
@@ -797,50 +900,165 @@ impl GhosttyEngine {
             let build = rebuild || row.dirty()? || forced || remarked;
             if !build && take != Take::Joiner {
                 shown.push(if known { self.shown.take(abs) } else { None });
+                // Not dirty: the row reads as it did when its print was taken.
+                if !in_place {
+                    match self.shown.print_row(abs).filter(|_| known) {
+                        Some((cells, flags)) => {
+                            prints.rows.push((prints.cells.len(), flags));
+                            prints.cells.extend_from_slice(cells);
+                        }
+                        None => prints.push(row.cells_raw()?, None),
+                    }
+                }
             }
-            if build {
+            // The row flags may be false positives, but a row without one has none of what it
+            // names: no links, no styled cell, no multi-codepoint cluster.
+            let (row_has_links, styled, clusters) = if build {
+                (raw.has_hyperlink()?, raw.is_styled()?, raw.has_grapheme_cluster()?)
+            } else {
+                (false, false, false)
+            };
+            let (wrapped, row_semantic) = if build {
+                (
+                    raw.is_wrap_continuation()?,
+                    raw.semantic_prompt().unwrap_or(RowSemanticPrompt::None),
+                )
+            } else {
+                (false, RowSemanticPrompt::None)
+            };
+            let row_flags =
+                (build && !forced && !remarked && !placeholders).then_some((wrapped, row_semantic));
+            // The line the viewers hold at this index, when the row still reads as it did when
+            // that line was built from it.
+            let unchanged = if build && known && !row_has_links && !clusters {
+                let held_print =
+                    if in_place { prints.get(usize::from(y)) } else { self.shown.print_at(abs) };
+                let same_cells = match held_print {
+                    Some((cells, flags)) if Some(flags) == row_flags => {
+                        cells.iter().copied().eq(row.cells_raw()?)
+                    }
+                    _ => false,
+                };
+                match self.shown.at(abs) {
+                    Some(held) if same_cells && styled => {
+                        // A style id names a style only while a cell uses it: one freed and
+                        // taken by another style leaves the cell's bits as they were.
+                        let mut it = self.cells_iter.update(row)?;
+                        let mut last_id = None;
+                        let mut same = true;
+                        for (x, rc) in row.cells_raw()?.enumerate() {
+                            let f = cell_fields(layout, rc)?;
+                            if !f.has_styling() || last_id == Some(f.style_id) {
+                                continue;
+                            }
+                            last_id = Some(f.style_id);
+                            it.select(u16::try_from(x).unwrap_or(u16::MAX))?;
+                            let style = convert::style(&it.style()?);
+                            if held.cells.get(x).is_none_or(|c| c.style != style) {
+                                same = false;
+                                break;
+                            }
+                        }
+                        same.then(|| Arc::clone(held))
+                    }
+                    Some(held) if same_cells => Some(Arc::clone(held)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(held) = unchanged {
+                if take == Take::Joiner {
+                    updates.push(RowUpdate { row: y, line: held });
+                } else {
+                    drop(held);
+                    let held = self.shown.take(abs);
+                    if full && let Some(line) = &held {
+                        updates.push(RowUpdate { row: y, line: Arc::clone(line) });
+                    }
+                    shown.push(held);
+                    prints.record(usize::from(y), in_place, row.cells_raw()?, row_flags);
+                    row.set_dirty(false)?;
+                }
+            } else if build {
                 let mut line = blank_line(self.spare_line.take(), cols);
                 let mut first_semantic = None;
                 let mut first_input = None;
-                // The row flag may be a false positive, but a row without it has no links.
-                let row_has_links = raw.has_hyperlink()?;
                 let mut links = LinkRuns::default();
-                let mut cell_iter = self.cells_iter.update(row)?;
+                // The row's cells come in one read, each decoded at once; the cell iteration,
+                // positioned per cell, is only for what a raw cell cannot say (a style, a
+                // cluster's codepoints).
+                let mut cell_iter = if styled || clusters || placeholders {
+                    Some(self.cells_iter.update(row)?)
+                } else {
+                    None
+                };
+                // Style ids name styles within one page, and a row never spans two.
+                let mut last_style = None;
                 let mut x: u16 = 0;
-                while let Some(cell) = cell_iter.next() {
+                for rc in row.cells_raw()? {
                     let Some(slot) = line.cells.get_mut(usize::from(x)) else { break };
-                    let rc = cell.raw_cell()?;
-                    let content = rc.semantic_content()?;
+                    let f = cell_fields(layout, rc)?;
                     if first_semantic.is_none() {
-                        first_semantic = Some(content);
+                        first_semantic = Some(f.semantic_content);
                     }
-                    if first_input.is_none() && matches!(content, CellSemanticContent::Input) {
+                    if first_input.is_none()
+                        && matches!(f.semantic_content, CellSemanticContent::Input)
+                    {
                         first_input = Some(x);
                     }
-                    let style = if cell.has_styling()? {
-                        convert::style(&cell.style()?)
-                    } else {
-                        Style::DEFAULT
+                    let width = convert::cell_width(f.wide);
+                    let has_style = f.has_styling();
+                    // Zero for a blank cell and for one holding only a background colour.
+                    let codepoint = if width.draws_text() { f.codepoint } else { 0 };
+                    let placeholder = placeholders && codepoint == placeholder::PLACEHOLDER;
+                    let cluster = codepoint != 0
+                        && matches!(f.content_tag, CellContentTag::CodepointGrapheme);
+                    let at = match cell_iter.as_mut() {
+                        Some(it) if has_style || cluster || placeholder => {
+                            it.select(x)?;
+                            Some(&*it)
+                        }
+                        _ => None,
                     };
-                    let width = convert::cell_width(rc.wide()?);
-                    let text = if placeholders && rc.codepoint()? == placeholder::PLACEHOLDER {
-                        // The image goes where the placeholder is; the character itself
-                        // is never drawn.
-                        self.scratch.clear();
-                        cell.graphemes_utf8(&mut self.scratch)?;
-                        runs.cell(x, y, placeholder_cell(&style, &self.scratch));
-                        CellText::EMPTY
-                    } else if rc.has_text()? && width.draws_text() {
-                        runs.finish();
-                        self.scratch.clear();
-                        cell.graphemes_utf8(&mut self.scratch)?;
-                        CellText::from_cluster(&self.scratch)
-                    } else {
-                        runs.finish();
-                        CellText::EMPTY
+                    let style = match at {
+                        Some(it) if has_style => {
+                            let id = f.style_id;
+                            match last_style {
+                                Some((last, style)) if last == id => style,
+                                _ => {
+                                    let style = convert::style(&it.style()?);
+                                    last_style = Some((id, style));
+                                    style
+                                }
+                            }
+                        }
+                        _ => Style::DEFAULT,
+                    };
+                    let text = match at {
+                        Some(it) if placeholder || cluster => {
+                            self.scratch.clear();
+                            it.graphemes_utf8(&mut self.scratch)?;
+                            if placeholder {
+                                // The image goes where the placeholder is; the character
+                                // itself is never drawn.
+                                runs.cell(x, y, placeholder_cell(&style, &self.scratch));
+                                CellText::EMPTY
+                            } else {
+                                runs.finish();
+                                CellText::from_cluster(&self.scratch)
+                            }
+                        }
+                        _ => {
+                            runs.finish();
+                            match char::from_u32(codepoint) {
+                                Some(c) if codepoint != 0 => CellText::from_char(c),
+                                _ => CellText::EMPTY,
+                            }
+                        }
                     };
                     if row_has_links {
-                        let uri = if rc.has_hyperlink()? {
+                        let uri = if f.hyperlink {
                             let gr = self.term.grid_ref(Point::Viewport(PointCoordinate {
                                 x,
                                 y: u32::from(y),
@@ -855,7 +1073,7 @@ impl GhosttyEngine {
                     x = x.saturating_add(1);
                 }
                 line.links = links.finish(x);
-                line.flags.set(LineFlags::WRAPPED, raw.is_wrap_continuation()?);
+                line.flags.set(LineFlags::WRAPPED, wrapped);
                 // The render state copies a row when the terminal dirtied it; a forced or
                 // remarked row was not, so its prompt flag is read from the live grid.
                 let semantic = if forced || remarked {
@@ -864,15 +1082,13 @@ impl GhosttyEngine {
                         .row()?
                         .semantic_prompt()?
                 } else {
-                    raw.semantic_prompt().unwrap_or(libghostty_vt::screen::RowSemanticPrompt::None)
+                    row_semantic
                 };
                 // A row erased in place (`CSI 2 J`, ⌃L at a prompt) keeps its number but not
                 // its prompt: the marks the shell wrote there are gone with it, else the next
                 // prompt drawn below would read as a continuation of a start that no longer
                 // exists.
-                if semantic != libghostty_vt::screen::RowSemanticPrompt::Prompt
-                    && self.prompt_starts.contains(&abs)
-                {
+                if semantic != RowSemanticPrompt::Prompt && self.prompt_starts.contains(&abs) {
                     let (marks, starts) = (&mut self.exit_marks, &mut self.prompt_starts);
                     remark(marks, starts, &mut self.remarked_rows, abs, |marks, starts| {
                         starts.remove(&abs);
@@ -927,6 +1143,7 @@ impl GhosttyEngine {
                         updates.push(RowUpdate { row: y, line: Arc::clone(&line) });
                     }
                     shown.push(Some(line));
+                    prints.record(usize::from(y), in_place, row.cells_raw()?, row_flags);
                 }
                 if take != Take::Joiner {
                     row.set_dirty(false)?;
@@ -968,13 +1185,26 @@ impl GhosttyEngine {
                 // is shipped again when it is placed again.
                 self.ledger.clear();
                 self.spare_rows = shown;
+                self.spare_prints = prints;
                 self.placed_if(graphics_gen, runs)?
             }
             Take::Everyone | Take::Diff => {
-                let record = Shown { epoch: self.epoch, cols, first, rows: shown };
-                let mut spare = std::mem::replace(&mut self.shown, record).rows;
+                let record = Shown { epoch: self.epoch, cols, first, rows: shown, prints };
+                let old = std::mem::replace(&mut self.shown, record);
+                let mut spare = old.rows;
                 spare.clear();
                 self.spare_rows = spare;
+                if in_place {
+                    // The next scroll copies the record into the spare; have it ready now,
+                    // not in that frame.
+                    let (cells, rows) =
+                        (self.shown.prints.cells.len(), self.shown.prints.rows.len());
+                    self.spare_prints.clear();
+                    self.spare_prints.cells.reserve(cells);
+                    self.spare_prints.rows.reserve(rows);
+                } else {
+                    self.spare_prints = old.prints;
+                }
                 if forcing {
                     // A forced row that is no longer on the screen has nothing left to say.
                     self.forced_rows.clear();
@@ -1123,9 +1353,8 @@ impl GhosttyEngine {
             self.term.grid_ref(Point::Screen(PointCoordinate { x: 0, y: screen_y }))?.row()?;
         let (styled, clusters, row_has_links) =
             (row.is_styled()?, row.has_grapheme_cluster()?, row.has_hyperlink()?);
-        let mut prompt_row = row
-            .semantic_prompt()
-            .is_ok_and(|p| p != libghostty_vt::screen::RowSemanticPrompt::None);
+        let mut prompt_row = row.semantic_prompt().is_ok_and(|p| p != RowSemanticPrompt::None);
+        let layout = CellLayout::linked();
         let mut chars = [char::MIN; 16];
         let mut first_semantic = None;
         let mut first_input = None;
@@ -1135,27 +1364,25 @@ impl GhosttyEngine {
         let mut last_style = None;
         for x in 0..cols {
             let gr = self.term.grid_ref(Point::Screen(PointCoordinate { x, y: screen_y }))?;
-            let rc = gr.cell()?;
-            // The input column matters on a prompt's rows only; an output row stops asking
+            let f = cell_fields(layout, gr.cell()?)?;
+            // The input column matters on a prompt's rows only; an output row stops looking
             // after its first cell.
             if first_input.is_none() && (x == 0 || prompt_row) {
-                let content = rc.semantic_content()?;
                 if first_semantic.is_none() {
-                    first_semantic = Some(content);
-                    prompt_row |= matches!(content, CellSemanticContent::Prompt);
+                    first_semantic = Some(f.semantic_content);
+                    prompt_row |= matches!(f.semantic_content, CellSemanticContent::Prompt);
                 }
-                if matches!(content, CellSemanticContent::Input) {
+                if matches!(f.semantic_content, CellSemanticContent::Input) {
                     first_input = Some(x);
                 }
             }
-            let width = convert::cell_width(rc.wide()?);
-            let style = if styled && rc.has_styling()? {
-                let id = rc.style_id()?;
+            let width = convert::cell_width(f.wide);
+            let style = if styled && f.has_styling() {
                 match last_style {
-                    Some((last, style)) if last == id => style,
+                    Some((last, style)) if last == f.style_id => style,
                     _ => {
                         let style = convert::style(&gr.style()?);
-                        last_style = Some((id, style));
+                        last_style = Some((f.style_id, style));
                         style
                     }
                 }
@@ -1166,15 +1393,14 @@ impl GhosttyEngine {
                 if uri_buf.is_empty() {
                     uri_buf.resize(256, 0);
                 }
-                let uri =
-                    if rc.has_hyperlink()? { hyperlink_uri(&gr, &mut uri_buf)? } else { None };
+                let uri = if f.hyperlink { hyperlink_uri(&gr, &mut uri_buf)? } else { None };
                 links.push(x, uri, width == CellWidth::SpacerTail);
             }
             // Zero for a blank cell and for one holding only a background colour.
-            let codepoint = if width.draws_text() { rc.codepoint()? } else { 0 };
+            let codepoint = if width.draws_text() { f.codepoint } else { 0 };
             let text = if codepoint == 0 {
                 CellText::EMPTY
-            } else if clusters && rc.content_tag()? == CellContentTag::CodepointGrapheme {
+            } else if clusters && f.content_tag == CellContentTag::CodepointGrapheme {
                 match gr.graphemes(&mut chars) {
                     Ok(n) => cluster_text(chars.get(..n).unwrap_or_default()),
                     Err(libghostty_vt::Error::OutOfSpace { required }) => {
@@ -1194,7 +1420,7 @@ impl GhosttyEngine {
         let abs = self.base.saturating_add(u64::from(screen_y));
         line.mark = first_semantic.map_or(SemanticMark::Unknown, |first| {
             convert::semantic_mark(
-                row.semantic_prompt().unwrap_or(libghostty_vt::screen::RowSemanticPrompt::None),
+                row.semantic_prompt().unwrap_or(RowSemanticPrompt::None),
                 first,
                 self.prompt_starts.contains(&abs),
                 exit_for(&self.exit_marks, &self.prompt_starts, abs),
@@ -1458,6 +1684,18 @@ fn cluster_text(chars: &[char]) -> CellText {
         .map_or(CellText::EMPTY, CellText::from_cluster)
 }
 
+/// Every field of a cell, decoded with the linked build's layout (looked up once per frame
+/// or row by the caller) and read through libghostty's getters when there is none.
+fn cell_fields(
+    layout: Option<&CellLayout>,
+    cell: VtCell,
+) -> Result<CellFields, libghostty_vt::Error> {
+    match layout {
+        Some(layout) => layout.decode(cell),
+        None => cell.fields(),
+    }
+}
+
 fn set_cell(line: &mut Line, x: u16, cell: Cell) {
     if let Some(slot) = line.cells.get_mut(usize::from(x)) {
         *slot = cell;
@@ -1573,22 +1811,20 @@ fn install_callbacks(
     let for_clip = Rc::clone(events);
     term.on_clipboard_write(move |_, write| {
         // Only the system clipboard; selection/primary are X11 notions with no counterpart
-        // on the clients. Reads (OSC 52 `?`) never reach this callback (libghostty drops
-        // them), and Slopty does not answer them anywhere else.
-        if write.location() != ClipboardLocation::Standard {
-            return Err(libghostty_vt::terminal::ClipboardWriteError::Unsupported);
-        }
-        let text = write
-            .contents()
-            .find(|c| c.mime.starts_with("text/plain"))
+        // on the clients. Reads (OSC 52 `?`, OSC 5522) go to a read callback the engine does
+        // not install, so libghostty answers them with nothing.
+        let text = (write.location() == ClipboardLocation::Standard)
+            .then(|| write.contents().find(|c| c.mime.starts_with("text/plain")))
+            .flatten()
             .map(|c| String::from_utf8_lossy(c.data).into_owned());
-        match text {
+        let result = match text {
             Some(text) => {
                 for_clip.borrow_mut().push(EngineEvent::ClipboardWrite { text });
                 Ok(())
             }
             None => Err(libghostty_vt::terminal::ClipboardWriteError::Unsupported),
-        }
+        };
+        write.reply(result, false);
     })?;
     Ok(())
 }
@@ -2039,6 +2275,28 @@ impl GhosttyEngine {
         }
     }
 
+    /// Whether libghostty's parser stands between sequences, with no escape sequence, control
+    /// string or UTF-8 character left open for the next write to finish: where a checkpoint
+    /// can cut the output without the rest printing as text after a restart.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn at_ground(&self) -> Result<bool, EngineError> {
+        Ok(self.term.vt_ground()?)
+    }
+
+    /// The terminfo entry the session's programs were given (`TERM`), which an XTGETTCAP
+    /// query for `TN` is answered with; without it the query gets no answer.
+    ///
+    /// # Errors
+    ///
+    /// A name longer than 128 bytes.
+    pub fn set_terminfo_name(&mut self, name: &str) -> Result<(), EngineError> {
+        self.term.set_terminfo_name(name)?;
+        Ok(())
+    }
+
     /// The pty's line discipline changed (the worker reads `termios` after each read): with
     /// echo off, as at a password prompt, the frames say [`TermModes::ECHO_OFF`] and the
     /// client guesses nothing. Takes effect on the next frame.
@@ -2189,6 +2447,33 @@ mod tests {
         let rows: Vec<u16> = f.updates.iter().map(|u| u.row).collect();
         assert!(rows.contains(&1) && !rows.contains(&0), "rows: {rows:?}");
         assert_eq!(f.updates.iter().find(|u| u.row == 1).unwrap().line.text(), "B");
+    }
+
+    /// A scroll dirties every row, and a row that reads as the line the viewers hold is not
+    /// sent; one changed in the same write as the scroll is, even when only its style changed
+    /// and its cell's raw bits came back the same.
+    #[test]
+    fn a_scroll_ships_what_changed_and_keeps_what_did_not() {
+        use slopty_grid::Color;
+        let mut e = engine(10, 4);
+        e.write(b"a\r\n\x1b[31mx\x1b[0m\r\nb\r\nc");
+        let _first = e.full_frame(0).unwrap();
+        assert!(e.take_frame(0).unwrap().is_none(), "nothing changed");
+        // Scroll by one: nothing but the new row is sent.
+        e.write(b"\r\nd");
+        let f = e.take_frame(1).unwrap().unwrap();
+        let sent: Vec<String> = f.updates.iter().map(|u| u.line.text()).collect();
+        assert_eq!(sent, ["d"], "only the row that came in");
+        let mut e = engine(10, 4);
+        e.write(b"a\r\n\x1b[31mx\x1b[0m\r\nb\r\nc");
+        let _first = e.full_frame(0).unwrap();
+        // Rewrite the red x as a plain one, which frees red's style id, then as a blue one,
+        // which takes the freed id, and scroll in the same write.
+        e.write(b"\x1b[2;1Hx\x1b[34m\x1b[2;1Hx\x1b[0m\x1b[4;2H\r\nd");
+        let f = e.take_frame(1).unwrap().unwrap();
+        let x = f.updates.iter().find(|u| u.line.text() == "x").expect("x's row is sent");
+        assert_eq!(x.line.cells[0].style.fg, Color::Palette(4));
+        assert_eq!(e.full_frame(2).unwrap().updates[0].line.cells[0].style.fg, Color::Palette(4));
     }
 
     #[test]
@@ -2397,6 +2682,10 @@ mod tests {
         // A resize between two reads of one sequence: the engine writes nothing into it.
         let split = zsh(b"\x1b]133;A;redraw=1\x07", b"\x1b[3");
         assert_eq!(split, stale, "left to libghostty");
+        // Ground is libghostty's parser state, not a guess from the bytes: an OSC cancelled by
+        // CAN leaves nothing open.
+        let cancelled = zsh(b"\x1b]133;A;redraw=1\x07", b"\x1b]0;x\x18");
+        assert_eq!(cancelled, cleared, "a cancelled sequence is ground");
 
         // bash redraws only the prompt's last row: `redraw=1` would lose the rows above it.
         let bash = |a: &[u8]| {
@@ -2907,6 +3196,85 @@ mod tests {
     }
 
     /// The driver's own colours, once set, are what the queries answer.
+    /// Ground is the parser's own state: complete sequences and characters are ground, and
+    /// every half of one is not, whichever introducer opened it.
+    #[test]
+    fn ground_is_where_the_parser_stands() {
+        let ground_after = |bytes: &[u8]| {
+            let mut e = engine(10, 3);
+            e.write(bytes);
+            e.at_ground().unwrap()
+        };
+        for bytes in [
+            &b"hello\r\n"[..],
+            b"\x1b[31mred\x1b[0m",
+            b"\x1b]0;title\x07",
+            b"\x1b]0;title\x1b\\",
+            b"\x1bP+q544e\x1b\\",
+            b"\x1b(B",
+            "h\u{e9}llo \u{2500}".as_bytes(),
+            b"\x1b[?1049h\x1b[H",
+            b"\x1b\x1b[0m",
+        ] {
+            assert!(ground_after(bytes), "ground after {bytes:?}");
+        }
+        for bytes in [
+            &b"\x1b"[..],
+            b"\x1b[",
+            b"\x1b[3",
+            b"\x1b[?104",
+            b"\x1b]0;tit",
+            b"\x1b]0;title\x1b",
+            b"\x1b(",
+            b"\xe2\x94",
+            b"\xf0\x9f\x98",
+            b"\xc3",
+            b"\x1bP+q",
+            b"\x1b_Gx",
+            b"\x1b^x",
+            b"\x1bXx",
+            b"\x1b\x1b",
+            b"\x1b]0;half\x1b[",
+            b"\x1bP+q\x1b[",
+            b"\x1b[3\x1bP",
+        ] {
+            assert!(!ground_after(bytes), "open after {bytes:?}");
+        }
+
+        // The state carries across writes, and CAN, SUB and a new escape end what was open.
+        let mut e = engine(10, 3);
+        for (bytes, ground) in [
+            (&b"abc\x1b["[..], false),
+            (b"31m", true),
+            (b"\x1b]0;half", false),
+            (b"\x18", true),
+            (b"\x1b[3", false),
+            (b"\x1a", true),
+            (b"\x1b]0;half\x1b[0m", true),
+            (b"\xe2", false),
+            (b"x", true),
+        ] {
+            e.write(bytes);
+            assert_eq!(e.at_ground().unwrap(), ground, "after {bytes:?}");
+        }
+    }
+
+    /// XTGETTCAP `TN` answers with the terminfo name the session's programs run under, once
+    /// the worker has said which.
+    #[test]
+    fn xtgettcap_names_the_terminfo_entry() {
+        let mut e = engine(10, 3);
+        let query = b"\x1bP+q544e\x1b\\";
+        e.write(query);
+        assert!(!e.drain_events().iter().any(|ev| matches!(ev, EngineEvent::PtyWrite(_))));
+        e.set_terminfo_name("xterm-ghostty").unwrap();
+        e.write(query);
+        // "xterm-ghostty" in hex.
+        let answer = b"\x1bP1+r544E=787465726D2D67686F73747479\x1b\\".to_vec();
+        assert_eq!(e.drain_events(), vec![EngineEvent::PtyWrite(answer)]);
+        assert!(e.set_terminfo_name(&"x".repeat(129)).is_err());
+    }
+
     /// `CSI ? 996 n` is answered from the driver's background; with mode 2031 on, a change
     /// of scheme is reported unprompted, a same-scheme change is not.
     #[test]
@@ -3392,6 +3760,53 @@ mod tests {
         // A read request ("?") produces neither an event nor a reply to the program.
         e.write(b"\x1b]52;c;?\x07");
         assert_eq!(e.drain_events(), vec![]);
+    }
+
+    /// A kitty clipboard write (OSC 5522) reaches the clipboard like OSC 52, and one past the
+    /// session's ceiling is refused while it is still being sent, not buffered to the end.
+    #[test]
+    fn a_kitty_clipboard_write_is_bounded_by_the_osc52_ceiling() {
+        let mut e = engine(10, 3);
+        let plain = "dGV4dC9wbGFpbg=="; // "text/plain"
+        e.write(b"\x1b]5522;type=write:id=a\x1b\\");
+        e.write(format!("\x1b]5522;type=wdata:mime={plain};aGVsbG8=\x1b\\").as_bytes());
+        e.write(b"\x1b]5522;type=wdata\x1b\\");
+        let events = e.drain_events();
+        assert!(events.contains(&EngineEvent::ClipboardWrite { text: "hello".to_owned() }));
+        assert!(events.contains(&EngineEvent::PtyWrite(
+            b"\x1b]5522;type=write:status=DONE:id=a\x1b\\".to_vec()
+        )));
+
+        // "aaa" is "YWFh": one byte past the ceiling, in chunks of 3000.
+        let chunks = MAX_OSC52_BYTES / 3000 + 1;
+        e.write(b"\x1b]5522;type=write:id=b\x1b\\");
+        let chunk = format!("\x1b]5522;type=wdata:mime={plain};{}\x1b\\", "YWFh".repeat(1000));
+        for _ in 0..chunks {
+            e.write(chunk.as_bytes());
+        }
+        e.write(b"\x1b]5522;type=wdata\x1b\\");
+        let events = e.drain_events();
+        assert!(!events.iter().any(|ev| matches!(ev, EngineEvent::ClipboardWrite { .. })));
+        assert!(events.contains(&EngineEvent::PtyWrite(
+            b"\x1b]5522;type=write:status=EFBIG:id=b\x1b\\".to_vec()
+        )));
+    }
+
+    /// A line that ends at the last column leaves the cursor waiting to wrap. A resize that
+    /// leaves room after it clears the wait, so the next character follows on the same row
+    /// instead of starting one (ghostty #14458, carried in aislopware/ghostty).
+    #[test]
+    fn a_pending_wrap_does_not_survive_a_resize_that_makes_room() {
+        for (cols, rows) in [(12, vec!["123456789|X"]), (8, vec!["12345678", "9|X"])] {
+            let mut e = engine(10, 4);
+            e.write(b"123456789|");
+            e.resize(TermSize { cols, ..e.size() }).unwrap();
+            e.write(b"X");
+            let f = e.full_frame(0).unwrap();
+            let text: Vec<String> = f.updates.iter().map(|u| u.line.text()).collect();
+            assert_eq!(text[..rows.len()], rows[..], "{cols} columns");
+            assert!(text[rows.len()..].iter().all(String::is_empty), "{cols} columns: {text:?}");
+        }
     }
 
     #[test]

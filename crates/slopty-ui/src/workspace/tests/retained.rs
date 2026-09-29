@@ -6,7 +6,7 @@
 //! steps, so a frame of motion and the frame drawn from scratch after it are drawn at the same
 //! instant.
 
-use gpui::{Modifiers, MouseMoveEvent};
+use gpui::{Modifiers, MouseButton, MouseMoveEvent};
 use slopty_proto::screen::VideoCodec;
 
 use super::*;
@@ -76,6 +76,42 @@ fn the_strip_springs_as_from_scratch(cx: &mut TestAppContext) {
         view.update(cx, |v, _| v.hold_clock(Some(Duration::from_secs(5))));
         next_frame(cx);
         fresh(cx, &format!("landed {way}"));
+    }
+}
+
+/// A frame of the overview's spring builds each shell it moves once: a shell drawn somewhere
+/// else is built again there, and nothing asks for it a second time in the same frame.
+#[gpui::test]
+fn a_frame_of_the_spring_builds_each_shell_once(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let shells = three_shells(&view, cx, &fake);
+    let terminals: Vec<Entity<TerminalView>> = shells
+        .iter()
+        .filter_map(|(session, _)| view.read_with(cx, |v, _| v.terminal(*session).cloned()))
+        .collect();
+    let renders = |cx: &mut VisualTestContext| -> Vec<u32> {
+        terminals.iter().map(|t| t.read_with(cx, |t, _| t.renders())).collect()
+    };
+    view.update(cx, |v, _| {
+        v.set_animation(true);
+        v.hold_clock(Some(Duration::ZERO));
+    });
+    cx.run_until_parked();
+    view.update(cx, |v, cx| {
+        v.tick();
+        v.layout.set_overview(true);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    for step in 1..=8_u32 {
+        let before = renders(cx);
+        view.update(cx, |v, _| v.hold_clock(Some(Duration::from_millis(u64::from(step) * 25))));
+        next_frame(cx);
+        let built: Vec<u32> =
+            renders(cx).iter().zip(&before).map(|(a, b)| a.saturating_sub(*b)).collect();
+        assert!(built.iter().all(|n| *n <= 1), "frame {step}: shells built {built:?}");
+        fresh(cx, &format!("frame {step} of the overview opening"));
     }
 }
 
@@ -166,15 +202,28 @@ fn a_remote_window_follows_a_resize_as_from_scratch(cx: &mut TestAppContext) {
             v.layout.set_overview(overview);
             cx.notify();
         });
-        fresh(cx, &format!("the overview, step {step}"));
+        next_frame(cx);
         // The picture and the pointer are laid out from the body's bounds as the render read
-        // them; the painted quads do not show the picture itself.
+        // them; the painted quads do not show the picture itself. Read before the oracle.
         let (drawn, rendered) = screen.read_with(cx, |s, _| s.bounds_rendered());
         assert_eq!(rendered, drawn, "step {step}: laid out at the bounds it was drawn in");
+        fresh(cx, &format!("the overview, step {step}"));
+        widths.push(drawn.size.width);
+    }
+    // The window resized under a still stream, no new picture coming: the picture is laid out
+    // again at the body's new bounds by the frame after the one that measured them.
+    for (w, h) in [(900.0, 700.0), (1400.0, 900.0)] {
+        cx.simulate_resize(size(px(w), px(h)));
+        cx.run_until_parked();
+        next_frame(cx);
+        // Read before the oracle, whose frames from scratch would lay it out again.
+        let (drawn, rendered) = screen.read_with(cx, |s, _| s.bounds_rendered());
+        assert_eq!(rendered, drawn, "at {w}×{h}: laid out at the bounds it was drawn in");
+        fresh(cx, &format!("a still picture, the window at {w}×{h}"));
         widths.push(drawn.size.width);
     }
     widths.dedup();
-    assert!(widths.len() > 1, "the tile changed size: {widths:?}");
+    assert!(widths.len() > 3, "the tile changed size each step: {widths:?}");
 }
 
 /// A picture of `w` × `h` for a stream to show.
@@ -251,6 +300,39 @@ fn the_strip_built_again_replays_a_shell_typed_into(cx: &mut TestAppContext) {
     assert_eq!(renders(cx), before, "no shell built again");
 }
 
+/// A pointer moving over a shell, a frame drawn for something else after each move: once it
+/// is in (entering changes what the shell's hover reads found), no shell is built again,
+/// since none of them keeps where the pointer is, or reads it, to draw itself.
+#[gpui::test]
+fn a_pointer_moving_over_the_shells_builds_none_of_them(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let shells = three_shells(&view, cx, &fake);
+    let terminals: Vec<Entity<TerminalView>> = shells
+        .iter()
+        .filter_map(|(session, _)| view.read_with(cx, |v, _| v.terminal(*session).cloned()))
+        .collect();
+    let renders = |cx: &mut VisualTestContext| -> Vec<u32> {
+        terminals.iter().map(|t| t.read_with(cx, |t, _| t.renders())).collect()
+    };
+    let body = cx.debug_bounds(selector("item", shells[1].1.item)).expect("drawn");
+    let strip = view.read_with(cx, |v, _| v.strip_host.entity_id());
+    let move_to = |cx: &mut VisualTestContext, step: u8| {
+        let at = body.origin + point(px(12.0) * f32::from(step), body.size.height / 2.0);
+        cx.simulate_mouse_move(at, None, Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_w, cx| cx.notify(strip));
+        cx.run_until_parked();
+    };
+    move_to(cx, 1);
+    let before = renders(cx);
+    for step in 2..6 {
+        move_to(cx, step);
+    }
+    assert_eq!(renders(cx), before, "no shell built again");
+    fresh(cx, "the pointer moved");
+}
+
 /// A command that starts in a shell scrolled off the strip retitles its navigator row in the
 /// frame it starts in: its title is worked out though no tile of it is drawn.
 #[gpui::test]
@@ -289,4 +371,89 @@ fn a_page_that_cannot_open_says_so_as_from_scratch(cx: &mut TestAppContext) {
     fresh(cx, "a page tile, opened as it is drawn");
     let failed = page.read_with(cx, |page, _| page.page().failed.is_some());
     assert!(failed, "no web view in a headless window: the page failed");
+}
+
+/// A tile dragged into the strip's right edge band and held there scrolls the strip on, one
+/// frame of motion asked for per frame however often the pointer moves, and each frame is the
+/// one drawn from scratch.
+#[gpui::test]
+fn a_drag_held_at_the_edge_scrolls_one_frame_at_a_time(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let tiles: Vec<TileRef> = (1..=6)
+        .map(|version| opens(&view, cx, &fake, SessionId::new(), fake.me, version))
+        .collect();
+    view.update(cx, |v, _| {
+        v.set_animation(true);
+        v.hold_clock(Some(Duration::ZERO));
+    });
+    let first = tiles[0];
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    cx.run_until_parked();
+    view.update(cx, |v, _| v.hold_clock(Some(Duration::from_secs(5))));
+    next_frame(cx);
+    fresh(cx, "the first column in view");
+    let header = cx.debug_bounds(selector("title", first.item)).expect("its header");
+    // Right of the title's text, left of the controls.
+    let grab = point(header.left() + header.size.width * 0.6, header.center().y);
+    let strip = view.read_with(cx, |v, _| v.drawn.viewport.get());
+    let edge = point(strip.right() - px(4.0), grab.y);
+    cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::default());
+    let scroll = |cx: &mut VisualTestContext| {
+        let next = tiles[1];
+        cx.debug_bounds(selector("item", next.item)).map_or(f32::MAX, |b| f32::from(b.left()))
+    };
+    let before = scroll(cx);
+    let landed = Duration::from_secs(5);
+    for step in 1..=12_u32 {
+        let wobble = px(if step % 2 == 0 { 0.0 } else { 1.0 });
+        let at = point(edge.x - wobble, edge.y);
+        cx.simulate_mouse_move(at, Some(MouseButton::Left), Modifiers::default());
+        let clock = landed.saturating_add(Duration::from_millis(16).saturating_mul(step));
+        view.update(cx, |v, _| v.hold_clock(Some(clock)));
+        let ran = cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+        // The strip's own frame, and at most one other (a caret's, a spring's).
+        assert!(ran <= 2, "move {step}: {ran} frames of motion asked for in one frame");
+        fresh(cx, &format!("frame {step} at the edge"));
+    }
+    let after = scroll(cx);
+    assert!(after < before, "the strip scrolled on: {before} → {after}");
+    cx.simulate_mouse_up(edge, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+}
+
+/// A file tile's caret blinking, or a keystroke in it, is its editor's news: the strip is not
+/// built again for it, the header reading only whether the edit is on disk.
+#[gpui::test]
+fn a_file_tiles_caret_blinks_without_building_the_strip(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let path = "/w/notes.md";
+    let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
+    let text = slopty_proto::file::FileRead::Text {
+        text: "# Notes".to_owned(),
+        size: 8,
+        modified_ms: WallMs::from_millis(1_000),
+        final_newline: true,
+    };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.file_read(key, path, &text, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.update(|window, _cx| window.activate_window());
+    cx.run_until_parked();
+    cx.simulate_input("x");
+    cx.run_until_parked();
+    let builds = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.drawn.builds.get());
+    let before = builds(cx);
+    for _ in 0..4 {
+        cx.executor().advance_clock(Duration::from_millis(510));
+        cx.run_until_parked();
+    }
+    cx.simulate_input("y");
+    cx.run_until_parked();
+    assert_eq!(builds(cx), before, "the strip was not built for the caret or the key");
+    assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_some(), "the dot still shows");
 }

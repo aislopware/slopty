@@ -209,7 +209,11 @@ fn a_file_past_the_cap_offers_a_terminal_instead(cx: &mut TestAppContext) {
     assert_eq!(
         events.borrow().as_slice(),
         [
-            FileViewEvent::Run("${EDITOR:-vi} +12 '/w/logs/it'\\''s big.log'".to_owned()),
+            FileViewEvent::Run(
+                "e=${EDITOR:-vi}; [ \"${e##*/}\" = slopty-editor ] && e=${VISUAL:-vi}; \
+                 $e +12 '/w/logs/it'\\''s big.log'"
+                    .to_owned()
+            ),
             FileViewEvent::Run("${PAGER:-less} '/w/logs/it'\\''s big.log'".to_owned()),
         ]
     );

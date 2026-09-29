@@ -37,6 +37,8 @@ pub mod keyboard;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_vendor = "apple")]
+pub mod motion;
+#[cfg(target_vendor = "apple")]
 pub mod notify;
 #[cfg(target_os = "macos")]
 pub mod panel;
@@ -411,19 +413,24 @@ pub fn computer_name() -> Option<String> {
 pub const REDUCE_MOTION_FRESH: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Whether the system asks for motion to be reduced, as read at most [`REDUCE_MOTION_FRESH`]
-/// ago.
+/// ago, or as its change notification last said ([`motion::watch_reduce_motion`]).
 ///
 /// The workspace and the terminal ask on every frame, so the answer is kept rather than asked
-/// of AppKit each time; a change in System Settings shows within a second. This crate does not
-/// watch the system's change notification, so a clock it is. The workspace is what the setting
-/// governs: its springs (a column settling, the view offset gliding along the strip, the
-/// overview opening and closing) are the motion Slopty invents, and a person who turned this on
-/// wants the view where it is going rather than gliding there.
+/// of AppKit each time. The workspace is what the setting governs: its springs (a column
+/// settling, the view offset gliding along the strip, the overview opening and closing) are the
+/// motion Slopty invents, and a person who turned this on wants the view where it is going
+/// rather than gliding there.
 pub fn reduce_motion() -> bool {
+    REDUCE_MOTION.get(since_epoch(), REDUCE_MOTION_FRESH, system_reduce_motion)
+}
+
+/// The kept answer of [`reduce_motion`].
+static REDUCE_MOTION: Kept = Kept::new();
+
+/// Time since the first ask, the clock [`REDUCE_MOTION`] is kept by.
+fn since_epoch() -> std::time::Duration {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    static KEPT: Kept = Kept::new();
-    let now = EPOCH.get_or_init(std::time::Instant::now).elapsed();
-    KEPT.get(now, REDUCE_MOTION_FRESH, system_reduce_motion)
+    EPOCH.get_or_init(std::time::Instant::now).elapsed()
 }
 
 /// A yes or no read from the system and trusted for a while, shared without a lock.
@@ -461,6 +468,18 @@ impl Kept {
         self.value.store(value, Relaxed);
         self.read_at.store(now, Relaxed);
         value
+    }
+
+    /// Keep `value`, read at `now`.
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        expect(dead_code, reason = "no watch off Apple platforms")
+    )]
+    fn set(&self, now: std::time::Duration, value: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let now = u64::try_from(now.as_nanos()).unwrap_or(u64::MAX).min(u64::MAX.saturating_sub(1));
+        self.value.store(value, Relaxed);
+        self.read_at.store(now, Relaxed);
     }
 }
 

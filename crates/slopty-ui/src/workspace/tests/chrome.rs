@@ -282,7 +282,7 @@ fn a_programs_title_draws_the_chrome_only_when_the_tiles_title_follows(cx: &mut 
     let first = opens(&view, cx, &studio, one, studio.me, 1);
     let second = opens(&view, cx, &studio, two, studio.me, 2);
     let titles = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| [first, second].map(|t| v.tile_title(v.item(t).unwrap(), cx)))
+        view.read_with(cx, |v, _| [first, second].map(|t| v.tile_title(v.item(t).unwrap())))
     };
     assert_eq!(titles(cx), ["Terminal", "Terminal 2"]);
     let before = renders(&view, cx);
@@ -379,6 +379,31 @@ fn leak(selector: String) -> &'static str {
 fn ms_ago(ago: Duration) -> u64 {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().saturating_sub(ago);
     u64::try_from(now.as_millis()).unwrap()
+}
+
+/// An agent at rest shows how long it has waited though nothing else counts: no command runs
+/// and no agent works, so the readouts' clock is still.
+#[gpui::test]
+fn an_agent_at_rest_shows_its_age_with_no_clock_running(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    opens(&view, cx, &studio, session, studio.me, 1);
+    let since_ms = ms_ago(Duration::from_mins(5));
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(
+            AgentEvent { since_ms: WallMs::from_millis(since_ms), ..blocked(session) },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    click_at(cx, leak(format!("nav-worker-{}", studio.key)));
+    assert!(cx.debug_bounds(leak(format!("nav-waiting-{session}"))).is_some(), "its row");
+    assert!(
+        cx.debug_bounds(leak(format!("nav-waiting-time-{session}"))).is_some(),
+        "how long it has waited"
+    );
 }
 
 /// While agents are at their turn out of sight (their worker folded), *Working* lists the first

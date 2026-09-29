@@ -126,6 +126,31 @@ mod roundtrip {
         acc
     }
 
+    /// The worker that attaches is told the `TERM` the shell was given, the spec's own here, and
+    /// a name no terminfo entry could have is refused before anything runs.
+    #[tokio::test]
+    async fn attach_names_the_term_the_shell_was_given() {
+        let daemon = start().await;
+        let (mut client, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let spec = |term: String| SpawnSpec {
+            command: vec!["/bin/sh".into(), "-c".into(), "echo \"<$TERM>\"; sleep 60".into()],
+            cwd: None,
+            env: vec![("TERM".into(), term)],
+            size: size(),
+        };
+        let id = SessionId::new();
+        client.spawn(id, spec("xterm-256color".into())).await.unwrap();
+        let attached = client.attach(id).await.unwrap();
+        assert_eq!(attached.term, "xterm-256color");
+        let master = PtyMaster::new(attached.master).unwrap();
+        read_until(&master, b"<xterm-256color>", attached.backlog).await;
+
+        let long = "x".repeat(slopty_pty::pty::MAX_TERM_BYTES + 1);
+        let refused = client.spawn(SessionId::new(), spec(long)).await;
+        assert!(matches!(refused, Err(PtyError::Daemon(PtydError::Os(_)))), "{refused:?}");
+        client.close(id).await.unwrap();
+    }
+
     #[tokio::test]
     async fn spawn_attach_detach_reattach_close() {
         let daemon = start().await;

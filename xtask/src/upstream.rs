@@ -895,9 +895,27 @@ fn build_checks(name: &str) -> &'static [(&'static str, &'static str)] {
             ),
             ("check gpui + gpui_platform (host)", "cargo check --locked -p gpui -p gpui_platform"),
         ],
-        "gpui-kit" => {
-            &[("check gpui-kit", "cargo check --locked -p gpui-kit --features component,assets")]
-        }
+        // The whole workspace, story and examples included: a sync that built only the kit once
+        // pushed a head whose shell and story did not compile. `too_many_arguments` is allowed
+        // because upstream's own functions trip it.
+        "gpui-kit" => &[
+            (
+                "clippy gpui-kit workspace",
+                "cargo clippy --workspace --all-targets --locked -- --deny warnings -A \
+                 clippy::too_many_arguments",
+            ),
+            (
+                "test gpui-kit story + recipes",
+                "cargo test --locked -p gpui-component-story -p gpui-kit-recipes --features \
+                 gpui-component-story/test-support",
+            ),
+            // The shell hosts draw real windows, so they are what sees a change in when
+            // gpui-fast re-renders a view.
+            (
+                "test gpui-kit shells",
+                "cargo test --locked --no-fail-fast -p gpui-shell -p gpui-component-shell",
+            ),
+        ],
         // `take` points `GHOSTTY_SOURCE_DIR` at the ghostty tree it pins, so these build the
         // ghostty the pin names, and they are ghostty's check too: the rebased terminal must
         // build under the binding and pass the binding's tests before either is pushed.

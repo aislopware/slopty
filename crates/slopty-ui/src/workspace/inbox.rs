@@ -219,12 +219,7 @@ impl WorkspaceView {
     /// An agent waiting on the human: what it asks first (what the tool does where the hook
     /// named only the tool, never a bare "Bash"), then its tile, worker and directory, and how
     /// long it has waited, from the worker's stamp so a reconnect keeps it.
-    fn waiting_inbox_row(
-        &self,
-        waiting: super::agents::Waiting,
-        now_ms: u64,
-        cx: &gpui::App,
-    ) -> Row {
+    fn waiting_inbox_row(&self, waiting: super::agents::Waiting, now_ms: u64) -> Row {
         let session = waiting.session;
         let agent = self.agent_state(session);
         // What it asks, under the heading that already says it waits; its state only when it
@@ -233,7 +228,7 @@ impl WorkspaceView {
             .and_then(|a| agent_ask_line(a).or_else(|| Some(agent_status_word(a))))
             .filter(|w| !w.is_empty())
             .unwrap_or_else(|| Status::NeedsYou.label().to_owned());
-        let title = waiting.tile.and_then(|t| Some(self.tile_title(self.item(t)?, cx)));
+        let title = waiting.tile.and_then(|t| Some(self.tile_title(self.item(t)?)));
         let worker = self.workers.get(&waiting.worker).map(|w| w.name.as_str()).unwrap_or_default();
         let age = agent
             .map(|a| a.since_ms)
@@ -264,7 +259,7 @@ impl WorkspaceView {
         let all = self.inbox.all;
         let now_ms = wall_ms();
         let waiting: Vec<Row> =
-            self.drawn_waiting.iter().map(|w| self.waiting_inbox_row(*w, now_ms, cx)).collect();
+            self.drawn_waiting.iter().map(|w| self.waiting_inbox_row(*w, now_ms)).collect();
         let finished = self.finished_rows(all);
         let mut list: Vec<gpui::AnyElement> = Vec::new();
         if !waiting.is_empty() {

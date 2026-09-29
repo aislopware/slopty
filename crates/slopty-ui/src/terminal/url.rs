@@ -219,12 +219,19 @@ pub fn shell_word(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// The command that opens `path` in the shell's editor: `$EDITOR`, else `vi`, at `line`
-/// when one is known. Typed at a prompt, so the shell expands the variable itself.
+/// The shell line that opens `path` in a terminal editor, at `line` when one is known.
+///
+/// That is `$EDITOR`, else `vi`. Every session's `$EDITOR` is Slopty's own unless the person's
+/// shell files set one (`slopty_pty::shell_integration::EDITOR_SHIM`), and it edits in a file tile,
+/// which is what a file too large for a tile asks a terminal to avoid: then `$VISUAL`, else
+/// `vi`. The shell expands the variables itself.
 #[must_use]
 pub fn editor_command(path: &str, line: Option<u32>) -> String {
     let at = line.map(|l| format!("+{l} ")).unwrap_or_default();
-    format!("${{EDITOR:-vi}} {at}{}", shell_word(path))
+    format!(
+        "e=${{EDITOR:-vi}}; [ \"${{e##*/}}\" = slopty-editor ] && e=${{VISUAL:-vi}}; $e {at}{}",
+        shell_word(path)
+    )
 }
 
 /// Byte range of the URL in `text` that covers byte `offset`.
@@ -391,8 +398,23 @@ mod tests {
         );
         assert_eq!(path_at(&[&line], (0, 1)), None);
         assert_eq!(shell_word("it's a b"), "'it'\\''s a b'");
-        assert_eq!(editor_command("a b.rs", Some(3)), "${EDITOR:-vi} +3 'a b.rs'");
-        assert_eq!(editor_command("/x/y", None), "${EDITOR:-vi} '/x/y'");
+        // Run as the shell would, the editor an `echo` that says how it was called.
+        let run = |line: &str, editor: &str| {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", line])
+                .env("EDITOR", editor)
+                .env("VISUAL", "echo visual")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                .unwrap_or_default()
+        };
+        assert_eq!(run(&editor_command("a b.rs", Some(3)), "echo ed"), "ed +3 a b.rs");
+        assert_eq!(run(&editor_command("/x/y", None), "echo ed"), "ed /x/y");
+        assert_eq!(
+            run(&editor_command("/x/y", Some(2)), "/d/bin/slopty-editor"),
+            "visual +2 /x/y",
+            "Slopty's own editor is passed over"
+        );
     }
 
     #[test]

@@ -120,8 +120,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   first, and a failed tap send is logged without stopping the loop. The first checkpoint is
   taken right after the replay (the ring came to us with the master, so until then a second
   restart would have only the previous checkpoint), and a quiet-spell checkpoint is deferred
-  while the output stands inside an escape sequence or a UTF-8 character
-  (`slopty_engine::boundary::Boundary`), because it replaces the bytes before it and the rest
+  while the output stands inside an escape sequence or a UTF-8 character (libghostty's own
+  parser state, `GhosttyEngine::at_ground`, since 2026-09-30; a byte-level guess before),
+  because it replaces the bytes before it and the rest
   of that sequence would print as text; the byte threshold forces one regardless. The
   checkpoint is libghostty-vt's own VT formatter (`Format::Vt`,
   palette, modes, scrolling region, pwd, keyboard, style, hyperlink, protection, kitty keyboard,

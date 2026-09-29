@@ -124,6 +124,9 @@ fn line_text(text: &Rope, row: usize, rows: usize) -> String {
     line
 }
 
+/// How many line states a parse compares a new one with before keeping it apart.
+const RECENT_STATES: usize = 64;
+
 /// Parse `text` again where `lines` has a line not parsed yet, from that line (or the nearest
 /// line above it whose start is known) down to the first line after it that is parsed and
 /// starts in the state it started in before (`starts`): what follows is as it was.
@@ -138,6 +141,20 @@ fn reparse(
     let parsed = |row: usize| lines.get(row).is_some_and(Option::is_some);
     let known = |row: usize| starts.get(row).and_then(Option::as_ref);
     let mut out = Vec::new();
+    // Most lines start in one of a few states (at the top level, in a block, in a comment):
+    // a state met a moment ago is shared, not kept again for every line.
+    let mut recent: Vec<Arc<LineState>> = Vec::with_capacity(RECENT_STATES);
+    let mut keep = |state: &LineState| {
+        if let Some(met) = recent.iter().find(|met| ***met == *state) {
+            return Arc::clone(met);
+        }
+        let kept = Arc::new(state.clone());
+        if recent.len() == RECENT_STATES {
+            recent.remove(0);
+        }
+        recent.push(Arc::clone(&kept));
+        kept
+    };
     let mut row = 0;
     while let Some(dirty) = (row..rows).find(|&r| !parsed(r)) {
         let from = (1..=dirty).rev().find(|&r| known(r).is_some()).unwrap_or(0);
@@ -146,7 +163,7 @@ fn reparse(
         row = from;
         loop {
             let spans = parser.line(&line_text(text, row, rows), &mut state);
-            out.push((row, Arc::from(spans), Arc::new(state.clone())));
+            out.push((row, Arc::from(spans), keep(&state)));
             row = row.saturating_add(1);
             if row >= rows || (parsed(row) && known(row).is_some_and(|s| **s == state)) {
                 break;
@@ -434,6 +451,51 @@ mod tests {
             "MEASURE a keystroke's parse, 2 000 lines: the whole text {whole:?}, the lines it \
              reaches {incremental:?} ({rows} rows); the first parse, states kept, {first:?}"
         );
+        Ok(())
+    }
+
+    /// What the kept parse holds for the largest file still coloured: Rust source cut to
+    /// [`crate::file::COLOURED_BYTES`], the process's resident size before and after the
+    /// parse, and how many distinct line states it keeps. Run by hand.
+    #[test]
+    #[ignore = "measurement, run by hand with --ignored --nocapture"]
+    fn memory_of_a_parse_kept() -> Result<(), String> {
+        let syntax = Syntax::for_token("rust").ok_or("rust")?;
+        let one = include_str!("../workspace.rs");
+        let mut text = String::new();
+        for line in one.lines().cycle() {
+            if text.len() + line.len() >= crate::file::COLOURED_BYTES {
+                break;
+            }
+            text.push_str(line);
+            text.push('\n');
+        }
+        let rss = || -> Result<u64, String> {
+            let out = std::process::Command::new("/bin/ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .map_err(|e| e.to_string())?;
+            String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().map_err(|e| e.to_string())
+        };
+        // The grammars load once, on the first parse: not the parse's to keep.
+        std::hint::black_box(parsed("fn a() {}\n", syntax));
+        let before = rss()?;
+        let lists = parsed(&text, syntax);
+        let after = rss()?;
+        let states = lists.starts.iter().flatten().collect::<Vec<_>>();
+        let mut distinct: Vec<*const LineState> = states.iter().map(|s| Arc::as_ptr(s)).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        println!(
+            "MEASURE a parse kept, {} lines ({} bytes): resident {} KiB more, {} line states, {} \
+             held apart",
+            lists.lines.len(),
+            text.len(),
+            after.saturating_sub(before),
+            states.len(),
+            distinct.len()
+        );
+        std::hint::black_box(lists);
         Ok(())
     }
 

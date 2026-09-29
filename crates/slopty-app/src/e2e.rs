@@ -551,6 +551,7 @@ fn apply(
                     delta: ScrollDelta::Lines(point(dx, dy)),
                     modifiers: Modifiers::default(),
                     touch_phase: TouchPhase::Moved,
+                    momentum_phase: None,
                 }),
                 cx,
             );
@@ -883,7 +884,7 @@ impl Workspace {
             workers,
             adding: self.adding.is_some(),
             status,
-            notice: view.toast_text(cx),
+            notice: view.toast_text(),
             workspace: view.workspace_name(),
             overview: view.layout().overview_open(),
             dark: self.theme.variant() == slopty_theme::Variant::Dark,

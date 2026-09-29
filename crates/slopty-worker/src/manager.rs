@@ -431,6 +431,7 @@ impl Worker {
         let handle = session::spawn(SessionStart {
             id,
             master: attached.master,
+            term: attached.term,
             checkpoint: screen.unwrap_or(attached.checkpoint),
             backlog: attached.backlog,
             tap: self.inner.tap.clone(),

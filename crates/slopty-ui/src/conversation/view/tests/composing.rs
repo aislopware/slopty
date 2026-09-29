@@ -135,13 +135,12 @@ fn the_keys_an_input_method_reads_are_its_own_while_it_composes(cx: &mut TestApp
     let composing =
         |cx: &mut VisualTestContext| view.read_with(cx, |v, cx| v.composer.read(cx).is_composing());
     assert!(composing(cx), "the input method holds its word");
-    // Tab is left out: gpui-kit's field puts a tab over the marked word, which is the kit's
-    // to fix; the face's part, not picking the menu's row on it, is the same guard as Enter's.
-    for key in ["down", "up", "enter", "escape"] {
+    for key in ["down", "up", "tab", "enter", "escape"] {
         cx.simulate_keystrokes(key);
         cx.run_until_parked();
         assert_eq!(draft(&view, cx), "/com", "{key} mid-word leaves the draft as it is");
         assert_eq!(menu_names(&view, cx), listed, "{key} mid-word leaves the menu open");
+        assert_eq!(view.read_with(cx, |v, _| v.menu.selected), 0, "{key} left the menu's row");
     }
     assert!(
         seen.borrow().iter().all(|e| !matches!(e, FaceEvent::Submit { .. })),

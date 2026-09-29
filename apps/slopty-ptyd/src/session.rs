@@ -33,6 +33,8 @@ pub struct Session {
     pid: u32,
     /// When the child was spawned.
     started_ms: WallMs,
+    /// The terminfo name the child was given as `TERM`.
+    term: String,
     /// Slave device.
     tty: PathBuf,
     /// Master, shared with the reader task.
@@ -86,6 +88,8 @@ pub struct Handover {
     pub size: TermSize,
     /// When the child was spawned.
     pub started_ms: WallMs,
+    /// The terminfo name the child was given as `TERM`.
+    pub term: String,
 }
 
 impl std::fmt::Debug for Session {
@@ -108,7 +112,7 @@ impl Session {
     ) -> Result<Arc<Self>, slopty_pty::PtyError> {
         let pty = Pty::open(spec.size)?;
         let tty = pty.slave_path().to_path_buf();
-        let mut child = pty.spawn_with(spec, integration)?;
+        let slopty_pty::Spawned { mut child, term } = pty.spawn_with(spec, integration)?;
         let pid = child.id().unwrap_or(0);
         let started_ms = WallMs::now();
         let master = Arc::new(PtyMaster::new(pty.into_master())?);
@@ -124,6 +128,7 @@ impl Session {
             id,
             pid,
             started_ms,
+            term,
             tty,
             master,
             state: Mutex::new(state),
@@ -240,6 +245,7 @@ impl Session {
             dropped,
             size: state.size,
             started_ms: self.started_ms,
+            term: self.term.clone(),
         }
     }
 

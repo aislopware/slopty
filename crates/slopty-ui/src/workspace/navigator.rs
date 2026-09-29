@@ -889,12 +889,7 @@ impl WorkspaceView {
     /// ends in "Needs approval" already, and "Needs approval: …" under it said the state twice.
     /// An agent at rest gives what it last said and no state at all, "Idle · done" having read
     /// as two states; its age runs from when it came to rest, the one thing its row should say.
-    pub(super) fn tile_meta(
-        &self,
-        item: &Item,
-        now: SystemTime,
-        cx: &gpui::App,
-    ) -> (String, Option<Duration>) {
+    pub(super) fn tile_meta(&self, item: &Item, now: SystemTime) -> (String, Option<Duration>) {
         match &item.kind {
             ItemKind::Terminal { session } => {
                 let summary = self.summary(*session);
@@ -934,7 +929,7 @@ impl WorkspaceView {
             }
             // The header's place; a page named by its address says nothing more.
             ItemKind::Browser { .. } | ItemKind::File { .. } | ItemKind::Folder { .. } => {
-                (self.tile_place(item, cx).unwrap_or_default(), None)
+                (self.tile_place(item).unwrap_or_default(), None)
             }
             ItemKind::Window { .. } | ItemKind::Display { .. } => (String::new(), None),
             ItemKind::Note { text } => {
@@ -970,8 +965,8 @@ impl WorkspaceView {
                 let Some(item) = w.doc.get(tile.item) else { continue };
                 let (mark, unseen) = self.tile_marks(tile, item);
                 rollup.add(mark, unseen);
-                let title = self.tile_title(item, cx);
-                let (meta, age) = self.tile_meta(item, now, cx);
+                let title = self.tile_title(item);
+                let (meta, age) = self.tile_meta(item, now);
                 if !named && !matches(&query, &[&title, &meta]) {
                     continue;
                 }
@@ -1049,7 +1044,7 @@ impl WorkspaceView {
     /// An agent's row data: what its tile is called (else what the agent says), its words,
     /// and its worker and directory. A waiting agent's words are what it asks, under the
     /// section that already says it waits.
-    fn nav_agent(&self, at: Waiting, status: Status, cx: &gpui::App) -> NavAgent {
+    fn nav_agent(&self, at: Waiting, status: Status) -> NavAgent {
         let agent = self.agent_state(at.session);
         let calm = |a: &AgentEvent| matches!(a.status, AgentStatus::Idle | AgentStatus::Done);
         let words = agent
@@ -1067,7 +1062,7 @@ impl WorkspaceView {
             .unwrap_or_default();
         let title = at
             .tile
-            .and_then(|t| Some(self.tile_title(self.item(t)?, cx)))
+            .and_then(|t| Some(self.tile_title(self.item(t)?)))
             .unwrap_or_else(|| if words.is_empty() { "Agent".to_owned() } else { words.clone() });
         let cwd = self.session_tail(at.session);
         let worker = self.worker_name(at.worker);
@@ -1084,8 +1079,8 @@ impl WorkspaceView {
 
     /// The words an agent's row under *Working* says.
     #[cfg(test)]
-    pub(super) fn working_words(&self, at: Waiting, cx: &gpui::App) -> String {
-        self.nav_agent(at, Status::Working, cx).words
+    pub(super) fn working_words(&self, at: Waiting) -> String {
+        self.nav_agent(at, Status::Working).words
     }
 
     /// The filter's field, made once there is a window to make it in. ↩ in it goes to the
@@ -1226,7 +1221,7 @@ impl WorkspaceView {
         let agents = |list: &[Waiting], status: Status| -> Vec<NavAgent> {
             list.iter()
                 .filter(|at| !seen(at))
-                .map(|at| self.nav_agent(*at, status, cx))
+                .map(|at| self.nav_agent(*at, status))
                 .filter(|a| matches(&query, &[&a.title, &a.words, &a.place]))
                 .collect()
         };
@@ -1596,14 +1591,16 @@ impl WorkspaceView {
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(", ");
-        let time = (agent.since_ms > 0)
-            .then_some(self.ticked())
-            .flatten()
-            .map(|(_, now)| Duration::from_millis(now.saturating_sub(agent.since_ms)))
-            .and_then(|elapsed| match agent.status {
-                Status::Working => Some(turn_label(elapsed)),
-                _ => age_shown(elapsed),
-            })
+        // A turn's time counts by the readouts' clock, which runs only while something works;
+        // an age at rest by the wall, the navigator's own tick drawing it again as it changes.
+        let working = agent.status == Status::Working;
+        let now = if working { self.ticked().map(|(_, now)| now) } else { Some(now_ms()) };
+        let time = now
+            .filter(|_| agent.since_ms > 0)
+            .map(|now| Duration::from_millis(now.saturating_sub(agent.since_ms)))
+            .and_then(
+                |elapsed| if working { Some(turn_label(elapsed)) } else { age_shown(elapsed) },
+            )
             .map(|text| {
                 readout(theme, text).debug_selector(move || format!("{prefix}-time-{session}"))
             });

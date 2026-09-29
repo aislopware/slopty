@@ -334,13 +334,13 @@ fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppCo
     assert!(listed(cx), "and the navigator lists it under Working");
     // The row and its agent line under Working: what the face says, never the hook's "Idle".
     let lines = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| {
-            let meta = v.item(tile).map(|item| v.tile_meta(item, SystemTime::now(), cx).0);
+        view.read_with(cx, |v, _| {
+            let meta = v.item(tile).map(|item| v.tile_meta(item, SystemTime::now()).0);
             let words = v
                 .working()
                 .into_iter()
                 .find(|w| w.session == session)
-                .map(|at| v.working_words(at, cx));
+                .map(|at| v.working_words(at));
             (meta.unwrap_or_default(), words.unwrap_or_default())
         })
     };
@@ -486,7 +486,7 @@ fn a_first_prompt_renumbers_the_agents_that_read_alike(cx: &mut TestAppContext) 
     });
     cx.run_until_parked();
     let titles = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| [first, second].map(|t| v.tile_title(v.item(t).unwrap(), cx)))
+        view.read_with(cx, |v, _| [first, second].map(|t| v.tile_title(v.item(t).unwrap())))
     };
     assert_eq!(titles(cx), ["Claude Code", "Claude Code 2"]);
     cx.simulate_keystrokes("cmd-j");

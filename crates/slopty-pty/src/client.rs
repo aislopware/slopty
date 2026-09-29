@@ -31,6 +31,8 @@ pub struct Attached {
     pub size: TermSize,
     /// When ptyd spawned the child.
     pub started_ms: slopty_core::WallMs,
+    /// The terminfo name ptyd gave the child as `TERM`.
+    pub term: String,
 }
 
 /// A reply, with the fd that rode on it.
@@ -88,9 +90,11 @@ impl PtydClient {
     pub async fn attach(&mut self, id: SessionId) -> Result<Attached, PtyError> {
         match self.call(&PtydRequest::Attach { id }).await? {
             (
-                PtydEvent::Attached { checkpoint, backlog, dropped, size, started_ms, .. },
+                PtydEvent::Attached {
+                    checkpoint, backlog, dropped, size, started_ms, term, ..
+                },
                 Some(master),
-            ) => Ok(Attached { master, checkpoint, backlog, dropped, size, started_ms }),
+            ) => Ok(Attached { master, checkpoint, backlog, dropped, size, started_ms, term }),
             (other, _) => Self::unexpected(other),
         }
     }

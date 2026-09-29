@@ -622,7 +622,7 @@ fn notices_stack_two_in_the_corner_and_go(cx: &mut TestAppContext) {
         cx.executor().advance_clock(Duration::from_secs(1));
     }
     cx.run_until_parked();
-    let shown = view.read_with(cx, WorkspaceView::toast_texts);
+    let shown = view.read_with(cx, |v, _| v.toast_texts());
     assert_eq!(shown.len(), SHOWN);
     assert_eq!(shown, vec!["two".to_owned(), long.clone()], "the oldest went");
 
@@ -638,7 +638,7 @@ fn notices_stack_two_in_the_corner_and_go(cx: &mut TestAppContext) {
 
     cx.executor().advance_clock(SAY_FOR);
     cx.run_until_parked();
-    assert!(view.read_with(cx, WorkspaceView::toast_texts).is_empty(), "gone after 6 s");
+    assert!(view.read_with(cx, |v, _| v.toast_texts()).is_empty(), "gone after 6 s");
 }
 
 /// The closed tile's notice offers it back, and its Undo does what ⌘Z does.
@@ -789,9 +789,8 @@ fn tiles_that_read_alike_are_numbered(cx: &mut TestAppContext) {
     let laptop = connect(&view, cx, 2, "laptop");
     let other = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
     cx.run_until_parked();
-    let titles = view.read_with(cx, |v, cx| {
-        [first, second, other].map(|t| v.tile_title(v.item(t).unwrap(), cx))
-    });
+    let titles =
+        view.read_with(cx, |v, _| [first, second, other].map(|t| v.tile_title(v.item(t).unwrap())));
     assert_eq!(titles, ["Terminal", "Terminal 2", "Terminal"]);
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Heading", Some("terminal Terminal 2"))), "{nodes:#?}");
@@ -875,9 +874,9 @@ fn a_note_keeps_its_name_and_counts_its_tasks(cx: &mut TestAppContext) {
     let fake = connect(&view, cx, 1, "studio");
     let text = "# Release\n- [x] build\n- [ ] tag\n- [ ] ship".to_owned();
     let note = arrives(&view, cx, &fake, ItemKind::Note { text }, 1);
-    let title = view.update(cx, |v, cx| {
+    let title = view.update(cx, |v, _| {
         let item = v.item(note).expect("the note").clone();
-        v.tile_title(&item, cx)
+        v.tile_title(&item)
     });
     assert_eq!(title, "Release");
     let nodes = tree(cx);
@@ -974,7 +973,7 @@ fn chrome_moves_and_holds_still_under_reduce_motion(cx: &mut TestAppContext) {
     cx.executor().advance_clock(SAY_FOR);
     cx.run_until_parked();
     assert!(cx.debug_bounds("said").is_some(), "time's up: it fades where it stands");
-    assert!(view.read_with(cx, WorkspaceView::toast_text).is_none(), "and is no longer up");
+    assert!(view.read_with(cx, |v, _| v.toast_text()).is_none(), "and is no longer up");
     cx.executor().advance_clock(Duration::from_secs(1));
     cx.run_until_parked();
     assert!(cx.debug_bounds("said").is_none(), "then it goes");

@@ -79,8 +79,8 @@ fn a_shell_is_titled_by_what_it_runs_then_its_own_title_then_where_it_is(cx: &mu
     let session = SessionId::new();
     let tile = opens_in(&view, cx, &fake, session, fake.me, 1, Some("/Volumes/Data/me"));
     let said = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| {
-            let place = v.item(tile).and_then(|item| v.tile_place(item, cx));
+        view.read_with(cx, |v, _| {
+            let place = v.item(tile).and_then(|item| v.tile_place(item));
             (v.terminal_title(session), place)
         })
     };
@@ -228,13 +228,13 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
 
     view.update_in(cx, |v, window, cx| v.add_window(&AddWindow, window, cx));
     cx.run_until_parked();
-    let notices = view.read_with(cx, WorkspaceView::toast_texts);
+    let notices = view.read_with(cx, |v, _| v.toast_texts());
     assert!(notices.iter().any(|n| n.contains("Screen Recording is off")), "{notices:?}");
     // A Linux worker has no capture at all: ⌘O says so, not that a Mac's grant is off.
     view.update_in(cx, |v, _w, cx| v.set_worker_caps(key, linux, cx));
     view.update_in(cx, |v, window, cx| v.add_window(&AddWindow, window, cx));
     cx.run_until_parked();
-    let notices = view.read_with(cx, WorkspaceView::toast_texts);
+    let notices = view.read_with(cx, |v, _| v.toast_texts());
     assert!(notices.iter().any(|n| n.contains("it has no screen capture")), "{notices:?}");
 
     view.update_in(cx, |v, _w, cx| v.toggle_hosts(cx));
@@ -306,8 +306,8 @@ fn the_palette_lists_tiles_by_recency_with_the_focused_last(cx: &mut TestAppCont
     }
     cx.run_until_parked();
     let sessions = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
-        view.update_in(cx, |v, _w, cx| {
-            v.session_rows(cx).into_iter().map(|r| r.session).collect::<Vec<_>>()
+        view.read_with(cx, |v, _| {
+            v.session_rows().into_iter().map(|r| r.session).collect::<Vec<_>>()
         })
     };
     assert_eq!(sessions(&view, cx), vec![a, b, c], "the latest first, the focused last");
@@ -339,9 +339,9 @@ fn overview_labels_say_state_place_and_worker(cx: &mut TestAppContext) {
     let meta = cx.debug_bounds(selector("shapes-meta", first)).expect("one meta line");
     assert!(meta.left() >= label.right() - px(0.5), "after the name: {meta:?} {label:?}");
     assert!((meta.center().y - label.center().y).abs() < px(1.0), "on its line");
-    let lines = view.read_with(cx, |v, cx| {
+    let lines = view.read_with(cx, |v, _| {
         let item = v.item(shells[1].1).cloned();
-        item.map(|item| v.tile_meta(&item, std::time::SystemTime::now(), cx).0)
+        item.map(|item| v.tile_meta(&item, std::time::SystemTime::now()).0)
     });
     assert_eq!(lines.as_deref(), Some("oss/slopty"));
     let ix = view.read_with(cx, |v, _| v.layout.active_workspace());

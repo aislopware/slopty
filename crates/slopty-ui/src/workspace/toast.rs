@@ -145,11 +145,11 @@ impl WorkspaceView {
     }
 
     /// What a notice says.
-    fn toast_line(&self, what: &ToastKind, cx: &gpui::App) -> Option<String> {
+    fn toast_line(&self, what: &ToastKind) -> Option<String> {
         Some(match what {
             ToastKind::Pointed { name, tile } => {
                 let item = self.item(*tile)?;
-                format!("{name} points at {}", self.tile_title(item, cx))
+                format!("{name} points at {}", self.tile_title(item))
             }
             ToastKind::Closed { title, .. } => format!("Closed {title}"),
             ToastKind::Said(text) => text.clone(),
@@ -158,9 +158,9 @@ impl WorkspaceView {
 
     /// The text of the newest notice up now, for tests and the self-test dump.
     #[must_use]
-    pub fn toast_text(&self, cx: &gpui::App) -> Option<String> {
+    pub fn toast_text(&self) -> Option<String> {
         let shown = self.toast.as_ref()?.shown.iter().rev().find(|shown| !shown.leaving)?;
-        self.toast_line(&shown.what, cx)
+        self.toast_line(&shown.what)
     }
 
     /// The "closed" toast goes with its offer: `seq` for one closing, `None` for any.
@@ -180,7 +180,7 @@ impl WorkspaceView {
     }
 
     pub(super) fn point_at(&mut self, tile: TileRef, cx: &mut Context<Self>) {
-        let Some(title) = self.item(tile).map(|i| self.tile_title(i, cx)) else { return };
+        let Some(title) = self.item(tile).map(|i| self.tile_title(i)) else { return };
         self.send(tile.worker, ClientMsg::Point { item: tile.item });
         self.show_toast(ToastKind::Said(format!("Pointed the others at {title}")), cx);
     }
@@ -190,7 +190,7 @@ impl WorkspaceView {
     fn render_one(&self, shown: &Shown, cx: &Draw<'_, Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let line = self.toast_line(&shown.what, cx)?;
+        let line = self.toast_line(&shown.what)?;
         let action = |id: &'static str, label: &'static str| {
             let el = div()
                 .id(id)
@@ -336,13 +336,9 @@ impl WorkspaceView {
 impl WorkspaceView {
     /// The texts of every notice up now, oldest first.
     #[must_use]
-    pub(super) fn toast_texts(&self, cx: &gpui::App) -> Vec<String> {
+    pub(super) fn toast_texts(&self) -> Vec<String> {
         self.toast.as_ref().map_or_else(Vec::new, |t| {
-            t.shown
-                .iter()
-                .filter(|s| !s.leaving)
-                .filter_map(|s| self.toast_line(&s.what, cx))
-                .collect()
+            t.shown.iter().filter(|s| !s.leaving).filter_map(|s| self.toast_line(&s.what)).collect()
         })
     }
 }

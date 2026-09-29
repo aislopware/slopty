@@ -466,24 +466,22 @@ impl WorkspaceView {
     /// palette line: where a shell is, the folder a file is in, a page's address when the
     /// title is not it, how far a note's tasks got. A window or display has none. Kept with
     /// the titles ([`Self::number_twins`]).
-    pub(super) fn tile_place(&self, item: &Item, cx: &App) -> Option<String> {
+    pub(super) fn tile_place(&self, item: &Item) -> Option<String> {
         match self.places.get(&item.id) {
             Some(place) => place.clone(),
-            None => self.derived_place(item, &self.derived_title(item, cx), cx),
+            None => self.derived_place(item, &self.derived_title(item)),
         }
     }
 
     /// [`Self::tile_place`] worked out, for an item whose derived title is `title`.
-    fn derived_place(&self, item: &Item, title: &str, cx: &App) -> Option<String> {
+    fn derived_place(&self, item: &Item, title: &str) -> Option<String> {
         match &item.kind {
             ItemKind::Terminal { session } => self.shell_context(*session, title),
             ItemKind::File { path } | ItemKind::Folder { path } => file_dir(path),
             // The host alone: the path is the page's business, and the title names the page.
-            ItemKind::Browser { .. } => self.browsers.get(&item.id).and_then(|v| {
-                let v = v.read(cx);
-                let host = v.short_url().split('/').next().unwrap_or_default();
-                (!host.is_empty() && (item.name.is_some() || !v.page().title.trim().is_empty()))
-                    .then(|| host.to_owned())
+            ItemKind::Browser { .. } => self.page_facts(item.id).and_then(|page| {
+                let host = page.short_url.split('/').next().unwrap_or_default();
+                (!host.is_empty() && (item.name.is_some() || page.titled)).then(|| host.to_owned())
             }),
             ItemKind::Note { text } => {
                 self.note_progress_of(item.id, text).map(|(done, total)| note_done(done, total))
@@ -494,7 +492,7 @@ impl WorkspaceView {
 
     /// What a header says without a name: the shell's title, the window's, "Display N", a
     /// note's first line, a file's `name · parent`.
-    pub(super) fn derived_title(&self, item: &Item, cx: &App) -> String {
+    pub(super) fn derived_title(&self, item: &Item) -> String {
         match &item.kind {
             ItemKind::Terminal { session } => self.terminal_title(*session),
             ItemKind::Window { window } => {
@@ -508,21 +506,20 @@ impl WorkspaceView {
             ItemKind::File { path } => file_title(path),
             ItemKind::Folder { path } => folder_title(path),
             ItemKind::Browser { url } => self
-                .browsers
-                .get(&item.id)
-                .map_or_else(|| crate::browser::short_url(url).to_owned(), |v| v.read(cx).title()),
+                .page_facts(item.id)
+                .map_or_else(|| crate::browser::short_url(url).to_owned(), |p| p.title.clone()),
         }
     }
 
     /// What a header says: the name the human gave the tile, else its derived title, as it
     /// was last worked out when the workspace changed.
     #[must_use]
-    pub fn tile_title(&self, item: &Item, cx: &App) -> String {
+    pub fn tile_title(&self, item: &Item) -> String {
         if let Some(name) = &item.name {
             return name.clone();
         }
         let derived = self.derived.get(&item.id);
-        let title = derived.map_or_else(|| self.derived_title(item, cx), String::clone);
+        let title = derived.map_or_else(|| self.derived_title(item), String::clone);
         match self.twins.get(&item.id) {
             Some(n) => format!("{title} {n}"),
             None => title,
@@ -538,14 +535,14 @@ impl WorkspaceView {
     /// derives every item's title. Every item's derived title and place are kept with the
     /// numbers, for every header, row and line to read, and so that a program's new title that
     /// leaves its tile's as it was is nobody's news ([`Self::retitled`]).
-    pub(super) fn number_twins(&mut self, cx: &App) {
+    pub(super) fn number_twins(&mut self) {
         let derived: HashMap<ItemId, String> =
-            self.items().map(|(_, item)| (item.id, self.derived_title(item, cx))).collect();
+            self.items().map(|(_, item)| (item.id, self.derived_title(item))).collect();
         let places = self
             .items()
             .map(|(_, item)| {
                 let title = derived.get(&item.id).map_or("", String::as_str);
-                (item.id, self.derived_place(item, title, cx))
+                (item.id, self.derived_place(item, title))
             })
             .collect();
         let mut seen: HashMap<(WorkerKey, &str, &str), u32> = HashMap::new();
@@ -568,7 +565,7 @@ impl WorkspaceView {
     /// follows it: a path, a prompt or the shell's own name leave it as it was.
     pub(super) fn retitled(&self, session: SessionId, cx: &mut Context<Self>) {
         let Some(item) = self.tile_of_session(session).and_then(|t| self.item(t)) else { return };
-        let title = self.derived_title(item, cx);
+        let title = self.derived_title(item);
         if self.derived.get(&item.id) != Some(&title) {
             cx.notify();
         }
@@ -664,7 +661,7 @@ impl WorkspaceView {
         let id = item.id;
         let worker_up = self.workers.get(&tile.worker).is_some_and(|w| w.link.is_some());
 
-        let title = self.tile_title(item, cx);
+        let title = self.tile_title(item);
         let label = SharedString::from(title.clone());
         let header = self.render_header(placed, item, title, chrome, cx);
         let body = self.render_body(placed, item, chrome, window, cx);
@@ -835,7 +832,7 @@ impl WorkspaceView {
                 .text_color(hsla(s.text_secondary))
                 .font_family(theme.typography.ui_family.clone())
                 .child(crate::palette::status_slot(theme, kind_icon(item, false), None, muted, k))
-                .child(SharedString::from(self.tile_title(item, cx)))
+                .child(SharedString::from(self.tile_title(item)))
         });
         let ghost = div()
             .debug_selector(move || format!("closing-{}", id.as_uuid()))
@@ -1046,13 +1043,13 @@ impl WorkspaceView {
         // is, with no separator: the colour tells it from the title.
         let place = match &item.kind {
             ItemKind::Terminal { .. } => {
-                self.tile_place(item, cx).and_then(|p| place_beside(p, &title))
+                self.tile_place(item).and_then(|p| place_beside(p, &title))
             }
             // How far a note's tasks got is a readout at the end, as a command's time is. The
             // path bar right under a folder's header is where it is, every folder above it a
             // click away; the parent beside the title said it twice, 20 pt apart.
             ItemKind::Note { .. } | ItemKind::Folder { .. } => None,
-            _ => self.tile_place(item, cx),
+            _ => self.tile_place(item),
         };
         // A directory keeps the folder it ends in.
         let path = matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::File { .. });
@@ -1118,10 +1115,7 @@ impl WorkspaceView {
             });
         // A file with an edit not yet on disk says so with a dot after its name, as an editor's
         // tab does; saving keeps the dot until the worker has written it.
-        let unsaved = self.files.get(&id).is_some_and(|v| {
-            let v = v.read(cx);
-            v.dirty() || v.saving()
-        });
+        let unsaved = self.file_facts(id).unsaved;
         let unsaved = unsaved.then(|| {
             div()
                 .id("unsaved")
@@ -1285,7 +1279,7 @@ impl WorkspaceView {
         chrome: Chrome,
         cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
-        let url = self.browsers.get(&tile.item)?.read(cx).page().url.clone();
+        let url = self.page_facts(tile.item)?.url.clone();
         let (scheme, host, rest) = crate::browser::address_parts(&url)?;
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -1368,7 +1362,7 @@ impl WorkspaceView {
             let slot =
                 crate::palette::status_slot(theme, kind_icon(item, agent), status, hsla(ink), k)
                     .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
-            let title = self.tile_title(item, cx);
+            let title = self.tile_title(item);
             let label = SharedString::from(title.clone());
             let name = self.header_name(tab, id, title, chrome);
             let close = kit::icon_button_at(
@@ -1681,7 +1675,7 @@ impl WorkspaceView {
                 if let Some(view) = self.browsers.get(&id).cloned() {
                     let uuid = id.as_uuid();
                     let k = chrome.k;
-                    if view.read(cx).page().can_go_back {
+                    if self.page_facts(id).is_some_and(|p| p.can_go_back) {
                         let target = view.clone();
                         actions.push(
                             kit::icon_button_at(
@@ -1711,7 +1705,7 @@ impl WorkspaceView {
             // The way up is the header's bare icon button, as a page's way back is.
             ItemKind::Folder { .. } => {
                 if let Some(view) = self.folders.get(&id).cloned()
-                    && view.read(cx).parent().is_some()
+                    && self.folder_facts(id).has_parent
                 {
                     actions.push(
                         kit::icon_button_at(
@@ -2202,11 +2196,11 @@ impl WorkspaceView {
     /// "Opening Safari" and the worker under it, one composed block in the body's middle. The
     /// mark is the body's, not the header's, until the first frame: a sentence alone in the
     /// void with a spinner far above it read as two things waiting.
-    fn opening_body(&self, tile: TileRef, item: &Item, k: f32, cx: &App) -> gpui::AnyElement {
+    fn opening_body(&self, tile: TileRef, item: &Item, k: f32) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let id = item.id;
-        let what = self.derived_title(item, cx);
+        let what = self.derived_title(item);
         let worker = self.workers.get(&tile.worker).map(|w| w.name.clone());
         let said = SharedString::from(match &worker {
             Some(worker) => format!("Opening {what} on {worker}…"),
@@ -2348,7 +2342,7 @@ impl WorkspaceView {
                     None if self.parked.contains(&item.id) => {
                         self.waiting_body(item, Wait::Lasting(PAUSED.into()), k)
                     }
-                    None => self.opening_body(placed.tile, item, k, cx),
+                    None => self.opening_body(placed.tile, item, k),
                 }
             }
             ItemKind::Note { .. } => match self.notes.get(&item.id) {

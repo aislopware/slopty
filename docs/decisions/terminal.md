@@ -2470,3 +2470,116 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       - `an_editor_with_no_client_to_show_it_is_vi_here`
   - **Pending, UI side** (`.research/ui-followups-worker-wave.md`): declaring the caps; the
     open, offer and edit handling; focus reports; the file card's "edit" pill.
+
+- ✅ **The libghostty-rs PR stack is taken whole, our commits on top; frames read a row's cells
+  at once** (2026-09-30). Upstream opened twelve stacked PRs (#84–#95, on #83, #98 and #99). A
+  stack is taken or left from the bottom up, and none of them was worth breaking it for, so
+  the fork's `master` is now upstream `stack/ghostty-examples` with our commits rebased onto
+  it (fork `fe69e05`, then `f050a4c` for the ghostty pin below). Four of ours were already
+  upstream and are dropped: the zeroed `Bytes` (#83), the render hold callback and the OSC 22
+  pointer shape (#99), and the OSC parser's NULL command and C-string title (#93). The old head
+  `6c2bf45` stays reachable as `archive/master-2026-09-30-pre-stack`, since the staged
+  Cargo.lock names it. What each PR is to Slopty:
+  - **#84, ghostty `f9e8270`: taken, pin kept on our fork.** `f9e8270` is `0538f7535` plus a
+    Windows DLL constructor, so the generated bindings are byte for byte ours. `GHOSTTY_REPO`
+    stays `aislopware/ghostty`.
+  - **#85, bulk render state: taken, and it is the win.** `build_frame` took every field of
+    every cell of a dirty row through the cell iterator, one call into libghostty each. It
+    now takes the row's raw cells in one read (`cells_raw`) and positions the iterator only
+    for a style or a cluster; the cursor comes in one call (`Snapshot::cursor`). Row ids,
+    overscan, `next_dirty` and `clean` are not used: the engine never scrolls the viewport,
+    every row is visited anyway to keep the viewers' record, and the per-row `set_dirty` it
+    already does is what `clean` would do.
+  - **Finished ourselves: the packed cell decoded in Rust** (fork `32963c5`, `ce05b45`,
+    `5ed65f3`, `fe69e05`). ghostty's `screen.h` documents the cell as a packed `u64` whose
+    layout `ghostty_type_json()` describes for the linked build, and supports decoding it
+    from there instead of `ghostty_cell_get` per field. `screen::CellLayout` reads the
+    positions from the manifest once (a small JSON reader in the fork, no dependency) and
+    refuses one it cannot read, `Cell::fields` falls back to the getters then, and debug
+    builds check every decoded cell against the getters, so every engine test is also a
+    layout test. Together with #85: a scroll frame −44 %, a keystroke's frame −38 %, a 4096-row
+    history fetch −17 % (MEASUREMENTS, "frames read a row's cells at once").
+  - **#91, streaming formatter: taken.** `plain_rows` (search's copy of the history, the text
+    reads) formats into its own `Vec` and skips the copy out of libghostty's buffer; the
+    "blank rows format to nothing, reported as out of memory" workaround goes with it. Search
+    formatting −10 %. The VT checkpoint still formats into a buffer, since it edits the
+    output in the middle (margins, row padding) before it is sent.
+  - **#87, ground state and protocol settings: taken.** The prompt clear before a reflow asked a
+    byte heuristic whether the stream was at ground (`redraw::ends_at_ground`, wrong towards
+    "open", and wrong for a sequence cancelled by CAN or SUB); it asks libghostty's parser now
+    (`vt_ground`), and the heuristic is deleted. The worker's checkpoint pacing asks the same
+    (`GhosttyEngine::at_ground`) in place of `boundary::Boundary`, a byte-level guess, now
+    deleted, that also started from ground in a new worker whatever the replayed backlog
+    ended in. A kitty
+    clipboard write (OSC 5522) is capped at `MAX_OSC52_BYTES` while it is still arriving
+    (`set_clipboard_write_max_bytes`); libghostty buffered up to 64 MiB of one before, only
+    for the session to drop it. `set_terminfo_name` answers XTGETTCAP `TN` with the `TERM`
+    the shell really has. `Pty::spawn_with` decides it once (the spec's own `TERM`, else
+    `default_term()`) and returns it with the child. ptyd keeps it per session and hands it
+    over in `PtydEvent::Attached` beside `started_ms`, and the worker sets it from
+    `SessionStart::term`, never recomputing. A worker cannot know what an older shell was
+    told: `default_term()` changes once the terminfo is installed, and a spec may set its own.
+    A `TERM` longer than `MAX_TERM_BYTES` (255, `NAME_MAX`, since a terminfo entry is a file
+    named after its terminal) is refused at spawn, which keeps `Attached` inside its envelope.
+    Tests: `the_term_reported_is_the_one_the_child_sees` (slopty-pty),
+    `attach_names_the_term_the_shell_was_given` (ptyd), and
+    `an_adopted_shell_is_answered_for_the_term_ptyd_gave_it` (worker against a real ptyd, a
+    shell spawned as `xterm-256color` whichever name this host would give). `vt_write_until_ground` and
+    `cursor_at_prompt` have no user: the engine writes its own sequences only at a prompt, and
+    its prompt state comes from its mark scanner.
+  - **#86, synchronous clipboard reads: taken in the binding, not answered.** "OSC 52: write
+    only" stands. The callback runs on the session's thread with the VT stream stopped until
+    it replies, and the clipboard that would answer is on a client a network away behind a
+    prompt. Without the callback libghostty answers nothing and reports mode 5522 as
+    unrecognised, so kitty paste events stay off and programs fall back to bracketed paste.
+  - **#89, `Terminal::paste`: taken in the binding, not used.** It chooses between a kitty paste
+    event and bracketed text from the terminal's modes; without #86 it is `paste::encode` with
+    its output routed through the pty-write callback, so `encode_paste` keeps `encode`. Its
+    injection check is done by the client before it sends the paste
+    (`slopty_ui::terminal::view::paste_is_safe`), against the modes of the last frame it had.
+  - **#88, search wrapper: taken in the binding, not used.** The 2026-09-12 ruling on native
+    search holds: its matching still folds ASCII case only.
+  - **#92, unsupported-sequence callbacks: taken in the binding, still rejected** for the
+    reasons in "The prompt-mark scanner reads OSCs as libghostty does".
+  - **#90, decoded snapshot continuation: taken, and the binary snapshot measured.** A
+    snapshot keeps both screens and an unfinished sequence, which the VT checkpoint cannot, and
+    writes 3.3 times faster (580 µs against 1.9 ms for 10 000 lines). It is also three times
+    the bytes (2.07 MB against 0.69 MB) held in ptyd and sent at every checkpoint, and restores
+    slower (2.6 ms against 2.3 ms). ⏸ Revisit when the checkpoint's own workarounds (primary
+    screen kept for the alternate one, mode resets, row padding) cost more than the bytes, or
+    the format shrinks; restore lives in the worker and ptyd.
+  - **#93 OSC parser commands, #94 secure random source, #95 examples workspace: taken, no
+    use.** The engine does not run libghostty's standalone OSC parser, and macOS has a random
+    source.
+  - **Follow-up the same day: a scrolled row that reads as its line is kept.** Every line of
+    output at the bottom moves the viewport's pin, and libghostty then marks all rows dirty and
+    clears the page's row dirty bits, so row ids (#85) and the dirty flag cannot tell a row that
+    moved from one that changed. The engine keeps a print of each held line instead: the raw
+    cells and the wrap and prompt flags it was built from. A dirty row equal to its print keeps
+    the held line without being built or compared; its styles are resolved again first, since
+    ghostty frees a style id when no cell uses it and a new style can take it while a cell's
+    bits come back the same (`a_scroll_ships_what_changed_and_keeps_what_did_not` fails
+    without that check). Rows with links, clusters, placeholders or a forced mark are always
+    built. A scroll frame is −75 % (80×24) and −88 % (200×60), a keystroke's +3 %.
+  Tests: fork `decoded_cells_match_the_getters` (every content tag, width, semantic content,
+  a style, a link and a protected cell),
+  `a_manifest_that_does_not_describe_the_cell_is_refused`, the manifest reader's own; engine
+  `ground_is_where_the_parser_stands`, the CAN case in
+  `a_prompt_the_shell_redraws_is_cleared_on_resize` (fails with the byte heuristic),
+  `a_kitty_clipboard_write_is_bounded_by_the_osc52_ceiling` (EFBIG past the ceiling),
+  `xtgettcap_names_the_terminfo_entry`; worker `session_actor`
+  `xtgettcap_is_answered_with_the_shells_term`, and the existing
+  `a_checkpoint_waits_for_the_end_of_an_escape_sequence` over the new ground check.
+
+- ✅ **A pending wrap does not survive a resize that makes room: ghostty #14458 carried**
+  (2026-09-30). A line that ends in the last column leaves the cursor waiting to wrap. When a
+  resize then left room after it, ghostty kept the wait, so the next character started a new
+  row: `123456789|`, widened, then `X`, printed `X` on the next row; narrowed to 8 columns it
+  left a blank row. Tiles resize all the time (strip springs, window drags, a remote size),
+  so output that ends at the edge hits it. fornwall's PR clears the wait and moves the cursor
+  to where the next character goes, as ghostty already did for the saved cursor. It is
+  cherry-picked onto `aislopware/ghostty`, which is now rebased onto ghostty `f9e827093`
+  (`038609517`; the old `7d0734aa8` is kept as `archive/main-2026-09-30-pre-f9e8270`), and the
+  commit says to drop it when the PR merges. `vendor/ghostty` and the binding's
+  `GHOSTTY_COMMIT` point at `038609517`; the headers did not move. Test: engine
+  `a_pending_wrap_does_not_survive_a_resize_that_makes_room` (both examples from the PR).

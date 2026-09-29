@@ -148,7 +148,7 @@ impl WorkspaceView {
             size(px(opened.width), px(opened.height)),
             cx,
         );
-        let title = self.item_by_id(item).map(|i| self.tile_title(&i, cx)).unwrap_or_default();
+        let title = self.item_by_id(item).map(|i| self.tile_title(&i)).unwrap_or_default();
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {

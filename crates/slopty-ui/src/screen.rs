@@ -262,26 +262,22 @@ const LOCAL_HOLD: Duration = Duration::from_millis(200);
 const FOLD: Duration = Duration::from_micros(8_333);
 
 /// How long a fling may go quiet before the worker is told its momentum ended. Both platforms say
-/// so themselves, so this is the backstop for a lost or dropped close. Momentum events arrive
-/// about a frame apart, which makes this several frames of silence.
+/// so themselves (`ScrollWheelEvent::momentum_phase`), so this is the backstop for a lost or
+/// dropped close. Momentum events arrive about a frame apart, which makes this several frames of
+/// silence.
 const MOMENTUM_GAP: Duration = Duration::from_millis(120);
 
-/// Where a scroll gesture over the picture has got to.
-///
-/// gpui reads `NSEvent.phase` and never `momentumPhase`, so a fling's momentum reaches us as
-/// plain `Moved` events *after* `Ended`. Forwarding those as more of the same gesture tells the
-/// remote app the scroll ended and then went on changing, which is not a thing macOS does. iOS
-/// coasts through its own touch recognizer, which sends the same run of `Moved` and then closes
-/// it with a second `Ended`.
+/// Where a scroll gesture over the picture has got to: what the worker has been told is open,
+/// so a second `Started` is not a second gesture and a fling whose close was lost is closed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum Scrolling {
-    /// No gesture in flight. A mouse wheel notch never leaves this state.
+    /// Nothing open. A mouse wheel notch never leaves this state.
     #[default]
     Idle,
     /// Between `Started` and `Ended`: the fingers are down.
     Fingers,
-    /// After `Ended`: everything further is momentum, `begun` once the first has been sent.
-    Momentum { begun: bool },
+    /// The fingers have lifted and the momentum they left is still coasting.
+    Momentum,
 }
 
 /// One stream on screen.
@@ -396,8 +392,7 @@ pub struct ScreenView {
     /// What the worker says its capture target is doing (`ScreenEvent::Source`). A target that
     /// has drawn nothing is not a broken stream, and the placeholder should not claim it is.
     source: SourceState,
-    /// Where the scroll gesture over the picture has got to, so the worker is sent the phases
-    /// macOS would have sent rather than the ones gpui reports.
+    /// Where the scroll gesture over the picture has got to.
     scrolling: Scrolling,
     /// Fires [`MOMENTUM_GAP`] after the last momentum event to close the fling. Replaced (so
     /// cancelled) by every event that keeps it alive.
@@ -1960,11 +1955,10 @@ impl ScreenView {
         if precise && ev.touch_phase == TouchPhase::Started {
             self.end_momentum(x, y, mods);
         }
-        let still = dx.abs() <= f32::EPSILON && dy.abs() <= f32::EPSILON;
-        let (phase, momentum) = self.scroll_phases(precise, ev.touch_phase, still);
+        let (phase, momentum) = self.scroll_phases(precise, ev.touch_phase, ev.momentum_phase);
         self.input(ScreenInput::Scroll { dx, dy, precise, phase, momentum, x, y, mods });
         if precise {
-            if matches!(self.scrolling, Scrolling::Momentum { .. }) {
+            if self.scrolling == Scrolling::Momentum {
                 self.arm_momentum_end(x, y, mods, cx);
             } else {
                 self.momentum_end = None;
@@ -1979,49 +1973,40 @@ impl ScreenView {
         &mut self,
         precise: bool,
         touch: TouchPhase,
-        still: bool,
+        momentum: Option<TouchPhase>,
     ) -> (ScrollPhase, ScrollPhase) {
+        const fn phase(touch: TouchPhase) -> ScrollPhase {
+            match touch {
+                TouchPhase::Started => ScrollPhase::Began,
+                TouchPhase::Moved => ScrollPhase::Changed,
+                TouchPhase::Ended => ScrollPhase::Ended,
+                TouchPhase::Cancelled => ScrollPhase::Cancelled,
+            }
+        }
         if !precise {
             return (ScrollPhase::None, ScrollPhase::None);
         }
+        if let Some(momentum) = momentum {
+            self.scrolling = match momentum {
+                TouchPhase::Started | TouchPhase::Moved => Scrolling::Momentum,
+                TouchPhase::Ended | TouchPhase::Cancelled => Scrolling::Idle,
+            };
+            return (ScrollPhase::None, phase(momentum));
+        }
         match (touch, self.scrolling) {
-            // macOS closes a coast with an event that moves nothing and carries
-            // `momentumPhase = End`. Its `phase()` is none, so gpui hands it over as a plain
-            // `Moved`: a momentum event that has stopped moving *is* the end, and reading it
-            // here is a frame or two earlier than waiting out `MOMENTUM_GAP` for the same news.
-            (TouchPhase::Moved, Scrolling::Momentum { begun: true }) if still => {
-                self.scrolling = Scrolling::Idle;
-                (ScrollPhase::None, ScrollPhase::Ended)
-            }
             // gpui reads `NSEventPhaseMayBegin` and `NSEventPhaseBegan` as the same `Started`, so
             // fingers that rest before they push open the gesture twice. The second one is the
             // same gesture; telling the worker it began again would restart its rubber-banding.
-            (TouchPhase::Started, Scrolling::Fingers) => (ScrollPhase::Changed, ScrollPhase::None),
+            (TouchPhase::Started, Scrolling::Fingers) | (TouchPhase::Moved, _) => {
+                (ScrollPhase::Changed, ScrollPhase::None)
+            }
             (TouchPhase::Started, _) => {
                 self.scrolling = Scrolling::Fingers;
                 (ScrollPhase::Began, ScrollPhase::None)
             }
-            // iOS coasts on its own recognizer and closes the coast with one more `Ended`. The
-            // fingers lifted a fling ago, so this ends the momentum, not the gesture; reading it
-            // as a second gesture end would leave the momentum open forever.
-            (TouchPhase::Ended, Scrolling::Momentum { begun: true }) => {
+            (TouchPhase::Ended | TouchPhase::Cancelled, _) => {
                 self.scrolling = Scrolling::Idle;
-                (ScrollPhase::None, ScrollPhase::Ended)
-            }
-            (TouchPhase::Ended, _) => {
-                self.scrolling = Scrolling::Momentum { begun: false };
-                (ScrollPhase::Ended, ScrollPhase::None)
-            }
-            (TouchPhase::Cancelled, _) => {
-                self.scrolling = Scrolling::Idle;
-                (ScrollPhase::Cancelled, ScrollPhase::None)
-            }
-            (TouchPhase::Moved, Scrolling::Momentum { begun }) => {
-                self.scrolling = Scrolling::Momentum { begun: true };
-                (ScrollPhase::None, if begun { ScrollPhase::Changed } else { ScrollPhase::Began })
-            }
-            (TouchPhase::Moved, Scrolling::Idle | Scrolling::Fingers) => {
-                (ScrollPhase::Changed, ScrollPhase::None)
+                (phase(touch), ScrollPhase::None)
             }
         }
     }
@@ -2034,25 +2019,25 @@ impl ScreenView {
         }));
     }
 
-    /// The zero-delta `momentumPhase = End` macOS sends when a fling stops. gpui has no event
-    /// for it, so without this the remote app is left latched to a scroll that never ended.
+    /// The zero-delta `momentumPhase = End` macOS sends when a fling stops, for a coast whose
+    /// own close never came: without it the remote app is left latched to a scroll that never
+    /// ended.
     fn end_momentum(&mut self, x: f32, y: f32, mods: Mods) {
-        let Scrolling::Momentum { begun } = self.scrolling else { return };
+        if self.scrolling != Scrolling::Momentum {
+            return;
+        }
         self.scrolling = Scrolling::Idle;
         self.momentum_end = None;
-        // A gesture that ended without a fling behind it is already closed by its own `Ended`.
-        if begun {
-            self.input(ScreenInput::Scroll {
-                dx: 0.0,
-                dy: 0.0,
-                precise: true,
-                phase: ScrollPhase::None,
-                momentum: ScrollPhase::Ended,
-                x,
-                y,
-                mods,
-            });
-        }
+        self.input(ScreenInput::Scroll {
+            dx: 0.0,
+            dy: 0.0,
+            precise: true,
+            phase: ScrollPhase::None,
+            momentum: ScrollPhase::Ended,
+            x,
+            y,
+            mods,
+        });
     }
 
     /// Focus left the view or the window went inactive: release on the worker every button,
@@ -3423,10 +3408,9 @@ mod tests {
     }
 
     /// A fling reaches the worker shaped the way macOS shapes one: the gesture begins, changes and
-    /// ends, and everything after that is momentum, which begins, continues and is closed by a
-    /// zero-delta end of its own. gpui reports none of that — it reads `NSEvent.phase` and never
-    /// `momentumPhase`, so momentum arrives as plain `Moved` events after `Ended` — and passing
-    /// them on unchanged would tell the remote app the scroll ended and then went on changing.
+    /// ends, and the momentum after it begins, continues and ends in phases of its own, which
+    /// gpui reports as `momentum_phase`. A scroll without one is never momentum, whenever it
+    /// comes: a smooth-scrolling mouse right after a swipe is the mouse.
     #[gpui::test]
     fn a_fling_over_the_picture_reaches_the_worker_as_a_gesture_and_then_as_momentum(
         cx: &mut gpui::TestAppContext,
@@ -3440,14 +3424,19 @@ mod tests {
         drop(sent(&mut rx));
         let bounds = view.read_with(cx, |v, _| v.bounds);
         let at = bounds.center();
-        let wheel = |cx: &mut gpui::VisualTestContext, dy: f32, touch_phase| {
+        let wheel = |cx: &mut gpui::VisualTestContext, dy: f32, touch_phase, momentum_phase| {
             cx.simulate_event(ScrollWheelEvent {
                 position: at,
                 delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
                 modifiers: Modifiers::default(),
                 touch_phase,
+                momentum_phase,
             });
             cx.run_until_parked();
+        };
+        let fingers = |cx: &mut gpui::VisualTestContext, dy: f32, touch| wheel(cx, dy, touch, None);
+        let coast = |cx: &mut gpui::VisualTestContext, dy: f32, momentum| {
+            wheel(cx, dy, TouchPhase::Moved, Some(momentum));
         };
         let phases = |rx: &mut mpsc::Receiver<ClientMsg>| {
             inputs(rx)
@@ -3459,36 +3448,48 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        wheel(cx, -8.0, TouchPhase::Started);
-        wheel(cx, -30.0, TouchPhase::Moved);
-        wheel(cx, -30.0, TouchPhase::Ended);
+        fingers(cx, -8.0, TouchPhase::Started);
+        fingers(cx, -30.0, TouchPhase::Moved);
+        fingers(cx, -30.0, TouchPhase::Ended);
+        coast(cx, -20.0, TouchPhase::Started);
+        coast(cx, -12.0, TouchPhase::Moved);
+        coast(cx, 0.0, TouchPhase::Ended);
         assert_eq!(
             phases(&mut rx),
-            [(Began, Off), (Changed, Off), (Ended, Off)],
-            "the fingers' own part of the fling"
+            [
+                (Began, Off),
+                (Changed, Off),
+                (Ended, Off),
+                (Off, Began),
+                (Off, Changed),
+                (Off, Ended)
+            ],
+            "the fingers' part of the fling, then its coast"
         );
-
-        // Everything after `Ended` is the fling coasting: no scroll phase at all, and a
-        // momentum phase that begins once and then continues.
-        wheel(cx, -20.0, TouchPhase::Moved);
-        wheel(cx, -12.0, TouchPhase::Moved);
-        wheel(cx, -5.0, TouchPhase::Moved);
-        assert_eq!(phases(&mut rx), [(Off, Began), (Off, Changed), (Off, Changed)], "the coast");
-
-        // The fling stops, and macOS says so with an event that moves nothing. Reading that
-        // closes the coast on the spot instead of waiting out `MOMENTUM_GAP` for the same news.
-        wheel(cx, 0.0, TouchPhase::Moved);
-        assert_eq!(phases(&mut rx), [(Off, Ended)], "the coast ends when it stops moving");
-        // And it is closed only once: the gap timer has nothing left to close.
         cx.executor().advance_clock(PAST_THE_GAP);
         cx.run_until_parked();
         assert!(inputs(&mut rx).is_empty(), "the fling is closed once");
 
-        // If that last event is lost, the silence itself still closes the coast, with the
-        // zero-delta end the worker needs to let the gesture go.
-        wheel(cx, -8.0, TouchPhase::Started);
-        wheel(cx, -30.0, TouchPhase::Ended);
-        wheel(cx, -20.0, TouchPhase::Moved);
+        // A mouse that scrolls in pixels and reports no phases, right after a swipe that left
+        // no momentum, is the mouse: it neither opens a coast nor has one closed behind it.
+        fingers(cx, -8.0, TouchPhase::Started);
+        fingers(cx, -8.0, TouchPhase::Ended);
+        fingers(cx, -6.0, TouchPhase::Moved);
+        fingers(cx, -6.0, TouchPhase::Moved);
+        assert_eq!(
+            phases(&mut rx),
+            [(Began, Off), (Ended, Off), (Changed, Off), (Changed, Off)],
+            "no momentum said, none sent"
+        );
+        cx.executor().advance_clock(PAST_THE_GAP);
+        cx.run_until_parked();
+        assert!(inputs(&mut rx).is_empty(), "nothing coasting, nothing to close");
+
+        // If the coast's own close is lost, the silence closes it, with the zero-delta end the
+        // worker needs to let the gesture go.
+        fingers(cx, -8.0, TouchPhase::Started);
+        fingers(cx, -30.0, TouchPhase::Ended);
+        coast(cx, -20.0, TouchPhase::Started);
         drop(inputs(&mut rx));
         cx.executor().advance_clock(PAST_THE_GAP);
         cx.run_until_parked();
@@ -3501,39 +3502,28 @@ mod tests {
         }
 
         // iOS coasts through gpui's own touch recognizer, whose last momentum step carries
-        // `Ended`. That closes the coast; it is not the gesture ending a second time.
-        wheel(cx, -8.0, TouchPhase::Started);
-        wheel(cx, -30.0, TouchPhase::Ended);
-        wheel(cx, -20.0, TouchPhase::Moved);
-        wheel(cx, -4.0, TouchPhase::Ended);
+        // `Ended` as its touch phase too. That closes the coast; the gesture does not end twice.
+        fingers(cx, -8.0, TouchPhase::Started);
+        fingers(cx, -30.0, TouchPhase::Ended);
+        coast(cx, -20.0, TouchPhase::Started);
+        wheel(cx, -4.0, TouchPhase::Ended, Some(TouchPhase::Ended));
         assert_eq!(
             phases(&mut rx),
             [(Began, Off), (Ended, Off), (Off, Began), (Off, Ended)],
             "the coast closes itself on iOS"
         );
-        cx.executor().advance_clock(PAST_THE_GAP);
-        cx.run_until_parked();
-        assert!(inputs(&mut rx).is_empty(), "and the backstop has nothing left to close");
 
         // Fingers that rest on the trackpad before they push open the gesture twice, because
         // gpui reads `MayBegin` and `Began` as the same phase. The worker is told once.
-        wheel(cx, 0.0, TouchPhase::Started);
-        wheel(cx, 0.0, TouchPhase::Started);
-        wheel(cx, -30.0, TouchPhase::Moved);
-        wheel(cx, -30.0, TouchPhase::Ended);
+        fingers(cx, 0.0, TouchPhase::Started);
+        fingers(cx, 0.0, TouchPhase::Started);
+        fingers(cx, -30.0, TouchPhase::Moved);
+        fingers(cx, -30.0, TouchPhase::Ended);
         assert_eq!(
             phases(&mut rx),
             [(Began, Off), (Changed, Off), (Changed, Off), (Ended, Off)],
             "resting fingers open the gesture once"
         );
-
-        // A drag that ends without a fling behind it needs no closing: its own `Ended` did it.
-        wheel(cx, -8.0, TouchPhase::Started);
-        wheel(cx, -8.0, TouchPhase::Ended);
-        drop(sent(&mut rx));
-        cx.executor().advance_clock(PAST_THE_GAP);
-        cx.run_until_parked();
-        assert!(inputs(&mut rx).is_empty(), "nothing coasting, nothing to close");
     }
 
     fn inputs(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<ScreenInput> {
@@ -3579,18 +3569,21 @@ mod tests {
             delta: ScrollDelta::Pixels(point(px(3.0), px(-12.0))),
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Moved,
+            momentum_phase: None,
         });
         cx.simulate_event(ScrollWheelEvent {
             position: at(0.5, 0.5),
             delta: ScrollDelta::Lines(point(0.0, 2.0)),
             modifiers: Modifiers { alt: true, ..Modifiers::default() },
             touch_phase: TouchPhase::Started,
+            momentum_phase: None,
         });
         cx.simulate_event(ScrollWheelEvent {
             position: at(0.5, 0.5),
             delta: ScrollDelta::Lines(point(0.0, 1.0)),
             modifiers: Modifiers { platform: true, ..Modifiers::default() },
             touch_phase: TouchPhase::Moved,
+            momentum_phase: None,
         });
         cx.run_until_parked();
 

@@ -307,7 +307,7 @@ fn files_pasted_into_a_window_are_staged_before_the_chord_goes(cx: &mut TestAppC
     view.update_in(cx, |v, _window, cx| v.xfer_message(XferMsg::Finished { xfer, paths }, cx));
     cx.run_until_parked();
     assert!(!screen.read_with(cx, |v, _| v.paste_held()), "and goes once they are there");
-    assert_eq!(view.read_with(cx, WorkspaceView::toast_text), None, "a paste says nothing");
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "a paste says nothing");
 
     let on_worker = ClipFiles::Worker { worker: studio.key, urls: Vec::new() };
     let weak = hold(cx, on_worker.clone());
@@ -785,7 +785,7 @@ fn forwarded_ports_show_on_the_shell_tile(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("port-5173", tile.item)).is_some(), "a chip per port");
     assert!(cx.debug_bounds(selector("port-8080", tile.item)).is_some());
     assert!(cx.debug_bounds(selector("port-out-5173", tile.item)).is_some(), "and its arrow");
-    let notice = view.read_with(cx, WorkspaceView::toast_text);
+    let notice = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(notice.as_deref(), Some("Port 8080 is taken here; forwarded on 8081"));
     // The number opens the page in a tile on the shell's worker, named by the worker's port:
     // each client serves it where it can.
@@ -905,7 +905,6 @@ fn a_drops_landing_goes_once_nothing_uploads_from_it(cx: &mut TestAppContext) {
 /// listener, which runs after the frame is painted: the frame after is drawn as from scratch,
 /// and so is the chip of a file dropped on the face.
 #[gpui::test]
-#[ignore = "fails until gpui-fast wakes the window for a notify raised by a focus listener"]
 fn a_caret_started_by_focus_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let (studio, _calls, _board) = connect_remote(&view, cx);

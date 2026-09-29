@@ -1,5 +1,6 @@
 //! What the strip and the chrome show of a body that changes on its own: a shell's command and
-//! title, a stream's first frame and sound, a face's turn and approval. Copied out of the body
+//! title, a stream's first frame and sound, a face's turn and approval, a file's unsaved edit, a
+//! page's address and title, a folder's way up. Copied out of the body
 //! each time it changes, and news for the views that show it only when the copy changes.
 //!
 //! GPUI draws a view again when an entity it read changed. A shell changes with every line of
@@ -15,7 +16,10 @@ use slopty_core::{ItemId, SessionId};
 use slopty_proto::screen::SourceState;
 
 use super::WorkspaceView;
+use crate::browser::{BrowserView, Placing};
 use crate::conversation::{ConversationView, HeaderChips};
+use crate::file::FileView;
+use crate::folder::FolderView;
 use crate::screen::{ScreenView, StreamHeader};
 use crate::terminal::TerminalView;
 
@@ -120,6 +124,64 @@ impl FaceFacts {
     }
 }
 
+/// What the workspace shows of a file: whether its edit is not yet on disk. Its editor
+/// changes with every keystroke and caret blink; the header's dot, a few times an edit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct FileFacts {
+    /// An edit not yet on disk, or a save not yet answered.
+    pub unsaved: bool,
+}
+
+impl FileFacts {
+    pub(super) const fn of(view: &FileView) -> Self {
+        Self { unsaved: view.dirty() || view.saving() }
+    }
+}
+
+/// What the workspace shows of a page.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct PageFacts {
+    /// Its address, which the header shows.
+    pub url: String,
+    /// What names its tile ([`BrowserView::title`]).
+    pub title: String,
+    /// Its address, short ([`BrowserView::short_url`]).
+    pub short_url: String,
+    /// The page has a title of its own.
+    pub titled: bool,
+    /// It has a page to go back to.
+    pub can_go_back: bool,
+    /// What decides where the native page stands ([`BrowserView::placing`]).
+    pub placing: Placing,
+}
+
+impl PageFacts {
+    pub(super) fn of(view: &BrowserView) -> Self {
+        let page = view.page();
+        Self {
+            url: page.url.clone(),
+            title: view.title(),
+            short_url: view.short_url().to_owned(),
+            titled: !page.title.trim().is_empty(),
+            can_go_back: page.can_go_back,
+            placing: view.placing(),
+        }
+    }
+}
+
+/// What the workspace shows of a folder: whether it has a folder above it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct FolderFacts {
+    /// The way up has somewhere to go.
+    pub has_parent: bool,
+}
+
+impl FolderFacts {
+    pub(super) fn of(view: &FolderView) -> Self {
+        Self { has_parent: view.parent().is_some() }
+    }
+}
+
 impl WorkspaceView {
     /// `session`'s shell as last copied.
     pub(super) fn shell(&self, session: SessionId) -> Option<&ShellFacts> {
@@ -183,6 +245,58 @@ impl WorkspaceView {
             App::notify(cx, self.chrome.navigator.entity_id());
             App::notify(cx, self.strip_host.entity_id());
         } else if was.chips != now.chips {
+            App::notify(cx, self.strip_host.entity_id());
+        }
+    }
+
+    /// Item `id`'s file as last copied.
+    pub(super) fn file_facts(&self, id: ItemId) -> FileFacts {
+        self.facts.files.get(&id).copied().unwrap_or_default()
+    }
+
+    /// Item `id`'s page as last copied.
+    pub(super) fn page_facts(&self, id: ItemId) -> Option<&PageFacts> {
+        self.facts.pages.get(&id)
+    }
+
+    /// Item `id`'s folder as last copied.
+    pub(super) fn folder_facts(&self, id: ItemId) -> FolderFacts {
+        self.facts.folders.get(&id).copied().unwrap_or_default()
+    }
+
+    /// Copy item `id`'s file again. Its dot is its header's news, and only when it changed.
+    pub(super) fn file_changed(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        let Some(view) = self.files.get(&id) else { return };
+        let now = FileFacts::of(view.read(cx));
+        if self.facts.files.insert(id, now) != Some(now) {
+            App::notify(cx, self.strip_host.entity_id());
+        }
+    }
+
+    /// Copy item `id`'s page again. Its title or address names its tile everywhere; its way
+    /// back and where it stands are the strip's news, the strip placing the native page.
+    pub(super) fn page_changed(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        let Some(view) = self.browsers.get(&id) else { return };
+        let now = PageFacts::of(view.read(cx));
+        let was = self.facts.pages.insert(id, now.clone());
+        let Some(was) = was else {
+            self.titles_dirty = true;
+            cx.notify();
+            return;
+        };
+        if (&was.title, &was.short_url, was.titled) != (&now.title, &now.short_url, now.titled) {
+            self.titles_dirty = true;
+            cx.notify();
+        } else if was != now {
+            App::notify(cx, self.strip_host.entity_id());
+        }
+    }
+
+    /// Copy item `id`'s folder again: its way up is its header's news.
+    pub(super) fn folder_changed(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        let Some(view) = self.folders.get(&id) else { return };
+        let now = FolderFacts::of(view.read(cx));
+        if self.facts.folders.insert(id, now) != Some(now) {
             App::notify(cx, self.strip_host.entity_id());
         }
     }
@@ -266,10 +380,13 @@ impl WorkspaceView {
 
     /// Forget the facts of bodies no longer kept.
     pub(super) fn prune_facts(&mut self) {
-        let Self { facts, terminals, screens, faces, .. } = self;
+        let Self { facts, terminals, screens, faces, files, browsers, folders, .. } = self;
         facts.shells.retain(|session, _| terminals.contains_key(session));
         facts.screens.retain(|id, _| screens.contains_key(id));
         facts.faces.retain(|session, _| faces.views.contains_key(session));
+        facts.files.retain(|id, _| files.contains_key(id));
+        facts.pages.retain(|id, _| browsers.contains_key(id));
+        facts.folders.retain(|id, _| folders.contains_key(id));
     }
 }
 
@@ -280,6 +397,9 @@ pub(super) struct Facts {
     shells: std::collections::HashMap<SessionId, ShellFacts>,
     screens: std::collections::HashMap<ItemId, ScreenFacts>,
     faces: std::collections::HashMap<SessionId, FaceFacts>,
+    files: std::collections::HashMap<ItemId, FileFacts>,
+    pages: std::collections::HashMap<ItemId, PageFacts>,
+    folders: std::collections::HashMap<ItemId, FolderFacts>,
     /// The readouts' last tick ([`WorkspaceView::keep_time`]): the monotonic clock, and the
     /// wall clock in Unix milliseconds for what a worker stamped.
     ticked: Option<(Instant, u64)>,
@@ -290,11 +410,14 @@ pub(super) struct Facts {
 impl Facts {
     /// How many facts are kept of each kind, for the footprint.
     #[cfg(test)]
-    pub(super) fn lens(&self) -> [(&'static str, usize); 3] {
+    pub(super) fn lens(&self) -> [(&'static str, usize); 6] {
         [
             ("facts.shells", self.shells.len()),
             ("facts.screens", self.screens.len()),
             ("facts.faces", self.faces.len()),
+            ("facts.files", self.files.len()),
+            ("facts.pages", self.pages.len()),
+            ("facts.folders", self.folders.len()),
         ]
     }
 }

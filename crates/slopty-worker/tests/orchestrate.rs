@@ -97,12 +97,13 @@ mod orchestrate {
             ],
             size,
         };
-        let child = pty.spawn_with(&spec, Some(&si)).unwrap();
+        let slopty_pty::Spawned { child, term } = pty.spawn_with(&spec, Some(&si)).unwrap();
         let (tap, mut taps) = mpsc::channel(64);
         tokio::spawn(async move { while taps.recv().await.is_some() {} });
         let handle = session::spawn(SessionStart {
             id: SessionId::new(),
             master: pty.into_master(),
+            term,
             checkpoint: Vec::new(),
             backlog: Vec::new(),
             tap,

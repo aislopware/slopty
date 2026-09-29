@@ -157,18 +157,12 @@ impl GhosttyEngine {
             .with_unwrap(false)
             .with_trim(true)
             .with_selection(&selection);
-        let mut formatter = Formatter::new(&self.term, options)?;
-        match formatter.format_alloc(None) {
-            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-            // Blank rows format to nothing, which the allocating call reports as out of memory
-            // (no buffer came back); the caller's-buffer call tells the two apart.
-            Err(libghostty_vt::Error::OutOfMemory)
-                if formatter.format_buf(&mut []).is_ok_and(|n| n == 0) =>
-            {
-                Ok(String::new())
-            }
-            Err(e) => Err(e.into()),
-        }
+        // Streamed into the string's own buffer: no copy of what may be the whole history,
+        // and blank rows are simply no text.
+        let mut text = Vec::new();
+        Formatter::new(&self.term, options)?.format(&mut text)?;
+        Ok(String::from_utf8(text)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
     }
 
     /// Rows `[first, end)` by absolute index, one string per row, blank rows included. Slices

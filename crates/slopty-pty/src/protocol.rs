@@ -21,7 +21,8 @@ pub const DEFAULT_BACKLOG_BYTES: usize = 4 << 20;
 pub const MAX_BACKLOG_BYTES: usize = DEFAULT_BACKLOG_BYTES;
 
 /// Room an `Attached` frame needs besides its checkpoint and backlog: the variant, the id, the
-/// two lengths, `dropped`, the size and the start time, well under this.
+/// two lengths, `dropped`, the size, the start time and the `TERM` (at most
+/// [`crate::pty::MAX_TERM_BYTES`]), well under this.
 const ATTACHED_ENVELOPE: usize = 4 << 10;
 
 /// The largest checkpoint ptyd keeps.
@@ -149,6 +150,9 @@ pub enum PtydEvent {
         /// When ptyd spawned the child. ptyd outlives the worker, so this is the one place a
         /// session's start survives a worker restart.
         started_ms: WallMs,
+        /// The terminfo name ptyd gave the child as `TERM`; a worker that adopts the shell
+        /// answers for that terminal.
+        term: String,
     },
     /// Generic success.
     Ok,
@@ -443,6 +447,7 @@ mod tests {
             dropped: u64::MAX,
             size,
             started_ms: WallMs::from_millis(u64::MAX),
+            term: "x".repeat(crate::pty::MAX_TERM_BYTES),
         };
         slopty_proto::codec::encode(&attached).unwrap();
     }

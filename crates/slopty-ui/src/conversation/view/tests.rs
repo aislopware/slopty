@@ -55,6 +55,7 @@ fn scroll(cx: &mut VisualTestContext, dy: f32) {
         delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
         modifiers: Modifiers::default(),
         touch_phase: TouchPhase::Moved,
+        momentum_phase: None,
     });
     cx.run_until_parked();
 }

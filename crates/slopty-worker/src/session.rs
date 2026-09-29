@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use bytes::{Buf as _, Bytes, BytesMut};
 use slopty_core::{ClientId, SessionId};
-use slopty_engine::boundary::Boundary;
 use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, TextSince};
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
 use slopty_proto::codec;
@@ -484,6 +483,8 @@ pub struct SessionStart {
     pub id: SessionId,
     /// The PTY master from ptyd.
     pub master: OwnedFd,
+    /// The terminfo name ptyd gave the shell as `TERM`: queries for it are answered with this.
+    pub term: String,
     /// The last worker's terminal state (empty if none), replayed before `backlog`.
     pub checkpoint: Vec<u8>,
     /// Output produced since then (replayed through the engine, never sent raw).
@@ -801,8 +802,6 @@ struct Actor {
     /// When a viewer's input last reached the PTY: a quiet-spell checkpoint waits
     /// [`CHECKPOINT_AFTER_INPUT`] past it.
     typed_at: Option<tokio::time::Instant>,
-    /// Where the output stands in VT syntax, so a quiet-spell checkpoint never cuts a sequence.
-    boundary: Boundary,
     /// What waiters watch.
     activity: watch::Sender<Activity>,
     /// See [`SessionStart::port_hints`].
@@ -883,6 +882,7 @@ impl Actor {
         if !start.checkpoint.is_empty() {
             engine.write(&start.checkpoint);
         }
+        engine.set_terminfo_name(&start.term)?;
         if start.divide {
             engine.mark_restored(RESTORED_DIVIDER)?;
         }
@@ -962,7 +962,6 @@ impl Actor {
             checkpoint_due: None,
             checkpoint_owed: false,
             typed_at: None,
-            boundary: Boundary::default(),
             activity,
             port_hints: start.port_hints,
             moves: start.moves,
@@ -1217,7 +1216,6 @@ impl Actor {
     /// Copy output to ptyd's ring and schedule the checkpoint that will fold it away.
     fn tap_output(&mut self, bytes: &[u8]) {
         self.dirty_since_checkpoint = true;
-        self.boundary.feed(bytes);
         if !self.tap_lost {
             self.tapped_since_checkpoint = self.tapped_since_checkpoint.saturating_add(bytes.len());
             let sent = match OutputFrame::new(self.id, bytes) {
@@ -1280,7 +1278,9 @@ impl Actor {
         }
         // A state the queue has no room for would be formatted for nothing; while the ring has
         // a hole that is every read of a flood.
-        if self.tap.capacity() == 0 || (!force && !self.boundary.is_ground()) {
+        // Ground is libghostty's own parser state, which has seen every byte tapped so far;
+        // a failed read counts as inside a sequence, never cut.
+        if self.tap.capacity() == 0 || (!force && !self.engine.at_ground().unwrap_or(false)) {
             self.checkpoint_after_quiet();
             return;
         }

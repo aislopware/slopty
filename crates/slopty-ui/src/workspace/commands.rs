@@ -825,7 +825,7 @@ impl WorkspaceView {
     ) {
         self.closed_seq = self.closed_seq.wrapping_add(1);
         let seq = self.closed_seq;
-        let title = self.tile_title(&item, cx);
+        let title = self.tile_title(&item);
         let at = self.layout.position(tile);
         self.closed.push(ClosedTile { tile, item, at, session, file: None, seq });
         self.propose(tile.worker, ItemOp::Remove(tile.item), cx);
@@ -908,7 +908,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some(item) = self.item(tile).cloned() else { return };
-        let placeholder = self.derived_title(&item, cx);
+        let placeholder = self.derived_title(&item);
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder)

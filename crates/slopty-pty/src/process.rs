@@ -414,7 +414,8 @@ mod tests {
                 env: Vec::new(),
                 size,
             })
-            .expect("spawn");
+            .expect("spawn")
+            .child;
         let master = crate::PtyMaster::new(pty.into_master()).expect("master");
         // Wait until the child has run far enough to own the tty.
         let mut buf = [0_u8; 64];

@@ -1,6 +1,6 @@
 //! `TerminalView`: one attached session on screen.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -432,8 +432,10 @@ pub struct TerminalView {
     /// The cell under the pointer, for the ⌘-hover link underline.
     hover: Option<(u16, u16)>,
     /// Where the pointer is over the grid's element, wherever it is covered (the block facts,
-    /// the sticky header): which block is hovered, followed through a scroll.
-    pointer_at: Option<gpui::Point<Pixels>>,
+    /// the sticky header): which block is hovered, followed through a scroll. A cell, so that
+    /// a move is kept without updating the view: it is news for the view only when it moves
+    /// the hover to another block, which then updates it.
+    pointer_at: Cell<Option<gpui::Point<Pixels>>>,
     /// ⌘ is down: links under the pointer show as links.
     cmd_held: bool,
     /// ⇧ is held: the pointer is the human's even while a program reports the mouse.
@@ -568,7 +570,7 @@ impl TerminalView {
             program_buttons: 0,
             reported_cell: None,
             hover: None,
-            pointer_at: None,
+            pointer_at: Cell::new(None),
             cmd_held: false,
             shift_held: false,
             touch_selecting: false,
@@ -919,22 +921,13 @@ impl TerminalView {
         Some((first, under))
     }
 
-    /// ⌘-click on a file path: open it in the shell's editor (`$EDITOR`, else `vi`, at the
-    /// line the text named) by typing the command at the prompt. While a command runs the
-    /// prompt is not there to type at, so the path opens as a file tile
-    /// instead (the workspace makes it absolute against this shell's directory); so does a tap
-    /// the key bar's ⌘ armed (`sticky`), since a phone has no comfortable editor to type into.
-    /// A path printed with a trailing `/` is a directory, which no editor opens: it goes to the
-    /// workspace too, as a folder tile.
-    fn open_path(&mut self, span: &url::PathSpan, sticky: bool, cx: &mut Context<Self>) {
-        if sticky || self.state.command_running() || span.path.ends_with('/') {
-            tracing::info!(path = %span.path, sticky, "path viewed");
-            cx.emit(TerminalViewEvent::ViewFile { path: span.path.clone(), line: span.line });
-            return;
-        }
-        let command = url::editor_command(&span.path, span.line);
-        tracing::info!(path = %span.path, line = ?span.line, "open path");
-        self.run_text(command, cx);
+    /// ⌘-click on a file path: the workspace opens it as a file tile at the line the text named
+    /// (it makes the path absolute against this shell's directory), a directory printed with a
+    /// trailing `/` as a folder tile. Nothing is typed at the prompt: every session's `$EDITOR`
+    /// is Slopty's own, which would open the same tile and hold the shell until it closed.
+    fn open_path(span: &url::PathSpan, sticky: bool, cx: &mut Context<Self>) {
+        tracing::info!(path = %span.path, line = ?span.line, sticky, "path viewed");
+        cx.emit(TerminalViewEvent::ViewFile { path: span.path.clone(), line: span.line });
     }
 
     /// Where the link under a ⌘-hover goes: the OSC 8 target or the URL as printed, or the
@@ -1086,12 +1079,12 @@ impl TerminalView {
     /// pointer's shape moves.
     fn set_pointer(
         &mut self,
-        hover: Option<(u16, u16)>,
+        at: gpui::Point<Pixels>,
         modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) {
         let before = (self.link_highlight(), self.pointer());
-        self.hover = hover;
+        self.hover = self.hover_at(at, modifiers);
         self.cmd_held = modifiers.platform;
         self.shift_held = modifiers.shift;
         if (self.link_highlight(), self.pointer()) != before {
@@ -1099,13 +1092,43 @@ impl TerminalView {
         }
     }
 
+    /// The cell a pointer at `at` is over, kept only while ⌘ is down: nothing else draws it,
+    /// and a view that kept every cell crossed would be built again for every move over it.
+    fn hover_at(&self, at: gpui::Point<Pixels>, modifiers: gpui::Modifiers) -> Option<(u16, u16)> {
+        self.metrics.and_then(|m| m.cell_at(at)).filter(|_| modifiers.platform)
+    }
+
+    /// Whether the pointer at `at` with `modifiers` changes what [`Self::set_pointer`] keeps.
+    fn pointer_changes(&self, at: gpui::Point<Pixels>, modifiers: gpui::Modifiers) -> bool {
+        self.hover_at(at, modifiers) != self.hover
+            || modifiers.platform != self.cmd_held
+            || modifiers.shift != self.shift_held
+    }
+
     fn modifiers_changed(
         &mut self,
         event: &ModifiersChangedEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_pointer(self.hover, event.modifiers, cx);
+        self.set_pointer(window.mouse_position(), event.modifiers, cx);
+    }
+
+    /// A listener that updates the view with `handle` only when `news` says the event changes
+    /// something in it. `cx.listener` updates it for every event, and a view updated, even
+    /// with nothing changed, is built again whenever a view around it is.
+    fn listen_if<E: 'static>(
+        cx: &Context<Self>,
+        news: impl Fn(&Self, &E, &Window) -> bool + 'static,
+        handle: fn(&mut Self, &E, &mut Window, &mut Context<Self>),
+    ) -> impl Fn(&E, &mut Window, &mut App) + 'static {
+        let view = cx.weak_entity();
+        move |event, window, cx| {
+            let Some(view) = view.upgrade() else { return };
+            if news(view.read(cx), event, window) {
+                view.update(cx, |this, cx| handle(this, event, window, cx));
+            }
+        }
     }
 
     /// The word under `at` as inclusive cells: the run of non-blank cells around it, or just
@@ -1528,7 +1551,7 @@ impl TerminalView {
                 .top_0()
                 .left_0()
                 .w_full()
-                .h(metrics.line_height)
+                .h(Self::row_height(&metrics, self.zoom))
                 .flex()
                 .items_center()
                 .justify_between()
@@ -1603,9 +1626,10 @@ impl TerminalView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let facts = self.block_facts(prompt);
-        let line = self
-            .metrics
-            .map_or_else(|| theme.typography.icon_large(), |m| f32::from(m.line_height));
+        let line = self.metrics.map_or_else(
+            || theme.typography.icon_large(),
+            |m| f32::from(Self::row_height(&m, self.zoom)),
+        );
         let button = 2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large());
         let more = crate::kit::icon_button_at(
             theme,
@@ -1666,9 +1690,9 @@ impl TerminalView {
             div()
                 .debug_selector(|| "block-chip".to_owned())
                 .absolute()
-                .top(inset + m.line_height * f32::from(row))
+                .top(inset + Self::row_height(&m, self.zoom) * f32::from(row))
                 .right(inset)
-                .h(m.line_height)
+                .h(Self::row_height(&m, self.zoom))
                 .flex()
                 .items_center()
                 .occlude()
@@ -2643,28 +2667,37 @@ impl TerminalView {
     /// the alternate screen.
     #[must_use]
     pub fn hovered_block(&self) -> Option<LineIndex> {
-        let at = self.pointer_at?;
-        let m = self.metrics?;
+        let row = self.pointer_row(self.pointer_at.get())?;
         if self.state.modes().contains(TermModes::ALT_SCREEN) {
             return None;
         }
-        let rows = ((at.y - m.origin.y) / m.line_height).floor();
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
-        let row = rows.clamp(0.0, f32::from(m.rows.saturating_sub(1))) as u16;
         let (prompt, typed) = self.state.block_prompt(self.state.index_at_row(row))?;
         let done = self.state.prompt_after(prompt).is_some();
         let running = self.state.command_running() && !done;
         typed.then_some(prompt).filter(|_| done || running)
     }
 
-    /// The pointer moved over the grid's element (`Some`, wherever it is covered) or left it:
-    /// a frame follows when that changes which block is hovered.
-    pub(super) fn pointer_over(&mut self, at: Option<gpui::Point<Pixels>>, cx: &mut Context<Self>) {
+    /// The grid row a pointer at `at` is level with.
+    fn pointer_row(&self, at: Option<gpui::Point<Pixels>>) -> Option<u16> {
+        let (at, m) = (at?, self.metrics?);
+        let rows = ((at.y - m.origin.y) / m.line_height).floor();
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
+        let row = rows.clamp(0.0, f32::from(m.rows.saturating_sub(1))) as u16;
+        Some(row)
+    }
+
+    /// Whether the pointer's move is news for the view beyond the block it hovers: a key hid
+    /// it, or it came near the right edge or left it.
+    pub(super) const fn pointer_news(&self, near: bool) -> bool {
+        self.pointer_hidden || self.scrollbar.near_edge() != near
+    }
+
+    /// The pointer moved over the grid's element (`Some`, wherever it is covered) or left it.
+    /// Whether that hovers another block, which the view is to be drawn again for.
+    pub(super) fn pointer_over(&self, at: Option<gpui::Point<Pixels>>) -> bool {
         let before = self.hovered_block();
-        self.pointer_at = at;
-        if self.hovered_block() != before {
-            cx.notify();
-        }
+        self.pointer_at.set(at);
+        self.hovered_block() != before
     }
 
     /// The images the latest frame places, each with its texture.
@@ -2712,10 +2745,33 @@ impl TerminalView {
         self.textures.len()
     }
 
+    /// The height of a row as this frame draws it: the zoom is this frame's, set before it,
+    /// while the metrics were measured in the last one.
+    fn row_height(m: &CellMetrics, zoom: f32) -> Pixels {
+        let zoom = if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 };
+        if (zoom - 1.0).abs() < f32::EPSILON {
+            m.unzoomed_line_height
+        } else {
+            m.unzoomed_line_height * zoom
+        }
+    }
+
     /// The element measured the grid: `cols × rows` fit, with these metrics. Measured while
     /// the window draws: a change is drawn in the next frame.
     pub fn fitted(&mut self, size: TermSize, metrics: CellMetrics, cx: &mut Context<Self>) {
-        let remeasured = self.metrics.replace(metrics) != Some(metrics);
+        // The view lays itself out relative to the grid, at the zoom it is given before the
+        // frame (`Self::row_height`), so a grid that only moved or zoomed (a frame of a spring)
+        // is news for it only where a still pointer now hovers another block. Anything else
+        // would build every moving shell twice a frame.
+        let hovered = self.hovered_block();
+        let kept = self.metrics.replace(metrics).map(|was| CellMetrics {
+            origin: metrics.origin,
+            cell_width: metrics.cell_width,
+            line_height: metrics.line_height,
+            pixel_scale: metrics.pixel_scale,
+            ..was
+        });
+        let remeasured = kept != Some(metrics) || self.hovered_block() != hovered;
         if self.state.size() == size || self.pending_size == Some(size) {
             if remeasured {
                 Self::drawn_again(cx);
@@ -3011,9 +3067,8 @@ impl TerminalView {
         // moment the grid ran out of scrollback, and the whole workspace would slide out from
         // under a terminal that was merely flicked too hard.
         //
-        // The latch outlives `Ended` on purpose. gpui reads only `NSEvent.phase`, never
-        // `momentumPhase`, so macOS momentum arrives as a run of `Moved` *after* the fingers
-        // lift — releasing on `Ended` would drop the latch at exactly the moment it is needed.
+        // The latch outlives `Ended` on purpose: a fling's momentum arrives *after* the fingers
+        // lift, so releasing on `Ended` would drop the latch at exactly the moment it is needed.
         // Only `Started` clears it, and `Started` itself decides nothing: the first event of a
         // gesture is a finger landing, and it carries no movement to judge.
         //
@@ -3202,18 +3257,31 @@ impl TerminalView {
         event: &MouseMoveEvent,
         cx: &Context<Self>,
     ) {
+        let Some(cell) = self.motion_cell(event.position) else { return };
+        if self.reported_cell.replace(cell) == Some(cell) {
+            return;
+        }
+        self.report_mouse(MouseAction::Motion, button, event.position, event.modifiers, cx);
+    }
+
+    /// The cell a move to `at` is reported at, when the program asked to hear of it.
+    fn motion_cell(&self, at: gpui::Point<Pixels>) -> Option<(u16, u16)> {
         let modes = self.state.modes();
         let wanted = if self.program_buttons != 0 {
             modes.intersects(TermModes::MOUSE_DRAG | TermModes::MOUSE_MOTION)
         } else {
             modes.contains(TermModes::MOUSE_MOTION)
         };
-        let Some(m) = self.metrics.filter(|_| wanted) else { return };
-        let cell = m.cell_at_clamped(event.position);
-        if self.reported_cell.replace(cell) == Some(cell) {
-            return;
-        }
-        self.report_mouse(MouseAction::Motion, button, event.position, event.modifiers, cx);
+        self.metrics.filter(|_| wanted).map(|m| m.cell_at_clamped(at))
+    }
+
+    /// Whether [`Self::mouse_move`] has anything to do for `event`.
+    fn mouse_move_news(&self, event: &MouseMoveEvent) -> bool {
+        let reports = event.pressed_button.is_none()
+            && self.program_buttons == 0
+            && !event.modifiers.shift
+            && self.motion_cell(event.position).is_some_and(|c| self.reported_cell != Some(c));
+        reports || self.pointer_changes(event.position, event.modifiers)
     }
 
     /// The pointer moved over the grid: the hover for the ⌘ underline (a drag is followed by
@@ -3225,8 +3293,7 @@ impl TerminalView {
         if event.pressed_button.is_none() && self.program_buttons == 0 && !event.modifiers.shift {
             self.report_motion(None, event, cx);
         }
-        let hover = self.metrics.and_then(|m| m.cell_at(event.position));
-        self.set_pointer(hover, event.modifiers, cx);
+        self.set_pointer(event.position, event.modifiers, cx);
     }
 
     /// The pointer moved somewhere in the window, which shows it again: the next key hides it.
@@ -3444,7 +3511,7 @@ impl TerminalView {
         }
         self.autoscroll = None;
         if let Some((span, armed, _)) = self.path_press.take() {
-            self.open_path(&span, armed, cx);
+            Self::open_path(&span, armed, cx);
             return;
         }
         if self.release_thumb(cx) {
@@ -3774,8 +3841,18 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
-            .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
+            .on_mouse_move(Self::listen_if(
+                cx,
+                |this, event, _| this.mouse_move_news(event),
+                Self::mouse_move,
+            ))
+            .on_modifiers_changed(Self::listen_if(
+                cx,
+                |this, event: &ModifiersChangedEvent, window| {
+                    this.pointer_changes(window.mouse_position(), event.modifiers)
+                },
+                Self::modifiers_changed,
+            ))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
@@ -4687,13 +4764,13 @@ mod tests {
         let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
         let plain = gpui::Modifiers::default();
         view.update_in(cx, |view, _window, cx| {
-            view.set_pointer(Some((6, 0)), cmd, cx);
+            view.set_pointer(at_cell(view, 6, 0), cmd, cx);
             assert_eq!(view.link_target().as_deref(), Some("http://a.b"));
-            view.set_pointer(Some((1, 1)), cmd, cx);
+            view.set_pointer(at_cell(view, 1, 1), cmd, cx);
             assert_eq!(view.link_target().as_deref(), Some("https://x.y/z"), "the OSC 8 target");
-            view.set_pointer(Some((5, 2)), cmd, cx);
+            view.set_pointer(at_cell(view, 5, 2), cmd, cx);
             assert_eq!(view.link_target().as_deref(), Some("src/main.rs:12"));
-            view.set_pointer(Some((5, 2)), plain, cx);
+            view.set_pointer(at_cell(view, 5, 2), plain, cx);
             assert_eq!(view.link_target(), None, "no ⌘, no preview");
         });
         cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), MouseButton::Left, cmd);
@@ -4725,18 +4802,18 @@ mod tests {
         let shift = gpui::Modifiers { shift: true, ..gpui::Modifiers::default() };
         view.update_in(cx, |view, _window, cx| {
             view.apply(frame(TermModes::empty()), cx);
-            view.set_pointer(Some((6, 0)), plain, cx);
+            view.set_pointer(at_cell(view, 6, 0), plain, cx);
             assert_eq!(view.pointer(), CursorStyle::IBeam);
-            view.set_pointer(Some((6, 0)), cmd, cx);
+            view.set_pointer(at_cell(view, 6, 0), cmd, cx);
             assert_eq!(view.pointer(), CursorStyle::PointingHand, "⌘ over the link");
-            view.set_pointer(Some((1, 1)), cmd, cx);
+            view.set_pointer(at_cell(view, 1, 1), cmd, cx);
             assert_eq!(view.pointer(), CursorStyle::IBeam, "⌘ over plain text");
             view.apply(frame(TermModes::MOUSE_TRACKING), cx);
-            view.set_pointer(Some((1, 1)), plain, cx);
+            view.set_pointer(at_cell(view, 1, 1), plain, cx);
             assert_eq!(view.pointer(), CursorStyle::Arrow, "the program has the mouse");
-            view.set_pointer(Some((1, 1)), shift, cx);
+            view.set_pointer(at_cell(view, 1, 1), shift, cx);
             assert_eq!(view.pointer(), CursorStyle::IBeam, "⇧ takes it back");
-            view.set_pointer(Some((6, 0)), cmd, cx);
+            view.set_pointer(at_cell(view, 6, 0), cmd, cx);
             assert_eq!(view.pointer(), CursorStyle::PointingHand, "a link still opens");
         });
     }
@@ -5967,6 +6044,13 @@ mod tests {
     }
 
     /// The window point at the middle of cell (`col`, `row`).
+    /// The middle of the cell at `col`, `row` of `view`'s grid.
+    fn at_cell(view: &TerminalView, col: u16, row: u16) -> gpui::Point<Pixels> {
+        let m = view.metrics.expect("laid out");
+        m.origin
+            + point(m.cell_width * (f32::from(col) + 0.5), m.line_height * (f32::from(row) + 0.5))
+    }
+
     fn cell_center(
         view: &Entity<TerminalView>,
         cx: &VisualTestContext,
@@ -6200,6 +6284,7 @@ mod tests {
             delta: ScrollDelta::Lines(point(0.0, 1.0)),
             modifiers: gpui::Modifiers::default(),
             touch_phase: TouchPhase::Started,
+            momentum_phase: None,
         });
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 3);
@@ -6310,6 +6395,7 @@ mod tests {
                 delta: ScrollDelta::Lines(point(0.0, lines)),
                 modifiers,
                 touch_phase: phase,
+                momentum_phase: None,
             });
             cx.run_until_parked();
         };
@@ -6343,6 +6429,7 @@ mod tests {
                 delta: ScrollDelta::Pixels(point(px(0.0), px(lines * h))),
                 modifiers: mods,
                 touch_phase: phase,
+                momentum_phase: None,
             });
             cx.run_until_parked();
         };
@@ -6478,6 +6565,7 @@ mod tests {
             delta: ScrollDelta::Lines(point(0.0, 1.0)),
             modifiers: mods,
             touch_phase: TouchPhase::Started,
+            momentum_phase: None,
         });
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 1);
@@ -6857,11 +6945,22 @@ mod tests {
         assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "a drag opens nothing");
     }
 
-    /// ⌘-click on a path a compiler printed types the editor command at the prompt, with the
-    /// line; a plain word nearby does nothing.
+    /// ⌘-click at the prompt on a path a compiler printed asks the workspace for a file tile at
+    /// its line and types nothing: the shell's `$EDITOR` would hold the prompt until the tile
+    /// it opened closed. A plain word nearby does nothing.
     #[gpui::test]
-    fn cmd_click_on_a_path_opens_it_in_the_shells_editor(cx: &mut TestAppContext) {
+    fn cmd_click_on_a_path_opens_its_tile_and_types_nothing(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
+        let viewed = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&viewed);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::ViewFile { path, line } = event {
+                    seen.borrow_mut().push((path.clone(), *line));
+                }
+            })
+            .detach();
+        });
         view.update_in(cx, |view, _window, cx| {
             view.apply(
                 TermEvent::Frame(Frame {
@@ -6899,19 +6998,11 @@ mod tests {
         assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "a word is not a path");
         cx.simulate_click(cell(10), cmd);
         cx.run_until_parked();
-        let mut pastes = Vec::new();
-        let mut keys = 0_u32;
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                ClientMsg::Term { req: TermRequest::Paste(text), .. } => pastes.push(text),
-                ClientMsg::Term { req: TermRequest::Key(_), .. } => {
-                    keys = keys.saturating_add(1_u32);
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(pastes, ["${EDITOR:-vi} +12 'src/main.rs'"]);
-        assert_eq!(keys, 1, "then ↩");
+        assert_eq!(*viewed.borrow(), [("src/main.rs".to_owned(), Some(12))]);
+        let typed = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|msg| matches!(msg, ClientMsg::Term { .. }))
+            .count();
+        assert_eq!(typed, 0, "nothing typed at the prompt");
     }
 
     /// ⌘-click at the prompt on a directory `ls -F` printed asks the workspace for it (a folder
@@ -7452,7 +7543,7 @@ mod tests {
         let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
         view.update(cx, |view, cx| {
             view.cmd_held = true;
-            view.set_pointer(Some((3, 1)), cmd, cx);
+            view.set_pointer(at_cell(view, 3, 1), cmd, cx);
         });
         let (highlight, target) = view.read_with(cx, |v, _| (v.link_highlight(), v.link_target()));
         assert_eq!(target.as_deref(), Some("https://a.b/cd"));

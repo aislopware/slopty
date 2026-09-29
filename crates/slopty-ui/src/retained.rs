@@ -42,14 +42,62 @@ pub fn painted(window: &Window) -> Vec<String> {
 /// agree. Draws a frame from scratch, which the window then shows. When they differ it draws
 /// another: something that moves on the wall clock (a fade, a spinner) paints differently a
 /// few milliseconds later however the frame was drawn, so two frames from scratch that differ
-/// say the window is in motion, and a frame in motion is not judged.
+/// say the window is in motion. Then only what both paint alike, what holds still, is judged:
+/// the frame shown must paint it too.
 pub fn stale(window: &mut Window, cx: &mut App, limit: usize) -> Option<String> {
     let shown = painted(window);
     let scratch = from_scratch(window, cx);
-    if shown == scratch || from_scratch(window, cx) != scratch {
+    if shown == scratch {
         return None;
     }
-    diff(&shown, &scratch, limit)
+    let again = from_scratch(window, cx);
+    if again == scratch {
+        return diff(&shown, &scratch, limit);
+    }
+    let still = common(&scratch, &again);
+    let missed = only(&still, &shown);
+    (!missed.is_empty()).then(|| {
+        format!(
+            "in motion, {} that holds still in a frame from scratch was not painted:\n  {}",
+            missed.len(),
+            cut(&missed, limit)
+        )
+    })
+}
+
+/// The lines of sorted `a` that sorted `b` does not hold, a repeat counting once per copy.
+fn only(a: &[String], b: &[String]) -> Vec<String> {
+    let mut rest = b.iter().peekable();
+    let mut out = Vec::new();
+    for line in a {
+        while rest.next_if(|other| *other < line).is_some() {}
+        if rest.next_if(|other| *other == line).is_none() {
+            out.push(line.clone());
+        }
+    }
+    out
+}
+
+/// The lines two sorted paintings both hold, a repeat as often as both hold it.
+fn common(a: &[String], b: &[String]) -> Vec<String> {
+    let mut rest = b.iter().peekable();
+    let mut out = Vec::new();
+    for line in a {
+        while rest.next_if(|other| *other < line).is_some() {}
+        if rest.next_if(|other| *other == line).is_some() {
+            out.push(line.clone());
+        }
+    }
+    out
+}
+
+/// `lines`, at most `limit` of them, one to a line.
+fn cut(lines: &[String], limit: usize) -> String {
+    let mut text: Vec<&str> = lines.iter().take(limit).map(String::as_str).collect();
+    if lines.len() > limit {
+        text.push("…");
+    }
+    text.join("\n  ")
 }
 
 /// What a frame drawn with every view built from scratch paints.
@@ -64,31 +112,13 @@ fn diff(shown: &[String], scratch: &[String], limit: usize) -> Option<String> {
     if shown == scratch {
         return None;
     }
-    let only = |a: &[String], b: &[String]| -> Vec<String> {
-        let mut rest = b.iter().peekable();
-        let mut out = Vec::new();
-        for line in a {
-            while rest.next_if(|other| *other < line).is_some() {}
-            if rest.next_if(|other| *other == line).is_none() {
-                out.push(line.clone());
-            }
-        }
-        out
-    };
     let (drawn, missed) = (only(shown, scratch), only(scratch, shown));
-    let show = |lines: &[String]| {
-        let mut text: Vec<&str> = lines.iter().take(limit).map(String::as_str).collect();
-        if lines.len() > limit {
-            text.push("…");
-        }
-        text.join("\n  ")
-    };
     Some(format!(
         "{} painted that a frame from scratch does not:\n  {}\n{} a frame from scratch paints that were not:\n  {}",
         drawn.len(),
-        show(&drawn),
+        cut(&drawn, limit),
         missed.len(),
-        show(&missed)
+        cut(&missed, limit)
     ))
 }
 
@@ -128,6 +158,55 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(cx.update(|window, cx| stale(window, cx, 4)), None, "told, it is drawn anew");
+    }
+
+    /// A mark that stands somewhere new every time it is drawn, as a spinner on the wall clock.
+    struct Spinner;
+
+    impl Render for Spinner {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            gpui::canvas(
+                |_, _, _| (),
+                |bounds, (), window, _| {
+                    let turn = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.subsec_nanos() % 97);
+                    let at = bounds.origin
+                        + gpui::point(px(f32::from(u8::try_from(turn).unwrap_or(0))), px(0.0));
+                    window.paint_quad(gpui::fill(
+                        gpui::Bounds::new(at, gpui::size(px(2.0), px(2.0))),
+                        gpui::black(),
+                    ));
+                    window.request_animation_frame();
+                },
+            )
+            .size_full()
+        }
+    }
+
+    /// Beside something in motion, a view changed without being told is still caught: what
+    /// holds still in the frames from scratch must be in the frame shown.
+    #[gpui::test]
+    fn a_view_changed_untold_is_caught_beside_motion(cx: &mut TestAppContext) {
+        use gpui::AppContext as _;
+        let (both, cx) =
+            cx.add_window_view(|_, cx| Both(cx.new(|_| Bar(10.0)), cx.new(|_| Spinner)));
+        let bar = both.read_with(cx, |both, _| both.0.clone());
+        cx.run_until_parked();
+        assert_eq!(cx.update(|window, cx| stale(window, cx, 4)), None, "drawn as it is");
+        bar.update(cx, |bar, _| bar.0 = 20.0);
+        cx.run_until_parked();
+        let found = cx.update(|window, cx| stale(window, cx, 4));
+        assert!(found.is_some(), "the bar widened untold, beside the spinner");
+    }
+
+    /// A bar and a spinner side by side.
+    struct Both(gpui::Entity<Bar>, gpui::Entity<Spinner>);
+
+    impl Render for Both {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().flex().child(self.0.clone()).child(self.1.clone())
+        }
     }
 
     fn lines(text: &[&str]) -> Vec<String> {

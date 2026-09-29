@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{App, Context, Entity};
+use gpui::{Context, Entity};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_platform::notify::{self, APPROVAL, Note, Notifier, Tap};
@@ -305,7 +305,7 @@ impl WorkspaceView {
     /// What notifications follow now: the agents waiting on the human, with their tile's name
     /// and what they ask, and the inbox's unread count.
     #[must_use]
-    pub fn attention_look(&self, cx: &App) -> Look {
+    pub fn attention_look(&self) -> Look {
         let asking = self
             .needs_you()
             .into_iter()
@@ -316,7 +316,7 @@ impl WorkspaceView {
                     Route { worker: w.worker, item: w.tile.map(|t| t.item), session: w.session };
                 let approval = self.approval(w.session).map(|prompt| prompt.ask);
                 let answered = self.answered_here(w.session);
-                let title = self.route_title(route, cx);
+                let title = self.route_title(route);
                 Some(Asking { route, title, body, approval, answered })
             })
             .collect();
@@ -326,10 +326,10 @@ impl WorkspaceView {
     /// Where a note about `session` leads, and the name its title says; `None` for a session
     /// with no tile here.
     #[must_use]
-    pub fn attention_route(&self, session: SessionId, cx: &App) -> Option<(Route, String)> {
+    pub fn attention_route(&self, session: SessionId) -> Option<(Route, String)> {
         let tile = self.tile_of_session(session)?;
         let route = Route { worker: tile.worker, item: Some(tile.item), session };
-        Some((route, self.route_title(route, cx)))
+        Some((route, self.route_title(route)))
     }
 
     /// How long a command runs before its end is worth a word.
@@ -388,11 +388,11 @@ impl WorkspaceView {
 
     /// What a note's title says: the tile's name, else the worker's.
     #[must_use]
-    pub fn route_title(&self, route: Route, cx: &App) -> String {
+    pub fn route_title(&self, route: Route) -> String {
         route
             .item
             .map(|item| TileRef { worker: route.worker, item })
-            .and_then(|tile| self.item(tile).map(|i| self.tile_title(i, cx)))
+            .and_then(|tile| self.item(tile).map(|i| self.tile_title(i)))
             .or_else(|| self.workers.get(&route.worker).map(|w| w.name.clone()))
             .unwrap_or_default()
     }

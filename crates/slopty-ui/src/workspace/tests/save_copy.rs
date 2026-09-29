@@ -124,7 +124,7 @@ fn a_file_tiles_copy_is_saved_whole_where_the_panel_says(cx: &mut TestAppContext
     let gone = FileRead::Missing { error: "No such file or directory".to_owned() };
     let dest = save("/w/gone.txt", gone, "gone.txt", cx);
     assert!(!dest.exists(), "nothing lands for a file the worker cannot send");
-    let said = view.read_with(cx, WorkspaceView::toast_texts);
+    let said = view.read_with(cx, |v, _| v.toast_texts());
     assert!(
         said.iter().any(|t| t == "gone.txt was not saved: No such file or directory"),
         "{said:?}"

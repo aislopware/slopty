@@ -21,7 +21,6 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
-pub mod boundary;
 pub mod convert;
 pub mod ghostty;
 pub mod graphics;

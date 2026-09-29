@@ -214,9 +214,14 @@ impl Chrome {
 
     /// Draw every region again: the workspace changed, and any of them may show it.
     fn notify(&self, cx: &mut App) {
-        for view in [&self.navigator, &self.titlebar, &self.statusbar] {
-            App::notify(cx, view.entity_id());
+        for view in self.ids() {
+            App::notify(cx, view);
         }
+    }
+
+    /// The three views.
+    fn ids(&self) -> [gpui::EntityId; 3] {
+        [&self.navigator, &self.titlebar, &self.statusbar].map(Entity::entity_id)
     }
 }
 
@@ -1381,7 +1386,7 @@ impl WorkspaceView {
         let Some((was, now)) = self.copy_shell(session, cx) else { return };
         let (navigator, strip) = (self.chrome.navigator.entity_id(), self.strip_host.entity_id());
         if was.running != now.running {
-            self.number_twins(cx);
+            self.number_twins();
             App::notify(cx, navigator);
             App::notify(cx, strip);
             // Still running at the threshold, the tile and its row say so: the readouts' clock
@@ -1561,13 +1566,13 @@ impl gpui::Render for WorkspaceView {
         // One clock for everything this frame draws: the bar's column marks and the strip,
         // which the strip's own view builds from the layout as it stands now.
         if self.advance(window) {
-            Self::motion_frame(cx.weak_entity(), self.strip_host.entity_id(), window);
+            Self::motion_frame(cx.weak_entity(), &self.drawn, self.strip_host.entity_id(), window);
         }
         let frame = self.layout.frame();
         self.follow_sized_displays(&frame, window, cx);
         self.arm_system_keys(window, cx);
         if std::mem::take(&mut self.titles_dirty) {
-            self.number_twins(cx);
+            self.number_twins();
             #[cfg(test)]
             {
                 self.counts.1 = self.counts.1.saturating_add(1);

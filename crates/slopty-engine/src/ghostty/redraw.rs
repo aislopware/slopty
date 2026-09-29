@@ -21,13 +21,13 @@ use crate::EngineError;
 use crate::osc133::Redraw;
 
 impl GhosttyEngine {
-    /// Clear the prompt the cursor is in, when the shell redraws all of it and the bytes so far
-    /// leave the parser where the engine's own sequences cannot land inside the shell's.
+    /// Clear the prompt the cursor is in, when the shell redraws all of it and libghostty's
+    /// parser is at ground, so the engine's own sequences cannot land inside the shell's.
     pub(super) fn clear_prompt_before_reflow(&mut self) -> Result<(), EngineError> {
         if self.prompt_redraw != Redraw::Full
             || !self.at_prompt
-            || !self.prompt_at_ground
             || self.on_alt
+            || !self.term.vt_ground()?
         {
             return Ok(());
         }
@@ -57,73 +57,5 @@ impl GhosttyEngine {
             }
         }
         Ok(run_top)
-    }
-}
-
-/// Whether VT bytes end at ground, with no escape sequence, control string or UTF-8 character
-/// left open for the next write to finish, given whether the bytes before them did. Judged from
-/// the last escape on, and wrong only towards "open": a control string holding escapes of its
-/// own (tmux's passthrough) reads as open.
-pub(super) fn ends_at_ground(was: bool, bytes: &[u8]) -> bool {
-    let closed = match memchr::memrchr(0x1b, bytes) {
-        None => was,
-        Some(at) => match bytes.get(at.saturating_add(1)..).unwrap_or_default().split_first() {
-            None | Some((b'P' | b'X' | b'^' | b'_', _)) => false,
-            Some((b'[', rest)) => rest.iter().any(|b| (0x40..=0x7e).contains(b)),
-            Some((b']', rest)) => rest.contains(&0x07),
-            Some((0x20..=0x2f, rest)) => rest.iter().any(|b| (0x30..=0x7e).contains(b)),
-            Some(_) => true,
-        },
-    };
-    closed && utf8_complete(bytes)
-}
-
-/// Whether `bytes` do not end inside a UTF-8 character.
-fn utf8_complete(bytes: &[u8]) -> bool {
-    for (back, &b) in bytes.iter().rev().take(4).enumerate() {
-        if b & 0xc0 == 0x80 {
-            continue;
-        }
-        let len = match b {
-            0xc0..=0xdf => 2,
-            0xe0..=0xef => 3,
-            0xf0..=0xf7 => 4,
-            _ => 1,
-        };
-        return back.saturating_add(1) >= len;
-    }
-    true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ground_is_judged_from_the_last_escape_on() {
-        let cases: &[(bool, &[u8], bool)] = &[
-            (true, b"plain", true),
-            (false, b"plain", false),
-            (false, b"\x1b[0mtyped", true),
-            (true, b"\x1b[3", false),
-            (true, b"\x1b[38;5", false),
-            (true, b"\x1b]133;B\x07ls", true),
-            (true, b"\x1b]0;title", false),
-            (true, b"\x1b]0;title\x1b\\", true),
-            (true, b"\x1b_Gf=100;AAAA", false),
-            (true, b"\x1bP", false),
-            (true, b"\x1b(B", true),
-            (true, b"\x1b(", false),
-            (true, b"\x1b7", true),
-            (true, b"\x1b", false),
-            (true, "d\u{e9}j\u{e0}".as_bytes(), true),
-            (true, &[b'a', 0xc3], false),
-            (true, &[0xe2, 0x94], false),
-            (true, &[0xe2, 0x94, 0x80], true),
-            (true, &[0xf0, 0x9f, 0x98], false),
-        ];
-        for &(was, bytes, at_ground) in cases {
-            assert_eq!(ends_at_ground(was, bytes), at_ground, "{was} {bytes:?}");
-        }
     }
 }

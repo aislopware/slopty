@@ -3819,18 +3819,67 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   arrives rather than after the typing pause. A keystroke's parse in a 2 000-line file went
   from 180–210 ms to 0.3–0.8 ms (MEASUREMENTS, "a keystroke's parse in the file tile"). Test:
   `highlight::editor::tests::an_edit_is_parsed_again_only_as_far_as_it_reaches`.
-- ⏳ **Two stale frames are GPUI's, not Slopty's** (2026-09-30). A notify raised while a
-  frame is drawn wakes nothing, and the app self-test's check sees what it left out. gpui-kit's
-  editor finds its scroll to the caret in its paint, after it laid the lines out at the old
-  scroll, so a file opened at a far line shows no text for its first frame; the file tile asks
-  for the next frame, so it is one frame and not until the next keystroke or caret blink. And
-  gpui-kit starts a caret from a focus listener, which runs in the draw's focus phase, so the
-  caret's first phase is not drawn. Both wait on the forks: gpui-kit laying the lines out at
-  the caret's scroll, gpui-fast waking the window for a notify raised after the paint. Test of
-  the second, ignored until then:
-  `workspace::tests::remote::a_caret_started_by_focus_is_drawn_as_from_scratch`.
+- ✅ **Two stale frames were GPUI's, and the forks fixed both** (2026-09-30). A file opened at
+  a far line showed no text for its first frame, because gpui-kit's editor laid its lines out at
+  the old scroll; gpui-kit `fbb7e913` lays them out at the caret's, and the file tile no longer
+  asks for a second frame. A caret started by a focus listener was not drawn, because a notify
+  raised in the draw's focus phase woke nothing; gpui-fast `8e135d4` wakes the window for it.
+  Tests: `workspace::tests::remote::a_caret_started_by_focus_is_drawn_as_from_scratch` (no
+  longer ignored) and the app self-test's 20 000-line file.
 - ✅ **A page's next dialog keeps the keyboard** (2026-09-30). Answering a script's dialog hands
   the keyboard back to the workspace in its next build; a page that asks again at once (an
   alert then a confirm) put up a sheet that build then took the keyboard from, so ↩ went to
   the workspace. The workspace now leaves the keyboard with a dialog that holds it. Test: the
   app self-test `tiles::a_blank_link_opens_a_tile_and_a_script_s_dialogs_are_sheets_in_it`.
+- ✅ **What the strip shows of a file, a page and a folder is a fact** (2026-09-30). The header
+  read the file tile's unsaved mark, the page's address and back button and the folder's parent
+  straight from the bodies, so every caret blink and page load built the strip. They are copies
+  in `workspace::facts` now, taken in each body's observer and after the workspace's own updates
+  made while drawing, which no observer hears. Test:
+  `workspace::tests::retained::a_file_tiles_caret_blinks_without_building_the_strip`.
+- ✅ **One frame of motion is asked for at a time** (2026-09-30). The strip's build and a drag's
+  edge scroll each asked for the next frame, and every answered frame asked again, so the
+  callbacks multiplied and a held drag scrolled faster the longer it was held.
+  `strip::Drawn::motion` keeps one request outstanding. Test:
+  `workspace::tests::retained::a_drag_held_at_the_edge_scrolls_one_frame_at_a_time`.
+- ✅ **The stale-frame oracle judges what stands still during motion** (2026-09-30). A frame
+  whose two scratch draws disagreed was not judged at all, so a view left stale beside a
+  spinner passed. Now the lines both scratch draws agree on must be in the frame shown. Test:
+  `retained::tests::a_view_changed_untold_is_caught_beside_motion`.
+- ✅ **The app's root reads no view** (2026-09-30). It read the workspace for the key bar's
+  target, so every workspace notify built the root and all it holds. It keeps the target it last
+  saw and moves it only from the workspace's observer when it changed. Test:
+  `tests::the_root_is_not_built_for_the_views_news` in `slopty-app`.
+- ✅ **Reduce Motion is watched, not polled** (2026-09-30). An observer of the system's
+  accessibility notification (`slopty_platform::motion`) replaces the settings poll's read, so
+  the change lands at once and the poll no longer asks AppKit.
+- ✅ **⌘-click on a path opens its tile and types nothing** (2026-09-30). It typed
+  `$EDITOR path` at the prompt, and every session's `$EDITOR` is Slopty's own, which opened the
+  same tile and held the shell until it closed. A file too large for a tile still offers a
+  terminal editor, which skips Slopty's own for `$VISUAL`, else `vi`. Tests:
+  `terminal::view::tests::cmd_click_on_a_path_opens_its_tile_and_types_nothing`,
+  `terminal::url::tests::paths_are_found_with_their_line_and_nothing_else_is`.
+- ✅ **The file tile's parser states are shared** (2026-09-30). A state kept per line held
+  81.5 MB for the largest file coloured; a state equal to one of the last 64 kept is shared, which
+  holds 27.4 MB (MEASUREMENTS, "a keystroke's parse in the file tile").
+- ✅ **Momentum is what GPUI says it is** (2026-09-30). gpui-fast now reports the momentum after
+  a swipe as `ScrollWheelEvent::momentum_phase`, on the Mac and in its iOS touch recognizer. A
+  remote picture forwards those phases as they are instead of guessing them from a run of moves
+  after the fingers lift, which read a smooth-scrolling mouse right after a swipe as momentum.
+  The strip swallows only momentum after its own swipe, so that mouse scrolls the shell under
+  it. The silence backstop stays for a close that never comes. Tests:
+  `screen::tests::a_fling_over_the_picture_reaches_the_worker_as_a_gesture_and_then_as_momentum`,
+  `workspace::tests::a_mouse_scroll_after_a_strip_swipe_reaches_the_terminal`.
+- ✅ **A pointer moving over a shell builds nothing** (2026-09-30). The shell's element read the
+  pointer's position in prepaint, and its move listeners updated the view on every move, so
+  every shell under a moving pointer was built again with the next frame of anything around it.
+  The element now lets the scrollbar go when the window goes inactive or the grid moves, and the
+  listeners update the view only for news (see ARCHITECTURE, "Drawing under retention"). Entering
+  a shell still builds it once: GPUI's hover reads change then. Test:
+  `workspace::tests::retained::a_pointer_moving_over_the_shells_builds_none_of_them`.
+- ✅ **A frame of a spring builds a shell once** (2026-09-30). The grid measured in prepaint moved
+  or zoomed with every frame of a spring, and the shell asked to be built again for it, so each
+  moving shell was built twice a frame. It lays its block headers out at the zoom handed to it
+  before the frame, and asks again only when the grid's own size changed or a still pointer now
+  hovers another block. Test:
+  `workspace::tests::retained::a_frame_of_the_spring_builds_each_shell_once`.

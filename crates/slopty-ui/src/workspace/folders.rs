@@ -203,6 +203,8 @@ impl WorkspaceView {
                 v.set_home(home);
                 v.set_path(&path, cx);
             });
+            // Drawn while the window draws, its notify reaches no observer.
+            self.folder_changed(id, cx);
             self.list_folder(key, id, cx);
         }
     }
@@ -237,6 +239,7 @@ impl WorkspaceView {
             cx.notify();
         })
         .detach();
+        cx.observe(&view, move |this, _view, cx| this.folder_changed(id, cx)).detach();
         self.folders.insert(id, view.clone());
         view
     }

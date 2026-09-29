@@ -522,6 +522,7 @@ mod tests {
             delta: ScrollDelta::Pixels(point(px(0.0), px(-3000.0))),
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Moved,
+            momentum_phase: None,
         });
         cx.run_until_parked();
         let later = drawn(cx);

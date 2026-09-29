@@ -264,6 +264,13 @@ struct Adding {
     _enter: gpui::Subscription,
 }
 
+impl Adding {
+    /// Whether an input method is composing in one of the panel's fields: Esc is its own then.
+    fn composing(&self, cx: &App) -> bool {
+        self.address.read(cx).is_composing() || self.ssh.as_ref().is_some_and(|s| s.composing(cx))
+    }
+}
+
 /// What the tailnet offers the panel: a server to connect to, or a worker to add.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Host {
@@ -356,6 +363,16 @@ const TAILNET_NOTE: &str =
 pub struct Workspace {
     /// Every worker, each with its own link.
     workers: Vec<WorkerSlot>,
+    /// What the view was last told: whether a dialog covers it and whether the key bar shows.
+    /// Kept here so the build compares without reading the view, which would build the app's
+    /// root again with every change the view hears of.
+    told: (bool, bool),
+    /// Where the key bar sends its keys, while it can show: followed from the view's changes
+    /// so the build reads no view.
+    key_target: Option<KeyTarget>,
+    /// Times it was built, for the tests.
+    #[cfg(test)]
+    renders: usize,
     /// The server's worker directory as last heard (the cache while it does not answer).
     directory: slopty_client::directory::Directory,
     /// The server in use, if any.
@@ -376,6 +393,8 @@ pub struct Workspace {
     /// The window's appearance is dark (`theme.appearance = "system"` follows it).
     window_dark: bool,
     subscriptions: Vec<gpui::Subscription>,
+    /// The system's Reduce Motion heard as it changes ([`watch_reduce_motion`]).
+    motion_watch: Option<slopty_platform::motion::Watch>,
     adding: Option<Adding>,
     /// Networking runtime; connects run there.
     runtime: tokio::runtime::Handle,
@@ -472,15 +491,17 @@ impl Workspace {
                 }
             }
             WorkspaceEvent::Unanswered { route, why } => {
-                let title = ws.view.read(cx).route_title(*route, cx);
+                let title = ws.view.read(cx).route_title(*route);
                 ws.attention.unanswered(*route, title, why);
             }
         });
-        // The key bar follows the focused tile: a workspace change re-renders the shell,
-        // which is a key bar and the overlays.
+        // The key bar follows the focused tile: the app's own build is drawn again only when
+        // the tile it sends keys to moves, never for the rest of the view's news.
         let changes = cx.observe(&view, |ws, _view, cx| {
             ws.look(cx);
-            cx.notify();
+            if ws.follow_key_target(cx) {
+                cx.notify();
+            }
         });
         let this_mac = this_mac::native(&runtime);
         let quick_hotkey = quick::Hotkey::new(quick::listen(view.clone(), cx));
@@ -488,6 +509,10 @@ impl Workspace {
         let deployer = ssh::native(&runtime);
         let this = Self {
             workers: Vec::new(),
+            told: (false, false),
+            key_target: None,
+            #[cfg(test)]
+            renders: 0,
             directory: slopty_client::directory::Directory::default(),
             server: None,
             server_generation: 0,
@@ -499,6 +524,7 @@ impl Workspace {
             settings: Settings::default(),
             window_dark: true,
             subscriptions: vec![events, changes],
+            motion_watch: None,
             adding: None,
             runtime,
             window: None,
@@ -538,7 +564,7 @@ impl Workspace {
     /// finished commands.
     fn look(&mut self, cx: &mut Context<Self>) {
         let view = self.view.read(cx);
-        let look = view.attention_look(cx);
+        let look = view.attention_look();
         let terminals = view.terminal_views();
         self.attention.look(&look);
         let before = self.heard_terminals.len();
@@ -592,7 +618,7 @@ impl Workspace {
     /// while the app is away, under the tile's name.
     fn program_note(&mut self, session: SessionId, title: &str, body: &str, cx: &Context<Self>) {
         let view = self.view.read(cx);
-        let Some((route, tile)) = view.attention_route(session, cx) else { return };
+        let Some((route, tile)) = view.attention_route(session) else { return };
         let (title, body) = slopty_ui::workspace::program_banner(Some(&tile), title, body);
         self.attention.program(route, title, body);
     }
@@ -600,7 +626,7 @@ impl Workspace {
     /// A shell command ended in `session`: a long one notifies while the app is away.
     fn command_finished(&mut self, session: SessionId, done: &Finished, cx: &Context<Self>) {
         let view = self.view.read(cx);
-        let Some((route, title)) = view.attention_route(session, cx) else { return };
+        let Some((route, title)) = view.attention_route(session) else { return };
         let slow = view.slow_command();
         self.attention.command_finished(route, title, done, slow);
     }
@@ -699,11 +725,27 @@ impl Workspace {
     }
 
     /// A keyboard was attached or removed: show or hide the key bar and the palette's chords.
+    /// Take the view's key target where the key bar can show. Whether it moved to another
+    /// tile (or came or went), which is all the app's own build shows of the view.
+    fn follow_key_target(&mut self, cx: &App) -> bool {
+        let target = key_bar_visible(TOUCH, self.hardware_keyboard)
+            .then(|| self.view.read(cx).active_key_target())
+            .flatten();
+        let id = |t: &KeyTarget| match t {
+            KeyTarget::Terminal(e) => e.entity_id(),
+            KeyTarget::Screen(e) => e.entity_id(),
+        };
+        let moved = self.key_target.as_ref().map(id) != target.as_ref().map(id);
+        self.key_target = target;
+        moved
+    }
+
     fn set_hardware_keyboard(&mut self, attached: bool, cx: &mut Context<Self>) {
         if self.hardware_keyboard != attached {
             tracing::info!(attached, "hardware keyboard");
             self.hardware_keyboard = attached;
             self.view.update(cx, |v, cx| v.set_hardware_keyboard(attached, cx));
+            self.follow_key_target(cx);
             cx.notify();
         }
     }
@@ -1773,6 +1815,9 @@ impl Workspace {
                     .rounded(px(radii.lg))
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                        if this.adding.as_ref().is_some_and(|a| a.composing(cx)) {
+                            return;
+                        }
                         this.cancel_add_worker(window, cx);
                         cx.stop_propagation();
                     }))
@@ -2425,15 +2470,16 @@ fn key_spoken(label: &str) -> &str {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.renders = self.renders.saturating_add(1);
+        }
         // Notch / Dynamic Island, home indicator and the soft keyboard on iOS; zero on macOS.
         // The workspace keeps the top and the sides clear itself.
         let insets = window.insets().effective();
         #[cfg(target_os = "ios")]
         self.ready_paste_key(window, cx);
-        let key_bar = key_bar_visible(TOUCH, self.hardware_keyboard)
-            .then(|| self.view.read(cx).active_key_target())
-            .flatten()
-            .map(|target| self.key_bar(&target, window, cx));
+        let key_bar = self.key_target.clone().map(|target| self.key_bar(&target, window, cx));
         let surfaces = self.theme.surfaces;
         let band = if key_bar.is_some() { self.theme.content() } else { surfaces.canvas };
         if std::mem::take(&mut self.pending_focus_editor)
@@ -2449,8 +2495,8 @@ impl Render for Workspace {
         // The key bar takes the status bar's row above the keyboard. Told only a change: an
         // update while the window draws would build everything that read the workspace again.
         let shown = key_bar.is_some();
-        let told = self.view.read(cx);
-        if told.covered() != covered || told.key_bar_shown() != shown {
+        if self.told != (covered, shown) {
+            self.told = (covered, shown);
             self.view.update(cx, |v, cx| {
                 v.set_covered(covered, cx);
                 v.set_key_bar_shown(shown, cx);
@@ -2938,9 +2984,10 @@ pub fn open_workspace(
         let framed = cx.new(|_| slopty_ui::frames::Framed::new(root_view));
         cx.new(|cx| Root::new(framed, window, cx))
     })?;
-    // GPUI's own animations hold still as the system asks, as Slopty's do; the settings poll
-    // keeps the flag in step ([`Workspace::set_reduce_motion`]).
+    // GPUI's own animations hold still as the system asks, as Slopty's do, and follow the
+    // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
     cx.set_reduce_motion(slopty_platform::reduce_motion());
+    watch_reduce_motion(&workspace, cx);
     watch_settings(workspace.clone(), cx);
     // A tapped note brings the app forward on its tile, on whichever worker it lives. The tap
     // that launched the app waited for `taps` above and arrives first, once the window is up.
@@ -3041,6 +3088,24 @@ fn pasteboard() -> Rc<dyn slopty_platform::pasteboard::Pasteboard> {
     Rc::new(IosPasteboard::general())
 }
 
+/// Follow the system's Reduce Motion as it changes: the watch hands each change to the app.
+fn watch_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let watch = slopty_platform::motion::watch_reduce_motion(move |on| {
+        let _closed = tx.send(on);
+    });
+    workspace.update(cx, |ws, _cx| ws.motion_watch = Some(watch));
+    let workspace = workspace.downgrade();
+    cx.spawn(async move |cx| {
+        while let Some(on) = rx.recv().await {
+            if workspace.update(cx, |ws, cx| ws.set_reduce_motion(on, cx)).is_err() {
+                return;
+            }
+        }
+    })
+    .detach();
+}
+
 /// Reload `settings.toml` whenever its stamp changes (see [`settings`] for why this polls),
 /// and notice a hardware keyboard coming or going on the same tick. The app's own saves are
 /// already applied and seen ([`settings::save`]), so they are not reloaded.
@@ -3049,10 +3114,8 @@ fn watch_settings(workspace: Entity<Workspace>, cx: &App) {
         loop {
             cx.background_executor().timer(settings::POLL).await;
             let keyboard = hardware_keyboard_attached();
-            let reduce_motion = slopty_platform::reduce_motion();
             workspace.update(cx, |ws, cx| {
                 ws.set_hardware_keyboard(keyboard, cx);
-                ws.set_reduce_motion(reduce_motion, cx);
                 if ws.settings_seen.changed(&ws.settings_path) {
                     tracing::info!(path = %ws.settings_path.display(), "settings changed; reloading");
                     let loaded = Settings::load(&ws.settings_path);
@@ -3338,6 +3401,55 @@ mod tests {
             let rising = first_top(cx);
             assert!(rising > still + 0.5, "below its place on its first frame: {rising}");
         }
+    }
+
+    /// A change the workspace view hears of builds that view, not the app's root over it.
+    #[gpui::test]
+    fn the_root_is_not_built_for_the_views_news(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        let view = ws.read_with(cx, |ws, _| ws.view.clone());
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.cancel_add_worker(window, cx)));
+        cx.run_until_parked();
+        // The panel's going is still settling into the view: news the root does draw.
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let before = ws.read_with(cx, |ws, _| ws.renders);
+        for _ in 0..3 {
+            view.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        }
+        assert_eq!(ws.read_with(cx, |ws, _| ws.renders), before, "the root replayed");
+    }
+
+    /// Esc while an input method composes in the address field is the input method's: the
+    /// panel stays. Once the word is committed, Esc closes it.
+    #[gpui::test]
+    fn esc_mid_word_leaves_the_panel_open(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        let address = ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| a.address.clone()));
+        let Some(address) = address else { panic!("the panel is open") };
+        cx.update(|window, cx| {
+            address.update(cx, |field, cx| {
+                field.focus(window, cx);
+                field.replace_and_mark_text_in_range(None, "s", Some(1..1), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(ws.read_with(cx, |ws, _| ws.adding.is_some()), "the input method took Esc");
+        cx.update(|window, cx| {
+            address.update(cx, |field, cx| field.replace_text_in_range(None, "s", window, cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "Esc closed the panel");
     }
 
     /// Each panel's field gives an example of its own kind of host, and switching panels
@@ -3820,7 +3932,7 @@ mod tests {
         assert!(press(cx, "cmd-;"), "the file's chord");
 
         load(cx, "[keys.app]\nopen_settings = \"cmd-shift-h\"\n");
-        let said = ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text(cx));
+        let said = ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
         assert_eq!(
             said.as_deref(),
             Some("Settings: ⇧⌘H runs `app.open_settings` now, no longer `app.add_worker`")
@@ -3887,7 +3999,7 @@ mod tests {
             cx.run_until_parked();
         };
         let said =
-            |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text(cx));
+            |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
         let quiet = |cx: &mut VisualTestContext| {
             cx.executor().advance_clock(std::time::Duration::from_secs(10));
             cx.run_until_parked();

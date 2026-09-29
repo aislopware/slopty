@@ -236,9 +236,9 @@ fn the_look_names_the_tile_and_says_what_the_agent_asks(cx: &mut TestAppContext)
         );
     });
     cx.run_until_parked();
-    view.update(cx, |v, cx| {
-        let look = v.attention_look(cx);
-        let title = v.item(tiles[0]).map(|i| v.tile_title(i, cx));
+    view.update(cx, |v, _| {
+        let look = v.attention_look();
+        let title = v.item(tiles[0]).map(|i| v.tile_title(i));
         assert_eq!(look.unread, v.inbox_count(), "the badge is the inbox's count");
         assert_eq!(look.unread, 1, "one agent waits");
         let [asks] = look.asking.as_slice() else { panic!("one agent asks: {look:?}") };
@@ -259,9 +259,9 @@ fn a_tapped_note_focuses_its_tile(cx: &mut TestAppContext) {
     let (tiles, _link) = worker(&view, cx, WorkerKey::new(7), "mini", &[first, second]);
     view.update_in(cx, |v, _window, cx| v.focus_tile(tiles[1], cx));
     cx.run_until_parked();
-    let tap = view.update(cx, |v, cx| {
+    let tap = view.update(cx, |v, _| {
         assert_eq!(v.focused(), Some(tiles[1]), "on the second tile");
-        let (route, _title) = v.attention_route(first, cx).expect("the first shell has a tile");
+        let (route, _title) = v.attention_route(first).expect("the first shell has a tile");
         Tap { id: first.to_string(), info: route.info(), action: None }
     });
     view.update_in(cx, |v, _window, cx| {
@@ -379,12 +379,12 @@ fn an_approval_is_answered_from_the_note_and_the_inbox_where_they_are(cx: &mut T
     view.update_in(cx, |v, _window, cx| {
         v.permission_event(asked(session, 7, "AskUserQuestion"), cx);
     });
-    let none = view.update(cx, |v, cx| v.attention_look(cx).asking[0].approval);
+    let none = view.update(cx, |v, _| v.attention_look().asking[0].approval);
     assert_eq!(none, None, "a question waits for the conversation");
 
     view.update_in(cx, |v, _window, cx| v.permission_event(asked(session, 8, "Bash"), cx));
-    let tap = view.update(cx, |v, cx| {
-        let look = v.attention_look(cx);
+    let tap = view.update(cx, |v, _| {
+        let look = v.attention_look();
         let [asks] = look.asking.as_slice() else { panic!("one agent asks: {look:?}") };
         assert_eq!(asks.approval, Some(8), "the note answers the prompt held");
         let note = asks.note(false);
@@ -468,7 +468,7 @@ fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
         })
         .detach();
     });
-    let toast = |cx: &mut VisualTestContext| view.read_with(cx, WorkspaceView::toast_text);
+    let toast = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.toast_text());
 
     view.update_in(cx, |v, _window, cx| v.open_notification(&tap(route, 8, notify::ALLOW), cx));
     cx.run_until_parked();

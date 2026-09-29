@@ -215,6 +215,8 @@ impl WorkspaceView {
                 // on another client, is where the page goes.
                 if view.read(cx).url() != url {
                     view.update(cx, |v, cx| v.go_to(url, cx));
+                    // Drawn while the window draws, its notify reaches no observer.
+                    self.page_changed(*id, cx);
                 }
                 continue;
             }
@@ -242,9 +244,11 @@ impl WorkspaceView {
                 cx.notify();
             })
             .detach();
-            // The header shows the page's title and address, and it is the workspace's.
-            cx.observe(&view, |_this, _view, cx| cx.notify()).detach();
+            // What the headers, rows and the page's placing show of it is copied as it changes
+            // ([`Self::page_changed`]): nothing reads the page's view to draw it.
+            cx.observe(&view, move |this, _view, cx| this.page_changed(item, cx)).detach();
             self.browsers.insert(*id, view);
+            self.page_changed(*id, cx);
         }
         self.browsers.retain(|id, _| wanted.iter().any(|(w, ..)| w == id));
         let browsers = &self.browsers;
@@ -264,6 +268,7 @@ impl WorkspaceView {
             let Some(port) = crate::browser::worker_port(&url) else {
                 if needs {
                     view.update(cx, |v, cx| v.set_local(Some(url), cx));
+                    self.page_changed(id, cx);
                 }
                 continue;
             };
@@ -285,6 +290,7 @@ impl WorkspaceView {
                 Some(local) => v.set_local(Some(crate::browser::local_url(&url, local)), cx),
                 None => v.unreachable(format!("Port {port} could not be served here"), cx),
             });
+            self.page_changed(id, cx);
         }
     }
 

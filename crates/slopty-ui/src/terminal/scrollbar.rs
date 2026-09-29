@@ -48,6 +48,11 @@ impl Visibility {
         self.held = held;
     }
 
+    /// The pointer is near the right edge.
+    pub(super) const fn near_edge(&self) -> bool {
+        self.near_edge
+    }
+
     /// Something keeps it up regardless of time.
     const fn pinned(&self) -> bool {
         self.near_edge || self.held

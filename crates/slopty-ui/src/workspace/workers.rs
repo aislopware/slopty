@@ -1072,6 +1072,7 @@ impl WorkspaceView {
             if this.focused().is_some_and(|t| t.item == id) {
                 App::notify(cx, this.chrome.statusbar.entity_id());
             }
+            this.file_changed(id, cx);
         })
         .detach();
         if let Some(line) = self.file_focus.remove(&id) {
